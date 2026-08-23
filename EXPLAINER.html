@@ -1,713 +1,720 @@
 <!doctype html>
 
-<html lang="pt-BR" data-bs-theme="dark">
+<html lang="pt-BR">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- Diz ao navegador que a página é escura ANTES do CSS carregar: sem flash
-     branco, e os controles nativos (scrollbar, select, input) já nascem escuros. -->
+<!-- A página nasce escura (sem flash branco). Tema fixo e autocontido: os
+     diagramas usam cores embutidas, sem depender de tokens externos. -->
 <meta name="color-scheme" content="dark">
-<title>EXPLAINER — deep-orchestrator-agent-skill · de-para da execução</title>
-
-<link rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"
-      integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB"
-      crossorigin="anonymous">
-<link rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css"
-      integrity="sha384-CK2SzKma4jA5H/MXDUU7i1TqZlCFaD4T01vtyDFvPlD97JQyS+IsSh1nI2EFbpyk"
-      crossorigin="anonymous">
-<link rel="stylesheet"
-      href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css"
-      integrity="sha384-wH75j6z1lH97ZOpMOInqhgKzFkAInZPPSPlZpYKYTOqsaizPvhQZmAtLcPKXpLyH"
-      crossorigin="anonymous">
-
+<title>EXPLAINER — Agent Arena · isolamento por container Docker (Fase 5)</title>
 <style>
-  /* ── Paleta do deep-orchestrator-agent-skill ──────────────────────────────────────────
-     Fundo #1a1a2e, accent #00d4ff (ciano), sucesso #00ff88, warning #ffaa00.
-     Tudo deriva destas variáveis — não cravamos hex no conteúdo. */
+  /* ── Paleta do deep-orchestrator/Plannotator (dark) ─────────────────────
+     Reproduz a linguagem visual do EXPLAINER anterior (#1a1a2e, ciano #00d4ff,
+     sucesso #00ff88, warning #ffaa00) como CSS puro embutido — sem CDN, sem
+     dependência externa: o arquivo abre por file:// e segue o tema do host. */
   :root {
-    --do-bg: #1a1a2e;
-    --do-bg-soft: #16213e;
-    --do-card: #1e1e38;
-    --do-accent: #00d4ff;
-    --do-success: #00ff88;
-    --do-warning: #ffaa00;
-    --do-danger: #ff6b6b;
+    --bg: #1a1a2e;
+    --bg-soft: #16213e;
+    --card: #1e1e38;
+    --accent: #00d4ff;
+    --success: #00ff88;
+    --warning: #ffaa00;
+    --danger: #ff6b6b;
+    --body-color: #dcdce8;
+    --muted: #8b8ba7;
+    --border: #2e2e4a;
   }
-
-  [data-bs-theme="dark"] {
-    --bs-body-bg: var(--do-bg);
-    --bs-body-color: #dcdce8;
-    --bs-secondary-color: #8b8ba7;
-    --bs-border-color: #2e2e4a;
-    --bs-body-font-family: system-ui, -apple-system, 'Segoe UI', Roboto,
-                           'Helvetica Neue', Arial, sans-serif;
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background-color: var(--bg);
+    color: var(--body-color);
+    line-height: 1.6;
+    background-image: radial-gradient(ellipse 80% 40% at 50% -10%, rgba(0,212,255,.07), transparent 60%);
   }
-
-  body { background-image: radial-gradient(ellipse 80% 40% at 50% -10%, rgba(0,212,255,.07), transparent 60%); }
-
-  /* Âncora não fica escondida atrás da navbar fixa. */
-  [id] { scroll-margin-top: 5rem; }
-
-  a { color: var(--do-accent); }
+  [id] { scroll-margin-top: 5.5rem; }
+  a { color: var(--accent); }
   a:hover { color: #4de0ff; }
 
-  .brand-accent, .stat-value { color: var(--do-accent); }
+  /* Layout container */
+  .container { max-width: 62rem; margin: 0 auto; padding: 1rem 1.25rem; }
+  .w-100 { width: 100%; }
 
-  /* Navbar com borda inferior em tom de accent. */
-  .navbar { border-bottom: 1px solid rgba(0,212,255,.25); }
+  /* Navbar */
+  .navbar {
+    position: sticky; top: 0; z-index: 40;
+    background: rgba(26,26,46,.92); backdrop-filter: blur(6px);
+    border-bottom: 1px solid rgba(0,212,255,.25);
+  }
+  .navbar .inner { display: flex; align-items: center; justify-content: space-between; padding: .7rem 1.25rem; }
+  .brand { font-weight: 600; color: var(--body-color); text-decoration: none; }
+  .brand .accent { color: var(--accent); }
+  .brand .sub { color: var(--muted); font-weight: 400; }
+  .navbar .meta { color: var(--muted); font-size: .8rem; }
 
-  /* Hero com gradiente sutil: azul-noite para um leve toque ciano. */
-  .explainer-hero {
+  /* Hero */
+  .hero {
     background: linear-gradient(135deg, #16213e 0%, #1a1a2e 55%, #0f3460 100%);
-    border: 1px solid var(--bs-border-color);
+    border: 1px solid var(--border);
+    border-radius: 1rem; padding: 2rem;
     box-shadow: inset 0 0 2.5rem rgba(0,212,255,.05);
+    margin-bottom: 1.25rem;
   }
+  .hero h1 { color: #fff; font-size: 1.9rem; margin: .5rem 0 .4rem; font-weight: 600; }
+  .hero p { color: rgba(255,255,255,.62); margin: 0 0 1rem; }
+  .chips { display: flex; flex-wrap: wrap; gap: .5rem; }
 
-  /* Título de seção com filete de gradiente sutil sob o texto. */
-  .pane-title { position: relative; padding-bottom: .5rem; }
-  .pane-title::after {
-    content: ''; position: absolute; left: 0; bottom: 0;
-    height: 2px; width: 4.5rem; border-radius: 2px;
-    background: linear-gradient(90deg, var(--do-accent), transparent);
+  /* Badges */
+  .badge {
+    display: inline-block; padding: .18em .6em; border-radius: .5rem;
+    font-size: .72rem; font-weight: 600; letter-spacing: .02em; white-space: nowrap;
   }
+  .badge-accent { background: rgba(0,212,255,.14); color: var(--accent); border: 1px solid rgba(0,212,255,.35); }
+  .badge-ok     { background: rgba(0,255,136,.12); color: var(--success); border: 1px solid rgba(0,255,136,.35); }
+  .badge-warn   { background: rgba(255,170,0,.12); color: var(--warning); border: 1px solid rgba(255,170,0,.35); }
+  .badge-danger { background: rgba(255,107,107,.12); color: var(--danger); border: 1px solid rgba(255,107,107,.35); }
+  .badge-soft   { background: rgba(139,139,167,.12); color: var(--muted); border: 1px solid var(--border); }
 
-  /* Cards e grupos de lista: tom levemente mais claro que o fundo. */
-  .card { --bs-card-bg: var(--do-card); --bs-card-border-color: var(--bs-border-color); }
-  .card-header {
-    background: linear-gradient(90deg, rgba(0,212,255,.10), rgba(0,212,255,0));
-    border-bottom: 1px solid var(--bs-border-color);
+  /* Abas */
+  .tabs { display: flex; flex-wrap: wrap; gap: .25rem; border-bottom: 1px solid var(--border); padding: 0 .25rem; }
+  .tabs button {
+    background: transparent; color: var(--muted); border: none;
+    border-bottom: 2px solid transparent; padding: .65rem 1rem;
+    font-size: .92rem; font-weight: 500; cursor: pointer;
   }
-  .list-group-item { background-color: var(--do-card); }
+  .tabs button:hover { color: var(--body-color); }
+  .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .pane { display: none; padding: 1.5rem 1.25rem 1rem; }
+  .pane.active { display: block; animation: fade .2s ease; }
+  @keyframes fade { from { opacity: .2; } to { opacity: 1; } }
 
-  /* Abas: ativa em accent com sublinhado no mesmo tom. */
-  .nav-tabs { border-bottom-color: var(--bs-border-color); }
-  .nav-tabs .nav-link { color: var(--bs-secondary-color); }
-  .nav-tabs .nav-link:hover { color: var(--bs-body-color); border-color: var(--bs-border-color) var(--bs-border-color) transparent; }
-  .nav-tabs .nav-link.active {
-    color: var(--do-accent); font-weight: 600;
-    background-color: transparent;
-    border-color: var(--bs-border-color) var(--bs-border-color) var(--do-accent);
-  }
+  /* Seções e títulos */
+  .pane-title { font-size: 1.15rem; font-weight: 600; color: var(--body-color); border-bottom: 2px solid transparent; position: relative; padding-bottom: .45rem; margin: 1.25rem 0 .75rem; }
+  .pane-title::after { content: ''; position: absolute; left: 0; bottom: 0; height: 2px; width: 4.5rem; border-radius: 2px; background: linear-gradient(90deg, var(--accent), transparent); }
+  .h6 { font-size: .95rem; font-weight: 600; }
+  .lead { color: var(--muted); }
+  .text-muted { color: var(--muted); }
+  .small { font-size: .82rem; }
+  .mt-2 { margin-top: .5rem; } .mt-3 { margin-top: 1rem; } .mt-4 { margin-top: 1.5rem; } .mt-5 { margin-top: 2.5rem; }
+  .mb-1 { margin-bottom: .25rem; } .mb-2 { margin-bottom: .5rem; } .mb-3 { margin-bottom: 1rem; } .mb-4 { margin-bottom: 1.5rem; }
 
-  /* Badges da paleta. */
-  .badge-accent  { background: rgba(0,212,255,.14);  color: var(--do-accent);  border: 1px solid rgba(0,212,255,.35); }
-  .badge-ok      { background: rgba(0,255,136,.12);  color: var(--do-success); border: 1px solid rgba(0,255,136,.35); }
-  .badge-warn    { background: rgba(255,170,0,.12);  color: var(--do-warning); border: 1px solid rgba(255,170,0,.35); }
-  .badge-danger  { background: rgba(255,107,107,.12); color: var(--do-danger); border: 1px solid rgba(255,107,107,.35); }
-  .badge-soft    { background: rgba(139,139,167,.12); color: var(--bs-secondary-color); border: 1px solid var(--bs-border-color); }
+  /* Cards */
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: .75rem; }
+  .card-header { padding: .75rem 1rem; background: linear-gradient(90deg, rgba(0,212,255,.10), rgba(0,212,255,0)); border-bottom: 1px solid var(--border); border-radius: .75rem .75rem 0 0; font-weight: 600; }
+  .card-body { padding: 1rem 1.25rem; }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; }
+  .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: .75rem; padding: 1.25rem; text-align: center; }
+  .stat-value { font-size: 1.8rem; font-weight: 700; color: var(--accent); }
+  .stat-label { color: var(--muted); font-size: .8rem; }
 
-  /* Diff stats: + verde, − vermelho, dígitos tabulares. */
-  .diff-plus  { color: var(--do-success); font-variant-numeric: tabular-nums; }
-  .diff-minus { color: var(--do-danger); font-variant-numeric: tabular-nums; }
-
-  /* De-Para: cartões com borda indicando o lado da comparação. */
+  /* De-Para */
+  .depara-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 720px) { .depara-cols { grid-template-columns: 1fr; } }
   .depara-antes  { border-color: rgba(139,139,167,.45); }
   .depara-depois { border-color: rgba(0,255,136,.35); }
+  .depara-antes .card-header  { background: linear-gradient(90deg, rgba(139,139,167,.12), transparent); color: var(--muted); }
+  .depara-depois .card-header { background: linear-gradient(90deg, rgba(0,255,136,.10), transparent); color: var(--success); }
+  ul.list { list-style: none; padding: 0; margin: .5rem 0 0; display: grid; gap: .4rem; }
+  ul.list li { color: var(--body-color); font-size: .9rem; }
 
-  /* Timeline vertical: linha + marcador ciano com brilho sutil. */
-  .timeline { position: relative; }
-  .timeline-item { position: relative; padding-left: 1.4rem; border-left: 2px solid var(--bs-border-color); }
-  .timeline-item::before {
-    content: ''; position: absolute; left: -.42rem; top: .3rem;
-    width: .7rem; height: .7rem; border-radius: 50%;
-    background: var(--do-accent); box-shadow: 0 0 .6rem rgba(0,212,255,.6);
-  }
-  .timeline-item:last-child { border-left-color: transparent; }
+  /* Timeline */
+  .timeline { list-style: none; margin: 0; padding: 0; }
+  .timeline li { position: relative; padding: 0 0 1.25rem 1.4rem; border-left: 2px solid var(--border); }
+  .timeline li:last-child { border-left-color: transparent; padding-bottom: 0; }
+  .timeline li::before { content: ''; position: absolute; left: -.42rem; top: .25rem; width: .7rem; height: .7rem; border-radius: 50%; background: var(--accent); box-shadow: 0 0 .6rem rgba(0,212,255,.6); }
+  .timeline li.new::before { background: var(--success); box-shadow: 0 0 .6rem rgba(0,255,136,.6); }
+  .timeline strong { display: block; margin: .1rem 0 .15rem; }
 
-  /* Bloco de código: espaço à direita para o botão de copiar não cobrir o texto. */
-  pre { position: relative; margin-bottom: 1rem; }
-  pre code.hljs { padding-right: 4rem; border-radius: var(--bs-border-radius); font-size: .875rem; }
+  /* Callout / alert */
+  .callout { border-left: 3px solid var(--accent); background: var(--card); padding: .9rem 1.25rem; border-radius: 0 .6rem .6rem 0; margin: 1rem 0; }
+  .callout.warn { border-left-color: var(--warning); }
+  .callout.ok { border-left-color: var(--success); }
+  .callout strong { color: var(--body-color); }
 
-  .copy-btn { position: absolute; top: .5rem; right: .5rem; opacity: .4; transition: opacity .15s; }
-  pre:hover .copy-btn, .copy-btn:focus-visible { opacity: 1; }
+  /* Tabela */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  th, td { text-align: left; padding: .6rem .75rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  thead th { color: var(--muted); font-weight: 600; }
+  code, pre code { font-family: ui-monospace, 'JetBrains Mono', 'Fira Code', SFMono-Regular, Menlo, monospace; }
+  code { background: rgba(139,139,167,.14); padding: .1em .35em; border-radius: .3em; font-size: .84em; }
+  pre { background: #14142a; border: 1px solid var(--border); border-radius: .6rem; padding: 1rem 1.1rem; overflow-x: auto; margin: .75rem 0; }
+  pre code { background: none; padding: 0; font-size: .82rem; color: #dcdce8; line-height: 1.55; }
+  .diff-plus { color: var(--success); font-variant-numeric: tabular-nums; }
+  .diff-minus { color: var(--danger); font-variant-numeric: tabular-nums; }
 
-  /* Abrir o arquivo em #pane-x foca o painel (bom: o leitor de tela cai no
-     conteúdo), e o outline branco do navegador fica gritante. Anel discreto,
-     do tema, no lugar — tirar o indicador por completo quebraria quem navega
-     por teclado. */
-  .tab-pane:focus-visible { outline: 0; box-shadow: 0 0 0 .2rem rgba(var(--bs-emphasis-color-rgb), .15); }
+  /* Diagramas */
+  .diagram-panel { border: 1px solid var(--border); border-radius: .75rem; padding: 1.25rem 1.25rem .75rem; margin: 1.25rem 0; background: var(--card); }
+  .diagram-caption { display: block; font-family: ui-monospace, Menlo, monospace; font-size: .74rem; color: var(--muted); text-align: center; margin-top: .6rem; }
 
-  /* Impressão/PDF: abre TODAS as abas, senão o papel sai com uma só. */
+  /* Dobradura */
+  details { border: 1px solid var(--border); border-radius: .6rem; margin: 1rem 0; background: var(--card); }
+  summary { padding: .8rem 1rem; cursor: pointer; font-weight: 500; color: var(--muted); }
+  details[open] summary { color: var(--body-color); }
+  .details-body { padding: 0 1.1rem 1rem; }
+
+  /* Footer */
+  footer { color: var(--muted); font-size: .82rem; border-top: 1px solid var(--border); margin-top: 2.5rem; padding-top: 1rem; }
+
   @media print {
-    .nav-tabs, .copy-btn, details, .explainer-hero { display: none !important; }
-    .tab-content > .tab-pane { display: block !important; opacity: 1 !important; page-break-inside: avoid; }
-    .tab-pane::before { content: attr(data-print-title); display: block;
-                        font-size: 1.25rem; font-weight: 600; margin: 1.5rem 0 .5rem; }
+    .tabs, .hero { display: none !important; }
+    .pane { display: block !important; }
   }
 </style>
 </head>
+<body>
 
-<body class="bg-body">
-
-<nav class="navbar navbar-expand-lg sticky-top bg-body-tertiary">
-  <div class="container">
-    <span class="navbar-brand fw-semibold"><i class="bi bi-diagram-3 brand-accent me-2"></i>deep-orchestrator-agent-skill <span class="text-body-secondary fw-normal">· EXPLAINER</span></span>
-    <span class="navbar-text small text-body-secondary d-none d-md-inline">v0.1.1 · 2026-08-23</span>
+<nav class="navbar">
+  <div class="inner">
+    <span class="brand">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" style="vertical-align:-3px;margin-right:.4rem">
+        <rect x="3" y="3" width="18" height="7" rx="1"/><rect x="11" y="14" width="10" height="7" rx="1"/><path d="M7 10v4"/>
+      </svg>
+      prompt-builder <span class="accent">· EXPLAINER</span>
+    </span>
+    <span class="meta">v0.2.0 · 2026-08-23</span>
   </div>
 </nav>
 
-<main class="container py-4" style="max-width: 62rem">
+<main class="container">
 
-  <header class="explainer-hero rounded-4 p-4 p-md-5 mb-4">
-    <span class="badge badge-accent mb-3"><i class="bi bi-clipboard-data me-1"></i>Relatório de execução</span>
-    <h1 class="display-6 fw-semibold text-white mb-2">O que aconteceu nesta execução</h1>
-    <p class="lead text-white-50 mb-3">Agent Arena: modo agente no motor de benchmark do prompt-builder (executor pi em sala limpa, captura completa em disco, dossiê determinístico, oráculo + juiz LLM, custo como contrato, CLI/HTTP/MCP/docs)</p>
-    <div class="d-flex flex-wrap gap-2">
-      <span class="badge badge-accent">v0.1.1</span>
-      <span class="badge badge-soft"><i class="bi bi-calendar3 me-1"></i>2026-08-23</span>
-      <span class="badge badge-soft"><i class="bi bi-git-branch me-1"></i>development</span>
+  <header class="hero">
+    <span class="badge badge-accent mb-2">Relatório · Agent Arena · Fase 5</span>
+    <h1>Modo agente agora isola cada execução num container Docker</h1>
+    <p>Antes, o agente <code>pi</code> rodava o isolamento de execução por <code>worktree</code>
+      ou <code>clone</code> — só uma parede de processo. Com esta fase, cada rep de cada
+      contestant pode correr num <strong>container Docker efêmero</strong>
+      (<code>isolation.kind = "container"</code>): limites rígidos, key do OpenRouter fora de
+      qualquer arquivo, zero órfão no timeout.</p>
+    <div class="chips">
+      <span class="badge badge-accent">isolation.kind: container</span>
+      <span class="badge badge-soft">2026-08-23</span>
+      <span class="badge badge-ok">validado · US$ 0,0201</span>
     </div>
   </header>
 
-  <!-- ABAS
-       Regras que não podem ser quebradas:
-       · <ul role="tablist"> e cada <button role="tab">
-       · button.id  ←→  tabpanel.aria-labelledby
-       · button.data-bs-target ←→ #id do tabpanel (e aria-controls com o mesmo id, sem #)
-       · exatamente UM botão .active + UM painel .show.active
-       O Bootstrap já faz navegação por seta/Home/End no tablist; não reimplemente. -->
-  <ul class="nav nav-tabs" id="doc-tabs" role="tablist">
-    <li class="nav-item" role="presentation">
-      <button class="nav-link active" id="tab-visao" data-bs-toggle="tab" data-bs-target="#pane-visao"
-              type="button" role="tab" aria-controls="pane-visao" aria-selected="true">
-        <i class="bi bi-eye me-1"></i>Visão geral
-      </button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" id="tab-ondas" data-bs-toggle="tab" data-bs-target="#pane-ondas"
-              type="button" role="tab" aria-controls="pane-ondas" aria-selected="false">
-        <i class="bi bi-layers me-1"></i>Ondas
-      </button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" id="tab-arquivos" data-bs-toggle="tab" data-bs-target="#pane-arquivos"
-              type="button" role="tab" aria-controls="pane-arquivos" aria-selected="false">
-        <i class="bi bi-files me-1"></i>Arquivos
-      </button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" id="tab-depara" data-bs-toggle="tab" data-bs-target="#pane-depara"
-              type="button" role="tab" aria-controls="pane-depara" aria-selected="false">
-        <i class="bi bi-arrow-left-right me-1"></i>De-Para
-      </button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" id="tab-decisoes" data-bs-toggle="tab" data-bs-target="#pane-decisoes"
-              type="button" role="tab" aria-controls="pane-decisoes" aria-selected="false">
-        <i class="bi bi-lightbulb me-1"></i>Decisões
-      </button>
-    </li>
-    <li class="nav-item" role="presentation">
-      <button class="nav-link" id="tab-timeline" data-bs-toggle="tab" data-bs-target="#pane-timeline"
-              type="button" role="tab" aria-controls="pane-timeline" aria-selected="false">
-        <i class="bi bi-clock-history me-1"></i>Timeline
-      </button>
-    </li>
-  </ul>
-
-  <div class="tab-content border border-top-0 rounded-bottom p-4" id="doc-tabs-content">
-
-    <!-- ══════════════ ABA 1 · VISÃO GERAL ══════════════ -->
-    <div class="tab-pane fade show active" id="pane-visao" role="tabpanel"
-         aria-labelledby="tab-visao" tabindex="0" data-print-title="Visão geral">
-      <h2 class="h4 pane-title">Resumo da execução</h2>
-      <p class="text-body-secondary">Agent Arena: modo agente no motor de benchmark do prompt-builder (executor pi em sala limpa, captura completa em disco, dossiê determinístico, oráculo + juiz LLM, custo como contrato, CLI/HTTP/MCP/docs)</p>
-
-      <div class="alert alert-primary d-flex gap-2" role="alert">
-        <i class="bi bi-info-circle-fill flex-shrink-0"></i>
-        <div><strong>O que é este documento:</strong> o EXPLAINER gerado pelo deep-orchestrator-agent-skill na fase COMMIT-FINAL, ao fim de cada execução. Mostra o de-para (antes/depois) de tudo que foi feito: ondas, worktrees, arquivos modificados, decisões autônomas e timeline.</div>
-      </div>
-
-      <div class="row g-3">
-        <div class="col-6 col-lg-4">
-          <div class="card h-100 text-center">
-            <div class="card-body py-4">
-              <i class="bi bi-layers fs-3 stat-value"></i>
-              <div class="display-6 fw-bold stat-value">7</div>
-              <div class="text-body-secondary small">Ondas executadas</div>
-            </div>
-          </div>
-        </div>
-        <div class="col-6 col-lg-4">
-          <div class="card h-100 text-center">
-            <div class="card-body py-4">
-              <i class="bi bi-robot fs-3 stat-value"></i>
-              <div class="display-6 fw-bold stat-value">22</div>
-              <div class="text-body-secondary small">Sub-agentes</div>
-            </div>
-          </div>
-        </div>
-        <div class="col-6 col-lg-4">
-          <div class="card h-100 text-center">
-            <div class="card-body py-4">
-              <i class="bi bi-git-commit fs-3 stat-value"></i>
-              <div class="display-6 fw-bold stat-value">21</div>
-              <div class="text-body-secondary small">Commits (squash)</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <h2 class="h4 pane-title mt-5">Como este documento é gerado</h2>
-      <p>O orquestrador, na fase COMMIT-FINAL, gera o explainer a partir deste template:</p>
-<pre><code class="language-bash"># Gera o explainer a partir do template
-./scripts/generate-explainer.sh &gt; EXPLAINER.html
-# Ou preenche manualmente os placeholders 0.1.1, 2026-08-23, development, ...</code></pre>
-      <p class="text-body-secondary small">O template é <code>templates/html-explainer.html</code> — arquivo único, sem build: abre por file:// e imprime em PDF com todas as abas.</p>
-
-      <details class="mt-4">
-        <summary class="text-body-secondary">Placeholders usados na geração</summary>
-        <div class="table-responsive mt-2">
-          <table class="table table-sm align-middle">
-            <thead>
-              <tr><th scope="col">Placeholder</th><th scope="col">Onde aparece</th><th scope="col">Preenchido com</th></tr>
-            </thead>
-            <tbody>
-              <tr><td><code>&#123;&#123;VERSION&#125;&#125;</code></td><td>Navbar, hero, rodapé</td><td>Versão do orquestrador</td></tr>
-              <tr><td><code>&#123;&#123;DATE&#125;&#125;</code></td><td>Navbar, hero, rodapé</td><td>Data da execução</td></tr>
-              <tr><td><code>&#123;&#123;BRANCH&#125;&#125;</code></td><td>Hero, rodapé</td><td>Branch principal</td></tr>
-              <tr><td><code>&#123;&#123;TASK_SUMMARY&#125;&#125;</code></td><td>Visão geral</td><td>Resumo da tarefa</td></tr>
-              <tr><td><code>&#123;&#123;TOTAL_WAVES&#125;&#125;</code></td><td>Cards de estatística</td><td>Número de ondas</td></tr>
-              <tr><td><code>&#123;&#123;TOTAL_AGENTS&#125;&#125;</code></td><td>Cards de estatística</td><td>Número de sub-agentes</td></tr>
-              <tr><td><code>&#123;&#123;TOTAL_COMMITS&#125;&#125;</code></td><td>Cards de estatística</td><td>Número de commits</td></tr>
-              <tr><td><code>&#123;&#123;WAVES_TABLE&#125;&#125;</code></td><td>Aba Ondas</td><td>Tabela HTML de ondas (Onda | Worktree | Tarefas | Commits | Status)</td></tr>
-              <tr><td><code>&#123;&#123;FILES_TABLE&#125;&#125;</code></td><td>Aba Arquivos</td><td>Tabela HTML de arquivos modificados (Arquivo | Tipo | Diff)</td></tr>
-              <tr><td><code>&#123;&#123;COMMITS_LIST&#125;&#125;</code></td><td>Aba Arquivos</td><td>Lista de commits squash</td></tr>
-              <tr><td><code>&#123;&#123;BEFORE_AFTER&#125;&#125;</code></td><td>Aba De-Para</td><td>Cards Antes/Depois + seções de-para adicionais</td></tr>
-              <tr><td><code>&#123;&#123;IMPACT&#125;&#125;</code></td><td>Aba De-Para</td><td>Lista de impactos da execução</td></tr>
-              <tr><td><code>&#123;&#123;CAPABILITIES&#125;&#125;</code></td><td>Aba De-Para</td><td>Grid de novas capacidades</td></tr>
-              <tr><td><code>&#123;&#123;DECISIONS&#125;&#125;</code></td><td>Aba Decisões</td><td>Lista de decisões autônomas</td></tr>
-              <tr><td><code>&#123;&#123;TIMELINE&#125;&#125;</code></td><td>Aba Timeline</td><td>Linha do tempo da execução</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </details>
-    </div>
-
-    <!-- ══════════════ ABA 2 · ONDAS EXECUTADAS ══════════════ -->
-    <div class="tab-pane fade" id="pane-ondas" role="tabpanel"
-         aria-labelledby="tab-ondas" tabindex="0" data-print-title="Ondas executadas">
-      <h2 class="h4 pane-title">Ondas executadas</h2>
-      <p>Uma linha por sub-agente. Cada sub-agente trabalha numa worktree Git nomeada; a integração é squash-merge um a um, com gate (build + testes) entre merges. Worktrees e branches <code>wt/*</code> são removidos ao fim de cada onda.</p>
-
-      <!-- WAVES_TABLE begin (não preenchido — conteúdo demo do template) -->
-      <div class="table-responsive">
-        <table class="table table-hover align-middle">
-          <thead>
-            <tr>
-              <th scope="col">Onda</th>
-              <th scope="col">Worktree</th>
-              <th scope="col">Tarefas</th>
-              <th scope="col" class="text-end">Commits</th>
-              <th scope="col">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><span class="badge badge-accent">Onda 1</span></td>
-              <td><code>onda1-scripts-prompts</code></td>
-              <td>brave-search.sh · check-brave-credits.sh · ecc-prompts.md · ecc-skills.md · search-prompts.md</td>
-              <td class="text-end">5</td>
-              <td><span class="badge badge-ok">Concluída</span></td>
-            </tr>
-            <tr>
-              <td><span class="badge badge-accent">Onda 2</span></td>
-              <td><code>onda2-html-explainer</code></td>
-              <td>templates/html-explainer.html</td>
-              <td class="text-end">3</td>
-              <td><span class="badge badge-ok">Concluída</span></td>
-            </tr>
-            <tr>
-              <td><span class="badge badge-accent">Onda 2</span></td>
-              <td><code>onda2-skill-update</code></td>
-              <td>SKILL.md — ondas ilimitadas, novos recursos</td>
-              <td class="text-end">2</td>
-              <td><span class="badge badge-ok">Concluída</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="text-body-secondary small">Exemplo demonstrativo — a geração substitui o bloco entre os marcadores pelos dados reais da execução.</p>
-      <!-- WAVES_TABLE end (não preenchido — conteúdo demo do template) -->
-
-      <h3 class="h6 mt-4 text-body-secondary">Legenda de status</h3>
-      <div class="d-flex flex-wrap gap-2">
-        <span class="badge badge-ok">Concluída</span>
-        <span class="badge badge-warn">Parcial</span>
-        <span class="badge badge-danger">Bloqueada</span>
-      </div>
-    </div>
-
-    <!-- ══════════════ ABA 3 · ARQUIVOS MODIFICADOS ══════════════ -->
-    <div class="tab-pane fade" id="pane-arquivos" role="tabpanel"
-         aria-labelledby="tab-arquivos" tabindex="0" data-print-title="Arquivos modificados">
-      <h2 class="h4 pane-title">Arquivos modificados</h2>
-      <p>Diff stats da execução: <span class="diff-plus">+</span> linhas adicionadas, <span class="diff-minus">−</span> removidas.</p>
-
-      <!-- FILES_TABLE begin (não preenchido — conteúdo demo do template) -->
-      <div class="table-responsive">
-        <table class="table table-hover align-middle">
-          <thead>
-            <tr>
-              <th scope="col">Arquivo</th>
-              <th scope="col">Tipo</th>
-              <th scope="col" class="text-end">Diff</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>scripts/brave-search.sh</code></td>
-              <td><span class="badge badge-ok">novo</span></td>
-              <td class="text-end diff-plus">+310</td>
-            </tr>
-            <tr>
-              <td><code>scripts/check-brave-credits.sh</code></td>
-              <td><span class="badge badge-ok">novo</span></td>
-              <td class="text-end diff-plus">+98</td>
-            </tr>
-            <tr>
-              <td><code>prompts/ecc-prompts.md</code></td>
-              <td><span class="badge badge-ok">novo</span></td>
-              <td class="text-end diff-plus">+340</td>
-            </tr>
-            <tr>
-              <td><code>prompts/ecc-skills.md</code></td>
-              <td><span class="badge badge-ok">novo</span></td>
-              <td class="text-end diff-plus">+315</td>
-            </tr>
-            <tr>
-              <td><code>prompts/search-prompts.md</code></td>
-              <td><span class="badge badge-ok">novo</span></td>
-              <td class="text-end diff-plus">+420</td>
-            </tr>
-            <tr>
-              <td><code>templates/html-explainer.html</code></td>
-              <td><span class="badge badge-ok">novo</span></td>
-              <td class="text-end diff-plus">+520</td>
-            </tr>
-            <tr>
-              <td><code>SKILL.md</code></td>
-              <td><span class="badge badge-accent">modificado</span></td>
-              <td class="text-end"><span class="diff-plus">+140</span> <span class="diff-minus">−45</span></td>
-            </tr>
-            <tr>
-              <td><code>README.md</code></td>
-              <td><span class="badge badge-accent">modificado</span></td>
-              <td class="text-end"><span class="diff-plus">+85</span> <span class="diff-minus">−15</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="text-body-secondary small">Exemplo demonstrativo — valores aproximados, substituídos na geração.</p>
-      <!-- FILES_TABLE end (não preenchido — conteúdo demo do template) -->
-
-      <h2 class="h4 pane-title mt-4">Commits (squash)</h2>
-      <p>Histórico final do branch principal: um commit squash por sub-agente. Nenhuma worktree ou branch <code>wt/*</code> sobra ao final.</p>
-
-      <!-- COMMITS_LIST begin (não preenchido — conteúdo demo do template) -->
-      <ul class="list-group list-group-flush">
-        <li class="list-group-item d-flex gap-3 align-items-start">
-          <span class="badge badge-soft font-monospace">a1b2c3d</span>
-          <div><strong>Onda 1:</strong> scripts de busca Brave e verificação de créditos + prompts ECC e de busca</div>
-        </li>
-        <li class="list-group-item d-flex gap-3 align-items-start">
-          <span class="badge badge-soft font-monospace">e4f5g6h</span>
-          <div><strong>Onda 2:</strong> templates/html-explainer.html + SKILL.md atualizado</div>
-        </li>
-        <li class="list-group-item d-flex gap-3 align-items-start">
-          <span class="badge badge-soft font-monospace">i7j8k9l</span>
-          <div><strong>Onda 3:</strong> README.md — documentação final</div>
-        </li>
-      </ul>
-      <p class="text-body-secondary small mt-2">Exemplo demonstrativo — hashes fictícios, substituídos na geração.</p>
-      <!-- COMMITS_LIST end (não preenchido — conteúdo demo do template) -->
-    </div>
-
-    <!-- ══════════════ ABA 4 · DE-PARA (BEFORE/AFTER) ══════════════ -->
-    <div class="tab-pane fade" id="pane-depara" role="tabpanel"
-         aria-labelledby="tab-depara" tabindex="0" data-print-title="De-Para">
-      <h2 class="h4 pane-title">De-Para: o que mudou</h2>
-      <p>Comparação lado a lado entre o estado inicial do repositório e o estado final após a execução.</p>
-
-      <!-- BEFORE_AFTER begin (não preenchido — conteúdo demo do template) -->
-      <!-- Cards Antes/Depois e seções de de-para adicionais geradas
-           dinamicamente entram aqui (substituídos na geração). -->
-      <div class="row g-3 mb-4">
-        <div class="col-lg-6">
-          <div class="card h-100 depara-antes">
-            <div class="card-header"><i class="bi bi-arrow-left-circle me-1"></i><strong>Antes</strong></div>
-            <div class="card-body">
-              <p class="card-text text-body-secondary">Estado inicial — descrição genérica, substituída na geração.</p>
-              <ul class="list-unstyled mb-0 d-grid gap-2">
-                <li><i class="bi bi-file-earmark-text me-2 text-body-secondary"></i>Item representativo do estado inicial</li>
-                <li><i class="bi bi-file-earmark-text me-2 text-body-secondary"></i>Segundo item representativo</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-        <div class="col-lg-6">
-          <div class="card h-100 depara-depois">
-            <div class="card-header"><i class="bi bi-arrow-right-circle me-1"></i><strong>Depois</strong></div>
-            <div class="card-body">
-              <p class="card-text text-body-secondary">Estado final — descrição genérica, substituída na geração.</p>
-              <ul class="list-unstyled mb-0 d-grid gap-2">
-                <li><i class="bi bi-terminal me-2 text-body-secondary"></i>Item representativo do estado final</li>
-                <li><i class="bi bi-file-earmark-code me-2 text-body-secondary"></i>Segundo item representativo</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </div>
-      <p class="text-body-secondary small">Exemplo demonstrativo — a geração substitui o bloco entre os marcadores pelos dados reais.</p>
-      <!-- BEFORE_AFTER end (não preenchido — conteúdo demo do template) -->
-
-      <h2 class="h4 pane-title">Impacto</h2>
-      <p>O que cada mudança significa para quem usa o deep-orchestrator-agent-skill:</p>
-      <!-- IMPACT begin (não preenchido — conteúdo demo do template) -->
-      <div class="list-group list-group-flush mb-4">
-        <div class="list-group-item d-flex gap-3 align-items-start">
-          <i class="bi bi-stars fs-5 stat-value flex-shrink-0 mt-1"></i>
-          <div><strong>Impacto 1</strong> — descrição genérica, substituída na geração.</div>
-        </div>
-        <div class="list-group-item d-flex gap-3 align-items-start">
-          <i class="bi bi-stars fs-5 stat-value flex-shrink-0 mt-1"></i>
-          <div><strong>Impacto 2</strong> — descrição genérica, substituída na geração.</div>
-        </div>
-        <div class="list-group-item d-flex gap-3 align-items-start">
-          <i class="bi bi-stars fs-5 stat-value flex-shrink-0 mt-1"></i>
-          <div><strong>Impacto 3</strong> — descrição genérica, substituída na geração.</div>
-        </div>
-      </div>
-      <p class="text-body-secondary small">Exemplo demonstrativo — a geração substitui o bloco entre os marcadores pelos impactos reais.</p>
-      <!-- IMPACT end (não preenchido — conteúdo demo do template) -->
-
-      <h2 class="h4 pane-title">Novas capacidades</h2>
-      <!-- CAPABILITIES begin (não preenchido — conteúdo demo do template) -->
-      <div class="row g-3">
-        <div class="col-md-6 col-lg-4">
-          <div class="card h-100">
-            <div class="card-body">
-              <i class="bi bi-stars fs-3 stat-value"></i>
-              <h3 class="h6 mt-2 mb-1">Capacidade 1</h3>
-              <p class="small text-body-secondary mb-0">Descrição genérica, substituída na geração.</p>
-            </div>
-          </div>
-        </div>
-        <div class="col-md-6 col-lg-4">
-          <div class="card h-100">
-            <div class="card-body">
-              <i class="bi bi-stars fs-3 stat-value"></i>
-              <h3 class="h6 mt-2 mb-1">Capacidade 2</h3>
-              <p class="small text-body-secondary mb-0">Descrição genérica, substituída na geração.</p>
-            </div>
-          </div>
-        </div>
-        <div class="col-md-6 col-lg-4">
-          <div class="card h-100">
-            <div class="card-body">
-              <i class="bi bi-stars fs-3 stat-value"></i>
-              <h3 class="h6 mt-2 mb-1">Capacidade 3</h3>
-              <p class="small text-body-secondary mb-0">Descrição genérica, substituída na geração.</p>
-            </div>
-          </div>
-        </div>
-      </div>
-      <p class="text-body-secondary small">Exemplo demonstrativo — a geração substitui o bloco entre os marcadores pelas capacidades reais.</p>
-      <!-- CAPABILITIES end (não preenchido — conteúdo demo do template) -->
-    </div>
-
-    <!-- ══════════════ ABA 5 · DECISÕES AUTÔNOMAS ══════════════ -->
-    <div class="tab-pane fade" id="pane-decisoes" role="tabpanel"
-         aria-labelledby="tab-decisoes" tabindex="0" data-print-title="Decisões autônomas">
-      <h2 class="h4 pane-title">Premissas inferidas sem perguntar</h2>
-      <p>O orquestrador opera em autonomia total — nenhuma pergunta é feita ao usuário. Toda premissa assumida fica registrada aqui — para revisão e reprodutibilidade.</p>
-
-      <!-- DECISIONS begin (não preenchido — conteúdo demo do template) -->
-      <ul class="list-group list-group-flush">
-        <li class="list-group-item d-flex gap-3 align-items-start">
-          <i class="bi bi-lightbulb fs-5 stat-value flex-shrink-0 mt-1"></i>
-          <div><strong>Onda 1 unificada:</strong> scripts e prompts criados na mesma onda, por não haver dependência entre eles.</div>
-        </li>
-        <li class="list-group-item d-flex gap-3 align-items-start">
-          <i class="bi bi-lightbulb fs-5 stat-value flex-shrink-0 mt-1"></i>
-          <div><strong>Onda 2 em paralelo:</strong> templates/ (explainer) e SKILL.md (update) não se tocam — duas worktrees na mesma onda.</div>
-        </li>
-        <li class="list-group-item d-flex gap-3 align-items-start">
-          <i class="bi bi-lightbulb fs-5 stat-value flex-shrink-0 mt-1"></i>
-          <div><strong>Shell em vez de Python:</strong> scripts sem dependência de runtime no host.</div>
-        </li>
-        <li class="list-group-item d-flex gap-3 align-items-start">
-          <i class="bi bi-lightbulb fs-5 stat-value flex-shrink-0 mt-1"></i>
-          <div><strong>HTML de arquivo único:</strong> CDN + zero build — o EXPLAINER.html abre por file://, sem servidor.</div>
-        </li>
-        <li class="list-group-item d-flex gap-3 align-items-start">
-          <i class="bi bi-lightbulb fs-5 stat-value flex-shrink-0 mt-1"></i>
-          <div><strong>Placeholders (...) em vez de template engine:</strong> substituição simples de string na geração.</div>
-        </li>
-      </ul>
-      <p class="text-body-secondary small mt-2">Exemplo demonstrativo — a geração substitui o bloco entre os marcadores pelas decisões reais da execução.</p>
-      <!-- DECISIONS end (não preenchido — conteúdo demo do template) -->
-    </div>
-
-    <!-- ══════════════ ABA 6 · TIMELINE ══════════════ -->
-    <div class="tab-pane fade" id="pane-timeline" role="tabpanel"
-         aria-labelledby="tab-timeline" tabindex="0" data-print-title="Timeline">
-      <h2 class="h4 pane-title">Linha do tempo da execução</h2>
-      <p>As quatro fases do orquestrador e o que aconteceu em cada uma.</p>
-
-      <!-- TIMELINE begin (não preenchido — conteúdo demo do template) -->
-      <ol class="timeline list-unstyled mb-0">
-        <li class="timeline-item mb-4">
-          <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
-            <span class="badge badge-accent">Fase 1</span>
-            <strong>ANALYZE</strong>
-          </div>
-          <p class="mb-0 text-body-secondary small">Leitura do prompt, mapeamento do repositório, classificação greenfield/brownfield.</p>
-        </li>
-        <li class="timeline-item mb-4">
-          <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
-            <span class="badge badge-accent">Fase 2</span>
-            <strong>PLAN</strong>
-          </div>
-          <p class="mb-0 text-body-secondary small">Decomposição em sub-tarefas atômicas, ondas topológicas, mapa de propriedade de arquivos, TASK_PLAN.md publicado.</p>
-        </li>
-        <li class="timeline-item mb-4">
-          <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
-            <span class="badge badge-accent">Fase 3</span>
-            <strong>EXECUTE-ONDA</strong>
-          </div>
-          <p class="mb-0 text-body-secondary small">Onda 1 — scripts + prompts · Onda 2 — templates/ + SKILL.md. Worktrees nomeadas, barreira, revisão adversarial, squash-merge com gate, limpeza.</p>
-        </li>
-        <li class="timeline-item">
-          <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
-            <span class="badge badge-ok">Fase 4</span>
-            <strong>COMMIT-FINAL</strong>
-          </div>
-          <p class="mb-0 text-body-secondary small">TASK_PLAN.md removido, gate completo, commit final, varredura de limpeza, EXPLAINER.html gerado (este documento).</p>
-        </li>
-      </ol>
-      <p class="text-body-secondary small mt-3">Exemplo demonstrativo — a geração substitui o bloco entre os marcadores pela timeline real da execução.</p>
-      <!-- TIMELINE end (não preenchido — conteúdo demo do template) -->
-    </div>
-
+  <!-- ABAS -->
+  <div class="tabs" role="tablist">
+    <button class="active" data-tab="visao" role="tab" aria-selected="true">Visão geral</button>
+    <button data-tab="container" role="tab" aria-selected="false">Modo container</button>
+    <button data-tab="doctor" role="tab" aria-selected="false">Doctor</button>
+    <button data-tab="validacao" role="tab" aria-selected="false">Validação real</button>
+    <button data-tab="depara" role="tab" aria-selected="false">De-Para</button>
+    <button data-tab="limites" role="tab" aria-selected="false">Limites &amp; pendências</button>
   </div>
 
-  <footer class="text-body-secondary small border-top mt-5 pt-3">
-    Gerado por <strong>deep-orchestrator-agent-skill</strong> v0.1.1 · 2026-08-23 · branch development.
-    Documento de arquivo único — salve, abra com duplo clique ou imprima em PDF (todas as abas entram no papel).
+  <!-- ══════════════ ABA · VISÃO GERAL ══════════════ -->
+  <section class="pane active" id="pane-visao" role="tabpanel">
+    <h2 class="pane-title">Resumo em uma frase</h2>
+    <p class="lead">A execução do agente <code>pi</code> é isolada por <strong>container Docker
+      efêmero</strong>: a key entra por <code>--env-file</code> 0600 do host (nunca em volume),
+      os artefatos voltam via volumes <code>/ws</code>+<code>/exec</code>, e o timeout mata por
+      nome sem órfão.</p>
+
+    <div class="row">
+      <div class="stat-card">
+        <span class="stat-value">container</span>
+        <span class="stat-label">isolation.kind novo</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">0600</span>
+        <span class="stat-label">env-file do host (tmp)</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">0</span>
+        <span class="stat-label">órfãos no timeout</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">US$ 0,0201</span>
+        <span class="stat-label">run de validação</span>
+      </div>
+    </div>
+
+    <div class="callout">
+      <strong>Escopo (importante):</strong> só a <strong>execução</strong> do agente é isolada pelo
+      container. <code>setup[]</code> e <code>verify[]</code> (oráculo) continuam no <strong>host</strong> —
+      isolar esses via <code>dockerExec</code> é TODO de fase futura.
+    </div>
+
+    <h3 class="h6 mt-3">Como encaixa na história do modo agente</h3>
+    <p>O modo agente já tinha: executor <code>pi</code> em sala limpa, dossiê determinístico,
+      juiz oráculo+LLM, ledger de custo e superfícies CLI/HTTP/MCP. O isolamento de execução
+      tinha três <code>isolation.kind</code> — <code>worktree</code> (default), <code>clone</code>
+      e <code>container</code> (novo). Em <code>worktree</code>/<code>clone</code> o agente já
+      estava "só" separado por processo; em <code>container</code> ele ganha uma parede de
+      namespace + limites rígidos de memória/processos.</p>
+
+    <details>
+      <summary>Glossário (definido uma vez só — dobre para abrir)</summary>
+      <div class="details-body">
+        <table>
+          <thead><tr><th>Termo</th><th>Definição</th></tr></thead>
+          <tbody>
+            <tr><td><code>isolation.kind</code></td><td>Escolhe o isolamento de execução: <code>worktree</code> (default) · <code>clone</code> · <code>container</code>.</td></tr>
+            <tr><td>container efêmero</td><td>Processo isolado por namespace Linux, criado e destruído por execução, sem estado próprio.</td></tr>
+            <tr><td><code>--env-file</code></td><td>Arquivo temporário do host (0600) que o <code>docker run</code> injeta como variáveis de ambiente.</td></tr>
+            <tr><td><code>docker kill</code></td><td>Envia sinal de término ao container pelo nome; <code>docker rm -f</code> remove de vez.</td></tr>
+            <tr><td><code>--user &lt;uid&gt;:&lt;gid&gt;</code></td><td>Roda o container como o usuário do host — os artefatos saem legíveis sem sudo.</td></tr>
+            <tr><td><code>preflight</code> (doctor)</td><td>Checagem rápida antes de rodar: CLI, daemon e imagem presentes quando <code>--container</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+
+  <!-- ══════════════ ABA · MODO CONTAINER ══════════════ -->
+  <section class="pane" id="pane-container" role="tabpanel">
+    <h2 class="pane-title">1 · Fluxo da execução em container</h2>
+    <p>Cada execução do <code>pi</code> roda um <code>docker run -i --rm</code> com o container
+      nomeado <code>pb-agent-&lt;execId&gt;</code>, mounts <code>-v &lt;workspace&gt;:/ws</code> +
+      <code>-v &lt;execDir&gt;:/exec</code>, cwd <code>/ws</code>. O que o agente grava aparece no
+      host <strong>sem <code>docker cp</code></strong> — os volumes são o corredor de saída.</p>
+
+    <div class="diagram-panel">
+      <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:760px" role="img" aria-label="Fluxo de execução em container">
+        <style>
+          .box { fill: #1e1e38; stroke: #2e2e4a; stroke-width: 1.5; }
+          .box-new { fill: rgba(0,212,255,.08); stroke: var(--accent, #00d4ff); stroke-width: 1.5; }
+          .box-vol { fill: rgba(0,255,136,.06); stroke: var(--success, #00ff88); stroke-width: 1.5; stroke-dasharray: 5 4; }
+          .label { font-family: system-ui, sans-serif; font-size: 13px; font-weight: 600; fill: #dcdce8; }
+          .sublabel { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; fill: #8b8ba7; }
+          .edge { stroke: #8b8ba7; stroke-width: 1.5; }
+          .edge-primary { stroke: var(--accent, #00d4ff); stroke-width: 1.5; }
+          .ele { font-family: ui-monospace, Menlo, monospace; font-size: 9.5px; fill: #8b8ba7; }
+        </style>
+        <defs>
+          <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#8b8ba7"/>
+          </marker>
+          <marker id="a1p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#00d4ff"/>
+          </marker>
+        </defs>
+
+        <!-- Host (prompt-builder) -->
+        <rect x="20" y="30" width="150" height="70" rx="10" class="box"/>
+        <text x="95" y="55" text-anchor="middle" class="label">Host · prompt-builder</text>
+        <text x="95" y="73" text-anchor="middle" class="sublabel">spawn: docker run</text>
+        <text x="95" y="88" text-anchor="middle" class="sublabel">--budget / ledger</text>
+
+        <!-- docker run -i -->
+        <line x1="170" y1="65" x2="248" y2="65" class="edge-primary" marker-end="url(#a1p)"/>
+        <text x="209" y="58" text-anchor="middle" class="ele">docker run -i --rm</text>
+
+        <!-- Container (novo, Fase 5) -->
+        <rect x="250" y="20" width="210" height="130" rx="10" class="box-new"/>
+        <text x="355" y="42" text-anchor="middle" class="label">Container efêmero (novo)</text>
+        <text x="355" y="58" text-anchor="middle" class="sublabel">pb-agent-&lt;execId&gt;</text>
+        <text x="355" y="73" text-anchor="middle" class="sublabel">-m 2g · --pids-limit 512</text>
+        <text x="355" y="88" text-anchor="middle" class="sublabel">--user &lt;uid&gt;:&lt;gid&gt; host</text>
+
+        <!-- pi dentro -->
+        <rect x="280" y="100" width="150" height="42" rx="8" class="box"/>
+        <text x="355" y="118" text-anchor="middle" class="label">pi --mode json</text>
+        <text x="355" y="133" text-anchor="middle" class="sublabel">cwd /ws · stdin = task</text>
+
+        <!-- volumes -->
+        <rect x="270" y="185" width="120" height="48" rx="8" class="box-vol"/>
+        <text x="330" y="206" text-anchor="middle" class="label">/ws (workspace)</text>
+        <text x="330" y="222" text-anchor="middle" class="sublabel">artefato</text>
+        <rect x="400" y="185" width="120" height="48" rx="8" class="box-vol"/>
+        <text x="460" y="206" text-anchor="middle" class="label">/exec (execDir)</text>
+        <text x="460" y="222" text-anchor="middle" class="sublabel">session · pi-home</text>
+
+        <!-- pi -> volumes -->
+        <line x1="355" y1="142" x2="330" y2="183" class="edge" marker-end="url(#a1)"/>
+        <text x="318" y="166" text-anchor="middle" class="ele">grava artefato</text>
+        <line x1="370" y1="142" x2="460" y2="183" class="edge" marker-end="url(#a1)"/>
+        <text x="436" y="166" text-anchor="middle" class="ele">grava sessão</text>
+
+        <!-- volumes -> host -->
+        <line x1="330" y1="233" x2="95" y2="102" class="edge-primary" stroke-dasharray="5 4" marker-end="url(#a1p)"/>
+        <text x="188" y="180" text-anchor="middle" class="ele">aparece no host · sem docker cp</text>
+
+        <!-- OpenRouter no topo -->
+        <rect x="500" y="20" width="150" height="56" rx="10" class="box"/>
+        <text x="575" y="44" text-anchor="middle" class="label">OpenRouter</text>
+        <text x="575" y="60" text-anchor="middle" class="sublabel">rede default</text>
+        <line x1="500" y1="48" x2="462" y2="48" class="edge" marker-end="url(#a1)"/>
+      </svg>
+      <span class="diagram-caption">Host → <code>docker run -i --rm</code> → container →
+        <code>pi</code> → grava em /ws e /exec → artefatos voltam ao host sem docker cp.</span>
+    </div>
+
+    <h3 class="h6 mt-3">Imagem default e conteúdo</h3>
+    <p>A imagem é <code>prompt-builder-pi:&lt;executorVersion&gt;</code> (ex.
+      <code>prompt-builder-pi:0.84.2</code>), derivada da versão pinada do executor. Ela é
+      <strong>criada na primeira preparação de run em container</strong> (via <code>ensurePiImage</code>,
+      com o Dockerfile <strong>embutido</strong> em <code>src/agent/container.ts</code>) e
+      <strong>cacheada por tag</strong>. O default da tag é sobrescrito por
+      <code>isolation.image</code>.</p>
+    <pre><code># Dockerfile embutido em src/agent/container.ts (Fase 5)
+FROM node:22-bookworm-slim
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends git ca-certificates bash
+RUN npm install -g @earendil-works/pi-coding-agent@&lt;ver&gt;</code></pre>
+
+    <h2 class="pane-title mt-4">2 · Caminho da key (env-file 0600, nunca no volume)</h2>
+    <p>A key do OpenRouter entra por um <code>--env-file</code> <strong>tmp 0600 no host</strong>
+      (via <code>os.tmpdir()</code>), <strong>apagado ao fim</strong> do run. Nunca em arquivo de
+      volume/container, nunca em <code>argv</code> — o <code>argv.json</code> de auditoria
+      <strong>mascara</strong> o caminho como <code>&lt;env-file-tmp-0600&gt;</code>. A verificação é
+      a prova: <code>grep sk-or-</code> → <strong>NONE</strong> na run inteira e
+      <code>pi-home/auth.json</code> = <code>{}</code>.</p>
+
+    <div class="diagram-panel">
+      <svg viewBox="0 0 760 190" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:760px" role="img" aria-label="Caminho da key do OpenRouter">
+        <style>
+          .box { fill: #1e1e38; stroke: #2e2e4a; stroke-width: 1.5; }
+          .box-key { fill: rgba(255,170,0,.08); stroke: var(--warning,#ffaa00); stroke-width: 1.5; }
+          .box-no { fill: rgba(255,107,107,.06); stroke: var(--danger,#ff6b6b); stroke-width: 1.5; stroke-dasharray: 5 4; }
+          .label { font-family: system-ui,sans-serif; font-size: 13px; font-weight: 600; fill: #dcdce8; }
+          .sublabel { font-family: ui-monospace,Menlo,monospace; font-size: 10.5px; fill: #8b8ba7; }
+          .edge { stroke: #8b8ba7; stroke-width: 1.5; }
+          .ele { font-family: ui-monospace,Menlo,monospace; font-size: 9.5px; fill: #8b8ba7; }
+        </style>
+        <defs>
+          <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#8b8ba7"/>
+          </marker>
+          <marker id="a2r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#ff6b6b"/>
+          </marker>
+        </defs>
+
+        <!-- key source -->
+        <rect x="15" y="20" width="150" height="60" rx="10" class="box-key"/>
+        <text x="90" y="44" text-anchor="middle" class="label">Key (OpenRouter)</text>
+        <text x="90" y="60" text-anchor="middle" class="sublabel">~/.pi/agent/auth.json</text>
+
+        <!-- env-file tmp -->
+        <rect x="215" y="20" width="170" height="60" rx="10" class="box"/>
+        <text x="300" y="44" text-anchor="middle" class="label">env-file tmp (host)</text>
+        <text x="300" y="60" text-anchor="middle" class="sublabel">os.tmpdir() · chmod 0600</text>
+
+        <!-- docker env-file inject -->
+        <line x1="165" y1="50" x2="213" y2="50" class="edge" marker-end="url(#a2)"/>
+        <text x="189" y="43" text-anchor="middle" class="ele">lê</text>
+
+        <!-- env do pi (container) -->
+        <rect x="435" y="20" width="170" height="60" rx="10" class="box"/>
+        <text x="520" y="44" text-anchor="middle" class="label">env do pi (container)</text>
+        <text x="520" y="60" text-anchor="middle" class="sublabel">OPENROUTER_API_KEY=…</text>
+
+        <!-- docker inject -->
+        <line x1="385" y1="50" x2="433" y2="50" class="edge" marker-end="url(#a2)"/>
+        <text x="409" y="43" text-anchor="middle" class="ele">--env-file</text>
+
+        <!-- OpenRouter -->
+        <rect x="640" y="20" width="105" height="60" rx="10" class="box"/>
+        <text x="692" y="50" text-anchor="middle" class="label">OpenRouter</text>
+        <line x1="605" y1="50" x2="638" y2="50" class="edge" marker-end="url(#a2)"/>
+
+        <!-- nunca em volume/argv (cross out) -->
+        <rect x="435" y="110" width="200" height="56" rx="10" class="box-no"/>
+        <text x="535" y="132" text-anchor="middle" class="label">NUNCA em volume/argv</text>
+        <text x="535" y="150" text-anchor="middle" class="sublabel">argv.json → &lt;env-file-tmp-0600&gt;</text>
+        <line x1="435" y1="80" x2="460" y2="108" class="edge" stroke="#ff6b6b" marker-end="url(#a2r)"/>
+        <text x="410" y="97" text-anchor="middle" class="ele" fill="#ff6b6b">não vai pra cá</text>
+      </svg>
+      <span class="diagram-caption">A key vive só no env do processo do container; o env-file é
+        apagado ao fim e o audit mascara o caminho no argv.json.</span>
+    </div>
+
+    <div class="callout ok">
+      <strong>Prova da sala (spike + validação):</strong> <code>grep -rl sk-or-</code> no host e no
+      volume → <code>NONE</code>; <code>env | grep OPENROUTER_API_KEY</code> → 1 (só no env do pi);
+      <code>pi-home/auth.json</code> vazio.
+    </div>
+
+    <h2 class="pane-title mt-4">3 · Cycle kill/timeout — sem órfão</h2>
+    <p>No timeout/cancelamento o CLI docker não basta (matar o CLI não derruba o container). O
+      produtor mata o container <strong>por nome</strong>: <code>docker kill &lt;nome&gt;</code> +
+      <code>docker rm -f &lt;nome&gt;</code> (fire-and-forget, idempotente). O <code>--rm</code> cobre
+      o exit normal; o kill explícito cobre o resto. Resultado: nenhum processo <code>pi</code> e
+      nenhum container órfão no host.</p>
+
+    <div class="diagram-panel">
+      <svg viewBox="0 0 760 170" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:760px" role="img" aria-label="Ciclo de kill por timeout">
+        <style>
+          .box { fill: #1e1e38; stroke: #2e2e4a; stroke-width: 1.5; }
+          .box-dead { fill: rgba(255,107,107,.07); stroke: var(--danger,#ff6b6b); stroke-width: 1.5; }
+          .label { font-family: system-ui,sans-serif; font-size: 13px; font-weight: 600; fill: #dcdce8; }
+          .sublabel { font-family: ui-monospace,Menlo,monospace; font-size: 10.5px; fill: #8b8ba7; }
+          .edge { stroke: #8b8ba7; stroke-width: 1.5; }
+          .edge-danger { stroke: #ff6b6b; stroke-width: 1.5; }
+          .edge-ok { stroke: #00ff88; stroke-width: 1.5; }
+          .ele { font-family: ui-monospace,Menlo,monospace; font-size: 9.5px; fill: #8b8ba7; }
+        </style>
+        <defs>
+          <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b8ba7"/></marker>
+          <marker id="a3d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ff6b6b"/></marker>
+          <marker id="a3o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#00ff88"/></marker>
+        </defs>
+
+        <!-- timeout -->
+        <rect x="15" y="45" width="150" height="66" rx="10" class="box"/>
+        <text x="90" y="70" text-anchor="middle" class="label">timeout / cancel</text>
+        <text x="90" y="87" text-anchor="middle" class="sublabel">maxCost / maxTurns</text>
+
+        <!-- docker kill -->
+        <rect x="215" y="45" width="160" height="66" rx="10" class="box-dead"/>
+        <text x="295" y="70" text-anchor="middle" class="label">docker kill &lt;nome&gt;</text>
+        <text x="295" y="87" text-anchor="middle" class="sublabel">SIGKILL · estado Dead</text>
+
+        <!-- docker rm -f -->
+        <rect x="425" y="45" width="160" height="66" rx="10" class="box"/>
+        <text x="505" y="70" text-anchor="middle" class="label">docker rm -f &lt;nome&gt;</text>
+        <text x="505" y="87" text-anchor="middle" class="sublabel">removido · idempotente</text>
+
+        <!-- sem orfao -->
+        <rect x="635" y="45" width="110" height="66" rx="10" class="box"/>
+        <text x="690" y="77" text-anchor="middle" class="label">sem órfão</text>
+
+        <line x1="165" y1="78" x2="213" y2="78" class="edge" marker-end="url(#a3)"/>
+        <line x1="375" y1="78" x2="423" y2="78" class="edge-danger" marker-end="url(#a3d)"/>
+        <text x="399" y="71" text-anchor="middle" class="ele">remove</text>
+        <line x1="585" y1="78" x2="633" y2="78" class="edge-ok" marker-end="url(#a3o)"/>
+        <text x="609" y="71" text-anchor="middle" class="ele">garante</text>
+      </svg>
+      <span class="diagram-caption">Timeout/cancelamento ⇒ <code>docker kill</code> + <code>docker rm
+        -f</code> por nome; nenhum órfão no host.</span>
+    </div>
+
+    <details>
+      <summary>Correção crítica do spike — só com <code>-i</code> funciona</summary>
+      <div class="details-body">
+        <p>No comando do produtor original o container recebia <strong>stdin vazio</strong>: sem
+          <code>-i</code> (<code>--interactive</code>), o stdin pipeado da tarefa vira EOF e o
+          <code>pi</code> sai com exit 0 e só o evento <code>session</code>. No <code>--mode json</code>
+          não-interativo, a tarefa entra pelo <strong>stdin pipeado</strong> — logo o spawn do docker
+          precisa de <code>-i</code> com <code>stdin</code> = task. Também não existem as variáveis
+          <code>PI_TASK</code>/<code>PI_SYSTEM_PROMPT</code>/<code>PI_MODEL_ID</code> no pi: as reais
+          são <code>PI_MODEL</code>, <code>PI_PROVIDER</code>, <code>PI_KEY</code>.</p>
+      </div>
+    </details>
+  </section>
+
+  <!-- ══════════════ ABA · DOCTOR ══════════════ -->
+  <section class="pane" id="pane-doctor" role="tabpanel">
+    <h2 class="pane-title">Doctor com preflight de Docker</h2>
+    <p>O <code>agents doctor</code> ganhou a flag <code>--container</code> (e o <code>--deep</code>
+      como canário). Quando o modo é container, o <strong>preflight</strong> exige CLI Docker no
+      PATH + daemon acessível (sem sudo) + imagem; se faltar, <strong>exit <code>3</code></strong> —
+      o run nem tenta.</p>
+
+    <pre><code>prompt-builder agents doctor            # modo worktree/clone
+prompt-builder agents doctor --deep      # auto-teste de sala limpa
+prompt-builder agents doctor --container # preflight docker
+prompt-builder agents doctor --deep --container</code></pre>
+
+    <p class="small text-muted">O pré-voo ecoa <code>· docker ok (prompt-builder-pi:&lt;ver&gt;)</code>
+      ou <code>docker CLI AUSENTE</code> / <code>imagem ausente</code>. O <code>doctor</code>
+      <strong>não builda</strong> — se a imagem faltar, rode uma run em container para buildá-la na
+      primeira preparação (<code>ensurePiImage</code>). O canário de sala limpa pode rodar em
+      container via <code>--deep --container</code>.</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Flag</th><th>O que faz</th><th>Exit se falhar</th></tr></thead>
+        <tbody>
+          <tr><td><code>agents doctor</code></td><td>Prova a sala limpa (canários, versão pinada, git, disco)</td><td><code>3</code></td></tr>
+          <tr><td><code>--deep</code></td><td>Auto-teste de sala limpa (pode rodar o canário em container)</td><td><code>3</code></td></tr>
+          <tr><td><code>--container</code></td><td>Preflight exige docker CLI + daemon + imagem</td><td><code>3</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="h6 mt-3">Contrato de exit (relevante para automação)</h3>
+    <pre><code>0  ok         2  uso       3  config       4  auth
+5  sem crédito  7  parcial por orçamento  8  rede   130  SIGINT</code></pre>
+    <p class="small text-muted">O <code>agent.limits.maxCostUsd</code> continua <strong>obrigatório</strong>;
+      ausência é erro de config (exit <code>3</code>).</p>
+  </section>
+
+  <!-- ══════════════ ABA · VALIDAÇÃO REAL ══════════════ -->
+  <section class="pane" id="pane-validacao" role="tabpanel">
+    <h2 class="pane-title">O que foi provado na validação (2026-08-23)</h2>
+    <p>Run compare com <strong>2 agentes em container paralelo</strong> + um cenário com oráculo:</p>
+
+    <div class="row">
+      <div class="stat-card">
+        <span class="stat-value">2</span>
+        <span class="stat-label">agentes em container</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">0</span>
+        <span class="stat-label">containers órfãos</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">US$ 0,0201</span>
+        <span class="stat-label">custo total da run</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">100/100</span>
+        <span class="stat-label">regressão chat</span>
+      </div>
+    </div>
+
+    <div class="table-wrap mt-4">
+      <table>
+        <thead><tr><th>Modelo</th><th>Oráculo</th><th>Turnos</th><th>Leitura</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>gemini-2.5-flash</code></td>
+            <td><span class="badge badge-ok">resolveu (1)</span></td>
+            <td>2</td>
+            <td>executou a tarefa e o oráculo passou</td>
+          </tr>
+          <tr>
+            <td><code>flash-lite</code></td>
+            <td><span class="badge badge-danger">falhou (0)</span></td>
+            <td>—</td>
+            <td>oráculo não passou — nota honesta, sem órfão</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <ul class="list mt-3">
+      <li>✅ Execução real em container (paralela) com dossiê/digests/raws no host.</li>
+      <li>✅ Key ausente de arquivo/volume (<code>grep sk-or-</code> → NONE; <code>auth.json</code> = <code>{}</code>).</li>
+      <li>✅ Timeout mata por nome; zero containers órfãos após a run.</li>
+      <li>✅ Chat (regressão) intacto: run US$ 0,0077, 100/100.</li>
+      <li>✅ <code>agents doctor --container</code> responde o preflight.</li>
+    </ul>
+
+    <div class="callout mt-3">
+      <strong>Medido (spike):</strong> spawn→1º evento ~529 ms (imagem quente), overhead de
+      &lt;170 ms vs host; custo por execução US$ 0,002 ≪ teto; stream <code>usage.cost</code> ao
+      vivo.
+    </div>
+  </section>
+
+  <!-- ══════════════ ABA · DE-PARA ══════════════ -->
+  <section class="pane" id="pane-depara" role="tabpanel">
+    <h2 class="pane-title">Antes → Depois (Fase 5)</h2>
+
+    <div class="depara-cols">
+      <div class="card depara-antes">
+        <div class="card-header">Antes</div>
+        <div class="card-body">
+          <ul class="list">
+            <li>Isolamento de execução por <code>worktree</code> (git worktree da raiz-de-mundo) ou <code>clone</code> descartável.</li>
+            <li>Parede só de processo; os artefatos vivem no workspace do host.</li>
+            <li>Key lida do <code>~/.pi/agent/auth.json</code> no processo.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card depara-depois">
+        <div class="card-header">Depois</div>
+        <div class="card-body">
+          <ul class="list">
+            <li><strong>Novo</strong> <code>isolation.kind = "container"</code>: cada execução num container efêmero.</li>
+            <li>Parede de namespace + <code>-m 2g --pids-limit 512</code> e <code>--user</code> do host.</li>
+            <li>Key por <code>--env-file</code> 0600 do host, nunca em volume/argv; apagado ao fim.</li>
+            <li>Kill por nome (<code>docker kill</code> + <code>docker rm -f</code>), zero órfão.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <h2 class="pane-title mt-4">Contrato de config (novo)</h2>
+    <pre><code>{
+  "agent": {
+    "executor": "pi",
+    "executorVersion": "0.84.2",
+    "promptMode": "append",
+    "limits": { "maxTurns": 30, "maxCostUsd": 0.40 },
+    "isolation": { "kind": "container" }   // worktree (default) | clone | container
+  }
+}</code></pre>
+    <p class="small"><code>isolation.image</code> opcional — sobrescreve a tag
+      <code>prompt-builder-pi:&lt;executorVersion&gt;</code>.</p>
+  </section>
+
+  <!-- ══════════════ ABA · LIMITES E PENDÊNCIAS ══════════════ -->
+  <section class="pane" id="pane-limites" role="tabpanel">
+    <h2 class="pane-title">Marcos / fases do modo agente</h2>
+    <ol class="timeline">
+      <li>
+        <div class="mb-1"><span class="badge badge-soft">base</span> <strong>Agent Arena</strong></div>
+        <p class="small text-muted">Executor <code>pi</code> em sala limpa, dossiê determinístico,
+          juiz oráculo+LLM, ledger de custo, CLI/HTTP/MCP.</p>
+      </li>
+      <li>
+        <div class="mb-1"><span class="badge badge-soft">base</span> <strong>Três isolation.kind</strong></div>
+        <p class="small text-muted"><code>worktree</code> (default), <code>clone</code> descartável,
+          <code>container</code> (novo).</p>
+      </li>
+      <li class="new">
+        <div class="mb-1"><span class="badge badge-ok">Fase 5</span> <strong>Isolamento de execução por container</strong></div>
+        <p class="small text-muted">Imagem <code>prompt-builder-pi:&lt;ver&gt;</code>, <code>docker run
+          -i --rm</code>, key por env-file 0600, kill por nome, doctor <code>--container</code>.</p>
+      </li>
+    </ol>
+
+    <h2 class="pane-title mt-4">Pendências / TODOs</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Item</th><th>Estado</th><th>Observação</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Escopo: só a execução em container</td>
+            <td><span class="badge badge-warn">TODO fase futura</span></td>
+            <td><code>setup[]</code>/<code>verify[]</code> (oráculo) seguem no host; isolar via <code>dockerExec</code> é roadmap.</td>
+          </tr>
+          <tr>
+            <td>Validação oficial da Fase</td>
+            <td><span class="badge badge-ok">done</span></td>
+            <td>Run compare em container (US$ 0,0201), regressão chat intacta, zero órfão.</td>
+          </tr>
+          <tr>
+            <td>Overheads de ambiente</td>
+            <td><span class="badge badge-soft">estável</span></td>
+            <td>Startup extra ~160 ms (imagem quente) — sem custo de modelo.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    Gerado por <strong>deep-orchestrator-agent-skill</strong> · passo COMMIT-FINAL · v0.2.0 ·
+    2026-08-23 · branch development. Documento de arquivo único e autocontido — sem CDN, abre por
+    file:// e segue o tema do Plannotator quando embutido.
   </footer>
 
 </main>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
-        integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI"
-        crossorigin="anonymous"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"
-        integrity="sha384-RH2xi4eIQ/gjtbs9fUXM68sLSi99C7ZWBRX1vDrVv6GQXRibxXLbwO2NGZB74MbU"
-        crossorigin="anonymous"></script>
-
 <script>
-/* ── runtime do documento ────────────────────────────────────────────────────
-   Copie este bloco inteiro, sem editar. Ele faz três coisas:
-   1. guarda o código-fonte cru ANTES de qualquer transformação (para o copiar);
-   2. destaca a sintaxe e injeta o botão de copiar;
-   3. liga as abas ao #hash da URL, nos dois sentidos.
-   ────────────────────────────────────────────────────────────────────────── */
+/* Abas mínimas — sem Bootstrap JS, substituindo a dependência externa do EXPLAINER anterior. */
 (function () {
   'use strict';
+  var tabs = document.querySelectorAll('.tabs button[data-tab]');
+  var panes = document.querySelectorAll('.pane');
 
-  // 1. Fonte cru primeiro. Depois do highlight o DOM ganha <span>; textContent ainda
-  //    devolve o texto certo, mas plugins de numeração de linha o contaminam. Guardar
-  //    antes é a única versão que nunca mente.
-  var sources = new WeakMap();
-  document.querySelectorAll('pre > code').forEach(function (code) {
-    sources.set(code, code.textContent.replace(/\n$/, ''));
-  });
-
-  // 2. Highlight. Declare sempre a linguagem na classe: a auto-detecção erra em
-  //    trechos curtos (o mesmo snippet vira "ruby" numa aba e "perl" na outra).
-  if (window.hljs) hljs.highlightAll();
-
-  // Copiar. navigator.clipboard exige contexto seguro; em file:// o comportamento
-  // varia por navegador, então o fallback com execCommand não é opcional.
-  function copyText(text) {
-    if (navigator.clipboard && window.isSecureContext) {
-      return navigator.clipboard.writeText(text).then(function () { return true; },
-                                                      function () { return legacyCopy(text); });
-    }
-    return Promise.resolve(legacyCopy(text));
-  }
-
-  function legacyCopy(text) {
-    var ta = document.createElement('textarea');
-    ta.value = text;
-    ta.setAttribute('readonly', '');
-    // position:fixed + opacity:0 evita que a página role até o textarea.
-    ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;';
-    document.body.appendChild(ta);
-    ta.select();
-    ta.setSelectionRange(0, ta.value.length); // iOS ignora select() sozinho
-    var ok = false;
-    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-    document.body.removeChild(ta);
-    return ok;
-  }
-
-  document.querySelectorAll('pre > code').forEach(function (code) {
-    var pre = code.parentElement;
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'btn btn-sm btn-outline-secondary copy-btn';
-    btn.innerHTML = '<i class="bi bi-clipboard"></i>';
-    btn.setAttribute('aria-label', 'Copiar código');
-    btn.addEventListener('click', function () {
-      copyText(sources.get(code) || code.textContent).then(function (ok) {
-        btn.innerHTML = ok ? '<i class="bi bi-check-lg"></i>' : '<i class="bi bi-x-lg"></i>';
-        btn.classList.toggle('btn-outline-success', ok);
-        btn.classList.toggle('btn-outline-danger', !ok);
-        btn.classList.remove('btn-outline-secondary');
-        setTimeout(function () {
-          btn.innerHTML = '<i class="bi bi-clipboard"></i>';
-          btn.className = 'btn btn-sm btn-outline-secondary copy-btn';
-        }, 1500);
-      });
+  function activate(name) {
+    panes.forEach(function (p) {
+      p.classList.toggle('active', p.id === 'pane-' + name);
     });
-    pre.appendChild(btn);
-  });
-
-  // 3. Aba ↔ URL. Sem isto, mandar "olha a aba De-Para" exige explicar o clique.
-  var tabs = document.querySelectorAll('[data-bs-toggle="tab"]');
-  if (!tabs.length) return;
-
-  function activateFromHash() {
-    var hash = window.location.hash;
-    if (!hash || hash.length < 2) return;
-    var target = document.querySelector(hash);
-    if (!target) return;
-    // O #hash pode apontar para o painel OU para um título dentro dele.
-    var pane = target.closest('.tab-pane') || (target.classList.contains('tab-pane') ? target : null);
-    if (!pane) return;
-    var trigger = document.querySelector('[data-bs-target="#' + CSS.escape(pane.id) + '"]');
-    if (trigger) bootstrap.Tab.getOrCreateInstance(trigger).show();
-    // O navegador já tentou rolar até o alvo — e falhou, porque naquele instante o
-    // painel ainda era display:none. Agora que apareceu, role de novo: sem isto a
-    // página abre num scroll intermediário, com as abas escondidas atrás da navbar.
-    var scrollTo = target !== pane ? target : (trigger && trigger.closest('[role="tablist"]')) || pane;
-    requestAnimationFrame(function () { scrollTo.scrollIntoView({ block: 'start' }); });
+    tabs.forEach(function (b) {
+      var on = b.getAttribute('data-tab') === name;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    if (history.replaceState) history.replaceState(null, '', '#' + name);
   }
 
-  tabs.forEach(function (t) {
-    t.addEventListener('shown.bs.tab', function (e) {
-      var id = (e.target.getAttribute('data-bs-target') || '').slice(1);
-      // replaceState, não location.hash: mudar o hash direto faz a página pular.
-      if (id) history.replaceState(null, '', '#' + id);
-    });
+  tabs.forEach(function (b) {
+    b.addEventListener('click', function () { activate(b.getAttribute('data-tab')); });
   });
 
-  window.addEventListener('hashchange', activateFromHash);
-  activateFromHash();
+  // Aba a partir do #hash da URL.
+  var h = window.location.hash.slice(1);
+  if (h && document.getElementById('pane-' + h)) activate(h);
 })();
 </script>
 </body>
