@@ -11,3 +11,5 @@ web/tsconfig.tsbuildinfo
 *.tgz
 .vercel
 .env*
+
+.deep-orchestrator/
