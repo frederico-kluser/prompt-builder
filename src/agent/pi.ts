@@ -536,7 +536,10 @@ export const piExecutor: AgentExecutor = {
       '--no-prompt-templates',
       '--no-themes',
       '--no-approve',
-      '--no-tests',
+      // A flag-teste desativada é registrada por EXTENSÃO (pi-lens) e NÃO existe
+      // no núcleo do pi. Como a sala limpa passa `--no-extensions`, o pi
+      // responderia `Unknown option: ...` e a execução falharia (verificado
+      // numa run real). Mantemos apenas as flags do help do núcleo.
       '--tools', tools.join(','),
       ...systemPromptArg(promptMode, systemPrompt, sessionDir),
     ];

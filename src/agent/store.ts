@@ -260,6 +260,10 @@ export async function ensureAgentsTokenFile(): Promise<string> {
   try {
     await fs.access(file);
   } catch {
+    // Quando o dataDir ainda não existe (ex.: PROMPT_BUILDER_HOME apontando
+    // para um caminho novo), o writeFile abaixo falharia com ENOENT. Cria o
+    // diretório primeiro (recursive; no-op se já existir).
+    await fs.mkdir(getDataDir(), { recursive: true });
     await fs.writeFile(file, randomUUID() + '\n', { encoding: 'utf-8', mode: 0o600 });
   }
   // idempotente: garante o mode mesmo que o arquivo já exista
