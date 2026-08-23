@@ -12,6 +12,7 @@ import { cmdModels } from './commands/models.js';
 import { cmdRun } from './commands/run.js';
 import { cmdDocs, cmdInit, cmdSkill } from './commands/knowledge.js';
 import { cmdMcp } from './commands/mcp.js';
+import { cmdAgents } from './commands/agents.js';
 import {
   cmdConfig,
   cmdDoctor,
@@ -60,6 +61,19 @@ RESULTADOS
 OUTROS
   techniques · lgpd · config validate <arq> · config example · doctor
   mcp                      servidor MCP por stdio (mesmo binário)
+
+AGENTES (modo agente — mesmo motor, executor pi)
+  agents doctor [--deep]   pré-voo do executor (canário real com --deep)
+  agents run --config <arq> --budget <usd|none> [--dry-run]
+                           roda a arena de agentes até o fim
+  agents show <runId>      record + execuções de agente
+  agents list              varre <data-dir>/agent-runs
+  agents logs <runId> --stage N --contestant <id>
+          [--rep N] [--what dossier|diff|trajectory|events|session|stderr|oracle]
+  agents replay <runId> --stage N --contestant <id> [--rep N]
+                           imprime o comando EXATO (env redigido) p/ reproduzir
+  agents gc [--older-than 30d] [--dry-run]
+                           apaga artefatos de runs antigas (enche disco)
 
 OPÇÕES GLOBAIS
   --budget <usd|none>      teto de gasto (OBRIGATÓRIO fora de um terminal)
@@ -129,6 +143,8 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdDoctor(argv);
     case 'mcp':
       return cmdMcp(argv);
+    case 'agents':
+      return cmdAgents(argv);
     default:
       throw new CliError(
         `Comando desconhecido: "${cmd}". Veja \`prompt-builder --help\`.`,
