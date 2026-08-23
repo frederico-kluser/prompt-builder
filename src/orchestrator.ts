@@ -537,6 +537,12 @@ async function runLoop(
         const agentVerdicts: Record<string, Verdict> = {};
         const agentExplanations: Record<string, string> = {};
         const agentIncompleteIds = new Set<string>();
+        // Vereditos POR REPETIÇÃO, por contestant — só quando a etapa roda com
+        // reps > 1 (§18.4). Cada rep é uma observação independente; quem consome
+        // o record precisa do vetor plano (cenário × repetição) para o
+        // judge-score e a significância, não só da média ordinal da etapa.
+        const agentVerdictsByRep: Record<string, Verdict[]> = {};
+        const agentRepIncomplete: Record<string, number> = {};
         const agentContestants = record.contestants.filter((c) => c.runner === 'agent');
         const chatContestants = record.contestants.filter((c) => c.runner !== 'agent');
 
@@ -579,6 +585,17 @@ async function runLoop(
                 agentExplanations[contestant.id] =
                   agentRes.repResults.find((r) => r.verdict !== null)?.explanation ??
                   '(sem explicação do juiz)';
+              }
+              // Expõe POR-REPETIÇÃO quando reps > 1 (§18.4): o vetor plano vira
+              // observações independentes no denominador do judge-score e no
+              // pareamento (cenário × repetição) do pairedSignificance. Reps
+              // `incomplete` (veredito null) NÃO entram no vetor — são contadas
+              // em repIncomplete.
+              const reps = record.config.agent?.repetitions ?? 1;
+              if (reps > 1) {
+                agentVerdictsByRep[contestant.id] = valid;
+                const incompletas = agentRes.repResults.filter((r) => r.verdict === null).length;
+                if (incompletas > 0) agentRepIncomplete[contestant.id] = incompletas;
               }
             } else {
               response = await runCompetitor({
@@ -652,6 +669,15 @@ async function runLoop(
                 verdictByContestant: { ...agentVerdicts },
                 explanationByContestant: { ...agentExplanations },
                 judgeModelId: record.config.judgeModelIds.join('+'),
+                // §18.4: quando a etapa tem reps>1, guarda o vetor plano por rep
+                // para o orquestrador montar o judge-score/vetor plano e a
+                // significância (o irmão `repIncomplete` registra as rep perdidas).
+                ...(Object.keys(agentVerdictsByRep).length > 0 && {
+                  verdictsByRep: agentVerdictsByRep,
+                }),
+                ...(Object.keys(agentRepIncomplete).length > 0 && {
+                  repIncomplete: agentRepIncomplete,
+                }),
               };
             } else {
               // Misto: refJudge roda SÓ com as respostas/contestants de chat, e o
@@ -674,6 +700,14 @@ async function runLoop(
                 ...base,
                 verdictByContestant: { ...base.verdictByContestant, ...agentVerdicts },
                 explanationByContestant: { ...base.explanationByContestant, ...agentExplanations },
+                // §18.4: reps>1 — anexa o vetor plano por rep e o count de
+                // incomplete dos agentes (chat não tem reps, fica de fora).
+                ...(Object.keys(agentVerdictsByRep).length > 0 && {
+                  verdictsByRep: agentVerdictsByRep,
+                }),
+                ...(Object.keys(agentRepIncomplete).length > 0 && {
+                  repIncomplete: agentRepIncomplete,
+                }),
               };
             }
             stageRecord.referenceJudge = refJudge;
@@ -806,15 +840,68 @@ async function runLoop(
     // não do agente). Filtramos os `undefined`, então o contestant entra no
     // judge-score só com as etapas em que ele pontuou de verdade. Chat NÃO muda:
     // vereditos de chat nunca são `undefined` no map.
+    //
+    // §18.4 — REPETIÇÕES: cada rep é uma observação independente. Quando algum
+    // `referenceJudge` guarda `verdictsByRep` (contestant de agente com reps>1),
+    // o score do contestant sai do vetor PLANO (todas as etapas × todas as reps),
+    // não da média ordinal por etapa. `judgeScoreFromVerdicts` não muda uma linha;
+    // mudou só QUEM chama com o quê. Sem `verdictsByRep` (reps=1 / chat) o fluxo
+    // é exatamente o legado.
+    const temVerdictsByRep = stagesComRef.some(
+      (s) => s.referenceJudge!.verdictsByRep && Object.keys(s.referenceJudge!.verdictsByRep!).length > 0,
+    );
     record.judgeScoreByContestant = Object.fromEntries(
-      record.contestants.map((c) => [
-        c.id,
-        judgeScoreFromVerdicts(
-          stagesComRef
-            .map((s) => s.referenceJudge!.verdictByContestant[c.id])
-            .filter((v): v is Verdict => v !== undefined),
-        ),
-      ]),
+      record.contestants.map((c) => {
+        if (temVerdictsByRep) {
+          // Vetor PLANO: concatena os vereditos POR REP de todas as etapas.
+          const flat: Verdict[] = [];
+          for (const s of stagesComRef) {
+            const porRep = s.referenceJudge!.verdictsByRep?.[c.id];
+            if (porRep) flat.push(...porRep);
+          }
+          return [c.id, judgeScoreFromVerdicts(flat)];
+        }
+        return [
+          c.id,
+          judgeScoreFromVerdicts(
+            stagesComRef
+              .map((s) => s.referenceJudge!.verdictByContestant[c.id])
+              .filter((v): v is Verdict => v !== undefined),
+          ),
+        ];
+      }),
+    );
+  }
+
+  // §18.4 — resolveRate por contestant: fração de 'resolve' entre os vereditos
+  // PLANOS (todas as etapas × todas as reps), em 0..1 com 3 casas. Presente só
+  // quando há contestants de agente: é o número que separa "resolve sempre" de
+  // "resolve às vezes". Com reps=1 vira uma amostra de tamanho 1 — o relatório
+  // final já avisa (§18.4). Usa o mesmo vetor plano do judge-score acima.
+  const agentIds = record.contestants.filter((c) => c.runner === 'agent').map((c) => c.id);
+  if (agentIds.length > 0 && stagesComRef.length > 0) {
+    record.resolveRateByContestant = Object.fromEntries(
+      agentIds.map((id) => {
+        let resolve = 0;
+        let total = 0;
+        for (const s of stagesComRef) {
+          const porRep = s.referenceJudge?.verdictsByRep?.[id];
+          if (porRep) {
+            for (const v of porRep) {
+              total += 1;
+              if (v === 'resolve') resolve += 1;
+            }
+          } else {
+            // reps=1 / etapa sem verdictsByRep — usa o veredito agregado da etapa.
+            const v = s.referenceJudge?.verdictByContestant[id];
+            if (v !== undefined) {
+              total += 1;
+              if (v === 'resolve') resolve += 1;
+            }
+          }
+        }
+        return [id, total > 0 ? Number((resolve / total).toFixed(3)) : 0];
+      }),
     );
   }
 
@@ -942,6 +1029,23 @@ async function runLoop(
   }
 
   syncLedger();
+
+  // §18.4 — aviso de repetições, irmão do `holdoutSkipped` do treino. Cada rep
+  // de agente é UMA observação independente; `repetitions` default é 1, ou seja,
+  // uma amostra de tamanho 1 por (cenário × contestant). A diferença de
+  // judge-score entre dois agentes medida com 1 execução por cenário pode ser
+  // inteiramente ruído — omitir essa fragilidade transformaria a feature em
+  // regressão de qualidade. Dispara SEMPRE que uma run de agente termina com
+  // repetições 1 (default também avisa: `repetitions` ausente resolve para 1).
+  const repsDefault = record.config.agent?.repetitions ?? 1;
+  const haAgenteReps1 =
+    record.contestants.some((c) => c.runner === 'agent') && repsDefault === 1;
+  if (haAgenteReps1) {
+    console.warn(
+      'Repetições 1 — a diferença entre contestants pode ser ruído; use 3+ para decidir.',
+    );
+  }
+
   record.status = 'finished';
   record.finishedAt = nowIso();
   await saver.flush();

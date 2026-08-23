@@ -493,6 +493,23 @@ export interface ReferenceJudgeResult {
   explanationByContestant: Record<string, string>;
   judgeModelId: string;
   inconclusive?: boolean;
+  /**
+   * Veredito DE CADA repeticao, por contestant — contestantId -> vetor de
+   * vereditos (1 por rep, na ordem das reps). Presente apenas quando o
+   * referenceJudge vem do caminho de AGENTE com `repetitions > 1` (§18.4): cada
+   * repeticao e uma observacao independente no denominador do judge-score, e
+   * quem quer significancia precisa do vetor plano (cenario x repeticao), nao
+   * so da media ordinal. Reps `incomplete` (veredito null, §18.3) NAO entram no
+   * vetor — sao contadas em {@link ReferenceJudgeResult.repIncomplete}.
+   */
+  verdictsByRep?: Record<string, Verdict[]>;
+  /**
+   * Quantidade de repeticoes `incomplete` (veredito null, §18.3) por contestant,
+   * so quando o caminho de agente tem reps. Uma rep incompleta nao pontua nem
+   * conta como 'nao' — a culpa foi do nosso teto, nao do agente; registrar a
+   * contagem permite ao leitor saber quantas observacoes foram perdidas.
+   */
+  repIncomplete?: Record<string, number>;
 }
 
 /** Resultado de UM duelo pairwise (2 ordens; desacordo entre ordens = empate). */
@@ -596,6 +613,14 @@ export interface RunRecord {
   costByContestant?: Record<string, number>;
   /** Judge-score agregado por contestant: (resolve + 0.5*parcial) / total * 100. */
   judgeScoreByContestant?: Record<string, number>;
+  /**
+   * Fração de 'resolve' entre os vereditos PLANOS (todas as etapas x todas as
+   * repetições) por contestant, em 0..1 com 3 casas. Presente apenas quando ha
+   * contestants de runner 'agent' (§18.4): e o numero que separa "resolve
+   * sempre" de "resolve as vezes" na vida real — repeticoes 1 tornam esta
+   * fracao (e qualquer outra estatistica) uma amostra de tamanho 1.
+   */
+  resolveRateByContestant?: Record<string, number>;
   /** Classificacao final agregada (Copeland dos duelos / pontos do placar). */
   standings?: {
     id: string;
