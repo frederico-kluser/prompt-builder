@@ -531,5 +531,48 @@ Mensagens típicas do importador da UI (a redação exata pode variar) → causa
 
 ---
 
+## 8. Formato arena-agent-config@1
+
+Quando o que se mede é um **agente** (o competidor vira um processo que executa
+uma tarefa num workspace e o juiz lê um dossiê), NÃO use este arquivo: o formato é
+**`"format": "arena-agent-config@1"`**, um contrato separado, com o bloco `agent`
+(executor `pi`, `promptMode`, `limits` com `maxCostUsd` obrigatório) e
+`scenarios[].agentTask` (`repo`/`setup`/`verify`/`forbiddenPaths`). Exemplo mínimo:
+
+```jsonc
+{
+  "format": "arena-agent-config@1",
+  "mode": "compare",
+  "theme": "Correção de bugs em TypeScript",
+  "agent": {
+    "executor": "pi",
+    "executorVersion": "0.84.2",
+    "promptMode": "append",
+    "limits": { "maxTurns": 30, "maxCostUsd": 0.40 }
+  },
+  "models": {
+    "competitors": ["anthropic/claude-…", "openai/gpt-…"],
+    "judges": ["google/gemini-2.5-flash"]
+  },
+  "scenarios": [
+    {
+      "question": "O parser de datas quebra com fuso negativo. Conserte e prove.",
+      "agentTask": {
+        "repo": { "kind": "git", "path": "./fixtures/date-lib", "ref": "a1b2c3d" },
+        "verify": [{ "label": "testes", "cmd": "npm test -- --run" }]
+      }
+    }
+  ],
+  "judging": { "dossierTokens": 12000 },
+  "duels": true,
+  "finalists": 2
+}
+```
+
+Contrato completo campo a campo: **`prompt-builder docs agent-task`** (embarcado,
+lido do pacote instalado). O básico do modo agente: `prompt-builder docs agents`.
+
+---
+
 *Contrato: `arena-config@1`. Este documento descreve exatamente o que o importador da página
 Nova Run valida — não invente campos, não renomeie chaves.*

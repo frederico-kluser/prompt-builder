@@ -23,6 +23,15 @@ Não instale nada: `npx prompt-builder-cli <comando>`.
 | "otimize esse prompt" | `train` |
 | "que think level esse modelo aceita?" | `models show <id>` |
 | "quanto isso vai custar?" | `estimate` ou `--dry-run` |
+| "qual agente/prompt de agente resolve melhor?" | `agents run` |
+
+## Modo agente (Agent Arena)
+
+Quando a resposta não é um texto e sim **agente que executa tarefas** (edita
+arquivos, roda `bash`, `verify`), o competidor vira um processo e o juiz lê um
+dossiê determinístico do que ele fez. O contrato é `arena-agent-config@1` e o
+caminho é `agents doctor` → `agents run --config x.json --budget N`. Leia
+`docs agents` para o básico e `docs agent-task` para o contrato campo a campo.
 
 ## O caminho feliz
 

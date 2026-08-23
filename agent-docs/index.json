@@ -64,5 +64,17 @@
     "title": "Contrato arena-config@1",
     "summary": "o documento completo do arquivo de configuração declarativo (longo)",
     "approxTokens": 9000
+  },
+  {
+    "topic": "agents",
+    "title": "Modo agente (Agent Arena)",
+    "summary": "o que é o modo agente, o caminho feliz em 5 comandos, os limites obrigatórios e a tabela de stopReason",
+    "approxTokens": 1200
+  },
+  {
+    "topic": "agent-task",
+    "title": "Contrato arena-agent-config@1",
+    "summary": "o contrato do modo agente inteiro, campo a campo, com JSON e os erros comuns (longo)",
+    "approxTokens": 4000
   }
 ]
