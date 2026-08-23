@@ -128,6 +128,8 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
     judge: 0,
     duel: 0,
     rewriter: 0,
+    // Onda 4 (estimativa de agente) computa o valor real — aqui só satisfaz o Record.
+    agent: 0,
   };
 
   // --- datagen: LOTES, nao um por cenario ---

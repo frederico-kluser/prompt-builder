@@ -1,3 +1,25 @@
+// ----------------------------------------------------------------------------
+// Modo agente (Agent Arena) — campos/eventos ADITIVOS.
+//
+// Tudo que este arquivo acrescenta abaixo é opcional e NÃO muda o significado
+// de nenhum campo existente: records antigos continuam abrindo e o modo chat
+// segue com o mesmo comportamento. Os TIPOS DE DOMÍNIO do modo agente (a
+// tarefa executável, a config do executor, o registro de execução em disco)
+// vivem em `src/agent/types.ts` — este arquivo só importa os poucos tipos que
+// precisam aparecer nos tipos compartilhados.
+//
+// ⚠️ O modo agente NÃO é espelhado em `web/src/engine`: ali não há
+// `child_process`, filesystem nem git no navegador, então o pipeline client-side
+// não consegue (nem deve) rodar um executor de agente. A SPA da Vercel continua
+// fazendo compare/variation/training de chat apenas.
+// ----------------------------------------------------------------------------
+import type {
+  AgentRunnerConfig,
+  AgentStopReason,
+  AgentTaskSpec,
+  ExecutionRef,
+} from './agent/types.js';
+
 export interface OpenRouterModelPricing {
   prompt: number; // USD per token
   completion: number; // USD per token
@@ -21,7 +43,15 @@ export interface PricingTier {
 // ----------------------------------------------------------------------------
 
 /** Papel da chamada no pipeline — a granularidade do ledger de gasto. */
-export type CostRole = 'datagen' | 'gabarito' | 'competitor' | 'judge' | 'duel' | 'rewriter';
+export type CostRole =
+  | 'datagen'
+  | 'gabarito'
+  | 'competitor'
+  | 'judge'
+  | 'duel'
+  | 'rewriter'
+  /** NOVO: gasto de LLM feito DENTRO de uma execução de agente. */
+  | 'agent';
 
 export const COST_ROLES: readonly CostRole[] = [
   'datagen',
@@ -30,6 +60,7 @@ export const COST_ROLES: readonly CostRole[] = [
   'judge',
   'duel',
   'rewriter',
+  'agent',
 ] as const;
 
 /**
@@ -104,7 +135,9 @@ export type RunPhase =
   | 'competitors'
   | 'judging'
   | 'finals'
-  | 'holdout';
+  | 'holdout'
+  /** NOVO: o grupo de orçamento G2 em modo agente (a execução DOS agentes). */
+  | 'agents';
 
 export interface OpenRouterModel {
   id: string;
@@ -172,6 +205,16 @@ export interface Contestant {
   temperature?: number;
   /** Nivel de reasoning deste contestant (compare-llms; identidade = tripla modelo/temp/reasoning). */
   reasoningLevel?: ReasoningLevel;
+  /**
+   * COMO a resposta deste competidor é colhida.
+   * 'chat'  (default, ausente) = uma chamada de chatCompletion — o que existe hoje.
+   * 'agent' = uma execução de agente num workspace isolado (Agent Arena).
+   *
+   * Eixo ORTOGONAL ao `mode`: um compare pode ter 3 modelos como agentes; um
+   * training pode evoluir o system prompt DE um agente. Foi por isso que este
+   * campo não virou um quarto RunMode — viraria a duplicação dos três.
+   */
+  runner?: 'chat' | 'agent';
 }
 
 /** Variacao de prompt fornecida manualmente (toggle de otimizacao desligado). */
@@ -284,6 +327,13 @@ export interface RunConfigBase {
    * token. A conversao mora so em `toPerMTok`/`toPerToken` (estimate.ts).
    */
   maxPricePerMTok?: { prompt?: number; completion?: number };
+  /**
+   * Config DA RUN do modo agente. Vive aqui (não por etapa) porque a MESMA
+   * tarefa precisa rodar sob o mesmo executor para todos os contestants —
+   * senão o experimento compara duas coisas ao mesmo tempo. AUSENTE => run
+   * inteiramente de chat (comportamento de hoje, intacto).
+   */
+  agent?: AgentRunnerConfig;
 }
 
 /** Campos comuns aos modos de 1 LLM (variation/training). */
@@ -341,6 +391,17 @@ export interface StageSpec {
   reference?: string;
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
+  /**
+   * A etapa, quando executada por um agente. AUSENTE => a etapa só serve ao
+   * runner 'chat' (comportamento de hoje, intacto).
+   *
+   * `question` continua sendo A TAREFA e `productContext` continua sendo o
+   * contexto/política — para o agente eles viram, respectivamente, o prompt
+   * inicial e o system prompt. `rubric` continua sendo a âncora do juiz e
+   * `reference` continua sendo o gabarito. É literalmente a mesma etapa
+   * servindo aos dois runners; só o transporte muda.
+   */
+  agentTask?: AgentTaskSpec;
 }
 
 export type CompetitorStatus = 'ok' | 'error';
@@ -356,6 +417,12 @@ export interface CompetitorResponse {
   costUsd: number;
   status: CompetitorStatus;
   errorMsg?: string;
+  /**
+   * Ponteiro para os artefatos da execução de agente em disco. NUNCA o
+   * conteúdo: o RunRecord é resserializado inteiro a cada saveRun (throttled
+   * em 800ms) e embutir trajetórias tornaria cada escrita O(tudo que já rodou).
+   */
+  execution?: ExecutionRef;
 }
 
 /**
@@ -719,7 +786,31 @@ export type RunEvent =
       decision: 'go' | 'stop';
     }
   | { type: 'run.finished'; runId: string; record: RunRecord }
-  | { type: 'run.error'; runId: string; error: string };
+  | { type: 'run.error'; runId: string; error: string }
+  // --------------------------------------------------------------------------
+  // Eventos ADITIVOS do modo agente. Vão pelo MESMO barramento (`events.ts`),
+  // porque uma run de agente é uma run — quem já assina `subscribe(runId, ...)`
+  // continua recebendo `stage.judged`, `run.spend`, etc. Consumidores existentes
+  // precisam IGNORAR tipos desconhecidos em silêncio: o reducer da UI e o
+  // `emitRunEvent` do CLI têm `switch` com casos enumerados; um evento novo
+  // simplesmente não faz nada em runtime (correto).
+  //
+  // ⚠️ `agent.tool` NUNCA carrega a saída da ferramenta: um agente emite dezenas
+  // de tool calls por etapa e a saída inteira estouraria a janela de contexto de
+  // quem faz tail no stream. Quem quer a saída abre o arquivo.
+  | { type: 'agent.started'; runId: string; stageIndex: number; contestantId: string;
+      execId: string; repetition: number }
+  | { type: 'agent.turn'; runId: string; stageIndex: number; contestantId: string;
+      execId: string; turn: number; costUsd: number }
+  | { type: 'agent.tool'; runId: string; stageIndex: number; contestantId: string;
+      execId: string; toolName: string; ok: boolean;
+      /** Só para bash: o comando, truncado em 200 chars. NUNCA a saída. */
+      summary?: string }
+  | { type: 'agent.finished'; runId: string; stageIndex: number; contestantId: string;
+      execId: string; stopReason: AgentStopReason; turns: number; costUsd: number;
+      diffStat?: { files: number; added: number; removed: number } }
+  | { type: 'agent.verified'; runId: string; stageIndex: number; contestantId: string;
+      execId: string; results: { label: string; ok: boolean; exitCode: number }[] };
 
 export type SessionEvent =
   | { type: 'session.started'; sessionId: string; record: SessionRecord }

@@ -241,6 +241,8 @@ export const ROLE_LABEL: Record<CostRole, string> = {
   judge: 'juiz',
   duel: 'duelo',
   rewriter: 'reescritor',
+  /** Gasto de LLM feito DENTRO de uma execução de agente. */
+  agent: 'agente de execução',
 };
 
 export const PHASE_LABEL: Record<RunPhase, string> = {
@@ -251,4 +253,6 @@ export const PHASE_LABEL: Record<RunPhase, string> = {
   judging: 'julgamento',
   finals: 'finais',
   holdout: 'holdout',
+  /** O grupo de orçamento G2 em modo agente: rodar os agentes de fato. */
+  agents: 'execução de agentes',
 };
