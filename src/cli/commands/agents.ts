@@ -1,7 +1,7 @@
 // `agents` — a superfície CLI do MODO AGENTE (Agent Arena, plano §22).
 //
 // Subcomandos:
-//   doctor   [--deep] [--json]          pré-voo do executor (pi) + canário de sala limpa
+//   doctor   [--deep] [--container] [--json]   pré-voo do executor (pi) + canário de sala limpa
 //   run      --config <arq> --budget .. roda a arena até o fim (+ --dry-run)
 //   show     <runId> [--json]           record (loadRun) + execução via store
 //   list     [--json]                   varre <dataDir>/agent-runs/<runId>
@@ -223,10 +223,15 @@ function resolveUnderAgentRuns(refDir: string): string {
 // ---------------------------------------------------------------------------
 
 async function cmdDoctor(argv: string[]): Promise<number> {
-  const parsed = parse(argv, { deep: { type: 'boolean' }, model: { type: 'string' } });
+  const parsed = parse(argv, {
+    deep: { type: 'boolean' },
+    model: { type: 'string' },
+    container: { type: 'boolean' },
+  });
   const ctx = buildContext(parsed);
   const { out, values } = ctx;
   const deep = values.deep === true;
+  const containerMode = values.container === true;
 
   // runDir temporário para o doctor (salary: cria doctor-proj/doctor-home).
   let runDir = '';
@@ -252,17 +257,21 @@ async function cmdDoctor(argv: string[]): Promise<number> {
   }
   const model = typeof values.model === 'string' && values.model.trim() ? values.model.trim() : DEFAULT_CANARY_MODEL;
 
-  out.info(`doctor (nível ${deep ? 'profundo — canário REAL' : 'rápido'}, esperado pi ${EXPECTED_PI_VERSION})…`);
+  out.info(
+    `doctor (nível ${deep ? 'profundo — canário REAL' : 'rápido'}${containerMode ? ' · modo container' : ''}, esperado pi ${EXPECTED_PI_VERSION})…`,
+  );
   const preflight = await runPreflight({
     expectedVersion: EXPECTED_PI_VERSION,
     runDir,
     apiKey,
     model,
     cacheKey: deep ? `pi-v${EXPECTED_PI_VERSION}:${model}` : undefined,
+    isolation: containerMode ? { kind: 'container' } : undefined,
   });
 
   if (!preflight.ok) {
-    // Sala suja/versão errada => EXIT.CONFIG (3). O detalhe vai nos `details`.
+    // Sala suja/versão errada (ou modo container sem Docker CLI/imagem) =>
+    // EXIT.CONFIG (3). O detalhe vai nos `details`.
     throw new CliError(
       `Sala do modo agente NÃO está pronta: ${preflight.errors.join('; ')}`,
       EXIT.CONFIG,
@@ -274,6 +283,15 @@ async function cmdDoctor(argv: string[]): Promise<number> {
     out.line(
       `ok — pi ${preflight.pi.version ?? '?'}${preflight.pi.expected ? ` (esperado ${preflight.pi.expected})` : ''} · git ${preflight.git ? 'presente' : 'AUSENTE'} · disco ${preflight.diskFreeGb.toFixed(1)} GB`,
     );
+    // Modo container: ecoa o estado do Docker (presente + imagem ok/ausente).
+    const d = preflight.docker;
+    if (d) {
+      if (d.imagePresent) {
+        out.line(`· docker ok (${d.image})`);
+      } else {
+        out.warn(`· docker ${d.present ? '' : 'CLI AUSENTE — '}imagem '${d.image ?? '?'}' ausente`);
+      }
+    }
     for (const e of preflight.errors) out.warn(e);
   }
   out.result(true, 'agents.doctor', { preflight });

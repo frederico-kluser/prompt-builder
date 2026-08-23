@@ -17,9 +17,19 @@
 // ----------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { CleanRoomReport } from './executor.js';
+import type { AgentStopReason } from './types.js';
+import {
+  defaultPiImageTag,
+  CONTAINER_MEM_LIMIT,
+  CONTAINER_NAME_PREFIX,
+  CONTAINER_PIDS_LIMIT,
+  dockerCliEnv,
+  writeEnvFile,
+  killContainer,
+} from './container.js';
 import { createJsonlSplitter } from './jsonl.js';
 import { spawnAgent } from './spawn.js';
 import { getDataDir } from '../storage.js';
@@ -40,6 +50,8 @@ export interface PreflightResult {
   git: boolean;
   diskFreeGb: number;
   canary?: CleanRoomReport;
+  /** Estado do Docker — presente SÓ quando `isolation.kind === 'container'`. */
+  docker?: { present: boolean; image?: string; imagePresent: boolean };
   errors: string[];
 }
 
@@ -57,6 +69,11 @@ export interface PreflightOpts {
   model: string;
   /** Caminho do binário `pi`. Default: `pi` no PATH da sala limpa. */
   bin?: string;
+  /**
+   * Modo de isolamento a verificar (mesmo `isolation.kind` de `RunConfig`). Quando
+   * `kind === 'container'`, o pré-voo também checa o Docker CLI e a imagem do pi.
+   */
+  isolation?: { kind?: 'worktree' | 'clone' | 'container'; image?: string };
 }
 
 /**
@@ -90,6 +107,35 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
   const gitPresent = await hasGit();
   if (!gitPresent) errors.push('`git` não encontrado no PATH — necessário para workspaces de execução.');
 
+  // --- modo container: Docker CLI + imagem ---------------------------------
+  // O pré-voo é checagem RÁPIDA e HONESTA — NÃO builda a imagem aqui (o build
+  // é responsabilidade da PREPARAÇÃO da run via `ensurePiImage`, em pi.ts).
+  // Aqui só afirmamos que o CLI e a imagem existem, ou listamos o que falta em
+  // `errors` para o CLI/endpoint ecoar de forma legível.
+  let dockerFail = false;
+  let dockerInfo: PreflightResult['docker'];
+  if (opts.isolation?.kind === 'container') {
+    const dockerPresent = await detectDockerCli();
+    const tag =
+      opts.isolation.image ?? defaultPiImageTag(opts.expectedVersion ?? '');
+    const imagePresent = dockerPresent ? await dockerImagePresent(tag) : false;
+    dockerInfo = { present: dockerPresent, image: tag, imagePresent };
+    if (!dockerPresent) {
+      dockerFail = true;
+      errors.push(
+        'modo container exige o Docker CLI no PATH — instale ou ative o daemon ' +
+          '(`docker --version` falhou).',
+      );
+    } else if (!imagePresent) {
+      dockerFail = true;
+      errors.push(
+        `imagem docker '${tag}' não encontrada no daemon. A primeira preparação de run ` +
+          'em modo container (ou `ensurePiImage`) a cria automaticamente — rode uma run ' +
+          'em container (ou o smoke da Onda 2) para buildá-la.',
+      );
+    }
+  }
+
   // --- disco ---------------------------------------------------------------
   const diskFreeGb = dfGb(opts.runDir);
   // Disco entra como AVISO, não falha o voo (o `ok` é decidido abaixo, só com
@@ -111,13 +157,14 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
     }
   }
 
-  const ok = !piFail && gitPresent && !canaryFail;
+  const ok = !piFail && gitPresent && !canaryFail && !dockerFail;
   return {
     ok,
     pi,
     git: gitPresent,
     diskFreeGb,
     canary,
+    docker: dockerInfo,
     errors,
   };
 }
@@ -128,6 +175,14 @@ export interface CleanRoomCoreOpts {
   apiKey: string;
   model: string;
   bin?: string;
+  /**
+   * Roda o canário DENTRO de um container Docker (isolation.kind === 'container'):
+   * os diretórios envenenados viram volumes e o pi roda via `docker run`. O
+   * parser/coleta de leaks é IDÊNTICO ao modo host.
+   */
+  container?: boolean;
+  /** Tag da imagem do pi a usar no modo container. Default `prompt-builder-pi:<versão>`. */
+  image?: string;
 }
 
 /**
@@ -141,6 +196,16 @@ export interface CleanRoomCoreOpts {
 export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<CleanRoomReport> {
   const { runDir, apiKey, model, bin } = opts;
   const uuid = randomUUID();
+
+  // Modo container exige a imagem resolvida — o chamador (cachedOrRunCanary) a
+  // deriva de `expectedVersion`; um chamador direto deve passá-la. Sem ela o
+  // `docker run` nem teria tag.
+  if (opts.container === true && !opts.image) {
+    throw new Error(
+      'runCleanRoomCanary: modo container exige `image` (tag da imagem do pi) explicitamente.',
+    );
+  }
+  const containerImage = opts.image ?? defaultPiImageTag('');
 
   // Tokens por camada (Apêndice E). Cada camada da "sala" que o pi supostamente
   // isola recebe um marcador único: se qualquer um aparecer na resposta, há um
@@ -169,14 +234,22 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
     'utf8',
   );
 
+  // Modo container: os diretórios envenenados viram VOLUMES e o pi enxerga os
+  // caminhos DENTRO do container (`/proj`, `/home`, `/sess`) — o `--session-dir`
+  // e o env-file apontam para esses mounts. O parser/coleta de leaks é o MESMO.
+  const isContainer = opts.container === true;
+  const containerProjDir = '/proj';
+  const containerHomeDir = '/home';
+  const containerSessDir = '/sess';
+
   // --- env explícito (sala limpa — NUNCA `...process.env`, §11.5) ----------
   const env: Record<string, string> = {
-    HOME: homeDir,
+    HOME: isContainer ? containerHomeDir : homeDir,
     PATH: cleanPath(),
     LANG: 'C.UTF-8',
     TZ: 'UTC',
-    PI_CODING_AGENT_DIR: homeDir,
-    PI_CODING_AGENT_SESSION_DIR: sessDir,
+    PI_CODING_AGENT_DIR: isContainer ? containerHomeDir : homeDir,
+    PI_CODING_AGENT_SESSION_DIR: isContainer ? containerSessDir : sessDir,
     PI_OFFLINE: '1',
     PI_SKIP_VERSION_CHECK: '1',
     PI_TELEMETRY: '0',
@@ -195,7 +268,7 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
     '--provider', 'openrouter',
     '--model', wantModel,
     '--thinking', wantThinking,
-    '--session-dir', sessDir,
+    '--session-dir', isContainer ? containerSessDir : sessDir,
     '--no-context-files',
     '--no-extensions',
     '--no-skills',
@@ -245,17 +318,78 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
   };
   const splitter = createJsonlSplitter(onRecord, () => undefined);
 
+  // --- spawn: host vs container -------------------------------------------
+  // Em container, o `bin` vira `docker`, o argv é o `docker run` montado a partir
+  // dos helpers de container.ts, o env do CLI é SÓ o do host (a key e as PI_*
+  // entram pelo env-file 0600), cwd = o diretório do projeto do HOST, e o kill
+  // por timeout/cancelamento aponta para `killContainer(<nome>)`. O resto do
+  // canário (splitter, parse, coleta de leaks, parede de tempo) NÃO muda.
+  let agentBin: string;
+  let agentArgv: string[];
+  let agentEnv: Record<string, string>;
+  let agentCwd: string;
+  let onKill: ((reason: AgentStopReason) => void) | undefined;
+  let envFilePath: string | undefined;
+  let containerName: string | undefined;
+
+  if (isContainer) {
+    containerName = `${CONTAINER_NAME_PREFIX}doctor-${uuid}`;
+    envFilePath = writeEnvFile({
+      OPENROUTER_API_KEY: apiKey,
+      PI_MODEL: wantModel,
+      PI_PROVIDER: 'openrouter',
+      PI_CODING_AGENT_DIR: containerHomeDir,
+      PI_CODING_AGENT_SESSION_DIR: containerSessDir,
+      HOME: containerHomeDir,
+      PI_OFFLINE: '1',
+      PI_SKIP_VERSION_CHECK: '1',
+      PI_TELEMETRY: '0',
+      GIT_TERMINAL_PROMPT: '0',
+    });
+    const uid = typeof process.getuid === 'function' ? process.getuid() ?? 0 : 0;
+    const gid = typeof process.getgid === 'function' ? process.getgid() ?? 0 : 0;
+    agentArgv = [
+      'run', '-i', '--rm',
+      '--name', containerName,
+      '--env-file', envFilePath,
+      '-v', `${projDir}:${containerProjDir}`,
+      '-v', `${homeDir}:${containerHomeDir}`,
+      '-v', `${sessDir}:${containerSessDir}`,
+      '-w', containerProjDir,
+      '-m', CONTAINER_MEM_LIMIT,
+      '--pids-limit', String(CONTAINER_PIDS_LIMIT),
+      '--user', `${uid}:${gid}`,
+      containerImage,
+      'pi',
+      ...argv,
+    ];
+    agentBin = 'docker';
+    agentEnv = dockerCliEnv();
+    agentCwd = projDir;
+    onKill = (): void => {
+      // Fire-and-forget (spawn.ts nunca awaita onKill): matar o container por
+      // nome não bloqueia o kill do CLI docker.
+      if (containerName) void killContainer(containerName);
+    };
+  } else {
+    agentBin = bin ?? path.join(cleanPathPrefix(), 'pi');
+    agentArgv = argv;
+    agentEnv = env;
+    agentCwd = projDir;
+  }
+
   try {
     const res = await spawnAgent({
-      bin: bin ?? path.join(cleanPathPrefix(), 'pi'),
-      argv,
-      cwd: projDir,
-      env,
+      bin: agentBin,
+      argv: agentArgv,
+      cwd: agentCwd,
+      env: agentEnv,
       stdin,
       timeoutMs: 120_000, // parede de tempo do canário (plano §12.6: chamada barata)
       maxOutputBytes: 8 * 1024 * 1024,
       onStdoutChunk: (chunk) => splitter.push(chunk),
       onStderrChunk: () => undefined, // narração — pode descartar (drenagem já via spawnAgent)
+      onKill,
     });
     splitter.end();
 
@@ -267,6 +401,16 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
   } catch (err) {
     leaks.push(`falha ao spawnar o pi no canário: ${(err as Error).message}`);
     splitter.end();
+  } finally {
+    // Modo container: remove o env-file do host (a key NUNCA permanece em disco
+    // além da janela do canário). `--rm` + `killContainer` já cuidam do container.
+    if (envFilePath) {
+      try {
+        rmSync(envFilePath, { force: true });
+      } catch {
+        /* limpeza best-effort — não derruba o canário */
+      }
+    }
   }
 
   if (thinkingChanged) {
@@ -323,6 +467,32 @@ async function hasGit(): Promise<boolean> {
   }
 }
 
+/**
+ * `docker --version` presente? Usa o env do HOST (dockerCliEnv: {PATH, HOME,
+ * DOCKER_HOST?}) — o daemon/CLI do usuário, não a sala limpa do pi.
+ */
+async function detectDockerCli(): Promise<boolean> {
+  try {
+    const out = await runSimple(['docker', '--version'], { env: dockerCliEnv() });
+    return out.code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A imagem `<tag>` existe no daemon do host? `docker image inspect` SILENCIOSO
+ * (stdout/stderr descartados) — o pré-voo NÃO builda (o build é da preparação).
+ */
+async function dockerImagePresent(tag: string): Promise<boolean> {
+  try {
+    const out = await runSimple(['docker', 'image', 'inspect', tag], { env: dockerCliEnv() });
+    return out.code === 0;
+  } catch {
+    return false;
+  }
+}
+
 /** Espaço livre (GB) no filesystem de `dir`, via `fs.statfs` + 1 casa decimal. */
 function dfGb(dir: string): number {
   try {
@@ -362,7 +532,12 @@ function cleanPathPrefix(): string {
 
 /** Cache do canário: relatório ok em `<dataDir>/agent-doctor-cache/<sha256>.json`. */
 async function cachedOrRunCanary(opts: PreflightOpts): Promise<CleanRoomReport> {
-  const cacheKey = opts.cacheKey;
+  // O cache distingue host vs container pelo SUFIXO — um relatório ok de um modo
+  // não pode servir ao outro (o isolamento verificado é diferente). O sufixo é
+  // adicionado AQUI (no doctor), e não no cmdDoctor, para centralizar a regra:
+  // qualquer chamador (CLI OU endpoint) herda a distinção de graça.
+  const isContainer = opts.isolation?.kind === 'container';
+  const cacheKey = opts.cacheKey ? `${opts.cacheKey}${isContainer ? ':container' : ''}` : undefined;
   if (cacheKey) {
     const cacheFile = path.join(getDataDir(), 'agent-doctor-cache', `${createHash('sha256').update(cacheKey).digest('hex')}.json`);
     if (existsSync(cacheFile)) {
@@ -374,7 +549,14 @@ async function cachedOrRunCanary(opts: PreflightOpts): Promise<CleanRoomReport> 
       }
     }
   }
-  const report = await runCleanRoomCanary(opts);
+  const report = await runCleanRoomCanary({
+    runDir: opts.runDir,
+    apiKey: opts.apiKey,
+    model: opts.model,
+    bin: opts.bin,
+    container: isContainer,
+    image: isContainer ? (opts.isolation?.image ?? defaultPiImageTag(opts.expectedVersion ?? '')) : undefined,
+  });
   if (cacheKey && report.ok) {
     try {
       const dir = path.join(getDataDir(), 'agent-doctor-cache');
