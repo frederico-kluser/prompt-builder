@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { cpus } from 'node:os';
 import { generateStages } from './datagen.js';
 import { runCompetitor } from './competitor.js';
 import { judgeStage } from './judge.js';
@@ -9,19 +10,22 @@ import { mergeScenarios } from './scenarioPack.js';
 import { sanitizeLlmVariants, variantsToContestants } from './llmVariants.js';
 import { judgeScoreFromVerdicts } from './rank.js';
 import { emitEvent } from './events.js';
-import { saveRun } from './storage.js';
+import { saveRun, getDataDir } from './storage.js';
 import { contestantsFromConfig } from './normalize.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { listModels } from './openrouter.js';
+import { runAgentStage, aggregateAgentVerdict } from './agent/runAgentStage.js';
 import type {
   Contestant,
+  ReferenceJudgeResult,
   RunConfig,
   RunCtx,
   RunPhase,
   RunRecord,
   StageRecord,
   StageSpec,
+  Verdict,
 } from './types.js';
 
 function nowIso(): string {
@@ -45,6 +49,37 @@ function applyScoreboard(
     const points = n - 1 - idx;
     scoreboard[contestantId] = (scoreboard[contestantId] ?? 0) + points;
   });
+}
+
+/**
+ * Semáforo assíncrono local de processos de AGENTE.
+ *
+ * ⚠️ Isto NÃO viola a regra do AGENTS.md "não ponha cap de concorrência local".
+ * Aquela regra fala do limitador global de `openrouter.ts`, que existe para
+ * respeitar o RATE LIMIT DO PROVEDOR (as nossas chamadas HTTP). Aqui o recurso
+ * escasso é a MÁQUINA: cada execução de agente é um processo Node + shells filhos
+ * + I/O de disco — e as chamadas do agente saem de DENTRO do executor, então o
+ * limitador global nem as enxerga (plano §20.5). São dois problemas distintos.
+ */
+class AgentSemaphore {
+  private running = 0;
+  private readonly queue: (() => void)[] = [];
+  constructor(private readonly max: number) {}
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.max > 0) {
+      while (this.running >= this.max) {
+        await new Promise<void>((res) => this.queue.push(res));
+      }
+      this.running++;
+      try {
+        return await fn();
+      } finally {
+        this.running--;
+        this.queue.shift()?.();
+      }
+    }
+    return fn();
+  }
 }
 
 export interface StartRunResult {
@@ -465,7 +500,10 @@ async function runLoop(
   // Autorizar os competidores sem reservar o julgamento na MESMA decisao
   // produziria etapas com resposta e sem nota (ou metade julgada), que e o
   // resultado incompleto com aparencia de completo.
-  const custoG2 = est.byRole.competitor + est.byRole.judge;
+  // Em modo agente, G2 ganha `est.byRole.agent` no mesmo grupo (o plano §20.1/§20.6:
+  // execuções de agente + julgamento são ATÔMICOS, de propósito).
+  const hasAgent = record.contestants.some((c) => c.runner === 'agent');
+  const custoG2 = est.byRole.competitor + est.byRole.judge + (hasAgent ? est.byRole.agent : 0);
   if (custoG2 > 0 && !gate('competitors', custoG2)) {
     for (const st of record.stages) {
       if (st.spec && !st.error) st.incomplete = true;
@@ -479,6 +517,14 @@ async function runLoop(
   // allSettled em vez de all: com `all`, a primeira rejeicao desenrola o loop
   // enquanto as irmas seguem gastando, e o resultado delas se perde DEPOIS de o
   // dinheiro sair. Aqui todas terminam e so entao o sinal de controle sobe.
+  const agentMaxParallel = Math.max(
+    1,
+    record.config.agent?.maxParallel ?? Math.min(4, (hasAgent ? cpus().length - 1 : 1)),
+  );
+  // Governador de processos de agente COMPARTILHADO entre todas as etapas: se
+  // cada etapa tivesse o próprio, N etapas em paralelo = N×maxParallel processos.
+  const agentSemaphore = hasAgent ? new AgentSemaphore(agentMaxParallel) : undefined;
+
   const etapasSettled = await Promise.allSettled(
     record.stages.map(async (stageRecord) => {
       const i = stageRecord.index;
@@ -486,29 +532,72 @@ async function runLoop(
       if (!stageSpec || stageRecord.error) return; // pulada na fase 1
 
       try {
+        // Verditios dos contestants de runner 'agent' (agregados por rep) e os
+        // que ficaram 'incomplete' (§18.3 — saem do ranking/judgeScore).
+        const agentVerdicts: Record<string, Verdict> = {};
+        const agentExplanations: Record<string, string> = {};
+        const agentIncompleteIds = new Set<string>();
+        const agentContestants = record.contestants.filter((c) => c.runner === 'agent');
+        const chatContestants = record.contestants.filter((c) => c.runner !== 'agent');
+
         // Competidores em paralelo — SEM cap local; o limitador global throttla.
+        // (Agentes têm `reps` SEQUENCIAIS dentro do próprio contestant; a
+        // concorrência ENTRE contestants é gateada pelo `maxParallel` do agente
+        // em `runAgentStage`/orquestrador e pelo limitador global de openrouter.)
         const respSettled = await Promise.allSettled(
           record.contestants.map(async (contestant) => {
-            const response = await runCompetitor({
-              apiKey,
-              contestantId: contestant.id,
-              modelId: contestant.modelId,
-              systemPrompt: contestant.systemPrompt,
-              stage: stageSpec,
-              timeoutMs: record.config.timeoutMs,
-              retries: 1,
-              maxOutputTokens: record.config.maxOutputTokens,
-              // compare-llms: temperatura/reasoning da tripla de identidade.
-              // Prioridade do reasoning: override do contestant, senao o do papel.
-              // Temperatura: override do contestant, senao a do modelo sob teste
-              // (variation/training aplicam a mesma a TODAS as variantes).
-              temperature:
-                contestant.temperature ??
-                ('temperature' in record.config ? record.config.temperature : undefined),
-              reasoningLevel: contestant.reasoningLevel ?? record.config.reasoning?.competitor,
-              ctx,
-              maxPricePerMTok,
-            });
+            let response;
+            if (contestant.runner === 'agent') {
+              // Processos de agente são gateados pelo semáforo local (§20.5);
+              // o valor 1+ garante que o fake/smoke nunca fique sem vaga.
+              const run = (): ReturnType<typeof runAgentStage> =>
+                runAgentStage({
+                  runId,
+                  stageIndex: stageRecord.index,
+                  contestant,
+                  stage: stageSpec,
+                  agentConfig: record.config.agent!,
+                  apiKey,
+                  ctx,
+                  dataDir: getDataDir(),
+                  catalog: catalogo,
+                  blindIds: record.contestants.map((c) => c.id),
+                  judgeModelIds: record.config.judgeModelIds,
+                });
+              const agentRes = agentSemaphore ? await agentSemaphore.run(run) : await run();
+              response = agentRes.response;
+              // Veredito agregado da etapa = média ordinal dos vereditos das reps.
+              // incomplete (tudo null, ou tudo erro) => contestant sai do ranking
+              // e do judgeScore SEM pontos e SEM 'nao' (§18.3/§15.2).
+              const valid = agentRes.repResults
+                .map((r) => r.verdict)
+                .filter((v): v is Verdict => v !== null);
+              if (valid.length === 0) {
+                agentIncompleteIds.add(contestant.id);
+              } else {
+                agentVerdicts[contestant.id] = aggregateAgentVerdict(valid);
+                agentExplanations[contestant.id] =
+                  agentRes.repResults.find((r) => r.verdict !== null)?.explanation ??
+                  '(sem explicação do juiz)';
+              }
+            } else {
+              response = await runCompetitor({
+                apiKey,
+                contestantId: contestant.id,
+                modelId: contestant.modelId,
+                systemPrompt: contestant.systemPrompt,
+                stage: stageSpec,
+                timeoutMs: record.config.timeoutMs,
+                retries: 1,
+                maxOutputTokens: record.config.maxOutputTokens,
+                temperature:
+                  contestant.temperature ??
+                  ('temperature' in record.config ? record.config.temperature : undefined),
+                reasoningLevel: contestant.reasoningLevel ?? record.config.reasoning?.competitor,
+                ctx,
+                maxPricePerMTok,
+              });
+            }
 
             stageRecord.responses.push(response);
             // `costByContestant` continua sendo a FATIA dos competidores; o
@@ -536,17 +625,57 @@ async function runLoop(
           if (stageSpec.reference?.trim()) {
             // Pointwise: cada resposta classificada isoladamente contra o
             // gabarito (resolve/parcial/nao) — base do judge-score.
-            const refJudge = await judgeStageReference({
-              stage: stageSpec,
-              responses: stageRecord.responses,
-              contestants: record.contestants,
-              judgeModelIds: record.config.judgeModelIds,
-              apiKey,
-              reasoningLevel: record.config.reasoning?.judge,
-              timeoutMs: record.config.timeoutMs,
-              ctx,
-              maxPricePerMTok,
-            });
+            //
+            // Em modo AGENTE (runner 'agent'), o veredito do contestant já saiu
+            // da própria execução (oráculo/dossiê — ver `runAgentStage`). O
+            // juiz de referência aqui SÓ julga os contestants de 'chat': os
+            // agentes são SOMADOS ao veredito no final, sem reavaliar (a
+            // trajetória não é texto de chat). Etapa 100% agente nem chama o
+            // refJudge — o `referenceJudge` é montado dos vereditos de agente.
+            let refJudge: ReferenceJudgeResult;
+            if (agentContestants.length === 0) {
+              // 100% chat — fluxo de hoje, intacto.
+              refJudge = await judgeStageReference({
+                stage: stageSpec,
+                responses: stageRecord.responses,
+                contestants: record.contestants,
+                judgeModelIds: record.config.judgeModelIds,
+                apiKey,
+                reasoningLevel: record.config.reasoning?.judge,
+                timeoutMs: record.config.timeoutMs,
+                ctx,
+                maxPricePerMTok,
+              });
+            } else if (chatContestants.length === 0) {
+              // 100% agente — os vereditos já vieram do runAgentStage.
+              refJudge = {
+                verdictByContestant: { ...agentVerdicts },
+                explanationByContestant: { ...agentExplanations },
+                judgeModelId: record.config.judgeModelIds.join('+'),
+              };
+            } else {
+              // Misto: refJudge roda SÓ com as respostas/contestants de chat, e o
+              // orquestrador COMPLETA verdictByContestant com os agentes.
+              const chatResponses = stageRecord.responses.filter(
+                (r) => !agentContestants.some((a) => a.id === r.contestantId),
+              );
+              const base = await judgeStageReference({
+                stage: stageSpec,
+                responses: chatResponses,
+                contestants: chatContestants,
+                judgeModelIds: record.config.judgeModelIds,
+                apiKey,
+                reasoningLevel: record.config.reasoning?.judge,
+                timeoutMs: record.config.timeoutMs,
+                ctx,
+                maxPricePerMTok,
+              });
+              refJudge = {
+                ...base,
+                verdictByContestant: { ...base.verdictByContestant, ...agentVerdicts },
+                explanationByContestant: { ...base.explanationByContestant, ...agentExplanations },
+              };
+            }
             stageRecord.referenceJudge = refJudge;
 
             // JudgeResult SINTETIZADO para nao quebrar scoreboard/medals/UI:
@@ -557,11 +686,14 @@ async function runLoop(
             // daria a ele todos os 1os lugares em empate — enviesando medalhas e
             // placar a favor da regua. Usa o shuffle cego semeado pelo conteudo da
             // etapa (mesmo criterio dos duelos): deterministico e neutro.
+            // Agentes incompletos (§18.3) ficam FORA do ranking (sem pontos, sem
+            // 'nao') — por isso o `filter` abaixo.
             const ordemCega = blindRankMap(
               record.contestants.map((c) => c.id),
               seedFromId(stageSpec.question),
             );
             const ranked = [...record.contestants]
+              .filter((c) => !agentIncompleteIds.has(c.id))
               .sort(
                 (a, b) =>
                   VERDICT_SCORE[refJudge.verdictByContestant[b.id] ?? 'nao'] -
@@ -667,10 +799,21 @@ async function runLoop(
   if (stagesComRef.length > 0) {
     // judge-score = (resolve + 0.5*parcial) / total * 100, por contestant,
     // sobre as etapas com juiz de referencia (ausente conta como 'nao').
+    //
+    // Agentes 'incomplete' (§18.3) NÃO aparecem no verdictByContestant (o
+    // orquestrador só os soma quando tiveram veredito) — para eles o `undefined`
+    // é "sem evidência" e NÃO pode contar como 'nao' (a culpa foi do nosso teto,
+    // não do agente). Filtramos os `undefined`, então o contestant entra no
+    // judge-score só com as etapas em que ele pontuou de verdade. Chat NÃO muda:
+    // vereditos de chat nunca são `undefined` no map.
     record.judgeScoreByContestant = Object.fromEntries(
       record.contestants.map((c) => [
         c.id,
-        judgeScoreFromVerdicts(stagesComRef.map((s) => s.referenceJudge!.verdictByContestant[c.id])),
+        judgeScoreFromVerdicts(
+          stagesComRef
+            .map((s) => s.referenceJudge!.verdictByContestant[c.id])
+            .filter((v): v is Verdict => v !== undefined),
+        ),
       ]),
     );
   }
