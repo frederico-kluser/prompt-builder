@@ -9,6 +9,7 @@
 
 import { chatCompletion } from './openrouter.js';
 import { isControlSignal } from './budget.js';
+import { readArtifact } from './agent/store.js';
 import type {
   CompetitorResponse,
   Contestant,
@@ -155,10 +156,10 @@ ${reference}
 PERGUNTA DO USUÁRIO:
 ${stage.question}
 ${rubricBlock}
-Candidato A:
+Candidato A (dossiê):
 ${textA || '(vazio)'}
 
-Candidato B:
+Candidato B (dossiê):
 ${textB || '(vazio)'}
 
 Qual candidato alcança melhor o resultado e a intenção da referência — A, B ou tie?`;
@@ -229,6 +230,16 @@ export interface RunStageDuelsOptions {
   maxPricePerMTok?: { prompt?: number; completion?: number };
   /** Vereditos do juiz pointwise (refJudge) — ordenam o bracket. Ausente => score −1. */
   verdictByContestant?: Record<string, Verdict>;
+  /**
+   * Score do ORÁCULO por contestant (§19.1 do PLANO-AGENT-ARENA) — aditivo.
+   * Quando AMBOS os lados de um par têm score presente E os scores diferem, o
+   * vencedor do duelo é decidido PELO ORÁCULO (maior score), SEM chamada LLM —
+   * o oráculo é determinístico e mais correto que o juiz para desempate (§19.1:
+   * "o oráculo MANDA"). O duelo só cai no LLM quando há empate de oráculo ou
+   * quando falta score de um dos lados. ADITIVO: sem esta opção, o
+   * comportamento é idêntico ao de hoje.
+   */
+  oracleScoresByContestant?: Record<string, number>;
   /** Dispara a CADA par resolvido (progresso durante a fase mais longa da etapa). */
   onPair?: (duel: DuelOutcome) => void;
 }
@@ -242,6 +253,13 @@ export interface RunStageDuelsOptions {
  * placement médio agregado não pode premiar uma variante que só pontuou onde se
  * classificou). `order`/placements/pontos cobrem TODOS os contestants com
  * resposta ok, bracket ou não.
+ *
+ * Modo agente (aditivo): quando uma resposta carrega `execution`, o candidato
+ * duela pelo DOSSIÊ do disco (`readArtifact(dossier.md)`) — o juiz lê a MESMA
+ * evidência que o pointwise (§19). E se `oracleScoresByContestant` estiver
+ * presente e ambos os lados de um par tiverem score diferente, o vencedor é
+ * decidido PELO ORÁCULO, sem LLM (§19.1). Faltar dossiê ou oráculo degrada,
+ * nunca derruba.
  */
 export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDuels> {
   const {
@@ -258,6 +276,7 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
     ctx,
     maxPricePerMTok,
     verdictByContestant,
+    oracleScoresByContestant,
     onPair,
   } = opts;
   // Finalistas globais ditam o bracket (fase de finais); sem eles, cai na
@@ -265,10 +284,24 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
   const effectiveTopK = duelists?.length ? duelists.length : topK;
 
   // Só respostas ok duelam; dedup defensivo (a 1ª ocorrência do id vence).
+  // Quando a resposta carrega `execution` (modo agente), o candidato entra no
+  // duelo pelo DOSSIÊ do disco, não pelo resumo 1-linha do `text` — o juiz lê a
+  // MESMA evidência que o pointwise viu (auditável via `dossierSha256`).
+  // Falha de leitura de dossiê DEGRADA para `r.text`: duelos nunca derrubam.
   const textById = new Map<string, string>();
   for (const r of responses ?? []) {
     if (r.status !== 'ok' || textById.has(r.contestantId)) continue;
-    textById.set(r.contestantId, r.text);
+    let text = r.text;
+    if (r.execution) {
+      try {
+        const dossier = await readArtifact(r.execution, 'dossier.md');
+        if (dossier) text = dossier;
+      } catch {
+        // sem dossiê no disco (leitura falhou): fica o resumo 1-linha. Degrada, nunca derruba.
+        text = r.text;
+      }
+    }
+    textById.set(r.contestantId, text);
   }
   const okIds = [...textById.keys()];
   // Fallback: no variation/training o controle é o prompt original.
@@ -359,8 +392,29 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
   // concorrência — sem cap local). Cada par é julgado 2× EM PARALELO, nas duas
   // ordens; os vencedores são convertidos para os termos REAIS do par ('a' = o
   // primeiro do par): acordo => vencedor, desacordo => empate.
+  // Exceção — ORÁCULO (§19.1): quando ambos os lados têm score de oráculo e os
+  // scores diferem, o par é decidido PELO ORÁCULO (maior score), SEM chamada
+  // LLM. O oráculo é determinístico — decidir duelo por ele é mais correto e
+  // corta custo. As duas ordens espelham o MESMO resultado ('a'/'b').
   const duels: DuelOutcome[] = await Promise.all(
     pairs.map(async ([a, b]) => {
+      const oracleA = oracleScoresByContestant?.[a];
+      const oracleB = oracleScoresByContestant?.[b];
+      const oracleDecides =
+        typeof oracleA === 'number' && typeof oracleB === 'number' && oracleA !== oracleB;
+      if (oracleDecides) {
+        const winner = oracleA > oracleB ? 'a' : 'b';
+        const explanation = `(decidido pelo oráculo: ${oracleA} vs ${oracleB})`;
+        const duel: DuelOutcome = {
+          a,
+          b,
+          order1: { winner, explanation },
+          order2: { winner, explanation },
+          outcome: winner,
+        };
+        onPair?.(duel);
+        return duel;
+      }
       const [v1, v2] = await Promise.all([judgeOnce(a, b), judgeOnce(b, a)]);
       const o1 = v1.winner === 'A' ? 'a' : v1.winner === 'B' ? 'b' : 'tie';
       const o2 = v2.winner === 'A' ? 'b' : v2.winner === 'B' ? 'a' : 'tie';
