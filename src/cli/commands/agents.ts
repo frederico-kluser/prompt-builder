@@ -7,6 +7,7 @@
 //   list     [--json]                   varre <dataDir>/agent-runs/<runId>
 //   logs     <runId> --stage N --contestant <id> [--rep N] [--what ...]
 //   replay   <runId> --stage N --contestant <id> [--rep N]
+//   reconcile <runId> [--json]        custo derivado + reconciliação (§20.4)
 //   gc       [--older-than 30d] [--dry-run]
 //
 // Contrato de saída idêntico ao resto do CLI: stdout é PAYLOAD, stderr é narração.
@@ -693,6 +694,74 @@ async function cmdReplay(argv: string[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// reconcile — §20.4
+// ---------------------------------------------------------------------------
+//
+// O subcomando fecha a conta do custo de modo agente. VERIFICAÇÃO EMPÍRICA
+// (2026-08-23, ver reconcile-evidence.md): o `responseId` do pi (`gen-...`) NÃO
+// é aceito por `GET /api/v1/generation?id=...` (HTTP 404 "Generation not found")
+// com a mesma key da chamada. Por isso a reconciliação com o OpenRouter está
+// INDISPONÍVEL/INVERIFICADA nesta versão e o endpoint NÃO é chamado em
+// produção: ficamos com o resumo DERIVADO (soma dos `usage.costUsd` das
+// execuções de agente somada ao `totalCostUsd` da run) e um aviso explícito.
+// O `RunRecord.agentCostReconciled` (outra sub-tarefa da onda, NULL na 6.1)
+// permanece vazio pelo mesmo motivo.
+async function cmdReconcile(argv: string[]): Promise<number> {
+  const parsed = parse(argv, {});
+  const ctx = buildContext(parsed);
+  const { out } = ctx;
+  const runId = parsed.positionals[0];
+  if (!runId) {
+    throw new CliError('Uso: prompt-builder agents reconcile <runId> [--json]', EXIT.USAGE);
+  }
+  const record = await loadRun(runId);
+  if (!record) {
+    throw new CliError(`Run de agente "${runId}" não encontrada em ${getDataDir()}.`, EXIT.USAGE);
+  }
+
+  // Soma os custos DERIVADOS das execuções de agente (cada rep registra seu
+  // `usage.costUsd` no ledger/trajectory com source 'agent-derived'/'catalog').
+  let derivedExecutionUsd = 0;
+  let executions = 0;
+  for (const s of record.stages) {
+    for (const r of s.responses) {
+      if (r.execution && typeof r.costUsd === 'number') {
+        derivedExecutionUsd += r.costUsd;
+        executions += 1;
+      }
+    }
+  }
+  // totalCostUsd já embute as execuções + os demais papéis (juiz/gabarito/…).
+  const totalUsd = typeof record.totalCostUsd === 'number' ? record.totalCostUsd : 0;
+
+  // AVISO EXPLÍCITO (§20.4 / Fase 4): reconciliar com o OpenRouter é
+  // impossível/indisponível — ver reconcile-evidence.md. NÃO chamamos o
+  // endpoint de geração em produção neste caso.
+  const aviso =
+    'reconciliação com o OpenRouter indisponível/não-verificada — custo permanece source \'catalog\'/\'agent-derived\'';
+
+  if (out.isText) {
+    out.line(`reconcile ${record.id}  ${record.status}  ${record.mode}`);
+    out.line(`execuções de agente: ${executions}`);
+    out.line(`custo DERIVADO das execuções: ${fmtUsd(derivedExecutionUsd)}`);
+    out.line(`custo total da run (totalCostUsd): ${fmtUsd(totalUsd)}`);
+    out.warn(aviso);
+  }
+  out.result(true, 'agents.reconcile', {
+    runId,
+    reconciled: false,
+    available: false,
+    executions,
+    derivedExecutionUsd,
+    totalCostUsd: totalUsd,
+    // `agentCostReconciled` é campo NULL na 6.1 (adicionado por outra sub-tarefa
+    // da onda); não o populamos porque não há billed a comparar.
+    note: aviso,
+  });
+  return EXIT.OK;
+}
+
+// ---------------------------------------------------------------------------
 // gc
 // ---------------------------------------------------------------------------
 
@@ -763,11 +832,13 @@ export async function cmdAgents(argv: string[]): Promise<number> {
       return cmdLogs(rest);
     case 'replay':
       return cmdReplay(rest);
+    case 'reconcile':
+      return cmdReconcile(rest);
     case 'gc':
       return cmdGc(rest);
     default:
       throw new CliError(
-        `Subcomando desconhecido de "agents": "${sub ?? ''}". Use um de: doctor, run, show, list, logs, replay, gc.`,
+        `Subcomando desconhecido de "agents": "${sub ?? ''}". Use um de: doctor, run, show, list, logs, replay, reconcile, gc.`,
         EXIT.USAGE,
       );
   }
