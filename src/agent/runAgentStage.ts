@@ -225,6 +225,9 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
       install: agentConfig.install ?? 'isolated',
       executorVersion: agentConfig.executorVersion,
       runDir,
+      // Isolamento da config (kind container → o prepare garante a imagem do pi
+      // e devolve bin='docker'). Campo aditivo em PrepareOpts — ver executor.ts.
+      isolation: agentConfig.isolation,
     });
   } catch (err) {
     if (isControlSignal(err)) throw err;

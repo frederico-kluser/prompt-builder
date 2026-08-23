@@ -23,6 +23,18 @@ export interface PrepareOpts {
   executorVersion: string;
   /** Raiz das pastas por-run (pi-bin/, pi-home/…). */
   runDir: string;
+  /**
+   * OPÇÕES DE ISOLAMENTO. O `prepare()` hoje não enxerga a config da run — este
+   * campo ADITIVO e opcional é a ÚNICA mudança necessária para permitir o
+   * branch `isolation.kind === 'container'` na preparação (garantir a imagem do
+   * pi, bin='docker', sem `npm install` isolado). Ausente = comportamento atual
+   * (host/instalação local). Não altera nenhum outro membro do contrato.
+   */
+  isolation?: {
+    kind?: 'worktree' | 'clone' | 'container';
+    /** Imagem Docker explícita — sobrescreve `prompt-builder-pi:<version>`. */
+    image?: string;
+  };
 }
 
 /** A execução de UMA tarefa num workspace já preparado. */

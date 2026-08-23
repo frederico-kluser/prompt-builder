@@ -57,6 +57,15 @@ export interface SpawnAgentOpts {
   /** Consultada a cada chunk de stdout. Retorna ≠ null → kill com essa razão
    * (teto de custo/turnos). `stderr` NÃO dispara isto: é narração, não trabalho. */
   shouldStop?: () => AgentStopReason | null;
+  /**
+   * Opcional — gancho disparado UMA vez dentro do guard `killTree` (junto do
+   * kill do grupo), na razão do kill. Pensado para limpeza EXTERNA do recurso
+   * do processo: em modo container, aponta para `killContainer(<nome>)`.
+   * FIRE-AND-FORGET: não deve ser `await`ado dentro do callback, e erros não
+   * devem derrubar o kill.
+   * Aditivo/genérico — não altera a semântica existente de `spawnAgent`.
+   */
+  onKill?: (reason: AgentStopReason) => void;
 }
 
 /**
@@ -145,6 +154,17 @@ export async function spawnAgent(opts: SpawnAgentOpts): Promise<SpawnAgentResult
       process.kill(-child.pid!, 'SIGTERM'); // `-` = o grupo (detached: true)
     } catch {
       /* o grupo já morreu (exit espontâneo entre o check e o kill) */
+    }
+    // Gancho de limpeza EXTERNA do recurso (ex.: killContainer em modo
+    // container). Dispara UMA vez, junto do killTree, sem bloquear: o chamador
+    // cuida de não fazer await e de engolir erros. `void` descarta a promessa.
+    const onKill = opts.onKill;
+    if (onKill) {
+      try {
+        void Promise.resolve(onKill(reason));
+      } catch {
+        /* nunca derruba o kill por um gancho externo */
+      }
     }
     setTimeout(() => {
       try {

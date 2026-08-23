@@ -36,7 +36,7 @@
 // `selfTest` v1 é só o pré-cheque de `pi --version` que o pré-voo precisa.
 // ----------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import type { WriteStream } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -44,6 +44,18 @@ import type { AgentExecutor, AgentRunOutcome, AgentRunOpts, CleanRoomReport, Pre
 import { createJsonlSplitter } from './jsonl.js';
 import { spawnAgent, type SpawnAgentResult } from './spawn.js';
 import type { AgentLimits, AgentStopReason, AgentTrajectory, AgentTurn } from './types.js';
+import {
+  buildDockerArgv,
+  CONTAINER_NAME_PREFIX,
+  CONTAINER_PI_HOME_DIR,
+  CONTAINER_SESSION_DIR,
+  dockerCliEnv,
+  dockerRunAuditArgv,
+  ENV_FILE_MASK,
+  ensurePiImage,
+  killContainer,
+  writeEnvFile,
+} from './container.js';
 
 // ----------------------------------------------------------------------------
 // Constantes da receita (SPIKE v0.84.2)
@@ -262,6 +274,22 @@ function systemPromptArg(mode: 'replace' | 'append' | 'none', prompt: string, se
   return [flag, file];
 }
 
+/**
+ * Em MODO CONTAINER, reescreve um valor de argv que aponte para um arquivo sob o
+ * `sessionDir` do HOST para o caminho equivalente DENTRO do container
+ * (`/exec/session/<nome>`). O `systemPromptArg` grava o arquivo no host (que é
+ * o bind-mount `/exec/session`) e devolve o CAMINHO DO HOST; o pi roda no
+ * container e só enxerga `/exec/session/<nome>`. Valores que não são caminhos
+ * de arquivo sob o sessionDir passam intactos (ex.: o próprio texto do prompt).
+ */
+function toContainerSessionPath(value: string, sessionDir: string): string {
+  const prefix = sessionDir.endsWith(path.sep) ? sessionDir : sessionDir + path.sep;
+  if (value.startsWith(prefix)) {
+    return `${CONTAINER_SESSION_DIR}/${path.basename(value)}`;
+  }
+  return value;
+}
+
 // ----------------------------------------------------------------------------
 // Executor
 // ----------------------------------------------------------------------------
@@ -445,6 +473,22 @@ export const piExecutor: AgentExecutor = {
     // exige `PI_MODEL_ID` (documentado no JSDoc do módulo).
     if (process.env.PI_MODEL_ID) env.PI_MODEL_ID = process.env.PI_MODEL_ID;
 
+    // --- modo CONTAINER (isolation.kind === 'container') ----------------------
+    // Cada execução roda num container Docker EFÊMERO. Aqui garantimos a imagem
+    // (`prompt-builder-pi:<version>`, CACHEADA por tag — não recria se existir),
+    // trocamos o binário para `docker` e estampamos a tag no env (`run`/`selfTest`
+    // a consomem). NÃO roda `npm install` isolado em modo container. Os modos
+    // 'worktree'/'clone' (install isolated/system) seguem INTOCADOS abaixo.
+    const isContainer = opts.isolation?.kind === 'container';
+    if (isContainer) {
+      const tag = await ensurePiImage(opts.executorVersion, {
+        image: opts.isolation?.image,
+        runDir: opts.runDir,
+      });
+      env.PI_CONTAINER_IMAGE = tag;
+      return { bin: 'docker', env };
+    }
+
     let bin: string;
     if (opts.install === 'isolated') {
       const prefix = path.join(opts.runDir, 'pi-bin');
@@ -523,13 +567,19 @@ export const piExecutor: AgentExecutor = {
     const systemPrompt = readSystemPrompt(opts, env);
     const taskInput = readTaskInput(opts, env);
 
-    // --- argv da receita -----------------------------------------------------
-    const argv: string[] = [
+    const isContainer = opts.config.isolation?.kind === 'container';
+    const containerTag = env.PI_CONTAINER_IMAGE; // em modo container, `prepare()` estampa a tag
+
+    // --- argv do pi (args posicionais após o binário `pi`) --------------------
+    // Compartilhado host/container; diverge só em `--session-dir` e no caminho
+    // do system-prompt (que, em container, precisa do caminho DENTRO do
+    // container — ver `toContainerSessionPath`).
+    const piArgv: string[] = [
       '--mode', 'json',
       '--provider', provider,
       '--model', model,
       ...thinkingArg(thinking),
-      '--session-dir', sessionDir,
+      '--session-dir', isContainer ? CONTAINER_SESSION_DIR : sessionDir,
       '--no-context-files',
       '--no-extensions',
       '--no-skills',
@@ -541,8 +591,104 @@ export const piExecutor: AgentExecutor = {
       // responderia `Unknown option: ...` e a execução falharia (verificado
       // numa run real). Mantemos apenas as flags do help do núcleo.
       '--tools', tools.join(','),
-      ...systemPromptArg(promptMode, systemPrompt, sessionDir),
+      ...(isContainer
+        ? systemPromptArg(promptMode, systemPrompt, sessionDir).map((v) => toContainerSessionPath(v, sessionDir))
+        : systemPromptArg(promptMode, systemPrompt, sessionDir)),
     ];
+
+    // --- parâmetros de LAUNCH (host vs container) -----------------------------
+    // Toda a diferença da execução em container fica AQUI: bin/argv/env do
+    // spawnAgent, o gancho de kill do processos externo (Docker) e o env-file
+    // temp. O parser/splitter/shouldStop e a montagem do outcome são IDÊNTICOS.
+    let agentBin: string;
+    let agentArgv: string[];
+    let agentEnv: Record<string, string>;
+    let agentCwd: string;
+    let onKill: ((reason: AgentStopReason) => void) | undefined;
+    let containerName: string | undefined;
+    let envFile: string | undefined;
+    let auditArgv: string[];
+
+    if (isContainer) {
+      // A key do OpenRouter NUNCA vai a argv/artefato/volume — entra SÓ pelo
+      // env-file (tmp 0600 do host). Run REAL exige a key: sem ela o container
+      // não tem como cobrar o modelo.
+      if (!env.OPENROUTER_API_KEY) {
+        throw new Error(
+          `piExecutor.run: modo container exige OPENROUTER_API_KEY no env preparado ` +
+            `(o canário/fake sem custo não roda em container).`,
+        );
+      }
+      // Garante os pontos de mount existirem ANTES do `docker run` — um bind de
+      // dir AUSENTE cria o diretório como root:root no host, e aí o usuário do
+      // host não conseguiria ler/apagar (owneria). `pi-home`/`session` sob
+      // workDir são criados como o usuário do host.
+      mkdirSync(path.join(opts.workDir, 'pi-home'), { recursive: true });
+      mkdirSync(path.join(opts.workDir, 'session'), { recursive: true });
+
+      containerName = `${CONTAINER_NAME_PREFIX}${opts.execId}`;
+      envFile = writeEnvFile({
+        OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
+        PI_MODEL: model,
+        PI_PROVIDER: provider,
+        PI_CODING_AGENT_DIR: CONTAINER_PI_HOME_DIR,
+        PI_CODING_AGENT_SESSION_DIR: CONTAINER_SESSION_DIR,
+        HOME: CONTAINER_PI_HOME_DIR,
+        PI_OFFLINE: '1',
+        PI_SKIP_VERSION_CHECK: '1',
+        PI_TELEMETRY: '0',
+        GIT_TERMINAL_PROMPT: '0',
+        // Identidade git do container (o agente commita no workspace; sem ela o
+        // `git commit` dentro do container falha) — espelha `baseExecutorEnv`.
+        GIT_AUTHOR_NAME: 'agent',
+        GIT_AUTHOR_EMAIL: 'agent@local',
+        GIT_COMMITTER_NAME: 'agent',
+        GIT_COMMITTER_EMAIL: 'agent@local',
+      });
+      agentArgv = buildDockerArgv({
+        image: containerTag,
+        containerName,
+        envFile,
+        workspaceDir: opts.workspaceDir,
+        workDir: opts.workDir,
+        uid: typeof process.getuid === 'function' ? process.getuid() ?? 0 : 0,
+        gid: typeof process.getgid === 'function' ? process.getgid() ?? 0 : 0,
+        piArgv,
+      });
+      // Env do CLI docker = APENAS o mínimo do host — NUNCA a OPENROUTER_API_KEY
+      // nem as PI_* (o env do agente entra SÓ pelo env-file).
+      agentEnv = dockerCliEnv();
+      agentBin = 'docker';
+      agentCwd = opts.workspaceDir;
+      // Auditoria crua: forma DOCUMENTADA do comando (`docker run ...`) com o
+      // caminho do env-file MASCARADO.
+      auditArgv = dockerRunAuditArgv({
+        image: containerTag,
+        containerName,
+        envFile,
+        workspaceDir: opts.workspaceDir,
+        workDir: opts.workDir,
+        uid: typeof process.getuid === 'function' ? process.getuid() ?? 0 : 0,
+        gid: typeof process.getgid === 'function' ? process.getgid() ?? 0 : 0,
+        piArgv,
+      }).map((a) => (a === envFile ? ENV_FILE_MASK : a));
+      writeFileSync(
+        path.join(opts.workDir, 'argv.json'),
+        JSON.stringify({ mode: 'container', image: containerTag, argv: auditArgv }, null, 2),
+        'utf8',
+      );
+      onKill = (): void => {
+        // Fire-and-forget (spawn.ts nunca awaita onKill): matar o container por
+        // nome não bloqueia o kill do CLI docker.
+        void killContainer(containerName as string);
+      };
+    } else {
+      agentBin = opts.bin;
+      agentArgv = piArgv;
+      agentEnv = env;
+      agentCwd = opts.workspaceDir;
+      auditArgv = piArgv;
+    }
 
     // --- estado do parser ----------------------------------------------------
     const parsed: ParsedRun = {
@@ -577,10 +723,10 @@ export const piExecutor: AgentExecutor = {
     let spawnResult: SpawnAgentResult;
     try {
       spawnResult = await spawnAgent({
-        bin: opts.bin,
-        argv,
-        cwd: opts.workspaceDir,
-        env,
+        bin: agentBin,
+        argv: agentArgv,
+        cwd: agentCwd,
+        env: agentEnv,
         stdin: taskInput,
         timeoutMs: limits.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         maxOutputBytes: limits.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
@@ -601,6 +747,9 @@ export const piExecutor: AgentExecutor = {
         },
         signal: baseOpts.signal,
         shouldStop,
+        // Em container: gancho de kill do container por nome (o CLI docker ser
+        // morto NÃO mata o container). Fire-and-forget — spawn.ts nunca awaita.
+        onKill,
       });
     } catch (err) {
       // Erro de spawn (binário ausente, permissão) → 'error'. CONTROLE: aborto
@@ -609,6 +758,14 @@ export const piExecutor: AgentExecutor = {
       const durationMs = Date.now() - startedAt;
       closeRawStreams(rawOut, rawErr);
       return makeOutcome(opts, parsed, { exitCode: null, signal: null, stopReason: 'error' }, durationMs, `Falha ao spawnar o pi: ${(err as Error).message}`, findSessionFile(sessionDir));
+    } finally {
+      // Cinto-e-suspensório (modo container): o `--rm` cobre o exit normal, mas
+      // um kill por timeout/cancelamento precisa do killContainer explícito.
+      // Feito também no erro de spawn acima. + Apaga o env-file tmp 0600.
+      if (isContainer) {
+        if (containerName) await killContainer(containerName).catch(() => undefined);
+        if (envFile) rmSync(envFile, { force: true });
+      }
     }
     splitter.end();
     // Auditoria (§14): fecha os streams crus ANTES de montar o outcome.
@@ -641,9 +798,28 @@ export const piExecutor: AgentExecutor = {
    * v1 — pré-cheque de sala limpa via `pi --version` no binário preparado. O
    * canário COMPLETO (tokens CANARY-* via execução real barata) vive no
    * `doctor` (onda 3.3) — este método é o gate barato do pré-voo.
+   *
+   * Em MODO CONTAINER (`bin === 'docker'`), a verificação é a REAL: `docker run
+   * --rm <env.PI_CONTAINER_IMAGE> pi --version` — prova que a imagem existe e
+   * responde a versão. Aditiva e segura (não altera o caminho host).
    */
   async selfTest(opts: SelfTestOpts): Promise<CleanRoomReport> {
     try {
+      if (opts.bin === 'docker' && opts.env.PI_CONTAINER_IMAGE) {
+        // Verificação REAL da imagem via container efêmero (`--rm` cobre o exit).
+        const r = await runSimple(
+          ['docker', 'run', '--rm', opts.env.PI_CONTAINER_IMAGE, 'pi', '--version'],
+          { env: dockerCliEnv() },
+        );
+        if (r.code !== 0) {
+          return {
+            ok: false,
+            leaks: [`docker run <imagem> pi --version falhou: ${r.code ?? r.signal} ${r.stderr.slice(-500)}`],
+            flagsUsed: [],
+          };
+        }
+        return { ok: true, leaks: [], piVersion: r.stdout.split('\n')[0].trim(), flagsUsed: [] };
+      }
       const r = await runSimple([opts.bin, '--version'], { env: opts.env });
       if (r.code !== 0) {
         return {
