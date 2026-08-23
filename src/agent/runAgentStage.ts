@@ -341,6 +341,12 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
         }
 
         const trajectory: AgentTrajectory = outcome.trajectory;
+        // F1 (§14 + reconciliação futura do proxy §20.4): persiste os
+        // `responseIds` capturados pelo executor no próprio `trajectory.json`
+        // como campo ADITIVO (cast — não altera o tipo `AgentTrajectory`). É a
+        // ponte entre o custo DERIVADO 'agent-derived' reportado aqui e a
+        // cobrança REAL do provedor, que virá por estes ids na reconciliação.
+        (trajectory as unknown as { responseIds?: string[] }).responseIds = outcome.responseIds ?? [];
         const stopReason = outcome.stopReason;
         const durationMs = outcome.durationMs;
 
@@ -461,9 +467,14 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
             'workspace.stat': collect.statText,
             'files.json': JSON.stringify(collect.nameStatus, null, 2),
             ...(oracle ? { 'oracle.json': JSON.stringify(oracle, null, 2) } : {}),
-            'stdout.log': '',
+            // REMOVIDOS os placeholders vazios 'stdout.log'/'events.jsonl' (eram
+            // sempre ''): o executor (pi) grava agora os arquivos CRUS de
+            // auditoria — `<workDir>/events.raw.jsonl` (JSONL íntegro do stdout)
+            // e `<workDir>/stderr.raw.log` (stderr INTEGRAL) — diretamente no
+            // próprio dir de execução (workDir === execDir aqui, ver
+            // `execDir`/`pi.run`), que é a fonte de auditoria (§14 do plano).
+            // `stderr.log` (tail) continua por reflexo para leituras curtas.
             'stderr.log': outcome.stderrTail ?? '',
-            'events.jsonl': '',
           },
         });
 

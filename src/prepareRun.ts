@@ -40,6 +40,10 @@ export function prepareOptsFor(
     prepare: () =>
       generateContestants({
         apiKey,
+        // F5: em modo agente (config.agent presente), as variantes de uma run
+        // variation com agente também rodam como 'agent' — sem isso o variator
+        // geraria contestants sem runner (= chat). O trainer ja passa o mesmo.
+        runner: cfg.agent ? 'agent' : undefined,
         modelId: cfg.contestantModelId,
         theme: cfg.theme,
         basePrompt: cfg.basePrompt,

@@ -122,14 +122,29 @@ export interface StartRunOpts {
  * cedo com a mensagem PT-BR do sanitize.
  */
 function compareContestants(config: RunConfig): Contestant[] {
+  let contestants: Contestant[];
   if (config.mode !== 'compare' || !config.competitorConfigs?.length) {
-    return contestantsFromConfig(config);
+    contestants = contestantsFromConfig(config);
+  } else {
+    const sane = sanitizeLlmVariants(config.competitorConfigs);
+    if (sane.error) contestants = contestantsFromConfig(config);
+    else {
+      for (const w of sane.warnings) console.warn(`[compare-llms] ${w}`);
+      contestants = variantsToContestants(sane.variants);
+      if (contestants[0]) contestants[0] = { ...contestants[0], isOriginal: true };
+    }
   }
-  const sane = sanitizeLlmVariants(config.competitorConfigs);
-  if (sane.error) return contestantsFromConfig(config);
-  for (const w of sane.warnings) console.warn(`[compare-llms] ${w}`);
-  const contestants = variantsToContestants(sane.variants);
-  if (contestants[0]) contestants[0] = { ...contestants[0], isOriginal: true };
+  // F5: em modo agente (config.agent presente), TODO contestant do compare roda
+  // como agente. Estampa `runner: 'agent'` AQUI — o único ponto por onde passam
+  // AMBOS os caminhos do eixo compare (competitorModelIds via
+  // `contestantsFromConfig` E competitorConfigs via `variantsToContestants`,
+  // inclusive o fallback de config inválida). Sem isto o orquestrador (que
+  // ramifica por `contestant.runner === 'agent'`) rodaria os candidatos como
+  // CHAT. (O variator/trainer já estampam no modo variation/training; o compare
+  // não tinha nenhum stamp.)
+  if (config.agent) {
+    contestants = contestants.map((c) => ({ ...c, runner: 'agent' }));
+  }
   return contestants;
 }
 
@@ -747,6 +762,14 @@ async function runLoop(
               inconclusive: refJudge.inconclusive,
             };
           } else {
+            // F2: etapa sem gabarito em modo agente — o fluxo listwise julgará a
+            // resposta do AGENTE pelo texto-resumo (não pela trajetória). Aviso
+            // ÚNICO no stderr (comportamento mantido — só avisa).
+            if (agentContestants.length > 0) {
+              console.warn(
+                'etapa sem gabarito em modo agente — candidato julgado pelo resumo (1 linha); use verify[] ou reference para modo agente',
+              );
+            }
             stageRecord.judge = await judgeStage({
               apiKey,
               stage: stageSpec,

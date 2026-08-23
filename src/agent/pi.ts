@@ -36,7 +36,8 @@
 // `selfTest` v1 é só o pré-cheque de `pi --version` que o pré-voo precisa.
 // ----------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import type { WriteStream } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { AgentExecutor, AgentRunOutcome, AgentRunOpts, CleanRoomReport, PrepareOpts, SelfTestOpts } from './executor.js';
@@ -487,6 +488,21 @@ export const piExecutor: AgentExecutor = {
     const sessionDir = baseOpts.sessionDir ?? path.join(opts.workDir, 'session');
     mkdirSync(sessionDir, { recursive: true });
 
+    // Streams CRUS de auditoria (§14): o stdout JSONL íntegro e o stderr INTEIRO
+    // do processo, gravados sob `<workDir>/` (que é o execDir — ver
+    // `execDir`/`runAgentStage`). São fontes de auditoria; degradam em silêncio
+    // se `workDir` não existir / a criação falhar (os logs seguem funcionando).
+    let rawOut: WriteStream | undefined;
+    let rawErr: WriteStream | undefined;
+    try {
+      if (existsSync(opts.workDir)) {
+        rawOut = createWriteStream(path.join(opts.workDir, 'events.raw.jsonl'), { flags: 'a' });
+        rawErr = createWriteStream(path.join(opts.workDir, 'stderr.raw.log'), { flags: 'a' });
+      }
+    } catch {
+      // degrade silencioso — auditoria é melhor-esforço
+    }
+
     // --- env da execução: base preparada + sessão ----------------------------
     const env: Record<string, string> = { ...opts.env, PI_CODING_AGENT_SESSION_DIR: sessionDir };
 
@@ -567,6 +583,9 @@ export const piExecutor: AgentExecutor = {
         maxOutputBytes: limits.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
         onStdoutChunk: (chunk) => {
           splitter.push(chunk);
+          // Auditoria (§14): espelha o chunk íntegro no stream cru (a)
+          // além do splitter; a falha do stream é degradada em silêncio.
+          rawOut?.write(chunk);
           // Deixa o shouldStop ser consultado a cada chunk também (fora do
           // spawnAgent), para o máximo de capacidade de resposta do custo.
           const s = shouldStop();
@@ -574,6 +593,8 @@ export const piExecutor: AgentExecutor = {
         },
         onStderrChunk: (chunk) => {
           stderrRing.push(chunk.toString('utf8'));
+          // Auditoria (§14): persiste TODO o stderr, não só o tail.
+          rawErr?.write(chunk);
         },
         signal: baseOpts.signal,
         shouldStop,
@@ -583,9 +604,12 @@ export const piExecutor: AgentExecutor = {
       // NÃO é engolido aqui — o spawnAgent resolve (não lança) em 'cancelled'
       // quando há `signal`; e sem `signal` isto é erro real de processo.
       const durationMs = Date.now() - startedAt;
+      closeRawStreams(rawOut, rawErr);
       return makeOutcome(opts, parsed, { exitCode: null, signal: null, stopReason: 'error' }, durationMs, `Falha ao spawnar o pi: ${(err as Error).message}`, findSessionFile(sessionDir));
     }
     splitter.end();
+    // Auditoria (§14): fecha os streams crus ANTES de montar o outcome.
+    closeRawStreams(rawOut, rawErr);
 
     // `shouldStop` pôde ter corrido por último (custo/turnos). Se o spawnAgent
     // não matou sozinho (por exemplo o teto foi atingido no último chunk, antes
@@ -635,6 +659,11 @@ export const piExecutor: AgentExecutor = {
 // ----------------------------------------------------------------------------
 // Montagem do outcome
 // ----------------------------------------------------------------------------
+
+/** Fecha os streams crus de auditoria (§14) — no-op se ausentes (degrade). */
+function closeRawStreams(...streams: (WriteStream | undefined)[]): void {
+  for (const s of streams) s?.end();
+}
 
 function findSessionFile(sessionDir: string): string | undefined {
   // Transcript do pi: <sessionDir>/<ts>_<uuid>.jsonl (plano §12.2 / 9.3).
