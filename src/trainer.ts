@@ -257,6 +257,12 @@ function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     // "corrigir" a ausencia — mas copiar o orcamento daria a CADA uma das N
     // iteracoes o teto inteiro da sessao, e o gasto total seria N x o teto.
     // Quem controla o dinheiro e o ledger da sessao, repassado por parentLedger.
+    //
+    // `agent` (Fase 4, §29.2): copiado por REQUERIDO. Sem isso o treino com
+    // agente rodaria todas as iteracoes (e o holdout) como CHAT em silencio —
+    // o bug mais caro e mais silencioso do plano. O runner='agent' dos
+    // contestants e marcado pelo variator/trainer quando `agent` presente.
+    agent: cfg.agent,
   };
 }
 
@@ -344,6 +350,8 @@ async function trainingLoop(
           timeoutMs: cfg.timeoutMs,
           ctx,
           maxPricePerMTok: cfg.maxPricePerMTok,
+          // Fase 4: sem `runner='agent'` o treino com agente rodaria como chat (§29.2).
+          runner: cfg.agent ? 'agent' : undefined,
         });
       } else {
         // Reflection GEPA (deterministico — ver buildLessons): substitui a
@@ -372,6 +380,8 @@ async function trainingLoop(
           timeoutMs: cfg.timeoutMs,
           ctx,
           maxPricePerMTok: cfg.maxPricePerMTok,
+          // Fase 4: mesmo runner nas iteracoes seguintes (agente quando config.agent).
+          runner: cfg.agent ? 'agent' : undefined,
         });
       }
 
@@ -590,6 +600,15 @@ async function finalizeHoldout(
   const basePrompt = cfg.basePrompt ?? '';
 
   let holdoutRun: RunRecord | undefined;
+  // Fase 4, treino com agente e reps>1: o pareamento do holdout (e da
+  // significancia) usa o veredito AGREGADO por cenário, nao o vetor plano por
+  // (cenário × rep) — mantém o comportamento atual ate a sub-tarefa de reps
+  // expor `referenceJudge.verdictsByRep`.
+  if (cfg.agent && (cfg.agent.repetitions ?? 1) > 1) {
+    console.warn(
+      `[train ${sessionId}] holdout pareado por cenário (reps não pareadas) — agent.repetitions=${cfg.agent.repetitions}`,
+    );
+  }
   // So ha o que re-testar se a fatia de holdout e confiavel, existe um prompt
   // base p/ servir de controle e o campeao final e uma VARIANTE (se o treino
   // convergiu sem ganho, campeao == base e a run compararia ele consigo mesmo).
@@ -610,12 +629,16 @@ async function finalizeHoldout(
         label: 'Controle (base)',
         modelId: cfg.contestantModelId,
         systemPrompt: basePrompt,
+        // Fase 4: holdout com agente precisa do runner para nao medir chat (§29.2).
+        ...(cfg.agent ? { runner: 'agent' as const } : {}),
       },
       {
         id: 'holdout-champion',
         label: 'Campeao (final)',
         modelId: cfg.contestantModelId,
         systemPrompt: champion.systemPrompt,
+        // Fase 4: mesmo runner no campeao do holdout.
+        ...(cfg.agent ? { runner: 'agent' as const } : {}),
       },
     ];
     holdoutRun = await runToCompletion(

@@ -162,6 +162,11 @@ export function arenaConfigToRunConfig(
 // silencioso. `stages` e forcado a `scenarios.length` — datagen de tarefa de
 // agente nao existe na v1 (um LLM nao gera repo+setup+verify que rodem sem
 // executa-los). `judging.dossierTokens` vira `agent.dossierTokens`.
+//
+// Fase 4 (§29.2): variation/training tambem sao aceitos. Como o arquivo de
+// agente nao traz modelo sob teste nem basePrompt (o `ArenaAgentConfigFile` só
+// tem `models.competitors`), o caminho varia o prompt do PRIMEIRO competidor —
+// as variações (systemPrompts) são geradas pelo variator com runner='agent'.
 // ----------------------------------------------------------------------------
 
 export type ArenaAgentConfigToRunConfigResult =
@@ -172,17 +177,6 @@ export function arenaAgentConfigToRunConfig(
   file: ArenaAgentConfigFile,
   overrides: Pick<ArenaConfigDefaults, 'finalists' | 'maxOutputTokens' | 'timeoutMs'> = {},
 ): ArenaAgentConfigToRunConfigResult {
-  // v1 suporta SO o eixo compare de agentes. variation/training com agente
-  // ainda nao tem caminho no motor (treino de agente chega na Fase 4) — rejeitar
-  // em vez de produzir uma run que mede outra coisa.
-  if (file.mode !== 'compare') {
-    return {
-      ok: false,
-      error:
-        'mode variation/training com agente ainda não suportado — use compare com arena-agent-config@1; treino com agente chega na Fase 4',
-    };
-  }
-
   // `agent.limits` e o default de todo `scenario.agentTask.limits` ausente.
   const agentLimits = file.agent.limits;
   const maxOutputTokens = Math.max(50, overrides.maxOutputTokens ?? 1000);
@@ -271,12 +265,36 @@ export function arenaAgentConfigToRunConfig(
     },
   };
 
-  const candidate: Record<string, unknown> = {
-    mode: 'compare',
-    ...common,
-    // TODOS os contestants rodam como agentes (runner preso em 'agent').
-    competitorConfigs: file.models.competitors.map((id) => ({ modelId: id })),
-  };
+  // Fase 4 (§29.2): variation/training com agente também são aceitos.
+  // `agent` (incl. limits/promptMode etc.) é preservado verbatim no `common`
+  // acima; quem dirige o runner='agent' dos contestants é o variator/trainer
+  // quando `config.agent` presente.
+  const candidate: Record<string, unknown> = file.mode === 'compare'
+    ? {
+        mode: 'compare',
+        ...common,
+        // TODOS os contestants rodam como agentes (runner preso em 'agent').
+        competitorConfigs: file.models.competitors.map((id) => ({ modelId: id })),
+      }
+    : {
+        mode: file.mode,
+        ...common,
+        // O arena-agent-config@1 nao traz modelo sob teste, promp base nem
+        // tecnicas (so `models.competitors`, min 2, para o compare). No caminho
+        // variation/training com agente, o modelo sob teste e o primeiro
+        // competidor e as variacoes de prompt (systemPrompts) sao geradas pelo
+        // variator com runner='agent'. Para um single-model VALIDO (o schema de
+        // run exige >= 2 candidatos), defaultamos a otimizacao ligada com duas
+        // tecnicas gerais (`getTechnique` aceita so ids reais — conferidas no
+        // catalogo). TODO: quando o arena-agent-config@1 ganhar base/tecnicas
+        // p/ variation/training, leia daqui em vez de defaultar.
+        contestantModelId: file.models.competitors[0],
+        promptOptimization: true,
+        techniqueIds: ['specificity', 'constraints'],
+        ...(file.mode === 'training'
+          ? { iterations: clamp(Math.round(3), 2, 10) }
+          : {}),
+      };
 
   const parsed = parseRunConfig(candidate);
   if (!parsed.ok) return { ok: false, error: parsed.error };

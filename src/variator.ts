@@ -64,6 +64,13 @@ export interface GenerateContestantsParams {
   analysisHint?: string;
   /** Nivel de raciocinio do papel "rewriter" (RunConfig.reasoning.rewriter). */
   reasoningLevel?: ReasoningLevel;
+  /**
+   * Runner dos contestants gerados. 'agent' quando a run e de agente
+   * (`config.agent` presente): sem isso o treino com agente rodaria as
+   * iteracoes (e o holdout) como CHAT em silencio (§29.2). Ausente/undefined
+   * mantém o comportamento de chat intacto.
+   */
+  runner?: 'chat' | 'agent';
   timeoutMs?: number;
   /** Sinal de abort + ledger de custo. */
   ctx?: RunCtx;
@@ -144,6 +151,15 @@ export async function generateContestants(
 ): Promise<Contestant[]> {
   const contestants: Contestant[] = [];
 
+  // Runner de agente (quando `config.agent` presente). Sem isso os contestants
+  // de uma run de agente sairiam com runner indefinido (= chat) e o treino
+  // mediria respostas de chat em PASSO de agente, sem erro nenhum (§29.2).
+  const stampRunner = (): void => {
+    if (p.runner && p.runner !== 'chat') {
+      for (const c of contestants) c.runner = p.runner;
+    }
+  };
+
   // 1) Controle: o prompt original do usuario (sempre, quando fornecido e pedido).
   const original = (p.originalPrompt ?? p.basePrompt)?.trim();
   if (p.includeOriginal && original) {
@@ -180,6 +196,7 @@ export async function generateContestants(
         systemPrompt: sp,
       });
     });
+    stampRunner();
     return contestants;
   }
 
@@ -202,6 +219,7 @@ export async function generateContestants(
     });
   });
 
+  stampRunner();
   return contestants;
 }
 
