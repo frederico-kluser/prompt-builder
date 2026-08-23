@@ -11,7 +11,7 @@
 // abaixo, cada uma marcando o que se perde se ela for esquecida.
 
 import { parseRunConfig } from './runConfigSchema.js';
-import type { ArenaConfigFile } from './configFile.js';
+import type { ArenaAgentConfigFile, ArenaConfigFile } from './configFile.js';
 import type { ReasoningConfig, RunConfig, StageSpec } from './types.js';
 
 /** Defaults da UI, aplicados quando o arquivo omite o campo. */
@@ -149,4 +149,151 @@ export function arenaConfigToRunConfig(
   const parsed = parseRunConfig(candidate);
   if (!parsed.ok) return { ok: false, error: parsed.error };
   return { ok: true, config: parsed.config };
+}
+
+// ----------------------------------------------------------------------------
+// Traducao `arena-agent-config@1` -> `RunConfig` (modo agente, §25).
+//
+// Diferente do chat, aqui o ROUTER do contestant fica preso em 'agent' para
+// TODOS os contestants quando mode==='compare': eles sao `models.competitors`
+// (os agentes sendo comparados). `agent.limits` e default para o
+// `scenario[].agentTask.limits` ausente; sem essa heranca, cada cenario
+// repetiria o bloco e uma divergencia acidental viraria experimento invalido
+// silencioso. `stages` e forcado a `scenarios.length` — datagen de tarefa de
+// agente nao existe na v1 (um LLM nao gera repo+setup+verify que rodem sem
+// executa-los). `judging.dossierTokens` vira `agent.dossierTokens`.
+// ----------------------------------------------------------------------------
+
+export type ArenaAgentConfigToRunConfigResult =
+  | { ok: true; config: RunConfig }
+  | { ok: false; error: string };
+
+export function arenaAgentConfigToRunConfig(
+  file: ArenaAgentConfigFile,
+  overrides: Pick<ArenaConfigDefaults, 'finalists' | 'maxOutputTokens' | 'timeoutMs'> = {},
+): ArenaAgentConfigToRunConfigResult {
+  // v1 suporta SO o eixo compare de agentes. variation/training com agente
+  // ainda nao tem caminho no motor (treino de agente chega na Fase 4) — rejeitar
+  // em vez de produzir uma run que mede outra coisa.
+  if (file.mode !== 'compare') {
+    return {
+      ok: false,
+      error:
+        'mode variation/training com agente ainda não suportado — use compare com arena-agent-config@1; treino com agente chega na Fase 4',
+    };
+  }
+
+  // `agent.limits` e o default de todo `scenario.agentTask.limits` ausente.
+  const agentLimits = file.agent.limits;
+  const maxOutputTokens = Math.max(50, overrides.maxOutputTokens ?? 1000);
+  const timeoutMs = clamp(Math.round(overrides.timeoutMs ?? agentLimits.timeoutMs ?? 600_000), 1_000, 300_000);
+
+  // Cenarios: cada um vira uma StageSpec de agentTask. `stages` = scenarios.length
+  // (datagen de tarefa de agente nao existe na v1). scenario SEM agentTask => ERRO,
+  // nao fallback para chat (cair em silencio mediria outra coisa, §25).
+  const stageSpecs: StageSpec[] = [];
+  for (const s of file.scenarios) {
+    if (!s.agentTask) {
+      return {
+        ok: false,
+        error: 'Em modo agente, todo cenário precisa de agentTask (não vira chat)',
+      };
+    }
+    const taskLimits = agentLimitsSchemaToAgentLimits(s.agentTask.limits) ?? agentLimitsSchemaToAgentLimits(file.agent.limits);
+    if (!taskLimits) {
+      return { ok: false, error: 'agent.limits.maxCostUsd é obrigatório em modo agente (§20.1)' };
+    }
+    stageSpecs.push({
+      question: s.question,
+      // productContext e OPTIONAL no arquivo — o schema do StageSpec exige min(1),
+      // entao quando ausente herdamos o contexto mais proximo (brief ou tema).
+      productContext: s.productContext?.trim() || file.scenarioBrief?.trim() || file.theme.trim(),
+      maxTokens: maxOutputTokens,
+      ...(s.rubric ? { rubric: s.rubric } : {}),
+      origin: 'import' as const,
+      agentTask: {
+        ...(s.agentTask.repo ? { repo: s.agentTask.repo } : {}),
+        ...(s.agentTask.setup ? { setup: s.agentTask.setup } : {}),
+        ...(s.agentTask.files ? { files: s.agentTask.files } : {}),
+        ...(s.agentTask.verify ? { verify: s.agentTask.verify } : {}),
+        ...(s.agentTask.forbiddenPaths ? { forbiddenPaths: s.agentTask.forbiddenPaths } : {}),
+        ...(s.agentTask.contextFiles ? { contextFiles: s.agentTask.contextFiles } : {}),
+        limits: taskLimits,
+      },
+    });
+  }
+
+  const finalists = clamp(
+    Math.round(overrides.finalists ?? file.finalists ?? 3),
+    0,
+    12,
+  );
+  const duelsOn = file.duels ?? true;
+  const semFinais = !duelsOn || finalists === 0;
+
+  // Reasoning no modo agente: juiz e datagen vao em `config.reasoning` (o agente
+  // em si usa `agent.thinking`). Sem ajuste por papel aqui — defaults do pipeline.
+  const reasoning: ReasoningConfig = {};
+
+  const referenceJudging = file.judging?.reference ?? true;
+
+  const common = {
+    theme: file.theme.trim(),
+    stages: stageSpecs.length,
+    datagenModelId: file.models.datagen,
+    judgeModelIds: file.models.judges,
+    concurrency: 4, // execucoes de agente sao pesadas de CPU — gateado pelo maxParallel do agente
+    timeoutMs,
+    maxOutputTokens,
+    referenceJudging,
+    finalists,
+    judgePasses: (file.judging?.passes === 2 ? 2 : 1) as 1 | 2,
+    customStages: stageSpecs,
+    ...(semFinais ? { duels: false } : {}),
+    ...(file.scenarioBrief?.trim() ? { scenarioBrief: file.scenarioBrief.trim() } : {}),
+    ...(file.models.reference ? { referenceModelId: file.models.reference } : {}),
+    // O agente controla os proprios tokens; maxOutputTokens/timeoutMs ficam
+    // preenchidos aqui pois a etapa tambem pode rodar em modo chat (§29.11).
+    ...(Object.keys(reasoning).length ? { reasoning } : {}),
+    agent: {
+      executor: 'pi' as const,
+      executorVersion: file.agent.executorVersion,
+      ...(file.agent.install ? { install: file.agent.install } : {}),
+      ...(file.agent.provider ? { provider: file.agent.provider } : {}),
+      ...(file.agent.promptMode ? { promptMode: file.agent.promptMode } : {}),
+      ...(file.agent.thinking ? { thinking: file.agent.thinking } : {}),
+      ...(file.agent.tools ? { tools: file.agent.tools } : {}),
+      ...(file.agent.repetitions ? { repetitions: file.agent.repetitions } : {}),
+      ...(file.agent.maxParallel ? { maxParallel: file.agent.maxParallel } : {}),
+      ...(file.agent.isolation ? { isolation: file.agent.isolation } : {}),
+      limits: agentLimitsSchemaToAgentLimits(file.agent.limits),
+      ...(file.judging?.dossierTokens ? { dossierTokens: file.judging.dossierTokens } : {}),
+    },
+  };
+
+  const candidate: Record<string, unknown> = {
+    mode: 'compare',
+    ...common,
+    // TODOS os contestants rodam como agentes (runner preso em 'agent').
+    competitorConfigs: file.models.competitors.map((id) => ({ modelId: id })),
+  };
+
+  const parsed = parseRunConfig(candidate);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+  return { ok: true, config: parsed.config };
+}
+
+// `ArenaAgentConfigLimits` exige maxCostUsd; `AgentLimits` o tem opcional. Converte
+// o objeto do arquivo para o tipo do dominio (remove extras, normaliza para AgentLimits).
+function agentLimitsSchemaToAgentLimits(
+  l: { maxTurns?: number; maxCostUsd: number; timeoutMs?: number; maxOutputBytes?: number; maxDiffBytes?: number } | undefined,
+): { maxTurns?: number; maxCostUsd?: number; timeoutMs?: number; maxOutputBytes?: number; maxDiffBytes?: number } | undefined {
+  if (!l) return undefined;
+  return {
+    ...(l.maxTurns !== undefined ? { maxTurns: l.maxTurns } : {}),
+    ...(l.maxCostUsd !== undefined ? { maxCostUsd: l.maxCostUsd } : {}),
+    ...(l.timeoutMs !== undefined ? { timeoutMs: l.timeoutMs } : {}),
+    ...(l.maxOutputBytes !== undefined ? { maxOutputBytes: l.maxOutputBytes } : {}),
+    ...(l.maxDiffBytes !== undefined ? { maxDiffBytes: l.maxDiffBytes } : {}),
+  };
 }

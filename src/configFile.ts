@@ -12,9 +12,25 @@
 import { z } from 'zod';
 import { getTechnique } from './techniques.js';
 import type { ReasoningLevel } from './types.js';
+import type { AgentLimits } from './agent/types.js';
 
 /** Valor do campo `format` — versão do contrato do arquivo de configuração. */
 export const ARENA_CONFIG_FORMAT = 'arena-config@1';
+
+/** Valor do campo `format` do arquivo de configuração do MODO AGENTE. */
+export const ARENA_AGENT_CONFIG_FORMAT = 'arena-agent-config@1';
+
+// ----------------------------------------------------------------------------
+// ⚠️ ESPELHO ASSIMÉTRICO — arquivo `arena-agent-config@1` NO BACKEND.
+//
+// O espelho `web/src/engine/configFile.ts` NÃO conhece este formato. Isto é de
+// PROPÓSITO, não um buraco para "consertar": o modo agente spawna um executável
+// num workspace isolado (child_process, filesystem, git) — o navegador não tem
+// nada disso. Se a SPA estática validasse `arena-agent-config@1`, ela aceitaria
+// (com sucesso) uma configuração que NUNCA conseguirá executar — o pior tipo de
+// erro, porque só aparece depois. Portanto não exista espelho do modo agente em
+// `web/src/engine/`; o frontend só roda chat (ver src/agent/types.ts, §25).
+// ----------------------------------------------------------------------------
 
 /** Cenário pinado no arquivo de configuração (vira `scenarioSeed` da run). */
 export interface ArenaConfigScenario {
@@ -77,6 +93,70 @@ export interface ArenaConfigFile {
   judging?: { reference?: boolean; passes?: 1 | 2 };
   limits?: { maxOutputTokens?: number; timeoutMs?: number; concurrency?: number }; // int positivos
   compliance?: { area: string; includeRessalvas: boolean };
+}
+
+// ----------------------------------------------------------------------------
+// Modo agente — contrato do arquivo `arena-agent-config@1` (backend/local).
+// Tradução para RunConfig: `arenaAgentConfigToRunConfig` em arenaConfig.ts.
+// ----------------------------------------------------------------------------
+
+/** `limits` do agente no arquivo — espelha `AgentLimits`, com `maxCostUsd` na
+ * prática obrigatório (o schema exige via superRefine; sem teto não há estimativa). */
+export interface ArenaAgentConfigLimits extends AgentLimits {
+  /** Teto de gasto DA EXECUÇÃO (USD). OBRIGATÓRIO em modo agente (§20.1). */
+  maxCostUsd: number;
+}
+
+/** Nó `scenario[].agentTask` do arquivo — espelha `AgentTaskSpec` (src/agent/types.ts). */
+export interface ArenaAgentTaskConfig {
+  repo?: { kind: 'git'; url?: string; path?: string; ref: string; shallow?: boolean };
+  setup?: { cmd: string; timeoutMs?: number }[];
+  files?: { path: string; content: string }[];
+  verify?: { label?: string; cmd: string; expectExit?: number; timeoutMs?: number; weight?: number }[];
+  forbiddenPaths?: string[];
+  contextFiles?: boolean;
+  limits?: ArenaAgentConfigLimits;
+}
+
+/** Nó `agent` do arquivo — espelha `AgentRunnerConfig` (src/agent/types.ts). */
+export interface ArenaAgentConfigAgent {
+  executor: 'pi';
+  executorVersion: string;
+  install?: 'system' | 'isolated';
+  provider?: string;
+  promptMode?: 'replace' | 'append' | 'none';
+  thinking?: ReasoningLevel;
+  tools?: string[];
+  repetitions?: number; // int 1..10
+  maxParallel?: number; // int 1..32
+  limits: ArenaAgentConfigLimits;
+  isolation?: { kind?: 'worktree' | 'clone' | 'container'; keepWorkspace?: boolean; image?: string };
+}
+
+/** Contrato do arquivo de configuração do MODO AGENTE (`arena-agent-config@1`). */
+export interface ArenaAgentConfigFile {
+  format: 'arena-agent-config@1';
+  mode: 'compare' | 'variation' | 'training';
+  theme: string; // min 1
+  scenarioBrief?: string;
+  agent: ArenaAgentConfigAgent;
+  models: {
+    datagen: string;
+    judges: string[]; // min 1
+    reference?: string;
+    /** Ids dos modelos que rodam COMO AGENTES no eixo de competidores (compare). */
+    competitors: string[]; // >= 2 quando mode compare
+  };
+  scenarios: {
+    question: string;
+    productContext?: string;
+    rubric?: string;
+    agentTask?: ArenaAgentTaskConfig;
+    limits?: ArenaAgentConfigLimits;
+  }[];
+  judging?: { reference?: boolean; passes?: 1 | 2; dossierTokens?: number };
+  duels?: boolean;
+  finalists?: number; // int 0..12
 }
 
 // ----------------------------------------------------------------------------
@@ -430,4 +510,202 @@ export function arenaConfigSummary(config: ArenaConfigFile): string {
   const juizes = config.models.judges;
   partes.push(juizes.length === 1 ? `juiz ${juizes[0]}` : `${juizes.length} juízes`);
   return partes.join(' · ');
+}
+
+// ----------------------------------------------------------------------------
+// Modo agente — schema zod + parse do `arena-agent-config@1`
+// ----------------------------------------------------------------------------
+
+// `limits` do agente: `maxCostUsd` obrigatório por construção.
+const agentLimitsSchema = z
+  .object(
+    {
+      maxTurns: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
+      maxCostUsd: z.number('obrigatório').positive('deve ser maior que zero'),
+      timeoutMs: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
+      maxOutputBytes: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
+      maxDiffBytes: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
+    },
+    'agent.limits deve ser um objeto com maxCostUsd obrigatório',
+  );
+
+const agentTaskSchema = z
+  .object(
+    {
+      repo: z
+        .object(
+          {
+            kind: z.literal('git'),
+            url: z.string('url deve ser texto').min(1, 'url não pode ser vazia').optional(),
+            path: z.string('path deve ser texto').min(1, 'path não pode ser vazio').optional(),
+            ref: z.string('ref obrigatório').min(1, 'ref obrigatório'),
+            shallow: z.boolean('shallow deve ser boolean').optional(),
+          },
+          'repo deve ser um objeto { kind: "git" }',
+        )
+        .optional(),
+      setup: z
+        .array(
+          z.object(
+            {
+              cmd: z.string('cmd obrigatório').min(1, 'cmd obrigatório'),
+              timeoutMs: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
+            },
+            'cada setup deve ser { cmd }',
+          ),
+          'setup deve ser uma lista',
+        )
+        .optional(),
+      files: z
+        .array(
+          z.object(
+            {
+              path: z.string('path obrigatório').min(1, 'path obrigatório'),
+              content: z.string('content deve ser texto'),
+            },
+            'cada arquivo deve ser { path, content }',
+          ),
+          'files deve ser uma lista',
+        )
+        .optional(),
+      verify: z
+        .array(
+          z.object(
+            {
+              label: z.string('label deve ser texto').optional(),
+              cmd: z.string('cmd obrigatório').min(1, 'cmd obrigatório'),
+              expectExit: z.number('deve ser número inteiro').int('deve ser número inteiro').optional(),
+              timeoutMs: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
+              weight: z.number('deve ser número').positive('deve ser maior que zero').optional(),
+            },
+            'cada verify deve ser { cmd }',
+          ),
+          'verify deve ser uma lista',
+        )
+        .optional(),
+      forbiddenPaths: z.array(z.string('caminho deve ser texto'), 'deve ser uma lista de caminhos').optional(),
+      contextFiles: z.boolean('contextFiles deve ser boolean').optional(),
+      limits: agentLimitsSchema.optional(),
+    },
+    'agentTask deve ser um objeto',
+  );
+
+const agentConfigSchema = z
+  .object(
+    {
+      executor: z.literal('pi'),
+      executorVersion: z.string('executorVersion obrigatório').min(1, 'executorVersion obrigatório'),
+      install: z.enum(['system', 'isolated'], "deve ser 'system' ou 'isolated'").optional(),
+      provider: z.string('provider deve ser texto').min(1, 'provider não pode ser vazio').optional(),
+      promptMode: z.enum(['replace', 'append', 'none'], "deve ser 'replace', 'append' ou 'none'").optional(),
+      thinking: reasoningLevelSchema.optional(),
+      tools: z.array(z.string('ferramenta deve ser texto'), 'deve ser uma lista de ferramentas').optional(),
+      repetitions: z
+        .number('deve ser número inteiro')
+        .int('deve ser número inteiro')
+        .min(1, 'mínimo 1')
+        .max(10, 'máximo 10')
+        .optional(),
+      maxParallel: z
+        .number('deve ser número inteiro')
+        .int('deve ser número inteiro')
+        .min(1, 'mínimo 1')
+        .max(32, 'máximo 32')
+        .optional(),
+      limits: agentLimitsSchema,
+      isolation: z
+        .object(
+          {
+            kind: z.enum(['worktree', 'clone', 'container'], "deve ser 'worktree', 'clone' ou 'container'").optional(),
+            keepWorkspace: z.boolean('keepWorkspace deve ser boolean').optional(),
+            image: z.string('image deve ser texto').optional(),
+          },
+          'isolation deve ser um objeto',
+        )
+        .optional(),
+    },
+    'agent deve ser um objeto',
+  );
+
+const agentScenarioSchema = z
+  .object(
+    {
+      question: z.string('question obrigatória').min(1, 'question obrigatória'),
+      productContext: z.string('productContext deve ser texto').optional(),
+      rubric: z.string('rubric deve ser texto').optional(),
+      agentTask: agentTaskSchema.optional(),
+      limits: agentLimitsSchema.optional(),
+    },
+    'cada cenário deve ser um objeto',
+  );
+
+const arenaAgentConfigSchema = z
+  .object(
+    {
+      format: z.literal(ARENA_AGENT_CONFIG_FORMAT),
+      mode: z.enum(['compare', 'variation', 'training'], "deve ser 'compare', 'variation' ou 'training'"),
+      theme: z.string('obrigatório').min(1, 'obrigatório'),
+      scenarioBrief: z.string('deve ser texto').max(4000, 'não pode passar de 4000 caracteres').optional(),
+      agent: agentConfigSchema,
+      models: z
+        .object(
+          {
+            datagen: z.string('obrigatório').min(1, 'obrigatório'),
+            judges: z
+              .array(z.string('ids de juiz devem ser texto').min(1, 'id de juiz não pode ser vazio'), 'deve ser uma lista de ids de modelo')
+              .min(1, 'informe ao menos 1 juiz'),
+            reference: z.string('deve ser texto').min(1, 'não pode ser vazio').optional(),
+            competitors: z
+              .array(z.string('id de competidor não pode ser vazio').min(1, 'id de competidor não pode ser vazio'), 'deve ser uma lista de ids de modelo')
+              .min(2, 'informe ao menos 2 competidores'),
+          },
+          'models deve ser um objeto',
+        ),
+      scenarios: z.array(agentScenarioSchema, 'deve ser uma lista de cenários').min(1, 'informe ao menos 1 cenário'),
+      judging: z
+        .object(
+          {
+            reference: z.boolean('deve ser boolean').optional(),
+            passes: z.union([z.literal(1), z.literal(2)], 'deve ser 1 ou 2').optional(),
+            dossierTokens: z
+              .number('deve ser número inteiro')
+              .int('deve ser número inteiro')
+              .min(1000, 'mínimo 1000')
+              .max(200000, 'máximo 200000')
+              .optional(),
+          },
+          'judging deve ser um objeto',
+        )
+        .optional(),
+      duels: z.boolean('deve ser boolean').optional(),
+      finalists: z
+        .number('deve ser número inteiro')
+        .int('deve ser número inteiro')
+        .min(0, 'mínimo 0')
+        .max(12, 'máximo 12')
+        .optional(),
+    },
+    'O arquivo deve ser um objeto de configuração de agente',
+  );
+
+/**
+ * Valida um JSON lido de arquivo como ArenaAgentConfigFile (`arena-agent-config@1`).
+ * Nunca lança. Valida o `format` ANTES do zod, para a mensagem exata de "não é uma
+ * configuração" quando o arquivo é outro (ou de outra versão).
+ */
+export function parseArenaAgentConfig(
+  json: unknown,
+): { ok: true; config: ArenaAgentConfigFile } | { ok: false; error: string } {
+  const formato =
+    json && typeof json === 'object' ? (json as Record<string, unknown>).format : undefined;
+  if (formato !== ARENA_AGENT_CONFIG_FORMAT) {
+    const desc = typeof formato === 'string' && formato.trim() ? formato : 'desconhecido';
+    return {
+      ok: false,
+      error: `Arquivo não é uma configuração do prompt-builder (formato ${desc})`,
+    };
+  }
+  const result = arenaAgentConfigSchema.safeParse(json);
+  if (!result.success) return { ok: false, error: descreverIssues(result.error)  };
+  return { ok: true, config: result.data };
 }

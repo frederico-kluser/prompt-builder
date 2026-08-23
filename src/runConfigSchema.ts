@@ -13,6 +13,117 @@ import type { RunConfig } from './types.js';
 // de reasoning.ts), repetido aqui como literal para o enum do Zod.
 const reasoningLevelSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 
+// ----------------------------------------------------------------------------
+// Modo agente (Agent Arena) — schemas Zod da tarefa executavel (`agentTask`) e
+// da config do executor (`config.agent`). Espelham `AgentTaskSpec` e
+// `AgentRunnerConfig` de src/agent/types.ts (case EXATO) — suficiente aqui, sem
+// importar de la (evita acoplar o schema ao dominio do agente).
+// ----------------------------------------------------------------------------
+
+const agentLimitsSchema = z.object({
+  // Turnos do agente. Default 30 no dominio.
+  maxTurns: z.number().int().positive().optional(),
+  // Teto de gasto DESTA execucao em USD. Em modo agente e OBRIGATORIO (o
+  // superRefine abaixo exige, pois sem teto nao ha estimativa/orcamento — §20.1).
+  maxCostUsd: z.number().positive().optional(),
+  // Parede de tempo da execucao. Default 600_000.
+  timeoutMs: z.number().int().positive().optional(),
+  // Teto de bytes de stdout+stderr. Default 8 MiB.
+  maxOutputBytes: z.number().int().positive().optional(),
+  // Teto de bytes do diff considerado. Default 512 KiB.
+  maxDiffBytes: z.number().int().positive().optional(),
+});
+
+// Schema Zod de AgentTaskSpec (src/agent/types.ts): a etapa de agente.
+const agentTaskSchema = z.object({
+  // Repositorio-semente. `ref` OBRIGATORIO quando ha repo (sem ref pinada nao
+  // ha reprodutibilidade); `url` (clonavel) ou `path` (local), um dos dois.
+  repo: z
+    .object({
+      kind: z.literal('git'),
+      url: z.string().min(1).optional(),
+      path: z.string().min(1).optional(),
+      ref: z.string().min(1),
+      shallow: z.boolean().optional(),
+    })
+    .optional(),
+  // Comandos rodados ANTES do agente acordar (npm ci, build) — nao entram na
+  // trajetoria julgada.
+  setup: z
+    .array(
+      z.object({
+        cmd: z.string().min(1),
+        timeoutMs: z.number().int().positive().optional(),
+      }),
+    )
+    .optional(),
+  // Fixtures escritos no workspace depois do setup.
+  files: z
+    .array(
+      z.object({
+        path: z.string().min(1),
+        content: z.string(),
+      }),
+    )
+    .optional(),
+  // Oraculo deterministico: comandos cujo exit code decide o veredito.
+  verify: z
+    .array(
+      z.object({
+        cmd: z.string().min(1),
+        expectExit: z.number().int().optional(),
+        timeoutMs: z.number().int().positive().optional(),
+        weight: z.number().positive().optional(),
+        label: z.string().optional(),
+      }),
+    )
+    .optional(),
+  // Caminhos que o agente NAO pode tocar (reward-hacking). Globs simples.
+  forbiddenPaths: z.array(z.string()).optional(),
+  // default false: ver aviso §12.2 do plano (`--no-context-files`).
+  contextFiles: z.boolean().default(false),
+  // Limites POR EXECUCAO (contrato de custo da tarefa). Default = config.agent.limits.
+  limits: agentLimitsSchema.optional(),
+});
+
+// Schema Zod de AgentRunnerConfig (src/agent/types.ts): `config.agent`.
+const agentSchema = z.object({
+  // v1 implementa so 'pi'. O enum existe desde ja para o ponto de extensao.
+  executor: z.literal('pi'),
+  // Versao EXIGIDA do executor — divergencia = run falha no pre-voo.
+  executorVersion: z.string().min(1),
+  // Como o binario e obtido. Default 'isolated'.
+  install: z.enum(['system', 'isolated']).optional(),
+  // Provider do agente. Default 'openrouter'.
+  provider: z.string().min(1).optional(),
+  // Como o prompt sob teste chega ao agente. Default 'append'.
+  promptMode: z.enum(['replace', 'append', 'none']).default('append'),
+  // Ferramentas liberadas (allowlist). Ausente = built-ins do executor.
+  tools: z.array(z.string()).optional(),
+  // Repeticoes por (contestant x cenario). Agente e estocastico. Default 1.
+  repetitions: z.number().int().min(1).max(10).optional(),
+  // Maximo de execucoes SIMULTANEAS neste processo. Default min(4, cpus-1).
+  // Nao viola a regra do limitador global de openrouter.ts — recurso escasso
+  // aqui e a MAQUINA, nao o rate limit do provedor.
+  maxParallel: z.number().int().min(1).max(32).optional(),
+  // Limites default, herdados por toda AgentTaskSpec que nao os declare.
+  limits: agentLimitsSchema.optional(),
+  // Isolamento do workspace.
+  isolation: z
+    .object({
+      kind: z.enum(['worktree', 'clone', 'container']).optional(),
+      // Guarda o workspace ao fim (debug). Default false.
+      keepWorkspace: z.boolean().optional(),
+      // Imagem, quando kind==='container'.
+      image: z.string().optional(),
+    })
+    .optional(),
+  // Nivel de esforco do agente. MESMA escada do repo (7 degraus).
+  thinking: reasoningLevelSchema.optional(),
+  // Orcamento de tokens do dossier entregue ao juiz. Default 12_000.
+  dossierTokens: z.number().int().min(1000).max(200_000).optional(),
+});
+
 // Schema Zod de StageSpec (types.ts), compartilhado por customStages e
 // scenarioSeed. Em customStages o preprocess preenche maxTokens ausente
 // (herda maxOutputTokens); em scenarioSeed o item ja deve trazer maxTokens.
@@ -26,6 +137,10 @@ const stageSpecSchema = z.object({
   reference: z.string().max(32_000).optional(),
   // Proveniencia da etapa: gerada pela IA ou importada de pacote JSON.
   origin: z.enum(['ai', 'import']).optional(),
+  // A etapa, quando executada por um agente. AUSENTE => a etapa so serve ao
+  // runner 'chat'. Em modo agente (config.agent presente) e obrigatorio em toda
+  // etapa — o superRefine abaixo exige.
+  agentTask: agentTaskSchema.optional(),
 });
 
 const baseFields = {
@@ -40,6 +155,9 @@ const baseFields = {
   // maxOutputTokens livre (teto generoso): a UI virou input livre — o teto
   // real e a janela do modelo; o OpenRouter rejeita o que exceder.
   maxOutputTokens: z.number().int().min(50).max(1_000_000).optional(),
+  // Config DA RUN do modo agente (Agent Runner). AUSENTE => run de chat.
+  // `maxCostUsd` (dentro de `limits`) e exigido pelo superRefine.
+  agent: agentSchema.optional(),
   promptOptimization: z.boolean().optional(),
   optimizerModelId: z.string().min(1).optional(),
   judgePasses: z.union([z.literal(1), z.literal(2)]).optional(),
@@ -172,6 +290,45 @@ export const runConfigSchema = z
     z.discriminatedUnion('mode', [compareObj, variationObj, trainingObj]),
   )
   .superRefine((cfg, ctx) => {
+    // ------------------------------------------------------------------ agente
+    // Validacoes do modo agente, ativas quando `config.agent` existe (qualquer
+    // `mode` — o eixo runner e ortogonal ao mode).
+    if (cfg.agent) {
+      // 1. `maxCostUsd` OBRIGATORIO (§20.1). Sem teto nao ha estimativa, e sem
+      // estimativa nao ha orcamento — a run seria aceita e gastaria o que quisesse.
+      const maxCost = cfg.agent.limits?.maxCostUsd;
+      if (!maxCost || maxCost <= 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['agent', 'limits', 'maxCostUsd'],
+          message: 'maxCostUsd é obrigatório em modo agente (§20.1)',
+        });
+      }
+      // 2. Toda etapa precisa de `agentTask` — sem ela nao ha tarefa executavel,
+      // e cair em silencio para chat mediria outra coisa (§25). `stages` em si e
+      // forcado na traducao (arenaConfig), nao exige aqui.
+      for (const [campo, lista] of [
+        ['customStages', cfg.customStages ?? []],
+        ['scenarioSeed', cfg.scenarioSeed ?? []],
+      ] as const) {
+        const semTask = lista.findIndex((s) => !s.agentTask);
+        if (semTask >= 0) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [campo, semTask],
+            message: 'Em modo agente, toda etapa precisa de agentTask',
+          });
+        }
+      }
+      // 3. §29.10 — o modelo do agente nao pode julgar a propria trajetoria. Os
+      // contestants (que em modo agente rodam como agentes) sao exatamente os
+      // ids de `effectiveModelIds`; o checque judiz-nao-compete abaixo ja as cobre
+      // para `compare`. Aqui reforcamos a mensagem para nao depender de interpretar.
+      // (maxOutputTokens/#maxTokens NAO se aplicam ao agente — ele controla os
+      // proprios tokens — entao nao os exigimos aqui; §29.11 mantem o campo para
+      // o caso de a etapa rodar em modo chat tambem.)
+    }
+
     // Gerador e juiz PODEM repetir o mesmo modelo (repeticao permitida).
     if (cfg.mode === 'compare') {
       // Eixo de competidores: competitorModelIds (classico) OU competitorConfigs
