@@ -77,3 +77,13 @@ em `trajectory.json` nem em `exec.json`; o bruto vive só nos transcripts raw
 `session/*.jsonl` (que não entram nos `digests.json`). Para uma reconciliação real
 futura (proxy local de §20.4/§20.5), será preciso primeiro persistir os
 `responseIds` no `trajectory.json`/`ExecutionRecord` na onda do store.
+
+## Atualização (2026-08-23, tarde)
+
+A onda "onda7-fixes" (mergeada depois deste documento) passou a **persistir os
+`responseIds` no próprio `trajectory.json`** (campo aditivo `responseIds`, escrito
+por `runAgentStage.ts`). Confirmado empiricamente na run de validação do modo
+container (run `337246b0`, execução `llm__google-gemini-2-5-flash__def__tdef`):
+`trajectory.json` traz `["gen-1787512178-...", "gen-1787512180-..."]`. O bruto
+segue nos transcripts `session/*.jsonl`; o veredito acima (404 do endpoint de
+geração → reconciliação indisponível) **permanece válido**.
