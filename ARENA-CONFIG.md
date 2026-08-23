@@ -548,7 +548,8 @@ uma tarefa num workspace e o juiz lê um dossiê), NÃO use este arquivo: o form
     "executor": "pi",
     "executorVersion": "0.84.2",
     "promptMode": "append",
-    "limits": { "maxTurns": 30, "maxCostUsd": 0.40 }
+    "limits": { "maxTurns": 30, "maxCostUsd": 0.40 },
+    "isolation": { "kind": "container" }   // worktree (default) | clone | container
   },
   "models": {
     "competitors": ["anthropic/claude-…", "openai/gpt-…"],
@@ -571,6 +572,9 @@ uma tarefa num workspace e o juiz lê um dossiê), NÃO use este arquivo: o form
 
 Contrato completo campo a campo: **`prompt-builder docs agent-task`** (embarcado,
 lido do pacote instalado). O básico do modo agente: `prompt-builder docs agents`.
+Em `"isolation": { "kind": "container" }`, **cada execução do agente roda num
+container Docker efêmero** (`prompt-builder-pi:<versão>`, key do OpenRouter por
+`--env-file` 0600 do host); exige Docker CLI/daemon acessível (sem sudo).
 
 ---
 

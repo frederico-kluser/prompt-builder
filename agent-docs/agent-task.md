@@ -99,11 +99,42 @@ duas coisas ao mesmo tempo. `agent.limits` é o **default** de todo
 
 ### `agent.isolation`
 
-| Campo | Tipo | Obr. | Descrição |
-|---|---|---|---|
-| `kind` | string | não | `'worktree'` (default) \| `'clone'` \| `'container'`. Cada execução roda num workspace git isolado. |
-| `keepWorkspace` | bool | não | `false` (default). Guardar o workspace ao fim ocupa disco rápido; só para debug. |
-| `image` | string | não | Imagem, quando `kind === 'container'`. |
+| Campo | Tipo | Obr. | Default | Descrição |
+|---|---|---|---|---|
+| `kind` | string | não | `worktree` | `'worktree'` (default) \| `'clone'` \| `'container'`. **`worktree`** = `git worktree` raiz de mundo, artefatos no workspace local, nada de Docker. **`clone`** = clone descartável por execução (o executor o clona/descarta ao fim). **`container`** = cada execução do `pi` roda num **container Docker efêmero** (ver `#### Modo container` abaixo) — o agente fica isolado do host além da parede de processo; `setup[]`/`verify[]` (oráculo) seguem no **host** (ver nota). |
+| `keepWorkspace` | bool | não | `false` | Guardar o workspace ao fim ocupa disco rápido; o default é **não guardar** (descarta quando o modo permitir) — só ligue para debug. |
+| `image` | string | não | `prompt-builder-pi:<executorVersion>` | Só tem efeito quando `kind === 'container'`. **Sobrescreve a tag** da imagem do `pi` (default `prompt-builder-pi:<executorVersion>`). Use para apontar uma imagem pré-buildada/alternativa. |
+
+#### `Modo container` (`kind: "container"`)
+
+Quando `isolation.kind` é `'container'`, a **execução** do agente (e só ela — `setup[]`
+e `verify[]`/oráculo continuam no host) roda num container Docker **efêmero** por
+repetição:
+
+- **Imagem default:** `prompt-builder-pi:<executorVersion>` (ex. `prompt-builder-pi:0.84.2`),
+  derivada da versão pinada do executor. Ela é **criada na primeira preparação de run
+  em container** (via `ensurePiImage`, com o Dockerfile embutido em `src/agent/container.ts`)
+  e **cacheada por tag** — o `doctor` **não** builda; `isolation.image` sobrescreve a tag.
+  Dockerfile em produção: `node:22-bookworm-slim` + `git`/`ca-certificates`/`bash` +
+  `npm i -g @earendil-works/pi-coding-agent@<versão>`.
+- **Execução efêmera por rep:** `docker run -i --rm` com o container nomeado
+  `pb-agent-<execId>`, mounts `-v <workspace>:/ws` + `-v <execDir>:/exec`, cwd `/ws`.
+  Os artefatos que o agente grava **aparecem no host** sem `docker cp`. Limites de
+  contenção: `-m 2g --pids-limit 512`.
+- **Usuário:** `--user <uid>:<gid>` = o **usuário do host** — os artefatos criados no
+  container são legíveis pelo host **sem sudo**.
+- **Key do OpenRouter:** entra por um **`--env-file` tmp 0600 no HOST** (fora dos
+  volumes, via `os.tmpdir()`), que é **apagado ao fim** do run. Nunca em arquivo de
+  volume/container, nunca em `argv` (o `argv.json` de auditoria mascara o caminho como
+  `<env-file-tmp-0600>`); a key só existe no env do processo do container.
+- **Timeout/cancelamento:** mata o container **por nome** → `docker kill <nome>` +
+  `docker rm -f <nome>` (fire-and-forget, idempotente). Nenhum órfão no host.
+- **Pré-requisito:** Docker **CLI** no PATH **e** daemon acessível (sem sudo), rede padrão
+  (o container chama o OpenRouter). Confira com `agents doctor --container`.
+
+**Nota de escopo (TODO de fase futura):** hoje só a **execução** do agente é isolada
+pelo container. `setup[]` e `verify[]` (oráculo) rodam no HOST. Isolar esses também via
+`dockerExec` está no roadmap de uma fase futura.
 
 ### `agent.limits`
 
@@ -248,6 +279,8 @@ O duelo atual:
 | "datagen não suportado" / sem `stages` | Datagen de tarefa de agente não existe na v1 | Pinee os cenários. Não peça `stages` > nº de `scenarios`. |
 | Agente falha pronto, todos `nao`, custo certo | Modelo **BYOK** sem saldo no provider do `pi` | Use modelo com saldo, ex. **`gemini-2.5-flash`**. |
 | `variation`/`training` estranhos | PromptMode confundido | `replace` mede o prompt inteiro; `append` (default) mede a instrução sobre um agente competente; `none` isola o modelo. |
+| `docker: comando não encontrado` (ou daemon indisponível) em `kind: "container"` | Docker CLI fora do PATH ou daemon inacessível **sem sudo** | Instale/ative o Docker e garanta acesso sem sudo. Confirme com `agents doctor --container` (falha com exit `3` quando o CLI/imagem faltam). |
+| imagem docker `prompt-builder-pi:<ver>` ausente em `kind: "container"` | A imagem ainda não existe no daemon | A **primeira preparação de run em container** cria/cacheia automaticamente. Adiantar: `docker build` seguindo o Dockerfile documentado (em produção, o Dockerfile está **embutido em `src/agent/container.ts`**). |
 | `0.061` visto com `maxCostUsd: 0.05` | Teto aproximado **por baixo** | É o teto funcionando: a chamada em voo já foi cobrada. |
 
 Referência curta do que é o modo agente: `prompt-builder docs agents`.

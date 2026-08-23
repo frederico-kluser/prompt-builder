@@ -16,12 +16,22 @@ no modo `isolated`, sem as skills/temas/`SYSTEM.md` do ambiente. A configuraçã
 da máquina não pode vazar para o experimento — e o `agents doctor` é quem **prova**
 (com canários) que a sala está limpa antes de rodar.
 
+O isolamento de execução tem **três `isolation.kind`**: **`worktree`** (default —
+`git worktree` da raiz-de-mundo), **`clone`** (clone descartável por execução) e
+**`container`**. Em `container`, **cada execução do `pi` roda num container Docker
+efêmero** (`prompt-builder-pi:<ver>`, monta `/ws` + `/exec`, roda como o usuário do
+host), com a key do OpenRouter chegando por um **`--env-file` 0600 do host** (nunca
+em arquivo/volume) e a imagem criada/cacheada na **primeira preparação** de run em
+container. Exige Docker **CLI/daemon** acessível (sem sudo); valide com
+`agents doctor --container`.
+
 O contrato completo da configuração está na próxima doc: `docs agent-task`.
 
 ## O caminho feliz em 5 comandos
 
 ```bash
 # 1. PROVE a sala limpa antes de qualquer coisa (canários, versão pinada, git, disco).
+#    Em modo container, use `--container` (vê se o Docker CLI/imagem existem — exit 3 se faltarem).
 prompt-builder agents doctor          # --deep roda o auto-teste de sala limpa
 
 # 2. Rode. --config declara a arena; --budget é o teto da run inteira.
