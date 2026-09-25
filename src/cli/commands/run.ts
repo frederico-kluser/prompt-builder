@@ -9,7 +9,9 @@ import { prepareOptsFor } from '../../prepareRun.js';
 import { subscribe, subscribeSession } from '../../events.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
 import { parseArenaConfig } from '../../configFile.js';
-import { arenaConfigToRunConfig } from '../../arenaConfig.js';
+import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
+import { listItems } from '../../library.js';
+import { hasGabarito, toStageSpec } from '../../engine/libraryCore.js';
 import { estimateInputFromConfig, estimateRunCost, toPerMTok } from '../../estimate.js';
 import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
 import { buildNetworkContext, checkKey, isAgentContext, parse, type NetworkContext } from '../context.js';
@@ -51,6 +53,8 @@ const OPTIONS = {
   'timeout-ms': { type: 'string' },
   'min-gain': { type: 'string' },
   'holdout-ratio': { type: 'string' },
+  // Reflexao GEPA: deterministic (default) | llm (meta-modelo) | off (F2 §7.5).
+  reflection: { type: 'string' },
   budget: { type: 'string' },
   'on-budget': { type: 'string' },
   'max-price-in': { type: 'string' },
@@ -129,6 +133,34 @@ async function readConfigFile(file: string): Promise<RunConfig> {
     if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG);
     const conv = arenaConfigToRunConfig(parsed.config);
     if (!conv.ok) throw new CliError(conv.error, EXIT.CONFIG);
+    // F1/P0.1: `scenarios.from: 'library'` — o config aponta o banco curado
+    // estável em <data-dir>/library/. Resolvido AQUI (fs é assíncrono): os
+    // itens viram customStages e os SEM GABARITO são RECUSADOS (paridade com o
+    // 409 do prompt-arena — sem âncora não há evolução comparável).
+    const lib = libraryRefFrom(parsed.config);
+    if (lib) {
+      const itens = await listItems(lib.profile);
+      const selecionados = lib.ids?.length
+        ? itens.filter((i) => lib.ids!.includes(i.id))
+        : itens;
+      if (!selecionados.length) {
+        throw new CliError(
+          `Biblioteca "${lib.profile}" sem itens${lib.ids?.length ? ` para os ids ${lib.ids.join(', ')}` : ''}. Rode \`prompt-builder library add/seed --profile ${lib.profile}\`.`,
+          EXIT.CONFIG,
+        );
+      }
+      const semGabarito = selecionados.filter((i) => !hasGabarito(i));
+      if (semGabarito.length) {
+        throw new CliError(
+          `Evolve recusa itens SEM gabarito (reference ou expected) — paridade com o 409 do prompt-arena: ${semGabarito
+            .map((i) => i.id)
+            .join(', ')}. Corrija com \`prompt-builder library verify --profile ${lib.profile}\`.`,
+          EXIT.CONFIG,
+        );
+      }
+      conv.config.customStages = selecionados.map((i) => toStageSpec(i));
+      conv.config.stages = selecionados.length;
+    }
     return conv.config;
   }
   const parsed = parseRunConfig(json);
@@ -230,6 +262,11 @@ async function buildFromFlags(
               : {}),
             ...(n(values['holdout-ratio'], '--holdout-ratio') !== undefined
               ? { holdoutRatio: n(values['holdout-ratio'], '--holdout-ratio') }
+              : {}),
+            ...(values.reflection === 'llm' ||
+            values.reflection === 'deterministic' ||
+            values.reflection === 'off'
+              ? { reflection: values.reflection }
               : {}),
           }
         : {}),

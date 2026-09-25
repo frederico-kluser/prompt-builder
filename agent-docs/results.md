@@ -31,6 +31,9 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 | `stages[].incomplete` | etapa cortada no meio — **fora** do placar e do julgamento |
 | `stages[].referenceJudge` | vereditos pointwise por contestant, com o motivo |
 | `finalists` | ids que disputaram a final |
+| `judgeDiagnostics` | pin do **contrato do juiz** (hash do prompt + modelos) + viés de verbosidade medido (correlação score×comprimento) |
+| `fairnessWarnings` | avisos de imparcialidade (juiz da família do competidor) — não-bloqueantes |
+| `repeats` (compare) | `record.stages.length === cenários × repeats` — cópias são observações independentes |
 
 Uma etapa `incomplete` é o que separa "parou cedo, honesto" de "terminou,
 mentindo": ela não vira veredito `parcial` nem entra na média.
@@ -45,6 +48,23 @@ mentindo": ela não vira veredito `parcial` nem entra na média.
 | `significance` | `{ n, meanDiffPp, ci95Pp, pValue }` ou `null` |
 | `holdoutSkipped` | **campeão não validado** contra sobreajuste |
 | `stoppedAtIteration` | onde o orçamento interrompeu |
+| `pool` | front Pareto final (com `paretoPool` > 1) |
+| `judgeDrift` | `true` = o **contrato do juiz mudou** no meio da sessão (calibration drift — deltas podem ser do juiz) |
 
 `regressed: true` significa que o campeão foi **pior** que a base no holdout —
 o ganho do treino era ruído ou sobreajuste. Não promova esse prompt.
+
+
+## Reprodutibilidade e handoff
+
+```bash
+prompt-builder runs reproduce <id>          # config + comando exato para re-rodar
+prompt-builder runs export <id> -o run.json # artefato auto-contido (gabaritos, prompts, vereditos)
+prompt-builder sessions winner <sid> --apply prompt.md [--commit]  # backup + diff + commit opcional
+prompt-builder registry validate            # guarda de drift: o needle do prompt ainda existe no fonte?
+```
+
+O `runs reproduce` devolve o RunConfig **lossless** (passa em `config validate`)
+e a vista `arena-config@1`; o `runs export` produz `prompt-builder-run@1` —
+auditoria completa sem o disco original. O `--apply` nunca perde o prompt de
+produção: backup `<destino>.bak-<ts>` antes de sobrescrever, diff sempre.

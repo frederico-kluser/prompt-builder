@@ -13,7 +13,11 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
 - start (prod): `npm start` — `node dist/server.js` (serve `web/dist` na raiz)
 - SPA estática (client-side, deploy Vercel): `npm run web:build` → `web/dist` (roda sem backend; ver `vercel.json`)
 - type-check backend: `npx tsc -p tsconfig.json --noEmit` · frontend: `cd web && npx tsc -b`
-- **Não há** `test` nem `lint` configurados. Verifique por type-check + execução manual.
+- **Testes:** `npm test` (vitest) roda os **testes de contrato** em `test/` — núcleo de evolução
+  (seeds/desempates/pisos), schema de config, orçamento, whitelists silenciosos e a **guarda de
+  sincronia** do motor (`src/` × `web/src/engine/`, classificação shim/mirror em
+  `test/engine-sync.test.ts`). Não há lint. Rode `npm test` antes e depois de mexer no pipeline;
+  o resto é type-check + execução manual.
 - ⚠️ **`npm install` da RAIZ não instala mais o `web/`** — o `postinstall` virou `npm run setup`.
   Ele tinha de sair: o npm roda o `postinstall` de toda dependência instalada, então publicar com
   ele quebraria `npm i prompt-builder-cli` para qualquer usuário (o `web/.npmrc` exige `MOTION_TOKEN`).
@@ -69,7 +73,13 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
 - ⚠️ **Dois whitelists engolem campo novo em silêncio** — ao adicionar campo em `RunConfigBase`/`RunRecord`, cheque os dois: (1) `normalizeRunRecord` (`normalize.ts`), que hoje espalha `...raw` de propósito (antes perdia `judgeScoreByContestant`/`standings`/`finalists` ao reler do IndexedDB); (2) **`variationConfigFrom` (`trainer.ts`)**, que enumera campo a campo — o que faltar ali é descartado em toda iteração do treino e no holdout, sem erro nenhum.
 - No **training**, promoção exige margem `minGain` sobre a campeã (`rank.ts`); `analyzeIteration` **não existe mais** (feedback = lições GEPA determinísticas) e o evento `iteration.analyzing` não é mais emitido. Holdout (piso 5) + significância bootstrap fecham a sessão.
 - IndexedDB do cliente é **v2** (store `prompts` — biblioteca `/prompts` via `web/src/engine/promptStore.ts`, client-only). Eventos agregados `stage.gabarito` (`stageIndex: -1`) e `duel.progress` (sem índice) **não** entram no reducer de etapas.
-- Há um **modo client-side** (`web/src/engine/`) que **duplica** o pipeline de `src/` para rodar no navegador (SPA estática/Vercel). Ao mudar a lógica do pipeline, **sincronize os dois lados**. Ver `knowledge-architecture`.
+- Há um **modo client-side** (`web/src/engine/`) que roda o pipeline no navegador (SPA
+  estática/Vercel). Desde o F0 do PLANO-PARIDADE a duplicação é **classificada e vigiada**:
+  módulos puros (`rank`/`stats`/`holdout`/`dedup`/`duelCore`/…) são **fonte única** em `src/` e o
+  web re-exporta (shim); os pares com seam divergente (`orchestrator`/`trainer`/`openrouter`/
+  `storage`/…) são **mirrors** editados em par. Módulo novo em qualquer dos lados derruba
+  `test/engine-sync.test.ts` até ser classificado — não crie uma terceira cópia. Lógica nova pura
+  vai em `src/engine/` e chega aos dois lados sem duplicar. Ver `knowledge-architecture`.
 - **Dinheiro é medido, nunca inferido.** O custo de cada chamada sai de `usage.cost` da resposta
   (o valor cobrado, já com cache/raciocínio/faixas de preço); o catálogo é só fallback e
   `source: 'unknown'` **não** é o mesmo que "custou zero". A contabilidade é feita em UM ponto,

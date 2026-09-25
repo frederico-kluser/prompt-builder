@@ -35,6 +35,20 @@ const DEFAULTS: Required<ArenaConfigDefaults> = {
 
 const clamp = (n: number, min: number, max: number): number => Math.max(min, Math.min(max, n));
 
+/**
+ * Referência à biblioteca de cenários do config (`scenarios.from: 'library'`),
+ * quando presente. A RESOLUÇÃO é assíncrona e vive no CLI (fs em
+ * `<data-dir>/library/<profile>/`): quem chama carrega os itens, RECUSA os sem
+ * gabarito (paridade com o 409 do prompt-arena) e vira `customStages`.
+ */
+export function libraryRefFrom(
+  file: ArenaConfigFile,
+): { profile: string; ids?: string[] } | undefined {
+  const s = file.scenarios;
+  if (Array.isArray(s) || !s) return undefined;
+  return { profile: s.profile, ids: s.ids };
+}
+
 export type ArenaConfigToRunConfigResult =
   | { ok: true; config: RunConfig }
   | { ok: false; error: string };
@@ -48,12 +62,17 @@ export function arenaConfigToRunConfig(
 
   // Cenarios pinados viram `scenarioSeed` — sem o `id` (o motor re-rotula) e
   // herdando `maxTokens` do limite global quando o arquivo nao especifica.
-  const scenarioSeed: StageSpec[] = (file.scenarios ?? []).map((s) => ({
+  // `scenarios` tambem pode ser uma REFERENCIA a biblioteca (F1/P0.1): ela e
+  // resolvida pelo CLI (filesystem) via `libraryRefFrom` + `customStages` —
+  // aqui so a forma de LISTA vira seed.
+  const pinados = Array.isArray(file.scenarios) ? file.scenarios : [];
+  const scenarioSeed: StageSpec[] = pinados.map((s) => ({
     question: s.question,
     productContext: s.productContext ?? '',
     maxTokens: s.maxTokens && s.maxTokens > 0 ? s.maxTokens : maxOutputTokens,
     ...(s.rubric ? { rubric: s.rubric } : {}),
     ...(s.reference ? { reference: s.reference } : {}),
+    ...(s.expected !== undefined ? { expected: s.expected } : {}),
     origin: 'import' as const,
   }));
 
@@ -95,11 +114,25 @@ export function arenaConfigToRunConfig(
     finalists,
     judgePasses: (file.judging?.passes === 2 ? 2 : 1) as 1 | 2,
     ...(semFinais ? { duels: false } : {}),
+    // Repeticoes por cenario (F2 §7.9): so o compare expande; nos demais modos
+    // a chave e descartada pelo schema (retrocompat).
+    ...(file.mode === 'compare' && file.repeats ? { repeats: file.repeats } : {}),
     ...(scenarioSeed.length ? { scenarioSeed } : {}),
     ...(file.scenarioBrief?.trim() ? { scenarioBrief: file.scenarioBrief.trim() } : {}),
     ...(file.models.reference ? { referenceModelId: file.models.reference } : {}),
     ...(Object.keys(reasoning).length ? { reasoning } : {}),
     ...(file.compliance ? { compliance: file.compliance } : {}),
+    // Contratos never-break (F2/P0.3): vivem no perfil do prompt, valem para
+    // toda reescrita do variator.
+    ...(file.prompt?.contracts ? { contracts: file.prompt.contracts } : {}),
+    // Multi-prompt (F2/P0.4): grupo de fragmentos + fragmento-alvo. O
+    // `prompt.text` do arquivo e o texto ATUAL do fragmento-alvo (basePrompt).
+    ...(file.prompt?.group?.length
+      ? {
+          promptGroup: { prompts: file.prompt.group },
+          ...(file.prompt.promptId ? { promptId: file.prompt.promptId } : {}),
+        }
+      : {}),
   };
 
   let candidate: Record<string, unknown>;
@@ -139,6 +172,9 @@ export function arenaConfigToRunConfig(
             minGain: clamp(file.training?.minGain ?? 1, 0, 100),
             holdoutRatio: clamp(file.training?.holdoutRatio ?? 0.2, 0, 0.5),
             feedbackDriven: file.training?.feedbackDriven !== false,
+            ...(file.training?.reflection ? { reflection: file.training.reflection } : {}),
+            ...(file.training?.halving !== undefined ? { halving: file.training.halving } : {}),
+            ...(file.training?.paretoPool !== undefined ? { paretoPool: file.training.paretoPool } : {}),
           }
         : {}),
     };

@@ -7,6 +7,7 @@
 
 import { z } from 'zod';
 import { sanitizeLlmVariants, MIN_LLM_VARIANTS, MAX_LLM_VARIANTS } from './llmVariants.js';
+import { validatePromptGroup } from './engine/promptGroup.js';
 import type { RunConfig } from './types.js';
 
 // Nivel de esforco de raciocinio (ReasoningLevel de types.ts / REASONING_LEVELS
@@ -135,6 +136,15 @@ const stageSpecSchema = z.object({
   maxTokens: z.number().int().positive().max(16_000),
   // Gabarito (resposta de referencia ideal) p/ julgamento pointwise + duelos.
   reference: z.string().max(32_000).optional(),
+  // Rotulo ESPERADO (ground-truth): veredito deterministico sem juiz LLM
+  // (`engine/groundTruth.ts`). string | alternativas | par campo->valor.
+  expected: z
+    .union([
+      z.string().min(1),
+      z.array(z.string().min(1)).min(1),
+      z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
+    ])
+    .optional(),
   // Proveniencia da etapa: gerada pela IA ou importada de pacote JSON.
   origin: z.enum(['ai', 'import']).optional(),
   // A etapa, quando executada por um agente. AUSENTE => a etapa so serve ao
@@ -200,6 +210,15 @@ const baseFields = {
       completion: z.number().positive().optional(),
     })
     .optional(),
+  // Contratos never-break do prompt base (F2/P0.3): o pos-rewriter valida toda
+  // reescrita (invariantes, placeholders verbatim, piso de comprimento).
+  contracts: z
+    .object({
+      neverBreak: z.array(z.string()).optional(),
+      placeholders: z.array(z.string()).optional(),
+      minLengthRatio: z.number().min(0).max(1).optional(),
+    })
+    .optional(),
 };
 
 const manualVariantSchema = z.object({
@@ -214,10 +233,32 @@ const singleModelFields = {
   manualVariants: z.array(manualVariantSchema).optional(),
   // Temperatura do modelo sob teste, aplicada a TODAS as variantes. Ausente = 0.
   temperature: z.number().min(0).max(2).optional(),
+  // Multi-prompt (F2/P0.4, coordinate ascent): grupo de fragmentos; a sessao
+  // evolui `promptId` com os irmaos congelados.
+  promptGroup: z
+    .object({
+      prompts: z
+        .array(
+          z.object({
+            id: z.string().min(1),
+            label: z.string().optional(),
+            text: z.string().min(1),
+          }),
+        )
+        .min(1),
+    })
+    .optional(),
+  promptId: z.string().min(1).optional(),
 };
 
 const compareObj = z.object({
   mode: z.literal('compare'),
+  // Repeticoes por cenario (1–3, F2 §7.9): medicao de instabilidade. SÓ no
+  // compare — nos demais modos a chave e descartada em silencio (retrocompat:
+  // configs antigos que a trazem nao quebram).
+  repeats: z
+    .union([z.literal(1), z.literal(2), z.literal(3)], 'deve ser 1, 2 ou 3')
+    .optional(),
   // >= 2 competidores, todos distintos (eixo classico). Opcional porque
   // competitorConfigs e a alternativa — o superRefine impede ambos/nenhum.
   competitorModelIds: z.array(z.string().min(1)).min(2).optional(),
@@ -252,6 +293,8 @@ const trainingObj = z.object({
   holdoutRatio: z.number().min(0).max(0.5).optional(),
   // Reflection estilo GEPA: variantes recebem licoes das falhas do campeao.
   feedbackDriven: z.boolean().optional(),
+  // Reflexao GEPA por LLM (opt-in, §7.5): default deterministico (zero custo).
+  reflection: z.enum(['off', 'deterministic', 'llm']).optional(),
   ...baseFields,
 });
 
@@ -385,6 +428,12 @@ export const runConfigSchema = z
         });
       }
     } else {
+      // Multi-prompt (F2/P0.4): grupo com >1 prompt exige promptId valido —
+      // sem ele o coordinate ascent nao sabe QUAL fragmento esta evoluindo.
+      const grupoCheck = validatePromptGroup(cfg.promptGroup, cfg.promptId);
+      if (!grupoCheck.ok) {
+        ctx.addIssue({ code: 'custom', path: ['promptGroup'], message: grupoCheck.error! });
+      }
       // variation | training: anti vies de auto-preferencia do juiz.
       if (cfg.judgeModelIds.includes(cfg.contestantModelId)) {
         ctx.addIssue({

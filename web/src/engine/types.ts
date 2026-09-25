@@ -1,3 +1,8 @@
+// Shape do rotulo esperado vem do motor compartilhado (fonte unica).
+import type { ExpectedSpec } from '../../../src/engine/groundTruth.js';
+import type { PromptContracts } from '../../../src/engine/contracts.js';
+import type { PromptGroup } from '../../../src/engine/promptGroup.js';
+
 export interface OpenRouterModelPricing {
   prompt: number; // USD per token
   completion: number; // USD per token
@@ -65,6 +70,8 @@ export interface Contestant {
   isOriginal?: boolean;
   /** Lineage de treino: contestant vencedor de onde esta variante derivou. */
   parentContestantId?: string;
+  /** Multi-prompt (F2/P0.4): texto do fragmento evoluido (systemPrompt = composicao). */
+  promptFragment?: string;
   /** Override de temperatura deste contestant (compare-llms). Default 0. */
   temperature?: number;
   /** Nivel de reasoning deste contestant (compare-llms; identidade = tripla modelo/temp/reasoning). */
@@ -166,6 +173,11 @@ export interface RunConfigBase {
   finalists?: number;
   /** Liga/desliga a fase de finais (duelos). Default: true quando ha gabarito. */
   duels?: boolean;
+  /**
+   * Contratos NEVER-BREAK do prompt base (F2/P0.3): invariantes, placeholders
+   * verbatim e piso de comprimento — o pos-rewriter rejeita o que quebrar.
+   */
+  contracts?: PromptContracts;
 }
 
 /** Campos comuns aos modos de 1 LLM (variation/training). */
@@ -180,10 +192,24 @@ export interface SingleModelFields {
   manualVariants?: ManualVariant[];
   /** Temperatura aplicada ao modelo sob teste em TODAS as variantes. Ausente = 0. */
   temperature?: number;
+  /**
+   * Grupo multi-prompt (F2/P0.4, coordinate ascent): evolucao de UM fragmento
+   * por sessao, irmaos congelados (`src/engine/promptGroup.ts`).
+   */
+  promptGroup?: PromptGroup;
+  /** Fragmento do grupo que esta sessao/run evolui. Obrigatorio se o grupo tem >1. */
+  promptId?: string;
 }
 
 export interface CompareConfig extends RunConfigBase {
   mode: 'compare';
+  /**
+   * Repeticoes por cenario (1–3, F2 §7.9): cada cenario roda N× para medir a
+   * INSTABILIDADE estocastica do modelo — a variancia real so aparece com
+   * repeticao, sobretudo com poucos cenarios. So no compare; cada copia vira
+   * uma observacao independente no judge-score/placar.
+   */
+  repeats?: 1 | 2 | 3;
   competitorModelIds: string[];
   /** compare-llms: variantes de config {modelo, temperatura, reasoning} no eixo de contestants (identidade = tripla). */
   competitorConfigs?: { modelId: string; temperature?: number; reasoningLevel?: ReasoningLevel }[];
@@ -201,6 +227,21 @@ export interface TrainingConfig extends RunConfigBase, SingleModelFields {
   holdoutRatio?: number;
   /** Reflection estilo GEPA: variantes recebem licoes das falhas do campeao. */
   feedbackDriven?: boolean;
+  /** Como as licoes GEPA sao produzidas: 'deterministic' (default, zero custo) | 'llm' (meta-modelo) | 'off'. */
+  reflection?: 'off' | 'deterministic' | 'llm';
+  /**
+   * Tamanho do POOL Pareto (F4.1, GEPA): >1 mantém uma população de prompts
+   * (pais diversos por dominância de fatia) em vez do campeão único elitista.
+   * 0/ausente = comportamento clássico (1).
+   */
+  paretoPool?: number;
+  /**
+   * Sequential halving (F4.3, §8.5): com muitas variantes, uma passada de
+   * TRIAGEM num subconjunto de cenários corta as piores antes da rodada
+   * completa (o controle nunca é eliminado). Reduz custo sem afetar o ranking
+   * final. Ausente/false = comportamento atual.
+   */
+  halving?: boolean;
 }
 export type RunConfig = CompareConfig | VariationConfig | TrainingConfig;
 
@@ -221,8 +262,20 @@ export interface StageSpec {
   rubric?: string;
   /** Gabarito: resposta de referencia ideal (juiz pointwise + duelos). */
   reference?: string;
+  /**
+   * Rotulo ESPERADO (ground-truth): veredito deterministico sem juiz LLM
+   * (`src/engine/groundTruth.ts`, fonte unica do shape).
+   */
+  expected?: ExpectedSpec;
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
+  /**
+   * Metadados de CURRICULO (F1/F4.1): tier curatorial e dimensoes medidas.
+   * Sobrevivem da biblioteca (`toStageSpec`) e alimentam a selecao Pareto por
+   * fatia — sem eles a populacao nao sabe onde cada prompt e especialista.
+   */
+  tier?: string;
+  dimensionTags?: string[];
 }
 
 export type CompetitorStatus = 'ok' | 'error';
@@ -411,6 +464,14 @@ export interface RunRecord {
   judgeScoreByContestant?: Record<string, number>;
   /** Ids dos finalistas (top-N por judge-score) que disputaram os duelos. */
   finalists?: string[];
+  /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
+  fairnessWarnings?: string[];
+  /** Diagnostico do juiz (F4.2): pin do contrato (hash) + vies de verbosidade medido. */
+  judgeDiagnostics?: {
+    contract: { hash: string; modelIds: string[]; pinnedAt: string };
+    verbosity: { n: number; r: number; biased: boolean; warning: string };
+  };
+
   /** Classificacao final agregada (Copeland dos duelos / pontos do placar). */
   standings?: {
     id: string;
@@ -478,6 +539,13 @@ export interface SessionRecord {
   } | null;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
+  /** Pool Pareto final (F4.1): prompts não-dominados por fatia que sobreviveram. */
+  pool?: { id: string; label: string; bySlice: Record<string, number> }[];
+  /**
+   * true = as runs da sessao compararam CONTRATOS DE JUIZ diferentes (F4.2):
+   * calibration drift — o delta entre iteracoes pode ser do juiz, nao do prompt.
+   */
+  judgeDrift?: boolean;
 }
 
 // ----------------------------------------------------------------------------

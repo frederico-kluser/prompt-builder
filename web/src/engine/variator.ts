@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { chatCompletion } from './openrouter';
 import { getTechnique } from './techniques';
+import { stripFences, verifyRewrite } from '../../../src/engine/contracts.js';
+import { composePrompt, siblingsContext, targetFragment } from '../../../src/engine/promptGroup.js';
+import type { PromptGroup } from '../../../src/engine/promptGroup.js';
+import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { Contestant, ManualVariant, PromptTechnique, ReasoningLevel } from './types';
 
 const variantSchema = z.object({ systemPrompt: z.string().min(1) });
@@ -18,13 +22,6 @@ REGRAS DURAS (violar qualquer uma torna a variante inutil — ela simplesmente p
 - NAO adicione exemplos few-shot a menos que a tecnica peca explicitamente.
 - Mantenha o idioma do prompt base.
 - NAO responda a tarefa do usuario; apenas reescreva o system prompt.`;
-
-/** Remove UM par de fences ``` envolvendo a saida inteira (fences internos ficam intactos). */
-function stripFences(text: string): string {
-  const t = text.trim();
-  const m = /^```[a-zA-Z]*\n([\s\S]*?)\n```$/.exec(t);
-  return m ? m[1].trim() : t;
-}
 
 function extractJson(text: string): string {
   const trimmed = text.trim();
@@ -63,6 +60,15 @@ export interface GenerateContestantsParams {
   analysisHint?: string;
   /** Nivel de raciocinio do papel "rewriter" (RunConfig.reasoning.rewriter). */
   reasoningLevel?: ReasoningLevel;
+  /**
+   * Contratos never-break do prompt base (F2/P0.3): a reescrita e validada por
+   * `src/engine/contracts.ts`; violacao tenta UMA correcao e persistindo
+   * REJEITA a variante.
+   */
+  contracts?: PromptContracts;
+  /** Multi-prompt (F2/P0.4): grupo de fragmentos + fragmento-alvo (irmaos congelados). */
+  promptGroup?: PromptGroup;
+  promptId?: string;
   timeoutMs?: number;
 }
 
@@ -73,14 +79,22 @@ async function generateOneVariant(
   const lessonsBlock = p.analysisHint?.trim()
     ? `\n<licoes_da_iteracao_anterior>\n${p.analysisHint.trim()}\n</licoes_da_iteracao_anterior>\n`
     : '';
+  // Multi-prompt: o ALVO da reescrita e o fragmento (nunca o composto).
   const baseText =
-    p.basePrompt?.trim() ??
+    p.basePrompt?.trim() ||
+    (p.promptGroup ? (targetFragment(p.promptGroup, p.promptId)?.text ?? '') : '') ||
     'Não há prompt base — escreva um prompt completo do zero sobre o tema.';
 
+  const irmaosBlock = p.promptGroup
+    ? (() => {
+        const ctx = siblingsContext(p.promptGroup, p.promptId);
+        return ctx ? `\n<fragmentos_congelados>\n${ctx}\n</fragmentos_congelados>\n` : '';
+      })()
+    : '';
   const userPrompt = `<contexto_da_tarefa>
 ${p.theme}
 </contexto_da_tarefa>
-
+${irmaosBlock}
 <tecnica id="${technique.id}" nome="${technique.name}">
 <quando_ajuda>${technique.good}</quando_ajuda>
 <cuidado>${technique.bad}</cuidado>
@@ -105,17 +119,45 @@ Reescreva o prompt agora, aplicando a tecnica.`;
       timeoutMs: p.timeoutMs ?? 90_000,
       reasoningLevel: p.reasoningLevel,
     });
-    const text = stripFences(result.text);
-    // Gate de usabilidade: reescrita vazia ou colapsada nao vale um benchmark —
-    // a variante e pulada (sem base, o piso e so o minimo absoluto de 40 chars).
-    const baseLen = p.basePrompt?.trim().length ?? 0;
-    if (!text || text.length < Math.max(40, baseLen * 0.3)) {
+    let texto = stripFences(result.text);
+    // Gate de CONTRATO (F2/P0.3, portado do rewriter do prompt-arena): a
+    // reescrita precisa sobreviver ao contrato do prompt base — placeholders
+    // verbatim, invariantes (neverBreak) e piso de comprimento. Violacao pede
+    // UMA correcao; persistindo, a variante e REJEITADA.
+    let check = verifyRewrite(baseText, texto, p.contracts);
+    if (!check.ok) {
+      const detalhes = check.violations.map((v) => `- ${v.detail}`).join('\n');
       console.warn(
-        `[variator] tecnica ${technique.id}: reescrita inutilizavel (${text.length} chars vs base ${baseLen})`,
+        `[variator] tecnica ${technique.id}: reescrita violou o contrato; pedindo UMA correcao:\n${detalhes}`,
       );
-      return null;
+      const retry = await chatCompletion({
+        apiKey: p.apiKey,
+        modelId: p.optimizerModelId,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+          { role: 'assistant', content: texto },
+          {
+            role: 'user',
+            content: `Sua reescrita violou o contrato do prompt base:\n${detalhes}\n\nReescreva de novo, preservando o contrato (placeholders exatamente como estao e invariantes intactas). Responda APENAS com o prompt reescrito.`,
+          },
+        ],
+        temperature: 0.3,
+        timeoutMs: p.timeoutMs ?? 90_000,
+        reasoningLevel: p.reasoningLevel,
+      });
+      texto = stripFences(retry.text);
+      check = verifyRewrite(baseText, texto, p.contracts);
+      if (!check.ok) {
+        console.warn(
+          `[variator] tecnica ${technique.id}: variante REJEITADA — contrato quebrado mesmo apos correcao (${check.violations
+            .map((v) => v.kind)
+            .join(', ')})`,
+        );
+        return null;
+      }
     }
-    return text;
+    return texto;
   } catch (err) {
     console.warn(`[variator] tecnica ${technique.id} falhou: ${(err as Error).message}`);
     return null;
@@ -132,15 +174,26 @@ export async function generateContestants(
   p: GenerateContestantsParams,
 ): Promise<Contestant[]> {
   const contestants: Contestant[] = [];
+  // Multi-prompt (F2/P0.4): `promptFragment` = fragmento evoluido; `systemPrompt`
+  // = composicao do grupo (o que o modelo sob teste recebe).
+  const compor = (fragmento: string): { systemPrompt: string; promptFragment?: string } =>
+    p.promptGroup
+      ? {
+          systemPrompt: composePrompt(p.promptGroup, p.promptId, fragmento),
+          promptFragment: fragmento,
+        }
+      : { systemPrompt: fragmento };
 
   // 1) Controle: o prompt original do usuario (sempre, quando fornecido e pedido).
-  const original = (p.originalPrompt ?? p.basePrompt)?.trim();
+  const original =
+    (p.originalPrompt ?? p.basePrompt)?.trim() ??
+    (p.promptGroup ? (targetFragment(p.promptGroup, p.promptId)?.text ?? '') : '');
   if (p.includeOriginal && original) {
     contestants.push({
       id: 'original',
       label: 'Original (controle)',
       modelId: p.modelId,
-      systemPrompt: original,
+      ...compor(original),
       isOriginal: true,
     });
   }
@@ -151,7 +204,7 @@ export async function generateContestants(
       id: 'carry',
       label: p.carryLabel ?? 'Melhor anterior',
       modelId: p.modelId,
-      systemPrompt: p.carryPrompt.trim(),
+      ...compor(p.carryPrompt.trim()),
       parentContestantId: p.carryParentId,
     });
   }
@@ -166,7 +219,7 @@ export async function generateContestants(
         id: `m${i}`,
         label: v.label?.trim() || `Variante ${i + 1}`,
         modelId: p.modelId,
-        systemPrompt: sp,
+        ...compor(sp),
       });
     });
     return contestants;
@@ -185,7 +238,7 @@ export async function generateContestants(
       id: `v${i}`,
       label: t.name,
       modelId: p.modelId,
-      systemPrompt,
+      ...compor(systemPrompt),
       techniqueId: t.id,
       parentContestantId: p.carryParentId,
     });
@@ -247,4 +300,58 @@ export async function generateBasePrompt(p: GenerateBasePromptParams): Promise<s
   const sp = parsed.data.systemPrompt.trim();
   if (!sp) throw new Error('O modelo devolveu um system prompt vazio.');
   return sp;
+}
+
+// ---------------------------------------------------------------------------
+// Reflexao GEPA POR LLM (opt-in, F2 §7.5). O default continua deterministico
+// (`buildLessons`, zero custo); aqui um meta-modelo REESCREVE as licoes num
+// bloco mais denso e acionavel para o reescritor da proxima rodada. Cada chamada
+// e contada no ledger como papel 'rewriter' — dinheiro medido, nunca inferido.
+// ---------------------------------------------------------------------------
+
+const REFLECT_SYSTEM = `Voce e um meta-otimizador de prompts (reflexao estilo GEPA). Recebe as FRAQUEZAS observadas ao benchmarkar um prompt e produz um bloco de licoes ACIONAVEL e conciso para o reescritor de prompts da proxima rodada.
+
+Regras:
+- Responda APENAS com o bloco de licoes (texto puro, sem preambulo, sem code fences).
+- Maximo ~1500 caracteres. Frases curtas e imperativas.
+- Agrupe PADROES (ex.: "falha sempre que a pergunta traz pressuposto falso") em vez de listar casos isolados.
+- NAO invente fraquezas nao observadas; NAO proponha mudancas que quebrem o contrato do prompt.`;
+
+export interface ReflectLessonsParams {
+  apiKey: string;
+  /** Meta-modelo que reescreve as licoes (no treino: o optimizer). */
+  modelId: string;
+  /** Licoes deterministicas (buildLessons) — materia-prima da reflexao. */
+  baseLessons: string;
+  /** Tema da run (contexto para o meta-modelo). */
+  theme?: string;
+  reasoningLevel?: ReasoningLevel;
+  timeoutMs?: number;
+}
+
+/**
+ * Reescreve as licoes deterministicas num bloco acionavel. Lanca erro (o
+ * chamador degrada para as licoes deterministicas) — nunca derruba a iteracao.
+ */
+export async function llmReflectLessons(p: ReflectLessonsParams): Promise<string> {
+  const userPrompt = `${p.theme?.trim() ? `TEMA DA RUN: ${p.theme.trim()}\n\n` : ''}FRAQUEZAS OBSERVADAS:
+${p.baseLessons}
+
+Produza o bloco de licoes para a proxima rodada de reescrita.`;
+
+  const result = await chatCompletion({
+    apiKey: p.apiKey,
+    modelId: p.modelId,
+    messages: [
+      { role: 'system', content: REFLECT_SYSTEM },
+      { role: 'user', content: userPrompt },
+    ],
+    temperature: 0.3,
+    timeoutMs: p.timeoutMs ?? 90_000,
+    reasoningLevel: p.reasoningLevel,
+  });
+
+  const texto = result.text.trim();
+  if (!texto) throw new Error('Reflexao LLM devolveu bloco vazio.');
+  return texto.slice(0, 4000);
 }

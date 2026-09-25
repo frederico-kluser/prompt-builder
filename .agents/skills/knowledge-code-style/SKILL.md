@@ -32,5 +32,7 @@ Escreva código que se pareça com o que já está em volta. Pontos não-óbvios
 - Tema claro/escuro pela classe `dark` no `<html>` (`theme.ts`), com opção `system`.
 
 ## Geral
-- Sem framework de testes — valide por type-check + execução manual (ver `task-run-and-verify`).
+- **Testes:** `npm test` (vitest) roda os testes de contrato em `test/` — adicione testes ao mexer
+  em lógica de pipeline (seeds/desempates/whitelists têm guardas lá). Valide o resto por
+  type-check + execução manual (ver `task-run-and-verify`).
 - Mensagens de commit em PT-BR, estilo conventional (`feat:`, `feat(web):`, `fix:` …).

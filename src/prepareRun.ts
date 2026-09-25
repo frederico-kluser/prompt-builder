@@ -56,6 +56,15 @@ export function prepareOptsFor(
         reasoningLevel: cfg.reasoning?.rewriter,
         timeoutMs: cfg.timeoutMs,
         ctx: options.ctx,
+        // Contratos never-break (F2/P0.3) valem para a run variation solta,
+        // igual ao treino — senão o modo variation escaparia do gate.
+        contracts: cfg.contracts,
+        // Multi-prompt (F2/P0.4): grupo + fragmento-alvo.
+        promptGroup: cfg.promptGroup,
+        promptId: cfg.promptId,
+        // Teto por requisição idem ao trainer (sem isto a run variation ignora
+        // o maxPricePerMTok do config em silêncio).
+        maxPricePerMTok: cfg.maxPricePerMTok,
       }),
   };
 }

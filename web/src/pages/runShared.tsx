@@ -208,7 +208,7 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
   return (
     <div className="rounded-xl bg-card ring-1 ring-foreground/10">
       <div className="border-b border-border px-4 py-2 text-[12px] text-muted-foreground">
-        ✓ resolve · ◐ parcial · ✕ não resolve · · pendente
+        ✓ resolve · ◐ parcial · ✕ não resolve · ⏳ aguardando julgamento · ! erro · · pendente
       </div>
       <div className="scroll-slim overflow-x-auto p-3">
         <div className="min-w-fit">
@@ -245,19 +245,34 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
                 )}
               </div>
               {stages.map((s, i) => {
+                // Fan-out ao vivo (F3/§7.2): a célula mostra a FASE do par
+                // (variante × cenário) — pendente → resposta recebida → julgada,
+                // com erro à parte. É o que faz a run longa não parecer travada.
                 const v = row.verdicts[i];
+                const resp = (s.responses ?? []).find((r) => r.contestantId === row.contestantId);
+                const estado = v
+                  ? { glyph: VERDICT_GLYPH[v], cls: VERDICT_META[v].cell, label: VERDICT_META[v].label }
+                  : resp?.status === 'error'
+                    ? { glyph: '!', cls: 'bg-nao/20 text-nao', label: 'resposta com erro' }
+                    : resp
+                      ? {
+                          glyph: '⏳',
+                          cls: 'bg-muted text-muted-foreground',
+                          label: 'resposta recebida — aguardando julgamento',
+                        }
+                      : { glyph: '·', cls: 'bg-muted/50 text-muted-foreground', label: 'pendente' };
                 return (
                   <div
                     key={s.index}
-                    title={`Cenário ${i + 1}: ${v ? VERDICT_META[v].label : 'pendente'}${onStageClick ? ' — clique para abrir' : ''}`}
+                    title={`Cenário ${i + 1}: ${estado.label}${onStageClick ? ' — clique para abrir' : ''}`}
                     className={cn(
                       cellBase,
-                      v ? VERDICT_META[v].cell : 'bg-muted/50 text-muted-foreground',
+                      estado.cls,
                       onStageClick && 'cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
                     )}
                     {...clickProps(s.index)}
                   >
-                    {v ? VERDICT_GLYPH[v] : '·'}
+                    {estado.glyph}
                   </div>
                 );
               })}

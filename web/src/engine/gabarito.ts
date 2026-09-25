@@ -60,9 +60,11 @@ export async function generateReferences(
   const { stages, apiKey, modelId, reasoningLevel, timeoutMs, onProgress } = params;
 
   const out = stages.slice();
+  // Etapas com rotulo ESPERADO (ground-truth) NAO ganham gabarito LLM: o
+  // veredito ali e deterministico e o gabarito custaria a toa (F1.4/P0.5).
   const pending = stages
     .map((stage, index) => ({ stage, index }))
-    .filter(({ stage }) => !stage.reference?.trim());
+    .filter(({ stage }) => !stage.reference?.trim() && stage.expected === undefined);
   const total = pending.length;
   if (total === 0) return out;
 

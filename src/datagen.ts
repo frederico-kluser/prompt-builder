@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { dedupeAdvanced } from './dedup.js';
+import { renderScenarioRules } from './engine/scenarioRules.js';
+import type { ScenarioRules } from './engine/libraryCore.js';
 import type { ReasoningLevel, StageSpec, RunCtx } from './types.js';
 
 const stageSchema = z.object({
@@ -115,6 +117,15 @@ export interface GenerateStagesParams {
   modelId: string;
   /** Perguntas ja existentes (ex.: seed importada) — os lotes devem evita-las. */
   excludePrompts?: string[];
+  /**
+   * Regras de geracao POR PERFIL/PROMPT com grounding real (F1.3): templates
+   * `{{context}}`/`{{fewShot}}`/`{{setupKeys}}` + matriz de cobertura. Quando
+   * presente, substituem o system/user genericos — o contrato de saida JSON
+   * continua em codigo (regra nao pode quebrar o parse).
+   */
+  rules?: ScenarioRules;
+  /** Instrucao de curriculum (lacunas de cobertura) embutida no user. */
+  coverageInstructionText?: string;
   timeoutMs?: number;
   reasoningLevel?: ReasoningLevel;
   ctx?: RunCtx;
@@ -141,6 +152,8 @@ async function runBatch(params: {
   batchCount?: number;
   excludePrompts: string[];
   scenarioBrief?: string;
+  rules?: ScenarioRules;
+  coverageInstructionText?: string;
   extraInstruction?: string;
   timeoutMs?: number;
   reasoningLevel?: ReasoningLevel;
@@ -155,6 +168,8 @@ async function runBatch(params: {
     batchCount,
     excludePrompts,
     scenarioBrief,
+    rules,
+    coverageInstructionText,
     extraInstruction,
     timeoutMs,
     reasoningLevel,
@@ -169,7 +184,23 @@ async function runBatch(params: {
     ? `\nEVITE perguntas equivalentes a estas já existentes:\n${excludePrompts.map((p) => `- ${p}`).join('\n')}`
     : '';
 
-  const userPrompt = `TEMA: ${theme}
+  // Regras do perfil (F1.3): grounding real VEM PRIMEIRO (domínio), o contrato
+  // de saída JSON fecha o system — a regra enriquece, nunca reescreve o parse.
+  const rendered = rules
+    ? renderScenarioRules(rules, {
+        theme,
+        count,
+        excludePrompts,
+        coverageInstruction: coverageInstructionText,
+      })
+    : undefined;
+  const system = rendered ? `${rendered.system}\n\n---\n\n${BATCH_SYSTEM_PROMPT}` : batchSystemPrompt(scenarioBrief);
+  const userPrompt = rendered
+    ? `${rendered.user}\n\nTEMA: ${theme}
+QUANTIDADE: ${count} cenarios${sliceLine}${extraInstruction ?? ''}
+
+Gere os ${count} cenarios em JSON conforme as regras.`
+    : `TEMA: ${theme}
 QUANTIDADE: ${count} cenarios
 ${sliceLine}${excludeLine}${extraInstruction ?? ''}
 
@@ -218,8 +249,19 @@ export function batchCountFor(count: number): number {
  * nunca derruba. Itens voltam SEM id (o consumidor atribui) e com origin 'ai'.
  */
 export async function generateStages(opts: GenerateStagesParams): Promise<StageSpec[]> {
-  const { apiKey, theme, scenarioBrief, count, modelId, excludePrompts, timeoutMs, reasoningLevel, ctx } =
-    opts;
+  const {
+    apiKey,
+    theme,
+    scenarioBrief,
+    count,
+    modelId,
+    excludePrompts,
+    rules,
+    coverageInstructionText,
+    timeoutMs,
+    reasoningLevel,
+    ctx,
+  } = opts;
   if (count <= 0) return [];
 
   const batchCount = batchCountFor(count);
@@ -239,6 +281,8 @@ export async function generateStages(opts: GenerateStagesParams): Promise<StageS
         batchCount,
         excludePrompts: exclude,
         scenarioBrief,
+        rules,
+        coverageInstructionText,
         timeoutMs,
         reasoningLevel,
         ctx,
@@ -265,6 +309,8 @@ export async function generateStages(opts: GenerateStagesParams): Promise<StageS
       count: Math.ceil(falta * 1.5),
       excludePrompts: excludeAll,
       scenarioBrief,
+      rules,
+      coverageInstructionText,
       extraInstruction:
         '\nCubra LACUNAS DE VARIEDADE: tipos de tarefa, dificuldades e idiomas ainda sub-representados.',
       timeoutMs,

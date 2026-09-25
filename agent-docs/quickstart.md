@@ -60,3 +60,15 @@ npx prompt-builder-cli sessions winner <sessionId> --prompt-only > prompt.md
 Detalhes: `prompt-builder docs overview`, `docs train`, `docs models`,
 `docs budget`, `docs ndjson`, `docs results`, `docs troubleshooting`.
 O contrato do arquivo de configuração: `prompt-builder docs config`.
+
+
+## Dataset estável (treino comparável entre sessões)
+
+```bash
+prompt-builder library init --profile meu-alvo
+prompt-builder library add --profile meu-alvo --file itens.json   # aceita reference | expected
+prompt-builder library verify --profile meu-alvo                  # itens sem gabarito = exit 3
+```
+
+Depois aponte o config: `"scenarios": { "from": "library", "profile": "meu-alvo" }`.
+Detalhes em `docs train`.

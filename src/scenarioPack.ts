@@ -60,6 +60,14 @@ const scenarioSchema = z.object({
     .max(16000, 'maxTokens não pode passar de 16000'),
   rubric: z.string('rubric deve ser texto').default(''),
   reference: z.string('reference deve ser texto').optional(),
+  // Rotulo esperado (ground-truth): veredito deterministico sem juiz LLM.
+  expected: z
+    .union([
+      z.string().min(1),
+      z.array(z.string().min(1)).min(1),
+      z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
+    ])
+    .optional(),
   origin: z.enum(['ai', 'import'], "origin deve ser 'ai' ou 'import'").optional(),
 });
 

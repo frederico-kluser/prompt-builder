@@ -19,10 +19,12 @@ import {
   cmdEstimate,
   cmdKey,
   cmdLgpd,
+  cmdRegistry,
   cmdRuns,
   cmdSessions,
   cmdTechniques,
 } from './commands/misc.js';
+import { cmdLibrary } from './commands/library.js';
 
 const VERSION = pkgVersion();
 
@@ -56,10 +58,20 @@ RUNS
 
 RESULTADOS
   runs list | show <id> | winner <id> [--prompt-only]
-  sessions list | show <id> | winner <id> [--prompt-only]
+  runs reproduce <id>      config reconstruído + comando p/ re-rodar a run
+  runs export <id> [-o <arq>]
+                           artefato auto-contido (config, gabaritos, prompts, juiz)
+  sessions list | show <id> | winner <id>
+          [--prompt-only | --apply <arq> [--commit]]   handoff com backup + diff
+
+BIBLIOTECA (dataset estável de cenários+gabaritos)
+  library list | init | show | add | seed | verify | coverage | export | rm | drop
+          veja \`prompt-builder library --help\`
 
 OUTROS
   techniques · lgpd · config validate <arq> · config example · doctor
+  registry validate [--file <arq>]   guarda de drift dos prompts de produção
+  registry init [-o <arq>]           grava um registro-exemplo comentado
   mcp                      servidor MCP por stdio (mesmo binário)
 
 AGENTES (modo agente — mesmo motor, executor pi)
@@ -133,12 +145,16 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdRuns(argv);
     case 'sessions':
       return cmdSessions(argv);
+    case 'library':
+      return cmdLibrary(argv);
     case 'techniques':
       return cmdTechniques(argv);
     case 'lgpd':
       return cmdLgpd(argv);
     case 'config':
       return cmdConfig(argv);
+    case 'registry':
+      return cmdRegistry(argv);
     case 'doctor':
       return cmdDoctor(argv);
     case 'mcp':

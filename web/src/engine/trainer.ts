@@ -1,6 +1,10 @@
 const randomUUID = (): string => crypto.randomUUID();
 import { runToCompletion } from './orchestrator';
-import { generateContestants } from './variator';
+import { generateContestants, llmReflectLessons } from './variator';
+import { composePrompt } from '../../../src/engine/promptGroup.js';
+import { addToPool, pickParent, sliceScores, type ParetoEntry } from '../../../src/engine/pareto.js';
+import { planHalving, survivorsOf } from '../../../src/engine/halving.js';
+import { seedFromId } from '../../../src/engine/duelCore.js';
 import { emitSessionEvent } from './events';
 import { saveSession } from './storage';
 import { computeMedals } from './medals';
@@ -149,6 +153,32 @@ function pairedStageScores(
   return { controlScores, championScores };
 }
 
+
+/**
+ * F4.1 — judge-score (escala 0–1) por FATIA (tier/dimensionTags do cenário) de
+ * um contestant. É o vetor que a dominância de Pareto compara: prompts
+ * diferentes são especialistas em fatias diferentes, e o campeão único não vê
+ * isso.
+ */
+function sliceScoresOf(run: RunRecord, contestantId: string): Record<string, number> {
+  const obs: { slice: string; score: number }[] = [];
+  for (const st of run.stages) {
+    const v =
+      st.referenceJudge?.verdictByContestant?.[contestantId] ??
+      st.judge?.verdictByContestant?.[contestantId];
+    if (!v) continue;
+    const fatias = st.spec?.dimensionTags?.length
+      ? st.spec.dimensionTags
+      : [st.spec?.tier ?? 'geral'];
+    for (const f of fatias) obs.push({ slice: f, score: VERDICT_SCORE[v] });
+  }
+  return sliceScores(obs);
+}
+
+interface PoolMember extends ParetoEntry {
+  text: string;
+}
+
 export interface StartTrainingResult {
   sessionId: string;
   record: SessionRecord;
@@ -212,6 +242,11 @@ function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     manualVariants: cfg.manualVariants,
     // Sem repassar, a temperatura do modelo sob teste sumiria em toda iteracao.
     temperature: cfg.temperature,
+    // Contratos never-break (F2/P0.3): valem para toda reescrita da sessao.
+    contracts: cfg.contracts,
+    // Multi-prompt (F2/P0.4): grupo + fragmento-alvo atravessam as iteracoes.
+    promptGroup: cfg.promptGroup,
+    promptId: cfg.promptId,
   };
 }
 
@@ -232,6 +267,12 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
   // sessoes nao resumem entre processos hoje, entao nao precisa ir para o disco.
   let holdoutStages: StageSpec[] = [];
   let prevRun: RunRecord | undefined;
+  // F4.1: pool Pareto (populacao diversa). maxSize 1 = elitismo classico.
+  const poolSize = Math.max(1, Math.round(cfg.paretoPool ?? 1));
+  let pool: PoolMember[] = [];
+  const usoPai: Record<string, number> = {};
+  // F4.2: 1o hash do contrato do juiz visto na sessao (detecta drift).
+  let primeiroHashJuiz: string | undefined;
   let champion: Champion | undefined;
   // Id que o campeao teve na run MAIS RECENTE (promovido: o id da variante;
   // convergido: a regua, que segurou o titulo). Usado na linhagem e no
@@ -255,21 +296,58 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           promptOptimization,
           optimizerModelId,
           reasoningLevel: cfg.reasoning?.rewriter,
+          contracts: cfg.contracts,
+          // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
+          promptGroup: cfg.promptGroup,
+          promptId: cfg.promptId,
           timeoutMs: cfg.timeoutMs,
         });
       } else {
         // Reflection GEPA (deterministico — ver buildLessons): substitui a
         // antiga etapa LLM de analise; so a partir da iteracao 1 e se
         // feedbackDriven nao foi desligado.
-        const hint =
+        const hint0 =
           cfg.feedbackDriven !== false && prevRun
             ? buildLessons(prevRun, champion!.contestantId)
             : '';
+        // Reflexao GEPA POR LLM (opt-in, §7.5): o meta-modelo reescreve as
+        // licoes deterministicas num bloco acionavel. Custo extra contado no
+        // ledger; falha DEGRADA para o deterministico — nunca derruba a iteracao.
+        let hint = hint0;
+        if (hint0 && cfg.reflection === 'llm') {
+          try {
+            hint = await llmReflectLessons({
+              apiKey,
+              modelId: optimizerModelId,
+              baseLessons: hint0,
+              theme: cfg.theme,
+              reasoningLevel: cfg.reasoning?.rewriter,
+              timeoutMs: cfg.timeoutMs,
+            });
+            log(sessionId, `reflexao LLM aplicada (${hint.length} chars de licoes)`);
+          } catch (err) {
+            // Sem budget ledger no browser, qualquer falha degrada para as
+            // licoes deterministicas — nunca derruba a iteracao.
+            log(
+              sessionId,
+              `reflexao LLM falhou; licoes deterministicas seguem: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            hint = hint0;
+          }
+        }
         contestants = await generateContestants({
           apiKey,
           modelId: cfg.contestantModelId,
           theme: cfg.theme,
-          basePrompt: champion!.systemPrompt,
+          // F4.1: com pool >1 a base de DERIVACAO rotaciona entre os membros
+          // nao-dominados (pais diversos — o GEPA mostra que colapsar num unico
+          // campeao e preso a otimo local). A REGUA ('carry') continua sendo o
+          // campeao: o gate por margem nao muda de significado.
+          basePrompt: (() => {
+            const pai = poolSize > 1 && pool.length ? pickParent(pool, usoPai) : undefined;
+            if (pai) usoPai[pai.id] = (usoPai[pai.id] ?? 0) + 1;
+            return pai?.text ?? champion!.systemPrompt;
+          })(),
           originalPrompt: cfg.basePrompt,
           carryPrompt: champion!.systemPrompt,
           carryLabel: `Melhor it.${i}`,
@@ -281,6 +359,10 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           optimizerModelId,
           analysisHint: hint,
           reasoningLevel: cfg.reasoning?.rewriter,
+          contracts: cfg.contracts,
+          // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
+          promptGroup: cfg.promptGroup,
+          promptId: cfg.promptId,
           timeoutMs: cfg.timeoutMs,
         });
       }
@@ -290,6 +372,47 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
       }
 
       // 2) Roda a iteracao (benchmark pinado a partir da iteracao 1).
+      // F4.3 — SEQUENTIAL HALVING (opt-in `training.halving`): antes da rodada
+      // completa, uma TRIAGEM barata num subconjunto de cenários corta as piores
+      // variantes (o controle nunca cai). O custo da triagem é real e entra no
+      // ledger; o ganho é rodar o benchmark completo só com os sobreviventes.
+      // Com dataset conhecido (customStages/scenarioSeed/pinos) e variantes > 3.
+      const estagiosConhecidos = pinnedStages ?? cfg.customStages ?? cfg.scenarioSeed ?? [];
+      if (cfg.halving && contestants.length > 3 && estagiosConhecidos.length >= 8) {
+        const seed = seedFromId(`halving:${sessionId}:${i}`);
+        const plano = planHalving(
+          contestants.map((c) => c.id),
+          estagiosConhecidos.map((s) => s.question),
+          seed,
+          { protectedIds: ['original', 'carry'] },
+        );
+        const rodada1 = plano.rounds[0];
+        const subset = estagiosConhecidos.filter((s) => rodada1.scenarioIds.includes(s.question));
+        log(sessionId, `halving: triagem de ${contestants.length} variantes em ${subset.length} cenarios`);
+        const rascunho = await runToCompletion(
+          { ...variationConfigFrom(cfg), stages: subset.length, customStages: subset, scenarioSeed: undefined },
+          apiKey,
+          {
+            runId: randomUUID(),
+            contestants,
+            sessionId,
+            iteration: i,
+            parentRunId: prevRun?.id,
+          },
+        );
+        const { survivors, eliminated } = survivorsOf(
+          rascunho.contestants.map((c) => ({ id: c.id, score: judgeScoreOf(rascunho, c.id) })),
+          rodada1.keepCount,
+          { seed, protectedIds: ['original', 'carry'] },
+        );
+        const antes = contestants.length;
+        contestants = contestants.filter((c) => survivors.includes(c.id));
+        log(
+          sessionId,
+          `halving: ${antes - contestants.length} variante(s) eliminada(s) na triagem (${eliminated.join(', ')})`,
+        );
+      }
+
       const runId = randomUUID();
       record.runIds.push(runId);
       await saveSession(record);
@@ -306,6 +429,14 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
       });
 
       record.totalCostUsd += runRec.totalCostUsd;
+
+      // F4.2: calibration drift — contrato do juiz diferente no meio da sessao
+      // significa que o delta entre iteracoes pode ser do JUIZ, nao do prompt.
+      const hashJuiz = runRec.judgeDiagnostics?.contract.hash;
+      if (hashJuiz) {
+        if (primeiroHashJuiz && hashJuiz !== primeiroHashJuiz) record.judgeDrift = true;
+        primeiroHashJuiz ??= hashJuiz;
+      }
 
       // 3) Pina o benchmark depois da iteracao 0 (mesmas perguntas em todas),
       //    com split anti-overfit: a fatia de holdout fica FORA da selecao e so
@@ -335,7 +466,8 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
         const wc = runRec.contestants.find((c) => c.id === pick.best!.id);
         champion = {
           contestantId: pick.best.id,
-          systemPrompt: wc?.systemPrompt ?? champion?.systemPrompt ?? cfg.basePrompt ?? '',
+          // Multi-prompt: o campeao e o FRAGMENTO evoluido (nunca o composto).
+          systemPrompt: wc?.promptFragment ?? wc?.systemPrompt ?? champion?.systemPrompt ?? cfg.basePrompt ?? '',
           label: wc?.label ?? pick.best.id,
         };
         championIdInLastRun = pick.best.id;
@@ -369,6 +501,21 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
         silvers: medalRow?.silvers ?? 0,
         bronzes: medalRow?.bronzes ?? 0,
       });
+
+      // F4.1: promocao entra no POOL (nunca derruba o campeao unico — o pool
+      // e aditivo e o champion segue sendo o melhor absoluto p/ holdout).
+      if (promoted) {
+        pool = addToPool(
+          pool,
+          {
+            id: `it-${i}`,
+            label: champion.label,
+            bySlice: sliceScoresOf(runRec, championIdInLastRun),
+            text: champion.systemPrompt,
+          },
+          { maxSize: poolSize },
+        );
+      }
 
       prevRun = runRec;
       emitSessionEvent({
@@ -447,6 +594,9 @@ async function finalizeHoldout(
   const cfg = record.config;
   const sessionId = record.id;
   const basePrompt = cfg.basePrompt ?? '';
+  // Multi-prompt: no holdout o systemPrompt efetivo e a composicao do grupo.
+  const comporHoldout = (fragmento: string): string =>
+    cfg.promptGroup ? composePrompt(cfg.promptGroup, cfg.promptId, fragmento) : fragmento;
 
   let holdoutRun: RunRecord | undefined;
   // So ha o que re-testar se a fatia de holdout e confiavel, existe um prompt
@@ -468,13 +618,13 @@ async function finalizeHoldout(
         id: 'holdout-control',
         label: 'Controle (base)',
         modelId: cfg.contestantModelId,
-        systemPrompt: basePrompt,
+        systemPrompt: comporHoldout(basePrompt),
       },
       {
         id: 'holdout-champion',
         label: 'Campeao (final)',
         modelId: cfg.contestantModelId,
-        systemPrompt: champion.systemPrompt,
+        systemPrompt: comporHoldout(champion.systemPrompt),
       },
     ];
     holdoutRun = await runToCompletion(

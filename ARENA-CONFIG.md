@@ -86,8 +86,11 @@ arquivo final):
   "stages": "int 1..50 — total de cenários (importados + gerados)",
   "duels": "bool (default true) — liga a fase FINAL de duelos entre os finalistas",
   "finalists": "int 0..12 (default 3) — quantos disputam a final; 0 desliga",
-  "scenarios": [{ "id": "opcional", "question": "obrigatória", "productContext": "''", "maxTokens": "int <=16000 (ausente = herda limits.maxOutputTokens)", "rubric": "''", "reference": "gabarito opcional — se ausente, a engine gera na hora" }],
-  "prompt": { "text": "system prompt base (variation/training)", "generateFrom": "opcional — descrição da tarefa p/ o botão 'gerar base' da UI" },
+  "scenarios": [{ "id": "opcional", "question": "obrigatória", "productContext": "''", "maxTokens": "int <=16000 (ausente = herda limits.maxOutputTokens)", "rubric": "''", "reference": "gabarito opcional", "expected": "rótulo esperado opcional (veredito determinístico, sem juiz)", "tier": "mft|invariance|adversarial|edge opcional", "dimensionTags": ["dimensões medidas, opcionais"] }],
+  // ALTERNATIVA de scenarios (dataset estável — resolvido só no CLI):
+  "scenarios": { "from": "library", "profile": "id-do-perfil", "ids": ["subset opcional"] },
+  "repeats": "1|2|3 (só compare) — cada cenário roda N× p/ medir instabilidade",
+  "prompt": { "text": "system prompt base (variation/training; multi-prompt = texto atual do fragmento-alvo)", "generateFrom": "opcional — descrição da tarefa p/ o botão 'gerar base' da UI", "contracts": { "neverBreak": ["invariantes"], "placeholders": ["{os}"], "minLengthRatio": 0.3 }, "group": [{ "id": "regras", "label": "Regras", "text": "…" }, { "id": "criticas", "text": "…" }], "promptId": "regras" },
   "models": {
     "datagen": "slug — gera os cenários",
     "judges": ["slug"],                // >=1 — julgam; o 1º também escreve os gabaritos e julga os duelos
@@ -99,7 +102,7 @@ arquivo final):
   },
   "effort": { "competitor": "nível", "judge": "nível", "rewriter": "nível", "datagen": "nível" },  // todos opcionais
   "variation": { "optimize": "bool (default true)", "techniques": ["ids"], "manualVariants": [{ "label": "", "systemPrompt": "" }] },
-  "training": { "iterations": "int 2..10 (default 3)", "minGain": "0..100 (default 1)", "holdoutRatio": "0..0.5 (default 0.2)", "feedbackDriven": "bool (default true)" },
+  "training": { "iterations": "int 2..10 (default 3)", "minGain": "0..100 (default 1)", "holdoutRatio": "0..0.5 (default 0.2)", "feedbackDriven": "bool (default true)", "reflection": "'deterministic' (default) | 'llm' | 'off'", "paretoPool": "int 0..8 (default 1 = campeão único; >1 = população Pareto)" },
   "judging": { "reference": "bool — juiz contra gabarito (default: on p/ variation/training/compare-configs, off p/ compare clássico)", "passes": "1|2 — passes do juiz listwise" },
   "limits": { "maxOutputTokens": "int positivo, LIVRE (o teto real é o do modelo)", "timeoutMs": "int", "concurrency": "int" },
   "compliance": { "area": "slug LGPD", "includeRessalvas": "bool" }
@@ -117,7 +120,7 @@ arquivo final):
 | `stages` | int | recomendado | default da UI | Total de cenários da run (importados + gerados), 1..50. Recomendado: 6–12. |
 | `duels` | bool | não | `true` | Liga a **fase final**: terminado o julgamento por gabarito, os finalistas duelam entre si em cada cenário (Copeland — cada par nas 2 ordens; desacordo = empate). `false` = só o judge-score. |
 | `finalists` | int | não | 3 | Quantos disputam a final, 0..12: os melhores por **judge-score médio de toda a run**. `0` desliga a final; valor ≥ nº de variantes = todos duelam. Vale para os três modos. |
-| `scenarios` | array | não | `[]` | Cenários "pinados" (curadoria manual) — ver seção 4. |
+| `scenarios` | array **ou** objeto | não | `[]` | Cenários "pinados" (curadoria manual, ver seção 4) **ou** `{ "from": "library", "profile", "ids" }` — referência à biblioteca persistente (`pb library`, CLI). Itens da biblioteca **sem gabarito (`reference`/`expected`) são recusados** no evolve (paridade com o 409 do prompt-arena). |
 | `prompt` | objeto | variation/training | — | Prompt base sob teste (ver 3.3). |
 | `models` | objeto | **sim** | — | Slugs por papel (ver 3.4). |
 | `effort` | objeto | não | padrão do modelo | Nível de raciocínio por papel (ver 3.5). |
@@ -126,11 +129,12 @@ arquivo final):
 | `judging` | objeto | não | por modo | Como julgar: por gabarito ou listwise (ver 3.8). |
 | `limits` | objeto | não | defaults da UI | Tetos de tokens/tempo/concorrência (ver 3.9). |
 | `compliance` | objeto | não | livre | Filtro consultivo LGPD do catálogo de modelos (ver 3.10). |
+| `repeats` | int | não | 1 | **Só compare**: cada cenário roda N× (1–3) para medir a **instabilidade estocástica** do modelo — a variância real só aparece com repetição. Os clones compartilham o gabarito (custo 1× por cenário) e viram observações independentes no judge-score. |
 
-> **Removidos:** `repeats` (cópias de cada cenário — hoje cada cenário roda **uma vez**) e
-> `training.duelTopK` (o bracket por etapa virou a fase final global: `duels` + `finalists`).
-> Arquivos antigos com essas chaves continuam válidos — elas são ignoradas na leitura.
+> **Removido:** `training.duelTopK` (o bracket por etapa virou a fase final global: `duels` +
+> `finalists`). Arquivos antigos com a chave continuam válidos — ela é ignorada na leitura.
 > `duels`/`finalists` são lidos tanto na raiz quanto dentro de `training`; prefira a raiz.
+> **`repeats` voltou** (só compare, 1–3) como medidor de instabilidade — ver 3.1.
 
 ### 3.2 `scenarios[]` (cenários pinados)
 
@@ -142,6 +146,9 @@ arquivo final):
 | `maxTokens` | int | não | herda `limits.maxOutputTokens` | Teto de tokens da resposta NESTE cenário, ≤ 16000. |
 | `rubric` | string | não | `''` | Critério de corretude do cenário; tem prioridade no julgamento. |
 | `reference` | string | não | gerado na hora | Gabarito (resposta-modelo). Se ausente, o modelo de referência gera na hora com temp 0. |
+| `expected` | string \| string[] \| objeto | não | — | **Rótulo esperado (ground-truth)**: o veredito da etapa vira **determinístico, sem juiz LLM** (e sem gabarito — custo zero). `string` = rótulo único; array = alternativas aceitáveis; objeto `{campo: valor}` = resposta deve ser JSON com o campo. |
+| `tier` | string | não | `''` | Tier curatorial (`mft`/`invariance`/`adversarial`/`edge`) — alimenta a cobertura (`pb library coverage`) e a seleção Pareto por fatia. |
+| `dimensionTags` | string[] | não | `[]` | Dimensões medidas pelo cenário (ex.: `["extracao", "recusa"]`) — idem. |
 
 ### 3.3 `prompt` (base sob teste — variation/training)
 
@@ -149,6 +156,9 @@ arquivo final):
 |---|---|---|---|---|
 | `text` | string | variation/training | `''` | System prompt base: roda como controle e é a semente das variações/iterações. |
 | `generateFrom` | string | não | — | Descrição da tarefa usada pelo botão "gerar base" da UI (a UI escreve o `text` a partir dela). |
+| `contracts` | objeto | não | — | **Contratos never-break** (F2): `neverBreak[]` (invariantes que a reescrita não pode remover), `placeholders[]` (tokens verbatim, ex.: `"{os}"`) e `minLengthRatio` (0..1, default 0.3). O pós-rewriter valida toda variante; violação tenta UMA correção e persistindo **rejeita a variante**. |
+| `group` | array | não | — | **Multi-prompt (coordinate ascent)**: os fragmentos da feature `[{ id, label?, text }]`. Com >1 fragmento, `promptId` é **obrigatório** — a sessão evolui SÓ esse fragmento e os irmãos ficam congelados (contexto fixo no rewriter; o system prompt efetivo dos contestants é a composição do grupo). |
+| `promptId` | string | se `group` > 1 | — | Qual fragmento do grupo esta sessão/run evolui. Precisa existir em `group`. |
 
 ### 3.4 `models` (papéis)
 
@@ -228,6 +238,8 @@ OpenRouter recusa com HTTP 400.
 | `minGain` | number | não | 1 | **Margem de promoção** (0..100 pontos de judge-score): a variante só vira campeã se superar a atual por pelo menos `minGain`. Sem margem → a sessão converge e para. |
 | `holdoutRatio` | number | não | 0.2 | **Fatia anti-overfit** (0..0.5): reserva parte dos cenários (split intercalado) para uma validação final controle × campeão. Piso de 5 cenários — abaixo disso o holdout é descartado. `0` desliga. |
 | `feedbackDriven` | bool | não | `true` | **Lições da rodada anterior**: até 8 cenários onde a campeã falhou viram um bloco de lições injetado no rewriter da próxima iteração. `false` = variação cega. |
+| `reflection` | string | não | `deterministic` | Como as lições GEPA são produzidas: `deterministic` (default, zero custo), `llm` (um meta-modelo reescreve as lições num bloco acionável — custo extra contado, degrada para o determinístico se falhar) ou `off`. |
+| `paretoPool` | int | não | 1 | **Seleção Pareto/população** (GEPA): >1 mantém um pool de prompts não-dominados por fatia (tier/dimensão) e rotaciona a **base de derivação** entre eles — pais diversos, menos presos a ótimo local. A régua do `minGain` continua sendo o campeão. `0`/ausente = campeão único (comportamento clássico). |
 
 ### 3.8 `judging`
 

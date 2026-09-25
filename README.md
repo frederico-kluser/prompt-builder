@@ -49,6 +49,21 @@ Três coisas que o CLI garante e a UI não garantia:
   que vai no fio para cada nível pedido — é o que permite a um agente treinar contra o próprio
   modelo sem tomar HTTP 400.
 
+Evolução de prompts com **dataset estável e cinto de segurança** (paridade com o
+prompt-arena):
+
+- **Biblioteca de cenários** (`prompt-builder library`) — banco persistente de cenários+
+  gabaritos por perfil, com `tier`/`dimensionTags`/`expected` (rótulo = veredito determinístico
+  sem juiz). `scenarios: {"from":"library","profile":…}` no config faz o evolve rodar sempre
+  sobre o MESMO dataset — e recusa item sem gabarito.
+- **Contratos never-break** (`prompt.contracts`) e **multi-prompt** (`prompt.group`/`promptId`,
+  coordinate ascent com irmãos congelados) — a evolução não quebra o prompt de produção.
+- **Pool Pareto** (`training.paretoPool`), **reflexão GEPA por LLM** (`training.reflection`),
+  **`repeats`** para medir instabilidade — seleção de população, não campeão único.
+- **Reprodutibilidade**: `runs reproduce` (config + comando exato), `runs export` (artefato
+  auto-contido), `sessions winner --apply` (handoff com backup+diff+commit) e `registry validate`
+  (guarda de drift do prompt em código).
+
 Documentação completa: `npx prompt-builder-cli docs --list`.
 
 ---
@@ -468,9 +483,12 @@ processo persistente: Railway/Render/Fly), mas **não é usado** pela SPA estát
 | `npm run build` | `tsc` do backend + `tsc -b && vite build` do front |
 | `npm run start` | Roda o backend compilado (`dist/server.js`) |
 | `npm run web:dev` / `web:build` / `web:install` | Atalhos para `web/` |
+| `npm test` | **Testes de contrato** (vitest): núcleo de evolução, config, orçamento e guarda de sincronia do motor |
 
-> Não há `test` nem `lint` configurados — valide por type-check
-> (`npx tsc -p tsconfig.json --noEmit` e `cd web && npx tsc -b`) + execução manual.
+> Verificação = `npm test` + type-check (`npx tsc -p tsconfig.json --noEmit` e `cd web && npx tsc -b`)
+> + execução manual. Os testes de contrato **travam o comportamento determinístico** (seeds,
+> desempates, pisos) e os whitelists silenciosos (`variationConfigFrom`, `normalizeRunRecord`) —
+> rode-os antes e depois de qualquer refactor do pipeline.
 
 ---
 
@@ -599,8 +617,12 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
 
 ## Notas e limitações
 
-- **Custo total exibido = soma das respostas dos participantes.** Datagen, juiz e avaliador **não**
-  entram no `totalCostUsd` (o foco é o custo da inferência comparada). Preços vêm do catálogo da OpenRouter.
+- **Custo total exibido = todos os papéis do pipeline.** O `totalCostUsd` vem do `BudgetLedger` e
+  soma **datagen, gabarito, competidores, juiz, duelos e rewriter** — cada chamada conta pelo valor
+  cobrado (`usage.cost`), com fallback no catálogo da OpenRouter (`costAccuracy` diz quantas saíram
+  exatas vs estimadas). `costByContestant` é a fatia **só dos competidores**: gasto de juiz/duelo
+  não é atribuível a um contestant. Os comandos `runs show`/`sessions show` trazem a quebra por
+  papel (`costByRole`).
 - **Filtro LGPD é consultivo**, não garante conformidade (não força roteamento) — ver
   [Conformidade LGPD](#conformidade-lgpd-filtro-consultivo). **Não é aconselhamento jurídico.**
 - **Sem autenticação de usuário / multiusuário:** ferramenta local; o histórico é compartilhado por

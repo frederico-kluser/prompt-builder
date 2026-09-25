@@ -58,6 +58,8 @@
     "dev": "concurrently -n bench,web -c blue,green \"tsx watch src/server.ts\" \"npm run web:dev\"",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "web:dev": "npm --prefix web run dev",
     "web:build": "npm --prefix web run build",
     "web:install": "npm --prefix web install"
@@ -72,7 +74,9 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
   },
   "repository": {
     "type": "git",

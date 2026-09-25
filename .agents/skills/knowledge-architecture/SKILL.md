@@ -8,14 +8,15 @@ metadata:
 # Arquitetura — prompt-builder
 
 Ferramenta de benchmark de LLMs via OpenRouter. Monorepo TypeScript: backend Express
-(`src/`) + frontend React/Vite (`web/`). UI e comentários em **PT-BR**. Sem framework de testes.
+(`src/`) + frontend React/Vite (`web/`). UI e comentários em **PT-BR**. Testes de contrato em `test/`
+(vitest, `npm test`) — inclui a guarda de sincronia do motor (`test/engine-sync.test.ts`).
 
 ## Comandos exatos
 - `npm run dev` — sobe backend (`tsx watch src/server.ts`, porta 3001) **e** frontend (Vite, 5173) via `concurrently`.
 - `npm run build` — `tsc -p tsconfig.json` (backend → `dist/`) **e** `npm run web:build` (`tsc -b && vite build` → `web/dist/`).
 - `npm start` — `node dist/server.js` (prod; serve `web/dist` estático na raiz).
 - Type-check só backend: `npx tsc -p tsconfig.json --noEmit`. Só frontend: `cd web && npx tsc -b`.
-- **Não há** `test` nem `lint` configurados (os `// eslint-disable` no código são inertes).
+- Testes: `npm test` (vitest, `test/`). Não há lint (os `// eslint-disable` são inertes).
 
 ## Layout
 ```
@@ -70,7 +71,14 @@ data/           runtime: runs/ e sessions/ (IGNORADO no git; ver /data/ no .giti
   direto, orquestra na aba, persiste no IndexedDB). Permite SPA estática (Vercel, `vercel.json`).
   `web/src/api.ts` delega ao engine; `engine/events.ts` (pub/sub) e `engine/storage.ts` (IndexedDB)
   substituem `events.ts`/`storage.ts` do Node.
-- **⚠️ `web/src/engine/*` é uma CÓPIA de `src/*`** (datagen/competitor/judge/variator/orchestrator/
+- **Desde o F0 do PLANO-PARIDADE a duplicação é CLASSIFICADA e vigiada**: módulos puros
+  (`rank`/`stats`/`holdout`/`dedup`/`medals`/`techniques`/`reasoning`/`llmVariants`/
+  `scenarioPack`/`normalize`) são fonte única em `src/` e `web/src/engine/<nome>.ts` é um
+  **shim de re-export**; a matemática dos duelos vive em `src/engine/duelCore.ts`. Módulo novo em
+  qualquer lado derruba `test/engine-sync.test.ts` até ser classificado (shim | mirror | web-only).
+  Lógica nova PURA vai em `src/engine/` e chega aos dois motores sem duplicar (`libraryCore`,
+  `groundTruth`, `contracts`, `promptGroup`, `pareto`, `scenarioRules`, `judgeCalibration`).
+- **⚠️ Os pares `mirror` de `web/src/engine/*` ainda são CÓPIA de `src/*`** (datagen/competitor/judge/variator/orchestrator/
   trainer/openrouter/normalize/techniques/types **e os módulos de evolução**: gabarito/refJudge/
   duels/rank/holdout/stats/llmVariants/reasoning/dedup/scenarioPack/medals). Ao mudar a lógica do
   pipeline, **atualize os dois lados** (ou só o engine, se o backend já é legado no seu caso).

@@ -116,3 +116,28 @@ Sistema portado do ondokai-prompt-arena. Cada módulo vive em `src/` **e** espel
   `iteration.analyzing` (fora do `SessionEvent`).
 - Na UI, os agregados (`stage.gabarito`/`duel.progress`) são interceptados **antes** do reducer
   (estado local de progresso); `stage.dueled` entra no reducer **por índice**.
+
+
+## Novos módulos (F1/F2/F4 do PLANO-PARIDADE) — `src/engine/` (fonte única)
+- **`libraryCore` + `src/library.ts` + CLI `pb library`** — banco persistente de cenários+
+  gabaritos (`<data-dir>/library/<perfil>/items/*.json`): item enriquecido (tier/persona/
+  successCriteria/rationale/dimensionTags), `hasGabarito` (reference OU expected — o evolve
+  RECUSA sem, paridade com o 409), `coverageReport` (tier × dimensão + lacunas vs matriz alvo),
+  seed idempotente (`mergeSeedItems` por id). `arena-config` aponta via
+  `scenarios: {"from":"library","profile","ids"}` (resolvido no CLI → `customStages`).
+- **`groundTruth`** — veredito determinístico por rótulo (`expected`: string | alternativas |
+  {campo:valor}): normalização + BCP-47 + match standalone/primeira-linha (resolve/parcial/nao).
+- **`contracts`** — never-break pós-rewriter (`verifyRewrite`: neverBreak/placeholders/
+  minLengthRatio 0.3 + stripFences); o variator tenta UMA correção e rejeita a variante que
+  persistir violando.
+- **`promptGroup`** — multi-prompt coordinate ascent: `promptGroup`/`promptId` no config;
+  `composePrompt` (systemPrompt efetivo) × `promptFragment` (fragmento evoluido, o que o treino
+  reusa como campeão); irmãos congelados via `siblingsContext`.
+- **`pareto`** — seleção Pareto/população (`training.paretoPool`): `addToPool`/`pickParent`
+  (rodízio)/`sliceScores` por fatia (tier/dimensionTags do cenário); `session.pool` = front final.
+- **`scenarioRules`** — grounding do datagen por perfil (`{{context}}`/`{{fewShot}}`/
+  `{{setupKeys}}` + `coverageInstruction` de curriculum); entra em `generateStages({rules})`.
+- **`judgeCalibration`** — `pinJudgeContract` (hash do contrato do juiz), `verbosityReport`
+  (Pearson score×comprimento), `sampleSizeWarning` (n<10), `meanCi95` (bootstrap).
+- **Reflexão GEPA por LLM**: `training.reflection: 'llm'` → `llmReflectLessons` (variator) reescreve
+  as lições deterministicas; falha degrada (nunca derruba a iteração).

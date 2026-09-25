@@ -19,6 +19,9 @@ import type {
   AgentTaskSpec,
   ExecutionRef,
 } from './agent/types.js';
+import type { ExpectedSpec } from './engine/groundTruth.js';
+import type { PromptContracts } from './engine/contracts.js';
+import type { PromptGroup } from './engine/promptGroup.js';
 
 export interface OpenRouterModelPricing {
   prompt: number; // USD per token
@@ -201,6 +204,13 @@ export interface Contestant {
   isOriginal?: boolean;
   /** Lineage de treino: contestant vencedor de onde esta variante derivou. */
   parentContestantId?: string;
+  /**
+   * Multi-prompt (F2/P0.4): o TEXT do fragmento evoluido (sem os irmãos
+   * congelados). `systemPrompt` guarda a COMPOSICAO (o que o modelo recebe);
+   * este campo e o que o treino reusa como base da proxima rodada — sem ele o
+   * coordinate ascent reescreveria o prompt composto inteiro como fragmento.
+   */
+  promptFragment?: string;
   /** Override de temperatura deste contestant (compare-llms). Default 0. */
   temperature?: number;
   /** Nivel de reasoning deste contestant (compare-llms; identidade = tripla modelo/temp/reasoning). */
@@ -334,6 +344,13 @@ export interface RunConfigBase {
    * inteiramente de chat (comportamento de hoje, intacto).
    */
   agent?: AgentRunnerConfig;
+  /**
+   * Contratos NEVER-BREAK do prompt base (F2 do PLANO-PARIDADE, P0.3):
+   * invariantes (`neverBreak`), placeholders verbatim e piso de comprimento.
+   * O pós-rewriter (`engine/contracts.ts`) valida TODA reescrita e rejeita a
+   * que quebrar — evolução com cinto de segurança, validação local sem LLM.
+   */
+  contracts?: PromptContracts;
 }
 
 /** Campos comuns aos modos de 1 LLM (variation/training). */
@@ -348,10 +365,26 @@ export interface SingleModelFields {
   manualVariants?: ManualVariant[];
   /** Temperatura aplicada ao modelo sob teste em TODAS as variantes. Ausente = 0. */
   temperature?: number;
+  /**
+   * Grupo multi-prompt (F2/P0.4, coordinate ascent): a feature real tem >1
+   * prompt (ex.: regras + criticas). A sessao evolui UM fragmento (`promptId`)
+   * com os IRMAOS CONGELADOS; o system prompt efetivo dos contestants e a
+   * composicao do grupo (`engine/promptGroup.ts`).
+   */
+  promptGroup?: PromptGroup;
+  /** Fragmento do grupo que esta sessao/run evolui. Obrigatorio se o grupo tem >1. */
+  promptId?: string;
 }
 
 export interface CompareConfig extends RunConfigBase {
   mode: 'compare';
+  /**
+   * Repeticoes por cenario (1–3, F2 §7.9): cada cenario roda N× para medir a
+   * INSTABILIDADE estocastica do modelo — a variancia real so aparece com
+   * repeticao, sobretudo com poucos cenarios. So no compare; cada copia vira
+   * uma observacao independente no judge-score/placar.
+   */
+  repeats?: 1 | 2 | 3;
   competitorModelIds: string[];
   /** compare-llms: variantes de config {modelo, temperatura, reasoning} no eixo de contestants (identidade = tripla). */
   competitorConfigs?: { modelId: string; temperature?: number; reasoningLevel?: ReasoningLevel }[];
@@ -369,6 +402,28 @@ export interface TrainingConfig extends RunConfigBase, SingleModelFields {
   holdoutRatio?: number;
   /** Reflection estilo GEPA: variantes recebem licoes das falhas do campeao. */
   feedbackDriven?: boolean;
+  /**
+   * Como as lições da reflexão GEPA são produzidas (F2, §7.5 do plano):
+   * - 'deterministic' (default): `buildLessons` — zero custo LLM;
+   * - 'llm': um meta-modelo REESCREVE as lições num bloco acionável
+   *   (`<licoes_da_iteracao_anterior>` mais denso) — custo extra contado no
+   *   ledger, degrada para o determinístico se a chamada falhar;
+   * - 'off': sem lições (== feedbackDriven false).
+   */
+  reflection?: 'off' | 'deterministic' | 'llm';
+  /**
+   * Tamanho do POOL Pareto (F4.1, GEPA): >1 mantém uma população de prompts
+   * (pais diversos por dominância de fatia) em vez do campeão único elitista.
+   * 0/ausente = comportamento clássico (1).
+   */
+  paretoPool?: number;
+  /**
+   * Sequential halving (F4.3, §8.5): com muitas variantes, uma passada de
+   * TRIAGEM num subconjunto de cenários corta as piores antes da rodada
+   * completa (o controle nunca é eliminado). Reduz custo sem afetar o ranking
+   * final. Ausente/false = comportamento atual.
+   */
+  halving?: boolean;
 }
 export type RunConfig = CompareConfig | VariationConfig | TrainingConfig;
 
@@ -389,8 +444,22 @@ export interface StageSpec {
   rubric?: string;
   /** Gabarito: resposta de referencia ideal (juiz pointwise + duelos). */
   reference?: string;
+  /**
+   * Rótulo ESPERADO (ground-truth): quando presente, o veredito da etapa e
+   * decidido deterministicamente (`engine/groundTruth.ts`), SEM juiz LLM — o
+   * padrao `gabaritoSpec kind:'labels'` do prompt-arena. string = rotulo unico,
+   * lista = alternativas aceitaveis, objeto = par campo->valor (resposta JSON).
+   */
+  expected?: ExpectedSpec;
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
+  /**
+   * Metadados de CURRICULO (F1/F4.1): tier curatorial e dimensoes medidas.
+   * Sobrevivem da biblioteca (`toStageSpec`) e alimentam a selecao Pareto por
+   * fatia — sem eles a populacao nao sabe onde cada prompt e especialista.
+   */
+  tier?: string;
+  dimensionTags?: string[];
   /**
    * A etapa, quando executada por um agente. AUSENTE => a etapa só serve ao
    * runner 'chat' (comportamento de hoje, intacto).
@@ -634,6 +703,14 @@ export interface RunRecord {
   }[];
   /** Ids dos finalistas (top-N por judge-score) que disputaram os duelos. */
   finalists?: string[];
+  /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
+  fairnessWarnings?: string[];
+  /** Diagnostico do juiz (F4.2): pin do contrato (hash) + vies de verbosidade medido. */
+  judgeDiagnostics?: {
+    contract: { hash: string; modelIds: string[]; pinnedAt: string };
+    verbosity: { n: number; r: number; biased: boolean; warning: string };
+  };
+
   /**
    * Custo TOTAL da run — todos os papeis, nao so os competidores. Antes contava
    * apenas `competitor.ts`, subcontando por um multiplo (juizes, gabarito,
@@ -711,6 +788,13 @@ export interface SessionRecord {
   } | null;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
+  /** Pool Pareto final (F4.1): prompts não-dominados por fatia que sobreviveram. */
+  pool?: { id: string; label: string; bySlice: Record<string, number> }[];
+  /**
+   * true = as runs da sessao compararam CONTRATOS DE JUIZ diferentes (F4.2):
+   * calibration drift — o delta entre iteracoes pode ser do juiz, nao do prompt.
+   */
+  judgeDrift?: boolean;
   /** Quebra do gasto por papel, somando todas as runs da sessao. */
   costByRole?: Record<CostRole, CostEntry>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };

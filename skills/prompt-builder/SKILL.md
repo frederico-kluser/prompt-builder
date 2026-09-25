@@ -129,3 +129,18 @@ agente (Agent Arena), o executor do motor é o `pi`; os demais entram como
 - **Segurança:** nunca imprima/commite chaves. O CLI lê a key de
   `OPENROUTER_API_KEY`/`key set`; o modo container recebe por `--env-file` 0600
   efêmero (fora dos volumes) e o `argv.json` mascara o caminho.
+
+
+## Dataset estável e evolução segura (paridade prompt-arena)
+
+- **`prompt-builder library`** — banco persistente de cenários+gabaritos por perfil
+  (`<data-dir>/library/<perfil>/`): `init`/`add`/`seed` (idempotente)/`verify`/`coverage`/
+  `export`/`rm`/`drop`. Item enriquecido: `tier`, `dimensionTags`, `persona`, `rationale` e
+  **gabarito obrigatório** (`reference` textual OU `expected` de rótulo — o evolve recusa sem).
+- **`expected`** (ground-truth): veredito determinístico sem juiz LLM — `"edit"`, `["edit","help"]`
+  ou `{"campo":"valor"}`.
+- **arena-config@1**: `scenarios: {"from":"library","profile","ids"}` · `prompt.contracts`
+  (never-break) · `prompt.group`+`promptId` (multi-prompt coordinate ascent) · `training.reflection`
+  (`deterministic|llm|off`) · `training.paretoPool` (população Pareto) · `repeats` (compare, 1–3).
+- **Reprodutibilidade**: `runs reproduce` · `runs export` · `sessions winner --apply [--commit]` ·
+  `registry validate` (drift do prompt em código).

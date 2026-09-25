@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { runToCompletion } from './orchestrator.js';
-import { generateContestants } from './variator.js';
+import { generateContestants, llmReflectLessons } from './variator.js';
+import { composePrompt } from './engine/promptGroup.js';
+import { addToPool, pickParent, sliceScores, type ParetoEntry } from './engine/pareto.js';
+import { planHalving, survivorsOf } from './engine/halving.js';
+import { seedFromId } from './engine/duelCore.js';
 import { emitSessionEvent } from './events.js';
 import { saveSession } from './storage.js';
 import { computeMedals } from './medals.js';
@@ -154,6 +158,32 @@ function pairedStageScores(
   return { controlScores, championScores };
 }
 
+
+/**
+ * F4.1 — judge-score (escala 0–1) por FATIA (tier/dimensionTags do cenário) de
+ * um contestant. É o vetor que a dominância de Pareto compara: prompts
+ * diferentes são especialistas em fatias diferentes, e o campeão único não vê
+ * isso.
+ */
+function sliceScoresOf(run: RunRecord, contestantId: string): Record<string, number> {
+  const obs: { slice: string; score: number }[] = [];
+  for (const st of run.stages) {
+    const v =
+      st.referenceJudge?.verdictByContestant?.[contestantId] ??
+      st.judge?.verdictByContestant?.[contestantId];
+    if (!v) continue;
+    const fatias = st.spec?.dimensionTags?.length
+      ? st.spec.dimensionTags
+      : [st.spec?.tier ?? 'geral'];
+    for (const f of fatias) obs.push({ slice: f, score: VERDICT_SCORE[v] });
+  }
+  return sliceScores(obs);
+}
+
+interface PoolMember extends ParetoEntry {
+  text: string;
+}
+
 export interface StartTrainingResult {
   sessionId: string;
   record: SessionRecord;
@@ -218,7 +248,14 @@ export async function trainToCompletion(
   return record;
 }
 
-function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
+/**
+ * Monta a VariationConfig de cada iteração a partir do TrainingConfig da sessão.
+ * ⚠️ WHITELIST campo a campo (ver AGENTS.md): o que faltar aqui é descartado em
+ * silêncio em TODA iteração e no holdout. O teste `test/runtime-guards.test.ts`
+ * falha quando um campo novo de RunConfigBase não aparece nem aqui nem na lista
+ * de exclusões documentadas.
+ */
+export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
   return {
     mode: 'variation',
     theme: cfg.theme,
@@ -252,6 +289,11 @@ function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     temperature: cfg.temperature,
     // Teto por requisicao vale para toda chamada da sessao.
     maxPricePerMTok: cfg.maxPricePerMTok,
+    // Contratos never-break (F2/P0.3): valem para toda reescrita da sessao.
+    contracts: cfg.contracts,
+    // Multi-prompt (F2/P0.4): o grupo e o fragmento-alvo atravessam as iteracoes.
+    promptGroup: cfg.promptGroup,
+    promptId: cfg.promptId,
     // ⚠️ `budgetUsd` NAO entra aqui DE PROPOSITO. Este whitelist normalmente
     // engole campo novo em silencio (ver AGENTS.md) e a reacao natural e
     // "corrigir" a ausencia — mas copiar o orcamento daria a CADA uma das N
@@ -310,6 +352,12 @@ async function trainingLoop(
   // sessoes nao resumem entre processos hoje, entao nao precisa ir para o disco.
   let holdoutStages: StageSpec[] = [];
   let prevRun: RunRecord | undefined;
+  // F4.1: pool Pareto (populacao diversa). maxSize 1 = elitismo classico.
+  const poolSize = Math.max(1, Math.round(cfg.paretoPool ?? 1));
+  let pool: PoolMember[] = [];
+  const usoPai: Record<string, number> = {};
+  // F4.2: 1o hash do contrato do juiz visto na sessao (detecta drift).
+  let primeiroHashJuiz: string | undefined;
   let champion: Champion | undefined;
   // Id que o campeao teve na run MAIS RECENTE (promovido: o id da variante;
   // convergido: a regua, que segurou o titulo). Usado na linhagem e no
@@ -350,6 +398,11 @@ async function trainingLoop(
           timeoutMs: cfg.timeoutMs,
           ctx,
           maxPricePerMTok: cfg.maxPricePerMTok,
+          // Contratos never-break (F2/P0.3): valem em toda iteracao.
+          contracts: cfg.contracts,
+          // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
+          promptGroup: cfg.promptGroup,
+          promptId: cfg.promptId,
           // Fase 4: sem `runner='agent'` o treino com agente rodaria como chat (§29.2).
           runner: cfg.agent ? 'agent' : undefined,
         });
@@ -357,15 +410,49 @@ async function trainingLoop(
         // Reflection GEPA (deterministico — ver buildLessons): substitui a
         // antiga etapa LLM de analise; so a partir da iteracao 1 e se
         // feedbackDriven nao foi desligado.
-        const hint =
+        const hint0 =
           cfg.feedbackDriven !== false && prevRun
             ? buildLessons(prevRun, champion!.contestantId)
             : '';
+        // Reflexao GEPA POR LLM (opt-in, §7.5): o meta-modelo reescreve as
+        // licoes deterministicas num bloco acionavel. Custo extra contado no
+        // ledger; falha DEGRADA para o deterministico — nunca derruba a iteracao.
+        let hint = hint0;
+        if (hint0 && cfg.reflection === 'llm') {
+          try {
+            hint = await llmReflectLessons({
+              apiKey,
+              modelId: optimizerModelId,
+              baseLessons: hint0,
+              theme: cfg.theme,
+              reasoningLevel: cfg.reasoning?.rewriter,
+              timeoutMs: cfg.timeoutMs,
+              ctx,
+              maxPricePerMTok: cfg.maxPricePerMTok,
+            });
+            log(sessionId, `reflexao LLM aplicada (${hint.length} chars de licoes)`);
+          } catch (err) {
+            if (isControlSignal(err)) throw err;
+            log(
+              sessionId,
+              `reflexao LLM falhou; licoes deterministicas seguem: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            hint = hint0;
+          }
+        }
         contestants = await generateContestants({
           apiKey,
           modelId: cfg.contestantModelId,
           theme: cfg.theme,
-          basePrompt: champion!.systemPrompt,
+          // F4.1: com pool >1 a base de DERIVACAO rotaciona entre os membros
+          // nao-dominados (pais diversos — o GEPA mostra que colapsar num unico
+          // campeao e preso a otimo local). A REGUA ('carry') continua sendo o
+          // campeao: o gate por margem nao muda de significado.
+          basePrompt: (() => {
+            const pai = poolSize > 1 && pool.length ? pickParent(pool, usoPai) : undefined;
+            if (pai) usoPai[pai.id] = (usoPai[pai.id] ?? 0) + 1;
+            return pai?.text ?? champion!.systemPrompt;
+          })(),
           originalPrompt: cfg.basePrompt,
           carryPrompt: champion!.systemPrompt,
           carryLabel: `Melhor it.${i}`,
@@ -380,6 +467,11 @@ async function trainingLoop(
           timeoutMs: cfg.timeoutMs,
           ctx,
           maxPricePerMTok: cfg.maxPricePerMTok,
+          // Contratos never-break (F2/P0.3): valem em toda iteracao.
+          contracts: cfg.contracts,
+          // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
+          promptGroup: cfg.promptGroup,
+          promptId: cfg.promptId,
           // Fase 4: mesmo runner nas iteracoes seguintes (agente quando config.agent).
           runner: cfg.agent ? 'agent' : undefined,
         });
@@ -390,6 +482,50 @@ async function trainingLoop(
       }
 
       // 2) Roda a iteracao (benchmark pinado a partir da iteracao 1).
+      // F4.3 — SEQUENTIAL HALVING (opt-in `training.halving`): antes da rodada
+      // completa, uma TRIAGEM barata num subconjunto de cenários corta as piores
+      // variantes (o controle nunca cai). O custo da triagem é real e entra no
+      // ledger; o ganho é rodar o benchmark completo só com os sobreviventes.
+      // Com dataset conhecido (customStages/scenarioSeed/pinos) e variantes > 3.
+      const estagiosConhecidos = pinnedStages ?? cfg.customStages ?? cfg.scenarioSeed ?? [];
+      if (cfg.halving && contestants.length > 3 && estagiosConhecidos.length >= 8) {
+        const seed = seedFromId(`halving:${sessionId}:${i}`);
+        const plano = planHalving(
+          contestants.map((c) => c.id),
+          estagiosConhecidos.map((s) => s.question),
+          seed,
+          { protectedIds: ['original', 'carry'] },
+        );
+        const rodada1 = plano.rounds[0];
+        const subset = estagiosConhecidos.filter((s) => rodada1.scenarioIds.includes(s.question));
+        log(sessionId, `halving: triagem de ${contestants.length} variantes em ${subset.length} cenarios`);
+        const rascunho = await runToCompletion(
+          { ...variationConfigFrom(cfg), stages: subset.length, customStages: subset, scenarioSeed: undefined },
+          apiKey,
+          {
+            runId: randomUUID(),
+            contestants,
+            sessionId,
+            iteration: i,
+            parentRunId: prevRun?.id,
+            parentLedger: ledger,
+            signal: opts.signal,
+          },
+        );
+        syncLedger();
+        const { survivors, eliminated } = survivorsOf(
+          rascunho.contestants.map((c) => ({ id: c.id, score: judgeScoreOf(rascunho, c.id) })),
+          rodada1.keepCount,
+          { seed, protectedIds: ['original', 'carry'] },
+        );
+        const antes = contestants.length;
+        contestants = contestants.filter((c) => survivors.includes(c.id));
+        log(
+          sessionId,
+          `halving: ${antes - contestants.length} variante(s) eliminada(s) na triagem (${eliminated.join(', ')})`,
+        );
+      }
+
       const runId = randomUUID();
       record.runIds.push(runId);
       await saveSession(record);
@@ -407,9 +543,20 @@ async function trainingLoop(
         signal: opts.signal,
       });
 
+      
+      // F4.2: calibration drift — contrato do juiz diferente no meio da sessao
+      // significa que o delta entre iteracoes pode ser do JUIZ, nao do prompt.
+      const hashJuiz = runRec.judgeDiagnostics?.contract.hash;
+      if (hashJuiz) {
+        if (primeiroHashJuiz && hashJuiz !== primeiroHashJuiz) record.judgeDrift = true;
+        primeiroHashJuiz ??= hashJuiz;
+      }
       // O ledger e a fonte de verdade do gasto (soma todos os papeis de todas
       // as runs); somar `runRec.totalCostUsd` aqui contaria duas vezes.
-      syncLedger();
+      // F4.1: o front final (sem o texto — grande demais p/ o record) mostra a
+    // POPULACAO que sobreviveu, nao so o campeao.
+    record.pool = pool.map(({ text: _text, ...e }) => ({ ...e, label: e.label ?? e.id }));
+    syncLedger();
 
       // A run filha parou por orcamento/cancelamento => a sessao para tambem.
       if (runRec.status === 'aborted' && runRec.stoppedReason) {
@@ -449,7 +596,8 @@ async function trainingLoop(
         const wc = runRec.contestants.find((c) => c.id === pick.best!.id);
         champion = {
           contestantId: pick.best.id,
-          systemPrompt: wc?.systemPrompt ?? champion?.systemPrompt ?? cfg.basePrompt ?? '',
+          // Multi-prompt: o campeao e o FRAGMENTO evoluido (nunca o composto).
+          systemPrompt: wc?.promptFragment ?? wc?.systemPrompt ?? champion?.systemPrompt ?? cfg.basePrompt ?? '',
           label: wc?.label ?? pick.best.id,
         };
         championIdInLastRun = pick.best.id;
@@ -483,6 +631,21 @@ async function trainingLoop(
         silvers: medalRow?.silvers ?? 0,
         bronzes: medalRow?.bronzes ?? 0,
       });
+
+      // F4.1: promocao entra no POOL (nunca derruba o campeao unico — o pool
+      // e aditivo e o champion segue sendo o melhor absoluto p/ holdout).
+      if (promoted) {
+        pool = addToPool(
+          pool,
+          {
+            id: `it-${i}`,
+            label: champion.label,
+            bySlice: sliceScoresOf(runRec, championIdInLastRun),
+            text: champion.systemPrompt,
+          },
+          { maxSize: poolSize },
+        );
+      }
 
       prevRun = runRec;
       emitSessionEvent({
@@ -623,12 +786,16 @@ async function finalizeHoldout(
     await saveSession(record);
     log(sessionId, `holdout: run ${runId} (${holdoutStages.length} cenarios reservados)`);
 
+    // Multi-prompt: no holdout o systemPrompt efetivo e a composicao do grupo
+    // (controle = base do fragmento + irmaos; campeao = fragmento vencedor).
+    const comporHoldout = (fragmento: string): string =>
+      cfg.promptGroup ? composePrompt(cfg.promptGroup, cfg.promptId, fragmento) : fragmento;
     const contestants: Contestant[] = [
       {
         id: 'holdout-control',
         label: 'Controle (base)',
         modelId: cfg.contestantModelId,
-        systemPrompt: basePrompt,
+        systemPrompt: comporHoldout(basePrompt),
         // Fase 4: holdout com agente precisa do runner para nao medir chat (§29.2).
         ...(cfg.agent ? { runner: 'agent' as const } : {}),
       },
@@ -636,7 +803,7 @@ async function finalizeHoldout(
         id: 'holdout-champion',
         label: 'Campeao (final)',
         modelId: cfg.contestantModelId,
-        systemPrompt: champion.systemPrompt,
+        systemPrompt: comporHoldout(champion.systemPrompt),
         // Fase 4: mesmo runner no campeao do holdout.
         ...(cfg.agent ? { runner: 'agent' as const } : {}),
       },

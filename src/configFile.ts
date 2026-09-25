@@ -42,6 +42,32 @@ export interface ArenaConfigScenario {
   rubric?: string; // default ''
   /** Gabarito (opcional — a engine gera se ausente). */
   reference?: string;
+  /**
+   * Rótulo esperado (ground-truth, F1/P0.5): veredito determinístico sem juiz
+   * LLM. `string` | alternativas | par campo→valor (resposta JSON).
+   */
+  expected?: string | string[] | Record<string, string | number | boolean>;
+}
+
+/**
+ * Referência à BIBLIOTECA de cenários persistente (F1/P0.1). Em vez de pinar
+ * cenários no arquivo, o config aponta um banco curado estável — é o que torna
+ * a evolução comparável entre sessões. Resolvido pelo CLI (`pb library`); a
+ * SPA client-side usa `scenarios: [...]` (sem filesystem).
+ */
+export interface ArenaConfigLibraryRef {
+  from: 'library';
+  /** Perfil da biblioteca (`<data-dir>/library/<profile>/`). */
+  profile: string;
+  /** Subset de ids (ausente = todos os itens do perfil). */
+  ids?: string[];
+}
+
+/** Contratos never-break do prompt base (F2/P0.3) — vivem no perfil do prompt. */
+export interface ArenaConfigContracts {
+  neverBreak?: string[];
+  placeholders?: string[];
+  minLengthRatio?: number;
 }
 
 /** Contrato do arquivo de configuração importável do assistente Nova Run. */
@@ -52,10 +78,21 @@ export interface ArenaConfigFile {
   /** Briefing detalhado para guiar o datagen (max 4000). */
   scenarioBrief?: string;
   stages?: number; // int 1..50
-  /** Cenários pinados (viram scenarioSeed). */
-  scenarios?: ArenaConfigScenario[];
-  /** text = basePrompt; generateFrom = taskDescription p/ o botão "gerar base" da UI. */
-  prompt?: { text: string; generateFrom?: string };
+  /** Cenários pinados (viram scenarioSeed) OU referência à biblioteca (F1). */
+  scenarios?: ArenaConfigScenario[] | ArenaConfigLibraryRef;
+  /**
+   * text = basePrompt (multi-prompt: o texto ATUAL do fragmento-alvo);
+   * generateFrom = taskDescription p/ o botão "gerar base" da UI.
+   * `group` + `promptId` = coordinate ascent (F2/P0.4): o grupo de fragmentos
+   * da feature e qual deles esta sessao evolui (irmaos congelados).
+   */
+  prompt?: {
+    text: string;
+    generateFrom?: string;
+    contracts?: ArenaConfigContracts;
+    group?: { id: string; label?: string; text: string }[];
+    promptId?: string;
+  };
   models: {
     datagen: string;
     judges: string[]; // min 1
@@ -81,6 +118,13 @@ export interface ArenaConfigFile {
     minGain?: number; // 0..100
     holdoutRatio?: number; // 0..0.5
     feedbackDriven?: boolean;
+    /** Reflexao GEPA: 'deterministic' (default) | 'llm' | 'off' (F2, §7.5). */
+    /** Reflexao GEPA: 'deterministic' (default) | 'llm' | 'off' (F2, §7.5). */
+    reflection?: 'off' | 'deterministic' | 'llm';
+    /** Pool Pareto (F4.1): >1 = população de prompts em vez do campeão único. */
+    paretoPool?: number;
+    /** Sequential halving (F4.3): triagem barata corta variantes perdedoras cedo. */
+    halving?: boolean;
     /** Aceito aqui por compat; o lugar canônico é a raiz do arquivo. */
     duels?: boolean;
     /** Aceito aqui por compat; o lugar canônico é a raiz do arquivo. */
@@ -88,6 +132,8 @@ export interface ArenaConfigFile {
   };
   /** Liga/desliga a fase de finais (duelos). Default: true onde há gabarito. */
   duels?: boolean;
+  /** Repetições por cenário (1–3, só compare) — mede instabilidade estocástica (F2 §7.9). */
+  repeats?: 1 | 2 | 3;
   /** Nº de finalistas que duelam entre si em cada cenário (0 = sem finais). Default 3. */
   finalists?: number; // int 0..12
   judging?: { reference?: boolean; passes?: 1 | 2 };
@@ -182,7 +228,38 @@ const scenarioSchema = z.object({
     .optional(),
   rubric: z.string('rubric deve ser texto').default(''),
   reference: z.string('reference deve ser texto').optional(),
+  // Rotulo esperado (ground-truth, F1/P0.5): veredito deterministico sem LLM.
+  expected: z
+    .union([
+      z.string().min(1),
+      z.array(z.string().min(1)).min(1),
+      z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
+    ])
+    .optional(),
 });
+
+// Referencia a biblioteca de cenarios persistente (`scenarios.from: 'library'`).
+const libraryRefSchema = z.object(
+  {
+    from: z.literal('library', "from deve ser 'library'"),
+    profile: z.string('profile obrigatório').min(1, 'profile obrigatório'),
+    ids: z.array(z.string().min(1)).optional(),
+  },
+  'library deve ser { from: "library", profile, ids? }',
+);
+
+const contractsSchema = z.object(
+  {
+    neverBreak: z.array(z.string()).optional(),
+    placeholders: z.array(z.string()).optional(),
+    minLengthRatio: z
+      .number('minLengthRatio deve ser número')
+      .min(0, 'mínimo 0')
+      .max(1, 'máximo 1')
+      .optional(),
+  },
+  'contracts deve ser um objeto { neverBreak?, placeholders?, minLengthRatio? }',
+);
 
 const modelsSchema = z.object(
   {
@@ -234,12 +311,28 @@ const arenaConfigSchema = z
         .min(1, 'deve ser ao menos 1')
         .max(50, 'não pode passar de 50')
         .optional(),
-      scenarios: z.array(scenarioSchema, 'deve ser uma lista de cenários').optional(),
+      scenarios: z
+        .union(
+          [z.array(scenarioSchema, 'deve ser uma lista de cenários'), libraryRefSchema],
+          "scenarios deve ser uma lista de cenários OU { from: 'library', profile, ids? }",
+        )
+        .optional(),
       prompt: z
         .object(
           {
             text: z.string('prompt.text obrigatório').min(1, 'prompt.text obrigatório'),
             generateFrom: z.string('generateFrom deve ser texto').optional(),
+            contracts: contractsSchema.optional(),
+            group: z
+              .array(
+                z.object({
+                  id: z.string('id obrigatório').min(1, 'id obrigatório'),
+                  label: z.string().optional(),
+                  text: z.string('text obrigatório').min(1, 'text obrigatório'),
+                }),
+              )
+              .optional(),
+            promptId: z.string().min(1).optional(),
           },
           'prompt deve ser um objeto com { text }',
         )
@@ -292,9 +385,15 @@ const arenaConfigSchema = z
             minGain: z.number('deve ser número').min(0, 'mínimo 0').max(100, 'máximo 100').optional(),
             holdoutRatio: z.number('deve ser número').min(0, 'mínimo 0').max(0.5, 'máximo 0.5').optional(),
             feedbackDriven: z.boolean('deve ser boolean').optional(),
+            reflection: z
+              .enum(['off', 'deterministic', 'llm'], "deve ser 'off', 'deterministic' ou 'llm'")
+              .optional(),
+            paretoPool: z.number().int().min(0).max(8).optional(),
+            halving: z.boolean('deve ser boolean').optional(),
             // Compat: `duels`/`finalists` valem para todos os modos e moram na
             // raiz; aceitos aqui para não invalidar arquivos antigos.
             duels: z.boolean('deve ser boolean').optional(),
+      repeats: z.union([z.literal(1), z.literal(2), z.literal(3)], 'deve ser 1, 2 ou 3').optional(),
             finalists: z
               .number('deve ser número inteiro')
               .int('deve ser número inteiro')
@@ -306,6 +405,7 @@ const arenaConfigSchema = z
         )
         .optional(),
       duels: z.boolean('deve ser boolean').optional(),
+      repeats: z.union([z.literal(1), z.literal(2), z.literal(3)], 'deve ser 1, 2 ou 3').optional(),
       finalists: z
         .number('deve ser número inteiro')
         .int('deve ser número inteiro')
@@ -493,9 +593,13 @@ export function arenaConfigSummary(config: ArenaConfigFile): string {
     );
   }
 
-  // Cenários: total pedido (stages) + quantos vêm pinados do arquivo.
-  const pinados = config.scenarios?.length ?? 0;
-  if (config.stages && pinados) partes.push(`${config.stages} cenários (${pinados} importados)`);
+  // Cenários: total pedido (stages) + quantos vêm pinados do arquivo, ou a
+  // referência à biblioteca (F1) quando o config aponta um banco curado.
+  const pinados = Array.isArray(config.scenarios) ? config.scenarios.length : 0;
+  const lib = !Array.isArray(config.scenarios) && config.scenarios ? config.scenarios : undefined;
+  if (lib) {
+    partes.push(`cenários da biblioteca "${lib.profile}"${lib.ids?.length ? ` (${lib.ids.length} selecionados)` : ''}`);
+  } else if (config.stages && pinados) partes.push(`${config.stages} cenários (${pinados} importados)`);
   else if (config.stages) partes.push(`${config.stages} cenários`);
   else if (pinados) partes.push(`${pinados} ${pinados === 1 ? 'cenário importado' : 'cenários importados'}`);
 
@@ -678,6 +782,7 @@ const arenaAgentConfigSchema = z
         )
         .optional(),
       duels: z.boolean('deve ser boolean').optional(),
+      repeats: z.union([z.literal(1), z.literal(2), z.literal(3)], 'deve ser 1, 2 ou 3').optional(),
       finalists: z
         .number('deve ser número inteiro')
         .int('deve ser número inteiro')
