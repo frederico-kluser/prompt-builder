@@ -49,13 +49,21 @@ export interface OpenRouterModel {
 export type { ModelCaps, ModelReasoningMeta } from './modelCaps';
 export { modelCaps, effortOptions, EFFORT_LABEL } from './modelCaps';
 // Preço com "desconhecido" explícito (IMPL-018): fonte única em src/engine/pricing.ts.
+// IMPL-043: filtro de preço com decisão explícita p/ o variável, contagem "X de Y",
+// prévia de custo com contribuição neutra e o aviso "custo não estimável".
 export {
+  createCostPreviewPricer,
+  describeMaxPriceFilter,
+  filterByMaxPrice,
   formatPricePerMTok,
   formatPricingLabel,
   isKnownPrice,
   knownPricing,
   priceTokens,
+  unestimableCostNotice,
+  unknownPriceNote,
   withinMaxPricePerMTok,
+  UNESTIMABLE_COST_LABEL,
   UNKNOWN_PRICE_LABEL,
 } from '../../src/engine/pricing.js';
 

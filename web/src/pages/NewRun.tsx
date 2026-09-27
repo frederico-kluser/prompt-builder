@@ -26,8 +26,10 @@ import {
   type Technique,
   effortOptions,
   modelCaps,
-  priceTokens,
-  withinMaxPricePerMTok,
+  createCostPreviewPricer,
+  describeMaxPriceFilter,
+  filterByMaxPrice,
+  unestimableCostNotice,
   UNKNOWN_PRICE_LABEL,
 } from '../api';
 import { AREA_LIVRE, creatorPrefix, familiaFor, filterModels, type LgpdData } from '../lgpd';
@@ -377,6 +379,9 @@ export function NewRun() {
   // Filtro de preço dos PARTICIPANTES (USD por 1M tokens; '' = sem limite).
   const [maxInputPrice, setMaxInputPrice] = useState('');
   const [maxOutputPrice, setMaxOutputPrice] = useState('');
+  // Preço VARIÁVEL (roteadores, "-1") fica fora do teto por default; só entra por
+  // decisão explícita do usuário (IMPL-043 / R-11b:REC-7).
+  const [includeUnknownPrice, setIncludeUnknownPrice] = useState(false);
 
   const [models, setModels] = useState<OpenRouterModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
@@ -436,21 +441,21 @@ export function NewRun() {
   }, [models, lgpd, complianceArea, includeRessalvas, isLivre]);
 
   // Catálogo dos PARTICIPANTES: LGPD + filtro de preço. Gerador e juiz NÃO
-  // usam este — eles veem o catálogo completo (`models`).
-  const participantModels = useMemo(() => {
-    const maxIn = parseFloat(maxInputPrice);
-    const maxOut = parseFloat(maxOutputPrice);
-    const hasIn = Number.isFinite(maxIn);
-    const hasOut = Number.isFinite(maxOut);
-    if (!hasIn && !hasOut) return filteredModels;
-    // Preço desconhecido (roteador, "-1") NÃO passa num teto: não dá para
-    // garantir que fique abaixo dele (antes o -1 passava em qualquer filtro).
-    return filteredModels.filter((m) => {
-      if (hasIn && !withinMaxPricePerMTok(m.pricing.prompt, maxIn)) return false;
-      if (hasOut && !withinMaxPricePerMTok(m.pricing.completion, maxOut)) return false;
-      return true;
-    });
-  }, [filteredModels, maxInputPrice, maxOutputPrice]);
+  // usam este — eles veem o catálogo completo (`models`). Preço desconhecido
+  // (roteador, "-1") NÃO passa num teto por default: não dá para garantir que
+  // fique abaixo dele (antes o -1 passava em qualquer filtro) — só com a escolha
+  // explícita `includeUnknownPrice`. Regra e contagem em src/engine/pricing.ts.
+  const priceFilter = useMemo(
+    () =>
+      filterByMaxPrice(filteredModels, {
+        maxPromptPerMTok: parseFloat(maxInputPrice),
+        maxCompletionPerMTok: parseFloat(maxOutputPrice),
+        includeUnknown: includeUnknownPrice,
+      }),
+    [filteredModels, maxInputPrice, maxOutputPrice, includeUnknownPrice],
+  );
+  const participantModels = priceFilter.models;
+  const priceFilterCount = describeMaxPriceFilter(priceFilter);
 
   // Espelho das seleções p/ a poda ler o estado mais recente sem re-rodar a cada
   // clique de seleção (só quando área/rigor/preço mudam).
@@ -460,7 +465,7 @@ export function NewRun() {
   // Ao mudar os filtros, remove dos PARTICIPANTES os modelos que saíram do
   // catálogo permitido e avisa. Gerador e juiz não são afetados.
   useEffect(() => {
-    const priceActive = maxInputPrice.trim() !== '' || maxOutputPrice.trim() !== '';
+    const priceActive = priceFilter.active;
     const lgpdActive = !!lgpd && complianceArea !== AREA_LIVRE;
     if ((!priceActive && !lgpdActive) || models.length === 0) {
       setPrunedNotice(null);
@@ -490,22 +495,6 @@ export function NewRun() {
     setPrunedNotice(removed.size ? `Removidos pelo filtro: ${[...removed].join(', ')}.` : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [participantModels]);
-
-  /**
-   * Custo de uma chamada pelo catálogo. Preço desconhecido (roteador, "-1")
-   * fica FORA da soma e o modelo vai para `unknown` — a estimativa é declarada
-   * incompleta ("+ variável"), nunca negativa nem "grátis" (IMPL-018).
-   */
-  function costOf(modelId: string, tin: number, tout: number, unknown?: Set<string>): number {
-    const m = priceById.get(modelId);
-    if (!m) return 0;
-    const v = priceTokens(m.pricing, tin, tout);
-    if (v === null) {
-      unknown?.add(modelId);
-      return 0;
-    }
-    return v;
-  }
 
   // nº de variantes (modos de 1 LLM) ou de competidores (compare).
   const variantCount = useMemo(() => {
@@ -578,15 +567,20 @@ export function NewRun() {
         ? competitorConfigs.filter((r) => r.modelId).map((r) => r.modelId)
         : competitors;
     const passes = twoPassJudge ? 2 : 1;
-    const unknown = new Set<string>();
+    // Custo de uma chamada pelo catálogo. Preço desconhecido (roteador, "-1") ou
+    // modelo fora do catálogo contribuem 0 (NEUTRO) e vão para o aviso "custo não
+    // estimável" — a estimativa é declarada incompleta, nunca negativa nem
+    // "grátis" (IMPL-018/IMPL-043).
+    const pricer = createCostPreviewPricer(priceById);
+    const costOf = (id: string, tin: number, tout: number) => pricer.cost(id, tin, tout);
     let perStage = 0;
     for (const id of contestantIds) {
-      perStage += costOf(id, ctxIn, maxTokensNum, unknown);
-      byRole.competidores += costOf(id, ctxIn, maxTokensNum, unknown);
+      perStage += costOf(id, ctxIn, maxTokensNum);
+      byRole.competidores += costOf(id, ctxIn, maxTokensNum);
       callsByRole.competidores += 1;
     }
     if (precisaGerar && datagen[0]) {
-      const c = costOf(datagen[0], 300, 450, unknown);
+      const c = costOf(datagen[0], 300, 450);
       perStage += c;
       byRole.datagen += c;
       callsByRole.datagen += 1;
@@ -595,14 +589,14 @@ export function NewRun() {
       // gabarito: 1 chamada do modelo de referência por cenário.
       const refId = referenceModel[0] ?? judge[0];
       if (refId) {
-        const c = costOf(refId, ctxIn + 600, 1500, unknown);
+        const c = costOf(refId, ctxIn + 600, 1500);
         perStage += c;
         byRole.gabarito += c;
         callsByRole.gabarito += 1;
       }
       // pointwise: cada juiz avalia CADA competidor contra o gabarito.
       for (const jid of judge) {
-        const c = costOf(jid, ctxIn + maxTokensNum + 1500, 350, unknown) * n;
+        const c = costOf(jid, ctxIn + maxTokensNum + 1500, 350) * n;
         perStage += c;
         byRole.juiz += c;
         callsByRole.juiz += n;
@@ -611,7 +605,7 @@ export function NewRun() {
       const k = duelsOn && finalists > 0 ? Math.min(finalists, n) : 0;
       if (k >= 2 && judge[0]) {
         const pairs = (k * (k - 1)) / 2;
-        const c = pairs * 2 * costOf(judge[0], ctxIn + 2 * maxTokensNum + 1500, 350, unknown);
+        const c = pairs * 2 * costOf(judge[0], ctxIn + 2 * maxTokensNum + 1500, 350);
         perStage += c;
         byRole.finais += c;
         callsByRole.finais += pairs * 2;
@@ -619,7 +613,7 @@ export function NewRun() {
     } else {
       // listwise: cada juiz lê o contexto + todas as respostas.
       for (const jid of judge) {
-        const c = costOf(jid, ctxIn + n * maxTokensNum, 350, unknown) * passes;
+        const c = costOf(jid, ctxIn + n * maxTokensNum, 350) * passes;
         perStage += c;
         byRole.juiz += c;
         callsByRole.juiz += passes;
@@ -634,7 +628,17 @@ export function NewRun() {
     const calls = Object.fromEntries(
       Object.entries(callsByRole).map(([k, v]) => [k, v * mult]),
     );
-    return { low: point * 0.45, high: point, byRole: byRoleUsd, calls, unknownPriceIds: [...unknown] };
+    const unknownPriceIds = pricer.unknownPriceIds();
+    const unpricedIds = pricer.unpricedIds();
+    return {
+      low: point * 0.45,
+      high: point,
+      byRole: byRoleUsd,
+      calls,
+      unknownPriceIds,
+      unpricedIds,
+      notice: unestimableCostNotice(unknownPriceIds, unpricedIds),
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     mode, isSingle, competitors, compareAxis, competitorConfigs, contestantModel, variantCount, datagen, judge,
@@ -1567,7 +1571,17 @@ export function NewRun() {
 
                 <SettingRow
                   label="Preço input/output máx. ($/1M)"
-                  sub="Esconde dos participantes os modelos acima do preço. Não afeta gerador nem juízes."
+                  sub={
+                    <>
+                      Esconde dos participantes os modelos acima do preço. Não afeta gerador nem juízes.
+                      {priceFilterCount && (
+                        // Contagem honesta "X de Y" com o caso do preço variável (IMPL-043).
+                        <span className="mt-1 block text-foreground tabular" aria-live="polite">
+                          {priceFilterCount}
+                        </span>
+                      )}
+                    </>
+                  }
                 >
                   <Input
                     type="number"
@@ -1592,6 +1606,16 @@ export function NewRun() {
                     onChange={(e) => setMaxOutputPrice(e.target.value)}
                   />
                 </SettingRow>
+
+                {priceFilter.active && (priceFilter.unknownIds.length > 0 || includeUnknownPrice) && (
+                  // Decisão EXPLÍCITA: preço variável não passa no teto por default (IMPL-043).
+                  <SwitchRow
+                    label={`Incluir modelos de preço ${UNKNOWN_PRICE_LABEL}`}
+                    sub={`Roteadores (ex.: openrouter/auto) não têm preço fixo: o teto não é garantido e o custo deles fica fora da estimativa. ${priceFilter.unknownIds.length} no catálogo filtrado.`}
+                    checked={includeUnknownPrice}
+                    onChange={setIncludeUnknownPrice}
+                  />
+                )}
               </SettingGroup>
             </SmoothTabsPanel>
           </SmoothTabsPanels>
@@ -1643,15 +1667,17 @@ export function NewRun() {
               estimate.byRole,
             )
               .map(([papel, usd]) => `${papel}: ${estimate.calls[papel]} chamada(s) · ~${fmtUsd(usd)}`)
-              .join('\n')}${
-              estimate.unknownPriceIds.length
-                ? `\nPreço ${UNKNOWN_PRICE_LABEL} (fora da soma — o custo real será maior): ${estimate.unknownPriceIds.join(', ')}`
-                : ''
-            }`}
+              .join('\n')}${!modelsLoading && estimate.notice ? `\n${estimate.notice}` : ''}`}
           >
             <span className="block text-[10px] tracking-wide uppercase">custo estimado</span>
             {modelsLoading ? '—' : `~${fmtUsd(estimate.low)} – ${fmtUsd(estimate.high)}`}
             {!modelsLoading && estimate.unknownPriceIds.length > 0 && ` + ${UNKNOWN_PRICE_LABEL}`}
+            {!modelsLoading && estimate.notice && (
+              // Aviso VISÍVEL (não só no title): o total acima é parcial (IMPL-043).
+              <span className="block max-w-[22rem] text-[10px] leading-snug text-foreground" role="note">
+                {estimate.notice}
+              </span>
+            )}
             {/* CostPreview (F3/§7.4): quebra por papel, uma linha compacta. */}
             <span className="block text-[10px] text-muted-foreground/80">
               {Object.entries(estimate.byRole)

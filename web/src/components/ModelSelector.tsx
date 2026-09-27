@@ -2,7 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Plus, Search, SlidersHorizontal, X } from 'lucide-react';
 import type { ModelCaps, OpenRouterModel, ReasoningLevel } from '../api';
-import { EFFORT_LABEL, effortOptions, fetchModels, formatPricingLabel, modelCaps } from '../api';
+import {
+  EFFORT_LABEL,
+  effortOptions,
+  fetchModels,
+  formatPricingLabel,
+  modelCaps,
+  unknownPriceNote,
+  UNKNOWN_PRICE_LABEL,
+} from '../api';
 import { useMotionUITransition, useMotionUITheme } from '@/components/motion-ui/ui-theme';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -312,8 +320,11 @@ export function ModelSelector({
           <AnimatePresence initial={false} mode="popLayout">
             {selected.map(({ id, model }) => {
               const resumo = tunable ? tuneSummary(tuning?.[id]) : '';
+              // Preço variável (roteador, "-1"): selo textual + aviso de custo não
+              // estimável no title — nunca um número negativo (IMPL-043).
+              const nota = unknownPriceNote(model);
               const base = model
-                ? `${id} — ${priceLabel(model)}`
+                ? `${id} — ${priceLabel(model)}${nota ? ` · ${nota}` : ''}`
                 : loading
                   ? `${id} — carregando…`
                   : `${id} — fora do catálogo`;
@@ -334,6 +345,11 @@ export function ModelSelector({
                   )}
                 >
                   {shortName(id)}
+                  {nota && (
+                    <span className="rounded-full bg-background px-1.5 text-[10px] font-normal text-muted-foreground">
+                      {UNKNOWN_PRICE_LABEL}
+                    </span>
+                  )}
                   {tunable && (
                     <button
                       type="button"
@@ -424,7 +440,10 @@ export function ModelSelector({
                   <span className="block truncate font-mono text-[12.5px] text-foreground">{m.id}</span>
                   <span className="block truncate text-[12px] text-muted-foreground">{m.name}</span>
                 </span>
-                <span className="shrink-0 font-mono text-[11px] text-muted-foreground tabular">
+                <span
+                  className="shrink-0 font-mono text-[11px] text-muted-foreground tabular"
+                  title={unknownPriceNote(m) ?? undefined}
+                >
                   {priceLabel(m)}
                 </span>
               </button>
