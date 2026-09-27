@@ -9,6 +9,8 @@
 // 3. Estimativa pré-iteração conta as avaliações extras (re-avaliação + carry),
 //    e a porta de orçamento do trainer usa essa conta.
 
+import { competitorMaxTokens, ROLE_MAX_TOKENS } from '../src/roleLimits.js';
+import { competitorModelHint } from '../src/competitor.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -497,7 +499,10 @@ describe('IMPL-013 — estimativa pré-iteração conta as avaliações extras',
     const com = estimateRunCost(input, catalogo);
     const sem = estimateRunCost({ ...input, reevalStages: 0 }, catalogo);
     const m = (id: string) => catalogo.find((x) => x.id === id);
-    const extra = 6 * 2 * (priceCall(m('fake/a'), 500, 300) + priceCall(m('fake/judge'), 500 + 300 + 1500, 1024));
+    // Tetos do IMPL-016: competidor = resposta + folga do degrau; juiz = ROLE_MAX_TOKENS.judge.
+    const tetoComp = competitorMaxTokens(300, input.contestantReasoningLevels?.[0], competitorModelHint(m('fake/a'), 500));
+    const extra =
+      6 * 2 * (priceCall(m('fake/a'), 500, tetoComp) + priceCall(m('fake/judge'), 500 + 300 + 1500, ROLE_MAX_TOKENS.judge));
     expect(extra).toBeGreaterThan(0);
     expect(com.perIteration - sem.perIteration).toBeCloseTo(extra, 12);
     expect(com.point - sem.point).toBeCloseTo(extra * cfg.iterations, 12);

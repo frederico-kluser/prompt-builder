@@ -511,12 +511,17 @@ describe('IMPL-020 (i) — teto menor que a estimativa para a run com parcial ho
   });
 
   it('porta das finais: julgamento completo, finais cortadas => aborted/budget sem duelo pela metade', async () => {
-    // Por cenário: juiz = 2 × (3000 in + 1024 out) = 8048 tokens × p; finais =
-    // 1 par × 2 ordens × (4000 + 512) = 9024 × p. Com p = 1e-4 e competidores
-    // ~grátis: G2 ≈ US$ 1,61 cabe no teto de 1,70; as finais (≈ 1,80) não.
-    const fake = fakePipeline({ price: (id) => (id === 'fake/judge' ? 1e-4 : 1e-9) });
+    // Tetos do IMPL-016: por cenário, juiz = 2 × (3000 in + 4096 out) = 14192
+    // tokens × p; finais = 1 par × 2 ordens × (4000 + 2048) = 12096 × p. Com
+    // p = 1e-4 e competidores ~grátis: G2 ≈ US$ 2,84 cabe no teto de 3,00; cada
+    // veredito do juiz COBRA US$ 0,70 (gasto ≈ 2,80), então as finais (≈ 2,42)
+    // não cabem no que sobra.
+    const fake = fakePipeline({
+      price: (id) => (id === 'fake/judge' ? 1e-4 : 1e-9),
+      cost: (m, n) => (m === 'fake/judge' ? 0.7 : Number((0.0001 * (n + 1)).toFixed(6))),
+    });
     usarGateway(fake.fetch);
-    const rec = (await runWeb({ ...COMPARE, budgetUsd: 1.7 } as never, KEY, {})) as RunRecord;
+    const rec = (await runWeb({ ...COMPARE, budgetUsd: 3 } as never, KEY, {})) as RunRecord;
 
     expect(rec.status).toBe('aborted');
     expect(rec.stoppedReason).toBe('budget');
@@ -594,12 +599,12 @@ describe('IMPL-020 (i) — teto menor que a estimativa para a run com parcial ho
 
   it('treino: a porta POR ITERAÇÃO para antes de uma rodada que não cabe, mantendo o campeão', async () => {
     // Cada chamada custa US$ 0,05 de verdade (rodada 0 com 6 cenários ≈ US$ 2,9);
-    // a estimativa de uma rodada (catálogo) ≈ US$ 2,5. Teto 4: a rodada 0 cabe
+    // a estimativa de uma rodada (catálogo, tetos do IMPL-016) ≈ US$ 2,5. Teto 4: a rodada 0 cabe
     // inteira, mas gasto(≈2,9) + rodada(≈2,5) > 4 => a rodada 1 nem começa.
     // 6 cenários (não 2): a rodada 0 precisa PROMOVER para haver rodada 1, e o
     // gate da melhor de K (IMPL-002) não promove com menos de 5 pares.
     const fake = fakePipeline({
-      price: (id) => (id === 'fake/judge' ? 2e-5 : 1e-9),
+      price: (id) => (id === 'fake/judge' ? 8e-6 : 1e-9),
       cost: () => 0.05,
       harshOnBase: true,
       cenarios: CENARIOS_TREINO,

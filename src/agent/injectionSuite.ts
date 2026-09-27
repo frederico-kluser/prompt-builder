@@ -27,6 +27,7 @@
 // Nenhum `node:*` aqui além do que `dossier.ts` já usa (hash da marca).
 // ----------------------------------------------------------------------------
 import { chatCompletion } from '../openrouter.js';
+import { ROLE_MAX_TOKENS } from '../roleLimits.js';
 import { isControlSignal, RunCancelled } from '../budget.js';
 import { buildDossier, type DossierInput } from './dossier.js';
 import { judgeDossier } from './agentJudge.js';
@@ -583,7 +584,8 @@ async function judgeOnce(
           },
         ],
         temperature: 0,
-        maxTokens: 1024,
+        // Mesmo teto do juiz defendido (IMPL-016): a comparação só mede a defesa.
+        maxTokens: ROLE_MAX_TOKENS.judge,
         responseFormatJson: true,
         timeoutMs: opts.timeoutMs ?? 90_000,
         role: 'judge',

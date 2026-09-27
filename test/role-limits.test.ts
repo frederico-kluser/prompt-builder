@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createGateway, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
+import { createGateway, guessPromptTokens, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
 import { competitorModelHint, runCompetitor } from '../src/competitor.js';
 import { estimateInputFromConfig, estimateRunCost } from '../src/estimate.js';
 import { runToCompletion } from '../src/orchestrator.js';
@@ -43,6 +43,8 @@ import {
 } from '../src/roleLimits.js';
 import * as roleLimitsWeb from '../web/src/engine/roleLimits.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeChatReply, type FakeRequest } from './fakeOpenRouter.js';
+import { canaryOf, duelReply, listwiseReply, pointwiseReply } from './judgeReplies.js';
+import { buildCaseInput } from '../src/engine/caseInput.js';
 import type { CompetitorResponse, Contestant, CostRole, ReasoningLevel, RunConfig, StageSpec } from '../src/types.js';
 
 const KEY = 'sk-or-test';
@@ -73,8 +75,21 @@ const RESPOSTAS = [resposta('v0', 'Você tem 30 dias para trocar.'), resposta('v
 function replyPorPapel(req: FakeRequest): FakeChatReply {
   if (req.stream) return { text: 'Você tem 30 dias.', finishReason: 'stop' };
   if (!req.body?.response_format) return { text: 'Gabarito: 30 dias com nota fiscal.', finishReason: 'stop' };
-  if (/duelo/i.test(req.system)) return { text: '{"winner":"A","explanation":"A mais completa"}', finishReason: 'stop' };
-  return { text: '{"verdict":"resolve","explanation":"confere com a referência"}', finishReason: 'stop' };
+  // Contrato do IMPL-006: todo veredito devolve o canário do pedido.
+  if (/duelo/i.test(req.system)) return { text: duelReply(req, 'A', 'A mais completa'), finishReason: 'stop' };
+  const rotulos = /ordene TODOS estes rotulos da melhor para a pior[^:]*: (\[[^\]]*\])/.exec(req.user)?.[1];
+  if (rotulos) {
+    const labels = JSON.parse(rotulos) as string[];
+    const verdicts = labels.map((label) => ({ label, justificativa: 'confere', veredito: 'resolve' }));
+    return { text: listwiseReply(req, labels, verdicts), finishReason: 'stop' };
+  }
+  // Juiz de dossiê (agente) não usa canário; o pointwise usa.
+  if (!canaryOf(req)) {
+    // Contrato do IMPL-033/034: veredito do dossiê vem com a rubrica.
+    const rubrica = { resultado: 'cumpre', escopo: 'no_escopo', burla: 'nao_detectada', manipulacao: 'nao_detectada' };
+    return { text: JSON.stringify({ rubrica, verdict: 'resolve', explanation: 'confere com a referência' }), finishReason: 'stop' };
+  }
+  return { text: pointwiseReply(req, 'resolve', 'confere com a referência'), finishReason: 'stop' };
 }
 
 /** Roda cada papel UMA vez contra o fake e devolve os pedidos de chat por papel. */
@@ -511,7 +526,8 @@ describe('revisão IMPL-016 — folga do competidor pelo degrau que VAI no fio',
       const [semRac, primeira, retry] = fake.chatRequests();
       expect(semRac.body?.max_tokens).toBe(STAGE.maxTokens);
       expect(semRac.body?.reasoning).toBeUndefined();
-      const prompt = Math.ceil((STAGE.productContext.length + STAGE.question.length) / 4);
+      // Prompt = o caso montado por buildCaseInput (IMPL-009), como o competidor envia.
+      const prompt = guessPromptTokens(buildCaseInput(STAGE));
       expect(primeira.body?.max_tokens).toBe(8192 - prompt);
       expect(r8k.truncationRetried).toBe(true);
       // O retry x2 também não passa do contexto (prompt + max_tokens > contexto = HTTP 400).
@@ -569,7 +585,8 @@ describe('revisão IMPL-016 — porta suave e porta dura usam o MESMO teto do co
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  const CEN: StageSpec[] = [0, 1, 2, 3].map((i) => ({
+  // 5 cenários: piso de n efetivo do IMPL-004 (abaixo disso a run é 'inconclusive').
+  const CEN: StageSpec[] = [0, 1, 2, 3, 4].map((i) => ({
     question: `Pergunta ${i} sobre prazo de troca?`,
     productContext: 'Trocas em 30 dias.',
     maxTokens: 300,
@@ -584,7 +601,7 @@ describe('revisão IMPL-016 — porta suave e porta dura usam o MESMO teto do co
         const usage = { prompt_tokens: 100, completion_tokens: 50, cost: 0.00015 };
         if (req.model === 'fake/ref') return { text: 'Gabarito: 30 dias', usage };
         if (req.stream) return { text: 'Resposta', usage };
-        return { text: '{"verdict":"resolve","explanation":"ok"}', usage };
+        return { text: pointwiseReply(req, 'resolve', 'ok'), usage };
       },
     });
   }
@@ -593,7 +610,7 @@ describe('revisão IMPL-016 — porta suave e porta dura usam o MESMO teto do co
     return {
       mode: 'compare',
       theme: 'suporte',
-      stages: 4,
+      stages: CEN.length,
       customStages: CEN,
       judgeModelIds: ['fake/judge'],
       referenceModelId: 'fake/ref',
@@ -618,15 +635,15 @@ describe('revisão IMPL-016 — porta suave e porta dura usam o MESMO teto do co
       // A estimativa precifica o teto que a reserva usa (resposta + folga de 'max').
       const teto = competitorMaxTokens(300, 'max', competitorModelHint(models.find((m) => m.id === 'fake/a')));
       expect(teto).toBe(300 + COMPETITOR_REASONING_HEADROOM.max);
-      expect(est.byRole.competitor).toBeCloseTo(4 * 2 * (500 + teto) * 1e-6, 9);
+      expect(est.byRole.competitor).toBeCloseTo(CEN.length * 2 * (500 + teto) * 1e-6, 9);
 
       const rec = await runToCompletion(configCom(est.point), KEY, {});
       expect(rec.stoppedReason).toBeUndefined();
       expect(rec.status).toBe('finished');
-      expect(rec.stages.map((s) => s.incomplete ?? false)).toEqual([false, false, false, false]);
+      expect(rec.stages.map((s) => s.incomplete ?? false)).toEqual(CEN.map(() => false));
       // O teto enviado é o mesmo que a estimativa precificou.
       const tetos = fake.chatRequests().filter((r) => r.stream).map((r) => r.body?.max_tokens);
-      expect(tetos).toEqual(Array.from({ length: 8 }, () => teto));
+      expect(tetos).toEqual(Array.from({ length: CEN.length * 2 }, () => teto));
     } finally {
       setDefaultGateway(anterior);
     }
