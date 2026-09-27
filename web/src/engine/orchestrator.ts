@@ -18,6 +18,7 @@ import { emitEvent } from './events';
 import { saveRun } from './storage';
 import { contestantsFromConfig } from './normalize';
 import { listModels } from './openrouter';
+import { enforceRunCompliance } from '../lgpd';
 import { BudgetLedger, isControlSignal, RunCancelled, toControlSignal } from './budget';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
 import { acquireLock } from './runLocks';
@@ -469,6 +470,18 @@ async function runLoop(
     const sane = sanitizeLlmVariants(record.config.competitorConfigs);
     if (sane.error) throw new Error(sane.error);
   }
+
+  // LGPD (IMPL-041): área SENSÍVEL é fail-closed — todo papel que vê o dado
+  // (competidor, juiz/duelo, gerador, gabarito, reescritor) precisa de endpoint
+  // ZDR na allowlist fresca; senão a run é recusada AQUI, antes de qualquer LLM.
+  // IMPL-042: + dado pessoal de aparência real recusa a run ("só sintético",
+  // modo agente, ou "redigir" sem `allowPii`). Runs de uma sessão só relatam:
+  // o config da SESSÃO já passou. O relatório (campo + tipos, nunca o valor)
+  // fica no record — pseudonimizar no envio nunca é correção silenciosa.
+  const preflight = await enforceRunCompliance(record.config, undefined, {
+    nested: Boolean(record.sessionId),
+  });
+  if (preflight.piiReport) record.piiReport = preflight.piiReport;
 
   // Resolve contestants on-demand (variacao: gera as variantes via optimizer).
   if (opts.prepare) {

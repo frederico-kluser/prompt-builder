@@ -1,6 +1,7 @@
 const randomUUID = (): string => crypto.randomUUID();
 import { runToCompletion } from './orchestrator';
 import { listModels } from './openrouter';
+import { enforceRunCompliance } from '../lgpd';
 import { generateContestants, llmReflectLessons } from './variator';
 import { composePrompt } from '../../../src/engine/promptGroup.js';
 import { addToPool, pickParent, sliceScores, type ParetoEntry } from '../../../src/engine/pareto.js';
@@ -267,6 +268,10 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     // Campos declarativos repassados verbatim p/ a run nao perder o intent do
     // usuario (datagen guiado, julgamento por referencia, reasoning por papel).
     compliance: cfg.compliance,
+    // IMPL-042: o modo de dado pessoal vale para toda iteracao e o holdout.
+    piiMode: cfg.piiMode,
+    // ...e a revisao do usuario (`allowPii`) vale para a sessao inteira.
+    allowPii: cfg.allowPii,
     reasoning: cfg.reasoning,
     referenceModelId: cfg.referenceModelId,
     referenceJudging: cfg.referenceJudging,
@@ -356,6 +361,9 @@ async function trainingLoop(
   // fora de uma run (reescritor/reflexão da rodada).
   let iterAtual = 0;
   try {
+    // LGPD (IMPL-041): recusa a sessão sensível fora da allowlist ANTES do
+    // reescritor da iteração 0 (que roda antes da 1ª run e do pré-voo dela).
+    await enforceRunCompliance(cfg);
     for (let i = 0; i < cfg.iterations; i++) {
       iterAtual = i;
       // Porta suave por ITERAÇÃO (espelho do Node): uma iteração inteira é

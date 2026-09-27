@@ -44,6 +44,7 @@
     "!dist/routes.*",
     "!dist/**/*.tsbuildinfo",
     "src/data/lgpd-compliance.json",
+    "src/data/lgpd-allowlist.generated.json",
     "agent-docs",
     "skills",
     "ARENA-CONFIG.md"
@@ -59,6 +60,7 @@
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "stats:sim": "tsx scripts/stats-sim.ts",
+    "lgpd:allowlist": "tsx scripts/gen-lgpd-allowlist.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "web:dev": "npm --prefix web run dev",

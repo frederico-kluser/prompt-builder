@@ -83,7 +83,7 @@ foi consolidada na memória em 2026-09-26.)
 - [Como funciona (visão geral)](#como-funciona-visão-geral)
 - [Os três modos](#os-três-modos)
 - [Os papéis dos modelos](#os-papéis-dos-modelos)
-- [Conformidade LGPD (filtro consultivo)](#conformidade-lgpd-filtro-consultivo)
+- [Conformidade LGPD (allowlist por endpoint)](#conformidade-lgpd-allowlist-por-endpoint)
 - [Anatomia de uma etapa](#anatomia-de-uma-etapa)
 - [Sistema de pontuação](#sistema-de-pontuação)
 - [Stack tecnológica](#stack-tecnológica)
@@ -190,32 +190,86 @@ Toda run tem **modelos de apoio** (gerador + juiz) além dos participantes:
 
 ---
 
-## Conformidade LGPD (filtro consultivo)
+## Conformidade LGPD (allowlist por endpoint)
 
-No passo **Tema** do assistente há um bloco **"Propósito / Conformidade LGPD"** que **filtra o
-catálogo de modelos** conforme a área de uso e a adequação à LGPD — útil porque este repositório é
-do **Grupo Fleury** (dados de saúde = sensíveis). Você escolhe um **propósito/área** (Geral,
-Jurídico, Saúde, Financeiro, Crianças e adolescentes, Setor público — ou **"Livre"**, que mostra
-tudo) e um **rigor** (incluir ou não modelos "permitido com ressalvas"). O filtro vale para **todos**
-os seletores (participantes, gerador, juiz) e **poda** automaticamente seleções que ficaram fora —
-inclusive os defaults de origem chinesa.
+No passo **Tema** do assistente há um bloco **"Conformidade LGPD"** que **filtra o catálogo de
+modelos** conforme a área de uso — útil porque este repositório é do **Grupo Fleury** (dados de
+saúde = sensíveis). Você escolhe uma **área** (Geral, Jurídico, Saúde, Financeiro, Crianças e
+adolescentes, Setor público — ou **"Livre"**, que mostra tudo) e um **rigor** (incluir ou não
+modelos "permitido com ressalvas").
 
-> ⚠️ É **consultivo** e **não é aconselhamento jurídico**: orienta e esconde modelos, mas **não força**
-> o roteamento de providers no OpenRouter. O perfil escolhido é apenas **gravado** em
-> `RunConfig.compliance` (gancho para uma futura fase de *enforcement* — ZDR + `provider.only`).
+A unidade da política é o **endpoint** (provedor + região/variante), como no OpenRouter — não o
+criador do modelo:
 
-**Como classifica** (`web/src/lgpd.ts` + `src/data/lgpd-compliance.json`): pelo **criador** do modelo
-(prefixo do id) quando ele está nas 9 famílias do relatório; senão, por **heurística de origem**
-(China/SG → não recomendado; ocidental → permitido com ressalvas). Status ∈ `permitido` /
-`permitido com ressalvas` / `não recomendado`.
+- **Áreas sensíveis** (todas menos Geral) são **fail-closed**: um modelo só passa com criador
+  conhecido **e** ≥ 1 endpoint ZDR de provedor mapeado no snapshot. Desconhecido ⇒ bloqueado
+  (criador fora da base, provedor fora do mapa, modelo que surgiu depois da geração, área
+  inexistente). Snapshot com mais de **90 dias** (alvo 30) bloqueia a área inteira.
+- A run/sessão sensível passa por um **pré-voo** antes de qualquer chamada de LLM: se QUALQUER
+  papel que vê o dado (competidor, juiz/duelo, gerador, gabarito, reescritor) estiver fora da
+  allowlist, ela é recusada com o papel e o motivo na mensagem.
+- **Geral** segue consultiva (classificação por criador; China/SG → não recomendado).
 
-- Base de conhecimento: [`src/data/lgpd-compliance.json`](./src/data/lgpd-compliance.json) (áreas,
-  famílias, origem de providers/criadores, status ANPD, config ZDR recomendada).
-- Snapshot de referência dos modelos atuais por área:
+> ⚠️ **Não é aconselhamento jurídico.** O roteamento forçado por requisição (`provider.only` +
+> `zdr` + `data_collection: deny`) é a fase seguinte; a allowlist já expõe as tags de endpoint
+> que irão em `provider.only` (`models allowlist --area saude`).
+
+- Classificação: **um só** núcleo puro, [`src/engine/lgpdCore.ts`](./src/engine/lgpdCore.ts),
+  usado pelo CLI/servidor (`src/lgpd.ts`), pela SPA (`web/src/lgpd.ts`) e pelo gerador.
+- Base de conhecimento: [`src/data/lgpd-compliance.json`](./src/data/lgpd-compliance.json) (áreas
+  com `sensivel`, famílias, origem de providers/criadores, status ANPD, config ZDR recomendada).
+- Snapshot por endpoint (consumido em runtime, viaja no pacote npm):
   [`src/data/lgpd-allowlist.generated.json`](./src/data/lgpd-allowlist.generated.json).
-- Regenerar o snapshot: `node scripts/gen-lgpd-allowlist.mjs` (usa os endpoints **públicos**
-  `/models` e `/endpoints/zdr` — sem key).
+- Regenerar: `npm run lgpd:allowlist` (endpoints **públicos** `/models` e `/endpoints/zdr` — sem
+  key). A CI regenera toda semana e abre PR (`.github/workflows/lgpd-allowlist.yml`).
+- Conferir idade e contagens: `prompt-builder models allowlist --check [--max-age 30] [--json]`
+  (exit 3 se vencida/ausente ou com desconhecido liberado).
 - Servido em `GET /v1/benchmark/lgpd`.
+
+### Dado pessoal: redação obrigatória e modo "só sintético"
+
+Toda chamada de LLM — dos 6 papéis (gerador, gabarito, competidor, juiz, duelo, reescritor), no
+CLI, no servidor e na SPA — passa por uma **cascata PT-BR** no ponto único do gateway
+([`src/engine/pii.ts`](./src/engine/pii.ts)) **antes** do envio:
+
+1. **Identificadores estruturados** (regex + dígito verificador mod-11 onde existe): CPF, CNPJ
+   (inclusive o **alfanumérico** de jul/2026), CNS, RG, CEP, telefone, e-mail e CRM saem
+   **pseudonimizados** (`[CPF_1a2b3c4d5e6f]` — o mesmo documento em qualquer formatação vira o
+   mesmo token). O token é **HMAC-SHA-256 com chave secreta de 256 bits por run/sessão**: conhecer
+   pares valor→token (o CPF que o próprio modelo gerou volta pseudonimizado) não permite prever
+   nem reverter outro token, e runs diferentes não se ligam pelo mesmo titular. Placeholders
+   (`(11) 99999-9999`), exemplos notórios e números de serviço (0800/4004) não mexem.
+2. **Nomes e endereços** (heurística local de dicionário + gatilhos — **não** um NER): detectados
+   e contados, **não reescritos** — marcados **"não coberto"**: não há promessa de recall (a
+   literatura mede ~49% para nomes em texto livre). Se os seus dados têm nomes reais, use o modo
+   "só sintético".
+3. **Aparência de dado real** ⇒ **bloqueio com aviso nomeando o campo**, nunca correção silenciosa:
+   identificador forte realista (CPF, CNS, RG com rótulo de identidade, CRM, celular, e-mail pessoal) ou "ficha" de titular
+   (nome + identificador forte, ou nome + ≥2 dados fracos como endereço + CEP). Nome de **persona**
+   do prompt ("Você é a Ana Paula, atendente… Rua Augusta, 1500") e contato comercial viram só
+   aviso. Vale na **importação** — JSON de cenários, pacote, `arena-config@1`, `arena-agent-config@1`
+   e **RunConfig cru** (CLI `--config`/flags, `estimate`, `config validate`, MCP, `POST /runs` e
+   `/sessions`), `library add` e `library seed --file` — e de novo no **pré-voo** da run (SPA inclusive).
+
+**Modo "redigir"** (padrão): o bloqueio acima exige **revisão explícita** — `allowPii: true` no
+config (CLI `--allow-pii`; SPA: "Revisei — importar/iniciar mesmo assim"). Revisado, os
+identificadores seguem pseudonimizados no envio e **voltam ao valor original nas respostas**
+(reversão fora do caminho de envio: o mapa token→valor vive só em memória, por run/sessão) — o
+prompt campeão, o cenário e o gabarito nunca carregam token, e `neverBreak` com o valor original
+continua valendo. Dado de empresa (CNPJ, fixo, CEP, e-mail funcional) nem pede revisão, mas sai
+pseudonimizado do mesmo jeito e a tela da run diz isso. O record guarda em `piiReport` os campos achados
+(caminho + tipos, **nunca o valor**); o CLI narra o mesmo no stderr. Nomes em texto livre seguem
+como estão. **Modo "só sintético"** (`piiMode: "synthetic"`; `--pii-mode synthetic`; switch em
+Avançado na Nova Run): a run/sessão é **recusada**, antes de qualquer LLM, sem exceção manual. O
+**modo agente** (executor `pi`, que fala com o provedor por conta própria, fora do gateway) é
+sempre tratado como "só sintético" — fail-closed para dado de aparência real. ⚠️ O que é só
+**aviso** (CNPJ, fixo, CEP, e-mail funcional, nome) passa no pré-voo e, no **executor**, segue
+**cru** para o provedor (nos demais papéis sai pseudonimizado); o CLI e a tela da run avisam. O
+ground truth determinístico (`expected`) compara a resposta reidratada com o rótulo cru.
+
+Medido na fixture própria [`test/fixtures/pii-ptbr.json`](./test/fixtures/pii-ptbr.json)
+(353 casos): recall 0,98 e precisão 1,00 nos estruturados, 0% de falso positivo no bloqueio
+(`test/lgpd-pii.test.ts`).
 
 Detalhes para agentes na memória CoALA do projeto (`coala.py search "lgpd"`).
 
@@ -340,7 +394,9 @@ prompt-builder/
 │  ├─ llmVariants.ts / reasoning.ts / dedup.ts / scenarioPack.ts   # compare-llms, reasoning por papel, dedup, pacote de cenários
 │  ├─ openrouter.ts          # Cliente OpenRouter: models, chat, stream, custo, validateKey
 │  ├─ techniques.ts          # Biblioteca curada de técnicas de prompt
-│  ├─ lgpd.ts                # Serve a base de conhecimento LGPD (GET /lgpd)
+│  ├─ lgpd.ts                # Base LGPD + allowlist do pacote e pré-voo da run (Node)
+│  ├─ engine/lgpdCore.ts     # Núcleo PURO da LGPD: classificação ÚNICA, allowlist por endpoint, pré-voo
+│  ├─ engine/pii.ts          # Núcleo PURO de dado pessoal PT-BR: detecção (DV mod-11), pseudonimização, bloqueio
 │  ├─ events.ts / normalize.ts / storage.ts / types.ts
 │  └─ data/                  # JSON estático VERSIONADO (lgpd-compliance, lgpd-allowlist.generated)
 │
@@ -349,12 +405,12 @@ prompt-builder/
 │     ├─ main.tsx            # Router, layout, navegação
 │     ├─ api.ts              # Cliente HTTP/SSE + tipos + key no localStorage
 │     ├─ idb.ts              # Cache IndexedDB v2 (incl. store `prompts`); theme.ts / help.ts (contexts)
-│     ├─ lgpd.ts             # Classificação/filtragem de conformidade
+│     ├─ lgpd.ts             # Shim do núcleo LGPD + loader do bundle (SPA)
 │     ├─ styles.css          # Design tokens (claro/escuro)
 │     ├─ components/         # ModelSelector, Toggle, TechniqueSelector, ManualVariantsEditor, KeySetup, HelpModal
 │     └─ pages/              # NewRun (assistente 5 passos), RunsList, RunView, TrainingView, PromptsPage, Settings
 │
-├─ scripts/gen-lgpd-allowlist.mjs   # Regenera o snapshot LGPD (endpoints públicos)
+├─ scripts/gen-lgpd-allowlist.mjs   # Regenera a allowlist LGPD por endpoint (npm run lgpd:allowlist)
 ├─ .agents/skills/          # Biblioteca de Knowledge Skills (fonte única) — ver seção abaixo
 ├─ .claude/skills           # symlink → ../.agents/skills (portabilidade Claude Code)
 ├─ AGENTS.md                # Instruções mínimas para agentes de código (CLAUDE.md é symlink)
@@ -642,8 +698,9 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
   exatas vs estimadas). `costByContestant` é a fatia **só dos competidores**: gasto de juiz/duelo
   não é atribuível a um contestant. Os comandos `runs show`/`sessions show` trazem a quebra por
   papel (`costByRole`).
-- **Filtro LGPD é consultivo**, não garante conformidade (não força roteamento) — ver
-  [Conformidade LGPD](#conformidade-lgpd-filtro-consultivo). **Não é aconselhamento jurídico.**
+- **LGPD:** áreas sensíveis bloqueiam o que está fora da allowlist de endpoints ZDR, mas o
+  roteamento por requisição (`provider.only`) ainda não é forçado — ver
+  [Conformidade LGPD](#conformidade-lgpd-allowlist-por-endpoint). **Não é aconselhamento jurídico.**
 - **Sem autenticação de usuário / multiusuário:** ferramenta local; o histórico é compartilhado por
   quem acessa o servidor.
 - **Persistência em arquivo** (não em banco): ótimo para uso local, não pensado para alta escala.

@@ -63,6 +63,7 @@ export {
   computeCost,
   chatCompletion,
   chatCompletionStream,
+  pseudonymize,
   primeModelsCache,
   peekModelsCache,
   currentConcurrency,
@@ -90,6 +91,36 @@ export type {
   GatewayBlock,
   GatewayErrorKind,
 } from './openrouter.js';
+
+// Dado pessoal PT-BR (IMPL-042): a cascata que o gateway aplica em toda chamada.
+export {
+  scanPii,
+  assessPii,
+  checkImportPii,
+  checkRunPii,
+  assertRunPii,
+  runPiiRefusal,
+  runPiiMessage,
+  summarizeRunPii,
+  isPiiPolicyError,
+  createPiiGuard,
+  PiiGuard,
+  PiiVault,
+  PII_COVERAGE,
+  PII_MODES,
+  isValidCpf,
+  isValidCnpj,
+  isValidCns,
+} from './engine/pii.js';
+export type {
+  PiiFinding,
+  PiiKind,
+  PiiMode,
+  PiiImportCheck,
+  PiiGuardStats,
+  PiiFieldReport,
+  PiiRunReport,
+} from './engine/pii.js';
 export { gatewayConfigFromEnv, configureGatewayFromEnv } from './gatewayEnv.js';
 export type { ChatCompletionParams, ChatCompletionResult, KeyInfo } from './openrouter.js';
 

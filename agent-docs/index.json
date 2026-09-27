@@ -14,8 +14,8 @@
   {
     "topic": "models",
     "title": "Modelos e think levels",
-    "summary": "filtros, schema de export e como não tomar HTTP 400 no esforço",
-    "approxTokens": 1100
+    "summary": "filtros, allowlist LGPD por endpoint, schema de export e como não tomar HTTP 400 no esforço",
+    "approxTokens": 1300
   },
   {
     "topic": "lifecycle",
@@ -62,8 +62,8 @@
   {
     "topic": "troubleshooting",
     "title": "Problemas comuns",
-    "summary": "400 no esforço, 402 sem crédito, 403 = bloqueio (não é key), truncamento > 2%, tudo 'parcial', run travada",
-    "approxTokens": 1150
+    "summary": "400 no esforço, 402 sem crédito, 403 = bloqueio (não é key), dado pessoal recusado (--allow-pii/--pii-mode), truncamento > 2%, tudo 'parcial', run travada",
+    "approxTokens": 1350
   },
   {
     "topic": "config",

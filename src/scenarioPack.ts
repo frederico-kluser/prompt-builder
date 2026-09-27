@@ -5,6 +5,7 @@
 
 import { z } from 'zod';
 import { rougeL } from './dedup.js';
+import { checkImportPii, type PiiImportCheck } from './engine/pii.js';
 import type { ScenarioPack, StageSpec } from './types.js';
 
 /** Valor do campo `format` gravado ao EXPORTAR — versão do contrato. */
@@ -110,7 +111,8 @@ function descreverIssues(error: z.ZodError): string {
  */
 export function parseScenarioPack(
   json: unknown,
-): { ok: true; pack: ScenarioPack } | { ok: false; error: string } {
+  opts: { allowPii?: boolean } = {},
+): { ok: true; pack: ScenarioPack } | { ok: false; error: string; pii?: PiiImportCheck } {
   // O discriminador `format` é checado à mão ANTES do zod, para garantir a
   // mensagem exata quando o arquivo não é um pacote (ou é de outra versão).
   const formato =
@@ -124,6 +126,13 @@ export function parseScenarioPack(
   }
   const result = packSchema.safeParse(json);
   if (!result.success) return { ok: false, error: descreverIssues(result.error) };
+  // LGPD (IMPL-042): pacote com dado pessoal de aparência real é BLOQUEADO com
+  // aviso nomeando o campo (cenário exportado por nós inclusive: `origin` é
+  // editável no arquivo). `allowPii` = revisão humana confirmou.
+  if (!opts.allowPii) {
+    const pii = checkImportPii(result.data);
+    if (!pii.ok) return { ok: false, error: pii.message!, pii };
+  }
   return { ok: true, pack: result.data };
 }
 

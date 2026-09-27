@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { listRuns, loadRun, listSessions, loadSession, getDataDir } from '../../storage.js';
 import { listTechniques } from '../../techniques.js';
-import { getLgpdData } from '../../lgpd.js';
+import { allowlistHealth, getLgpdData, isSensitiveArea, PII_COVERAGE, PII_MODES } from '../../lgpd.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
 import { parseArenaConfig, arenaConfigSummary } from '../../configFile.js';
 import { arenaConfigToRunConfig } from '../../arenaConfig.js';
@@ -527,11 +527,27 @@ export async function cmdLgpd(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
   const ctx = buildContext(parsed);
   const data = getLgpdData();
+  // IMPL-041: área sensível é FAIL-CLOSED (allowlist de endpoints ZDR); a
+  // "geral" segue consultiva. O estado do snapshot vai junto.
+  const health = allowlistHealth(data.allowlist);
   if (ctx.out.isText) {
-    for (const a of data.areas) ctx.out.line(`${a.id.padEnd(24)} ${a.label}`);
-    ctx.out.info('Filtro CONSULTIVO: orienta a escolha, não muda o roteamento no OpenRouter.');
+    for (const a of data.areas) {
+      ctx.out.line(`${a.id.padEnd(24)} ${a.label}${isSensitiveArea(a.id, data) ? '  [sensível: bloqueia fora da allowlist]' : ''}`);
+    }
+    ctx.out.info(`${health.message} Detalhes: \`prompt-builder models allowlist --check\`.`);
+    // IMPL-042: o que a cascata de dado pessoal cobre (e o que NÃO cobre).
+    ctx.out.info(
+      'Dado pessoal: CPF/CNPJ/CNS (dígito verificador), RG, CEP, telefone, e-mail e CRM são pseudonimizados ' +
+        'antes de TODA chamada de LLM; nomes/endereços em texto livre: não coberto. Dado de aparência real ' +
+        'no config recusa a run até a revisão (`--allow-pii`); `--pii-mode synthetic` e o modo agente ' +
+        'recusam sem exceção.',
+    );
   }
-  ctx.out.result(true, 'lgpd.areas', { areas: data.areas });
+  ctx.out.result(true, 'lgpd.areas', {
+    areas: data.areas.map((a) => ({ ...a, sensivel: isSensitiveArea(a.id, data) })),
+    allowlist: { state: health.state, usable: health.usable, dataGeracao: health.geradoEm ?? null, ageDays: health.ageDays ?? null },
+    pii: { modes: PII_MODES, coverage: PII_COVERAGE },
+  });
   return EXIT.OK;
 }
 

@@ -3,6 +3,7 @@ import { parseLifecycleMeta } from './engine/modelLifecycle.js';
 import { isControlSignal, toControlSignal } from './budget.js';
 import { classifyPrice, priceTokens, type PriceFieldKind } from './engine/pricing.js';
 import { finishSignalsOf, isTruncated, truncationSignals } from './engine/truncation.js';
+import { createPiiGuard, type PiiGuardStats } from './engine/pii.js';
 import type {
   CallCost,
   CallFinishSignals,
@@ -890,10 +891,12 @@ export interface ChatMessage {
 }
 
 export interface ChatCompletionResult {
+  /** Resposta do modelo, já REIDRATADA (tokens de dado pessoal → valor original). */
   text: string;
   tokensIn: number;
   tokensOut: number;
   latencyMs: number;
+  /** Payload do fio como o provedor devolveu (pseudonimizado: com os tokens). */
   raw: unknown;
   /** Custo da chamada. Sempre presente; a honestidade fica em `cost.source`. */
   cost: CallCost;
@@ -977,6 +980,16 @@ interface GuardedResponse {
   finish: (ok: boolean) => void;
 }
 
+/**
+ * Escopo do cofre de pseudonimos: a RAIZ do ledger (run avulsa ou sessao de
+ * treino inteira), quando o sink sabe dize-la; senao o proprio sink. Sem sink
+ * (chamada avulsa) = cofre da instancia.
+ */
+function piiScopeOf(sink?: CostSink): object | undefined {
+  if (!sink) return undefined;
+  return typeof sink.piiScope === 'function' ? sink.piiScope() : sink;
+}
+
 // cache por key (sufixo curto) pra nao misturar contas
 function cacheKey(apiKey: string): string {
   return apiKey.slice(-12);
@@ -994,6 +1007,10 @@ export class OpenRouterGateway {
   private readonly modelsCache = new Map<string, { fetchedAt: number; data: OpenRouterModel[] }>();
   /** Alertas da ultima validacao de /models, por key (ver `validateModelsPayload`). */
   private readonly modelsIssues = new Map<string, CatalogIssue[]>();
+  // LGPD (IMPL-042): cascata de dado pessoal — uma por instância (contadores
+  // próprios; cofre de pseudônimos com chave HMAC própria POR RUN/SESSÃO),
+  // aplicada em `buildBody`, o ponto único dos 6 papéis.
+  private readonly piiGuard = createPiiGuard();
 
   constructor(config: Partial<GatewayConfig> = {}) {
     this.cfg = mergeConfig(DEFAULT_CONFIG, config);
@@ -1217,7 +1234,7 @@ export class OpenRouterGateway {
     const model = this.cachedModel(apiKey, modelId);
     const body: Record<string, unknown> = {
       model: modelId,
-      messages,
+      messages: this.protectMessages(messages, params.sink),
       ...deterministicSampling(model, modelId, temperature),
     };
     if (stream) body.stream = true;
@@ -1233,6 +1250,44 @@ export class OpenRouterGateway {
     }
     applyMaxPrice(body, params.maxPricePerMTok);
     return body;
+  }
+
+  /**
+   * LGPD (IMPL-042): NENHUMA mensagem vira corpo de requisicao sem passar pela
+   * cascata de dado pessoal (src/engine/pii.ts) — identificadores estruturados
+   * realistas (CPF, CNPJ, CNS, RG, CEP, telefone, e-mail, CRM) saem
+   * pseudonimizados (HMAC com chave secreta POR RUN/SESSAO: o escopo e a raiz
+   * do ledger da chamada); nomes/enderecos so sao contados (camada
+   * `nao-coberto`). Obrigatoria: nao ha parametro que desligue.
+   */
+  private protectMessages(messages: ChatMessage[], sink?: CostSink): ChatMessage[] {
+    return this.piiGuard.protect(messages, piiScopeOf(sink));
+  }
+
+  /**
+   * A VOLTA (R-16 DEC-5, reversao fora do caminho de envio): tokens do cofre do
+   * escopo viram de novo o valor original ANTES de a resposta chegar aos papeis.
+   * Sem isto o token vazava irreversivel para o que o usuario recebe (variante
+   * campea gravada por `sessions winner --apply`, cenario, gabarito) e o
+   * contrato `neverBreak` com o valor original rejeitava toda reescrita. O mapa
+   * token→valor so existe em memoria, no cofre; o reenvio re-tokeniza igual.
+   */
+  private restoreText(text: string, sink?: CostSink, count = true): string {
+    return this.piiGuard.restore(text, piiScopeOf(sink), count);
+  }
+
+  /**
+   * Os MESMOS tokens que o envio usaria no escopo de `sink` — utilitario para
+   * comparar localmente com o que o modelo viu (diagnostico/teste). Nao conta
+   * como chamada.
+   */
+  pseudonymize<T>(value: T, sink?: CostSink): T {
+    return this.piiGuard.vaultFor(piiScopeOf(sink)).redactDeep(value);
+  }
+
+  /** Contadores da cascata (o teste prova: chamadas varridas == chamadas enviadas). */
+  piiStats(): PiiGuardStats {
+    return this.piiGuard.stats();
   }
 
   /**
@@ -1329,7 +1384,8 @@ export class OpenRouterGateway {
 
       const usage = extractUsage(json.usage);
       const choice = json.choices?.[0];
-      const text = choice?.message?.content ?? '';
+      // Reidratada: o papel recebe o valor original, nunca o token (LGPD, IMPL-042).
+      const text = this.restoreText(choice?.message?.content ?? '', sink);
       const finishReason = finishText(choice?.finish_reason);
       const nativeFinishReason = finishText(choice?.native_finish_reason);
       const inBandBlock = json.error ? blockFromErrorBody(json.error, undefined, 'in_band') : undefined;
@@ -1464,7 +1520,9 @@ export class OpenRouterGateway {
             const delta = choice?.delta?.content;
             if (typeof delta === 'string' && delta.length > 0) {
               fullText += delta;
-              onDelta?.(delta, fullText);
+              // Previa ja reidratada (sem contar: e a mesma resposta a cada pedaco).
+              // `delta` e o pedaco cru do provedor — pode trazer token parcial.
+              onDelta?.(delta, this.restoreText(fullText, sink, false));
             }
             if (typeof choice?.delta?.refusal === 'string') refusal += choice.delta.refusal;
             finishReason = finishText(choice?.finish_reason) ?? finishReason;
@@ -1524,7 +1582,8 @@ export class OpenRouterGateway {
       const latencyMs = Date.now() - startedAt;
       ok = true;
       return {
-        text: fullText,
+        // Texto final acumulado, reidratado (LGPD, IMPL-042).
+        text: this.restoreText(fullText, sink),
         tokensIn: usage.tokensIn,
         tokensOut: usage.tokensOut,
         latencyMs,
@@ -1665,6 +1724,11 @@ export function chatCompletion(params: ChatCompletionParams): Promise<ChatComple
 
 export function chatCompletionStream(params: ChatStreamParams): Promise<ChatCompletionResult> {
   return defaultGateway.chatCompletionStream(params);
+}
+
+/** Pseudonimiza `value` com o cofre do escopo de `sink` na instancia padrao (ver o metodo). */
+export function pseudonymize<T>(value: T, sink?: CostSink): T {
+  return defaultGateway.pseudonymize(value, sink);
 }
 
 export function validateKey(apiKey: string): Promise<ValidateKeyResult> {

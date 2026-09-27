@@ -55,8 +55,7 @@ export type {
   ModelLifecycleSnapshot,
 } from '../../src/engine/modelLifecycle.js';
 import type { ModelReasoningMeta } from './modelCaps';
-import type { LgpdData } from './lgpd';
-import lgpdData from './data/lgpd-compliance.json';
+import { checkImportPii, loadLgpdData, type LgpdData, type PiiImportCheck, type PiiRunReport } from './lgpd';
 import { cancelRun as engineCancelRun, isRunCancellable, startRun } from './engine/orchestrator';
 import { cancelTraining, isTrainingCancellable, startTraining } from './engine/trainer';
 import { generateContestants, generateBasePrompt as engineGenerateBasePrompt } from './engine/variator';
@@ -201,6 +200,10 @@ export interface RunConfig {
   iterations?: number;
   /** Perfil de conformidade LGPD (consultivo; gravado no record). Ausente = "livre". */
   compliance?: { area: string; includeRessalvas: boolean };
+  /** Dado pessoal (IMPL-042): 'redact' (default) ou 'synthetic' ("so sintetico", recusa dado de aparencia real). */
+  piiMode?: 'redact' | 'synthetic';
+  /** Revisei o dado pessoal apontado: pode seguir pseudonimizado ('redact'; nomes nao cobertos). */
+  allowPii?: boolean;
   /** Etapas fornecidas pelo usuario (JSON); pulam o datagen e fixam `stages`. */
   customStages?: StageSpec[];
   // evolucao de prompts / compare-llms:
@@ -471,6 +474,8 @@ export interface RunRecord {
   truncationCounts?: { calls: number; truncated: number };
   /** Os 4 sinais de fim agregados por papel — 100% das chamadas que completaram (IMPL-014). */
   finishSignalsByRole?: Partial<Record<CostRole, FinishSignalCounts>>;
+  /** LGPD (IMPL-042): campos com dado pessoal achados no pré-voo (caminho + tipos, nunca o valor). */
+  piiReport?: PiiRunReport;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -721,8 +726,9 @@ export function subscribeRunLive(id: string, onEvent: (e: any) => void): () => v
 }
 
 export async function fetchLgpd(): Promise<LgpdData> {
-  // Client-side: a base de conhecimento LGPD é empacotada no bundle.
-  return lgpdData as unknown as LgpdData;
+  // Client-side: base + allowlist de endpoints ZDR do bundle, lidas de
+  // `src/data/` (fonte única; a cópia em web/src/data sumiu — IMPL-041).
+  return loadLgpdData();
 }
 
 // -------------- Sessões de treino --------------
@@ -1045,10 +1051,15 @@ function parseRawStages(
  * `prompt-builder-pack@1`/`ai-benchmark-pack@1` (pacote de cenarios) ou um array cru de etapas
  * (`[{question, productContext, rubric?, maxTokens?, reference?}]`, ou `{stages:[…]}`).
  * NUNCA lanca: erro vira `{ ok: false, error }` em PT-BR.
+ *
+ * LGPD (IMPL-042): os TRES formatos passam pela varredura de dado pessoal — aparencia
+ * de dado real bloqueia com aviso nomeando o campo (`pii` preenchido). `allowPii` =
+ * o usuario revisou e confirmou; os identificadores seguem pseudonimizados no envio.
  */
 export async function readImportFile(
   file: File,
-): Promise<{ ok: true; data: ImportedFile } | { ok: false; error: string }> {
+  opts: { allowPii?: boolean } = {},
+): Promise<{ ok: true; data: ImportedFile } | { ok: false; error: string; pii?: PiiImportCheck }> {
   let json: unknown;
   try {
     json = JSON.parse(await file.text());
@@ -1061,7 +1072,7 @@ export async function readImportFile(
       ? (json as Record<string, unknown>).format
       : undefined;
   if (formato === ARENA_CONFIG_FORMAT) {
-    const r = parseArenaConfig(json);
+    const r = parseArenaConfig(json, opts);
     // Chave descontinuada (ex.: training.halving, IMPL-012): lida e ignorada.
     if (r.ok) for (const w of r.warnings ?? []) console.warn(w);
     return r.ok ? { ok: true, data: { kind: 'config', config: r.config } } : r;
@@ -1069,7 +1080,7 @@ export async function readImportFile(
   // Aceita tambem o nome legado: pacotes ja exportados pelo usuario nao podem
   // deixar de abrir por causa de uma troca de marca.
   if (formato === SCENARIO_PACK_FORMAT || formato === SCENARIO_PACK_FORMAT_LEGACY) {
-    const r = parseScenarioPack(json);
+    const r = parseScenarioPack(json, opts);
     return r.ok ? { ok: true, data: { kind: 'pack', pack: r.pack } } : r;
   }
   const arr = Array.isArray(json)
@@ -1079,7 +1090,12 @@ export async function readImportFile(
       : null;
   if (arr) {
     const r = parseRawStages(arr);
-    return r.ok ? { ok: true, data: { kind: 'stages', stages: r.stages } } : r;
+    if (!r.ok) return r;
+    if (!opts.allowPii) {
+      const pii = checkImportPii(r.stages, 'cenarios');
+      if (!pii.ok) return { ok: false, error: pii.message!, pii };
+    }
+    return { ok: true, data: { kind: 'stages', stages: r.stages } };
   }
   return {
     ok: false,

@@ -35,7 +35,21 @@ import {
   UNKNOWN_PRICE_LABEL,
 } from '../api';
 import { CostConfirmDialog } from '../components/CostConfirmDialog';
-import { AREA_LIVRE, creatorPrefix, familiaFor, filterModels, type LgpdData } from '../lgpd';
+import {
+  AREA_LIVRE,
+  allowlistNotice,
+  checkRunCompliance,
+  checkImportPii,
+  checkRunPii,
+  creatorPrefix,
+  familiaFor,
+  filterModels,
+  piiReviewKeys,
+  runPiiMessage,
+  unreviewedPii,
+  type LgpdData,
+  type PiiMode,
+} from '../lgpd';
 import { defaultMinGain, GATE_ALPHA } from '../engine/rank';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
 import {
@@ -380,6 +394,23 @@ export function NewRun() {
   const [includeRessalvas, setIncludeRessalvas] = useState(true);
   const [lgpd, setLgpd] = useState<LgpdData | null>(null);
   const [prunedNotice, setPrunedNotice] = useState<string | null>(null);
+  // Dado pessoal (IMPL-042): 'synthetic' recusa dado de aparência real antes de
+  // começar; nos dois modos o gateway pseudonimiza CPF/telefone/e-mail… no envio.
+  const [piiMode, setPiiMode] = useState<PiiMode>('redact');
+  // Importação bloqueada por dado pessoal: o arquivo fica pendente até o usuário
+  // revisar (nunca corrigimos em silêncio) — ele pode confirmar e importar.
+  // `keys` = o dado que o aviso mostrou (hash, nunca o valor): é o que "Revisei" confirma.
+  const [piiImport, setPiiImport] = useState<{ file: File; message: string; keys: string[] } | null>(null);
+  // Dado de aparência real nos campos no modo "redigir": a run só sai depois da
+  // revisão explícita (vira `allowPii: true` no config). A revisão vale para o
+  // dado REVISADO (chaves de `piiReviewKeys`), não para o que o usuário puser
+  // depois: CPF trocado ou celular novo em qualquer campo pede nova
+  // confirmação. Ref = leitura síncrona no submit disparado pelo próprio botão.
+  const [piiSubmit, setPiiSubmit] = useState<{ message: string; keys: string[] } | null>(null);
+  const piiAck = useRef<Set<string>>(new Set());
+  const ackPii = (keys: readonly string[]) => {
+    for (const k of keys) piiAck.current.add(k);
+  };
 
   // Filtro de preço dos PARTICIPANTES (USD por 1M tokens; '' = sem limite).
   // Teto de gasto (US$) da run/sessão. '' = sem limite.
@@ -690,14 +721,23 @@ export function NewRun() {
       setComplianceArea(config.compliance.area);
       setIncludeRessalvas(config.compliance.includeRessalvas);
     }
+    if (config.piiMode) setPiiMode(config.piiMode);
+    // Importado com "Revisei" (ou `allowPii` no arquivo): a revisão cobre o dado
+    // DESTE arquivo — não o que for digitado depois.
+    if (config.allowPii) ackPii(piiReviewKeys(checkImportPii(config).blocked));
   }
 
   // Import unificado: UM arquivo, três formatos possíveis (arena-config@1,
   // prompt-builder-pack@1 (ou o legado ai-benchmark-pack@1) ou array cru — `readImportFile` detecta.
-  async function handleImport(file: File) {
+  async function handleImport(file: File, allowPii = false, reviewedKeys: readonly string[] = []) {
     setError(null);
-    const res = await readImportFile(file);
-    if (!res.ok) return setError(res.error);
+    const res = await readImportFile(file, { allowPii });
+    if (!res.ok) {
+      if (res.pii) return setPiiImport({ file, message: res.error, keys: piiReviewKeys(res.pii.blocked) });
+      return setError(res.error);
+    }
+    setPiiImport(null);
+    if (allowPii) ackPii(reviewedKeys);
     if (res.data.kind === 'config') {
       applyArenaConfig(res.data.config);
       setConfigSummary(arenaConfigSummary(res.data.config));
@@ -813,6 +853,7 @@ export function NewRun() {
       maxOutputTokens: maxTokensNum,
       ...(rawStages ? { customStages: rawStages } : {}),
       ...(isLivre ? {} : { compliance: { area: complianceArea, includeRessalvas } }),
+      ...(piiMode === 'synthetic' ? { piiMode } : {}),
       ...(scenarioBrief.trim() ? { scenarioBrief: scenarioBrief.trim() } : {}),
       // Seed do pacote: perde o `id` do arquivo (o engine re-rotula as etapas).
       ...(seedCount > 0 && pack ? { scenarioSeed: pack.scenarios.map(({ id, ...spec }) => spec) } : {}),
@@ -929,7 +970,42 @@ export function NewRun() {
       setTab(faltas[0].tab);
       return setError(faltas[0].text);
     }
-    const config = buildConfig();
+    let config = buildConfig();
+
+    // LGPD (IMPL-041): área sensível é fail-closed para TODO papel que vê o
+    // dado (gerador, juiz e gabarito inclusive, que não passam pelo filtro dos
+    // participantes). Avisa aqui em vez de a run nascer e morrer no pré-voo.
+    if (lgpd) {
+      const lgpdCheck = checkRunCompliance(config, lgpd);
+      if (lgpdCheck.violations.length) {
+        return setError(
+          `LGPD (${complianceArea}): ${lgpdCheck.violations.map((v) => v.message).join('; ')}.`,
+        );
+      }
+    }
+
+    // IMPL-042: "só sintético" recusa dado pessoal de aparência real — avisa
+    // aqui, nomeando o campo, em vez de a run nascer e morrer no pré-voo.
+    if (piiMode === 'synthetic') {
+      const piiCheck = checkRunPii(config);
+      if (piiCheck.blocked.length) return setError(runPiiMessage(piiCheck));
+    } else {
+      // Modo "redigir": nada sai com dado de aparência real sem revisão —
+      // pseudonimizar sem avisar seria correção silenciosa (e nome não é redigido).
+      const piiCheck = checkRunPii(config);
+      const pendentes = unreviewedPii(piiCheck.blocked, piiAck.current);
+      if (pendentes.length) {
+        setPiiSubmit({
+          message: runPiiMessage({ ...piiCheck, blocked: pendentes }),
+          keys: piiReviewKeys(pendentes),
+        });
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return setError('Dado pessoal com aparência de dado real — revise o aviso no topo da página.');
+      }
+      if (piiCheck.blocked.length) config = { ...config, allowPii: true };
+    }
+    setPiiSubmit(null);
+
     // Confirmação de custo (IMPL-020): faixa alta > US$ 1 (ou preço
     // desconhecido) exige um "sim" explícito com a faixa e os drivers à vista.
     const est = estimateConfigCost(config, models);
@@ -1004,6 +1080,51 @@ export function NewRun() {
             </SegmentedToggleOption>
           ))}
         </SegmentedToggle>
+
+        {piiImport && (
+          <Banner tone="warn" className="mt-4 flex flex-col gap-3">
+            <p>{piiImport.message}</p>
+            <p className="text-muted-foreground">
+              {piiMode === 'synthetic'
+                ? 'No modo "só sintético" não há exceção: corrija o arquivo ou troque para o modo "redigir" em Avançado.'
+                : 'Se você revisou e são dados sintéticos, pode importar mesmo assim: CPF, telefone, e-mail e demais identificadores continuam pseudonimizados antes de cada envio ao modelo. Nomes em texto livre não são cobertos.'}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {piiMode !== 'synthetic' && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void handleImport(piiImport.file, true, piiImport.keys)}
+                >
+                  Revisei — importar mesmo assim
+                </Button>
+              )}
+              <Button type="button" size="sm" variant="ghost" onClick={() => setPiiImport(null)}>
+                Dispensar
+              </Button>
+            </div>
+          </Banner>
+        )}
+
+        {piiSubmit && (
+          <Banner tone="warn" className="mt-4 flex flex-col gap-3">
+            <p>{piiSubmit.message}</p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="submit"
+                size="sm"
+                variant="outline"
+                onClick={() => ackPii(piiSubmit.keys)}
+              >
+                Revisei — iniciar mesmo assim
+              </Button>
+              <Button type="button" size="sm" variant="ghost" onClick={() => setPiiSubmit(null)}>
+                Voltar e corrigir
+              </Button>
+            </div>
+          </Banner>
+        )}
 
         {(configSummary || draftNotice) && (
           <div className="mt-4 flex flex-col gap-2">
@@ -1514,7 +1635,7 @@ export function NewRun() {
 
                 <SettingRow
                   label="Conformidade LGPD"
-                  sub="Filtra o catálogo de modelos pela área de uso. É consultivo: orienta a escolha, não muda o roteamento no OpenRouter."
+                  sub="Filtra o catálogo pela área de uso. Geral é consultiva; nas áreas sensíveis só passam modelos com endpoint ZDR na allowlist (vale também para gerador, juiz e gabarito) e o desconhecido é bloqueado."
                   wide
                 >
                   <div className="flex flex-wrap gap-1.5">
@@ -1530,6 +1651,10 @@ export function NewRun() {
                     ))}
                   </div>
                   {prunedNotice && <Banner tone="warn">{prunedNotice}</Banner>}
+                  {(() => {
+                    const aviso = allowlistNotice(lgpd, complianceArea);
+                    return aviso ? <Banner tone={aviso.tone}>{aviso.text}</Banner> : null;
+                  })()}
                 </SettingRow>
 
                 {!isLivre && (
@@ -1540,6 +1665,13 @@ export function NewRun() {
                     onChange={setIncludeRessalvas}
                   />
                 )}
+
+                <SwitchRow
+                  label="Só dados sintéticos"
+                  sub="Recusa a run se algum campo tiver dado pessoal com aparência real (CPF, CNS, RG, celular, e-mail pessoal, nome junto de documento ou endereço). Nos dois modos, identificadores são pseudonimizados antes de cada envio; nomes em texto livre não são cobertos pelo detector."
+                  checked={piiMode === 'synthetic'}
+                  onChange={(v) => setPiiMode(v ? 'synthetic' : 'redact')}
+                />
 
                 <SettingRow
                   label="Preço input/output máx. ($/1M)"

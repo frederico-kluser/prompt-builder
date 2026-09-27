@@ -26,6 +26,22 @@ exclui por padrão) · `--free` · `--lgpd-area <área> [--include-ressalvas]` �
 de preço, o stderr diz (linha `teto de preço: …`) quantos ficaram acima do teto
 e quantos de preço variável ficaram fora — ou entraram.
 
+### LGPD: allowlist por endpoint (fail-closed)
+
+`--lgpd-area` filtra pela allowlist **por endpoint** (provedor + região) que
+viaja no pacote, derivada de `GET /models` + `GET /endpoints/zdr`. Em área
+**sensível** (tudo menos `geral`) só passa modelo com criador conhecido e ≥ 1
+endpoint ZDR de provedor mapeado; o que é desconhecido é **bloqueado**, e uma
+run sensível com qualquer papel (competidor, juiz, gerador, gabarito,
+reescritor) fora da allowlist é recusada antes da primeira chamada. Snapshot
+com mais de 90 dias bloqueia a área sensível inteira.
+
+```bash
+prompt-builder models allowlist --check            # idade + contagens; exit 3 se vencida
+prompt-builder models allowlist --check --max-age 30 --json
+prompt-builder models allowlist --area saude       # liberados + tags p/ provider.only
+```
+
 ## O formato de export (`prompt-builder-models@2`)
 
 ```json

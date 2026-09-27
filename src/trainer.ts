@@ -19,6 +19,7 @@ import { formatIterationGate, pairedSignificance, VERDICT_SCORE } from './stats.
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { listModels } from './openrouter.js';
+import { enforceRunCompliance } from './lgpd.js';
 import type {
   Contestant,
   RunCtx,
@@ -252,6 +253,10 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     // Campos declarativos repassados verbatim p/ a run nao perder o intent do
     // usuario (datagen guiado, julgamento por referencia, reasoning por papel).
     compliance: cfg.compliance,
+    // IMPL-042: o modo de dado pessoal vale para toda iteracao e o holdout.
+    piiMode: cfg.piiMode,
+    // ...e a revisao do usuario (`allowPii`) vale para a sessao inteira.
+    allowPii: cfg.allowPii,
     reasoning: cfg.reasoning,
     referenceModelId: cfg.referenceModelId,
     referenceJudging: cfg.referenceJudging,
@@ -349,6 +354,9 @@ async function trainingLoop(
   let championIdInLastRun = '';
 
   try {
+    // LGPD (IMPL-041): recusa a sessão sensível fora da allowlist ANTES do
+    // reescritor da iteração 0 (que roda antes da 1ª run e do pré-voo dela).
+    await enforceRunCompliance(cfg);
     for (let i = 0; i < cfg.iterations; i++) {
       // Porta suave por ITERACAO: uma iteracao inteira e descartavel, e parar
       // aqui deixa o campeao da anterior intacto. Compara contra `high`, nao

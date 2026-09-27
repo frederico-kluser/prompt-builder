@@ -2,6 +2,7 @@
 import type { ExpectedSpec } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
+import type { PiiRunReport } from '../../../src/engine/pii.js';
 import type {
   CallFinishSignals,
   CostEntry,
@@ -233,6 +234,21 @@ export interface RunConfigBase {
    * providers no OpenRouter. Ausente = "livre" (sem filtro de conformidade).
    */
   compliance?: { area: string; includeRessalvas: boolean };
+  /**
+   * Dado pessoal (LGPD, IMPL-042). A cascata PT-BR roda em TODA chamada de LLM
+   * nos dois modos (identificadores estruturados saem pseudonimizados; nomes
+   * em texto livre NAO sao cobertos). 'synthetic' ("so sintetico") alem disso
+   * RECUSA a run no pre-voo se algum campo fornecido pelo usuario tiver dado
+   * pessoal de aparencia real. Ausente = 'redact'.
+   */
+  piiMode?: 'redact' | 'synthetic';
+  /**
+   * O usuario REVISOU o dado pessoal de aparencia real apontado no config e
+   * confirmou que a run pode seguir no modo 'redact' (identificadores
+   * pseudonimizados no envio; nomes NAO cobertos). Sem ele a run e recusada
+   * no pre-voo nomeando o campo. Ignorado no 'synthetic' e no modo agente.
+   */
+  allowPii?: boolean;
   /**
    * Etapas fornecidas pelo usuario (JSON), substituindo o datagen automatico.
    * Quando presente e nao-vazio, o pipeline PULA a geracao de cenarios e usa
@@ -606,6 +622,13 @@ export interface RunRecord {
   finalists?: string[];
   /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
   fairnessWarnings?: string[];
+  /**
+   * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
+   * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
+   * `allowPii`. E o registro de que os identificadores foram pseudonimizados
+   * no envio — nao uma correcao silenciosa.
+   */
+  piiReport?: PiiRunReport;
   /** Diagnostico do juiz (F4.2): pin do contrato (hash) + vies de verbosidade medido. */
   judgeDiagnostics?: {
     contract: { hash: string; modelIds: string[]; pinnedAt: string };

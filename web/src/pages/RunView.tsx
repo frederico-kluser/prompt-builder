@@ -39,6 +39,7 @@ import { VERDICT_META, verdictOf, trunc, denseStages, applyEvent, ScoreHeatmap, 
 import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
 import { TruncationNotice } from '../components/TruncationNotice';
 import { cn } from '@/lib/utils';
+import { describePiiReport } from '../lgpd';
 
 // Notacao decimal sempre: "$4.00e-4" e ilegivel para quem so quer saber quanto
 // custou. Abaixo de 1 centesimo de centavo, um teto basta.
@@ -260,6 +261,9 @@ export function RunView() {
   const isSingle = mode !== 'compare';
   const isRunning = record.status === 'running';
   const totalStages = record.config.stages;
+  const piiNote = describePiiReport(record.piiReport, {
+    agent: (record.config as { agent?: unknown }).agent != null,
+  });
   const doneStages = stages.filter((s) => s.judge || s.error).length;
   // Bloco "Final": mesma condicao de nulidade do FinalsPanel (evita o rotulo orfao).
   const hasFinals = Boolean(record.finalists?.length) || stages.some((s) => s.duels);
@@ -402,6 +406,9 @@ export function RunView() {
       {/* IMPL-022: gravação local que falhou (run só na memória da aba) ou
           persistência negada pelo navegador — visível, nunca só no console. */}
       <StorageNotice className="mt-4" targets={[{ subject: 'run', id: record.id }]} />
+      {/* LGPD (IMPL-042): o que saiu pseudonimizado é dito, nunca silencioso — dado de
+          empresa (CNPJ, fixo, CEP, e-mail funcional) nem pede revisão na Nova Run. */}
+      {piiNote && <Banner className="mt-4">{piiNote}</Banner>}
 
       <SectionHead>Resultados</SectionHead>
       <ScoreHeatmap record={record} ranked={!isRunning} onStageClick={openStageFromHeatmap} />

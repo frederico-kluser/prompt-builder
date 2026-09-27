@@ -6,7 +6,16 @@
 // modelo aceita (`thinkLevels`) e treina contra ele sem arriscar um HTTP 400.
 
 import { MODELS_EXPORT_FORMAT, modelCaps, toExportRow, type ModelExportRow } from '../../modelCaps.js';
-import { filterModels, getLgpdData } from '../../lgpd.js';
+import {
+  AREA_LIVRE,
+  allowlistHealth,
+  allowlistReport,
+  filterModels,
+  getLgpdData,
+  isSensitiveArea,
+  permissionOf,
+  type LgpdData,
+} from '../../lgpd.js';
 import { REASONING_LEVELS } from '../../reasoning.js';
 import { promises as fs } from 'node:fs';
 import {
@@ -17,7 +26,7 @@ import {
   type MaxPriceFilterResult,
 } from '../../engine/pricing.js';
 import { CliError, EXIT } from '../output.js';
-import { buildNetworkContext, parse, type ParsedArgs } from '../context.js';
+import { buildContext, buildNetworkContext, parse, type ParsedArgs } from '../context.js';
 import { daysUntil, describeSuccessor, lifecycleAlertFor } from '../../engine/modelLifecycle.js';
 import type { OpenRouterModel, ReasoningLevel } from '../../types.js';
 
@@ -39,6 +48,10 @@ const OPTIONS = {
   expiring: { type: 'string' },
   format: { type: 'string' },
   out: { type: 'string', short: 'o' },
+  // `models allowlist`
+  check: { type: 'boolean' },
+  area: { type: 'string' },
+  'max-age': { type: 'string' },
 } as const;
 
 function num(v: unknown, campo: string): number | undefined {
@@ -196,10 +209,115 @@ function toCsv(rows: ModelExportRow[]): string {
   return [head.join(','), ...linhas].join('\n');
 }
 
+/** Resultado de `models allowlist` (puro: `now`/`data` injetáveis nos testes). */
+export interface AllowlistCheck {
+  ok: boolean;
+  /** Por que o `--check` reprovou (vazio = aprovado). */
+  failures: string[];
+  data: Record<string, unknown>;
+  lines: string[];
+}
+
+/**
+ * Idade e contagem da allowlist LGPD por endpoint que ESTE pacote carrega
+ * (IMPL-041). Não precisa de key nem de rede: lê o snapshot versionado.
+ * `--check` vira porta (CI): reprova snapshot vencido/ausente/inválido,
+ * idade acima de `--max-age` e qualquer desconhecido liberado em área sensível.
+ */
+export function allowlistCheck(
+  data: LgpdData,
+  opts: { area?: string; maxAgeDays?: number; now?: Date | number } = {},
+): AllowlistCheck {
+  const now = opts.now ?? Date.now();
+  const rep = allowlistReport(data, now);
+  const h = rep.health;
+  const desconhecidos = Object.values(rep.porArea).reduce((s, a) => s + a.desconhecidos_liberados, 0);
+  const failures: string[] = [];
+  if (!h.usable) failures.push(h.message);
+  if (opts.maxAgeDays !== undefined && h.ageDays !== undefined && h.ageDays > opts.maxAgeDays) {
+    failures.push(`idade ${h.ageDays} dias > --max-age ${opts.maxAgeDays}`);
+  }
+  if (desconhecidos > 0) failures.push(`${desconhecidos} desconhecido(s) liberado(s) em área sensível (limiar 0)`);
+
+  const lines = [
+    h.message,
+    `  estado ${h.state} · validade ${h.maxAgeDays} dias · alvo ${h.targetAgeDays} dias`,
+    `  ${h.modelos} modelos no snapshot · ${h.modelosComZdr} com endpoint ZDR · ${h.endpoints} endpoints ZDR`,
+    `  modelos com endpoint elegível na UE: ${rep.modelosComEndpointUe}`,
+  ];
+  if (rep.provedoresForaDoMapa.length) {
+    lines.push(`  provedores fora do mapa (excluídos): ${rep.provedoresForaDoMapa.join(', ')}`);
+  }
+  for (const [id, a] of Object.entries(rep.porArea)) {
+    lines.push(
+      `  ${id.padEnd(22)} ${a.sensivel ? 'sensível  ' : 'consultiva'} permitidos=${a.permitidos} ` +
+        `ressalvas=${a.com_ressalvas} bloqueados=${a.bloqueados} desconhecidos_liberados=${a.desconhecidos_liberados}`,
+    );
+  }
+
+  let modelos: { id: string; status: string; endpoints: string[] }[] | undefined;
+  if (opts.area) {
+    modelos = Object.keys(data.allowlist?.modelos ?? {})
+      .sort()
+      .map((id) => ({ id, p: permissionOf(id, opts.area!, data, now) }))
+      .filter(({ p }) => p.status !== 'não recomendado')
+      .map(({ id, p }) => ({ id, status: p.status, endpoints: (p.endpoints ?? []).map((e) => e.tag) }));
+    lines.push('', `Liberados em "${opts.area}" (${modelos.length}):`);
+    for (const m of modelos) {
+      lines.push(`  ${m.id}  [${m.status}]${m.endpoints.length ? `  only: ${m.endpoints.join(', ')}` : ''}`);
+    }
+  }
+
+  return {
+    ok: failures.length === 0,
+    failures,
+    lines,
+    data: {
+      state: h.state,
+      usable: h.usable,
+      dataGeracao: h.geradoEm ?? null,
+      ageDays: h.ageDays ?? null,
+      maxAgeDays: h.maxAgeDays,
+      targetAgeDays: h.targetAgeDays,
+      counts: { modelos: h.modelos, modelosComZdr: h.modelosComZdr, endpoints: h.endpoints },
+      desconhecidosLiberados: desconhecidos,
+      modelosComEndpointUe: rep.modelosComEndpointUe,
+      provedoresForaDoMapa: rep.provedoresForaDoMapa,
+      porArea: rep.porArea,
+      fonte: data.allowlist?.fonte ?? null,
+      ...(modelos ? { area: opts.area, modelos } : {}),
+      ...(failures.length ? { failures } : {}),
+    },
+  };
+}
+
+async function cmdAllowlist(parsed: ParsedArgs): Promise<number> {
+  const ctx = buildContext(parsed);
+  const { out, values } = ctx;
+  const data = getLgpdData();
+  const area = typeof values.area === 'string' ? values.area.trim() : '';
+  if (area && (area === AREA_LIVRE || !data.areas.some((a) => a.id === area))) {
+    throw new CliError(
+      `--area desconhecida: "${area}". Disponíveis: ${data.areas.map((a) => a.id).join(', ')}.`,
+      EXIT.USAGE,
+    );
+  }
+  const maxAge = num(values['max-age'], '--max-age');
+  const r = allowlistCheck(data, { area: area || undefined, maxAgeDays: maxAge });
+  for (const l of r.lines) out.line(l);
+  const check = values.check === true;
+  if (check && !r.ok) for (const f of r.failures) out.warn(`allowlist reprovada: ${f}`);
+  out.result(check ? r.ok : true, 'models.allowlist', r.data);
+  // Sem --check é só relatório; com --check a reprovação é erro de CONFIG (3).
+  return check && !r.ok ? EXIT.CONFIG : EXIT.OK;
+}
+
 export async function cmdModels(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
   const rest = sub === argv[0] ? argv.slice(1) : argv;
   const parsed: ParsedArgs = parse(rest, OPTIONS);
+  // `allowlist` lê o snapshot do pacote: sem key, sem rede.
+  if (sub === 'allowlist') return cmdAllowlist(parsed);
   const ctx = await buildNetworkContext(parsed);
   const { out, values } = ctx;
 
@@ -261,6 +379,13 @@ export async function cmdModels(argv: string[]): Promise<number> {
     const dica =
       price.unknownIds.length > 0 && !price.includeUnknown ? ' — use --include-variable-price para mantê-los' : '';
     out.info(`teto de preço: ${detalhes.join(' · ')}${dica}`);
+  }
+  // Área sensível com snapshot inutilizável (ou velho) esvazia/encolhe a lista:
+  // diga POR QUÊ em vez de devolver 0 modelos em silêncio.
+  const lgpdArea = typeof values['lgpd-area'] === 'string' ? values['lgpd-area'].trim() : '';
+  if (lgpdArea && isSensitiveArea(lgpdArea, getLgpdData())) {
+    const h = allowlistHealth(getLgpdData().allowlist);
+    if (h.state !== 'ok') out.warn(h.message);
   }
   const limit = num(values.limit, '--limit');
   const rows = (limit !== undefined ? filtrados.slice(0, limit) : filtrados).map(toExportRow);

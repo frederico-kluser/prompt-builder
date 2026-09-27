@@ -1,0 +1,54 @@
+# Regenera a allowlist LGPD por endpoint (IMPL-041, R-16:REC-3).
+#
+# O snapshot src/data/lgpd-allowlist.generated.json vale 90 dias (alvo 30):
+# passado isso o runtime BLOQUEIA toda área sensível (fail-closed). Este job
+# regenera toda semana a partir de GET /models + GET /endpoints/zdr (públicos,
+# sem key, sem custo), valida com a porta `models allowlist --check` e o teste
+# de contrato, e abre um PR com o diff (um modelo por linha: diff legível).
+#
+# Requer: Settings → Actions → "Allow GitHub Actions to create and approve pull
+# requests". Não precisa de MOTION_TOKEN (só a raiz é instalada; o web não).
+name: lgpd-allowlist
+
+on:
+  schedule:
+    - cron: '17 6 * * 1' # segunda, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Regenera o snapshot (endpoints públicos)
+        run: npm run lgpd:allowlist
+      - name: Porta — idade ≤ 30 dias e 0 desconhecidos liberados
+        run: npx tsx src/cli/index.ts models allowlist --check --max-age 30
+      - name: Contrato da allowlist
+        run: npx vitest run test/lgpd-allowlist.test.ts
+      - name: Abre PR com o snapshot novo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet -- src/data/lgpd-allowlist.generated.json; then
+            echo "snapshot inalterado"; exit 0
+          fi
+          dia="$(date -u +%Y-%m-%d)"
+          branch="chore/lgpd-allowlist-${dia}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add src/data/lgpd-allowlist.generated.json
+          git commit -m "chore(lgpd): regenera allowlist por endpoint (${dia})"
+          git push -u origin "$branch"
+          gh pr create --title "chore(lgpd): allowlist por endpoint ${dia}" \
+            --body "Regenerado de GET /models + GET /endpoints/zdr. Revise provedores novos fora do mapa (\`npx tsx src/cli/index.ts models allowlist\`)."

@@ -1,0 +1,3990 @@
+{
+  "format": "pii-fixture-ptbr@1",
+  "descricao": "Fixture PRÓPRIA do IMPL-042 (R-16:REC-5): identificadores BR válidos e inválidos, distratores clínicos/comerciais, nomes e endereços. Todos os dados são SINTÉTICOS: DV calculados por gerador independente do detector (semente fixa); nomes/logradouros genéricos. `pii` = o que DEVERIA ser achado; `realPii` = a importação DEVERIA ser bloqueada.",
+  "gerado_em": "2026-09-27",
+  "cases": [
+    {
+      "id": "cpf-valido-001",
+      "grupo": "cpf-valido",
+      "text": "Meu CPF é 53304769331, pode verificar o cadastro?",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "53304769331"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-002",
+      "grupo": "cpf-valido",
+      "text": "CPF do titular: 113.072.226-09",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "113.072.226-09"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-003",
+      "grupo": "cpf-valido",
+      "text": "Segue o CPF 173100187-88 para emissão da nota.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "173100187-88"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-004",
+      "grupo": "cpf-valido",
+      "text": "Paciente informou o documento 20948121114 na recepção.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "20948121114"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-005",
+      "grupo": "cpf-valido",
+      "text": "cpf 575.472.430-61 — conferir se bate com o convênio",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "575.472.430-61"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-006",
+      "grupo": "cpf-valido",
+      "text": "Preciso atualizar o cadastro vinculado ao CPF nº 109176835-87.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "109176835-87"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-007",
+      "grupo": "cpf-valido",
+      "text": "O cliente passou o CPF (70066568420) por telefone.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "70066568420"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-008",
+      "grupo": "cpf-valido",
+      "text": "Documento: 697.112.416-25. Data de nascimento: 12/03/1985.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "697.112.416-25"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-009",
+      "grupo": "cpf-valido",
+      "text": "Meu CPF é 298568032-84, pode verificar o cadastro?",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "298568032-84"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-010",
+      "grupo": "cpf-valido",
+      "text": "CPF do titular: 86327438130",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "86327438130"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-011",
+      "grupo": "cpf-valido",
+      "text": "Segue o CPF 556.076.436-11 para emissão da nota.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "556.076.436-11"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-012",
+      "grupo": "cpf-valido",
+      "text": "Paciente informou o documento 087683357-17 na recepção.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "087683357-17"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-013",
+      "grupo": "cpf-valido",
+      "text": "cpf 65791106270 — conferir se bate com o convênio",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "65791106270"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-014",
+      "grupo": "cpf-valido",
+      "text": "Preciso atualizar o cadastro vinculado ao CPF nº 404.225.760-77.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "404.225.760-77"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-015",
+      "grupo": "cpf-valido",
+      "text": "O cliente passou o CPF (977718984-24) por telefone.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "977718984-24"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-016",
+      "grupo": "cpf-valido",
+      "text": "Documento: 46206159191. Data de nascimento: 12/03/1985.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "46206159191"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-017",
+      "grupo": "cpf-valido",
+      "text": "Meu CPF é 093.972.163-50, pode verificar o cadastro?",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "093.972.163-50"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-018",
+      "grupo": "cpf-valido",
+      "text": "CPF do titular: 311512664-69",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "311512664-69"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-019",
+      "grupo": "cpf-valido",
+      "text": "Segue o CPF 23497725943 para emissão da nota.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "23497725943"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-020",
+      "grupo": "cpf-valido",
+      "text": "Paciente informou o documento 684.009.393-01 na recepção.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "684.009.393-01"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-021",
+      "grupo": "cpf-valido",
+      "text": "cpf 950653839-52 — conferir se bate com o convênio",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "950653839-52"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-022",
+      "grupo": "cpf-valido",
+      "text": "Preciso atualizar o cadastro vinculado ao CPF nº 86809960929.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "86809960929"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-023",
+      "grupo": "cpf-valido",
+      "text": "O cliente passou o CPF (655.019.825-95) por telefone.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "655.019.825-95"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-024",
+      "grupo": "cpf-valido",
+      "text": "Documento: 008924856-20. Data de nascimento: 12/03/1985.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "008924856-20"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-025",
+      "grupo": "cpf-valido",
+      "text": "Meu CPF é 72361125188, pode verificar o cadastro?",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "72361125188"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-026",
+      "grupo": "cpf-valido",
+      "text": "CPF do titular: 571.769.097-50",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "571.769.097-50"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-027",
+      "grupo": "cpf-valido",
+      "text": "Segue o CPF 046121435-07 para emissão da nota.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "046121435-07"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-028",
+      "grupo": "cpf-valido",
+      "text": "Paciente informou o documento 33782895207 na recepção.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "33782895207"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-029",
+      "grupo": "cpf-valido",
+      "text": "cpf 705.858.709-42 — conferir se bate com o convênio",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "705.858.709-42"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-valido-030",
+      "grupo": "cpf-valido",
+      "text": "Preciso atualizar o cadastro vinculado ao CPF nº 770185591-20.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "770185591-20"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cpf-exemplo-031",
+      "grupo": "cpf-exemplo",
+      "text": "Exemplo de preenchimento: 123.456.789-09 (fictício).",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "123.456.789-09"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cpf-exemplo-032",
+      "grupo": "cpf-exemplo",
+      "text": "Use o CPF de teste 111.444.777-35 no ambiente de homologação.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "111.444.777-35"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cpf-invalido-033",
+      "grupo": "cpf-invalido",
+      "text": "CPF do titular: 94172140123",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cpf-invalido-034",
+      "grupo": "cpf-invalido",
+      "text": "Segue o CPF 979.949.173-86 para emissão da nota.",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cpf-invalido-035",
+      "grupo": "cpf-invalido",
+      "text": "CPF do titular: 68833840576",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cpf-invalido-036",
+      "grupo": "cpf-invalido",
+      "text": "Documento: 963.880.350-96. Data de nascimento: 12/03/1985.",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cpf-invalido-037",
+      "grupo": "cpf-invalido",
+      "text": "Meu CPF é 62206271309, pode verificar o cadastro?",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cpf-invalido-038",
+      "grupo": "cpf-invalido",
+      "text": "cpf 779.302.977-16 — conferir se bate com o convênio",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cpf-invalido-039",
+      "grupo": "cpf-invalido",
+      "text": "cpf 85797128905 — conferir se bate com o convênio",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cpf-invalido-040",
+      "grupo": "cpf-invalido",
+      "text": "O cliente passou o CPF (678.363.584-82) por telefone.",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cpf-invalido-041",
+      "grupo": "cpf-invalido",
+      "text": "cpf 67783163909 — conferir se bate com o convênio",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cpf-invalido-042",
+      "grupo": "cpf-invalido",
+      "text": "Segue o CPF 106.256.470-70 para emissão da nota.",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cpf-invalido-043",
+      "grupo": "cpf-invalido",
+      "text": "CPF 000.000.000-00 é o placeholder do formulário.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "cpf-invalido-044",
+      "grupo": "cpf-invalido",
+      "text": "Informe o CPF no formato ***.***.***-** (mascarado).",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "cpf-invalido-045",
+      "grupo": "cpf-invalido",
+      "text": "O CPF 111.111.111-11 é rejeitado pelo sistema.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "cpf-invalido-046",
+      "grupo": "cpf-invalido",
+      "text": "Campo CPF: XXX.XXX.XXX-XX",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "cpf-invalido-047",
+      "grupo": "cpf-invalido",
+      "text": "Os três primeiros dígitos do CPF (529) indicam a região fiscal.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "cpf-invalido-048",
+      "grupo": "cpf-invalido",
+      "text": "Pedido nº 48213579102 aguardando faturamento.",
+      "pii": [],
+      "realPii": false,
+      "nota": "11 dígitos sem DV de CPF"
+    },
+    {
+      "id": "cnpj-valido-049",
+      "grupo": "cnpj-valido",
+      "text": "Razão social Comercial Aurora Ltda, CNPJ 05.818.419/0001-79.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "05.818.419/0001-79"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-050",
+      "grupo": "cnpj-valido",
+      "text": "A nota foi emitida para o CNPJ 40.629.718/0001-66.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "40.629.718/0001-66"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-051",
+      "grupo": "cnpj-valido",
+      "text": "Fornecedor cadastrado sob o CNPJ nº 48.883.877/0001-02",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "48.883.877/0001-02"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-052",
+      "grupo": "cnpj-valido",
+      "text": "CNPJ: 34013774000179 — situação ativa na Receita.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "34013774000179"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-053",
+      "grupo": "cnpj-valido",
+      "text": "Razão social Comercial Aurora Ltda, CNPJ 64.910.357/0001-90.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "64.910.357/0001-90"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-054",
+      "grupo": "cnpj-valido",
+      "text": "A nota foi emitida para o CNPJ 47.144.879/0001-09.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "47.144.879/0001-09"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-055",
+      "grupo": "cnpj-valido",
+      "text": "Fornecedor cadastrado sob o CNPJ nº 70.126.293/0001-33",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "70.126.293/0001-33"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-056",
+      "grupo": "cnpj-valido",
+      "text": "CNPJ: 36370940000110 — situação ativa na Receita.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "36370940000110"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-057",
+      "grupo": "cnpj-valido",
+      "text": "Razão social Comercial Aurora Ltda, CNPJ 94.245.563/0001-93.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "94.245.563/0001-93"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-058",
+      "grupo": "cnpj-valido",
+      "text": "A nota foi emitida para o CNPJ 99.509.130/0001-11.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "99.509.130/0001-11"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-059",
+      "grupo": "cnpj-valido",
+      "text": "Fornecedor cadastrado sob o CNPJ nº 78.248.814/0001-37",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "78.248.814/0001-37"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-060",
+      "grupo": "cnpj-valido",
+      "text": "CNPJ: 90126962000184 — situação ativa na Receita.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "90126962000184"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-061",
+      "grupo": "cnpj-valido",
+      "text": "Razão social Comercial Aurora Ltda, CNPJ 29.775.922/0001-52.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "29.775.922/0001-52"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-062",
+      "grupo": "cnpj-valido",
+      "text": "A nota foi emitida para o CNPJ 41.567.452/0001-37.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "41.567.452/0001-37"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-063",
+      "grupo": "cnpj-valido",
+      "text": "Fornecedor cadastrado sob o CNPJ nº 90.543.381/0001-48",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "90.543.381/0001-48"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-valido-064",
+      "grupo": "cnpj-valido",
+      "text": "CNPJ: 25758410000127 — situação ativa na Receita.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "25758410000127"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-alfa-065",
+      "grupo": "cnpj-alfa",
+      "text": "Razão social Comercial Aurora Ltda, CNPJ ZG.6HQ.JB2/LMJT-22.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "ZG.6HQ.JB2/LMJT-22"
+        }
+      ],
+      "realPii": false,
+      "nota": "CNPJ alfanumérico (jul/2026)"
+    },
+    {
+      "id": "cnpj-alfa-066",
+      "grupo": "cnpj-alfa",
+      "text": "A nota foi emitida para o CNPJ 8V.PZM.KM7/I6DM-33.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "8V.PZM.KM7/I6DM-33"
+        }
+      ],
+      "realPii": false,
+      "nota": "CNPJ alfanumérico (jul/2026)"
+    },
+    {
+      "id": "cnpj-alfa-067",
+      "grupo": "cnpj-alfa",
+      "text": "Fornecedor cadastrado sob o CNPJ nº JKGWCV2QKDFZ46",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "JKGWCV2QKDFZ46"
+        }
+      ],
+      "realPii": false,
+      "nota": "CNPJ alfanumérico (jul/2026)"
+    },
+    {
+      "id": "cnpj-alfa-068",
+      "grupo": "cnpj-alfa",
+      "text": "CNPJ: 6T.RRY.F4K/CWPK-52 — situação ativa na Receita.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "6T.RRY.F4K/CWPK-52"
+        }
+      ],
+      "realPii": false,
+      "nota": "CNPJ alfanumérico (jul/2026)"
+    },
+    {
+      "id": "cnpj-alfa-069",
+      "grupo": "cnpj-alfa",
+      "text": "Razão social Comercial Aurora Ltda, CNPJ JV.SMJ.AYA/3RUN-34.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "JV.SMJ.AYA/3RUN-34"
+        }
+      ],
+      "realPii": false,
+      "nota": "CNPJ alfanumérico (jul/2026)"
+    },
+    {
+      "id": "cnpj-alfa-070",
+      "grupo": "cnpj-alfa",
+      "text": "A nota foi emitida para o CNPJ 2VY53DTQ07P196.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "2VY53DTQ07P196"
+        }
+      ],
+      "realPii": false,
+      "nota": "CNPJ alfanumérico (jul/2026)"
+    },
+    {
+      "id": "cnpj-exemplo-071",
+      "grupo": "cnpj-exemplo",
+      "text": "Exemplo de CNPJ: 11.222.333/0001-81.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "11.222.333/0001-81"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-invalido-072",
+      "grupo": "cnpj-invalido",
+      "text": "Razão social Comercial Aurora Ltda, CNPJ 51495701000183.",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cnpj-invalido-073",
+      "grupo": "cnpj-invalido",
+      "text": "Fornecedor cadastrado sob o CNPJ nº 87.913.639/0001-40",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cnpj-invalido-074",
+      "grupo": "cnpj-invalido",
+      "text": "CNPJ: 35634488000197 — situação ativa na Receita.",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cnpj-invalido-075",
+      "grupo": "cnpj-invalido",
+      "text": "Razão social Comercial Aurora Ltda, CNPJ 52.072.053/0001-15.",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cnpj-invalido-076",
+      "grupo": "cnpj-invalido",
+      "text": "Fornecedor cadastrado sob o CNPJ nº 40246918000137",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cnpj-invalido-077",
+      "grupo": "cnpj-invalido",
+      "text": "Razão social Comercial Aurora Ltda, CNPJ 99.723.248/0001-41.",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cnpj-invalido-078",
+      "grupo": "cnpj-invalido",
+      "text": "CNPJ 00.000.000/0000-00 (preencher)",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "cnpj-invalido-079",
+      "grupo": "cnpj-invalido",
+      "text": "Código do lote AB12CD34EF5678 conferido.",
+      "pii": [],
+      "realPii": false,
+      "nota": "alfanumérico sem contexto"
+    },
+    {
+      "id": "cns-valido-080",
+      "grupo": "cns-valido",
+      "text": "Cartão Nacional de Saúde: 151614345030000",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "151614345030000"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cns-valido-081",
+      "grupo": "cns-valido",
+      "text": "CNS do paciente 107 1772 8152 0002, confirmar na recepção.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "107 1772 8152 0002"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cns-valido-082",
+      "grupo": "cns-valido",
+      "text": "Número do cartão do SUS 192680833300000.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "192680833300000"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cns-valido-083",
+      "grupo": "cns-valido",
+      "text": "Informe o CNS 100 5429 3404 0005 no agendamento.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "100 5429 3404 0005"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cns-valido-084",
+      "grupo": "cns-valido",
+      "text": "Cartão Nacional de Saúde: 256036667270004",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "256036667270004"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cns-valido-085",
+      "grupo": "cns-valido",
+      "text": "CNS do paciente 225 3352 5241 0009, confirmar na recepção.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "225 3352 5241 0009"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cns-valido-086",
+      "grupo": "cns-valido",
+      "text": "Número do cartão do SUS 107708284800001.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "107708284800001"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cns-valido-087",
+      "grupo": "cns-valido",
+      "text": "Informe o CNS 261 3369 0328 0008 no agendamento.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "261 3369 0328 0008"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cns-valido-088",
+      "grupo": "cns-valido",
+      "text": "Cartão Nacional de Saúde: 269672736240000",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "269672736240000"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "cns-valido-089",
+      "grupo": "cns-valido",
+      "text": "Cartão Nacional de Saúde: 899144991174642",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "899144991174642"
+        }
+      ],
+      "realPii": true,
+      "nota": "provisório"
+    },
+    {
+      "id": "cns-valido-090",
+      "grupo": "cns-valido",
+      "text": "CNS do paciente 983 0019 5626 9843, confirmar na recepção.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "983 0019 5626 9843"
+        }
+      ],
+      "realPii": true,
+      "nota": "provisório"
+    },
+    {
+      "id": "cns-valido-091",
+      "grupo": "cns-valido",
+      "text": "Número do cartão do SUS 817092103476994.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "817092103476994"
+        }
+      ],
+      "realPii": true,
+      "nota": "provisório"
+    },
+    {
+      "id": "cns-valido-092",
+      "grupo": "cns-valido",
+      "text": "Informe o CNS 874 0260 3051 8199 no agendamento.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "874 0260 3051 8199"
+        }
+      ],
+      "realPii": true,
+      "nota": "provisório"
+    },
+    {
+      "id": "cns-valido-093",
+      "grupo": "cns-valido",
+      "text": "Cartão Nacional de Saúde: 994102198491855",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "994102198491855"
+        }
+      ],
+      "realPii": true,
+      "nota": "provisório"
+    },
+    {
+      "id": "cns-valido-094",
+      "grupo": "cns-valido",
+      "text": "CNS do paciente 973 4869 6243 9392, confirmar na recepção.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "973 4869 6243 9392"
+        }
+      ],
+      "realPii": true,
+      "nota": "provisório"
+    },
+    {
+      "id": "cns-valido-095",
+      "grupo": "cns-valido",
+      "text": "Número do cartão do SUS 742662337558481.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "742662337558481"
+        }
+      ],
+      "realPii": true,
+      "nota": "provisório"
+    },
+    {
+      "id": "cns-valido-096",
+      "grupo": "cns-valido",
+      "text": "Informe o CNS 759 7654 7770 2549 no agendamento.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "759 7654 7770 2549"
+        }
+      ],
+      "realPii": true,
+      "nota": "provisório"
+    },
+    {
+      "id": "cns-valido-097",
+      "grupo": "cns-valido",
+      "text": "Cartão Nacional de Saúde: 740316146016498",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "740316146016498"
+        }
+      ],
+      "realPii": true,
+      "nota": "provisório"
+    },
+    {
+      "id": "cns-invalido-098",
+      "grupo": "cns-invalido",
+      "text": "CNS do paciente 925314604773622, confirmar na recepção.",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cns-invalido-099",
+      "grupo": "cns-invalido",
+      "text": "Informe o CNS 908 3545 5140 8309 no agendamento.",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cns-invalido-100",
+      "grupo": "cns-invalido",
+      "text": "Cartão Nacional de Saúde: 765489713237828",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cns-invalido-101",
+      "grupo": "cns-invalido",
+      "text": "CNS do paciente 834 7256 0064 3845, confirmar na recepção.",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cns-invalido-102",
+      "grupo": "cns-invalido",
+      "text": "Cartão Nacional de Saúde: 828252858360229",
+      "pii": [],
+      "realPii": false,
+      "nota": "DV inválido"
+    },
+    {
+      "id": "cns-invalido-103",
+      "grupo": "cns-invalido",
+      "text": "IMEI do aparelho: 861536030196001.",
+      "pii": [],
+      "realPii": false,
+      "nota": "15 dígitos sem contexto de CNS"
+    },
+    {
+      "id": "rg-valido-104",
+      "grupo": "rg-valido",
+      "text": "Apresentar o RG (10.934.317-7) na coleta.",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "10.934.317-7"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-valido-105",
+      "grupo": "rg-valido",
+      "text": "Documento de identidade nº 42.480.152-4",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "42.480.152-4"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-valido-106",
+      "grupo": "rg-valido",
+      "text": "RG 57.737.319-9 SSP/SP",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "57.737.319-9"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-valido-107",
+      "grupo": "rg-valido",
+      "text": "Documento de identidade nº 13.357.481-2",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "13.357.481-2"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-valido-108",
+      "grupo": "rg-valido",
+      "text": "Carteira de identidade 29.222.718-2, expedida em 2011.",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "29.222.718-2"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-valido-109",
+      "grupo": "rg-valido",
+      "text": "Documento de identidade nº 18.679.179-0",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "18.679.179-0"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-valido-110",
+      "grupo": "rg-valido",
+      "text": "Documento de identidade nº 29.466.237-7",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "29.466.237-7"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-valido-111",
+      "grupo": "rg-valido",
+      "text": "Apresentar o RG (33.744.653-0) na coleta.",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "33.744.653-0"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-contexto-112",
+      "grupo": "rg-contexto",
+      "text": "RG nº 6739850 (SSP-MG)",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "6739850"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-contexto-113",
+      "grupo": "rg-contexto",
+      "text": "RG nº MG-17.100.441 (SSP-MG)",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "MG-17.100.441"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-contexto-114",
+      "grupo": "rg-contexto",
+      "text": "identidade 10238092",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "10238092"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-contexto-115",
+      "grupo": "rg-contexto",
+      "text": "RG nº MG-3.486.167 (SSP-MG)",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "MG-3.486.167"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-contexto-116",
+      "grupo": "rg-contexto",
+      "text": "RG nº 1939173 (SSP-MG)",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "1939173"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-contexto-117",
+      "grupo": "rg-contexto",
+      "text": "RG nº MG-4.567.409 (SSP-MG)",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "MG-4.567.409"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-distrator-118",
+      "grupo": "rg-distrator",
+      "text": "Tamanho do arquivo: 12.345.678 bytes.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "rg-distrator-119",
+      "grupo": "rg-distrator",
+      "text": "O programa atendeu 2.345.678 famílias em 2024.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "rg-distrator-120",
+      "grupo": "rg-distrator",
+      "text": "Versão 1.234.567 do firmware.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "rg-distrator-121",
+      "grupo": "rg-distrator",
+      "text": "RG é o documento de identidade estadual.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "rg-distrator-122",
+      "grupo": "rg-distrator",
+      "text": "Faturamento anual de R$ 45.678.901,00.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "cep-valido-123",
+      "grupo": "cep-valido",
+      "text": "Entregar no CEP 76209-112, bloco B.",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "76209-112"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-valido-124",
+      "grupo": "cep-valido",
+      "text": "CEP 20563-860",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "20563-860"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-valido-125",
+      "grupo": "cep-valido",
+      "text": "Entregar no CEP 74524-742, bloco B.",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "74524-742"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-valido-126",
+      "grupo": "cep-valido",
+      "text": "Endereço de cobrança com CEP 38247-375.",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "38247-375"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-valido-127",
+      "grupo": "cep-valido",
+      "text": "CEP 55635-441",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "55635-441"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-valido-128",
+      "grupo": "cep-valido",
+      "text": "O frete para 73320-729 sai em 3 dias úteis.",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "73320-729"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-valido-129",
+      "grupo": "cep-valido",
+      "text": "Entregar no CEP 72949-075, bloco B.",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "72949-075"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-valido-130",
+      "grupo": "cep-valido",
+      "text": "Endereço de cobrança com CEP 04385-306.",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "04385-306"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-valido-131",
+      "grupo": "cep-valido",
+      "text": "Entregar no CEP 34905-063, bloco B.",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "34905-063"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-valido-132",
+      "grupo": "cep-valido",
+      "text": "Entregar no CEP 51436-885, bloco B.",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "51436-885"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-contexto-133",
+      "grupo": "cep-contexto",
+      "text": "CEP: 74372379",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "74372379"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-contexto-134",
+      "grupo": "cep-contexto",
+      "text": "CEP: 24522622",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "24522622"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-contexto-135",
+      "grupo": "cep-contexto",
+      "text": "CEP: 61853081",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "61853081"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-contexto-136",
+      "grupo": "cep-contexto",
+      "text": "CEP: 13820755",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "13820755"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "cep-distrator-137",
+      "grupo": "cep-distrator",
+      "text": "Informe o CEP no formato 00000-000.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "cep-distrator-138",
+      "grupo": "cep-distrator",
+      "text": "O processo 0001234-56.2024.8.26.0100 está concluso.",
+      "pii": [],
+      "realPii": false,
+      "nota": "número CNJ"
+    },
+    {
+      "id": "cep-distrator-139",
+      "grupo": "cep-distrator",
+      "text": "Resolução 2.217/2018 do CFM.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "cep-distrator-140",
+      "grupo": "cep-distrator",
+      "text": "Lei 13.709/2018 (LGPD), art. 7º.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "cep-distrator-141",
+      "grupo": "cep-distrator",
+      "text": "Código EAN 7891234567895 do produto.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "cep-distrator-142",
+      "grupo": "cep-distrator",
+      "text": "Temperatura entre 2-8 °C; lote 45-678.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "tel-celular-143",
+      "grupo": "tel-celular",
+      "text": "Pode me ligar no (51) 98857-1503 depois das 18h.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(51) 98857-1503"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-144",
+      "grupo": "tel-celular",
+      "text": "Pode me ligar no (27) 98531-4597 depois das 18h.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(27) 98531-4597"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-145",
+      "grupo": "tel-celular",
+      "text": "Telefone do responsável 13 98207-9026.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "13 98207-9026"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-146",
+      "grupo": "tel-celular",
+      "text": "Pode me ligar no +55 61 96758-3054 depois das 18h.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "+55 61 96758-3054"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-147",
+      "grupo": "tel-celular",
+      "text": "Telefone do responsável 54 96471-1798.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "54 96471-1798"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-148",
+      "grupo": "tel-celular",
+      "text": "Telefone do responsável +55 (65) 97506 6017.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "+55 (65) 97506 6017"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-149",
+      "grupo": "tel-celular",
+      "text": "Telefone do responsável +55 (61) 97911 6805.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "+55 (61) 97911 6805"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-150",
+      "grupo": "tel-celular",
+      "text": "Pode me ligar no 27 96340-8107 depois das 18h.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "27 96340-8107"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-151",
+      "grupo": "tel-celular",
+      "text": "Meu WhatsApp é 12 99874-8539.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "12 99874-8539"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-152",
+      "grupo": "tel-celular",
+      "text": "Telefone do responsável 11 98492-2786.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "11 98492-2786"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-153",
+      "grupo": "tel-celular",
+      "text": "Telefone do responsável +55 (21) 99970 8999.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "+55 (21) 99970 8999"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-154",
+      "grupo": "tel-celular",
+      "text": "Celular para contato: (98) 97133-9315",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(98) 97133-9315"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-sem-ddd-155",
+      "grupo": "tel-celular-sem-ddd",
+      "text": "celular 98662-1465",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "98662-1465"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-sem-ddd-156",
+      "grupo": "tel-celular-sem-ddd",
+      "text": "celular 99396-7002",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "99396-7002"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-sem-ddd-157",
+      "grupo": "tel-celular-sem-ddd",
+      "text": "celular 96320-9821",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "96320-9821"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-celular-sem-ddd-158",
+      "grupo": "tel-celular-sem-ddd",
+      "text": "celular 99166-6776",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "99166-6776"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-corrido-159",
+      "grupo": "tel-corrido",
+      "text": "WhatsApp: 24982373120",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "24982373120"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-corrido-160",
+      "grupo": "tel-corrido",
+      "text": "WhatsApp: 24965509389",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "24965509389"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-corrido-161",
+      "grupo": "tel-corrido",
+      "text": "telefone 19992192907",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "19992192907"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-corrido-162",
+      "grupo": "tel-corrido",
+      "text": "WhatsApp: 47969971743",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "47969971743"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "tel-fixo-163",
+      "grupo": "tel-fixo",
+      "text": "Recado no fixo (012) 4982-3023.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(012) 4982-3023"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "tel-fixo-164",
+      "grupo": "tel-fixo",
+      "text": "Telefone residencial (65) 4778-1479.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(65) 4778-1479"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "tel-fixo-165",
+      "grupo": "tel-fixo",
+      "text": "Recado no fixo 41 5013-3850.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "41 5013-3850"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "tel-fixo-166",
+      "grupo": "tel-fixo",
+      "text": "Telefone residencial (071) 5725-8853.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(071) 5725-8853"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "tel-fixo-167",
+      "grupo": "tel-fixo",
+      "text": "Central da unidade: (083) 4040-6717",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(083) 4040-6717"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "tel-fixo-168",
+      "grupo": "tel-fixo",
+      "text": "Central da unidade: (51) 4809-1705",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(51) 4809-1705"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "tel-fixo-169",
+      "grupo": "tel-fixo",
+      "text": "Central da unidade: (15) 4862-5165",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(15) 4862-5165"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "tel-fixo-170",
+      "grupo": "tel-fixo",
+      "text": "Telefone residencial 67 3345-4943.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "67 3345-4943"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "tel-fixo-sem-ddd-171",
+      "grupo": "tel-fixo-sem-ddd",
+      "text": "Ramal/telefone: 3923-4611",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "3923-4611"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "tel-fixo-sem-ddd-172",
+      "grupo": "tel-fixo-sem-ddd",
+      "text": "tel 4751-3277 (manhã)",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "4751-3277"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "tel-dummy-173",
+      "grupo": "tel-dummy",
+      "text": "Exemplo: (11) 91234-5678.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(11) 91234-5678"
+        }
+      ],
+      "realPii": false,
+      "nota": "placeholder"
+    },
+    {
+      "id": "tel-dummy-174",
+      "grupo": "tel-dummy",
+      "text": "Formato: (21) 99999-9999",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(21) 99999-9999"
+        }
+      ],
+      "realPii": false,
+      "nota": "placeholder"
+    },
+    {
+      "id": "tel-distrator-175",
+      "grupo": "tel-distrator",
+      "text": "Ligue grátis 0800 123 4567.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "tel-distrator-176",
+      "grupo": "tel-distrator",
+      "text": "Ligue na central de capitais 4004-0001 (sem DDD).",
+      "pii": [],
+      "realPii": false,
+      "nota": "número de serviço: não é dado pessoal"
+    },
+    {
+      "id": "tel-distrator-177",
+      "grupo": "tel-distrator",
+      "text": "Período de 2019-2023 analisado.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "tel-distrator-178",
+      "grupo": "tel-distrator",
+      "text": "Atendimento das 08:00 às 18:00, de segunda a sexta.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "tel-distrator-179",
+      "grupo": "tel-distrator",
+      "text": "DDD inválido: (10) 3456-7890 não existe.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "tel-distrator-180",
+      "grupo": "tel-distrator",
+      "text": "Faixa etária 20-45 anos, 1500-2000 kcal por dia.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "tel-distrator-181",
+      "grupo": "tel-distrator",
+      "text": "Coordenadas -23.5505, -46.6333 do centro.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "tel-distrator-182",
+      "grupo": "tel-distrator",
+      "text": "IP 192.168.10.254 do servidor interno.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "tel-distrator-183",
+      "grupo": "tel-distrator",
+      "text": "Chave NF-e 35240912345678000190550010000123451234567890.",
+      "pii": [],
+      "realPii": false,
+      "nota": "44 dígitos"
+    },
+    {
+      "id": "tel-distrator-184",
+      "grupo": "tel-distrator",
+      "text": "Linha digitável 23790.12345 60000.123456 78901.234567 8 91230000010000",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "tel-distrator-185",
+      "grupo": "tel-distrator",
+      "text": "Pedido 1134567890 enviado.",
+      "pii": [],
+      "realPii": false,
+      "nota": "10 dígitos sem contexto de telefone"
+    },
+    {
+      "id": "email-pessoal-186",
+      "grupo": "email-pessoal",
+      "text": "Meu e-mail é joao.oliveira@gmail.com",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "joao.oliveira@gmail.com"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "email-pessoal-187",
+      "grupo": "email-pessoal",
+      "text": "Meu e-mail é ana_ferreira88@hotmail.com",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "ana_ferreira88@hotmail.com"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "email-pessoal-188",
+      "grupo": "email-pessoal",
+      "text": "Meu e-mail é carlos.lima@uol.com.br",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "carlos.lima@uol.com.br"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "email-pessoal-189",
+      "grupo": "email-pessoal",
+      "text": "Enviar o laudo para fernanda.c@outlook.com.",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "fernanda.c@outlook.com"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "email-pessoal-190",
+      "grupo": "email-pessoal",
+      "text": "Meu e-mail é lucas.rocha@empresaxyz.com.br",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "lucas.rocha@empresaxyz.com.br"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "email-pessoal-191",
+      "grupo": "email-pessoal",
+      "text": "Meu e-mail é patricia.n1990@yahoo.com.br",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "patricia.n1990@yahoo.com.br"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "email-funcional-192",
+      "grupo": "email-funcional",
+      "text": "Dúvidas: escreva para contato@clinicavida.com.br.",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "contato@clinicavida.com.br"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "email-funcional-193",
+      "grupo": "email-funcional",
+      "text": "Dúvidas: escreva para sac@lojaaurora.com.br.",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "sac@lojaaurora.com.br"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "email-funcional-194",
+      "grupo": "email-funcional",
+      "text": "Dúvidas: escreva para atendimento@banco-exemplar.com.br.",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "atendimento@banco-exemplar.com.br"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "email-funcional-195",
+      "grupo": "email-funcional",
+      "text": "Dúvidas: escreva para faleconosco@operadora.com.br.",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "faleconosco@operadora.com.br"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "email-distrator-196",
+      "grupo": "email-distrator",
+      "text": "Nosso perfil é @clinicavida no Instagram.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "email-distrator-197",
+      "grupo": "email-distrator",
+      "text": "Use usuario@example.com como exemplo.",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "usuario@example.com"
+        }
+      ],
+      "realPii": false,
+      "nota": "domínio de exemplo"
+    },
+    {
+      "id": "email-distrator-198",
+      "grupo": "email-distrator",
+      "text": "O arquivo relatorio@2024.pdf foi anexado.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "email-distrator-199",
+      "grupo": "email-distrator",
+      "text": "Endereço de e-mail: (não informado).",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "crm-200",
+      "grupo": "crm",
+      "text": "Laudo assinado por CRM/SP 123456.",
+      "pii": [
+        {
+          "kind": "crm",
+          "value": "123456"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "crm-201",
+      "grupo": "crm",
+      "text": "Médico responsável: CRM-RJ 52.123.456",
+      "pii": [
+        {
+          "kind": "crm",
+          "value": "52.123.456"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "crm-202",
+      "grupo": "crm",
+      "text": "CRM 98765/MG",
+      "pii": [
+        {
+          "kind": "crm",
+          "value": "98765"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "crm-203",
+      "grupo": "crm",
+      "text": "Registro no CRM: 45678",
+      "pii": [
+        {
+          "kind": "crm",
+          "value": "45678"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "distrator-204",
+      "grupo": "distrator",
+      "text": "Consulta marcada para 15/09/2024 às 14:30.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-205",
+      "grupo": "distrator",
+      "text": "Diagnóstico CID-10 J45.9 (asma não especificada).",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-206",
+      "grupo": "distrator",
+      "text": "Tomar 500 mg de 8 em 8 horas por 7 dias.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-207",
+      "grupo": "distrator",
+      "text": "Total do pedido: R$ 1.234,56 em 3x sem juros.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-208",
+      "grupo": "distrator",
+      "text": "Protocolo de atendimento 2024091500123.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-209",
+      "grupo": "distrator",
+      "text": "Estoque atual: 1.250.000 unidades.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-210",
+      "grupo": "distrator",
+      "text": "A glicemia em jejum foi de 99 mg/dL.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-211",
+      "grupo": "distrator",
+      "text": "Rastreamento BR123456789BR nos Correios.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-212",
+      "grupo": "distrator",
+      "text": "ISBN 978-85-359-0277-8 da 3ª edição.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-213",
+      "grupo": "distrator",
+      "text": "Placa do veículo ABC1D23 registrada no pátio.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-214",
+      "grupo": "distrator",
+      "text": "Versão 2.14.3 publicada em 2026-08-01.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-215",
+      "grupo": "distrator",
+      "text": "CNES 2077485 do hospital credenciado.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-216",
+      "grupo": "distrator",
+      "text": "Taxa de 12,5% ao ano sobre R$ 10.000,00.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-217",
+      "grupo": "distrator",
+      "text": "Horário: 7h às 19h; sábados 8h às 12h.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-218",
+      "grupo": "distrator",
+      "text": "A pressão estava 120/80 mmHg.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-219",
+      "grupo": "distrator",
+      "text": "Resultado do hemograma: leucócitos 7.500/mm³.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-220",
+      "grupo": "distrator",
+      "text": "Carga horária de 40 horas semanais, 220 horas mensais.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-221",
+      "grupo": "distrator",
+      "text": "Senha do Wi-Fi da recepção: Clinica2024.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-222",
+      "grupo": "distrator",
+      "text": "Timestamp 1727400000000 no log.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-223",
+      "grupo": "distrator",
+      "text": "Código do produto 7894900011517 (EAN-13).",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-224",
+      "grupo": "distrator",
+      "text": "O voo LA3456 sai às 06:45 do portão 12.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-225",
+      "grupo": "distrator",
+      "text": "Jejum de 8 a 12 horas antes da coleta.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-226",
+      "grupo": "distrator",
+      "text": "Guia TISS 000123456789 aprovada pela operadora.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-227",
+      "grupo": "distrator",
+      "text": "Matrícula funcional 00456789 no RH.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-228",
+      "grupo": "distrator",
+      "text": "Apólice 1234.5678.9012 vigente até 31/12/2026.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-229",
+      "grupo": "distrator",
+      "text": "Conta corrente 12345-6, agência 0001.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-230",
+      "grupo": "distrator",
+      "text": "Cartão final 4242 aprovado.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-231",
+      "grupo": "distrator",
+      "text": "O exame custa R$ 89,90 no particular.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-232",
+      "grupo": "distrator",
+      "text": "Sala 1203, 12º andar, torre B.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-233",
+      "grupo": "distrator",
+      "text": "Temperatura corporal 37,8 °C às 22h10.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-234",
+      "grupo": "distrator",
+      "text": "Ordem de serviço OS-2024-000987.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-235",
+      "grupo": "distrator",
+      "text": "Frequência cardíaca de 72 bpm em repouso.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-236",
+      "grupo": "distrator",
+      "text": "Página 123 do manual, seção 4.5.6.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-237",
+      "grupo": "distrator",
+      "text": "Unidades 01, 02 e 03 abertas aos domingos.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-238",
+      "grupo": "distrator",
+      "text": "Parcelamento em 10x de R$ 45,00.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "distrator-239",
+      "grupo": "distrator",
+      "text": "Prazo de 30 dias corridos a partir do recebimento.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "nome-contexto-240",
+      "grupo": "nome-contexto",
+      "text": "Cliente Maria Aparecida Souza reclamou do atraso.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Maria Aparecida Souza"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome sozinho: aviso, não bloqueia"
+    },
+    {
+      "id": "nome-contexto-241",
+      "grupo": "nome-contexto",
+      "text": "Meu nome é João Pedro Oliveira e preciso remarcar.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "João Pedro Oliveira"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome sozinho: aviso, não bloqueia"
+    },
+    {
+      "id": "nome-contexto-242",
+      "grupo": "nome-contexto",
+      "text": "Cliente Ana Clara Ferreira reclamou do atraso.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Ana Clara Ferreira"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome sozinho: aviso, não bloqueia"
+    },
+    {
+      "id": "nome-contexto-243",
+      "grupo": "nome-contexto",
+      "text": "Cliente Carlos Eduardo Lima reclamou do atraso.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Carlos Eduardo Lima"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome sozinho: aviso, não bloqueia"
+    },
+    {
+      "id": "nome-contexto-244",
+      "grupo": "nome-contexto",
+      "text": "Paciente Fernanda Costa chegou para a coleta.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Fernanda Costa"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome sozinho: aviso, não bloqueia"
+    },
+    {
+      "id": "nome-contexto-245",
+      "grupo": "nome-contexto",
+      "text": "Paciente Lucas Almeida Rocha chegou para a coleta.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Lucas Almeida Rocha"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome sozinho: aviso, não bloqueia"
+    },
+    {
+      "id": "nome-contexto-246",
+      "grupo": "nome-contexto",
+      "text": "Meu nome é Juliana Martins e preciso remarcar.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Juliana Martins"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome sozinho: aviso, não bloqueia"
+    },
+    {
+      "id": "nome-contexto-247",
+      "grupo": "nome-contexto",
+      "text": "Cliente Rafael Gomes Pereira reclamou do atraso.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Rafael Gomes Pereira"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome sozinho: aviso, não bloqueia"
+    },
+    {
+      "id": "nome-livre-248",
+      "grupo": "nome-livre",
+      "text": "Patrícia Nunes confirmou presença na reunião de amanhã.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Patrícia Nunes"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome em texto livre"
+    },
+    {
+      "id": "nome-livre-249",
+      "grupo": "nome-livre",
+      "text": "Gustavo Henrique Dias confirmou presença na reunião de amanhã.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Gustavo Henrique Dias"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome em texto livre"
+    },
+    {
+      "id": "nome-livre-250",
+      "grupo": "nome-livre",
+      "text": "Beatriz Carvalho confirmou presença na reunião de amanhã.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Beatriz Carvalho"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome em texto livre"
+    },
+    {
+      "id": "nome-livre-251",
+      "grupo": "nome-livre",
+      "text": "Marcos Vinícius Santos confirmou presença na reunião de amanhã.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Marcos Vinícius Santos"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome em texto livre"
+    },
+    {
+      "id": "nome-livre-252",
+      "grupo": "nome-livre",
+      "text": "Camila Ribeiro confirmou presença na reunião de amanhã.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Camila Ribeiro"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome em texto livre"
+    },
+    {
+      "id": "nome-livre-253",
+      "grupo": "nome-livre",
+      "text": "Paulo Roberto Mendes confirmou presença na reunião de amanhã.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Paulo Roberto Mendes"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome em texto livre"
+    },
+    {
+      "id": "nome-livre-254",
+      "grupo": "nome-livre",
+      "text": "Luciana Teixeira confirmou presença na reunião de amanhã.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Luciana Teixeira"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome em texto livre"
+    },
+    {
+      "id": "nome-livre-255",
+      "grupo": "nome-livre",
+      "text": "Ontem a Bia e o Zé foram à farmácia.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Bia"
+        },
+        {
+          "kind": "nome",
+          "value": "Zé"
+        }
+      ],
+      "realPii": false,
+      "nota": "apelidos: fora do alcance da heurística"
+    },
+    {
+      "id": "nome-livre-256",
+      "grupo": "nome-livre",
+      "text": "Quem assinou foi o Kauã Tupinambá.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Kauã Tupinambá"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome fora do dicionário"
+    },
+    {
+      "id": "persona-257",
+      "grupo": "persona",
+      "text": "Você é a Sofia, assistente virtual da Clínica Vida.",
+      "pii": [],
+      "realPii": false,
+      "nota": "persona: não é dado pessoal"
+    },
+    {
+      "id": "persona-258",
+      "grupo": "persona",
+      "text": "Seu nome é Leo e você atende a Loja Aurora.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "persona-259",
+      "grupo": "persona",
+      "text": "Atenda como a atendente virtual Bia, com tom cordial.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "negocio-260",
+      "grupo": "negocio",
+      "text": "Loja Aurora — Av. Paulista, 1000, São Paulo, CEP 01310-100.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Av. Paulista, 1000"
+        },
+        {
+          "kind": "cep",
+          "value": "01310-100"
+        }
+      ],
+      "realPii": false,
+      "nota": "endereço de EMPRESA"
+    },
+    {
+      "id": "negocio-261",
+      "grupo": "negocio",
+      "text": "Nossa unidade fica na Rua Augusta, 1500; central (11) 3456-7890.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Rua Augusta, 1500"
+        },
+        {
+          "kind": "telefone",
+          "value": "(11) 3456-7890"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "negocio-262",
+      "grupo": "negocio",
+      "text": "Hospital São Lucas, Rua Barata Ribeiro, 370.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Rua Barata Ribeiro, 370"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "negocio-263",
+      "grupo": "negocio",
+      "text": "Estacionamento conveniado na Alameda Santos, 900.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Alameda Santos, 900"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "lugar-264",
+      "grupo": "lugar",
+      "text": "Moro em Vitória da Conquista desde 2010.",
+      "pii": [],
+      "realPii": false,
+      "nota": "cidade, não nome"
+    },
+    {
+      "id": "lugar-265",
+      "grupo": "lugar",
+      "text": "Filial em São Paulo e em Santa Maria.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "lugar-266",
+      "grupo": "lugar",
+      "text": "A Rua 25 de Março fica lotada em dezembro.",
+      "pii": [],
+      "realPii": false,
+      "nota": "logradouro sem número"
+    },
+    {
+      "id": "endereco-267",
+      "grupo": "endereco",
+      "text": "Moro na Rua das Acácias, 245, apto 32.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Rua das Acácias, 245"
+        }
+      ],
+      "realPii": false,
+      "nota": "endereço sozinho: aviso"
+    },
+    {
+      "id": "endereco-268",
+      "grupo": "endereco",
+      "text": "Endereço de entrega: Av. Brasil, 1500.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Av. Brasil, 1500"
+        }
+      ],
+      "realPii": false,
+      "nota": "endereço sozinho: aviso"
+    },
+    {
+      "id": "endereco-269",
+      "grupo": "endereco",
+      "text": "Moro na Rua XV de Novembro, 88, apto 32.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Rua XV de Novembro, 88"
+        }
+      ],
+      "realPii": false,
+      "nota": "endereço sozinho: aviso"
+    },
+    {
+      "id": "endereco-270",
+      "grupo": "endereco",
+      "text": "Moro na Avenida Sete de Setembro, 3120, apto 32.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Avenida Sete de Setembro, 3120"
+        }
+      ],
+      "realPii": false,
+      "nota": "endereço sozinho: aviso"
+    },
+    {
+      "id": "endereco-271",
+      "grupo": "endereco",
+      "text": "Moro na Rua Padre Anchieta, 17, apto 32.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Rua Padre Anchieta, 17"
+        }
+      ],
+      "realPii": false,
+      "nota": "endereço sozinho: aviso"
+    },
+    {
+      "id": "endereco-272",
+      "grupo": "endereco",
+      "text": "Endereço de entrega: Alameda Santos, 900.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Alameda Santos, 900"
+        }
+      ],
+      "realPii": false,
+      "nota": "endereço sozinho: aviso"
+    },
+    {
+      "id": "produto-273",
+      "grupo": "produto",
+      "text": "O plano Premium Gold dá direito a 3 consultas.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "produto-274",
+      "grupo": "produto",
+      "text": "Linha Maria Bonita de cosméticos.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Maria Bonita"
+        }
+      ],
+      "realPii": false,
+      "nota": "marca que parece nome"
+    },
+    {
+      "id": "produto-275",
+      "grupo": "produto",
+      "text": "Conheça a coleção Ana Paula Verão 2026.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Ana Paula"
+        }
+      ],
+      "realPii": false,
+      "nota": "marca que parece nome"
+    },
+    {
+      "id": "ficha-276",
+      "grupo": "ficha",
+      "text": "Paciente Maria Aparecida Souza, CPF 153.075.089-05, celular (91) 97833-5973.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Maria Aparecida Souza"
+        },
+        {
+          "kind": "cpf",
+          "value": "153.075.089-05"
+        },
+        {
+          "kind": "telefone",
+          "value": "(91) 97833-5973"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-277",
+      "grupo": "ficha",
+      "text": "João Pedro Oliveira — Av. Brasil, 1500 — CEP 02197-348 — tel (11) 99068-4065",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "João Pedro Oliveira"
+        },
+        {
+          "kind": "endereco",
+          "value": "Av. Brasil, 1500"
+        },
+        {
+          "kind": "cep",
+          "value": "02197-348"
+        },
+        {
+          "kind": "telefone",
+          "value": "(11) 99068-4065"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-278",
+      "grupo": "ficha",
+      "text": "Nome: Ana Clara Ferreira\nCPF: 650.836.997-02\nEndereço: Rua XV de Novembro, 88",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Ana Clara Ferreira"
+        },
+        {
+          "kind": "cpf",
+          "value": "650.836.997-02"
+        },
+        {
+          "kind": "endereco",
+          "value": "Rua XV de Novembro, 88"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-279",
+      "grupo": "ficha",
+      "text": "Olá, sou Carlos Eduardo Lima, moro na Avenida Sete de Setembro, 3120 (CEP 22148-611).",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Carlos Eduardo Lima"
+        },
+        {
+          "kind": "endereco",
+          "value": "Avenida Sete de Setembro, 3120"
+        },
+        {
+          "kind": "cep",
+          "value": "22148-611"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-280",
+      "grupo": "ficha",
+      "text": "Beneficiário Fernanda Costa, CNS 294 1458 0289 0002, agendou ressonância.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Fernanda Costa"
+        },
+        {
+          "kind": "cns",
+          "value": "294 1458 0289 0002"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-281",
+      "grupo": "ficha",
+      "text": "Cliente Lucas Almeida Rocha (lucas.rocha@gmail.com) pediu o boleto.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Lucas Almeida Rocha"
+        },
+        {
+          "kind": "email",
+          "value": "lucas.rocha@gmail.com"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-282",
+      "grupo": "ficha",
+      "text": "Paciente Juliana Martins, CPF 646.876.852-77, celular (15) 98755-6470.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Juliana Martins"
+        },
+        {
+          "kind": "cpf",
+          "value": "646.876.852-77"
+        },
+        {
+          "kind": "telefone",
+          "value": "(15) 98755-6470"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-283",
+      "grupo": "ficha",
+      "text": "Rafael Gomes Pereira — Rua Barão de Itapetininga, 55 — CEP 70359-572 — tel (19) 96179-6110",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Rafael Gomes Pereira"
+        },
+        {
+          "kind": "endereco",
+          "value": "Rua Barão de Itapetininga, 55"
+        },
+        {
+          "kind": "cep",
+          "value": "70359-572"
+        },
+        {
+          "kind": "telefone",
+          "value": "(19) 96179-6110"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-284",
+      "grupo": "ficha",
+      "text": "Nome: Patrícia Nunes\nCPF: 192.143.045-13\nEndereço: Rua das Acácias, 245",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Patrícia Nunes"
+        },
+        {
+          "kind": "cpf",
+          "value": "192.143.045-13"
+        },
+        {
+          "kind": "endereco",
+          "value": "Rua das Acácias, 245"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-285",
+      "grupo": "ficha",
+      "text": "Olá, sou Gustavo Henrique Dias, moro na Av. Brasil, 1500 (CEP 11034-574).",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Gustavo Henrique Dias"
+        },
+        {
+          "kind": "endereco",
+          "value": "Av. Brasil, 1500"
+        },
+        {
+          "kind": "cep",
+          "value": "11034-574"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-286",
+      "grupo": "ficha",
+      "text": "Beneficiário Beatriz Carvalho, CNS 161 9797 6979 0001, agendou ressonância.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Beatriz Carvalho"
+        },
+        {
+          "kind": "cns",
+          "value": "161 9797 6979 0001"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-287",
+      "grupo": "ficha",
+      "text": "Cliente Marcos Vinícius Santos (marcos.santos@gmail.com) pediu o boleto.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Marcos Vinícius Santos"
+        },
+        {
+          "kind": "email",
+          "value": "marcos.santos@gmail.com"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-288",
+      "grupo": "ficha",
+      "text": "Paciente Camila Ribeiro, CPF 062.850.417-92, celular (83) 99590-1551.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Camila Ribeiro"
+        },
+        {
+          "kind": "cpf",
+          "value": "062.850.417-92"
+        },
+        {
+          "kind": "telefone",
+          "value": "(83) 99590-1551"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-289",
+      "grupo": "ficha",
+      "text": "Paulo Roberto Mendes — Alameda Santos, 900 — CEP 35461-806 — tel (13) 97174-0605",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Paulo Roberto Mendes"
+        },
+        {
+          "kind": "endereco",
+          "value": "Alameda Santos, 900"
+        },
+        {
+          "kind": "cep",
+          "value": "35461-806"
+        },
+        {
+          "kind": "telefone",
+          "value": "(13) 97174-0605"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-290",
+      "grupo": "ficha",
+      "text": "Nome: Luciana Teixeira\nCPF: 725.605.363-07\nEndereço: Travessa São José, 12",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Luciana Teixeira"
+        },
+        {
+          "kind": "cpf",
+          "value": "725.605.363-07"
+        },
+        {
+          "kind": "endereco",
+          "value": "Travessa São José, 12"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-291",
+      "grupo": "ficha",
+      "text": "Olá, sou Maria Aparecida Souza, moro na Rua Barão de Itapetininga, 55 (CEP 27079-292).",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Maria Aparecida Souza"
+        },
+        {
+          "kind": "endereco",
+          "value": "Rua Barão de Itapetininga, 55"
+        },
+        {
+          "kind": "cep",
+          "value": "27079-292"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-292",
+      "grupo": "ficha",
+      "text": "Beneficiário João Pedro Oliveira, CNS 127 8519 2877 0003, agendou ressonância.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "João Pedro Oliveira"
+        },
+        {
+          "kind": "cns",
+          "value": "127 8519 2877 0003"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "ficha-293",
+      "grupo": "ficha",
+      "text": "Cliente Ana Clara Ferreira (ana.ferreira@gmail.com) pediu o boleto.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Ana Clara Ferreira"
+        },
+        {
+          "kind": "email",
+          "value": "ana.ferreira@gmail.com"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "dificil-294",
+      "grupo": "dificil",
+      "text": "CPF 760 676 425 57 (ditado por telefone)",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "760 676 425 57"
+        }
+      ],
+      "realPii": true,
+      "nota": "CPF com espaços"
+    },
+    {
+      "id": "dificil-295",
+      "grupo": "dificil",
+      "text": "cpf:47047910840",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "47047910840"
+        }
+      ],
+      "realPii": true,
+      "nota": "sem espaço após dois-pontos"
+    },
+    {
+      "id": "dificil-296",
+      "grupo": "dificil",
+      "text": "182.507.456-98;Ana Clara Ferreira;ativo",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "182.507.456-98"
+        },
+        {
+          "kind": "nome",
+          "value": "Ana Clara Ferreira"
+        }
+      ],
+      "realPii": true,
+      "nota": "linha CSV"
+    },
+    {
+      "id": "dificil-297",
+      "grupo": "dificil",
+      "text": "CPF/CNPJ: 773.668.017-55",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "773.668.017-55"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "dificil-298",
+      "grupo": "dificil",
+      "text": "CPF nº: 313.334.516-87.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "313.334.516-87"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "dificil-299",
+      "grupo": "dificil",
+      "text": "Celular (83) 9 6898-7504",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(83) 9 6898-7504"
+        }
+      ],
+      "realPii": true,
+      "nota": "9 separado"
+    },
+    {
+      "id": "dificil-300",
+      "grupo": "dificil",
+      "text": "zap 62 9 8286-3233",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "62 9 8286-3233"
+        }
+      ],
+      "realPii": true,
+      "nota": "9 separado sem parênteses"
+    },
+    {
+      "id": "dificil-301",
+      "grupo": "dificil",
+      "text": "celular (027) 9 7808-8858",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(027) 9 7808-8858"
+        }
+      ],
+      "realPii": true,
+      "nota": "com 0 e 9 separado"
+    },
+    {
+      "id": "dificil-302",
+      "grupo": "dificil",
+      "text": "fone 81.96877.4969",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "81.96877.4969"
+        }
+      ],
+      "realPii": true,
+      "nota": "separado por pontos"
+    },
+    {
+      "id": "dificil-303",
+      "grupo": "dificil",
+      "text": "Contato internacional +55-92-99400-2133",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "+55-92-99400-2133"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "dificil-304",
+      "grupo": "dificil",
+      "text": "Tel:(47)96615-8812",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(47)96615-8812"
+        }
+      ],
+      "realPii": true,
+      "nota": "sem espaço após parênteses"
+    },
+    {
+      "id": "dificil-305",
+      "grupo": "dificil",
+      "text": "Tel.: (54) 3817-8828 / 96538-2806",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(54) 3817-8828"
+        },
+        {
+          "kind": "telefone",
+          "value": "96538-2806"
+        }
+      ],
+      "realPii": true,
+      "nota": "dois números"
+    },
+    {
+      "id": "dificil-306",
+      "grupo": "dificil",
+      "text": "Contato: 2198-9778 ramal 12",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "2198-9778"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "dificil-307",
+      "grupo": "dificil",
+      "text": "..., São Paulo - SP, 06371-925",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "06371-925"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "dificil-308",
+      "grupo": "dificil",
+      "text": "CEP 81.178-328",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "81.178-328"
+        }
+      ],
+      "realPii": false,
+      "nota": "formato antigo"
+    },
+    {
+      "id": "dificil-309",
+      "grupo": "dificil",
+      "text": "Atendemos a faixa de CEP 01000-000 a 05999-999.",
+      "pii": [
+        {
+          "kind": "cep",
+          "value": "01000-000"
+        },
+        {
+          "kind": "cep",
+          "value": "05999-999"
+        }
+      ],
+      "realPii": false,
+      "nota": "faixa de CEP de EMPRESA"
+    },
+    {
+      "id": "dificil-310",
+      "grupo": "dificil",
+      "text": "E-MAIL: JOAO.SILVA@GMAIL.COM",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "JOAO.SILVA@GMAIL.COM"
+        }
+      ],
+      "realPii": true,
+      "nota": "caixa alta"
+    },
+    {
+      "id": "dificil-311",
+      "grupo": "dificil",
+      "text": "Resultados para maria.souza+exames@gmail.com",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "maria.souza+exames@gmail.com"
+        }
+      ],
+      "realPii": true,
+      "nota": "e-mail com +tag"
+    },
+    {
+      "id": "dificil-312",
+      "grupo": "dificil",
+      "text": "Pagamento ao favorecido 88458038000153.",
+      "pii": [
+        {
+          "kind": "cnpj",
+          "value": "88458038000153"
+        }
+      ],
+      "realPii": false,
+      "nota": "CNPJ corrido sem contexto"
+    },
+    {
+      "id": "dificil-313",
+      "grupo": "dificil",
+      "text": "RG 32708851-9",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "32708851-9"
+        }
+      ],
+      "realPii": true,
+      "nota": "RG sem pontos"
+    },
+    {
+      "id": "dificil-314",
+      "grupo": "dificil",
+      "text": "rg 32.606.306-x",
+      "pii": [
+        {
+          "kind": "rg",
+          "value": "32.606.306-x"
+        }
+      ],
+      "realPii": true,
+      "nota": "RG com DV x minúsculo"
+    },
+    {
+      "id": "dificil-315",
+      "grupo": "dificil",
+      "text": "Cartão SUS: 816310160961402",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "816310160961402"
+        }
+      ],
+      "realPii": true,
+      "nota": "CNS provisório corrido com contexto"
+    },
+    {
+      "id": "dificil-316",
+      "grupo": "dificil",
+      "text": "Valor contratado: R$ 276.223.307,01.",
+      "pii": [],
+      "realPii": false,
+      "nota": "dinheiro com os dígitos de um CPF válido"
+    },
+    {
+      "id": "dificil-317",
+      "grupo": "dificil",
+      "text": "Processo 5299822-47.2025.8.26.0001 em segredo de justiça.",
+      "pii": [],
+      "realPii": false,
+      "nota": "número CNJ"
+    },
+    {
+      "id": "dificil-318",
+      "grupo": "dificil",
+      "text": "Coleta das 07:00-09:30, resultado em 2-3 dias.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "dificil-319",
+      "grupo": "dificil",
+      "text": "Código de rastreio 3456-7890 no app.",
+      "pii": [],
+      "realPii": false,
+      "nota": "sem palavra de telefone"
+    },
+    {
+      "id": "dificil-320",
+      "grupo": "dificil",
+      "text": "Nota fiscal nº 000.123.456 série 1.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "dificil-321",
+      "grupo": "dificil",
+      "text": "Seq. 1234-5678 do lote de reagentes.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "dificil-322",
+      "grupo": "dificil",
+      "text": "Versão do laudo: 12.345.678 (sem dígito).",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "dificil-323",
+      "grupo": "dificil",
+      "text": "Agência 1234-5, conta 98765-4.",
+      "pii": [],
+      "realPii": false
+    },
+    {
+      "id": "limitacao-324",
+      "grupo": "limitacao",
+      "text": "Meu telefone é onze, nove oito sete seis cinco, quatro três dois um.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "onze, nove oito sete seis cinco, quatro três dois um"
+        }
+      ],
+      "realPii": true,
+      "nota": "número por extenso"
+    },
+    {
+      "id": "limitacao-325",
+      "grupo": "limitacao",
+      "text": "CPF 002.470.\n320-69",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "002.470.\n320-69"
+        }
+      ],
+      "realPii": true,
+      "nota": "CPF quebrado em duas linhas"
+    },
+    {
+      "id": "limitacao-326",
+      "grupo": "limitacao",
+      "text": "CPF 542769452 83",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "542769452 83"
+        }
+      ],
+      "realPii": true,
+      "nota": "espaço antes do DV"
+    },
+    {
+      "id": "limitacao-327",
+      "grupo": "limitacao",
+      "text": "tel (67) 96820 - 9415",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "(67) 96820 - 9415"
+        }
+      ],
+      "realPii": true,
+      "nota": "espaços em volta do hífen"
+    },
+    {
+      "id": "nome-livre-328",
+      "grupo": "nome-livre",
+      "text": "Kauê Tupinambá deixou recado na recepção.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Kauê Tupinambá"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome fora do dicionário"
+    },
+    {
+      "id": "nome-livre-329",
+      "grupo": "nome-livre",
+      "text": "Thaynara Kelly Bezerra deixou recado na recepção.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Thaynara Kelly Bezerra"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome fora do dicionário"
+    },
+    {
+      "id": "nome-livre-330",
+      "grupo": "nome-livre",
+      "text": "Yuri Gagarin Nogueira deixou recado na recepção.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Yuri Gagarin Nogueira"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome fora do dicionário"
+    },
+    {
+      "id": "nome-livre-331",
+      "grupo": "nome-livre",
+      "text": "Wanderléia Barros deixou recado na recepção.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Wanderléia Barros"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome fora do dicionário"
+    },
+    {
+      "id": "nome-livre-332",
+      "grupo": "nome-livre",
+      "text": "Jurandir Freire Costa deixou recado na recepção.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Jurandir Freire Costa"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome fora do dicionário"
+    },
+    {
+      "id": "nome-livre-333",
+      "grupo": "nome-livre",
+      "text": "Iracema Potiguara deixou recado na recepção.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Iracema Potiguara"
+        }
+      ],
+      "realPii": false,
+      "nota": "nome fora do dicionário"
+    },
+    {
+      "id": "cpf-valido-334",
+      "grupo": "cpf-valido",
+      "text": "CPF-604.913.827-31 consta no cadastro antigo.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "604.913.827-31"
+        }
+      ],
+      "realPii": true,
+      "nota": "fronteira: hífen colado em CPF"
+    },
+    {
+      "id": "cpf-valido-335",
+      "grupo": "cpf-valido",
+      "text": "Consulte cpf/24710596352 no sistema legado.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "24710596352"
+        }
+      ],
+      "realPii": true,
+      "nota": "fronteira: barra colada em cpf"
+    },
+    {
+      "id": "cpf-valido-336",
+      "grupo": "cpf-valido",
+      "text": "Titular CPF.735.216.498-73, conferir assinatura.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "735.216.498-73"
+        }
+      ],
+      "realPii": true,
+      "nota": "fronteira: ponto colado em CPF"
+    },
+    {
+      "id": "cns-valido-337",
+      "grupo": "cns-valido",
+      "text": "Cartão CNS/151614345030000 do beneficiário.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "151614345030000"
+        }
+      ],
+      "realPii": true,
+      "nota": "fronteira: barra colada em CNS"
+    },
+    {
+      "id": "distrator-338",
+      "grupo": "distrator",
+      "text": "Lote XCPF-604.913.827-31 do fornecedor (código interno).",
+      "pii": [],
+      "realPii": false,
+      "nota": "fronteira: gatilho colado em letra não conta"
+    },
+    {
+      "id": "persona-339",
+      "grupo": "persona",
+      "text": "Você é a Ana Paula, atendente da Clínica Vida, na Rua Augusta, 1500.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Ana Paula"
+        },
+        {
+          "kind": "endereco",
+          "value": "Rua Augusta, 1500"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "persona-340",
+      "grupo": "persona",
+      "text": "Você é o Dr. Carlos Mendes, clínico geral; agendamentos pelo (11) 3456-7890.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Carlos Mendes"
+        },
+        {
+          "kind": "telefone",
+          "value": "(11) 3456-7890"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "persona-341",
+      "grupo": "persona",
+      "text": "Você é a Maria Clara, recepcionista da unidade Paulista (CEP 01310-100).",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Maria Clara"
+        },
+        {
+          "kind": "cep",
+          "value": "01310-100"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "persona-342",
+      "grupo": "persona",
+      "text": "Atenda como a atendente virtual Ana Beatriz, da Loja Aurora — Av. Paulista, 1000, CEP 01310-100, tel (11) 3456-7890.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Ana Beatriz"
+        },
+        {
+          "kind": "endereco",
+          "value": "Av. Paulista, 1000"
+        },
+        {
+          "kind": "cep",
+          "value": "01310-100"
+        },
+        {
+          "kind": "telefone",
+          "value": "(11) 3456-7890"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "negocio-343",
+      "grupo": "negocio",
+      "text": "Hospital Santa Maria Silva — Av. Brasil, 200.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Av. Brasil, 200"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "ficha-344",
+      "grupo": "ficha",
+      "text": "Encaminhe o paciente Carlos Mendes, morador da Rua das Palmeiras, 45, telefone residencial (11) 3456-7891.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Carlos Mendes"
+        },
+        {
+          "kind": "endereco",
+          "value": "Rua das Palmeiras, 45"
+        },
+        {
+          "kind": "telefone",
+          "value": "(11) 3456-7891"
+        }
+      ],
+      "realPii": true
+    },
+    {
+      "id": "rg-distrator-345",
+      "grupo": "rg-distrator",
+      "text": "Versão 1.234.567-8 do app.",
+      "pii": [],
+      "realPii": false,
+      "nota": "formato de RG com rótulo de versão"
+    },
+    {
+      "id": "rg-distrator-346",
+      "grupo": "rg-distrator",
+      "text": "Lote 12.345.678-9 do fornecedor.",
+      "pii": [],
+      "realPii": false,
+      "nota": "formato de RG com rótulo de lote"
+    },
+    {
+      "id": "rg-distrator-347",
+      "grupo": "rg-distrator",
+      "text": "Valor: R$ 1.234.567-8 (campo mal formatado).",
+      "pii": [],
+      "realPii": false,
+      "nota": "formato de RG precedido de R$"
+    },
+    {
+      "id": "rg-distrator-348",
+      "grupo": "rg-distrator",
+      "text": "Pedido nº 23.456.789-0 enviado ao estoque.",
+      "pii": [],
+      "realPii": false,
+      "nota": "formato de RG com rótulo de pedido"
+    },
+    {
+      "id": "pix-349",
+      "grupo": "pix",
+      "text": "Chave pix: 21988473312",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "21988473312"
+        }
+      ],
+      "realPii": true,
+      "nota": "celular corrido como chave PIX"
+    },
+    {
+      "id": "pix-350",
+      "grupo": "pix",
+      "text": "Pode fazer o PIX para 11974418823, é meu celular.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "11974418823"
+        }
+      ],
+      "realPii": true,
+      "nota": "celular corrido como chave PIX"
+    },
+    {
+      "id": "pix-351",
+      "grupo": "pix",
+      "text": "Minha chave é 48991267754, pode transferir.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "48991267754"
+        }
+      ],
+      "realPii": true,
+      "nota": "celular corrido como chave PIX"
+    },
+    {
+      "id": "pix-352",
+      "grupo": "pix",
+      "text": "Chave PIX (CPF): 47230591805",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "47230591805"
+        }
+      ],
+      "realPii": true,
+      "nota": "CPF corrido como chave PIX"
+    },
+    {
+      "id": "pix-353",
+      "grupo": "pix",
+      "text": "Chave pix aleatória: 7f3c9a2e-1b4d-4c8e-9a6f-2d1e3b4c5a6f",
+      "pii": [],
+      "realPii": false,
+      "nota": "chave aleatória (UUID) não é dado pessoal"
+    }
+  ]
+}

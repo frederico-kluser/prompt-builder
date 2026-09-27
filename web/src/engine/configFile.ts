@@ -10,6 +10,7 @@
 // erro em PT-BR legível, para a UI exibir num banner sem derrubar nada.
 
 import { z } from 'zod';
+import { checkImportPii, type PiiImportCheck } from '../../../src/engine/pii.js';
 import { getTechnique } from './techniques';
 import type { ReasoningLevel } from './types';
 // Schema/tipo de `contracts` são FONTE ÚNICA (src/engine/contracts.ts): o
@@ -119,6 +120,15 @@ export interface ArenaConfigFile {
   judging?: { reference?: boolean; passes?: 1 | 2 };
   limits?: { maxOutputTokens?: number; timeoutMs?: number; concurrency?: number }; // int positivos
   compliance?: { area: string; includeRessalvas: boolean };
+  /** Dado pessoal (IMPL-042): 'synthetic' = "só sintético" (recusa dado de aparência real). */
+  piiMode?: 'redact' | 'synthetic';
+  /**
+   * Revisei o dado pessoal apontado na importação e pode seguir (modo 'redact':
+   * identificadores pseudonimizados no envio; nomes NÃO cobertos). Explícito no
+   * arquivo ou via `parseArenaConfig(json, { allowPii: true })` (CLI `--allow-pii`,
+   * botão "Revisei" da SPA) — que o grava aqui para a run herdar a revisão.
+   */
+  allowPii?: boolean;
 }
 
 // ----------------------------------------------------------------------------
@@ -362,6 +372,8 @@ const arenaConfigSchema = z
           'compliance deve ser um objeto com { area, includeRessalvas }',
         )
         .optional(),
+      piiMode: z.enum(['redact', 'synthetic'], "piiMode deve ser 'redact' ou 'synthetic'").optional(),
+      allowPii: z.boolean('allowPii deve ser true ou false').optional(),
     },
     'O arquivo deve ser um objeto de configuração',
   )
@@ -461,7 +473,10 @@ function descreverIssues(error: z.ZodError): string {
  */
 export function parseArenaConfig(
   json: unknown,
-): { ok: true; config: ArenaConfigFile; warnings?: string[] } | { ok: false; error: string } {
+  opts: { allowPii?: boolean } = {},
+):
+  | { ok: true; config: ArenaConfigFile; warnings?: string[] }
+  | { ok: false; error: string; pii?: PiiImportCheck } {
   // O discriminador `format` é checado à mão ANTES do zod, para garantir a
   // mensagem exata quando o arquivo não é uma configuração (ou é de outra versão).
   const formato =
@@ -475,8 +490,16 @@ export function parseArenaConfig(
   }
   const result = arenaConfigSchema.safeParse(json);
   if (!result.success) return { ok: false, error: descreverIssues(result.error) };
+  // LGPD (IMPL-042): dado pessoal de aparência real BLOQUEIA a importação com
+  // aviso nomeando o campo — nunca corrige em silêncio. `allowPii` = o usuário
+  // revisou e confirmou (os identificadores seguem pseudonimizados no envio).
+  if (!opts.allowPii && result.data.allowPii !== true) {
+    const pii = checkImportPii(result.data);
+    if (!pii.ok) return { ok: false, error: pii.message!, pii };
+  }
+  const config = opts.allowPii ? { ...result.data, allowPii: true } : result.data;
   const warnings = deprecationWarnings(json);
-  return warnings.length ? { ok: true, config: result.data, warnings } : { ok: true, config: result.data };
+  return warnings.length ? { ok: true, config, warnings } : { ok: true, config };
 }
 
 /** Aviso de `training.halving`, descontinuado no IMPL-012 (lido e ignorado, nunca erro). */
