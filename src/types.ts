@@ -501,6 +501,41 @@ export interface CompetitorResponse {
  */
 export type Verdict = 'resolve' | 'parcial' | 'nao';
 
+// ----------------------------------------------------------------------------
+// Veredito AUSENTE (IMPL-004, R-03b:REC-4) — nomes FIXOS do CONVENTIONS.
+//
+// Falha do juiz NÃO é veredito. Quando não há veredito legítimo (juiz falhou,
+// saída inválida após o retry, timeout, bloqueio do gateway, erro de infra do
+// competidor), a chave do contestant NÃO aparece em `verdictByContestant` —
+// nunca se imputa 'parcial'/'nao'. O motivo vai no mapa paralelo
+// `verdictErrorByContestant`; a origem de todo veredito PRESENTE vai em
+// `verdictSourceByContestant`. Consumidores (placar, médias, pareamento,
+// lições) tratam chave ausente como "sem observação", nunca como 'nao'.
+// ----------------------------------------------------------------------------
+
+/**
+ * Origem de um veredito PRESENTE. `judge` = juiz LLM com o painel completo;
+ * `auto` = regra determinística sem LLM (resposta ok VAZIA => 'nao');
+ * `ground-truth` = rótulo esperado/oráculo; `degraded` = juiz LLM com painel
+ * REDUZIDO (parte dos juízes falhou) — conta na regra de run inconclusiva.
+ */
+export type VerdictSource = 'judge' | 'auto' | 'ground-truth' | 'degraded';
+
+export type VerdictErrorKind =
+  | 'judge_failed'
+  | 'invalid_output'
+  | 'timeout'
+  | 'truncated'
+  | 'blocked'
+  | 'competitor_error'
+  | 'no_reference';
+
+/** Por que um contestant ficou SEM veredito numa etapa. */
+export interface VerdictError {
+  kind: VerdictErrorKind;
+  message: string;
+}
+
 /** Veredito COMPACTO de UM juiz para UMA resposta: justificativa + veredito ternario. */
 export interface JudgeVerdict {
   contestantId: string;
@@ -586,6 +621,20 @@ export interface ReferenceJudgeResult {
    * ({@link RunRecord.censoredResolveRateByContestant}).
    */
   limitCutByContestant?: Record<string, number>;
+  /**
+   * IMPL-033 — repeticoes de agente em que o JUIZ falhou mesmo apos as 2
+   * retentativas (flag `judgeError`), por contestant. Com oraculo, o veredito
+   * da rep e o DO ORACULO (preservado — nunca 'parcial' imputado); sem
+   * oraculo, a rep fica SEM veredito (conta tambem em `unscoredRepsByContestant`).
+   */
+  judgeErrorByContestant?: Record<string, number>;
+  /**
+   * IMPL-033 — repeticoes de agente SEM veredito por motivo que NAO e controle:
+   * verificador inconclusivo mesmo apos a re-verificacao (execucao invalida,
+   * a reexecutar) ou juiz que falhou sem oraculo para cair. Ficam FORA do
+   * denominador (sem observacao) — nunca viram 'nao' nem 'parcial'.
+   */
+  unscoredRepsByContestant?: Record<string, number>;
 }
 
 /** Resultado de UM duelo pairwise (2 ordens; desacordo entre ordens = empate). */
@@ -715,6 +764,22 @@ export interface RunRecord {
    * de versoes diferentes nao sao comparaveis.
    */
   agentVerdictTreeVersion?: number;
+  /**
+   * IMPL-033 (R-14a DEC-3) — quantas repeticoes de agente tiveram falha do
+   * JUIZ (flag `judgeError`: excecao/timeout/saida invalida mesmo apos 2
+   * retentativas). Presente (0 incluso) em toda run com agente, desde o
+   * inicio — vale tambem para run abortada. A nota dessas reps e a do oraculo
+   * (ou nenhuma, sem oraculo); nunca 'parcial' imputado.
+   */
+  agentJudgeErrorCount?: number;
+  /** O mesmo, por contestant de agente (so as chaves com falha). */
+  agentJudgeErrorsByContestant?: Record<string, number>;
+  /**
+   * Repeticoes de agente SEM veredito por motivo nao-controle (verificador
+   * inconclusivo apos re-verificacao; juiz falhou sem oraculo), por contestant.
+   * Fora de judge-score/resolveRate/significancia — nunca contadas como 'nao'.
+   */
+  agentUnscoredRepsByContestant?: Record<string, number>;
   /** Classificacao final agregada (Copeland dos duelos / pontos do placar). */
   standings?: {
     id: string;

@@ -3,12 +3,20 @@
 //
 // É o paralelo agentic de `refJudge.ts`, com uma diferença central: o juiz lê o
 // DOSSIÊ (§16 do plano) em vez do texto da resposta. O contrato de saída não muda:
-// `{"verdict": "resolve"|"parcial"|"nao", "explanation": "<uma frase>"}`, o parse
-// é o mesmo tolerante (JSON, fallback regex, lixo ⇒ 'parcial') e a agregação
-// multi-juiz é a mesma média ordinal.
+// `{"verdict": "resolve"|"parcial"|"nao", "explanation": "<uma frase>"}` e a
+// agregação multi-juiz é a mesma média ordinal.
 //
 // Hierarquia (§17.1): o oráculo MANDA; o juiz só aparece nas lacunas. Quem decide
-// QUANDO chamar é o `runAgentStage` (§18). Este módulo só IMPLEMENTA uma chamada.
+// QUANDO chamar é o `runAgentStage` (§18), e quem confina o veredito à faixa do
+// oráculo é `settleRepVerdict` (`verdictTree.ts`). Este módulo só IMPLEMENTA a
+// chamada.
+//
+// FALHA NÃO É VEREDITO (IMPL-033 / R-14a DEC-3): exceção, timeout ou saída sem
+// veredito reconhecível contam como FALHA do juiz, re-tentada 2× (3 tentativas
+// no total, cegas ao resultado — o gateway já re-tenta 429/5xx/rede por baixo).
+// Esgotadas, o juiz devolve `verdict: null` + `judgeError`, e quem chama cai no
+// veredito do ORÁCULO. Antes a falha virava 'parcial' e um oráculo 100% saía
+// rebaixado (resolve→parcial, defeito A3) sem ninguém saber.
 //
 // Três parágrafos novos no system prompt (Apêndice B.1 do plano), e por quê
 // (§18.1): julgue o RESULTADO não o estilo; a VERIFICAÇÃO AUTOMÁTICA tem
@@ -17,8 +25,8 @@
 // ⚠️ ESPELHO CLIENT-SIDE: NÃO existe — o navegador não executa agente (§7.3).
 // ----------------------------------------------------------------------------
 import { chatCompletion } from '../openrouter.js';
-import { isControlSignal } from '../budget.js';
-import type { ReasoningLevel, RunCtx, StageSpec, Verdict } from '../types.js';
+import { isControlSignal, RunCancelled } from '../budget.js';
+import type { ReasoningLevel, RunCtx, StageSpec, Verdict, VerdictError } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // System prompt do juiz de agentes — transcrição do Apêndice B.1 do plano.
@@ -71,18 +79,25 @@ function extractJson(text: string): string {
   return trimmed;
 }
 
-/** Fallback regex: 1a ocorrencia de resolve|parcial|nao no texto cru. */
-function verdictFromText(text: string): Verdict {
+/**
+ * Fallback regex: 1a ocorrencia de resolve|parcial|nao no texto cru. `null` =
+ * nenhum rótulo reconhecível (lixo) — é FALHA do juiz, não 'parcial' (IMPL-033).
+ * (A saída estrita validada por schema, sem este fallback, é o IMPL-034.)
+ */
+function verdictFromText(text: string): Verdict | null {
   const lower = text.toLowerCase();
   // 'nao' antes de 'resolve' (texto "não resolve" nao pode virar 'resolve').
   if (lower.includes('parcial')) return 'parcial';
   if (/n[aã]o/.test(lower)) return 'nao';
   if (lower.includes('resolve')) return 'resolve';
-  return 'parcial'; // lixo => neutro
+  return null;
 }
 
-/** Parse tolerante do veredito: JSON primeiro; regex como fallback; lixo => 'parcial'. */
-function parseJudgeReply(text: string): { verdict: Verdict; explanation: string } {
+/**
+ * Parse do veredito: JSON primeiro; regex como fallback; `null` = saída sem
+ * veredito reconhecível (vira tentativa falha, re-tentada).
+ */
+function parseJudgeReply(text: string): { verdict: Verdict; explanation: string } | null {
   try {
     const parsed = JSON.parse(extractJson(text)) as {
       verdict?: unknown;
@@ -100,7 +115,8 @@ function parseJudgeReply(text: string): { verdict: Verdict; explanation: string 
   } catch {
     // JSON invalido — cai no fallback regex abaixo.
   }
-  return { verdict: verdictFromText(text), explanation: '(veredito do juiz de agente)' };
+  const verdict = verdictFromText(text);
+  return verdict === null ? null : { verdict, explanation: '(veredito do juiz de agente)' };
 }
 
 /**
@@ -134,22 +150,60 @@ export interface JudgeDossierParams {
 }
 
 export interface JudgeDossierResult {
-  verdict: Verdict;
+  /**
+   * Veredito agregado dos juízes que RESPONDERAM. `null` = nenhum juiz produziu
+   * veredito válido mesmo após as retentativas — ver `judgeError`. Nunca um
+   * 'parcial' inventado no lugar da falha (IMPL-033).
+   */
+  verdict: Verdict | null;
   explanation: string;
   judgeModelId: string;
-  /** true = o juiz não conseguiu produzir um veredito confiável (falha de chamada). */
+  /** true = o juiz não conseguiu produzir um veredito confiável (falha total). */
   inconclusive?: boolean;
-}
-
-interface SingleAgentVerdict {
-  judgeModelId: string;
-  verdict: Verdict;
-  explanation: string;
+  /** Falha TOTAL do juiz (todos os juízes falharam após 1+2 tentativas). */
+  judgeError?: VerdictError;
+  /** Tentativas (chamadas) do juiz que mais tentou — auditoria/explicação. */
+  attempts: number;
+  /** Juízes que falharam (painel reduzido quando < total). */
+  failedJudges?: { judgeModelId: string; error: VerdictError }[];
+  /** true = parte do painel falhou; o veredito vem só de quem respondeu. */
+  degraded?: boolean;
 }
 
 /**
- * UM juiz julgando UM dossiê. NUNCA lança: falha de chamada => 'parcial' com
- * motivo (exceto sinais de controle — isControlSignal com rethrow).
+ * Retentativas do juiz de agente além da 1ª chamada (R-14a DEC-3: "retry 2×").
+ * Cegas ao resultado: exceção, timeout e saída sem veredito são re-tentados
+ * igual. Sinais de controle (orçamento/cancelamento) NUNCA são re-tentados.
+ */
+export const AGENT_JUDGE_RETRIES = 2;
+
+/** Lembrete de formato anexado à tentativa seguinte a uma saída sem veredito. */
+const FORMAT_REMINDER =
+  'LEMBRETE: responda APENAS com o objeto JSON {"verdict": "resolve"|"parcial"|"nao", "explanation": "<uma frase>"} — nada antes nem depois.';
+
+type SingleAgentVerdict =
+  | { ok: true; judgeModelId: string; verdict: Verdict; explanation: string; attempts: number }
+  | { ok: false; judgeModelId: string; error: VerdictError; attempts: number };
+
+/** Timeout do gateway (`abort(new Error('timeout'))`) ou `TimeoutError` do runtime. */
+function isTimeout(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const e = err as { name?: unknown; message?: unknown };
+  if (e.name === 'TimeoutError') return true;
+  return typeof e.message === 'string' && /\btime-?out\b|\btimed out\b/i.test(e.message);
+}
+
+function describeFailure(err: unknown): VerdictError {
+  const message = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim().slice(0, 160);
+  return { kind: isTimeout(err) ? 'timeout' : 'judge_failed', message };
+}
+
+/**
+ * UM juiz julgando UM dossiê, com até {@link AGENT_JUDGE_RETRIES} retentativas.
+ * NUNCA lança erro comum: devolve `{ ok: false, error }` quando todas as
+ * tentativas falham. Sinais de controle sobem (isControlSignal com rethrow), e
+ * um abort externo no meio da chamada vira `RunCancelled` — cancelamento não é
+ * falha do juiz e não pode inflar a contagem de `judgeError`.
  */
 async function judgeOneDossier(opts: {
   apiKey: string;
@@ -162,39 +216,54 @@ async function judgeOneDossier(opts: {
   maxPricePerMTok?: { prompt?: number; completion?: number };
 }): Promise<SingleAgentVerdict> {
   const { apiKey, judgeModelId, stage, dossierText, reasoningLevel, timeoutMs, ctx, maxPricePerMTok } = opts;
-  try {
-    const result = await chatCompletion({
-      apiKey,
-      modelId: judgeModelId,
-      messages: [
-        { role: 'system', content: JUDGE_SYSTEM_PROMPT },
-        { role: 'user', content: buildUserPrompt(stage, dossierText) },
-      ],
-      temperature: 0,
-      maxTokens: 1024,
-      responseFormatJson: true,
-      reasoningLevel,
-      timeoutMs,
-      role: 'judge',
-      signal: ctx?.signal,
-      sink: ctx?.sink,
-      maxPricePerMTok,
-    });
-    const parsed = parseJudgeReply(result.text);
-    return { judgeModelId, ...parsed };
-  } catch (err) {
-    // ESTE catch degrada: sem o rethrow, um estouro de orcamento viraria
-    // 'parcial' e a run sairia 'concluida' com notas inventadas (§29.3).
-    if (isControlSignal(err)) throw err;
-    const msg = (err instanceof Error ? err.message : String(err)).slice(0, 160);
-    return { judgeModelId, verdict: 'parcial', explanation: `Juiz de agentes falhou: ${msg}` };
+  const userPrompt = buildUserPrompt(stage, dossierText);
+  let lastError: VerdictError = { kind: 'judge_failed', message: 'sem tentativa' };
+  let reminder = false;
+  let attempts = 0;
+  for (let attempt = 0; attempt <= AGENT_JUDGE_RETRIES; attempt++) {
+    attempts += 1;
+    try {
+      const result = await chatCompletion({
+        apiKey,
+        modelId: judgeModelId,
+        messages: [
+          { role: 'system', content: JUDGE_SYSTEM_PROMPT },
+          { role: 'user', content: reminder ? `${userPrompt}\n\n${FORMAT_REMINDER}` : userPrompt },
+        ],
+        temperature: 0,
+        maxTokens: 1024,
+        responseFormatJson: true,
+        reasoningLevel,
+        timeoutMs,
+        role: 'judge',
+        signal: ctx?.signal,
+        sink: ctx?.sink,
+        maxPricePerMTok,
+      });
+      const parsed = parseJudgeReply(result.text);
+      if (parsed) return { ok: true, judgeModelId, ...parsed, attempts };
+      const t = result.text.replace(/\s+/g, ' ').trim();
+      lastError = {
+        kind: 'invalid_output',
+        message: `saída sem veredito reconhecível: ${t ? `"${t.slice(0, 80)}${t.length > 80 ? '…' : ''}"` : '(vazia)'}`,
+      };
+      reminder = true;
+    } catch (err) {
+      // ESTE catch degrada: sem o rethrow, um estouro de orcamento viraria
+      // falha do juiz e a run sairia 'concluida' com notas do oráculo (§29.3).
+      if (isControlSignal(err)) throw err;
+      if (ctx?.signal?.aborted) throw new RunCancelled(ctx.signal.reason);
+      lastError = describeFailure(err);
+    }
   }
+  return { ok: false, judgeModelId, error: lastError, attempts };
 }
 
 /**
  * Julga UM dossiê contra o critério da etapa. Multi-juiz: cada juiz vota e o
- * veredito agregado é a média ordinal; a explanation agregada é a do 1º juiz
- * que deu o veredito agregado (fallback: a do 1º juiz).
+ * veredito agregado é a média ordinal DOS QUE RESPONDERAM (painel reduzido =
+ * `degraded`); a explanation agregada é a do 1º juiz que deu o veredito
+ * agregado. Todos falharam ⇒ `verdict: null` + `judgeError` (nunca 'parcial').
  */
 export async function judgeDossier(
   opts: JudgeDossierParams,
@@ -205,17 +274,20 @@ export async function judgeDossier(
   const judgeIds = [...new Set(judgeModelIds ?? [])];
   const judgeModelId = judgeIds.join('+');
 
-  // Sem juiz configurado => inconclusivo (sem chamadas LLM).
+  // Sem juiz configurado ou dossiê vazio => sem veredito (sem chamadas LLM).
   if (judgeIds.length === 0 || !dossierText.trim()) {
     return {
-      verdict: 'parcial',
+      verdict: null,
       explanation: '(sem juiz configurado ou dossiê vazio)',
       judgeModelId,
       inconclusive: true,
+      judgeError: { kind: 'judge_failed', message: 'sem juiz configurado ou dossiê vazio' },
+      attempts: 0,
     };
   }
 
-  // UMA chamada por juiz, todas em paralelo — o limitador global gateia.
+  // UMA chamada por juiz (mais as retentativas), todas em paralelo — o
+  // limitador global gateia.
   const singles = await Promise.all(
     judgeIds.map((jid) =>
       judgeOneDossier({
@@ -231,7 +303,36 @@ export async function judgeDossier(
     ),
   );
 
-  const agg = aggregateAgentVerdict(singles.map((s) => s.verdict));
-  const explanation = (singles.find((s) => s.verdict === agg) ?? singles[0])?.explanation ?? '';
-  return { verdict: agg, explanation, judgeModelId };
+  const attempts = Math.max(0, ...singles.map((s) => s.attempts));
+  const ok = singles.filter((s): s is Extract<SingleAgentVerdict, { ok: true }> => s.ok);
+  const failedJudges = singles
+    .filter((s): s is Extract<SingleAgentVerdict, { ok: false }> => !s.ok)
+    .map((s) => ({ judgeModelId: s.judgeModelId, error: s.error }));
+
+  if (ok.length === 0) {
+    const first = failedJudges[0]?.error ?? { kind: 'judge_failed' as const, message: 'juiz sem resposta' };
+    const error: VerdictError =
+      failedJudges.length > 1
+        ? { kind: first.kind, message: failedJudges.map((f) => `${f.judgeModelId}: ${f.error.message}`).join(' | ').slice(0, 300) }
+        : first;
+    return {
+      verdict: null,
+      explanation: `Juiz de agentes falhou: ${error.message}`,
+      judgeModelId,
+      inconclusive: true,
+      judgeError: error,
+      attempts,
+      failedJudges,
+    };
+  }
+
+  const agg = aggregateAgentVerdict(ok.map((s) => s.verdict));
+  const explanation = (ok.find((s) => s.verdict === agg) ?? ok[0])?.explanation ?? '';
+  return {
+    verdict: agg,
+    explanation,
+    judgeModelId,
+    attempts,
+    ...(failedJudges.length > 0 ? { failedJudges, degraded: true } : {}),
+  };
 }

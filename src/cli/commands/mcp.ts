@@ -88,6 +88,8 @@ function parseAgentConfigRaw(config: unknown): RunConfig {
 
 function agentSummary(rec: {
   agentVerdictTreeVersion?: number;
+  agentJudgeErrorCount?: number;
+  agentUnscoredRepsByContestant?: Record<string, number>;
   contestants: { runner?: 'chat' | 'agent' }[];
   stages: { responses: { costUsd: number; execution?: { turns: number; stopReason: string; oracle?: { score: number } } }[] }[];
 }) {
@@ -106,7 +108,12 @@ function agentSummary(rec: {
       : undefined;
   // Versão da árvore que produziu as notas (1 = legado, corte fora do denominador).
   const verdictTreeVersion = agentVerdictTreeVersionOf(rec);
-  return { executions, failed, incomplete, limitCut, avgTurns, avgCostUsd, oracleRate, verdictTreeVersion };
+  // IMPL-033: falhas do juiz (nota ficou com o oráculo) e reps sem veredito.
+  const judgeErrors = rec.agentJudgeErrorCount;
+  const unscoredReps = rec.agentUnscoredRepsByContestant
+    ? Object.values(rec.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0)
+    : undefined;
+  return { executions, failed, incomplete, limitCut, avgTurns, avgCostUsd, oracleRate, verdictTreeVersion, judgeErrors, unscoredReps };
 }
 
 const TOOLS: Tool[] = [

@@ -90,6 +90,23 @@ inteira do placar, para todos.
 de forma verificável, e o critério de sucesso é o teste, não a educação do
 agente ao se despedir. Oráculo parcial, zerado ou violado + corte = `nao`.
 
+## Oráculo × juiz — o juiz só age DENTRO da faixa do oráculo
+
+Teste passando não prova correção (e o juiz LLM erra), então o juiz **audita**
+— só rebaixa —, **nunca promove** acima do que o oráculo mediu:
+
+| Oráculo (`verify[]`) | Faixa do juiz | Se o juiz falhar |
+|---|---|---|
+| score 1, sem violação | `resolve` ou rebaixa a `parcial` | fica `resolve` (do oráculo) + `judgeError` |
+| score entre 0 e 1 | confirma `parcial` ou rebaixa a `nao` — **nunca `resolve`** | fica `parcial` (do oráculo) + `judgeError` |
+| score 0 / `forbiddenPaths` violado | `nao` direto, sem juiz | — |
+| inconclusivo (check não rodou) | **sem juiz**: re-verifica 2×; persistindo, execução **inválida** — sem nota, fora do denominador | — |
+| sem oráculo | juiz pleno pelo dossiê | **sem nota** (nunca um `parcial` inventado) + `judgeError` |
+
+"Falhar" = exceção, timeout ou resposta sem veredito reconhecível **mesmo após 2
+retentativas** (3 chamadas). Orçamento/cancelamento não são falha do juiz: sobem
+como controle.
+
 ### Métricas de agente no `RunRecord`
 
 | Campo | O que é |
@@ -97,10 +114,14 @@ agente ao se despedir. Oráculo parcial, zerado ou violado + corte = `nao`.
 | `resolveRateByContestant` | **métrica principal**: fração de `resolve` sobre TODAS as execuções (etapas × repetições), cortes incluídos como `nao` |
 | `censoredResolveRateByContestant` | **só diagnóstico** ("sucesso até o limite"): a mesma fração sem os cortes no denominador. Nunca entra em placar, finais ou gate |
 | `limitCutsByContestant` | quantas execuções foram cortadas por limite (já contadas como `nao`) |
-| `agentVerdictTreeVersion` | versão da árvore de veredito que produziu as notas. **Ausente numa run com agente = v1 (legado)**, em que o corte saía do denominador — notas de versões diferentes não se comparam |
+| `agentVerdictTreeVersion` | versão da árvore de veredito que produziu as notas. **Ausente numa run com agente = v1 (legado)**, em que o corte saía do denominador; **v3** = juiz confinado ao oráculo e falha do juiz sem `parcial` inventado — notas de versões diferentes não se comparam |
+| `agentJudgeErrorCount` / `agentJudgeErrorsByContestant` | execuções em que o juiz falhou após as retentativas (`judgeError`) — a nota ficou com o oráculo, ou sem nota se não havia oráculo. Presente (0) em toda run com agente |
+| `agentUnscoredRepsByContestant` | execuções **sem nota** por motivo que não é controle (verificador inconclusivo; juiz falho sem oráculo) — fora de judge-score/resolveRate/significância |
 
 O `agentSummary` (NDJSON `run.finished`, `result` do `agents run`, MCP) separa
 `limitCut` (cortes, contam `nao`) de `incomplete` (só cancelamento) e traz
-`verdictTreeVersion`.
+`verdictTreeVersion`, `judgeErrors` e `unscoredReps`. Taxa de `judgeErrors`
+alta = o juiz está instável (modelo, timeout curto, dossiê grande): as notas
+ainda são do oráculo, mas a auditoria do juiz não aconteceu.
 
 Detalhes do contrato: `prompt-builder docs agent-task`.

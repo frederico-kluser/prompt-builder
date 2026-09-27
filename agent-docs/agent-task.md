@@ -239,9 +239,15 @@ Mapeamento do oráculo para veredito:
 | Situação | Veredito | Juiz LLM |
 |---|---|---|
 | `forbiddenPaths` violado | **`nao`** | não roda (indiscutível) |
+| check inconclusivo (comando ausente / timeout do check) | re-verifica 2×; persistindo, **sem nota** (execução inválida, fora do denominador) | **não roda** — o juiz não supre o oráculo |
 | `score === 1` | **`resolve`** (candidato) | roda só para graduar qualidade; **não pode rebaixar para `nao`** |
-| `0 < score < 1` | **`parcial`** (candidato) | roda; pode confirmar ou rebaixar para `nao` |
+| `0 < score < 1` | **`parcial`** (candidato) | roda; pode confirmar ou rebaixar para `nao` — **nunca promover a `resolve`** |
 | `score === 0` | **`nao`** | não roda |
+
+Falha do juiz (exceção, timeout ou resposta sem veredito, mesmo após 2
+retentativas) **não mexe na nota**: fica o candidato do oráculo, com a flag
+`judgeError` contada por run (`agentJudgeErrorCount`). Sem oráculo não há
+candidato — a execução fica sem nota em vez de ganhar um `parcial` inventado.
 
 ## `judging`
 

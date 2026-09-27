@@ -134,6 +134,10 @@ export interface AgentRunSummary {
   oracleRate: number;
   /** Versão da árvore de veredito (1 = legado: corte por limite fora do denominador). */
   verdictTreeVersion?: number;
+  /** IMPL-033: reps com falha do juiz após 2 retentativas (nota ficou com o oráculo). */
+  judgeErrors?: number;
+  /** IMPL-033: reps sem veredito (execução inválida / juiz falho sem oráculo). */
+  unscoredReps?: number;
 }
 
 function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
@@ -172,6 +176,10 @@ function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
     avgCostUsd: costSum / exes.length,
     oracleRate: oracleTotal > 0 ? oraclePassed / oracleTotal : 0,
     verdictTreeVersion: agentVerdictTreeVersionOf(record),
+    ...(record.agentJudgeErrorCount !== undefined ? { judgeErrors: record.agentJudgeErrorCount } : {}),
+    ...(record.agentUnscoredRepsByContestant
+      ? { unscoredReps: Object.values(record.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0) }
+      : {}),
   };
 }
 
@@ -404,7 +412,9 @@ async function cmdRun(argv: string[]): Promise<number> {
       out.line(
         `Agentes    ${summary.executions} execuções · ${summary.failed} falhas · ` +
           `${summary.limitCut} cortadas por limite (contam 'nao') · ${summary.incomplete} canceladas · ` +
-          `média ${summary.avgTurns.toFixed(1)} turnos · ${fmtUsd(summary.avgCostUsd)} · oráculo ${(summary.oracleRate * 100).toFixed(0)}%`,
+          `média ${summary.avgTurns.toFixed(1)} turnos · ${fmtUsd(summary.avgCostUsd)} · oráculo ${(summary.oracleRate * 100).toFixed(0)}%` +
+          (summary.judgeErrors ? ` · ${summary.judgeErrors} falha(s) do juiz (nota do oráculo)` : '') +
+          (summary.unscoredReps ? ` · ${summary.unscoredReps} sem veredito (fora do placar)` : ''),
       );
     }
   }

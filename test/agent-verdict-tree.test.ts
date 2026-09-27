@@ -137,7 +137,10 @@ const KEY = 'sk-or-v1-fake-key-para-teste-0000000000';
 // 1. Árvore PURA
 // ===========================================================================
 
-describe('IMPL-032 — árvore de veredito: os 9 caminhos', () => {
+// IMPL-033 acrescentou o 10º caminho ('oracle-inconclusive': verificador que
+// não decidiu = execução inválida, sem veredito) e tirou o 'parcial' inventado
+// do caminho sem oráculo (candidate null: falha do juiz ali = sem veredito).
+describe('IMPL-032 — árvore de veredito: os 10 caminhos', () => {
   const casos: Array<{
     nome: string;
     input: Parameters<typeof decideRepVerdict>[0];
@@ -169,39 +172,45 @@ describe('IMPL-032 — árvore de veredito: os 9 caminhos', () => {
       esperado: { kind: 'final', verdict: 'nao' },
     },
     {
-      nome: "5 oracle-pass → juiz gradua 'resolve' (piso 'parcial')",
-      input: { stopReason: 'completed', oracle: { score: 1, violations: [] }, diffEmpty: false },
-      path: 'oracle-pass',
-      esperado: { kind: 'judge', candidate: 'resolve', floor: 'parcial' },
+      nome: '5 oracle-inconclusive → sem veredito (execução inválida, sem juiz) — IMPL-033',
+      input: { stopReason: 'completed', oracle: { score: 0.5, violations: [], inconclusive: true }, diffEmpty: false },
+      path: 'oracle-inconclusive',
+      esperado: { kind: 'unscored' },
     },
     {
-      nome: "6 oracle-fail → 'nao' (score 0)",
+      nome: "6 oracle-pass → juiz gradua 'resolve' (piso 'parcial')",
+      input: { stopReason: 'completed', oracle: { score: 1, violations: [] }, diffEmpty: false },
+      path: 'oracle-pass',
+      esperado: { kind: 'judge', candidate: 'resolve', floor: 'parcial', ceiling: 'resolve' },
+    },
+    {
+      nome: "7 oracle-fail → 'nao' (score 0)",
       input: { stopReason: 'completed', oracle: { score: 0, violations: [] }, diffEmpty: false },
       path: 'oracle-fail',
       esperado: { kind: 'final', verdict: 'nao' },
     },
     {
-      nome: "7 oracle-partial → juiz gradua 'parcial' (piso 'nao')",
+      nome: "8 oracle-partial → juiz gradua 'parcial' (piso 'nao')",
       input: { stopReason: 'completed', oracle: { score: 0.5, violations: [] }, diffEmpty: false },
       path: 'oracle-partial',
-      esperado: { kind: 'judge', candidate: 'parcial', floor: 'nao' },
+      esperado: { kind: 'judge', candidate: 'parcial', floor: 'nao', ceiling: 'parcial' },
     },
     {
-      nome: "8 no-oracle-empty → 'nao' (completou sem mudar nada)",
+      nome: "9 no-oracle-empty → 'nao' (completou sem mudar nada)",
       input: { stopReason: 'completed', diffEmpty: true },
       path: 'no-oracle-empty',
       esperado: { kind: 'final', verdict: 'nao' },
     },
     {
-      nome: '9 no-oracle-judge → juiz pleno pelo dossiê',
+      nome: '10 no-oracle-judge → juiz pleno pelo dossiê (sem oráculo, sem fallback)',
       input: { stopReason: 'completed', diffEmpty: false },
       path: 'no-oracle-judge',
-      esperado: { kind: 'judge', candidate: 'parcial', floor: 'nao' },
+      esperado: { kind: 'judge', candidate: null, floor: 'nao', ceiling: 'resolve' },
     },
   ];
 
-  it('a tabela cobre exatamente os 9 caminhos declarados', () => {
-    expect(VERDICT_PATHS).toHaveLength(9);
+  it('a tabela cobre exatamente os 10 caminhos declarados', () => {
+    expect(VERDICT_PATHS).toHaveLength(10);
     expect(new Set(casos.map((c) => c.path))).toEqual(new Set(VERDICT_PATHS));
   });
 
@@ -332,7 +341,8 @@ describe('IMPL-032 — métricas: principal nunca exclui; censurada só diagnós
   });
 
   it('versão: gravada vence; run com agente sem o campo = legado v1; run de chat = undefined', () => {
-    expect(AGENT_VERDICT_TREE_VERSION).toBe(2);
+    // 3 desde o IMPL-033 (juiz confinado ao oráculo; falha do juiz ≠ 'parcial').
+    expect(AGENT_VERDICT_TREE_VERSION).toBe(3);
     expect(agentVerdictTreeVersionOf({ agentVerdictTreeVersion: 2, contestants: [{ runner: 'agent' }] })).toBe(2);
     expect(agentVerdictTreeVersionOf({ contestants: [{ runner: 'agent' }] })).toBe(1);
     expect(agentVerdictTreeVersionOf({ contestants: [{ runner: 'chat' }, {}] })).toBeUndefined();

@@ -41,6 +41,13 @@ export interface AgentSummary {
    * versões diferentes não se comparam (IMPL-032).
    */
   verdictTreeVersion?: number;
+  /**
+   * IMPL-033: reps em que o juiz de agente falhou mesmo após 2 retentativas
+   * (flag `judgeError`; a nota ficou com o oráculo). Ausente em record legado.
+   */
+  judgeErrors?: number;
+  /** IMPL-033: reps sem veredito (execução inválida / juiz falho sem oráculo) — fora do placar. */
+  unscoredReps?: number;
 }
 
 /**
@@ -87,6 +94,10 @@ function buildAgentSummary(record: RunRecord): AgentSummary | undefined {
     avgCostUsd: costSum / exes.length,
     oracleRate: oracleTotal > 0 ? oraclePassed / oracleTotal : 0,
     verdictTreeVersion: agentVerdictTreeVersionOf(record),
+    ...(record.agentJudgeErrorCount !== undefined ? { judgeErrors: record.agentJudgeErrorCount } : {}),
+    ...(record.agentUnscoredRepsByContestant
+      ? { unscoredReps: Object.values(record.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0) }
+      : {}),
   };
 }
 

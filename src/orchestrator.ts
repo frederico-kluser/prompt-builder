@@ -20,7 +20,7 @@ import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { listModels } from './openrouter.js';
 import { runAgentStage, aggregateAgentVerdict } from './agent/runAgentStage.js';
-import { AGENT_VERDICT_TREE_VERSION, agentRateMetrics, stageObservations } from './agent/verdictTree.js';
+import { AGENT_VERDICT_TREE_VERSION, agentRateMetrics, stageObservations, tallyReps } from './agent/verdictTree.js';
 import type {
   Contestant,
   ReferenceJudgeResult,
@@ -544,6 +544,14 @@ async function runLoop(
   // Ausente numa run com agente = legado (v1: corte por limite fora do
   // denominador); notas de versões diferentes não se comparam (IMPL-032).
   if (hasAgent) record.agentVerdictTreeVersion = AGENT_VERDICT_TREE_VERSION;
+  // IMPL-033: contagem de `judgeError` (juiz de agente que falhou mesmo após as
+  // 2 retentativas) e de reps sem veredito por motivo não-controle, POR RUN —
+  // presentes desde já (0) para valerem também em run abortada.
+  if (hasAgent) {
+    record.agentJudgeErrorCount = 0;
+    record.agentJudgeErrorsByContestant = {};
+    record.agentUnscoredRepsByContestant = {};
+  }
   const custoG2 = est.byRole.competitor + est.byRole.judge + (hasAgent ? est.byRole.agent : 0);
   if (custoG2 > 0 && !gate('competitors', custoG2)) {
     for (const st of record.stages) {
@@ -574,8 +582,9 @@ async function runLoop(
 
       try {
         // Verditios dos contestants de runner 'agent' (agregados por rep) e os
-        // que ficaram sem veredito — SÓ por cancelamento (IMPL-032: corte por
-        // limite conta 'nao' e fica no ranking/judge-score).
+        // que ficaram sem veredito — cancelamento, ou (IMPL-033) toda rep sem
+        // observação: execução inválida/juiz falho sem oráculo. Corte por
+        // limite conta 'nao' e fica no ranking/judge-score (IMPL-032).
         const agentVerdicts: Record<string, Verdict> = {};
         const agentExplanations: Record<string, string> = {};
         const agentIncompleteIds = new Set<string>();
@@ -588,6 +597,10 @@ async function runLoop(
         // Reps decididas pelo caminho 'limit-cut' (já contadas como 'nao'): só
         // alimentam o diagnóstico "sucesso até o limite" (IMPL-032).
         const agentLimitCuts: Record<string, number> = {};
+        // IMPL-033: reps com juiz falho (flag judgeError) e reps sem veredito por
+        // motivo NÃO-controle (execução inválida / juiz falhou sem oráculo).
+        const agentJudgeErrors: Record<string, number> = {};
+        const agentUnscored: Record<string, number> = {};
         const agentContestants = record.contestants.filter((c) => c.runner === 'agent');
         const chatContestants = record.contestants.filter((c) => c.runner !== 'agent');
 
@@ -621,9 +634,19 @@ async function runLoop(
               // Sem veredito algum (só cancelamento — que na prática já subiu
               // como RunCancelled) => fora do ranking. Corte por limite e erro
               // de execução TÊM veredito ('nao') e ficam no denominador.
-              const valid = agentRes.repResults
-                .map((r) => r.verdict)
-                .filter((v): v is Verdict => v !== null);
+              const tally = tallyReps(agentRes.repResults);
+              const valid = tally.verdicts;
+              if (tally.judgeErrors > 0) {
+                agentJudgeErrors[contestant.id] = tally.judgeErrors;
+                record.agentJudgeErrorCount = (record.agentJudgeErrorCount ?? 0) + tally.judgeErrors;
+                const porContestant = (record.agentJudgeErrorsByContestant ??= {});
+                porContestant[contestant.id] = (porContestant[contestant.id] ?? 0) + tally.judgeErrors;
+              }
+              if (tally.unscored > 0) {
+                agentUnscored[contestant.id] = tally.unscored;
+                const porContestant = (record.agentUnscoredRepsByContestant ??= {});
+                porContestant[contestant.id] = (porContestant[contestant.id] ?? 0) + tally.unscored;
+              }
               if (valid.length === 0) {
                 agentIncompleteIds.add(contestant.id);
               } else {
@@ -632,18 +655,17 @@ async function runLoop(
                   agentRes.repResults.find((r) => r.verdict !== null)?.explanation ??
                   '(sem explicação do juiz)';
               }
-              const cortes = agentRes.repResults.filter((r) => r.path === 'limit-cut').length;
-              if (cortes > 0) agentLimitCuts[contestant.id] = cortes;
+              if (tally.limitCuts > 0) agentLimitCuts[contestant.id] = tally.limitCuts;
               // Expõe POR-REPETIÇÃO quando reps > 1 (§18.4): o vetor plano vira
               // observações independentes no denominador do judge-score e no
               // pareamento (cenário × repetição) do pairedSignificance. Reps
-              // canceladas (veredito null) NÃO entram no vetor — são contadas
-              // em repIncomplete; reps cortadas por limite ENTRAM como 'nao'.
+              // sem veredito NÃO entram no vetor — canceladas contam em
+              // repIncomplete, inválidas/juiz-sem-oráculo em
+              // unscoredRepsByContestant; reps cortadas por limite ENTRAM como 'nao'.
               const reps = record.config.agent?.repetitions ?? 1;
               if (reps > 1) {
                 agentVerdictsByRep[contestant.id] = valid;
-                const incompletas = agentRes.repResults.filter((r) => r.verdict === null).length;
-                if (incompletas > 0) agentRepIncomplete[contestant.id] = incompletas;
+                if (tally.cancelled > 0) agentRepIncomplete[contestant.id] = tally.cancelled;
               }
             } else {
               response = await runCompetitor({
@@ -729,6 +751,12 @@ async function runLoop(
                 ...(Object.keys(agentLimitCuts).length > 0 && {
                   limitCutByContestant: agentLimitCuts,
                 }),
+                ...(Object.keys(agentJudgeErrors).length > 0 && {
+                  judgeErrorByContestant: agentJudgeErrors,
+                }),
+                ...(Object.keys(agentUnscored).length > 0 && {
+                  unscoredRepsByContestant: agentUnscored,
+                }),
               };
             } else {
               // Misto: refJudge roda SÓ com as respostas/contestants de chat, e o
@@ -761,6 +789,12 @@ async function runLoop(
                 }),
                 ...(Object.keys(agentLimitCuts).length > 0 && {
                   limitCutByContestant: agentLimitCuts,
+                }),
+                ...(Object.keys(agentJudgeErrors).length > 0 && {
+                  judgeErrorByContestant: agentJudgeErrors,
+                }),
+                ...(Object.keys(agentUnscored).length > 0 && {
+                  unscoredRepsByContestant: agentUnscored,
                 }),
               };
             }
@@ -899,8 +933,9 @@ async function runLoop(
     // Observacoes por etapa (`stageObservations`): o vetor POR REP quando existe
     // (§18.4 — cada rep de agente e uma observacao independente; vetor PLANO de
     // todas as etapas x todas as reps), senao o veredito agregado da etapa.
-    // Veredito ausente = nenhuma observacao. Para agentes isso agora so acontece
-    // por cancelamento: corte por limite (timeout/maxTurns/maxCost/maxOutput)
+    // Veredito ausente = nenhuma observacao. Para agentes isso so acontece por
+    // cancelamento ou rep sem veredito legitimo (IMPL-033: verificador
+    // inconclusivo, juiz falho sem oraculo): corte por limite (timeout/maxTurns/maxCost/maxOutput)
     // chega aqui como 'nao' e CONTA no denominador (IMPL-032 / R-14a DEC-1 —
     // antes saia, e um agente que estourava o teto nas tarefas dificeis ficava
     // com nota perfeita nas faceis: vies de sobrevivencia). Chat numa run mista

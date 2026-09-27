@@ -25,9 +25,10 @@
 //
 // 3. **`inconclusive` = o oráculo NÃO decidiu.** Comando ausente (spawn error)
 //    ou timeout do próprio check significam "o critério de sucesso não pôde ser
-//    aferido" — e o plano §17.1 é explícito: nesse caso o veredito cai para o
-//    caminho SEM oráculo, com o dossiê marcando isso. Fingir `ok:false` aqui
-//    seria punir a tarefa (não o agente) por um oráculo mal escrito.
+//    aferido". Desde o IMPL-033 (R-14a DEC-3) isso é EXECUÇÃO INVÁLIDA: quem
+//    chama re-verifica e, persistindo, a rep fica sem veredito — nunca vai ao
+//    juiz (que não supre o oráculo). Fingir `ok:false` aqui seria punir a
+//    tarefa (não o agente) por um oráculo mal escrito.
 //
 // ⚠️ ESPELHO CLIENT-SIDE: NÃO existe. O navegador não tem `child_process` —
 // rodar oráculo na SPA é impossível por construção (ver nota em `types.ts`).
