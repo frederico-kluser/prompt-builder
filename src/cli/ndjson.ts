@@ -7,7 +7,8 @@
 // enxuto; o record completo fica no disco, acessivel por `runs show`.
 
 import type { Output } from './output.js';
-import type { RunEvent, SessionEvent, RunRecord } from '../types.js';
+import type { CostRole, RunEvent, SessionEvent, RunRecord } from '../types.js';
+import { truncationAlert } from '../engine/truncation.js';
 
 export interface NdjsonMapperOptions {
   /** Com --verbose, inclui config e systemPrompt (que sao grandes). */
@@ -76,6 +77,37 @@ function buildAgentSummary(record: RunRecord): AgentSummary | undefined {
   };
 }
 
+/**
+ * Campos de truncamento do resultado da run (IMPL-014 / R-07b:REC-2): a taxa
+ * (TODAS as chamadas de LLM da run), o numerador/denominador, a quebra POR
+ * PAPEL (`truncationByRole` — so `calls`/`truncated`; os histogramas de
+ * finish_reason ficam no record, `runs show`) e o ALERTA (texto) quando passa
+ * de 2%. Usado no `run.finished` do NDJSON e no `result` do `--json` — o mesmo
+ * formato nos dois. Record anterior ao IMPL-014 (sem `truncationRate`) nao
+ * ganha campo nenhum.
+ */
+export function truncationFields(record: RunRecord): {
+  truncationRate?: number;
+  truncationCounts?: { calls: number; truncated: number };
+  truncationByRole?: Partial<Record<CostRole, { calls: number; truncated: number }>>;
+  truncationAlert?: string;
+} {
+  if (typeof record.truncationRate !== 'number') return {};
+  const counts = record.truncationCounts ?? { calls: 0, truncated: 0 };
+  const porPapel = Object.fromEntries(
+    Object.entries(record.finishSignalsByRole ?? {})
+      .filter(([, c]) => c && c.calls > 0)
+      .map(([role, c]) => [role, { calls: c!.calls, truncated: c!.truncated }]),
+  ) as Partial<Record<CostRole, { calls: number; truncated: number }>>;
+  const alerta = truncationAlert({ ...counts, rate: record.truncationRate }, porPapel);
+  return {
+    truncationRate: record.truncationRate,
+    truncationCounts: counts,
+    ...(Object.keys(porPapel).length ? { truncationByRole: porPapel } : {}),
+    ...(alerta ? { truncationAlert: alerta } : {}),
+  };
+}
+
 export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions = {}): void {
   if (!out.isNdjson) return;
   // Durante um treino, eventos de sessao e de cada iteracao se intercalam: sem
@@ -116,10 +148,25 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         question: e.spec.question,
         hasRubric: Boolean(e.spec.rubric?.trim()),
         hasReference: Boolean(e.spec.reference?.trim()),
+        // IMPL-014: gabarito truncado mesmo apos o retry x2 e descartado — a
+        // etapa e julgada sem regua. Aviso curto (sem o texto do gabarito).
+        ...(e.gabaritoCall?.truncated ? { referenceTruncated: true } : {}),
+        ...(e.warning ? { warning: e.warning } : {}),
       });
       break;
     case 'stage.failed':
       out.event('stage.failed', { ...base, stageIndex: e.stageIndex, error: e.error });
+      break;
+    case 'stage.incomplete':
+      // IMPL-014: etapa fora do placar e das medias. So ids e o motivo — o
+      // texto das respostas truncadas fica no record (`runs show`).
+      out.event('stage.incomplete', {
+        ...base,
+        stageIndex: e.stageIndex,
+        reason: e.reason,
+        detail: e.detail,
+        ...(e.contestantIds?.length ? { contestantIds: e.contestantIds } : {}),
+      });
       break;
     case 'competitor.finished':
       out.event('competitor.finished', {
@@ -134,6 +181,9 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         costUsd: e.response.costUsd,
         chars: e.response.text.length,
         ...(e.response.errorMsg ? { errorMsg: e.response.errorMsg } : {}),
+        // IMPL-014: cortada no teto (mesmo apos o retry x2) / precisou do retry.
+        ...(e.response.truncated ? { truncated: true } : {}),
+        ...(e.response.truncationRetried ? { truncationRetried: true } : {}),
       });
       break;
     case 'stage.judging':
@@ -198,6 +248,12 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         ...(e.record.judgeScoreByContestant
           ? { judgeScoreByContestant: e.record.judgeScoreByContestant }
           : {}),
+        // IMPL-010: bloqueio ≠ recusa ≠ erro (3 números pequenos, cabem no stream).
+        ...(e.record.competitorOutcomeCounts
+          ? { competitorOutcomeCounts: e.record.competitorOutcomeCounts }
+          : {}),
+        // IMPL-014: taxa de truncamento + alerta acima de 2%.
+        ...truncationFields(e.record),
       });
       break;
     }

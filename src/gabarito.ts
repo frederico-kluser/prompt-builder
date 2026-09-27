@@ -1,7 +1,8 @@
 import { chatCompletion } from './openrouter.js';
-import type { ChatMessage } from './openrouter.js';
+import type { ChatCompletionResult, ChatMessage } from './openrouter.js';
 import { isControlSignal } from './budget.js';
-import type { ReasoningLevel, RunCtx, StageSpec } from './types.js';
+import { finishSignalsOf, retryMaxTokens } from './engine/truncation.js';
+import type { CallFinishSignals, ReasoningLevel, RunCtx, StageSpec } from './types.js';
 
 // Gabaritos (respostas de referência), portados do prompt-arena: UMA chamada
 // temp-0 do modelo de referência por etapa, recebendo o MESMO contexto de
@@ -25,6 +26,12 @@ export interface GenerateReferencesParams {
   maxPricePerMTok?: { prompt?: number; completion?: number };
   /** Chamado a cada etapa concluída (sucesso ou falha); total = etapas sem gabarito. */
   onProgress?: (done: number, total: number) => void;
+  /**
+   * Sinais de fim da chamada que gerou o gabarito de `stages[stageIndex]`
+   * (IMPL-014): finish_reason, native_finish_reason, raciocínio vs teto e
+   * tamanho do conteúdo. Só é chamado quando uma chamada COMPLETOU.
+   */
+  onCall?: (stageIndex: number, call: CallFinishSignals) => void;
 }
 
 // System = productContext da etapa (idêntico ao que os competidores recebem) +
@@ -61,7 +68,7 @@ Responda APENAS com a resposta de referência ideal, completa e direta, sem pre�
 export async function generateReferences(
   params: GenerateReferencesParams,
 ): Promise<StageSpec[]> {
-  const { stages, apiKey, modelId, reasoningLevel, timeoutMs, ctx, maxPricePerMTok, onProgress } =
+  const { stages, apiKey, modelId, reasoningLevel, timeoutMs, ctx, maxPricePerMTok, onProgress, onCall } =
     params;
 
   const out = stages.slice();
@@ -74,13 +81,13 @@ export async function generateReferences(
   let done = 0;
   const settled = await Promise.allSettled(
     pending.map(async ({ stage, index }) => {
-      try {
-        const result = await chatCompletion({
+      const chamar = (maxTokens: number): Promise<ChatCompletionResult> =>
+        chatCompletion({
           apiKey,
           modelId,
           messages: buildMessages(stage),
           temperature: 0,
-          maxTokens: MAX_TOKENS_GABARITO,
+          maxTokens,
           timeoutMs,
           reasoningLevel,
           role: 'gabarito',
@@ -88,8 +95,34 @@ export async function generateReferences(
           sink: ctx?.sink,
           maxPricePerMTok,
         });
+      // Sinais da ultima chamada que COMPLETOU (reportados mesmo se o retry falhar).
+      let ultima: CallFinishSignals | undefined;
+      try {
+        let maxTokens = MAX_TOKENS_GABARITO;
+        let result = await chamar(maxTokens);
+        ultima = finishSignalsOf(result, maxTokens);
+        // Truncamento (IMPL-014 / R-07b:DEC-2): UM retry com teto x2. E o
+        // modo de falha tipico do gabarito — juiz/referencia com raciocinio
+        // alto consome os 1500 tokens e devolve `length` com conteudo vazio.
+        // Os sinais da 1a tentativa (a truncada) ficam em `firstAttempt`:
+        // qual sinal disparou e quanto raciocinio ela gastou calibram o teto.
+        if (result.truncated) {
+          const primeira = ultima;
+          maxTokens = retryMaxTokens(maxTokens);
+          result = await chamar(maxTokens);
+          ultima = finishSignalsOf(result, maxTokens, primeira);
+        }
         const reference = result.text.trim();
-        if (reference) {
+        if (result.truncated) {
+          // Regua CORTADA nao julga ninguem: descartada, a etapa segue sem
+          // `reference` (mesma degradacao do gabarito vazio). O sinal fica
+          // persistido em `StageRecord.gabaritoCall`, entra na truncationRate e
+          // o orquestrador AVISA no `stage.generated` (`warning`) — ver
+          // `describeTruncatedReference`.
+          console.warn(
+            `[gabarito] referência da etapa ${index + 1} truncada no teto mesmo com max_tokens=${maxTokens}; descartada.`,
+          );
+        } else if (reference) {
           out[index] = { ...stage, reference };
         } else {
           console.warn(
@@ -105,6 +138,7 @@ export async function generateReferences(
           `[gabarito] falha ao gerar referência da etapa ${index + 1}: ${(err as Error).message}`,
         );
       } finally {
+        if (ultima) onCall?.(index, ultima);
         done += 1;
         onProgress?.(done, total);
       }

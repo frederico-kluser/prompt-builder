@@ -118,7 +118,8 @@ flowchart LR
 
 1. **Datagen** — um modelo recebe o tema (e um `scenarioBrief` opcional) e produz os **cenários**
    em lotes paralelos: uma pergunta de usuário (`question`), um **contexto de produto**
-   (`productContext`, que vira o *system prompt*: políticas, FAQs, dados, restrições) e um teto de
+   (`productContext`: políticas, FAQs, dados, restrições — entregue ao participante como bloco de
+   dado delimitado antes da pergunta; a variante sob teste é o único *system prompt*) e um teto de
    tokens sugerido (`maxTokens`). Cada etapa varia o tipo de tarefa (extração, raciocínio,
    comparação, recusa…). Um **pacote de cenários** importado vira seed e mescla com os gerados.
 2. **Participantes** — respondem **ao mesmo cenário em paralelo** (com limite de concorrência),
@@ -607,7 +608,18 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
 - **Juiz e avaliador em `Promise.allSettled`:** um falhando não derruba o outro nem a run.
 - **Casos-limite do juiz:** 0 respostas válidas → inconclusiva; 1 resposta → auto-ranqueada.
 - **Escrita atômica + fila por run**; **timeouts via `AbortController`** em toda chamada à OpenRouter.
-- **Mensagens de erro traduzidas** (401/403 = key inválida; 402 = sem crédito; 429 = rate limit).
+- **Mensagens de erro traduzidas** (401 = key inválida; 402 = sem crédito; 429 = rate limit).
+- **Bloqueio ≠ recusa ≠ erro:** HTTP 403 de moderação/guardrail e `finish_reason` de filtro de
+  conteúdo viram `status: blocked` (defesa do gateway — **não** é problema de key nem falha do
+  prompt); recusa declarada pelo modelo (`message.refusal`) vira `status: refused` (julgável); o
+  resto é `status: error` (infra). O record traz as três contagens em `competitorOutcomeCounts`.
+- **Truncamento nunca é silencioso:** o gateway lê `finish_reason`/`native_finish_reason` (JSON e
+  stream) + raciocínio ≈ teto + conteúdo vazio com tokens; competidor e gabarito repetem 1x com
+  `max_tokens` x2. Resposta ainda truncada deixa a etapa `incomplete` (`incompleteReason:
+  truncation`), fora do placar e das médias; o record traz `truncationRate` (todas as chamadas,
+  juiz e duelo inclusive), os sinais de fim agregados por papel (`finishSignalsByRole`) e o
+  CLI/UI alertam acima de 2% dizendo quais papéis truncaram. Gabarito ainda truncado é
+  descartado com aviso visível (a etapa é julgada sem gabarito).
 
 ---
 

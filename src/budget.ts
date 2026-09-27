@@ -16,13 +16,16 @@
 
 import type {
   CallCost,
+  CallFinishSignals,
   CostEntry,
   CostRole,
   CostSink,
+  FinishSignalCounts,
   Reservation,
   RunPhase,
 } from './types.js';
 import { COST_ROLES } from './types.js';
+import { cloneFinishCounts, emptyFinishCounts, tallyFinish } from './engine/truncation.js';
 
 // ---------------------------------------------------------------------------
 // Sinais de controle
@@ -104,6 +107,11 @@ export interface BudgetSnapshot {
   upstreamUsd: number;
   byRole: Record<CostRole, CostEntry>;
   accuracy: { exact: number; estimated: number; unknown: number };
+  /**
+   * Sinais de fim agregados por papel (IMPL-014) — so papeis com ao menos uma
+   * chamada que completou. Copia: pode ir direto para o RunRecord.
+   */
+  finishByRole: Partial<Record<CostRole, FinishSignalCounts>>;
 }
 
 export interface BudgetLedgerOptions {
@@ -132,6 +140,13 @@ export class BudgetLedger implements CostSink {
   upstreamUsd = 0;
   byRole: Record<CostRole, CostEntry> = emptyByRole();
   accuracy = { exact: 0, estimated: 0, unknown: 0 };
+  /**
+   * Sinais de fim por papel (IMPL-014): o gateway os entrega junto com o custo,
+   * no MESMO ponto unico — assim juiz, duelo, datagen e reescritor tem
+   * finish_reason/native_finish_reason/truncamento contados sem que cada papel
+   * precise persisti-los. Sobe a cadeia como o custo (sessao ve o total).
+   */
+  finishByRole: Partial<Record<CostRole, FinishSignalCounts>> = {};
 
   constructor(opts: BudgetLedgerOptions = {}) {
     this.budgetUsd = opts.budgetUsd;
@@ -214,6 +229,7 @@ export class BudgetLedger implements CostSink {
       cost: CallCost;
       tokensIn: number;
       tokensOut: number;
+      finish?: CallFinishSignals;
     },
   ): void {
     reservation.release();
@@ -229,6 +245,9 @@ export class BudgetLedger implements CostSink {
       if (entry.cost.source === 'usage') n.accuracy.exact += 1;
       else if (entry.cost.source === 'catalog') n.accuracy.estimated += 1;
       else n.accuracy.unknown += 1;
+      if (entry.finish) {
+        tallyFinish((n.finishByRole[entry.role] ??= emptyFinishCounts()), entry.finish);
+      }
     }
   }
 
@@ -243,6 +262,9 @@ export class BudgetLedger implements CostSink {
       upstreamUsd: this.upstreamUsd,
       byRole: this.byRole,
       accuracy: { ...this.accuracy },
+      finishByRole: Object.fromEntries(
+        Object.entries(this.finishByRole).map(([role, c]) => [role, cloneFinishCounts(c!)]),
+      ) as Partial<Record<CostRole, FinishSignalCounts>>,
     };
   }
 }

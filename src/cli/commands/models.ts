@@ -9,7 +9,14 @@ import { MODELS_EXPORT_FORMAT, modelCaps, toExportRow, type ModelExportRow } fro
 import { filterModels, getLgpdData } from '../../lgpd.js';
 import { REASONING_LEVELS } from '../../reasoning.js';
 import { promises as fs } from 'node:fs';
-import { CliError, EXIT, fmtPerMTok } from '../output.js';
+import {
+  filterByMaxPrice,
+  formatPricePerMTok,
+  isFreePricing,
+  maxPriceFilterDetails,
+  type MaxPriceFilterResult,
+} from '../../engine/pricing.js';
+import { CliError, EXIT } from '../output.js';
 import { buildNetworkContext, parse, type ParsedArgs } from '../context.js';
 import { daysUntil, describeSuccessor, lifecycleAlertFor } from '../../engine/modelLifecycle.js';
 import type { OpenRouterModel, ReasoningLevel } from '../../types.js';
@@ -24,6 +31,7 @@ const OPTIONS = {
   'min-context': { type: 'string' },
   'max-prompt-price': { type: 'string' },
   'max-completion-price': { type: 'string' },
+  'include-variable-price': { type: 'boolean' },
   free: { type: 'boolean' },
   'lgpd-area': { type: 'string' },
   'include-ressalvas': { type: 'boolean' },
@@ -40,8 +48,15 @@ function num(v: unknown, campo: string): number | undefined {
   return n;
 }
 
-function applyFilters(models: OpenRouterModel[], v: Record<string, unknown>): OpenRouterModel[] {
+interface FilterOutcome {
+  models: OpenRouterModel[];
+  /** Resultado do teto de preço (contagem "X de Y" + preço variável), quando houve teto. */
+  price?: MaxPriceFilterResult<OpenRouterModel>;
+}
+
+function applyFilters(models: OpenRouterModel[], v: Record<string, unknown>): FilterOutcome {
   let out = models;
+  let price: MaxPriceFilterResult<OpenRouterModel> | undefined;
 
   const search = typeof v.search === 'string' ? v.search.toLowerCase().trim() : '';
   if (search) {
@@ -79,14 +94,27 @@ function applyFilters(models: OpenRouterModel[], v: Record<string, unknown>): Op
   if (minCtx !== undefined) out = out.filter((m) => (m.contextLength ?? 0) >= minCtx);
 
   // Precos de filtro sao em USD por MILHAO (o que humanos usam); o catalogo e
-  // por token. A conversao acontece so aqui.
+  // por token. Preco DESCONHECIDO (roteador, "-1") nao passa em teto nenhum por
+  // default nem conta como gratis — antes o -1 passava em qualquer
+  // `--max-*-price`. `--include-variable-price` e a decisao EXPLICITA de mante-los
+  // (IMPL-043: mesma regra do filtro da SPA, src/engine/pricing.ts).
   const maxIn = num(v['max-prompt-price'], '--max-prompt-price');
-  if (maxIn !== undefined) out = out.filter((m) => m.pricing.prompt * 1_000_000 <= maxIn);
   const maxOut = num(v['max-completion-price'], '--max-completion-price');
-  if (maxOut !== undefined) out = out.filter((m) => m.pricing.completion * 1_000_000 <= maxOut);
+  for (const [campo, teto] of [['--max-prompt-price', maxIn], ['--max-completion-price', maxOut]] as const) {
+    // Teto negativo nao tem sentido (e o filtro puro o ignora): erro de uso, nao silencio.
+    if (teto !== undefined && teto < 0) throw new CliError(`${campo} deve ser >= 0.`, EXIT.USAGE);
+  }
+  if (maxIn !== undefined || maxOut !== undefined) {
+    price = filterByMaxPrice(out, {
+      maxPromptPerMTok: maxIn,
+      maxCompletionPerMTok: maxOut,
+      includeUnknown: v['include-variable-price'] === true,
+    });
+    out = price.models;
+  }
 
   if (v.free === true) {
-    out = out.filter((m) => m.pricing.prompt === 0 && m.pricing.completion === 0);
+    out = out.filter((m) => isFreePricing(m.pricing));
   }
 
   // `--expiring <dias>` (IMPL-019): só modelos com expiration_date em até N
@@ -114,7 +142,12 @@ function applyFilters(models: OpenRouterModel[], v: Record<string, unknown>): Op
     out = filterModels(out, area, v['include-ressalvas'] === true, data).allowed;
   }
 
-  return out;
+  return { models: out, price };
+}
+
+/** Preco de uma linha de export ("variável" quando desconhecido — nunca "-1"). */
+function fmtRowPrice(p: ModelExportRow['pricing']['prompt']): string {
+  return formatPricePerMTok(typeof p === 'number' ? p : null);
 }
 
 function renderTable(rows: ModelExportRow[]): string[] {
@@ -122,7 +155,7 @@ function renderTable(rows: ModelExportRow[]): string[] {
     const think = r.thinkLevels.accepted.length
       ? r.thinkLevels.accepted.join(',')
       : '—';
-    const preco = `in ${fmtPerMTok(r.pricing.prompt)} / out ${fmtPerMTok(r.pricing.completion)}`;
+    const preco = `in ${fmtRowPrice(r.pricing.prompt)} / out ${fmtRowPrice(r.pricing.completion)}`;
     return `${r.id}\n    ${preco} /1M · ctx ${r.contextLength ?? '?'} · think: ${think}`;
   });
 }
@@ -186,7 +219,7 @@ export async function cmdModels(argv: string[]): Promise<number> {
       out.line(`${row.id}  —  ${row.name}`);
       out.line(`  contexto        ${row.contextLength ?? '?'} tokens`);
       out.line(
-        `  preço           in ${fmtPerMTok(row.pricing.prompt)} / out ${fmtPerMTok(row.pricing.completion)} por 1M tokens`,
+        `  preço           in ${fmtRowPrice(row.pricing.prompt)} / out ${fmtRowPrice(row.pricing.completion)} por 1M tokens`,
       );
       out.line(`  temperature     ${row.caps.temperature ? 'aceita' : 'NÃO aceita'}`);
       out.line(
@@ -220,7 +253,15 @@ export async function cmdModels(argv: string[]): Promise<number> {
   }
 
   // list | export
-  const filtrados = applyFilters(ctx.models, values);
+  const { models: filtrados, price } = applyFilters(ctx.models, values);
+  // O que o teto de preço fez, com o preço variável explícito — na NARRAÇÃO
+  // (stderr), nunca no payload. O "X de Y modelos." geral sai no fim, como antes.
+  const detalhes = price ? maxPriceFilterDetails(price) : [];
+  if (price && detalhes.length > 0) {
+    const dica =
+      price.unknownIds.length > 0 && !price.includeUnknown ? ' — use --include-variable-price para mantê-los' : '';
+    out.info(`teto de preço: ${detalhes.join(' · ')}${dica}`);
+  }
   const limit = num(values.limit, '--limit');
   const rows = (limit !== undefined ? filtrados.slice(0, limit) : filtrados).map(toExportRow);
 

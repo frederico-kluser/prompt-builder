@@ -2,7 +2,17 @@ import { requestPersistentStorage, type StorageSubject } from './storageHealth';
 import type { ExpectedSpec } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
-import type { CostEntry, CostRole, RunCtx, RunPhase, StoredSignificance } from '../../src/types.js';
+import type {
+  CallFinishSignals,
+  CostEntry,
+  CostRole,
+  FinishSignalCounts,
+  RunCtx,
+  RunPhase,
+  StageIncompleteReason,
+  StoredSignificance,
+  TruncationSignal,
+} from '../../src/types.js';
 export type { CostEntry, CostRole, RunPhase } from '../../src/types.js';
 import {
   estimateLaunchCost,
@@ -29,6 +39,13 @@ export type {
   PairSensitivity,
   RunCompleteness,
   SessionPairing,
+} from '../../src/types.js';
+// Sinais de fim / truncamento (IMPL-014): fonte única em src/types.ts.
+export type {
+  CallFinishSignals,
+  FinishSignalCounts,
+  StageIncompleteReason,
+  TruncationSignal,
 } from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelLifecycleSnapshot } from '../../src/engine/modelLifecycle.js';
@@ -87,7 +104,8 @@ export interface OpenRouterModel {
   id: string;
   name: string;
   contextLength?: number;
-  pricing: { prompt: number; completion: number };
+  /** USD por token. `null` = preço DESCONHECIDO/variável (ex.: roteadores; "-1" no catálogo). */
+  pricing: { prompt: number | null; completion: number | null };
   /** `supported_parameters` do OpenRouter — usado p/ determinismo por modelo. */
   supportedParameters?: string[];
   /** Metadados de raciocínio: quais degraus de esforço este modelo aceita. */
@@ -103,6 +121,24 @@ export interface OpenRouterModel {
 // porta única (api.ts), a regra mora em modelCaps.ts.
 export type { ModelCaps, ModelReasoningMeta } from './modelCaps';
 export { modelCaps, effortOptions, EFFORT_LABEL } from './modelCaps';
+// Preço com "desconhecido" explícito (IMPL-018): fonte única em src/engine/pricing.ts.
+// IMPL-043: filtro de preço com decisão explícita p/ o variável, contagem "X de Y",
+// prévia de custo com contribuição neutra e o aviso "custo não estimável".
+export {
+  createCostPreviewPricer,
+  describeMaxPriceFilter,
+  filterByMaxPrice,
+  formatPricePerMTok,
+  formatPricingLabel,
+  isKnownPrice,
+  knownPricing,
+  priceTokens,
+  unestimableCostNotice,
+  unknownPriceNote,
+  withinMaxPricePerMTok,
+  UNESTIMABLE_COST_LABEL,
+  UNKNOWN_PRICE_LABEL,
+} from '../../src/engine/pricing.js';
 
 export type RunMode = 'compare' | 'variation' | 'training';
 
@@ -228,8 +264,19 @@ export interface CompetitorResponse {
   tokensIn: number;
   tokensOut: number;
   costUsd: number;
-  status: 'ok' | 'error';
+  /** `blocked` = moderação/guardrail (sem veredito); `refused` = o modelo recusou (julgável); `error` = infra. */
+  status: 'ok' | 'error' | 'blocked' | 'refused';
   errorMsg?: string;
+  finishReason?: string;
+  nativeFinishReason?: string;
+  /** Cortada no teto mesmo após o retry x2 (IMPL-014) — a etapa fica fora do placar. */
+  truncated?: boolean;
+  reasoningTokens?: number;
+  maxTokens?: number;
+  truncationSignals?: TruncationSignal[];
+  truncationRetried?: boolean;
+  /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
+  firstAttempt?: CallFinishSignals;
 }
 
 export interface StageSpec {
@@ -345,9 +392,12 @@ export interface StageRecord {
   evaluation?: StageEvaluation;
   /** Preenchido quando a etapa falhou (datagen/imprevisto) e foi pulada. */
   error?: string;
-  /** Etapa cortada (orçamento/cancelamento): FORA do placar e das médias. */
+  /** Etapa fora do placar e das médias (orçamento/cancelamento/truncamento). */
   incomplete?: boolean;
-  incompleteReason?: 'budget' | 'cancelled' | 'truncation';
+  /** Motivo do `incomplete` (IMPL-014: `truncation` = resposta cortada no teto mesmo após o retry x2). */
+  incompleteReason?: StageIncompleteReason;
+  /** Sinais de fim da chamada do gabarito (IMPL-014). */
+  gabaritoCall?: CallFinishSignals;
   startedAt: string;
   finishedAt?: string;
 }
@@ -414,6 +464,13 @@ export interface RunRecord {
    * (Web Locks) ficou livre com o record ainda 'running'.
    */
   stoppedReason?: 'budget' | 'cancelled' | 'orphan';
+  /** Desfechos não-ok dos competidores, separados (IMPL-010): bloqueio ≠ recusa ≠ erro. */
+  competitorOutcomeCounts?: { blocked: number; refused: number; error: number };
+  /** Fração das chamadas de LLM da run (todos os papéis) truncadas no teto (IMPL-014); alerta acima de 2%. */
+  truncationRate?: number;
+  truncationCounts?: { calls: number; truncated: number };
+  /** Os 4 sinais de fim agregados por papel — 100% das chamadas que completaram (IMPL-014). */
+  finishSignalsByRole?: Partial<Record<CostRole, FinishSignalCounts>>;
   startedAt: string;
   finishedAt?: string;
   error?: string;

@@ -36,6 +36,7 @@ import { isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
 import { blindRankMap, seedFromId } from '../duels.js';
 import { tierFor } from '../openrouter.js';
+import { isKnownPrice } from '../engine/pricing.js';
 import type {
   AgentLimits,
   AgentRunnerConfig,
@@ -156,7 +157,10 @@ function priceFns(catalog: OpenRouterModel[], modelId: string): {
   const model = catalog.find((m) => m.id === modelId);
   const rate = (t: number, kind: 'prompt' | 'completion'): number => {
     if (!model) return 0;
-    return t * tierFor(model.pricing, Math.max(1, t))[kind];
+    const preco = tierFor(model.pricing, Math.max(1, t))[kind];
+    // IMPL-018: preco desconhecido ("-1", roteador) nunca multiplica tokens —
+    // antes dava custo NEGATIVO. Mesmo tratamento do modelo fora do catalogo.
+    return isKnownPrice(preco) ? t * preco : 0;
   };
   return {
     priceTokensIn: (n) => rate(n, 'prompt'),

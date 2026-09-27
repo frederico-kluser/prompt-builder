@@ -48,6 +48,12 @@ export interface LaunchCostEstimate {
   drivers: CostDriver[];
   /** Modelos sem preço no catálogo — contados como ZERO; a faixa não é confiável. */
   unpricedModelIds: string[];
+  /**
+   * Modelos NO catálogo com preço variável/desconhecido ("-1", roteadores —
+   * IMPL-018/043): fora da soma (neutros), então a faixa é PARCIAL. Contam para
+   * o portão como os sem preço: custo que não dá para limitar pede um "sim".
+   */
+  unknownPriceModelIds: string[];
   assumptions: CostEstimate['assumptions'];
   thresholdUsd: number;
   /** true = iniciar exige confirmação (faixa alta > limiar, ou custo desconhecido). */
@@ -158,9 +164,14 @@ export function estimateLaunchCost(
     high: est.high,
     drivers,
     unpricedModelIds: est.unpricedModelIds,
+    unknownPriceModelIds: est.unknownPriceModelIds,
     assumptions: est.assumptions,
     thresholdUsd,
-    requiresConfirmation: requiresCostConfirmation(est.high, est.unpricedModelIds, thresholdUsd),
+    requiresConfirmation: requiresCostConfirmation(
+      est.high,
+      [...est.unpricedModelIds, ...est.unknownPriceModelIds],
+      thresholdUsd,
+    ),
     ...(budgetUsd !== undefined ? { budgetUsd } : {}),
     budgetBelowLow: budgetUsd !== undefined && budgetUsd < est.low,
     budgetBelowHigh: budgetUsd !== undefined && budgetUsd < est.high,

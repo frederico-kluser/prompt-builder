@@ -2,7 +2,18 @@
 import type { ExpectedSpec } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
-import type { CostEntry, CostRole, PricingTier, RunPhase, StoredSignificance } from '../../../src/types.js';
+import type {
+  CallFinishSignals,
+  CostEntry,
+  CostRole,
+  FinishSignalCounts,
+  PricingTier,
+  RunPhase,
+  StageIncompleteReason,
+  StoredSignificance,
+  TokenPrice,
+  TruncationSignal,
+} from '../../../src/types.js';
 import type { ModelLifecycleSnapshot } from '../../../src/engine/modelLifecycle.js';
 
 // Ciclo de vida de modelos (IMPL-019): fonte única em src/engine/modelLifecycle.ts.
@@ -28,8 +39,17 @@ export type {
   Reservation,
   RunCtx,
   RunPhase,
+  TokenPrice,
 } from '../../../src/types.js';
 export { COST_ROLES } from '../../../src/types.js';
+// Sinais de fim / truncamento (IMPL-014): fonte única em src/types.ts — o
+// gateway e o competidor já são shims, os dois motores gravam o MESMO formato.
+export type {
+  CallFinishSignals,
+  FinishSignalCounts,
+  StageIncompleteReason,
+  TruncationSignal,
+} from '../../../src/types.js';
 
 // Significância pareada: FONTE ÚNICA em src/types.ts (IMPL-001). O cálculo já é
 // shim (src/stats.ts), então o shape que ele devolve também não se duplica.
@@ -57,8 +77,9 @@ export type {
 } from '../../../src/types.js';
 
 export interface OpenRouterModelPricing {
-  prompt: number; // USD per token
-  completion: number; // USD per token
+  /** USD por token. `null` = desconhecido ("-1"/roteador, ausente, inválido) — ver src/types.ts. */
+  prompt: TokenPrice;
+  completion: TokenPrice;
   /** Faixas de preço por tamanho de prompt (`pricing.overrides` do catálogo). */
   overrides?: PricingTier[];
 }
@@ -72,7 +93,8 @@ export interface OpenRouterModel {
    * Parametros de amostragem que o modelo aceita (campo `supported_parameters`
    * do OpenRouter). Fonte de verdade para enviar `temperature`/`seed` so a quem
    * suporta — reasoning models (gpt-5*, serie o*) NAO listam `temperature` e
-   * respondem vazio (HTTP 400) se ela for enviada. Ausente = desconhecido.
+   * respondem vazio (HTTP 400) se ela for enviada. Ausente = desconhecido;
+   * `[]` = declara que não aceita nenhum (também o fail-closed de campo malformado).
    */
   supportedParameters?: string[];
   /** Metadados de raciocinio declarados pelo modelo (campo `reasoning` de /models). */
@@ -127,7 +149,7 @@ export interface Contestant {
   label: string;
   /** Modelo real OpenRouter (usado para preco/getModel). */
   modelId: string;
-  /** Override do system message; ausente => usa stage.productContext (compare). */
+  /** Variante: vira o system message (ausente => sem system, compare). O productContext vai sempre no user, como dado (buildCaseInput). */
   systemPrompt?: string;
   /** Tecnica da biblioteca que gerou esta variante (ausente = verbatim/original). */
   techniqueId?: string;
@@ -354,7 +376,19 @@ export interface StageSpec {
   dimensionTags?: string[];
 }
 
-export type CompetitorStatus = 'ok' | 'error';
+/**
+ * Desfecho de UMA resposta (IMPL-010): `ok`; `blocked` = moderacao/guardrail
+ * ou filtro de conteudo (sem veredito para o prompt); `refused` = o modelo
+ * recusou (julgavel); `error` = infraestrutura. Espelho de src/types.ts.
+ */
+export type CompetitorStatus = 'ok' | 'error' | 'blocked' | 'refused';
+
+/** Contagens dos desfechos nao-ok dos competidores de uma run (IMPL-010). */
+export interface CompetitorOutcomeCounts {
+  blocked: number;
+  refused: number;
+  error: number;
+}
 
 export interface CompetitorResponse {
   /** Chave universal. compare: === modelId. */
@@ -366,7 +400,24 @@ export interface CompetitorResponse {
   tokensOut: number;
   costUsd: number;
   status: CompetitorStatus;
+  /** Motivo do `error` (infra) ou do `blocked` (mensagem de moderacao — nunca "key invalida"). */
   errorMsg?: string;
+  /** `finish_reason` normalizado pelo OpenRouter (ex.: stop, length, content_filter). */
+  finishReason?: string;
+  /** `native_finish_reason` cru do provedor (ex.: SAFETY, end_turn). */
+  nativeFinishReason?: string;
+  /** Resposta final cortada no teto mesmo após o retry x2 (IMPL-014) — etapa fica `incomplete`. */
+  truncated?: boolean;
+  /** `reasoning_tokens` da tentativa final. */
+  reasoningTokens?: number;
+  /** `max_tokens` enviado na tentativa final (dobra no retry por truncamento). */
+  maxTokens?: number;
+  /** Sinais de truncamento observados na tentativa final. */
+  truncationSignals?: TruncationSignal[];
+  /** true = a 1a tentativa truncou; `costUsd` soma as duas tentativas. */
+  truncationRetried?: boolean;
+  /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
+  firstAttempt?: CallFinishSignals;
 }
 
 /**
@@ -521,13 +572,16 @@ export interface StageRecord {
   /** Preenchido quando a etapa falhou (ex.: datagen) e foi pulada sem matar a run. */
   error?: string;
   /**
-   * Etapa interrompida no meio (orcamento/cancelamento) — NAO entra no placar
-   * nem nas medias. E o que separa "parou cedo, honesto" de "terminou,
-   * mentindo": sem a marca, uma etapa cortada viraria veredito inventado.
+   * Etapa interrompida no meio (orcamento/cancelamento) ou com resposta
+   * truncada no teto (IMPL-014) — NAO entra no placar nem nas medias. E o que
+   * separa "parou cedo, honesto" de "terminou, mentindo": sem a marca, uma
+   * etapa cortada viraria veredito inventado. Espelho de src/types.ts.
    */
   incomplete?: boolean;
-  /** Por que a etapa ficou incompleta (CONVENTIONS §4). */
-  incompleteReason?: 'budget' | 'cancelled' | 'truncation';
+  /** Motivo do `incomplete` (CONVENTIONS §4; `truncation` desde o IMPL-014). */
+  incompleteReason?: StageIncompleteReason;
+  /** Sinais de fim da chamada do gabarito (so no 1o clone com repeats) — IMPL-014. */
+  gabaritoCall?: CallFinishSignals;
   startedAt: string;
   finishedAt?: string;
 }
@@ -601,6 +655,14 @@ export interface RunRecord {
    * (Web Locks) ficou livre com o record ainda 'running'.
    */
   stoppedReason?: 'budget' | 'cancelled' | 'orphan';
+  /** Desfechos nao-ok dos competidores, separados (blocked/refused/error) — IMPL-010. */
+  competitorOutcomeCounts?: CompetitorOutcomeCounts;
+  /** Fracao das chamadas de LLM da run (TODOS os papeis) truncadas no teto — IMPL-014; alerta > 2%. */
+  truncationRate?: number;
+  /** Numerador/denominador de `truncationRate`. */
+  truncationCounts?: { calls: number; truncated: number };
+  /** Os 4 sinais de fim agregados por papel (100% das chamadas que completaram) — IMPL-014. */
+  finishSignalsByRole?: Partial<Record<CostRole, FinishSignalCounts>>;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -731,8 +793,26 @@ export type RunEvent =
   | { type: 'variants.generating'; runId: string }
   | { type: 'variants.generated'; runId: string; contestants: Contestant[] }
   | { type: 'stage.generating'; runId: string; stageIndex: number }
-  | { type: 'stage.generated'; runId: string; stageIndex: number; spec: StageSpec }
+  | {
+      type: 'stage.generated';
+      runId: string;
+      stageIndex: number;
+      spec: StageSpec;
+      /** Sinais de fim da chamada do gabarito (IMPL-014). */
+      gabaritoCall?: CallFinishSignals;
+      /** Aviso visivel — hoje: gabarito truncado e descartado (etapa julgada sem gabarito). */
+      warning?: string;
+    }
   | { type: 'stage.failed'; runId: string; stageIndex: number; error: string }
+  /** Etapa fora do placar e das medias (IMPL-014: truncamento). Sem texto de resposta. */
+  | {
+      type: 'stage.incomplete';
+      runId: string;
+      stageIndex: number;
+      reason: StageIncompleteReason;
+      detail: string;
+      contestantIds?: string[];
+    }
   | { type: 'competitor.finished'; runId: string; stageIndex: number; response: CompetitorResponse }
   | { type: 'stage.judging'; runId: string; stageIndex: number }
   | {

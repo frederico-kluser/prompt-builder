@@ -15,10 +15,29 @@
 //
 // A faixa `low..high` e larga de proposito (~2.2x). Quem consome deve olhar
 // `assumptions`, nao tratar `point` como promessa.
+//
+// Preco DESCONHECIDO (IMPL-018 / R-07b:REC-7): modelo com preco "-1" no
+// catalogo (roteadores — preco variavel) sai SEMPRE listado em
+// `unknownPriceModelIds` e nunca vira numero negativo nem "gratis". Duas
+// politicas, escolhidas por quem consome:
+//   - `exclude` (default; o que se REPORTA ao humano): fica fora da soma, com
+//     aviso de que o total real e maior;
+//   - `worst-case` (o que as PORTAS de orcamento usam): cada lado desconhecido
+//     vira o pior caso dos endpoints elegiveis (`worstCasePricing`: o preco
+//     mais alto do catalogo, limitado pelo `maxPricePerMTok` da run quando ha).
+//     `/models/{id}/endpoints` de roteador vem vazio, entao sem teto o
+//     "elegivel" e o catalogo inteiro. Projetar de menos estoura o orcamento;
+//     projetar de mais so corta cedo.
+// A reserva da porta dura (`makeCallEstimator`) e sempre `worst-case`.
 
 import { batchCountFor } from './datagen.js';
-import { tierFor } from './openrouter.js';
 import { CANARY_MAX_TOKENS, JUDGE_MAX_TOKENS } from './contractGate.js';
+import {
+  priceTokens,
+  priceTokensOrWorst,
+  worstCasePricing,
+  type PriceCapPerMTok,
+} from './engine/pricing.js';
 import type { CostRole, OpenRouterModel, RunConfig, RunMode } from './types.js';
 
 /** USD por token -> USD por milhao. A conversao 1e6 mora SO aqui e em toPerToken. */
@@ -82,6 +101,24 @@ export interface EstimateInput {
   agentRuns?: number;
   /** Teto de gasto POR execucao de agente (USD). Vindo de `agent.limits.maxCostUsd`. */
   agentMaxCostUsd?: number;
+  /**
+   * Teto de preco por requisicao (USD por MILHAO; `RunConfig.maxPricePerMTok`).
+   * So limita o PIOR CASO de modelo de preco desconhecido (IMPL-018): endpoint
+   * acima do teto nao e elegivel. Preco conhecido nao e afetado.
+   */
+  maxPricePerMTok?: PriceCapPerMTok;
+}
+
+/**
+ * Como tratar modelo de preco desconhecido/variavel (IMPL-018). `exclude` =
+ * fora da soma, com aviso (reportar); `worst-case` = pior caso dos endpoints
+ * elegiveis (portas de orcamento).
+ */
+export type UnknownPricePolicy = 'exclude' | 'worst-case';
+
+export interface EstimateOptions {
+  /** Default `exclude`. */
+  unknownPrice?: UnknownPricePolicy;
 }
 
 export interface CostEstimate {
@@ -91,9 +128,17 @@ export interface CostEstimate {
   byRole: Record<CostRole, number>;
   /** Custo de UMA iteracao (training); igual a `point` nos outros modos. */
   perIteration: number;
-  /** Modelos que nao estao no catalogo — a estimativa os conta como 0. */
+  /** Modelos que nao estao no catalogo — ficam FORA da soma (nao sao "gratis"). */
   unpricedModelIds: string[];
+  /**
+   * Modelos NO catalogo com preco desconhecido/variavel ("-1", ex.: roteadores).
+   * Ficam FORA da soma: `point/low/high` sao so a parte precificavel e quem
+   * consome precisa avisar que o total real e maior (nunca "custou zero").
+   */
+  unknownPriceModelIds: string[];
   assumptions: {
+    /** Politica aplicada a `unknownPriceModelIds` (IMPL-018). */
+    unknownPrice: UnknownPricePolicy;
     ctxInTokens: number;
     maxOutputTokens: number;
     stages: number;
@@ -106,15 +151,18 @@ export interface CostEstimate {
   };
 }
 
-/** Custo de UMA chamada, pelo catalogo, respeitando as faixas de preco. */
+/**
+ * Custo de UMA chamada, pelo catalogo, respeitando as faixas de preco.
+ * `null` = impossivel precificar (fora do catalogo ou preco desconhecido) —
+ * nunca 0 "por omissao" e nunca negativo.
+ */
 export function priceCall(
   model: OpenRouterModel | undefined,
   promptTokens: number,
   completionTokens: number,
-): number {
-  if (!model) return 0;
-  const preco = tierFor(model.pricing, promptTokens);
-  return promptTokens * preco.prompt + completionTokens * preco.completion;
+): number | null {
+  if (!model) return null;
+  return priceTokens(model.pricing, promptTokens, completionTokens);
 }
 
 function indexModels(models: OpenRouterModel[]): Map<string, OpenRouterModel> {
@@ -126,8 +174,15 @@ function pares(k: number): number {
   return k >= 2 ? (k * (k - 1)) / 2 : 0;
 }
 
-export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[]): CostEstimate {
+export function estimateRunCost(
+  input: EstimateInput,
+  models: OpenRouterModel[],
+  opts: EstimateOptions = {},
+): CostEstimate {
   const idx = indexModels(models);
+  const politica: UnknownPricePolicy = opts.unknownPrice ?? 'exclude';
+  // Pior caso so e calculado quando a politica pede (varre o catalogo inteiro).
+  const pior = politica === 'worst-case' ? worstCasePricing(models, input.maxPricePerMTok) : null;
   const ctxIn = input.ctxInTokens ?? DEFAULT_CTX_IN;
   const stages = Math.max(0, input.plannedStages);
   const iterations = input.mode === 'training' ? Math.max(1, input.iterations) : 1;
@@ -136,11 +191,25 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
   const maxOut = Math.max(1, input.maxOutputTokens);
 
   const unpriced = new Set<string>();
+  const unknownPrice = new Set<string>();
   const model = (id?: string): OpenRouterModel | undefined => {
     if (!id) return undefined;
     const m = idx.get(id);
     if (!m) unpriced.add(id);
     return m;
+  };
+  /**
+   * Preco de uma chamada para a SOMA. Desconhecido vai SEMPRE para
+   * `unknownPriceModelIds`; na soma entra pelo pior caso (`worst-case`) ou
+   * fica de fora (`exclude` — o total e declarado incompleto, nao zerado).
+   * Fora do catalogo ja foi para `unpricedModelIds` em `model()`.
+   */
+  const price = (m: OpenRouterModel | undefined, promptTokens: number, completionTokens: number): number => {
+    const v = priceCall(m, promptTokens, completionTokens);
+    if (v !== null) return v;
+    if (!m) return 0;
+    unknownPrice.add(m.id);
+    return priceTokensOrWorst(m.pricing, promptTokens, completionTokens, pior) ?? 0;
   };
 
   // Um acumulador por papel, para "point" (teto de tokens) e "low" (piso).
@@ -159,20 +228,20 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
   const datagenBatches = input.datagenModelId && stages > 0 ? batchCountFor(stages) : 0;
   if (datagenBatches > 0) {
     const m = model(input.datagenModelId);
-    byRole.datagen += datagenBatches * priceCall(m, 400, MAX_TOKENS_DATAGEN_BATCH);
+    byRole.datagen += datagenBatches * price(m, 400, MAX_TOKENS_DATAGEN_BATCH);
   }
 
   // --- gabaritos: um por cenario ---
   if (input.referenceJudging && stages > 0) {
     const m = model(input.referenceModelId ?? input.judgeModelIds[0]);
-    byRole.gabarito += stages * priceCall(m, ctxIn + 200, MAX_TOKENS_GABARITO);
+    byRole.gabarito += stages * price(m, ctxIn + 200, MAX_TOKENS_GABARITO);
   }
 
   // --- reescritor: uma chamada por variante por iteracao ---
   const variantes = input.variantsPerIteration ?? 0;
   if (variantes > 0 && input.optimizerModelId) {
     const m = model(input.optimizerModelId);
-    byRole.rewriter += variantes * priceCall(m, 1200, 1200);
+    byRole.rewriter += variantes * price(m, 1200, 1200);
   }
 
   // --- contrato never-break: verificar cada variante (IMPL-011) ---
@@ -183,21 +252,21 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
   const contrato = input.contract;
   if (contrato && variantes > 0 && input.optimizerModelId) {
     const checagens = 2;
-    byRole.rewriter += variantes * priceCall(model(input.optimizerModelId), 2600, 1200);
+    byRole.rewriter += variantes * price(model(input.optimizerModelId), 2600, 1200);
     if (contrato.judgeDiff) {
       const mJuiz = model(contrato.judgeModelId ?? input.optimizerModelId);
       byRole.rewriter +=
-        variantes * checagens * 2 * priceCall(mJuiz, CONTRACT_JUDGE_IN, JUDGE_MAX_TOKENS);
+        variantes * checagens * 2 * price(mJuiz, CONTRACT_JUDGE_IN, JUDGE_MAX_TOKENS);
     }
     const mAlvo = model(input.contestantModelIds[0]);
     for (const teto of contrato.canaryMaxTokens) {
-      byRole.rewriter += (variantes * checagens * 2 + 1) * priceCall(mAlvo, 1300, teto);
+      byRole.rewriter += (variantes * checagens * 2 + 1) * price(mAlvo, 1300, teto);
     }
   }
 
   // --- competidores: cada contestant responde cada cenario ---
   for (const id of input.contestantModelIds) {
-    byRole.competitor += stages * priceCall(model(id), ctxIn, maxOut);
+    byRole.competitor += stages * price(model(id), ctxIn, maxOut);
   }
 
   // --- julgamento ---
@@ -206,13 +275,13 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
       byRole.judge +=
-        stages * nContestants * priceCall(m, ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE);
+        stages * nContestants * price(m, ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE);
     }
   } else {
     // listwise: uma chamada por (juiz x passe x cenario), com TODAS as respostas
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
-      byRole.judge += stages * input.judgePasses * priceCall(m, ctxIn + nContestants * maxOut, 800);
+      byRole.judge += stages * input.judgePasses * price(m, ctxIn + nContestants * maxOut, 800);
     }
   }
 
@@ -225,7 +294,7 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
       stages *
       duelPairs *
       2 *
-      priceCall(m, ctxIn + 2 * maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_DUEL);
+      price(m, ctxIn + 2 * maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_DUEL);
   }
 
   // --- agente: custo declarado por construção (§20.1) ---
@@ -247,13 +316,13 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
   const holdoutStages = input.mode === 'training' ? (input.holdoutStages ?? 0) : 0;
   if (holdoutStages > 0) {
     const mComp = model(input.contestantModelIds[0]);
-    const holdoutComp = holdoutStages * 2 * priceCall(mComp, ctxIn, maxOut);
+    const holdoutComp = holdoutStages * 2 * price(mComp, ctxIn, maxOut);
     let holdoutJudge = 0;
     for (const jid of input.judgeModelIds) {
       holdoutJudge +=
         holdoutStages *
         2 *
-        priceCall(model(jid), ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE);
+        price(model(jid), ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE);
     }
     byRole.competitor += holdoutComp;
     byRole.judge += holdoutJudge;
@@ -267,7 +336,9 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
     byRole,
     perIteration,
     unpricedModelIds: [...unpriced],
+    unknownPriceModelIds: [...unknownPrice],
     assumptions: {
+      unknownPrice: politica,
       ctxInTokens: ctxIn,
       maxOutputTokens: maxOut,
       stages,
@@ -343,6 +414,7 @@ export function estimateInputFromConfig(
     holdoutStages: opts.holdoutStages,
     contract: contractEstimateFrom(config, variantsPerIteration),
     ...(config.agent ? { agentRuns, agentMaxCostUsd } : {}),
+    ...(config.maxPricePerMTok ? { maxPricePerMTok: config.maxPricePerMTok } : {}),
   };
 }
 
@@ -368,10 +440,27 @@ function contractEstimateFrom(config: RunConfig, variants: number): EstimateInpu
 /**
  * Estimativa de UMA chamada avulsa, usada pela reserva otimista da porta dura.
  * Grosseira de proposito: so dimensiona o quanto reservar, nunca o que reportar.
+ *
+ * Preco desconhecido (roteador, "-1") reserva pelo PIOR CASO dos endpoints
+ * elegiveis (`worstCasePricing`, limitado por `maxPricePerMTok` quando a run tem
+ * teto): antes o -1 entrava direto e a reserva saia NEGATIVA — cada chamada
+ * afrouxava a porta dura em vez de aperta-la. Reservar de mais so limita quantas
+ * chamadas cabem em voo; o valor real (`usage.cost`) substitui a reserva quando
+ * a resposta chega. Fora do catalogo segue 0 (o pre-voo do CLI recusa orcamento
+ * com modelo fora do catalogo). Nunca negativo.
  */
 export function makeCallEstimator(
   models: OpenRouterModel[],
+  opts: { maxPricePerMTok?: PriceCapPerMTok } = {},
 ): (modelId: string, promptTokens: number, maxTokens: number) => number {
   const idx = indexModels(models);
-  return (modelId, promptTokens, maxTokens) => priceCall(idx.get(modelId), promptTokens, maxTokens);
+  let pior: { prompt: number; completion: number } | null | undefined; // preguicoso: so com roteador
+  return (modelId, promptTokens, maxTokens) => {
+    const m = idx.get(modelId);
+    if (!m) return 0;
+    const v = priceCall(m, promptTokens, maxTokens);
+    if (v !== null) return v;
+    if (pior === undefined) pior = worstCasePricing(models, opts.maxPricePerMTok);
+    return priceTokensOrWorst(m.pricing, promptTokens, maxTokens, pior) ?? 0;
+  };
 }

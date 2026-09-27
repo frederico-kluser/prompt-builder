@@ -208,25 +208,32 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
   return (
     <div className="rounded-xl bg-card ring-1 ring-foreground/10">
       <div className="border-b border-border px-4 py-2 text-[12px] text-muted-foreground">
-        ✓ resolve · ◐ parcial · ✕ não resolve · ⏳ aguardando julgamento · ! erro · ⊘ cortado · · pendente
+        ✓ resolve · ◐ parcial · ✕ não resolve · ⏳ aguardando julgamento · ⊘ bloqueado · ✂ truncada · ⏹ cortado · ! erro · · pendente
       </div>
       <div className="scroll-slim overflow-x-auto p-3">
         <div className="min-w-fit">
           <div className="grid items-center gap-1 pb-1.5" style={gridStyle}>
             <div />
-            {stages.map((s, i) => (
-              <div
-                key={s.index}
-                title={onStageClick ? `Cenário ${i + 1} — clique para abrir` : `Cenário ${i + 1}`}
-                className={cn(
-                  'grid h-6 place-items-center rounded-[5px] text-[11px] text-muted-foreground tabular',
-                  onStageClick && 'cursor-pointer hover:bg-muted focus-visible:bg-muted focus-visible:outline-none',
-                )}
-                {...clickProps(s.index)}
-              >
-                {i + 1}
-              </div>
-            ))}
+            {stages.map((s, i) => {
+              // IMPL-014: gabarito truncado mesmo após o retry x2 foi descartado —
+              // o cenário é julgado SEM régua (listwise). Marca visível no cabeçalho.
+              const semRegua = s.gabaritoCall?.truncated === true;
+              const base = `Cenário ${i + 1}${semRegua ? ' — gabarito truncado no teto e descartado: julgado sem gabarito' : ''}`;
+              return (
+                <div
+                  key={s.index}
+                  title={onStageClick ? `${base} — clique para abrir` : base}
+                  className={cn(
+                    'grid h-6 place-items-center rounded-[5px] text-[11px] text-muted-foreground tabular',
+                    semRegua && 'underline decoration-dotted underline-offset-2',
+                    onStageClick && 'cursor-pointer hover:bg-muted focus-visible:bg-muted focus-visible:outline-none',
+                  )}
+                  {...clickProps(s.index)}
+                >
+                  {semRegua ? `${i + 1}✂` : i + 1}
+                </div>
+              );
+            })}
             <div
               className="pr-1 text-right text-[11px] text-muted-foreground"
               title="(resolve + ½·parcial) ÷ julgados × 100"
@@ -250,13 +257,23 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
                 // com erro à parte. É o que faz a run longa não parecer travada.
                 const v = row.verdicts[i];
                 const resp = (s.responses ?? []).find((r) => r.contestantId === row.contestantId);
-                const estado = v
+                // Bloqueio (moderação/guardrail) vem ANTES do veredito: o cenário
+                // é inconclusivo para o prompt, nunca um 'não' (IMPL-010).
+                const estado = resp?.status === 'blocked'
+                  ? { glyph: '⊘', cls: 'bg-muted text-muted-foreground', label: 'bloqueado pela moderação — sem veredito para o prompt' }
+                  : resp?.truncated
+                  ? // IMPL-014: cortada no teto mesmo após o retry x2 — a etapa inteira sai do placar.
+                    { glyph: '✂', cls: 'bg-muted text-muted-foreground', label: 'resposta truncada no teto de tokens — etapa fora do placar' }
+                  : s.incompleteReason === 'truncation' && !v
+                  ? { glyph: '–', cls: 'bg-muted/50 text-muted-foreground', label: 'etapa fora do placar (outra resposta foi truncada)' }
+                  : v
                   ? { glyph: VERDICT_GLYPH[v], cls: VERDICT_META[v].cell, label: VERDICT_META[v].label }
                   : s.incomplete
                     ? {
                         // Cortado por orçamento/cancelamento (IMPL-020): sem nota
                         // e fora do score — nunca um ✕ que o competidor não mereceu.
-                        glyph: '⊘',
+                        // ⏹ (não ⊘): ⊘ é o bloqueio da moderação (IMPL-010).
+                        glyph: '⏹',
                         cls: 'bg-muted/50 text-muted-foreground',
                         label:
                           s.incompleteReason === 'budget'
@@ -494,7 +511,22 @@ export function applyEvent(prev: RunRecord, event: any): RunRecord {
     }
     case 'stage.generated': {
       const s = next.stages[event.stageIndex];
-      if (s) s.spec = event.spec;
+      if (s) {
+        s.spec = event.spec;
+        // IMPL-014: sinais do gabarito (inclusive "truncado e descartado").
+        if (event.gabaritoCall) s.gabaritoCall = event.gabaritoCall;
+      }
+      return next;
+    }
+    case 'stage.incomplete': {
+      // IMPL-014: etapa fora do placar e das médias (hoje: truncamento). Por
+      // índice, como os demais — os eventos chegam fora de ordem.
+      const s = next.stages[event.stageIndex];
+      if (s) {
+        s.incomplete = true;
+        s.incompleteReason = event.reason;
+        s.finishedAt = new Date().toISOString();
+      }
       return next;
     }
     case 'stage.failed': {

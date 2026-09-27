@@ -64,6 +64,21 @@ Precisão   288 exatas · 0 estimadas · 0 SEM PREÇO
 ser precificada** — nunca confunda com "custou zero". Com `--budget` ligado, um
 modelo fora do catálogo faz o comando recusar no pré-voo.
 
+### Preço variável (roteadores como `openrouter/auto`)
+
+O catálogo manda `"-1"` como preço de roteador: o preço depende do modelo para
+onde a chamada for roteada. Isso vira **desconhecido** — nunca `-1`, nunca
+"grátis":
+
+- a estimativa (`estimate`, `--dry-run`) deixa o modelo **fora da soma** e o lista
+  em `unknownPriceModelIds` (`assumptions.unknownPrice: "exclude"`) — o custo real
+  será maior;
+- as portas de orçamento projetam pelo **pior caso dos endpoints elegíveis**: o
+  preço mais alto do catálogo, limitado por `--max-price-in`/`--max-price-out`;
+- com `--budget`, o pré-voo **recusa** (exit 3) a menos que os DOIS tetos de preço
+  estejam definidos — aí o orçamento é conferido por esse pior caso;
+- o custo cobrado continua vindo de `usage.cost` da resposta.
+
 ## Pré-voo
 
 Antes de gastar: o catálogo é aquecido, a key é validada e o custo é estimado.

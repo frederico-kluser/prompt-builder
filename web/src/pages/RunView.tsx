@@ -37,6 +37,7 @@ import {
 } from '../components/primitives';
 import { VERDICT_META, verdictOf, trunc, denseStages, applyEvent, ScoreHeatmap, FinalsPanel } from './runShared';
 import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
+import { TruncationNotice } from '../components/TruncationNotice';
 import { cn } from '@/lib/utils';
 
 // Notacao decimal sempre: "$4.00e-4" e ilegivel para quem so quer saber quanto
@@ -420,6 +421,7 @@ export function RunView() {
           <DeltaBars record={record} onVariantClick={setDrawerVariant} />
           <FailureDigest record={record} />
           <JudgeDiagnostics record={record} />
+          <TruncationNotice record={record} />
         </>
       )}
       <VariantPromptDrawer
@@ -527,6 +529,7 @@ function StageRow({ stage, byId, contestants, interrupted }: StageRowProps) {
           <span className="min-w-0 flex-1 truncate text-[13px]">{snippet}</span>
           {stage.error && <Tag className="shrink-0">pulado</Tag>}
           {stage.incomplete && !stage.error && <Tag className="shrink-0">incompleto</Tag>}
+          {stage.gabaritoCall?.truncated && <Tag className="shrink-0">gabarito truncado</Tag>}
         </span>
       </AccordionTrigger>
       <AccordionPanel className="px-4 pb-4">
@@ -542,8 +545,19 @@ function StageRow({ stage, byId, contestants, interrupted }: StageRowProps) {
               ? 'cortado pelo teto de orçamento'
               : stage.incompleteReason === 'cancelled'
                 ? 'interrompido pelo cancelamento'
-                : 'interrompido'}{' '}
-            antes de ser julgado — fica fora do placar e das médias.
+                : stage.incompleteReason === 'truncation'
+                  ? 'uma resposta saiu truncada no teto de tokens mesmo após o retry x2'
+                  : 'interrompido'}{' '}
+            {stage.incompleteReason === 'truncation' ? 'e o cenário não foi julgado' : 'antes de ser julgado'} — fica
+            fora do placar e das médias.
+          </Banner>
+        )}
+        {/* IMPL-014: régua cortada não julga ninguém — o gabarito foi descartado. */}
+        {stage.gabaritoCall?.truncated && (
+          <Banner tone="warn" className="mb-4">
+            <strong>Gabarito truncado:</strong> cortado no teto de {stage.gabaritoCall.maxTokens ?? '?'} tokens
+            mesmo após o retry com teto x2 ({stage.gabaritoCall.finishReason ?? stage.gabaritoCall.nativeFinishReason ?? 'sem finish_reason'}).
+            Foi descartado: este cenário é julgado sem gabarito (juiz listwise) e fica fora do judge-score por referência.
           </Banner>
         )}
 
@@ -598,13 +612,31 @@ function StageRow({ stage, byId, contestants, interrupted }: StageRowProps) {
                   <div className="mt-1 font-mono text-[11.5px] text-muted-foreground tabular">
                     {formatMs(r.latencyMs)} · {r.tokensIn}→{r.tokensOut} tok · {formatUsd(r.costUsd)}
                     {r.status === 'error' && <span className="text-destructive"> · ERRO: {r.errorMsg}</span>}
+                    {/* IMPL-010: bloqueio é a defesa do gateway (sem veredito), não erro nem key. */}
+                    {r.status === 'blocked' && (
+                      <span className="text-muted-foreground"> · BLOQUEADO pela moderação: {r.errorMsg}</span>
+                    )}
+                    {r.status === 'refused' && <span className="text-muted-foreground"> · o modelo recusou</span>}
+                    {/* IMPL-014: cortada no teto (mesmo com o retry x2) — a etapa fica fora do placar. */}
+                    {r.truncated && (
+                      <span className="text-muted-foreground">
+                        {' '}· TRUNCADA no teto de {r.maxTokens ?? '?'} tokens ({r.finishReason ?? r.nativeFinishReason ?? 'sem finish_reason'}) — etapa fora do placar
+                      </span>
+                    )}
+                    {!r.truncated && r.truncationRetried && (
+                      <span className="text-muted-foreground">
+                        {' '}· truncou na 1ª tentativa
+                        {r.firstAttempt?.truncationSignals?.length ? ` (${r.firstAttempt.truncationSignals.join(', ')})` : ''}
+                        ; refeita com teto {r.maxTokens}
+                      </span>
+                    )}
                   </div>
                   {explanation && (
                     <p className="mt-2 border-l-2 border-border pl-3 text-[13px] text-muted-foreground">
                       {explanation}
                     </p>
                   )}
-                  {r.status === 'ok' && <Pre className="mt-2">{r.text}</Pre>}
+                  {(r.status === 'ok' || r.status === 'refused') && <Pre className="mt-2">{r.text}</Pre>}
                 </div>
               );
             })}

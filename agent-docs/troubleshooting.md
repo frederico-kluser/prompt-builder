@@ -22,6 +22,42 @@ obrigatório neles.
 `prompt-builder key check` mostra uso, limite e saldo. O pré-voo recusa antes de
 gastar quando o saldo não cobre nem o piso da estimativa.
 
+## `status: "blocked"` / `OpenRouter bloqueou a requisicao` (HTTP 403)
+
+**Não é problema de key.** O 403 do OpenRouter é moderação/guardrail: o conteúdo
+do cenário (ou a saída) foi sinalizado pela rota moderada do provedor, ou um
+guardrail da conta proibiu a chamada. Também vira `blocked` a resposta cortada
+por filtro de conteúdo (`finishReason: "content_filter"` ou equivalente nativo,
+ex. `SAFETY`). É a **defesa do gateway**, contada à parte — o cenário fica sem
+veredito para o prompt:
+
+```bash
+prompt-builder runs show <runId> --json | jq '.data.run.competitorOutcomeCounts'
+# { "blocked": 2, "refused": 0, "error": 0 }
+```
+
+`refused` = o modelo declarou a recusa (julgável normalmente); `error` = infra
+(rede, 5xx, timeout). Key inválida é só o **401**, com código de saída `4`; um
+bloqueio nunca sai com `4`. Um 403 de *limite de gasto da key* é sem crédito
+(código `5`).
+
+## `truncationAlert` / `saíram truncadas no teto de tokens`
+
+Mais de 2% das chamadas bateram no `max_tokens` (`finish_reason: length`, ou o
+raciocínio comeu o teto e não sobrou resposta). Cada resposta truncada já foi
+refeita **uma vez** com o teto x2; a que continuou cortada deixa a etapa
+`incomplete` (`incompleteReason: "truncation"`), fora do placar e das médias —
+nunca vira veredito `nao`. A taxa cobre **todos os papéis** e o alerta diz
+quais truncaram (`truncationByRole` no `--json`). Para corrigir: competidor →
+suba `--max-output-tokens` (ou `maxTokens` do cenário) ou baixe
+`--effort-competitor`; juiz, duelo ou gabarito (tetos fixos de 1024/512/1500
+tokens) → baixe `--effort-judge`. Gabarito que continuou truncado é descartado
+(`stage.generated` traz `warning`) e a etapa é julgada sem gabarito.
+
+```bash
+prompt-builder runs show <runId> --json | jq '.data.run | {truncationRate, truncationCounts, finishSignalsByRole}'
+```
+
 ## Todos os vereditos vieram `parcial`
 
 Significa que o juiz não teve gabarito para comparar. Causas, em ordem de

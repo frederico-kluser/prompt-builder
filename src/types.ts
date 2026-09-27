@@ -34,9 +34,19 @@ export type {
   SuccessorSuggestion,
 } from './engine/modelLifecycle.js';
 
+/**
+ * Preco em USD por token. `null` = DESCONHECIDO (IMPL-018 / R-07b:REC-7): o
+ * catalogo trouxe "-1" (roteadores como `openrouter/auto` — preco variavel),
+ * valor ausente, nao numerico, nao finito ou negativo. Nunca vira 0 ("gratis")
+ * nem numero negativo: antes o "-1" entrava como -1 e produzia estimativa e
+ * reserva de orcamento NEGATIVAS em silencio. Quem precisa do numero trata o
+ * `null` explicitamente (a tipagem obriga).
+ */
+export type TokenPrice = number | null;
+
 export interface OpenRouterModelPricing {
-  prompt: number; // USD per token
-  completion: number; // USD per token
+  prompt: TokenPrice; // USD per token (null = desconhecido)
+  completion: TokenPrice; // USD per token (null = desconhecido)
   /**
    * Precificacao POR FAIXA de tamanho de prompt (campo `pricing.overrides`,
    * vivo no catalogo mas nao documentado). Ignorar isto subestima runs de
@@ -48,8 +58,8 @@ export interface OpenRouterModelPricing {
 
 export interface PricingTier {
   minPromptTokens: number;
-  prompt: number; // USD per token
-  completion: number; // USD per token
+  prompt: TokenPrice; // USD per token (null = desconhecido)
+  completion: TokenPrice; // USD per token (null = desconhecido)
 }
 
 // ----------------------------------------------------------------------------
@@ -126,6 +136,13 @@ export interface CostSink {
       cost: CallCost;
       tokensIn: number;
       tokensOut: number;
+      /**
+       * Sinais de fim da chamada (IMPL-014) — presentes quando a chamada
+       * COMPLETOU (ausentes no 200 com corpo de erro, que lanca). E por aqui
+       * que os sinais de TODO papel (juiz, duelo, datagen, reescritor…) chegam
+       * ao RunRecord sem cada papel precisar persisti-los.
+       */
+      finish?: CallFinishSignals;
     },
   ): void;
 }
@@ -162,7 +179,10 @@ export interface OpenRouterModel {
    * Parametros de amostragem que o modelo aceita (campo `supported_parameters`
    * do OpenRouter). Fonte de verdade para enviar `temperature`/`seed` so a quem
    * suporta — reasoning models (gpt-5*, serie o*) NAO listam `temperature` e
-   * respondem vazio (HTTP 400) se ela for enviada. Ausente = desconhecido.
+   * respondem vazio (HTTP 400) se ela for enviada. Ausente = desconhecido
+   * (heuristica por nome). `[]` = o catalogo declara que NAO aceita nenhum —
+   * tambem e o valor FAIL-CLOSED quando o campo vem malformado (IMPL-018):
+   * nada opcional vai no fio.
    */
   supportedParameters?: string[];
   /** Metadados de raciocinio declarados pelo modelo (campo `reasoning` de /models). */
@@ -217,7 +237,7 @@ export interface Contestant {
   label: string;
   /** Modelo real OpenRouter (usado para preco/getModel). */
   modelId: string;
-  /** Override do system message; ausente => usa stage.productContext (compare). */
+  /** Variante: vira o system message (ausente => sem system, compare). O productContext vai sempre no user, como dado (buildCaseInput). */
   systemPrompt?: string;
   /** Tecnica da biblioteca que gerou esta variante (ausente = verbatim/original). */
   techniqueId?: string;
@@ -495,7 +515,96 @@ export interface StageSpec {
   agentTask?: AgentTaskSpec;
 }
 
-export type CompetitorStatus = 'ok' | 'error';
+/**
+ * Desfecho de UMA resposta de competidor (IMPL-010 / R-21:REC-6):
+ * - `ok`      — resposta normal;
+ * - `blocked` — moderacao/guardrail do gateway ou filtro de conteudo do
+ *               provedor (HTTP 403 de moderacao, `finish_reason` de filtro).
+ *               Defesa do gateway: o cenario fica SEM veredito para o prompt;
+ * - `refused` — o MODELO recusou (`message.refusal`); resposta legitima, julgavel;
+ * - `error`   — infraestrutura (rede, 5xx, timeout, key).
+ */
+export type CompetitorStatus = 'ok' | 'error' | 'blocked' | 'refused';
+
+/** Contagens dos desfechos nao-ok dos competidores de uma run (IMPL-010). */
+export interface CompetitorOutcomeCounts {
+  blocked: number;
+  refused: number;
+  error: number;
+}
+
+/**
+ * Sinal de truncamento de UMA chamada (IMPL-014 / R-07b:DEC-2). Os provedores
+ * devolvem 200 OK tanto para a resposta completa quanto para a cortada no teto
+ * — sem ler estes sinais as duas sao indistinguiveis:
+ * - `finish_length`     — `finish_reason` normalizado = `length`;
+ * - `native_length`     — `native_finish_reason` cru de teto (`max_tokens`,
+ *                          `MAX_TOKENS`, `length`, …) mesmo que o normalizado diga outra coisa;
+ * - `reasoning_at_cap`  — `reasoning_tokens` ≈ `max_tokens` (o raciocinio comeu o teto);
+ * - `empty_with_tokens` — conteudo vazio com `completion_tokens > 0`.
+ */
+export type TruncationSignal =
+  | 'finish_length'
+  | 'native_length'
+  | 'reasoning_at_cap'
+  | 'empty_with_tokens';
+
+/**
+ * Os sinais de fim de UMA chamada (IMPL-014): os 4 sinais do R-07b:REC-2
+ * (finish_reason, native_finish_reason, reasoning_tokens vs teto e tamanho do
+ * conteudo) + a decisao. O gateway monta um por chamada que completou e o
+ * entrega ao ledger (`CostSink.note`), que agrega por papel em
+ * `RunRecord.finishSignalsByRole` — e assim que juiz/duelo/datagen tem os
+ * sinais no record. Por chamada, persistidos no gabarito
+ * (`StageRecord.gabaritoCall`); o competidor guarda os mesmos campos soltos na
+ * `CompetitorResponse` (nomes fixados no CONVENTIONS).
+ */
+export interface CallFinishSignals {
+  finishReason?: string;
+  nativeFinishReason?: string;
+  reasoningTokens?: number;
+  /** `completion_tokens` da chamada (inclui raciocinio). */
+  tokensOut: number;
+  /** Tamanho do conteudo VISIVEL devolvido (chars). */
+  contentChars: number;
+  /** `max_tokens` enviado nesta chamada (o teto contra o qual o truncamento e medido). */
+  maxTokens?: number;
+  /** Decisao: a saida desta chamada foi cortada no teto. */
+  truncated: boolean;
+  /** Sinais observados (inclusive os auxiliares que sozinhos nao decidem). */
+  truncationSignals?: TruncationSignal[];
+  /** true = a 1a tentativa truncou e estes sinais sao do retry com teto x2. */
+  truncationRetried?: boolean;
+  /**
+   * Sinais da 1a tentativa, a que TRUNCOU e foi repetida com teto x2 — qual
+   * sinal disparou e quanto raciocinio ela gastou (calibra o teto, R-07b:REC-1).
+   * Presente so quando `truncationRetried`.
+   */
+  firstAttempt?: CallFinishSignals;
+}
+
+/**
+ * Sinais de fim AGREGADOS de um papel numa run (IMPL-014): contados no ponto
+ * unico da contabilidade (gateway -> ledger), entao cobrem 100% das chamadas
+ * que completaram — inclusive juiz, duelo, datagen e reescritor, que nao
+ * guardam sinal por chamada no record. Cada tentativa conta (o retry x2 e uma
+ * chamada).
+ */
+export interface FinishSignalCounts {
+  /** Chamadas que completaram (com sinal de fim observado). */
+  calls: number;
+  /** Quantas sairam truncadas (decisao do gateway). */
+  truncated: number;
+  /** Histograma de `finish_reason` normalizado (`(none)` = ausente). */
+  finishReasons: Record<string, number>;
+  /** Histograma de `native_finish_reason` cru (`(none)` = ausente). */
+  nativeFinishReasons: Record<string, number>;
+  /** Quantas chamadas mostraram cada sinal (inclusive os auxiliares que sozinhos nao decidem). */
+  signals: Partial<Record<TruncationSignal, number>>;
+}
+
+/** Por que uma etapa ficou `incomplete` (fora do placar e das medias). */
+export type StageIncompleteReason = 'budget' | 'cancelled' | 'truncation';
 
 export interface CompetitorResponse {
   /** Chave universal. compare: === modelId. */
@@ -507,7 +616,33 @@ export interface CompetitorResponse {
   tokensOut: number;
   costUsd: number;
   status: CompetitorStatus;
+  /** Motivo do `error` (infra) ou do `blocked` (mensagem de moderacao — nunca "key invalida"). */
   errorMsg?: string;
+  /** `finish_reason` normalizado pelo OpenRouter (ex.: stop, length, content_filter). */
+  finishReason?: string;
+  /** `native_finish_reason` cru do provedor (ex.: SAFETY, end_turn). */
+  nativeFinishReason?: string;
+  /**
+   * A resposta FINAL saiu cortada no teto de tokens (IMPL-014), mesmo depois
+   * do retry com teto x2. Etapa com resposta truncada fica `incomplete`
+   * (`incompleteReason: 'truncation'`) — fora do placar e das medias. Ausente
+   * = chamada que nao completou (erro/403) ou record anterior ao IMPL-014.
+   */
+  truncated?: boolean;
+  /** `completion_tokens_details.reasoning_tokens` da tentativa final. */
+  reasoningTokens?: number;
+  /** `max_tokens` enviado na tentativa final (dobra quando houve retry por truncamento). */
+  maxTokens?: number;
+  /** Sinais de truncamento observados na tentativa final (ver `TruncationSignal`). */
+  truncationSignals?: TruncationSignal[];
+  /**
+   * true = a 1a tentativa truncou e esta resposta e a do retry com teto x2.
+   * `costUsd` soma as DUAS tentativas (o dinheiro saiu nas duas); tokens e
+   * latencia sao da tentativa final.
+   */
+  truncationRetried?: boolean;
+  /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
+  firstAttempt?: CallFinishSignals;
   /**
    * Ponteiro para os artefatos da execução de agente em disco. NUNCA o
    * conteúdo: o RunRecord é resserializado inteiro a cada saveRun (throttled
@@ -686,8 +821,22 @@ export interface StageRecord {
    * mentindo": sem esta marca, uma etapa cortada viraria veredito 'parcial'.
    */
   incomplete?: boolean;
-  /** Por que a etapa ficou incompleta (CONVENTIONS §4). */
-  incompleteReason?: 'budget' | 'cancelled' | 'truncation';
+  /**
+   * Motivo do `incomplete`: orcamento, cancelamento ou TRUNCAMENTO (IMPL-014:
+   * uma resposta de competidor saiu cortada no teto mesmo apos o retry x2 —
+   * a etapa nao e julgada, porque comparar resposta cortada com resposta
+   * inteira mede o nosso teto, nao o prompt). Ausente em records antigos.
+   * Nomes fixos em CONVENTIONS §4.
+   */
+  incompleteReason?: StageIncompleteReason;
+  /**
+   * Sinais de fim da chamada que gerou o gabarito desta etapa (IMPL-014). Com
+   * `repeats > 1` fica so no 1o clone do cenario (o gabarito e 1 chamada).
+   * `truncated: true` = o gabarito saiu cortado mesmo apos o retry x2 e foi
+   * DESCARTADO (regua cortada nao julga ninguem) — a etapa segue sem `reference`
+   * (julgada listwise) e o `stage.generated` leva um `warning` visivel.
+   */
+  gabaritoCall?: CallFinishSignals;
   startedAt: string;
   finishedAt?: string;
 }
@@ -762,6 +911,31 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** BYOK: cobrado pelo provedor upstream, fora dos creditos do OpenRouter. */
   upstreamCostUsd?: number;
+  /**
+   * Desfechos nao-ok dos competidores, SEPARADOS (IMPL-010): `blocked` =
+   * defesa do gateway (moderacao/guardrail — metrica de seguranca propria,
+   * nunca falha do prompt), `refused` = recusa declarada pelo modelo, `error` =
+   * infraestrutura. Ausente = record anterior a taxonomia.
+   */
+  competitorOutcomeCounts?: CompetitorOutcomeCounts;
+  /**
+   * Fracao (0..1, 4 casas) das chamadas de LLM desta run — TODOS os papeis:
+   * competidor, gabarito, juiz, duelo, datagen, reescritor — que sairam
+   * TRUNCADAS no teto de tokens (IMPL-014 / R-07b:REC-2), contando cada
+   * tentativa (o retry x2 e uma chamada). Acima de `TRUNCATION_ALERT_RATE`
+   * (2%) o CLI/UI alertam: o teto de tokens esta baixo para estes modelos.
+   * A quebra por papel esta em `finishSignalsByRole`. Ausente = record
+   * anterior ao IMPL-014.
+   */
+  truncationRate?: number;
+  /** Numerador/denominador de `truncationRate` (chamadas com sinal de fim observado). */
+  truncationCounts?: { calls: number; truncated: number };
+  /**
+   * Os 4 sinais de fim (finish_reason, native_finish_reason, raciocinio ≈ teto,
+   * conteudo vazio com tokens) AGREGADOS por papel (IMPL-014), contados no
+   * gateway para 100% das chamadas que completaram. So papeis com chamada.
+   */
+  finishSignalsByRole?: Partial<Record<CostRole, FinishSignalCounts>>;
   /** Teto de gasto configurado (ausente = sem limite). */
   budgetUsd?: number;
   /** true = a run parou porque o orcamento acabou. */
@@ -1139,8 +1313,33 @@ export type RunEvent =
   | { type: 'variants.generating'; runId: string }
   | { type: 'variants.generated'; runId: string; contestants: Contestant[] }
   | { type: 'stage.generating'; runId: string; stageIndex: number }
-  | { type: 'stage.generated'; runId: string; stageIndex: number; spec: StageSpec }
+  | {
+      type: 'stage.generated';
+      runId: string;
+      stageIndex: number;
+      spec: StageSpec;
+      /** Sinais de fim da chamada do gabarito desta etapa (IMPL-014). */
+      gabaritoCall?: CallFinishSignals;
+      /**
+       * Aviso visivel (PT-BR) sobre a etapa — hoje: gabarito truncado mesmo apos
+       * o retry x2 e DESCARTADO, entao a etapa e julgada sem gabarito.
+       */
+      warning?: string;
+    }
   | { type: 'stage.failed'; runId: string; stageIndex: number; error: string }
+  /**
+   * Etapa marcada `incomplete` (IMPL-014): fica fora do placar e das medias.
+   * Hoje so o truncamento emite (o corte por orcamento sai em `run.budget`).
+   * `contestantIds` = quem truncou; NUNCA carrega o texto das respostas.
+   */
+  | {
+      type: 'stage.incomplete';
+      runId: string;
+      stageIndex: number;
+      reason: StageIncompleteReason;
+      detail: string;
+      contestantIds?: string[];
+    }
   | { type: 'competitor.finished'; runId: string; stageIndex: number; response: CompetitorResponse }
   | { type: 'stage.judging'; runId: string; stageIndex: number }
   | {

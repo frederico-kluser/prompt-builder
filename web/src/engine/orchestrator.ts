@@ -1,6 +1,6 @@
 const randomUUID = (): string => crypto.randomUUID();
 import { generateStages } from './datagen';
-import { runCompetitor } from './competitor';
+import { countCompetitorOutcomes, runCompetitor } from './competitor';
 import { judgeStage } from './judge';
 import { generateReferences } from './gabarito';
 import { judgeStageReference } from './refJudge';
@@ -21,7 +21,15 @@ import { listModels } from './openrouter';
 import { BudgetLedger, isControlSignal, RunCancelled, toControlSignal } from './budget';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
 import { acquireLock } from './runLocks';
+import {
+  describeTruncatedReference,
+  describeTruncatedStage,
+  truncatedResponses,
+  truncationAlert,
+  truncationRecordFields,
+} from '../../../src/engine/truncation.js';
 import type {
+  CallFinishSignals,
   Contestant,
   RunConfig,
   RunCtx,
@@ -129,6 +137,9 @@ function syncLedger(record: RunRecord, ledger: BudgetLedger): void {
   record.costByRole = snap.byRole;
   record.costAccuracy = snap.accuracy;
   if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
+  // IMPL-014 (espelho do Node): sinais de fim por papel + taxa de truncamento
+  // da run, do MESMO ponto unico do custo — 100% das chamadas, juiz inclusive.
+  Object.assign(record, truncationRecordFields(snap.finishByRole));
 }
 
 /**
@@ -167,6 +178,11 @@ function buildRecord(config: RunConfig, opts: StartRunOpts): RunRecord {
     scoreboard: Object.fromEntries(contestants.map((c) => [c.id, 0])),
     costByContestant: Object.fromEntries(contestants.map((c) => [c.id, 0])),
     totalCostUsd: 0,
+    // IMPL-010: sempre presente numa run nova — "0 bloqueios" e informacao.
+    competitorOutcomeCounts: { blocked: 0, refused: 0, error: 0 },
+    // IMPL-014: idem — "0% truncado" tambem e informacao.
+    truncationRate: 0,
+    truncationCounts: { calls: 0, truncated: 0 },
     startedAt: nowIso(),
     sessionId: opts.sessionId,
     iteration: opts.iteration,
@@ -570,6 +586,9 @@ async function runLoop(
   // cenario roda uma unica vez. Etapas que ja trazem reference (seed/pinadas)
   // passam intactas; falha num gabarito so deixa a etapa sem reference
   // (degrada na fase 3). ===
+  // Sinais de fim de cada gabarito (IMPL-014), por posicao em `specs` ANTES
+  // da expansao de repeats — vao para o StageRecord na materializacao.
+  const gabaritoCalls = new Map<number, CallFinishSignals>();
   if (referenceJudging) {
     state.phase = 'gabarito';
     specs = await generateReferences({
@@ -583,6 +602,7 @@ async function runLoop(
       // concluidos), nao de uma etapa especifica.
       onProgress: (done, total) =>
         emitEvent({ type: 'stage.gabarito', runId, stageIndex: -1, done, total }),
+      onCall: (idx, call) => gabaritoCalls.set(idx, call),
     });
   }
   syncLedger(record, ledger);
@@ -596,7 +616,22 @@ async function runLoop(
   // os slots do rabo viram stage.failed e a run segue com o que houver.
   specs.forEach((spec, i) => {
     record.stages[i].spec = spec;
-    emitEvent({ type: 'stage.generated', runId, stageIndex: i, spec });
+    // O gabarito e UMA chamada por cenario: com repeats, so o 1o clone guarda
+    // os sinais (senao a visao por etapa contaria a mesma chamada N vezes).
+    const call = i % repeats === 0 ? gabaritoCalls.get(i / repeats) : undefined;
+    if (call) record.stages[i].gabaritoCall = call;
+    // Gabarito truncado apos o retry x2 foi descartado: aviso VISIVEL (Node idem),
+    // um por gabarito — com repeats, no 1o clone (onde a chamada fica persistida).
+    const warning = call?.truncated ? describeTruncatedReference(i, call) : undefined;
+    if (warning) log(runId, warning);
+    emitEvent({
+      type: 'stage.generated',
+      runId,
+      stageIndex: i,
+      spec,
+      ...(call ? { gabaritoCall: call } : {}),
+      ...(warning ? { warning } : {}),
+    });
   });
   for (let i = specs.length; i < record.stages.length; i++) {
     const msg = `Datagen entregou menos cenarios que o alvo apos dedup/falha de lote; etapa descartada.`;
@@ -604,6 +639,7 @@ async function runLoop(
     record.stages[i].finishedAt = nowIso();
     emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
   }
+  syncLedger(record, ledger);
   scheduleSave();
 
   // Contestants ja sao finais aqui (opts.prepare rodou). Controle = ancora do
@@ -667,6 +703,9 @@ async function runLoop(
             });
 
             stageRecord.responses.push(response);
+            // Bloqueio (defesa do gateway) ≠ recusa do modelo ≠ erro de infra —
+            // tres contagens separadas no record (IMPL-010 / R-21:REC-6).
+            record.competitorOutcomeCounts = countCompetitorOutcomes(record.stages);
             // Total verdadeiro vem do ledger (juiz/duelo/datagen nao sao
             // atribuiveis a um contestant); `costByContestant` segue sendo a
             // fatia dos competidores — agora com o custo MEDIDO (usage.cost).
@@ -687,6 +726,28 @@ async function runLoop(
         if (rejeitada?.status === 'rejected') throw rejeitada.reason;
         // Cancelou enquanto as respostas chegavam: nem começa o julgamento.
         throwIfCancelled();
+
+        // IMPL-014 (espelho do Node): resposta que CONTINUOU truncada depois
+        // do retry x2 torna a etapa `incomplete` — fora do placar e das medias,
+        // sem julgamento (comparar resposta cortada mede o nosso teto).
+        const truncadas = truncatedResponses(stageRecord.responses);
+        if (truncadas.length > 0) {
+          stageRecord.incomplete = true;
+          stageRecord.incompleteReason = 'truncation';
+          stageRecord.finishedAt = nowIso();
+          const detail = describeTruncatedStage(i, truncadas, labelOf);
+          log(runId, detail);
+          scheduleSave();
+          emitEvent({
+            type: 'stage.incomplete',
+            runId,
+            stageIndex: i,
+            reason: 'truncation',
+            detail,
+            contestantIds: truncadas.map((r) => r.contestantId),
+          });
+          return;
+        }
 
         // === FASE 3: julgamento. Com gabarito: pointwise vs referencia (os
         // duelos sairam daqui — agora sao a FASE 4, so entre os finalistas).
@@ -826,8 +887,10 @@ async function runLoop(
   syncLedger(record, ledger);
 
   // === Agregados do julgamento por referencia (trainer/UI consomem). ===
-  // Etapas `incomplete` (cortadas) ficam de fora: contar uma etapa sem
-  // julgamento como 'nao' rebaixaria todo mundo por falta de dinheiro.
+  // Etapas `incomplete` (cortadas por orçamento/cancelamento ou por
+  // truncamento) ficam de fora: contar uma etapa sem julgamento como 'nao'
+  // rebaixaria todo mundo por falta de dinheiro ou pelo nosso teto de tokens.
+  // Espelho do Node.
   const stagesComRef = record.stages.filter((s) => s.referenceJudge && !s.incomplete);
   if (stagesComRef.length > 0) {
     // judge-score = (resolve + 0.5*parcial) / total * 100, por contestant,
@@ -1007,6 +1070,19 @@ async function runLoop(
       log(runId, `aviso de verbosidade do juiz: ${record.judgeDiagnostics.verbosity.warning}`);
     }
     for (const aviso of record.fairnessWarnings) log(runId, `imparcialidade: ${aviso}`);
+    const desfechos = record.competitorOutcomeCounts;
+    if (desfechos && desfechos.blocked + desfechos.refused + desfechos.error > 0) {
+      // Bloqueio NAO e erro de key nem falha do prompt: e a defesa do gateway.
+      log(runId, 'desfechos dos competidores (bloqueio ≠ recusa ≠ erro)', { ...desfechos });
+    }
+    // IMPL-014: acima de 2% de chamadas truncadas (TODOS os papeis) o teto
+    // esta baixo p/ estes modelos; o alerta diz quais papeis truncaram.
+    syncLedger(record, ledger);
+    const alertaTrunc = truncationAlert(
+      { ...record.truncationCounts!, rate: record.truncationRate! },
+      record.finishSignalsByRole,
+    );
+    if (alertaTrunc) log(runId, `ALERTA de truncamento: ${alertaTrunc}`);
   } catch (err) {
     // Diagnostico e SUPORTE, nunca derruba a finalizacao.
     log(runId, `diagnostico do juiz falhou (ignorado): ${err instanceof Error ? err.message : String(err)}`);
