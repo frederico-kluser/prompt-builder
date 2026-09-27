@@ -38,6 +38,7 @@ import type { RunConfig } from '../src/types.js';
 import { FakeIdb } from './fakeIndexedDb.js';
 import { catalogItem, fakeOpenRouter, noSleep } from './fakeOpenRouter.js';
 import { expectPipelineDone } from './runOutcome.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -382,8 +383,8 @@ function usarPipelineFalso(opts: { atrasoCompetidorMs?: number } = {}): void {
         if (opts.atrasoCompetidorMs) await new Promise((r) => setTimeout(r, opts.atrasoCompetidorMs));
         return { text: `Resposta de ${req.model}`, usage };
       }
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A"}', usage };
-      return { text: '{"verdict":"resolve","explanation":"ok"}', usage };
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A'), usage };
+      return { text: pointwiseReply(req, 'resolve', 'ok'), usage };
     },
   });
   const prev = setDefaultGateway(createGateway({ fetch: f.fetch, sleep: noSleep }));

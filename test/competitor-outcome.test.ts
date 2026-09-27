@@ -36,6 +36,7 @@ import { emitRunEvent } from '../src/cli/ndjson.js';
 import type { CompetitorResponse, RunConfig, RunRecord, StageSpec } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeChatReply } from './fakeOpenRouter.js';
 import { expectPipelineDone } from './runOutcome.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 
 vi.mock('../web/src/engine/storage', () => ({
   saveRun: async () => undefined,
@@ -309,8 +310,8 @@ function fakeDaRun() {
       if (req.model === 'fake/d') return { text: 'Parcial', finishReason: 'content_filter', nativeFinishReason: 'SAFETY' };
       if (req.model === 'fake/e') return { status: 500, bodyText: 'upstream caiu' };
       if (req.stream) return { text: `Resposta de ${req.model}`, finishReason: 'stop' };
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}' };
-      return { text: '{"verdict":"resolve","explanation":"confere"}' };
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor') };
+      return { text: pointwiseReply(req, 'resolve', 'confere') };
     },
   });
 }
@@ -404,7 +405,7 @@ describe('IMPL-010 (3)+(4) — run inteira: contagens separadas e 0 bloqueio com
       chat: (req) => {
         if (req.model === 'fake/gen') return { text: JSON.stringify({ stages: CENARIOS }) };
         if (req.stream) return { text: 'ok', finishReason: 'stop' };
-        return { text: '{"verdict":"resolve","explanation":"ok"}' };
+        return { text: pointwiseReply(req, 'resolve', 'ok') };
       },
     });
     anterior = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));

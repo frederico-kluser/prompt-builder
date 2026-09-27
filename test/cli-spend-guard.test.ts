@@ -66,6 +66,7 @@ import { isBudgetSignal, isControlSignal } from '../src/budget.js';
 import { createGateway, setDefaultGateway, type FetchLike } from '../src/openrouter.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter, type FakeRequest } from './fakeOpenRouter.js';
 import type { RunConfig } from '../src/types.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
@@ -643,8 +644,8 @@ function rotaDoPipeline(req: FakeRequest, n: number): { text: string; usage: { p
   }
   if (req.model === 'fake/ref') return { text: `Gabarito: ${req.user.slice(0, 30)}`, usage };
   if (req.stream) return { text: `Resposta de ${req.model}`, usage };
-  if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}', usage };
-  return { text: '{"verdict":"resolve","explanation":"confere"}', usage };
+  if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
+  return { text: pointwiseReply(req, 'resolve', 'confere'), usage };
 }
 
 const PIPE_CONFIG = {

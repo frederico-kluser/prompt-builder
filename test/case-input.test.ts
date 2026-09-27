@@ -33,6 +33,8 @@ import * as caseInputWeb from '../web/src/engine/caseInput.js';
 import type { CompetitorResponse, Contestant, RunConfig, StageSpec } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
 import { expectPipelineDone, type RunOutcomeView } from './runOutcome.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
+import { readMarkedBlock } from '../src/engine/judgeGuard.js';
 
 vi.mock('../web/src/engine/storage', () => ({
   saveRun: async () => undefined,
@@ -164,7 +166,9 @@ describe('IMPL-009 — rótulo do listwise deixa de ser falso', () => {
     );
     const user = fake.chatRequests()[0].user;
     expect(user).not.toContain('CONTEXTO FORNECIDO AOS MODELOS');
-    expect(user).toContain(`CONTEXTO DO CASO (entregue a todos os modelos como dado, antes da pergunta):\n${STAGE.productContext}`);
+    // IMPL-006: o contexto vai num bloco marcado logo depois do rótulo.
+    expect(user).toContain('CONTEXTO DO CASO (entregue a todos os modelos como dado, antes da pergunta):');
+    expect(readMarkedBlock(user, 'CONTEXTO')).toBe(STAGE.productContext);
   });
 });
 
@@ -220,8 +224,8 @@ describe('IMPL-009 (1) ponta a ponta — run variation nos DOIS motores', () => 
       chat: (req) => {
         if (req.model === 'fake/ref') return { text: 'Gabarito.' };
         if (req.stream) return { text: `Resposta (${req.system.slice(0, 10)})` };
-        if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"ok"}' };
-        return { text: '{"verdict":"resolve","explanation":"ok"}' };
+        if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'ok') };
+        return { text: pointwiseReply(req, 'resolve', 'ok') };
       },
     });
 

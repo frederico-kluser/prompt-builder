@@ -44,6 +44,7 @@ import type { RunEvent, RunRecord, SessionRecord } from '../web/src/engine/types
 import type { OpenRouterModel, RunConfig } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
 import { expectPipelineDone } from './runOutcome.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -139,11 +140,11 @@ function fakePipeline(opts: PipelineOpts = {}): FakeOpenRouter {
         const boa = /\((persona|constraints)\)/.test(req.system);
         return { text: `Resposta ${boa ? 'boa' : 'fraca'} de ${req.model}`, usage };
       }
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}', usage };
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
       if (opts.harshOnBase && req.user.includes('Resposta fraca')) {
-        return { text: '{"verdict":"nao","explanation":"nao resolve"}', usage };
+        return { text: pointwiseReply(req, 'nao', 'nao resolve'), usage };
       }
-      return { text: '{"verdict":"resolve","explanation":"confere"}', usage };
+      return { text: pointwiseReply(req, 'resolve', 'confere'), usage };
     },
   });
 }

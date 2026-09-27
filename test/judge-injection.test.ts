@@ -371,7 +371,7 @@ describe.each([
     );
     expect(d.duels).toEqual([]);
     expect(d.failedDuels?.[0].error.kind).toBe('invalid_output');
-    expect(Object.values(d.points).every((p) => p === 0)).toBe(true);
+    expect(Object.values(d.winRate).every((p) => p === 0)).toBe(true); // IMPL-007: placar = taxa de vitória
   });
 
   it('duelo legítimo registra 1 canário por ORDEM (diferentes entre si, iguais aos pedidos)', async () => {

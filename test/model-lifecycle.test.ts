@@ -36,6 +36,7 @@ import { prepareOptsFor } from '../src/prepareRun.js';
 import type { OpenRouterModel, RunConfig, RunRecord } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
 import { expectPipelineDone } from './runOutcome.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -245,8 +246,8 @@ function fakeComCicloDeVida(): FakeOpenRouter {
       }
       if (req.model === 'fake/ref') return { text: 'Gabarito de referencia.', usage };
       if (req.stream) return { text: `Resposta de ${req.model}`, usage };
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}', usage };
-      return { text: '{"verdict":"resolve","explanation":"confere"}', usage };
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
+      return { text: pointwiseReply(req, 'resolve', 'confere'), usage };
     },
   });
 }
@@ -373,7 +374,7 @@ describe('(i) RunRecord.modelLifecycle em 100% das runs — Node e SPA (transpor
   });
 
   it('Node — catálogo fora do ar: a run segue e o snapshot diz "unavailable" (não inventa ausência)', async () => {
-    const fake = fakeOpenRouter({ catalog: [], chat: () => ({ text: '{"verdict":"resolve","explanation":"ok"}' }) });
+    const fake = fakeOpenRouter({ catalog: [], chat: (req) => ({ text: pointwiseReply(req, 'resolve', 'ok') }) });
     const prev = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));
     try {
       const rec = await runNode(

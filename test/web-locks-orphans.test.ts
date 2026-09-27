@@ -36,6 +36,7 @@ import { FakeIdb } from './fakeIndexedDb.js';
 import { FakeLockBroker, type FakeLockContext } from './fakeWebLocks.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
 import { expectPipelineDone } from './runOutcome.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const KEY = 'sk-or-v1-fake-key-para-teste-0000000000';
@@ -108,8 +109,8 @@ function pipeline(opts: PipelineOpts = {}): FakeOpenRouter {
         if (opts.gate) await opts.gate;
         return { text: `Resposta de ${req.model}`, usage };
       }
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A"}', usage };
-      return { text: '{"verdict":"resolve","explanation":"ok"}', usage };
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A'), usage };
+      return { text: pointwiseReply(req, 'resolve', 'ok'), usage };
     },
   });
 }

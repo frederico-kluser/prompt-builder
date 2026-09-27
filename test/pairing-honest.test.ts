@@ -41,6 +41,7 @@ import { runToCompletion as runWeb } from '../web/src/engine/orchestrator.js';
 import type { RunRecord, SessionRecord, Verdict } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep } from './fakeOpenRouter.js';
 import { expectPipelineDone } from './runOutcome.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -452,8 +453,8 @@ describe('IMPL-005 — completude no RunRecord', () => {
           if (req.model === 'fake/gen') return { text: JSON.stringify({ stages: CENARIOS }), usage };
           if (req.model === 'fake/ref') return { text: 'Gabarito.', usage };
           if (req.stream) return { text: `Resposta de ${req.model}`, usage };
-          if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A"}', usage };
-          return { text: '{"verdict":"resolve","explanation":"ok"}', usage };
+          if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A'), usage };
+          return { text: pointwiseReply(req, 'resolve', 'ok'), usage };
         },
       });
       prev = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));

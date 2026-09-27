@@ -41,6 +41,7 @@ import { parseRunConfig, runConfigSchema } from '../src/runConfigSchema.js';
 import type { RunConfig, TrainingConfig } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter, type FakeRequest } from './fakeOpenRouter.js';
 import { expectPipelineDone } from './runOutcome.js';
+import { duelReply, listwiseReply, pointwiseReply } from './judgeReplies.js';
 
 vi.mock('../web/src/engine/storage', () => ({
   saveRun: async () => undefined,
@@ -581,16 +582,16 @@ function fakeComPii(): FakeOpenRouter {
       }
       if (req.model === M.ref) return { text: `Gabarito: confirme o CPF ${CPF_2} e o prazo.`, usage };
       if (req.stream) return { text: `Localizei o cadastro do CPF ${CPF_2}; prazo confirmado.`, usage };
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}', usage };
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
       // Juiz LISTWISE (compare sem gabarito): ranking + veredito por rótulo no
       // schema estrito — desde o IMPL-004 saída fora do contrato é veredito PERDIDO.
-      const rotulos = /ordene TODOS estes rotulos da melhor para a pior: (\[[^\]]*\])/.exec(req.user)?.[1];
+      const rotulos = /ordene TODOS estes rotulos da melhor para a pior[^:]*: (\[[^\]]*\])/.exec(req.user)?.[1];
       if (rotulos) {
         const labels = JSON.parse(rotulos) as string[];
         const verdicts = labels.map((label) => ({ label, justificativa: 'confere', veredito: 'resolve' }));
-        return { text: JSON.stringify({ ranking: labels, verdicts }), usage };
+        return { text: listwiseReply(req, labels, verdicts), usage };
       }
-      return { text: '{"verdict":"resolve","explanation":"confere"}', usage };
+      return { text: pointwiseReply(req, 'resolve', 'confere'), usage };
     },
   });
 }

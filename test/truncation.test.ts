@@ -65,6 +65,7 @@ import type {
 } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeChatReply } from './fakeOpenRouter.js';
 import { expectPipelineDone } from './runOutcome.js';
+import { duelReply, listwiseReply, pointwiseReply } from './judgeReplies.js';
 
 vi.mock('../web/src/engine/storage', () => ({
   saveRun: async () => undefined,
@@ -533,16 +534,16 @@ function fakeDaRun() {
         }
         return { text: `Resposta de ${req.model}`, finishReason: 'stop', nativeFinishReason: 'end_turn' };
       }
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}' };
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor') };
       // Juiz LISTWISE (compare sem gabarito): ranking + veredito por rótulo no
       // schema estrito — desde o IMPL-004 saída fora do contrato é veredito PERDIDO.
-      const rotulos = /ordene TODOS estes rotulos da melhor para a pior: (\[[^\]]*\])/.exec(req.user)?.[1];
+      const rotulos = /ordene TODOS estes rotulos da melhor para a pior[^:]*: (\[[^\]]*\])/.exec(req.user)?.[1];
       if (rotulos) {
         const labels = JSON.parse(rotulos) as string[];
         const verdicts = labels.map((label) => ({ label, justificativa: 'confere', veredito: 'resolve' }));
-        return { text: JSON.stringify({ ranking: labels, verdicts }), finishReason: 'stop' };
+        return { text: listwiseReply(req, labels, verdicts), finishReason: 'stop' };
       }
-      return { text: '{"verdict":"resolve","explanation":"confere"}', finishReason: 'stop' };
+      return { text: pointwiseReply(req, 'resolve', 'confere'), finishReason: 'stop' };
     },
   });
 }
@@ -777,18 +778,15 @@ function fakeJuizEGabaritoTruncados() {
       if (req.system.includes('juiz técnico estrito')) {
         // Pointwise: o raciocínio comeu o teto de 1024 ao julgar fake/b.
         return req.user.includes('Resposta de fake/b')
-          ? { text: '{"verdict":"resolve","explanation":"confere"}', finishReason: 'length', nativeFinishReason: 'max_tokens' }
-          : { text: '{"verdict":"resolve","explanation":"confere"}', finishReason: 'stop' };
+          ? { text: pointwiseReply(req, 'resolve', 'confere'), finishReason: 'length', nativeFinishReason: 'max_tokens' }
+          : { text: pointwiseReply(req, 'resolve', 'confere'), finishReason: 'stop' };
       }
-      // Listwise (etapa sem gabarito): ranking + vereditos válidos.
+      // Listwise (etapa sem gabarito): ranking + vereditos válidos (contrato do IMPL-006).
       return {
-        text: JSON.stringify({
-          ranking: ['A', 'B'],
-          verdicts: [
-            { label: 'A', acceptable: true, motivo: 'ok' },
-            { label: 'B', acceptable: true, motivo: 'ok' },
-          ],
-        }),
+        text: listwiseReply(req, ['A', 'B'], [
+          { label: 'A', justificativa: 'ok', veredito: 'resolve' },
+          { label: 'B', justificativa: 'ok', veredito: 'resolve' },
+        ]),
         finishReason: 'stop',
       };
     },
@@ -1156,8 +1154,8 @@ describe('IMPL-014 (iv) — whitelists: normalizeRunRecord e variationConfigFrom
           }
           return { text: 'Curta.', finishReason: 'stop' };
         }
-        if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"ok"}' };
-        return { text: '{"verdict":"resolve","explanation":"ok"}', finishReason: 'stop' };
+        if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'ok') };
+        return { text: pointwiseReply(req, 'resolve', 'ok'), finishReason: 'stop' };
       },
     });
     const anterior = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));

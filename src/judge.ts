@@ -190,7 +190,9 @@ export function buildListwisePrompt(stage: StageSpec, ordered: { text: string }[
   const partes = [
     'PERGUNTA DO USUARIO:',
     markedBlock('PERGUNTA', guard.nonce, stage.question),
-    'CONTEXTO FORNECIDO AOS MODELOS:',
+    // IMPL-009: o contexto do caso É entregue a todos os modelos (bloco de dado
+    // antes da pergunta) — o rótulo antigo "fornecido aos modelos" era falso p/ variante.
+    'CONTEXTO DO CASO (entregue a todos os modelos como dado, antes da pergunta):',
     markedBlock('CONTEXTO', guard.nonce, stage.productContext ?? ''),
   ];
   if (rubric) {

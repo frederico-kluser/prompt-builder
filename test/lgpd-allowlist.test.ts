@@ -31,6 +31,7 @@ import { subscribeSession } from '../web/src/engine/events.js';
 import type { RunConfig, TrainingConfig } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
 import { expectPipelineDone } from './runOutcome.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -486,8 +487,8 @@ function fakePipeline(): FakeOpenRouter {
       }
       if (req.model === M.ref) return { text: `Gabarito: ${req.user.slice(0, 40)}`, usage };
       if (req.stream) return { text: `Resposta de ${req.model}`, usage };
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}', usage };
-      return { text: '{"verdict":"resolve","explanation":"confere"}', usage };
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
+      return { text: pointwiseReply(req, 'resolve', 'confere'), usage };
     },
   });
 }

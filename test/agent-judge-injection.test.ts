@@ -129,6 +129,7 @@ import type { AgentTaskSpec } from '../src/agent/types.js';
 import type { RunConfig, RunEvent, StageSpec, Verdict } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeChatReply, type FakeOpenRouter, type FakeRequest } from './fakeOpenRouter.js';
 import { expectPipelineDone } from './runOutcome.js';
+import { duelReply } from './judgeReplies.js';
 
 const KEY = 'sk-or-v1-fake-key-para-teste-0000000000';
 const CATALOGO = ['fake/a', 'fake/b', 'fake/judge', 'fake/gen', 'mock/obediente', 'mock/credulo', 'mock/delimitador-ingenuo'].map(
@@ -765,7 +766,7 @@ function configAgente(tasks: AgentTaskSpec[], extra: Partial<RunConfig> = {}): R
 function roteador(req: FakeRequest): FakeChatReply {
   if (req.system.includes('MODELO DE REFERÊNCIA')) return { text: 'done.txt deve existir' };
   if (req.system === AGENT_JUDGE_SYSTEM_PROMPT) return { text: juizJson('resolve') };
-  if (req.system.includes('DUELO DIRETO')) return { text: '{"winner": "tie", "explanation": "empate"}' };
+  if (req.system.includes('DUELO DIRETO')) return { text: duelReply(req, 'tie', 'empate') };
   return { text: 'ok' };
 }
 

@@ -41,6 +41,7 @@ import type {
   Verdict,
 } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep } from './fakeOpenRouter.js';
+import { candidateOf, duelReply, listwiseReply, pointwiseReply } from './judgeReplies.js';
 
 vi.mock('../web/src/engine/storage', () => ({
   saveRun: async () => undefined,
@@ -71,7 +72,9 @@ const resp = (id: string, text: string): CompetitorResponse => ({
   status: 'ok',
 });
 const cont = (id: string): Contestant => ({ id, label: id, modelId: 'fake/a' });
-const OK_JSON = (verdict: Verdict, explanation: string): string => JSON.stringify({ verdict, explanation });
+// Contrato do IMPL-006: JSON estrito com o canário do pedido (`test/judgeReplies.ts`).
+const OK_JSON = (req: { user: string }, verdict: Verdict, explanation: string): string =>
+  pointwiseReply(req, verdict, explanation);
 
 async function comGateway<T>(fetch: FetchLike, fn: () => Promise<T>): Promise<T> {
   const anterior = setDefaultGateway(createGateway({ fetch, sleep: noSleep }));
@@ -183,8 +186,8 @@ describe('refJudge — painel de 2 juízes dividido', () => {
     const fake = fakeOpenRouter({
       chat: (req) =>
         req.model === 'fake/j1'
-          ? { text: OK_JSON('resolve', 'EXPLICACAO-INFLADA') }
-          : { text: OK_JSON('parcial', 'EXPLICACAO-DA-MAIORIA') },
+          ? { text: OK_JSON(req, 'resolve', 'EXPLICACAO-INFLADA') }
+          : { text: OK_JSON(req, 'parcial', 'EXPLICACAO-DA-MAIORIA') },
     });
     const r = await comGateway(fake.fetch, () =>
       judgeStageReference({
@@ -206,8 +209,8 @@ describe('refJudge — painel de 2 juízes dividido', () => {
   it('parcial + nao => nao (empate); unânime => sem marca de empate', async () => {
     const fake = fakeOpenRouter({
       chat: (req) => {
-        if (req.user.includes('CANDIDATO:\nRESP-U')) return { text: OK_JSON('resolve', 'ok') };
-        return req.model === 'fake/j1' ? { text: OK_JSON('parcial', 'meio') } : { text: OK_JSON('nao', 'errado') };
+        if (candidateOf(req) === 'RESP-U') return { text: OK_JSON(req, 'resolve', 'ok') };
+        return req.model === 'fake/j1' ? { text: OK_JSON(req, 'parcial', 'meio') } : { text: OK_JSON(req, 'nao', 'errado') };
       },
     });
     const r = await comGateway(fake.fetch, () =>
@@ -227,7 +230,7 @@ describe('refJudge — painel de 2 juízes dividido', () => {
 
   it('painel de 3 com maioria: 2×resolve + 1×parcial => resolve, sem empate', async () => {
     const fake = fakeOpenRouter({
-      chat: (req) => ({ text: OK_JSON(req.model === 'fake/j3' ? 'parcial' : 'resolve', 'x') }),
+      chat: (req) => ({ text: OK_JSON(req, req.model === 'fake/j3' ? 'parcial' : 'resolve', 'x') }),
     });
     const r = await comGateway(fake.fetch, () =>
       judgeStageReference({
@@ -243,18 +246,15 @@ describe('refJudge — painel de 2 juízes dividido', () => {
 });
 
 describe('judge (listwise) — painel de 2 juízes dividido', () => {
-  const saida = (veredito: Verdict): string =>
-    JSON.stringify({
-      ranking: ['A', 'B'],
-      verdicts: [
-        { label: 'A', justificativa: 'x', veredito },
-        { label: 'B', justificativa: 'x', veredito },
-      ],
-    });
+  const saida = (req: { user: string }, veredito: Verdict): string =>
+    listwiseReply(req, ['A', 'B'], [
+      { label: 'A', justificativa: 'x', veredito },
+      { label: 'B', justificativa: 'x', veredito },
+    ]);
 
   it('j1 resolve + j2 parcial => parcial (empate técnico), ainda aceitável', async () => {
     const fake = fakeOpenRouter({
-      chat: (req) => ({ text: saida(req.model === 'fake/j1' ? 'resolve' : 'parcial') }),
+      chat: (req) => ({ text: saida(req, req.model === 'fake/j1' ? 'resolve' : 'parcial') }),
     });
     const r = await comGateway(fake.fetch, () =>
       judgeStage({
@@ -272,7 +272,7 @@ describe('judge (listwise) — painel de 2 juízes dividido', () => {
 
   it('j1 parcial + j2 nao => nao: deixa de ser aceitável', async () => {
     const fake = fakeOpenRouter({
-      chat: (req) => ({ text: saida(req.model === 'fake/j1' ? 'parcial' : 'nao') }),
+      chat: (req) => ({ text: saida(req, req.model === 'fake/j1' ? 'parcial' : 'nao') }),
     });
     const r = await comGateway(fake.fetch, () =>
       judgeStage({
@@ -417,12 +417,12 @@ function fakePainel() {
     ),
     chat: (req) => {
       if (req.stream) return { text: `Resposta de ${req.model}` };
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"x"}' };
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'x') };
       if (req.model === 'fake/ref') return { text: 'gabarito' };
       // fake/a divide o painel (j1 resolve, j2 parcial); fake/b é unânime 'resolve'.
-      const doA = req.user.includes('CANDIDATO:\nResposta de fake/a');
+      const doA = candidateOf(req) === 'Resposta de fake/a';
       const v: Verdict = doA && req.model === 'fake/j2' ? 'parcial' : 'resolve';
-      return { text: OK_JSON(v, `voto ${req.model}`) };
+      return { text: OK_JSON(req, v, `voto ${req.model}`) };
     },
   });
 }
