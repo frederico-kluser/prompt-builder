@@ -7,7 +7,7 @@ metadata:
 ---
 # Tarefa: alterar o formulário de Nova Run
 
-Pré-requisitos: `knowledge-frontend`. O formulário vive em `web/src/pages/NewRun.tsx`.
+Pré-requisitos: memória CoALA — `coala.py search "frontend nova run"`. O formulário vive em `web/src/pages/NewRun.tsx`.
 **Não é assistente em passos nem página única de blocos**: desde 2026-07-26 é um `<form>` com um
 `<SegmentedToggle>` de MODO e um `<SmoothTabs>` de 4 etapas, mais um rodapé **fixo** com a pendência,
 a estimativa de custo e o `<MultiStateButton type="submit">`.
@@ -84,8 +84,8 @@ existe no backend, feche o ciclo em `RunConfig` (`web/src/api.ts` **e** `src/typ
 `src/routes.ts` (ver `task-add-endpoint`). **Grep pelo nome do campo antes de fechar.**
 
 ## Estilos
-Tailwind com classe semântica; **não** existe mais `.nr-*`/`.picker-*`/`.link-toggle` — ver
-`knowledge-code-style`. Componha de `components/primitives.tsx` antes de repetir cadeia de classe.
+Tailwind com classe semântica; **não** existe mais `.nr-*`/`.picker-*`/`.link-toggle` — ver memória
+CoALA (`search "code style tokens"`). Componha de `components/primitives.tsx` antes de repetir cadeia de classe.
 O rodapé é `fixed bottom-0`, e é o `pb-32` do `<Screen>` que impede o último campo de ficar embaixo
 dele: se aumentar a altura do rodapé, aumente o padding também.
 

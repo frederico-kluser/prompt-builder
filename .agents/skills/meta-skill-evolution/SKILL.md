@@ -1,6 +1,6 @@
 ---
 name: meta-skill-evolution
-description: Decide o que fazer com um aprendizado novo ou uma área de conhecimento emergente neste repositório — atualizar uma skill existente, criar uma nova skill, ou descartar. Use ao fim de uma tarefa quando o passo <evolution> de uma skill detectar algo digno de persistir, ou quando o project-router não encontrar skill que cubra a tarefa. Sempre produz um diff git para revisão humana.
+description: Decide o que fazer com um aprendizado novo ou uma área de conhecimento emergente neste repositório — atualizar uma skill existente, criar uma nova skill, registar na memória CoALA, ou descartar. Use ao fim de uma tarefa quando o passo <evolution> de uma skill detectar algo digno de persistir, ou quando nenhuma skill cobrir a tarefa. Sempre produz um diff git para revisão humana.
 metadata:
   version: 0.1.0
   type: meta
@@ -14,7 +14,8 @@ auto-gerado *sem curadoria* piora o desempenho do agente. Por isso o gate humano
 
 ## Quando usar
 - Uma skill de tarefa rodou seu `<evolution>` e há aprendizado a persistir.
-- O `project-router` não achou skill para a tarefa (nova área de conhecimento).
+- Nenhuma skill cobre a tarefa (nova área de conhecimento) — antes de criar skill nova, considere
+  registar o conhecimento na memória CoALA (`coala.py add`).
 - Revisão pontual de uma skill que ficou imprecisa.
 
 ## Decisão (uma das três)

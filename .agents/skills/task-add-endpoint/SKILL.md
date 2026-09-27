@@ -7,12 +7,13 @@ metadata:
 ---
 # Tarefa: adicionar um endpoint
 
-Pré-requisitos de conhecimento: `knowledge-backend` (e `knowledge-frontend` se a UI consome;
-`knowledge-openrouter` se chama modelo).
+Pré-requisitos de conhecimento: memória CoALA — `coala.py search "backend api"`, `"frontend"` se a
+UI consome, `"openrouter"` se chama modelo (as antigas skills `knowledge-*` foram consolidadas lá).
 
 > **Modo client-side (SPA):** lá não há rota Express — "expor dados" = uma função no
 > `web/src/engine/` + wrapper em `web/src/api.ts` (que mantém a mesma interface pública). Se a
-> feature precisa valer nos dois modos, reflita no backend (`src/`) E no engine. Ver `knowledge-architecture`.
+> feature precisa valer nos dois modos, reflita no backend (`src/`) E no engine. Ver memória CoALA
+> (`search "arquitetura shim mirror"`).
 
 ## Procedimento
 1. **Rota** em `src/routes.ts`: adicione `router.get/post('/<rota>', ...)`. Decida se precisa de
@@ -23,7 +24,8 @@ Pré-requisitos de conhecimento: `knowledge-backend` (e `knowledge-frontend` se 
 3. **Tipos**: atualize `src/types.ts` (ex.: campo novo em `RunConfigBase`) e **espelhe** em
    `web/src/api.ts` (os tipos são duplicados de propósito — mantenha sincronizados).
 4. **Lógica**: coloque regra de negócio no módulo certo (`openrouter.ts`, `storage.ts`, novo
-   módulo) — a rota deve ser fina. Para ler JSON estático, use `process.cwd()` (padrão de `lgpd.ts`).
+   módulo) — a rota deve ser fina. Para ler JSON estático, use **`PKG_DATA_DIR` (`src/paths.ts`)** —
+   nunca `process.cwd()` (instalado como pacote dá ENOENT).
 5. **Wrapper no frontend**: em `web/src/api.ts`, crie `fetchX()`/`postX()` no padrão existente
    (`authHeaders()`, checagem de `res.ok` com mensagem PT-BR, retorno de `json.data`).
 6. **Verifique**: rode `task-run-and-verify` (type-check dos dois lados + curl + smoke na UI).

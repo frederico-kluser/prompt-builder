@@ -68,9 +68,10 @@ Documentação completa: `npx prompt-builder-cli docs --list`.
 
 ---
 
-A documentação das **telas** está em [`TELAS.md`](./TELAS.md). Convenções para **agentes de código**
-(Claude Code, Codex, Cursor…) estão em [`AGENTS.md`](./AGENTS.md) e na biblioteca de skills em
-[`.agents/skills/`](./.agents/skills/) — veja [Sistema de Knowledge Skills](#sistema-de-knowledge-skills).
+Convenções para **agentes de código** (Claude Code, Codex, Cursor…) estão em [`AGENTS.md`](./AGENTS.md),
+na biblioteca de skills em [`.agents/skills/`](./.agents/skills/) e na **memória CoALA** do projeto —
+veja [Skills e memória CoALA](#skills-e-memória-coala). (A antiga documentação em `docs/`/`TELAS.md`
+foi consolidada na memória em 2026-09-26.)
 
 ---
 
@@ -84,7 +85,7 @@ A documentação das **telas** está em [`TELAS.md`](./TELAS.md). Convenções p
 - [Sistema de pontuação](#sistema-de-pontuação)
 - [Stack tecnológica](#stack-tecnológica)
 - [Estrutura do projeto](#estrutura-do-projeto)
-- [Sistema de Knowledge Skills](#sistema-de-knowledge-skills)
+- [Skills e memória CoALA](#skills-e-memória-coala)
 - [Configuração](#configuração)
 - [Como rodar](#como-rodar)
 - [Fluxo de eventos (SSE)](#fluxo-de-eventos-sse)
@@ -211,7 +212,7 @@ inclusive os defaults de origem chinesa.
   `/models` e `/endpoints/zdr` — sem key).
 - Servido em `GET /v1/benchmark/lgpd`.
 
-Detalhes para agentes na skill [`knowledge-lgpd-compliance`](./.agents/skills/knowledge-lgpd-compliance/SKILL.md).
+Detalhes para agentes na memória CoALA do projeto (`coala.py search "lgpd"`).
 
 ---
 
@@ -360,39 +361,41 @@ prompt-builder/
 
 ---
 
-## Sistema de Knowledge Skills
+## Skills e memória CoALA
 
-O repositório adota um sistema de **Agent Skills** (formato `SKILL.md`) para **agentes de código**
-(Claude Code, Codex, Cursor…): o conhecimento do projeto vive em [`.agents/skills/`](./.agents/skills/)
-e é injetado **sob demanda**, em vez de o agente reler docs ou varrer o codebase a cada tarefa.
+O conhecimento do projeto vive na **memória CoALA local**
+([`.agents/prompt-builder-coala-memory-agent-skill/`](./.agents/prompt-builder-coala-memory-agent-skill/)):
+uma base SQLite com busca híbrida (FTS5 + vetor, fusão RRF), memória **episódica, semântica e
+procedimental**, working memory orçamentada, proveniência (`owner`/`agent`/`untrusted`) e supersessão.
+As antigas *knowledge skills* (`knowledge-*`) e o `project-router` foram **destiladas para essa
+memória** (chaves `skill:<nome>:<tema>`) e apagadas em 2026-09-27; o conteúdo das 32 deep researches
+técnicas e dos documentos do projeto também está lá (chaves `R-xx:DEC-n`, `R-xx:REC-n`, `docs:Q-xx`,
+`docs:pivo-P-x`, …).
 
-**Como funciona:** toda tarefa passa primeiro pela skill roteadora
-[`project-router`](./.agents/skills/project-router/SKILL.md), que seleciona e encadeia as skills
-relevantes **antes** de implementar. O *progressive disclosure* mantém o contexto enxuto (metadados
-sempre carregados; corpo no gatilho; `references/` sob demanda).
+**Como usar (agentes de código):** no início de cada tarefa,
+`python3 .agents/prompt-builder-coala-memory-agent-skill/scripts/coala.py recall "<tarefa>" --budget 1500`;
+para dúvidas pontuais, `coala.py search "<termos>"`; no fim, registar o durável com `coala.py add`.
 
 ```
-.agents/skills/                  (fonte única; .claude/skills é symlink)
-├─ project-router/               roteia toda tarefa para as skills certas
-├─ knowledge-*/                  memória semântica: architecture, code-style, backend,
-│                                frontend, openrouter, benchmark-modes, lgpd-compliance
-├─ task-*/                       memória procedural (terminam com passo <evolution> + LEARNINGS.md):
-│                                add-endpoint, add-wizard-step, run-and-verify
-├─ meta-skill-evolution/         atualiza/cria skills a partir de aprendizados (via git diff)
-├─ meta-skill-consolidate/       GC periódico: dedup, contradições, versionamento, poda
-├─ catalog.md                    índice (estilo llms.txt) · skill-template.md  modelo
+.agents/skills/                              (fonte única; .claude/skills é symlink)
+├─ prompt-builder-coala-memory-agent-skill/  memória CoALA local (conhecimento do projeto)
+├─ task-*/                                   memória procedural (terminam com <evolution> + LEARNINGS.md):
+│                                            add-endpoint, edit-newrun-form, run-and-verify
+├─ meta-skill-evolution/                     decide o destino de aprendizados novos (via git diff)
+├─ meta-skill-consolidate/                   GC periódico: dedup, contradições, versionamento, poda
+└─ catalog.md                                índice · skill-template.md  modelo
 ```
 
 **Memória evolutiva com salvaguardas:** skills de tarefa terminam com um passo `<evolution>` que
 destila aprendizados em `LEARNINGS.md`. Inspirado em Voyager (persistir só após verificação) e
-Reflexion (feedback verbal). **Gate humano inegociável:** toda atualização de skill é um *commit*
-separado para revisão por `git diff` — pesquisa da ETH Zurich (arXiv:2602.11988) mostra que contexto
-auto-gerado *sem curadoria* piora o desempenho do agente. As skills aqui são **rascunhos curados**:
-trate-as como tal e revise antes de confiar.
+Reflexion (feedback verbal). **Gate humano inegociável:** toda atualização de skill (ou registro
+durável na memória) é um *commit* separado para revisão por `git diff` — pesquisa da ETH Zurich
+(arXiv:2602.11988) mostra que contexto auto-gerado *sem curadoria* piora o desempenho do agente.
+As skills aqui são **rascunhos curados**: trate-as como tal e revise antes de confiar.
 
 **Portabilidade:** fonte única em `.agents/skills/`, frontmatter mínimo (`name` + `description`),
-symlinks versionados. Começo: [`AGENTS.md`](./AGENTS.md) (comandos exatos + regras não-óbvias) e
-[`catalog.md`](./.agents/skills/catalog.md).
+symlinks versionados. Começo: [`AGENTS.md`](./AGENTS.md) (comandos exatos + regras não-óbvias),
+[`catalog.md`](./.agents/skills/catalog.md) e a memória CoALA.
 
 ---
 

@@ -40,7 +40,7 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
 - OpenRouter: `/models` e `/endpoints/zdr` são **públicos**; valide a key por `/key`.
 - Toda chamada de LLM passa por `chatCompletion`/`chatCompletionStream` (`openrouter.ts`), que têm um **limitador global adaptativo** (semáforo + backoff em 429). Não chame o OpenRouter por fora nem ponha cap de concorrência local — confie no limitador. Teto via `OPENROUTER_MAX_CONCURRENCY`.
 - O pipeline roda **todas as etapas em paralelo** (`orchestrator.ts`); o placar é aditivo (ordem-independente) e o `saveRun` é throttled.
-- Julgamento default é **por referência**: gabarito temp-0 por cenário (`gabarito.ts`) + juiz pointwise (`refJudge.ts`, vereditos resolve/parcial/nao) → `JudgeResult` sintetizado (ranking **sempre por veredito**). O listwise de `judge.ts` é **fallback** (compare clássico/etapa sem gabarito). Ver `knowledge-prompt-evolution`.
+- Julgamento default é **por referência**: gabarito temp-0 por cenário (`gabarito.ts`) + juiz pointwise (`refJudge.ts`, vereditos resolve/parcial/nao) → `JudgeResult` sintetizado (ranking **sempre por veredito**). O listwise de `judge.ts` é **fallback** (compare clássico/etapa sem gabarito). Ver memória CoALA (`coala.py search "julgamento por referência"`).
 - **Fase 4 — finais:** os duelos NÃO acontecem mais dentro da etapa. Depois de todas as etapas julgadas, `pickFinalists` (`duels.ts`) escolhe os **N melhores por judge-score médio** (`config.finalists`, default 3; sem vaga garantida p/ o controle) e eles duelam em **todos** os cenários, tudo num `Promise.all` (sem cap local). Eventos: `finals.started` → `stage.dueled` + `duel.progress`. **`duelTopK` não existe mais**; `duels`/`finalists` vivem em `RunConfigBase`.
 - **Capacidade de ajuste vem do catálogo, NUNCA de tabela por modelo:** `GET /models` traz
   `supported_parameters` (quem aceita `temperature`) **e** um objeto `reasoning` com
@@ -79,7 +79,7 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
   web re-exporta (shim); os pares com seam divergente (`orchestrator`/`trainer`/`openrouter`/
   `storage`/…) são **mirrors** editados em par. Módulo novo em qualquer dos lados derruba
   `test/engine-sync.test.ts` até ser classificado — não crie uma terceira cópia. Lógica nova pura
-  vai em `src/engine/` e chega aos dois lados sem duplicar. Ver `knowledge-architecture`.
+  vai em `src/engine/` e chega aos dois lados sem duplicar. Ver memória CoALA (`coala.py search "arquitetura shim mirror"`).
 - **Dinheiro é medido, nunca inferido.** O custo de cada chamada sai de `usage.cost` da resposta
   (o valor cobrado, já com cache/raciocínio/faixas de preço); o catálogo é só fallback e
   `source: 'unknown'` **não** é o mesmo que "custou zero". A contabilidade é feita em UM ponto,
@@ -107,7 +107,7 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
   development). Ele estava AUSENTE e por isso todo deploy falhava desde 2026-07-26 com
   `400 Bad Request` em `api.motion.dev` — um erro que não menciona a variável e manda investigar
   o lugar errado. Configurado em 2026-07-30.
-- **Não rode o backend `src/` em serverless (Vercel):** ele grava runs no filesystem (`storage.ts`), efêmero/isolado no serverless → `GET /v1/benchmark/runs/:id` vira `Run nao encontrada`. Produção = **SPA estática** (`npm run web:build`); o backend é só dev/self-host. Deploy errado se denuncia quando `/health` responde JSON em vez do `index.html`. Ver `knowledge-architecture`.
+- **Não rode o backend `src/` em serverless (Vercel):** ele grava runs no filesystem (`storage.ts`), efêmero/isolado no serverless → `GET /v1/benchmark/runs/:id` vira `Run nao encontrada`. Produção = **SPA estática** (`npm run web:build`); o backend é só dev/self-host. Deploy errado se denuncia quando `/health` responde JSON em vez do `index.html`. Ver memória CoALA (`coala.py search "arquitetura shim mirror"`).
 
 ## CLI (`src/cli/`, publicado como `prompt-builder`)
 - Mora em `src/cli/` e compila pelo MESMO `tsconfig.json` → `dist/cli/`. **Não** é uma terceira
@@ -130,10 +130,13 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
   `npm pack --dry-run` (server/routes ficam de fora por glob de negação).
 
 ## Skills (leia primeiro)
-Toda tarefa passa por **`.agents/skills/project-router`**, que carrega as skills de conhecimento/tarefa
-relevantes ANTES de implementar. Índice: **`.agents/skills/catalog.md`**. Fonte única em
-`.agents/skills/`; `.claude/skills` é symlink. As skills são geradas por LLM — trate como rascunho
-curado e revise por `git diff` (ver `meta-skill-evolution`).
+O conhecimento do projeto vive na **memória CoALA** (`.agents/prompt-builder-coala-memory-agent-skill/` —
+bloco abaixo): dê `recall` no início de cada tarefa e `search` para dúvidas pontuais. As skills
+`knowledge-*` e o `project-router` foram **consolidadas na memória** (chaves `skill:<nome>:<tema>`) e
+apagadas em 2026-09-27. Sobram as skills de tarefa (`task-*`, com passo `<evolution>` + `LEARNINGS.md`),
+as meta-skills (`meta-skill-*`) e o índice `.agents/skills/catalog.md`. Fonte única em
+`.agents/skills/`; `.claude/skills` é symlink. Skills são rascunhos curados gerados por LLM — trate
+como tal e revise por `git diff` (ver `meta-skill-evolution`).
 
 ## Segurança
 - Nunca leia/commite: `.env`, secrets. A key do OpenRouter é do usuário (vai por header `x-openrouter-key` / `localStorage`) — não hardcode keys.
