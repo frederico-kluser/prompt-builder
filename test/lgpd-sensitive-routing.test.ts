@@ -40,6 +40,8 @@ import { startTraining as startWebTraining } from '../web/src/engine/trainer.js'
 import { getRunRecord, subscribeRun, subscribeSession } from '../web/src/engine/events.js';
 import type { CostEntry, CostRole, RunConfig, TrainingConfig } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter, type FakeRequest } from './fakeOpenRouter.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -121,8 +123,9 @@ function fakePipeline(): FakeOpenRouter {
       }
       if (req.model === M.ref) return { text: `Gabarito: ${req.user.slice(0, 40)}`, usage };
       if (req.stream) return { text: `Resposta de ${req.model}`, usage };
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}', usage };
-      return { text: '{"verdict":"resolve","explanation":"confere"}', usage };
+      // Juízes no contrato do IMPL-006: JSON estrito com o canário do pedido.
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
+      return { text: pointwiseReply(req, 'resolve', 'confere'), usage };
     },
   });
 }
@@ -304,7 +307,7 @@ describe('IMPL-040 (1) — toda requisição do modo sensível carrega os 4 camp
   it('Node — compare: datagen, gabarito, competidor (stream), juiz e duelo com provider ZDR forçado', async () => {
     const fake = comFake();
     const rec = await runNode(COMPARE as unknown as RunConfig, KEY, {});
-    expect(rec.status, rec.error).toBe('finished');
+    expectPipelineDone(rec);
     const a = auditar(fake);
     conferirSnapshot(a, CINCO);
     conferirLedger(a, rec.costByRole, CINCO);
@@ -314,7 +317,7 @@ describe('IMPL-040 (1) — toda requisição do modo sensível carrega os 4 camp
     const fake = comFake();
     const cfg = VARIATION as unknown as RunConfig;
     const rec = await runNode(cfg, KEY, prepareOptsFor(cfg, KEY));
-    expect(rec.status, rec.error).toBe('finished');
+    expectPipelineDone(rec);
     const a = auditar(fake);
     conferirSnapshot(a, SEIS);
     conferirLedger(a, rec.costByRole, SEIS);
@@ -323,7 +326,7 @@ describe('IMPL-040 (1) — toda requisição do modo sensível carrega os 4 camp
   it('Node — treino: reescritor da sessão + runs aninhadas (forks do ledger) herdam o modo', async () => {
     const fake = comFake();
     const rec = await trainNode(TREINO as unknown as TrainingConfig, KEY);
-    expect(rec.status, rec.error).toBe('finished');
+    expectPipelineDone(rec);
     const a = auditar(fake);
     conferirSnapshot(a, SEIS);
     conferirLedger(a, rec.costByRole, SEIS);
@@ -332,7 +335,7 @@ describe('IMPL-040 (1) — toda requisição do modo sensível carrega os 4 camp
   it('SPA — compare (web/src/engine/orchestrator): mesmo gateway, mesmos 4 campos', async () => {
     const fake = comFake();
     const rec = await runWeb(COMPARE as never, KEY, {});
-    expect(rec.status, rec.error).toBe('finished');
+    expectPipelineDone(rec);
     const a = auditar(fake);
     conferirSnapshot(a, CINCO);
     conferirLedger(a, rec.costByRole, CINCO);
@@ -345,7 +348,7 @@ describe('IMPL-040 (1) — toda requisição do modo sensível carrega os 4 camp
     const runId = await createRun(VARIATION as never);
     await esperarRunWeb(runId);
     const rec = getRunRecord(runId)!;
-    expect(rec.status, rec.error).toBe('finished');
+    expectPipelineDone(rec);
     const a = auditar(fake);
     conferirSnapshot(a, SEIS);
     conferirLedger(a, rec.costByRole, SEIS);
@@ -365,7 +368,7 @@ describe('IMPL-040 (1) — toda requisição do modo sensível carrega os 4 camp
     for (const compliance of [{ area: 'geral', includeRessalvas: true }, undefined]) {
       const fake = comFake();
       const rec = await runNode({ ...COMPARE, compliance } as unknown as RunConfig, KEY, {});
-      expect(rec.status, rec.error).toBe('finished');
+      expectPipelineDone(rec);
       const chats = fake.chatRequests();
       expect(chats.length).toBeGreaterThan(0);
       for (const r of chats) expect(r.body?.provider).toBeUndefined();
