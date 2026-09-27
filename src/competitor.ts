@@ -11,6 +11,7 @@ import { finishSignalsOf, retryMaxTokens } from './engine/truncation.js';
 import { buildCaseInput } from './engine/caseInput.js';
 import { competitorContextRoom, competitorMaxTokens, type CompetitorModelHint } from './roleLimits.js';
 import type {
+  CallCost,
   CallFinishSignals,
   CompetitorOutcomeCounts,
   CompetitorResponse,
@@ -120,6 +121,14 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
   /** Custo da 1a tentativa truncada — o dinheiro saiu, entra no costUsd final. */
   let spentOnTruncated = 0;
   /**
+   * Custo LANCADO no ledger por tentativas que falharam depois de despachadas
+   * (timeout = gasto conservador; 200 com erro in-band = custo medido). Sem
+   * isto o competidor saia com `costUsd` 0 e `soma(costByContestant)` ficava
+   * abaixo do `totalCostUsd` (IMPL-017, revisao). Pendente nao entra: segue a
+   * regra do ledger (fora do gasto ate conciliar).
+   */
+  let spentOnFailed = 0;
+  /**
    * Sinais da 1a tentativa (a truncada): sem isto so sobrava `truncationRetried`
    * e uma linha de log — qual sinal disparou e quanto raciocinio ela gastou
    * (o que calibra o teto) se perdiam. Persistidos em `firstAttempt`.
@@ -132,6 +141,7 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
   let lastError: unknown;
   while (attempt <= retries) {
     const start = Date.now();
+    let attemptCost: CallCost | undefined;
     try {
       const res = await chatCompletionStream({
         apiKey,
@@ -147,6 +157,9 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
         signal: ctx?.signal,
         sink: ctx?.sink,
         maxPricePerMTok,
+        onCost: (c) => {
+          attemptCost = c;
+        },
         onDelta: (_delta, fullText) => {
           if (!onProgress) return;
           const elapsedSec = Math.max(0.001, (Date.now() - start) / 1000);
@@ -190,7 +203,7 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
         // Custo EXATO vindo de `usage.cost` (fallback: catalogo). Antes era
         // sempre derivado do catalogo, ignorando cache e faixas de preco.
         // Com retry por truncamento, soma as duas tentativas.
-        costUsd: res.cost.usd + spentOnTruncated,
+        costUsd: res.cost.usd + spentOnTruncated + spentOnFailed,
         status,
         ...(res.blocked ? { errorMsg: res.blocked.message } : {}),
         ...(res.finishReason ? { finishReason: res.finishReason } : {}),
@@ -208,6 +221,7 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
       // gastaria mais, e devolver status 'error' faria a run parecer completa
       // com um competidor "que falhou". Sai do laco propagando.
       if (isControlSignal(err)) throw err;
+      spentOnFailed += attemptCost?.usd ?? 0;
       // Bloqueio de moderacao/guardrail (403) e DETERMINISTICO para a mesma
       // entrada: repetir so gastaria tempo, e nao e falha de infraestrutura
       // nem de key. Sai do laco como 'blocked' — o OpenRouter nao cobra a
@@ -221,7 +235,7 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
           tokensIn: 0,
           tokensOut: 0,
           // O 403 nao e cobrado; uma 1a tentativa truncada antes dele, sim.
-          costUsd: spentOnTruncated,
+          costUsd: spentOnTruncated + spentOnFailed,
           status: 'blocked',
           errorMsg: err.message,
           ...retryFields(),
@@ -240,8 +254,9 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
     latencyMs: 0,
     tokensIn: 0,
     tokensOut: 0,
-    // Erro de infra nao gera cobranca conhecida, mas a 1a tentativa truncada gerou.
-    costUsd: spentOnTruncated,
+    // Erro de infra: so o que o ledger LANCOU (timeout conservador, erro
+    // in-band medido) e a 1a tentativa truncada.
+    costUsd: spentOnTruncated + spentOnFailed,
     status: 'error',
     errorMsg: lastError instanceof Error ? lastError.message : String(lastError),
     ...retryFields(),

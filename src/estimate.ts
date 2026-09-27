@@ -9,13 +9,14 @@
 //   2. Datagen e em LOTE, nao por etapa. A UI cobrava uma chamada por cenario;
 //      `generateStages` faz `batchCountFor(count)` lotes. Erro de ~4x.
 //   3. `high` era ficticio (`high = point`). Agora sai dos tetos que o codigo
-//      realmente envia (`ROLE_MAX_TOKENS` de roleLimits.ts, IMPL-016: gabarito,
-//      juiz pointwise/listwise e duelo com sala p/ raciocinio) e, no
+//      realmente envia — importados de `engine/callCaps.ts`, a MESMA constante
+//      que vai no corpo e na reserva da porta dura (gabarito, juiz pointwise e
+//      listwise e duelo re-exportam `ROLE_MAX_TOKENS` de roleLimits.ts, IMPL-016,
+//      com sala p/ raciocinio; reescritor e datagen, IMPL-017) e, no
 //      competidor, do MESMO teto que a porta dura reserva: resposta
 //      (`maxOutputTokens`) + folga de raciocinio do degrau EFETIVO
-//      (`competitorMaxTokens`). Sem a folga aqui a porta suave aprovava G2 e a
-//      reserva (resposta + folga, todas em paralelo) estourava no meio da fase
-//      — o cenario que a porta suave existe para impedir (revisao IMPL-016).
+//      (`competitorMaxTokens`). Numero copiado aqui fazia a porta suave aprovar
+//      uma fase que a porta dura cortava no meio (revisoes IMPL-016/017).
 //      E pior caso por construcao; prever os reasoning_tokens reais por
 //      esforco x familia e o R-08:DEC-5.
 //   4. O HOLDOUT do treino nao era contado (uma run extra de N cenarios x 2).
@@ -40,6 +41,16 @@
 import { batchCountFor } from './datagen.js';
 import { CANARY_MAX_TOKENS, JUDGE_MAX_TOKENS } from './contractGate.js';
 import {
+  DATAGEN_PROMPT_TOKENS,
+  MAX_TOKENS_DATAGEN_BATCH,
+  MAX_TOKENS_DUEL,
+  MAX_TOKENS_GABARITO,
+  MAX_TOKENS_JUDGE_LISTWISE,
+  MAX_TOKENS_REF_JUDGE,
+  MAX_TOKENS_REWRITER,
+  REWRITER_PROMPT_TOKENS,
+} from './engine/callCaps.js';
+import {
   priceTokens,
   priceTokensOrWorst,
   worstCasePricing,
@@ -47,7 +58,7 @@ import {
 } from './engine/pricing.js';
 import { selectionMinibatchSize, TECHNIQUES_PER_ITERATION } from './engine/trainingPolicy.js';
 import { competitorModelHint } from './competitor.js';
-import { competitorMaxTokens, ROLE_MAX_TOKENS } from './roleLimits.js';
+import { competitorMaxTokens } from './roleLimits.js';
 import type { CostRole, OpenRouterModel, ReasoningLevel, RunConfig, RunMode } from './types.js';
 
 /** USD por token -> USD por milhao. A conversao 1e6 mora SO aqui e em toPerToken. */
@@ -55,11 +66,7 @@ export const PER_MTOK = 1_000_000;
 export const toPerMTok = (usdPerToken: number): number => usdPerToken * PER_MTOK;
 export const toPerToken = (usdPerMTok: number): number => usdPerMTok / PER_MTOK;
 
-/** Tetos reais que o pipeline envia — base do limite superior da faixa (fonte unica: roleLimits.ts). */
-const MAX_TOKENS_GABARITO = ROLE_MAX_TOKENS.gabarito;
-const MAX_TOKENS_REF_JUDGE = ROLE_MAX_TOKENS.judge;
-const MAX_TOKENS_DUEL = ROLE_MAX_TOKENS.duel;
-const MAX_TOKENS_DATAGEN_BATCH = 2000;
+// Tetos reais que o pipeline envia: `engine/callCaps.ts` (fonte unica).
 /** Contexto de entrada assumido por cenario (pergunta + productContext). */
 const DEFAULT_CTX_IN = 500;
 /** Entrada do juiz do contrato: instrucoes + invariantes + base + reescrita + diff. */
@@ -283,7 +290,7 @@ export function estimateRunCost(
   const datagenBatches = input.datagenModelId && stages > 0 ? batchCountFor(stages) : 0;
   if (datagenBatches > 0) {
     const m = model(input.datagenModelId);
-    byRole.datagen += datagenBatches * price(m, 400, MAX_TOKENS_DATAGEN_BATCH);
+    byRole.datagen += datagenBatches * price(m, DATAGEN_PROMPT_TOKENS, MAX_TOKENS_DATAGEN_BATCH);
   }
 
   // --- gabaritos: um por cenario que usa regua textual (IMPL-034) ---
@@ -297,7 +304,7 @@ export function estimateRunCost(
   const variantes = input.variantsPerIteration ?? 0;
   if (variantes > 0 && input.optimizerModelId) {
     const m = model(input.optimizerModelId);
-    byRole.rewriter += variantes * price(m, 1200, 1200);
+    byRole.rewriter += variantes * price(m, REWRITER_PROMPT_TOKENS, MAX_TOKENS_REWRITER);
   }
 
   // --- contrato never-break: verificar cada variante (IMPL-011) ---
@@ -342,8 +349,9 @@ export function estimateRunCost(
     // listwise: uma chamada por (juiz x passe x cenario), com TODAS as respostas
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
-      // Listwise agora envia o teto do juiz (IMPL-016); antes ia sem teto e aqui se supunha 800.
-      byRole.judge += runStages * input.judgePasses * price(m, ctxIn + nContestants * maxOut, MAX_TOKENS_REF_JUDGE);
+      // Listwise envia o teto do juiz (IMPL-016/017); antes ia sem teto e aqui se supunha 800.
+      byRole.judge +=
+        runStages * input.judgePasses * price(m, ctxIn + nContestants * maxOut, MAX_TOKENS_JUDGE_LISTWISE);
     }
   }
 
@@ -377,7 +385,7 @@ export function estimateRunCost(
       const m = model(jid);
       byRole.judge += input.referenceJudging
         ? reevalStages * 2 * price(m, ctxIn + maxOut + REFERENCE_TEXT_TOKENS, MAX_TOKENS_REF_JUDGE)
-        : reevalStages * input.judgePasses * price(m, ctxIn + 2 * maxOut, MAX_TOKENS_REF_JUDGE);
+        : reevalStages * input.judgePasses * price(m, ctxIn + 2 * maxOut, MAX_TOKENS_JUDGE_LISTWISE);
     }
   }
 

@@ -11,6 +11,7 @@ import type {
   CostRole,
   CostSink,
   ModelReasoningMeta,
+  PendingReason,
   OpenRouterModel,
   PricingTier,
   ReasoningLevel,
@@ -49,6 +50,25 @@ const INITIAL_CONCURRENCY = 8;
 const MIN_CONCURRENCY = 1;
 /** Re-tentativas de transientes (429/5xx/rede). 1 + 6 = no maximo 7 tentativas. */
 export const MAX_RETRIES = 6;
+/**
+ * Teto de saida quando o chamador nao passa `maxTokens` (IMPL-017): o corpo
+ * SEMPRE leva `max_tokens` e a reserva usa o MESMO numero. Antes a reserva
+ * assumia 1024 enquanto a saida seguia ilimitada — sem limite de estouro.
+ * Os papeis do pipeline passam o proprio teto; isto so cobre chamada avulsa.
+ */
+export const DEFAULT_MAX_TOKENS = 4096;
+
+/** O teto que vai no corpo E na reserva — um numero so. */
+export function effectiveMaxTokens(maxTokens: number | undefined): number {
+  return typeof maxTokens === 'number' && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS;
+}
+
+/** Id da geracao (`gen-…`) no corpo/chunk — chave da conciliacao via GET /generation. */
+function generationIdOf(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const id = (payload as { id?: unknown }).id;
+  return typeof id === 'string' && id.trim() ? id.trim() : undefined;
+}
 const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Transporte HTTP. Assinatura minima do `fetch` padrao (Node 18+ e navegador). */
@@ -660,6 +680,11 @@ export function priceUsage(u: UsageInfo, model: OpenRouterModel | undefined): Ca
   return { usd: 0, source: 'unknown' };
 }
 
+/** A resposta trouxe bloco `usage`? Sem ele o custo NAO foi medido (IMPL-017). */
+function hasUsage(raw: unknown): boolean {
+  return typeof raw === 'object' && raw !== null;
+}
+
 /**
  * Estimativa grosseira de tokens de prompt — so dimensiona a reserva otimista
  * (e o limite de contexto do teto do competidor, IMPL-016).
@@ -979,6 +1004,15 @@ export interface ChatCompletionParams {
   sink?: CostSink;
   /** Teto por requisicao (USD por MILHAO de tokens). Ver applyMaxPrice. */
   maxPricePerMTok?: { prompt?: number; completion?: number };
+  /**
+   * Chamado quando o custo desta chamada e LANCADO no ledger — inclusive
+   * quando ela termina em erro depois de despachada (timeout, corpo de erro
+   * in-band). Sem isto o chamador so via o custo no retorno, e um competidor
+   * que estourava o timeout ficava com `costUsd` 0 enquanto o ledger ja tinha
+   * lancado o gasto conservador (IMPL-017, revisao). Nao e chamado quando a
+   * reserva volta inteira (HTTP de erro/nada despachado: nao houve custo).
+   */
+  onCost?: (cost: CallCost) => void;
 }
 
 export interface ChatStreamParams extends ChatCompletionParams {
@@ -1022,6 +1056,17 @@ interface GuardedResponse {
   startedAt: number;
   /** Libera o slot do limitador; passe ok=true se a leitura do corpo concluiu. */
   finish: (ok: boolean) => void;
+  /** Se a leitura do corpo foi abortada: por timeout ou por abort externo (IMPL-017). */
+  abortReason: () => PendingReason | undefined;
+}
+
+/**
+ * Preenchido por `guardedFetch` quando a ULTIMA tentativa foi abortada DEPOIS
+ * de despachada (IMPL-017): o provedor pode estar gerando (e cobrando) — a
+ * reserva nao pode ser devolvida.
+ */
+interface DispatchTrack {
+  abortedInFlight?: PendingReason;
 }
 
 /**
@@ -1197,6 +1242,7 @@ export class OpenRouterGateway {
     init: RequestInit,
     timeoutMs: number,
     externalSignal?: AbortSignal,
+    track?: DispatchTrack,
   ): Promise<GuardedResponse> {
     const limiter = this.limiter;
     let attempt = 0;
@@ -1209,7 +1255,11 @@ export class OpenRouterGateway {
         throw toControlSignal(externalSignal.reason);
       }
       const controller = new AbortController();
-      const timeoutHandle = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+      let timedOut = false;
+      const timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        controller.abort(new Error('timeout'));
+      }, timeoutMs);
       const onExternalAbort = () => controller.abort(externalSignal?.reason);
       if (externalSignal) {
         if (externalSignal.aborted) controller.abort(externalSignal.reason);
@@ -1221,12 +1271,22 @@ export class OpenRouterGateway {
       };
 
       const startedAt = Date.now();
+      // Sinal ja abortado ANTES do envio = nada saiu (o fetch rejeita sem rede).
+      const dispatched = !controller.signal.aborted;
       let res: Response;
       try {
         res = await this.transport(url, { ...init, signal: controller.signal });
       } catch (err) {
         cleanup();
         limiter.release();
+        // Abortada DEPOIS de despachada: o provedor pode seguir gerando e
+        // cobrando — quem chamou mantem a reserva (IMPL-017). Erro de rede sem
+        // abort (conexao recusada/DNS) nao chegou a gerar: segue devolvendo.
+        // Marcado ANTES do sinal de controle abaixo: Cancelar também é abort
+        // em voo (a reserva fica pendente, não some).
+        if (controller.signal.aborted && dispatched && track) {
+          track.abortedInFlight = timedOut ? 'timeout' : 'aborted';
+        }
         // Abort EXTERNO (Cancelar/Ctrl-C) sai como SINAL DE CONTROLE, aqui no
         // ponto unico: o que o transporte rejeita varia por runtime, e um erro
         // comum seria degradado pelos papeis em nota inventada (IMPL-020).
@@ -1266,6 +1326,7 @@ export class OpenRouterGateway {
           cleanup();
           limiter.release();
         },
+        abortReason: () => (controller.signal.aborted ? (timedOut ? 'timeout' : 'aborted') : undefined),
       };
     }
   }
@@ -1274,7 +1335,7 @@ export class OpenRouterGateway {
 
   /** Corpo comum de chat/stream: amostragem determinista, esforco encaixado, teto de preco. */
   private buildBody(params: ChatCompletionParams, stream: boolean): Record<string, unknown> {
-    const { apiKey, modelId, messages, temperature = 0, maxTokens } = params;
+    const { apiKey, modelId, messages, temperature = 0 } = params;
     const model = this.cachedModel(apiKey, modelId);
     const body: Record<string, unknown> = {
       model: modelId,
@@ -1282,7 +1343,9 @@ export class OpenRouterGateway {
       ...deterministicSampling(model, modelId, temperature),
     };
     if (stream) body.stream = true;
-    if (typeof maxTokens === 'number' && maxTokens > 0) body.max_tokens = maxTokens;
+    // SEMPRE com teto (IMPL-017): sem ele a reserva nao limita o estouro.
+    body.max_tokens = effectiveMaxTokens(params.maxTokens);
+    // json_schema estrito quando o catalogo declara structured_outputs (IMPL-006).
     const responseFormat = responseFormatFor(model, params);
     if (responseFormat) body.response_format = responseFormat;
     // O esforco pedido e ENCAIXADO no que este modelo declara aceitar (ver
@@ -1363,6 +1426,62 @@ export class OpenRouterGateway {
         ...(finish ? { finish } : {}),
       });
     }
+    params.onCost?.(cost);
+    return cost;
+  }
+
+  /**
+   * Reserva ANTES do slot do limitador: se o orcamento ja estourou, nem
+   * enfileira. Lanca BudgetExceeded/RunCancelled (sinais de controle). O teto
+   * reservado e o MESMO que vai no corpo (`effectiveMaxTokens`); o gateway
+   * manda junto a sua propria estimativa pelo catalogo em cache (fallback do
+   * ledger) e usa `admit` — o limite de 1 chamada sem preco em voo por papel.
+   */
+  private async reserveFor(
+    params: ChatCompletionParams,
+    role: CostRole,
+  ): Promise<ReturnType<CostSink['reserve']> | undefined> {
+    const sink = params.sink;
+    if (!sink) return undefined;
+    const cap = effectiveMaxTokens(params.maxTokens);
+    const promptGuess = guessPromptTokens(params.messages);
+    const fallback = computeCost(promptGuess, cap, this.cachedModel(params.apiKey, params.modelId));
+    const fb = fallback === null ? undefined : fallback;
+    return sink.admit
+      ? sink.admit(role, params.modelId, promptGuess, cap, fb, params.signal)
+      : sink.reserve(role, params.modelId, promptGuess, cap, fb);
+  }
+
+  /**
+   * Chamada DESPACHADA sem custo medido (IMPL-017 / R-07a:REC-2): abort,
+   * timeout, corpo ilegivel ou resposta sem bloco `usage`. A reserva e mantida
+   * (pendente, conciliavel pelo `generationId`) ou lancada inteira como gasto
+   * conservador — nunca devolvida, nunca zero. O custo devolvido ao chamador
+   * segue a MESMA regra do ledger (IMPL-017, revisao): conservador => `usd` =
+   * reserva (ja esta no gasto); pendente => `usd: 0` + `pendingUsd` = reserva
+   * (fora do gasto ate conciliar). Antes o pendente voltava como `usd` cheio e
+   * `soma(costByContestant)` passava de `totalCostUsd`.
+   */
+  private accountUnmeasured(
+    params: ChatCompletionParams,
+    reservation: ReturnType<CostSink['reserve']> | undefined,
+    reason: PendingReason,
+    generationId: string | undefined,
+    finish?: CallFinishSignals,
+  ): CallCost {
+    if (reservation) {
+      params.sink?.pending(reservation, {
+        role: params.role ?? 'competitor',
+        modelId: params.modelId,
+        reason,
+        ...(generationId ? { generationId } : {}),
+        ...(finish ? { finish } : {}),
+      });
+    }
+    const usd = reservation?.usd ?? 0;
+    const cost: CallCost =
+      reservation?.status === 'pending' ? { usd: 0, source: 'unknown', pendingUsd: usd } : { usd, source: 'unknown' };
+    params.onCost?.(cost);
     return cost;
   }
 
@@ -1396,14 +1515,14 @@ export class OpenRouterGateway {
   }
 
   async chatCompletion(params: ChatCompletionParams): Promise<ChatCompletionResult> {
-    const { messages, maxTokens, timeoutMs = 60_000, signal: externalSignal, sink } = params;
+    const { timeoutMs = 60_000, signal: externalSignal, sink } = params;
+    const maxTokens = effectiveMaxTokens(params.maxTokens);
     const role = params.role ?? 'competitor';
     const body = this.buildBody(params, false);
 
-    // Reserva ANTES do slot do limitador: se o orcamento ja estourou, nem
-    // enfileira. Lanca BudgetExceeded/RunCancelled (sinais de controle).
-    const reservation = sink?.reserve(role, params.modelId, guessPromptTokens(messages), maxTokens ?? 1024);
+    const reservation = await this.reserveFor(params, role);
 
+    const track: DispatchTrack = {};
     let guarded: GuardedResponse;
     try {
       guarded = await this.guardedFetch(
@@ -1411,17 +1530,26 @@ export class OpenRouterGateway {
         { method: 'POST', headers: this.headers(params.apiKey), body: JSON.stringify(body) },
         timeoutMs,
         externalSignal,
+        track,
       );
     } catch (err) {
-      reservation?.release();
+      // Abortada depois de despachada => pendente/conservador; HTTP de erro e
+      // falha de rede sem resposta => nada gerado, a reserva volta (IMPL-017).
+      if (track.abortedInFlight) this.accountUnmeasured(params, reservation, track.abortedInFlight, undefined);
+      else reservation?.release();
       throw err;
     }
     const { res, startedAt, finish } = guarded;
 
     let ok = false;
+    // A partir daqui o provedor ja respondeu 200: qualquer saida sem custo
+    // lancado e "despachada sem usage" — nunca devolucao da reserva.
+    let accounted = false;
+    let generationId: string | undefined;
     try {
       const latencyMs = Date.now() - startedAt;
       const json = (await res.json()) as {
+        id?: unknown;
         choices?: {
           message?: { content?: string | null; refusal?: string | null };
           finish_reason?: string | null;
@@ -1430,6 +1558,7 @@ export class OpenRouterGateway {
         usage?: unknown;
         error?: OpenRouterErrorBody;
       };
+      generationId = generationIdOf(json);
 
       const usage = extractUsage(json.usage);
       const choice = json.choices?.[0];
@@ -1455,17 +1584,17 @@ export class OpenRouterGateway {
       // (provider rejeitou um parametro) JA foi cobrada. Sem isto ela sai de
       // graca nos livros e cara na fatura. Os sinais de fim so vao junto
       // quando a chamada completou (a falha in-band nao tem fim a medir).
-      const cost = this.account(
-        params,
-        reservation,
-        usage,
-        inBandFailure
-          ? undefined
-          : finishSignalsOf(
-              { text, tokensOut: usage.tokensOut, reasoningTokens: usage.reasoningTokens, finishReason, nativeFinishReason, ...trunc },
-              maxTokens,
-            ),
-      );
+      const fim = inBandFailure
+        ? undefined
+        : finishSignalsOf(
+            { text, tokensOut: usage.tokensOut, reasoningTokens: usage.reasoningTokens, finishReason, nativeFinishReason, ...trunc },
+            maxTokens,
+          );
+      // Sem bloco `usage` nao ha custo medido: pendente pelo id (IMPL-017).
+      const cost = hasUsage(json.usage)
+        ? this.account(params, reservation, usage, fim)
+        : this.accountUnmeasured(params, reservation, 'no_usage', generationId, fim);
+      accounted = true;
       if (inBandFailure && json.error) {
         if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
         throw new Error(`OpenRouter: ${json.error.message ?? JSON.stringify(json.error)}`);
@@ -1490,18 +1619,24 @@ export class OpenRouterGateway {
     } catch (err) {
       throw controlIfAborted(err, externalSignal);
     } finally {
-      if (!ok) reservation?.release();
+      // Corpo abortado/ilegivel depois do 200: o provedor gerou (e cobra) —
+      // no nao-streaming ele segue gerando apos o abort (IMPL-017).
+      if (!accounted) {
+        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', generationId);
+      }
       finish(ok);
     }
   }
 
   async chatCompletionStream(params: ChatStreamParams): Promise<ChatCompletionResult> {
-    const { messages, maxTokens, timeoutMs = 60_000, signal: externalSignal, sink, onDelta } = params;
+    const { timeoutMs = 60_000, signal: externalSignal, sink, onDelta } = params;
+    const maxTokens = effectiveMaxTokens(params.maxTokens);
     const role = params.role ?? 'competitor';
     const body = this.buildBody(params, true);
 
-    const reservation = sink?.reserve(role, params.modelId, guessPromptTokens(messages), maxTokens ?? 1024);
+    const reservation = await this.reserveFor(params, role);
 
+    const track: DispatchTrack = {};
     let guarded: GuardedResponse;
     try {
       guarded = await this.guardedFetch(
@@ -1509,14 +1644,20 @@ export class OpenRouterGateway {
         { method: 'POST', headers: this.headers(params.apiKey), body: JSON.stringify(body) },
         timeoutMs,
         externalSignal,
+        track,
       );
     } catch (err) {
-      reservation?.release();
+      if (track.abortedInFlight) this.accountUnmeasured(params, reservation, track.abortedInFlight, undefined);
+      else reservation?.release();
       throw err;
     }
     const { res, startedAt, finish } = guarded;
 
     let ok = false;
+    let accounted = false;
+    // Id da geracao: vem em TODO chunk — e o que permite conciliar um stream
+    // cortado no meio pelo GET /generation (IMPL-017).
+    let generationId: string | undefined;
     let fullText = '';
     let lastRaw: unknown = null;
     // Guardado SEPARADO de `lastRaw`: hoje o ultimo chunk *por acaso* e o de
@@ -1559,8 +1700,10 @@ export class OpenRouterGateway {
               }[];
               usage?: unknown;
               error?: OpenRouterErrorBody;
+              id?: unknown;
             };
             lastRaw = chunk;
+            generationId ??= generationIdOf(chunk);
             if (chunk.error && !streamError) {
               streamError =
                 typeof chunk.error === 'object' ? chunk.error : { message: String(chunk.error) };
@@ -1604,24 +1747,24 @@ export class OpenRouterGateway {
       );
       // Contabiliza antes do throw in-band — a chamada ja foi cobrada. Sinais
       // de fim so quando a chamada completou.
-      const cost = this.account(
-        params,
-        reservation,
-        usage,
-        inBandFailure
-          ? undefined
-          : finishSignalsOf(
-              {
-                text: fullText,
-                tokensOut: usage.tokensOut,
-                reasoningTokens: usage.reasoningTokens,
-                finishReason,
-                nativeFinishReason,
-                ...trunc,
-              },
-              maxTokens,
-            ),
-      );
+      const fim = inBandFailure
+        ? undefined
+        : finishSignalsOf(
+            {
+              text: fullText,
+              tokensOut: usage.tokensOut,
+              reasoningTokens: usage.reasoningTokens,
+              finishReason,
+              nativeFinishReason,
+              ...trunc,
+            },
+            maxTokens,
+          );
+      // Stream sem frame de usage: pendente pelo id dos chunks (IMPL-017).
+      const cost = hasUsage(usageRaw)
+        ? this.account(params, reservation, usage, fim)
+        : this.accountUnmeasured(params, reservation, 'no_usage', generationId, fim);
+      accounted = true;
       // Resposta vazia + erro in-band (provider rejeitou parametro etc.): falha alto.
       if (inBandFailure && streamError) {
         if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
@@ -1649,7 +1792,11 @@ export class OpenRouterGateway {
     } catch (err) {
       throw controlIfAborted(err, externalSignal);
     } finally {
-      if (!ok) reservation?.release();
+      // Stream cortado no meio (abort/timeout/rede): tokens ja gerados foram
+      // cobrados — pendente pelo id dos chunks, conservador sem ele (IMPL-017).
+      if (!accounted) {
+        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', generationId);
+      }
       finish(ok);
     }
   }

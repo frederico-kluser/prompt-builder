@@ -5,6 +5,7 @@ import type { PromptGroup } from '../../src/engine/promptGroup.js';
 import type {
   CallFinishSignals,
   CostEntry,
+  CostLedgerSummary,
   CostRole,
   FinishSignalCounts,
   RunCtx,
@@ -13,7 +14,7 @@ import type {
   StoredSignificance,
   TruncationSignal,
 } from '../../src/types.js';
-export type { CostEntry, CostRole, RunPhase } from '../../src/types.js';
+export type { CostEntry, CostLedgerSummary, CostRole, RunPhase } from '../../src/types.js';
 import {
   estimateLaunchCost,
   type LaunchCostEstimate,
@@ -527,6 +528,8 @@ export interface RunRecord {
   costByRole?: Record<CostRole, CostEntry>;
   /** Quantas chamadas tiveram preço exato, estimado ou desconhecido. */
   costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** Ledger: spent/committed/pending (IMPL-017). Ausente em records antigos. */
+  costLedger?: CostLedgerSummary;
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
   /** Ciclo de vida de todo modelo da run + alertas 30/14/7 dias (IMPL-019). */
@@ -857,6 +860,8 @@ export interface SessionRecord {
   /** Soma do `failureCountByRole` de todas as runs da sessão (IMPL-004). */
   failureCountByRole?: Partial<Record<CostRole, number>>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** Ledger da sessão: spent/committed/pending (IMPL-017). */
+  costLedger?: CostLedgerSummary;
   upstreamCostUsd?: number;
   budgetUsd?: number;
   budgetExhausted?: boolean;

@@ -33,11 +33,14 @@ export type {
 export type {
   CallCost,
   CostEntry,
+  CostLedgerSummary,
   CostRole,
   CostSink,
   CostSource,
+  PendingReason,
   PricingTier,
   Reservation,
+  ReservationStatus,
   RunCtx,
   RunPhase,
   TokenPrice,
@@ -750,6 +753,8 @@ export interface RunRecord {
   costByRole?: Record<CostRole, CostEntry>;
   /** Quantas chamadas tiveram preço exato, estimado ou desconhecido. */
   costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** Ledger: spent/committed/pending (IMPL-017). Ausente em records antigos. */
+  costLedger?: import('../../../src/types.js').CostLedgerSummary;
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
   /** Teto de gasto configurado (ausente = sem limite). */
@@ -818,6 +823,8 @@ export interface SessionRecord {
   /** Soma do `failureCountByRole` de todas as runs da sessão (IMPL-004). */
   failureCountByRole?: Partial<Record<CostRole, number>>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** Ledger da sessão: spent/committed/pending (IMPL-017). */
+  costLedger?: import('../../../src/types.js').CostLedgerSummary;
   upstreamCostUsd?: number;
   budgetUsd?: number;
   budgetExhausted?: boolean;

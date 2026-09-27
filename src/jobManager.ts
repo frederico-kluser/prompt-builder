@@ -253,6 +253,8 @@ export function benchmarkSummary(rec: RunRecord): Record<string, unknown> {
     stoppedReason: rec.stoppedReason,
     totalCostUsd: rec.totalCostUsd,
     costByRole: rec.costByRole,
+    // IMPL-017: totalCostUsd EXCLUI o pendente (abort/timeout sem custo medido).
+    ...(rec.costLedger ? { costLedger: rec.costLedger } : {}),
     budgetExhausted: Boolean(rec.budgetExhausted),
     stoppedAtPhase: rec.stoppedAtPhase,
     standings: rec.standings,
@@ -267,6 +269,7 @@ export function agentRunSummary(rec: RunRecord): Record<string, unknown> {
     status: rec.status,
     stoppedReason: rec.stoppedReason,
     totalCostUsd: rec.totalCostUsd,
+    ...(rec.costLedger ? { costLedger: rec.costLedger } : {}), // IMPL-017
     agentSummary: agentSummary(rec),
   };
 }
@@ -279,6 +282,7 @@ export function trainingSummary(rec: SessionRecord): Record<string, unknown> {
     stoppedReason: rec.stoppedReason,
     totalCostUsd: rec.totalCostUsd,
     costByRole: rec.costByRole,
+    ...(rec.costLedger ? { costLedger: rec.costLedger } : {}), // IMPL-017
     iterationsDone: rec.bestPromptByIteration.length,
     championPrompt: campeao?.systemPrompt,
     holdout: rec.holdout,

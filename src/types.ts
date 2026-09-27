@@ -102,6 +102,12 @@ export interface CallCost {
   source: CostSource;
   /** BYOK: cobrado direto pelo provedor upstream, fora dos creditos. */
   upstreamUsd?: number;
+  /**
+   * Chamada despachada sem custo medido e com id de geracao (IMPL-017): a
+   * reserva ficou PENDENTE no ledger — fora de `usd`/`totalCostUsd` ate a
+   * conciliacao. `usd: 0` com este campo NAO e "custou zero".
+   */
+  pendingUsd?: number;
 }
 
 export interface CostEntry {
@@ -111,9 +117,73 @@ export interface CostEntry {
   tokensOut: number;
 }
 
+/**
+ * Ciclo de vida de uma reserva (IMPL-017 / R-07a:REC-2):
+ * - `reserved`: chamada em voo (a reserva conta no `committedUsd`);
+ * - `noted`: custo medido lancado (a reserva deu lugar ao valor real);
+ * - `released`: devolvida — a chamada comprovadamente nao foi cobrada (HTTP de erro);
+ * - `pending`: despachada SEM custo medido (abort/timeout/sem usage) e COM id de
+ *   geracao — a reserva fica MANTIDA (nem gasto nem devolvida) ate conciliar
+ *   via GET /generation (gancho `BudgetLedger.settlePending`, IMPL-074);
+ * - `conservative`: idem, mas SEM id recuperavel — a reserva inteira vira gasto
+ *   (nunca zero: nao medido nao e o mesmo que "custou zero");
+ * - `reconciled`: pendente conciliada com o valor do /generation.
+ */
+export type ReservationStatus =
+  | 'reserved'
+  | 'noted'
+  | 'released'
+  | 'pending'
+  | 'conservative'
+  | 'reconciled';
+
+/** Por que uma chamada despachada ficou sem custo medido. */
+export type PendingReason = 'timeout' | 'aborted' | 'no_usage';
+
+/**
+ * Chamada DESPACHADA que terminou sem custo medido e tem id de geracao
+ * (IMPL-017). A reserva fica mantida ate `BudgetLedger.settlePending`
+ * (IMPL-074 concilia via GET /api/v1/generation?id=…).
+ */
+export interface PendingCall {
+  generationId: string;
+  role: CostRole;
+  modelId: string;
+  /** Valor reservado, mantido no `committedUsd`/`pendingUsd`. */
+  usd: number;
+  reason: PendingReason;
+}
+
 /** Reserva otimista devolvida por `CostSink.reserve`. */
 export interface Reservation {
   release(): void;
+  /** Estado atual (ausente em reservas nulas de chamadas sem ledger). */
+  readonly status?: ReservationStatus;
+  /** Valor reservado, em USD (ausente em reservas nulas). */
+  readonly usd?: number;
+}
+
+/**
+ * Resumo do ledger que vai para o resultado da run/sessao (IMPL-017):
+ * `spentUsd` = medido + conservador; `pendingUsd` = reservas mantidas a
+ * espera de conciliacao; `committedUsd` = spent + pending + em voo (o que a
+ * porta dura compara com o teto).
+ */
+export interface CostLedgerSummary {
+  spentUsd: number;
+  committedUsd: number;
+  pendingUsd: number;
+  pendingCalls: number;
+  /** Reservas sem id recuperavel lancadas INTEIRAS como gasto (limite superior). */
+  conservativeUsd: number;
+  conservativeCalls: number;
+  /**
+   * As pendentes em si (id, papel, modelo, reserva, motivo), presente so
+   * quando ha alguma. Persistidas no record para que a conciliacao (IMPL-074,
+   * GET /generation) possa rodar DEPOIS que o processo terminou — so as
+   * contagens deixavam o `pendingUsd` preso no record para sempre.
+   */
+  pendingEntries?: PendingCall[];
 }
 
 /**
@@ -128,7 +198,39 @@ export interface CostSink {
     modelId: string,
     promptTokensGuess: number,
     maxTokens: number,
+    /** Estimativa do proprio gateway (preco do catalogo em cache), usada se maior. */
+    fallbackUsd?: number,
   ): Reservation;
+  /**
+   * Variante assincrona de `reserve` usada pelo gateway (IMPL-017): com teto
+   * definido e custo IMPOSSIVEL de estimar, admite no maximo 1 chamada em voo
+   * por papel — e o que limita o estouro a 1 chamada por papel.
+   */
+  admit?(
+    role: CostRole,
+    modelId: string,
+    promptTokensGuess: number,
+    maxTokens: number,
+    fallbackUsd?: number,
+    /** Sinal da PROPRIA chamada: abortar solta a espera pela vaga do papel. */
+    signal?: AbortSignal,
+  ): Promise<Reservation>;
+  /**
+   * Chamada DESPACHADA que terminou sem custo medido (abort/timeout/sem
+   * usage). Nunca devolve a reserva: com `generationId` ela fica pendente
+   * (conciliavel), sem ele vira gasto conservador (IMPL-017).
+   */
+  pending(
+    reservation: Reservation,
+    entry: {
+      role: CostRole;
+      modelId: string;
+      reason: PendingReason;
+      generationId?: string;
+      /** Sinais de fim, quando a resposta completou sem `usage` (IMPL-014). */
+      finish?: CallFinishSignals;
+    },
+  ): void;
   /** Chamado DEPOIS do fetch, sempre: troca a reserva pelo custo real. */
   note(
     reservation: Reservation,
@@ -1186,6 +1288,8 @@ export interface RunRecord {
   costByRole?: Record<CostRole, CostEntry>;
   /** Quantas chamadas tiveram preco exato, estimado ou desconhecido. */
   costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** Ledger: spent/committed/pending (IMPL-017). Ausente em records antigos. */
+  costLedger?: CostLedgerSummary;
   /** BYOK: cobrado pelo provedor upstream, fora dos creditos do OpenRouter. */
   upstreamCostUsd?: number;
   /**
@@ -1578,6 +1682,8 @@ export interface SessionRecord {
   /** Soma do `failureCountByRole` de todas as runs da sessao (IMPL-004). */
   failureCountByRole?: Partial<Record<CostRole, number>>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** Ledger da sessao: spent/committed/pending (IMPL-017). */
+  costLedger?: CostLedgerSummary;
   upstreamCostUsd?: number;
   budgetUsd?: number;
   budgetExhausted?: boolean;

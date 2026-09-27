@@ -586,7 +586,7 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
   const summary = buildAgentSummary(record);
 
   if (out.isText) {
-    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy)) {
+    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) {
       out.line(l);
     }
     if (record.budgetExhausted) out.line(`Parou em   ${record.stoppedAtPhase ?? '?'} — orçamento esgotado`);
@@ -689,7 +689,7 @@ async function cmdShow(argv: string[]): Promise<number> {
     out.line(`${record.id}  ${record.status}  ${record.mode}`);
     out.line(`tema: ${record.config.theme}`);
     out.line(`etapas: ${record.stages.length} · contestants: ${record.contestants.length}`);
-    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy)) out.line(l);
+    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) out.line(l);
     out.line();
     out.line(`execuções de agente: ${execs.length}`);
     for (const e of execs) {

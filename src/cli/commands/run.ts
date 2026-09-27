@@ -461,7 +461,7 @@ export function exitFor(
 function relatorioFinal(out: Output, record: RunRecord): void {
   if (!out.isText) return;
   out.line();
-  for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy)) {
+  for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) {
     out.line(l);
   }
   if (record.budgetExhausted) {
@@ -581,6 +581,8 @@ function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
     runId: record.id,
     status: record.status,
     totalCostUsd: record.totalCostUsd,
+    // IMPL-017: spent/committed/pending — pendente = abort/timeout sem custo medido.
+    ...(record.costLedger ? { costLedger: record.costLedger } : {}),
     budgetExhausted: Boolean(record.budgetExhausted),
     stoppedReason: record.stoppedReason ?? null,
     stoppedAtPhase: record.stoppedAtPhase,
@@ -619,7 +621,7 @@ function sessionOutcome(out: Output, record: SessionRecord, sessionId: string, x
 
   if (out.isText) {
     out.line();
-    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy)) {
+    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) {
       out.line(l);
     }
     if (record.budgetExhausted) {
@@ -674,6 +676,7 @@ function sessionOutcome(out: Output, record: SessionRecord, sessionId: string, x
     sessionId,
     status: record.status,
     totalCostUsd: record.totalCostUsd,
+    ...(record.costLedger ? { costLedger: record.costLedger } : {}), // IMPL-017
     iterationsDone: record.bestPromptByIteration.length,
     budgetExhausted: Boolean(record.budgetExhausted),
     stoppedReason: record.stoppedReason ?? null,
