@@ -36,7 +36,8 @@ Erro é a linha `result` com `ok: false` e o **mesmo** objeto `error` do
 
 | `type` | Quando | Campos principais |
 |---|---|---|
-| `start` | primeira linha | `command`, `runId` ou `sessionId` |
+| `start` | primeira linha | `command`, `runId` ou `sessionId` (+ `idempotencyKey`) |
+| `attached` | a `--idempotency-key` já tem run em voo: esperando ela (nada é gasto) | `idempotencyKey`, `runId` ou `sessionId`, `ownerPid` |
 | `run.started` | run começou | `mode`, `stages`, `contestants[]` |
 | `variants.generating` / `variants.generated` | geração de variantes | `contestants[]` |
 | `stage.generating` / `stage.generated` | cenários | `stageIndex`, `question`, `hasReference` |
@@ -50,7 +51,7 @@ Erro é a linha `result` com `ok: false` e o **mesmo** objeto `error` do
 | `run.finished` | run terminou | `status`, `totalCostUsd`, `standings` |
 | `iteration.started` / `iteration.finished` / `iteration.promoted` | treino | `iteration`, `runId`, `gain` |
 | `session.holdout` / `session.converged` / `session.finished` | treino | ver `docs train` |
-| `result` | última linha | `ok`, `status`, `totalCostUsd`, `budgetExhausted`, `stoppedReason`, … — ou `ok:false` + `error` |
+| `result` | última linha | `ok`, `status`, `totalCostUsd`, `budgetExhausted`, `stoppedReason`, `dailyCapReached`, `idempotency` (`reused` = nada gasto agora), … — ou `ok:false` + `error` |
 
 ## O que **não** vem no stream
 

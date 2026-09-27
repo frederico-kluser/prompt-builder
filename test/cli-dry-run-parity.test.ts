@@ -35,6 +35,8 @@ import { isKnownModel, modelIdsCalledBy, runPreflight, type Refusal } from '../s
 import { createGateway, setDefaultGateway, type FetchLike, type OpenRouterGateway } from '../src/openrouter.js';
 import { catalogPath, ensureCatalog } from '../src/modelsCache.js';
 import { setDataDir } from '../src/storage.js';
+import { acquireRunLock, configHash } from '../src/cli/runLock.js';
+import { FileSpendLedger, writeDailyCap } from '../src/cli/spendLedger.js';
 import { catalogItem, fakeOpenRouter, noSleep } from './fakeOpenRouter.js';
 import type { RunConfig, RunMode } from '../src/types.js';
 
@@ -74,6 +76,8 @@ interface WorldOpts {
   /** `'down'` = GET /models responde 503 (e não há cache em disco). */
   catalog?: unknown[] | 'down';
   keyData?: Record<string, unknown>;
+  /** `GET /key` sem rede (a key pode estar boa): falha de transporte. */
+  keyDown?: boolean;
 }
 
 /** Transporte falso: o fake do IMPL-021 + /models fora do ar + key recusada (401). */
@@ -91,6 +95,7 @@ function fakeTransport(opts: WorldOpts): { fetch: FetchLike; seen: Seen[]; chats
     const p = new URL(url).pathname;
     seen.push({ method: (init?.method ?? 'GET').toUpperCase(), path: p, auth });
     if (opts.catalog === 'down' && p.endsWith('/models')) return new Response('fora do ar', { status: 503 });
+    if (opts.keyDown && p.endsWith('/key')) throw new TypeError('fetch failed');
     if (p.endsWith('/key') && auth.includes(BAD_KEY)) return new Response('{"error":"invalid"}', { status: 401 });
     return fake.fetch(url, init);
   };
@@ -185,6 +190,8 @@ interface Caso {
   world?: WorldOpts;
   /** `parse` = recusado antes do pré-voo (parse/schema) — sem `wouldRefuse` em details. */
   stage?: 'parse' | 'preflight';
+  /** Estado da máquina ANTES de invocar (IMPL-031: lock ativo, gasto do dia). Roda nos 2 mundos. */
+  setup?: (dir: string) => Promise<void> | void;
 }
 
 const CASOS: Caso[] = [
@@ -271,6 +278,38 @@ const CASOS: Caso[] = [
     world: { keyData: { label: 'fake', usage: 1, limit: 1, limit_remaining: 1e-9 } },
   },
   {
+    nome: 'GET /key sem rede (key não verificada)',
+    code: 'network.key_check_failed',
+    exit: EXIT.NETWORK,
+    argv: () => [...COMPARE, '--budget', '100', '--key', VALID_KEY],
+    world: { keyDown: true },
+  },
+  {
+    // IMPL-031: outro processo VIVO roda a MESMA config (o lock é do próprio
+    // processo de teste — PID vivo, heartbeat fresco).
+    nome: 'lock ativo da mesma config (outro processo rodando)',
+    code: 'run.locked',
+    exit: EXIT.USAGE,
+    argv: () => [...COMPARE, '--budget', '100', '--key', VALID_KEY],
+    setup: async (dir) => {
+      const sonda = await invoke(newWorld(), 'compare', [...COMPARE, '--budget', '100', '--key', VALID_KEY, '--dry-run']);
+      const cfg = (JSON.parse(sonda.stdout) as { data: { config: RunConfig } }).data.config;
+      acquireRunLock(dir, { command: 'compare', configHash: configHash(cfg), runId: 'run-de-outro-processo' });
+    },
+  },
+  {
+    // IMPL-031: o teto diário da máquina já foi gasto por outro processo hoje.
+    nome: 'teto diário da máquina esgotado',
+    code: 'control.daily_cap_reached',
+    exit: EXIT.BUDGET,
+    argv: () => [...COMPARE, '--budget', '100', '--key', VALID_KEY],
+    setup: (dir) => {
+      writeDailyCap(dir, 0.5);
+      const outro = new FileSpendLedger({ dataDir: dir, cap: { capUsd: 0.5, source: 'file' }, label: 'outro' });
+      outro.settle(outro.reserve(0.5), 0.5);
+    },
+  },
+  {
     nome: 'key ausente com config válida',
     code: 'auth.key_missing',
     exit: EXIT.AUTH,
@@ -313,8 +352,10 @@ describe('dry-run × execução real — MESMO error.code para cada recusa conhe
       const mode = c.mode ?? 'compare';
       // Mundos separados: o cache em disco de uma rota não pode ajudar a outra.
       const wReal = newWorld(c.world);
+      await c.setup?.(wReal.dir);
       const real = await invoke(wReal, mode, c.argv());
       const wDry = newWorld(c.world);
+      await c.setup?.(wDry.dir);
       const dry = await invoke(wDry, mode, [...c.argv(), '--dry-run']);
 
       // A execução real recusa ANTES de gastar: zero chamadas de chat.
@@ -350,7 +391,14 @@ describe('dry-run × execução real — MESMO error.code para cada recusa conhe
     const fonte = readFileSync(path.join(ROOT, 'src', 'cli', 'preflight.ts'), 'utf-8');
     const doPreflight = [...fonte.matchAll(/code: '([a-z]+\.[a-z_]+)'/g)].map((m) => m[1]);
     // Recusas que o pré-voo repassa de context.ts (key/catálogo).
-    const repassadas = ['auth.key_missing', 'auth.key_invalid', 'network.catalog_unavailable'];
+    const repassadas = [
+      'auth.key_missing',
+      'auth.key_invalid',
+      'network.catalog_unavailable',
+      // IMPL-031: repassadas de context.ts (GET /key sem rede) e de runLock.ts (lock ativo).
+      'network.key_check_failed',
+      'run.locked',
+    ];
     const cobertos = new Set(CASOS.map((c) => c.code));
     for (const code of new Set([...doPreflight, ...repassadas])) {
       expect(cobertos.has(code), `recusa ${code} sem caso pareado`).toBe(true);

@@ -71,6 +71,7 @@ Antes de gastar, na ordem (a primeira recusa encerra a execução real):
 
 | # | Checagem | Recusa (`error.code`, exit) |
 |---|---|---|
+| 0 | nenhum outro processo vivo roda a MESMA config | `run.locked` (2) |
 | 1 | `--budget` presente fora de TTY | `usage.budget_required` (2) |
 | 2 | catálogo (público; cache em disco 24 h) | `network.catalog_unavailable` (8) |
 | 3 | todo modelo chamado existe no catálogo | `config.unknown_model` (3) |
@@ -78,8 +79,9 @@ Antes de gastar, na ordem (a primeira recusa encerra a execução real):
 | 5 | `--max-price-in/out` cobre o preço dos modelos | `config.price_cap_below_model` (3) |
 | 6 | teto abaixo do piso estimado (sem `--force`) | `usage.budget_below_estimate` (2) |
 | 6 | teto dentro da faixa, fora de TTY, sem `--yes` | `usage.confirmation_required` (2) |
+| 6b | teto diário da máquina não esgotado (e ≥ piso, salvo `--force`) | `control.daily_cap_reached` (7) |
 | 7 | key presente | `auth.key_missing` (4) |
-| 7 | key aceita pelo OpenRouter (`GET /key`) | `auth.key_invalid` (4) |
+| 7 | key aceita pelo OpenRouter (`GET /key`) | `auth.key_invalid` (4) · sem rede: `network.key_check_failed` (8) |
 | 8 | saldo da key ≥ piso estimado | `credit.insufficient` (5) |
 
 Teto acima do teto estimado roda direto; saldo menor que o teto só avisa.
@@ -105,6 +107,36 @@ toda recusa de configuração sai igual com ou sem key.
 
 `agents run --dry-run` estima com o catálogo e espelha as recusas da execução
 de agentes (só `usage.budget_required`; a key vai em `requires`).
+
+## Defesa anti-gasto N× (vários processos, retentativas)
+
+O `--budget` é por **processo**. Um agente que re-dispara o comando (timeout do
+harness, laço de retentativa, dois terminais) gastaria N× sem que um visse o
+outro. Por isso há camadas por cima dele:
+
+1. **Lock da config.** Um 2º processo com a MESMA config (o hash ignora só o
+   `--budget`) enquanto o 1º roda é recusado com `run.locked` (exit `2`) antes
+   de tocar a rede; `error.details.holder` diz quem (pid, run). Lock de processo
+   morto ou com heartbeat parado há mais de 2 min é quebrado sozinho. Réplica
+   intencional em paralelo: `--allow-concurrent`.
+2. **`--idempotency-key <k>`.** Use SEMPRE numa retentativa. Repetir a mesma key
+   com a mesma config **anexa** à run existente: se ela ainda roda, espera (NDJSON
+   `attached`) e devolve o resultado dela; se já terminou, devolve na hora. Nada é
+   gasto (nem key nem `--budget` são exigidos) e o resultado traz
+   `idempotency: {key, reused: true, attached}`. Mesma key com OUTRA config =
+   `usage.idempotency_conflict` (2). Dona morta sem terminar = `run.orphaned`
+   (1) — rodar de novo exige outra key. O `--dry-run` diz `wouldReuse`.
+3. **Teto diário da máquina** (padrão US$ 20 por dia UTC): cada chamada reserva
+   num ledger em arquivo (`<data-dir>/ledger/`, escrita atômica, mutex entre
+   processos) que soma **todos** os processos. Esgotado no pré-voo:
+   `control.daily_cap_reached` (7, nada gasto). Esgotado no meio: a run para como
+   por orçamento (exit `7`, parcial) com `dailyCapReached: true`. Vale também com
+   `--budget none`. Veja/ajuste com `limits show` e `limits set --daily <usd|none>`
+   (ou `$PROMPT_BUILDER_DAILY_CAP_USD`); é por diretório de dados.
+4. **Limite da key no OpenRouter** — a ÚNICA camada que vale entre máquinas e
+   contra agente desgovernado. `prompt-builder doctor` mostra `limit` e
+   `limit_reset` da key e recomenda `limit_reset=daily` (reset 00:00 UTC) quando
+   falta. `doctor` sai `4` sem key válida (e `8` sem rede).
 
 ## Teto por requisição
 

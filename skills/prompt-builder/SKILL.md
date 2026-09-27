@@ -71,6 +71,8 @@ npx prompt-builder-cli sessions winner <sessionId> --apply prompt.md
    progresso e avisos vão para o stderr.
 6. **Leia o código de saída.** `7` significa **resultado parcial por orçamento**,
    não erro: há resultado válido, só incompleto.
+7. **Retentativa = mesma `--idempotency-key`.** Reusa a run (não gasta de novo);
+   sem ela, repetir a mesma config em paralelo sai `run.locked` (exit `2`).
 
 ## Documentação embarcada (casada com a versão instalada)
 

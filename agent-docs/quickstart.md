@@ -48,9 +48,13 @@ npx prompt-builder-cli sessions winner <sessionId> --apply prompt.md
    real recusaria — todas as recusas em `error.details.wouldRefuse`, a
    estimativa em `details.estimate`. Exit `0` = a run real passaria; o que ainda
    falta (key, saldo não verificado) vem em `data.requires`.
-4. **O juiz não pode competir.** Nenhum modelo em `judges` pode ser o modelo sob
+4. **Retentativa = mesma `--idempotency-key`.** Repetir a key com a mesma
+   config se anexa à run existente (espera ou devolve o resultado) e não gasta
+   de novo; sem ela, um 2º processo com a mesma config sai `run.locked`. Há um
+   teto diário por máquina (US$ 20 padrão, `limits show`) somando processos.
+5. **O juiz não pode competir.** Nenhum modelo em `judges` pode ser o modelo sob
    teste nem um competidor — o schema rejeita (viés de auto-preferência).
-5. **Leia o código de saída.** `0` ok · `1` falha inesperada · `2` uso inválido ·
+6. **Leia o código de saída.** `0` ok · `1` falha inesperada · `2` uso inválido ·
    `3` config inválida · `4` auth · `5` sem crédito · `6` run inconclusiva ·
    `7` **parcial, orçamento esgotado** · `8` rede · `9` espera esgotada ·
    `10` portão recusou (ex.: handoff com holdout regredido) · `130` interrompido. O `7` não é erro: há resultado válido, só incompleto.

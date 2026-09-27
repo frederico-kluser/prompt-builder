@@ -195,6 +195,23 @@ const NET_ERRNO = new Set([
 export function toCliError(err: unknown): CliError {
   if (isCliError(err)) return err;
   if (isControlSignal(err)) {
+    // Teto DIÁRIO da máquina (IMPL-031, `DailyCapExceeded` em spendLedger.ts —
+    // reconhecido por forma para não criar import circular): o mesmo exit 7,
+    // mas o code diz que o limite é o da máquina, não o `--budget` da run.
+    const diario = err as { scope?: unknown; reason?: unknown };
+    if (isBudgetSignal(err) && diario.scope === 'daily') {
+      return new CliError(
+        err.message,
+        EXIT.BUDGET,
+        { spentTodayUsd: err.spentUsd, capUsd: err.budgetUsd, role: err.role ?? null, reason: diario.reason ?? 'cap' },
+        {
+          code: 'control.daily_cap_reached',
+          hint:
+            'O teto diário vale para TODOS os processos desta máquina. Espere o reset (00:00 UTC) ou, por ' +
+            'decisão humana, `prompt-builder limits set --daily <usd>`; `prompt-builder limits show` mostra quem gastou.',
+        },
+      );
+    }
     return isBudgetSignal(err)
       ? new CliError(
           err.message,

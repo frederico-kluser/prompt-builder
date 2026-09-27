@@ -197,6 +197,14 @@ export interface StartTrainingOpts {
    * de eventos sem corrida — `session.started` e emitido dentro do laco.
    */
   onSession?: (sessionId: string, record: SessionRecord) => void;
+  /**
+   * Ledger EXTERNO (IMPL-031): a sessao vira FILHA dele e o teto segue na raiz
+   * (que o chamador cria com o `budgetUsd` da sessao). O CLI passa aqui a raiz
+   * que tambem reserva no ledger EM ARQUIVO da maquina (teto diario somando
+   * processos). Ausente => raiz propria a partir de cfg.budgetUsd, como antes.
+   * Seam so do Node: o mirror web nao tem ledger de maquina.
+   */
+  parentLedger?: BudgetLedger;
 }
 
 function newSessionRecord(config: TrainingConfig): SessionRecord {
@@ -325,11 +333,15 @@ async function trainingLoop(
   const catalogo = await listModels(apiKey).catch(() => []);
 
   // UM ledger raiz para a sessao inteira: o teto e da sessao, nao da iteracao.
-  const ledger = new BudgetLedger({
-    budgetUsd: cfg.budgetUsd,
-    signal: opts.signal,
-    estimateCall: makeCallEstimator(catalogo),
-  });
+  // Com `parentLedger` (CLI, IMPL-031) a sessao e filha dele — o teto continua
+  // UM so, na raiz, e a reserva passa tambem pelo ledger da maquina.
+  const ledger =
+    opts.parentLedger?.fork() ??
+    new BudgetLedger({
+      budgetUsd: cfg.budgetUsd,
+      signal: opts.signal,
+      estimateCall: makeCallEstimator(catalogo),
+    });
   const ctx: RunCtx = { signal: opts.signal, sink: ledger };
   record.budgetUsd = cfg.budgetUsd;
 

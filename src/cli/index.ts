@@ -26,6 +26,7 @@ import {
   cmdTechniques,
 } from './commands/misc.js';
 import { cmdLibrary } from './commands/library.js';
+import { cmdLimits } from './commands/limits.js';
 
 const VERSION = pkgVersion();
 
@@ -49,6 +50,9 @@ CUSTO
   estimate -c <arquivo>    estima o custo antes de gastar (sem key)
   key check                valida a key e mostra o saldo
   key set --stdin          grava a key (leia da entrada padrão, nunca de argv)
+  limits show              teto diário da máquina (UTC) e quem gastou hoje
+  limits set --daily <usd|none>
+                           teto diário somando TODOS os processos (padrão US$ 20)
 
 RUNS
   compare --models a,b     compara modelos no mesmo desafio
@@ -57,6 +61,11 @@ RUNS
   <cmd> --config <arq>     usa um arena-config@1 (ver: docs config)
   <cmd> --dry-run          pré-voo inteiro SEM gastar: recusa com o MESMO
                            error.code/exit da run real (wouldRefuse/requires)
+  <cmd> --idempotency-key <k>
+                           repetir a MESMA key reusa a run (espera ou devolve
+                           o resultado dela) em vez de gastar de novo
+  <cmd> --allow-concurrent réplica intencional: sem o lock da config
+                           (2º processo com a mesma config → run.locked)
 
 RESULTADOS
   runs list | show <id> | winner <id> [--prompt-only]
@@ -74,7 +83,9 @@ BIBLIOTECA (dataset estável de cenários+gabaritos)
           veja \`prompt-builder library --help\`
 
 OUTROS
-  techniques · lgpd · config validate <arq> · config example · doctor
+  techniques · lgpd · config validate <arq> · config example
+  doctor                   key (exit 4 se ausente/recusada), limite da key,
+                           teto diário e runs ativas
   registry validate [--file <arq>]   guarda de drift dos prompts de produção
   registry init [-o <arq>]           grava um registro-exemplo comentado
   mcp                      servidor MCP por stdio (mesmo binário)
@@ -151,6 +162,7 @@ const COMMANDS = [
   'config',
   'registry',
   'doctor',
+  'limits',
   'mcp',
   'agents',
 ] as const;
@@ -191,6 +203,8 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdRegistry(argv);
     case 'doctor':
       return cmdDoctor(argv);
+    case 'limits':
+      return cmdLimits(argv);
     case 'mcp':
       return cmdMcp(argv);
     case 'agents':

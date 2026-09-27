@@ -2,8 +2,8 @@
   {
     "topic": "quickstart",
     "title": "Começo rápido",
-    "summary": "o caminho de 6 passos e as 5 regras que evitam erro. COMECE AQUI.",
-    "approxTokens": 850
+    "summary": "o caminho de 6 passos e as 6 regras que evitam erro (inclui retentativa com --idempotency-key). COMECE AQUI.",
+    "approxTokens": 900
   },
   {
     "topic": "overview",
@@ -20,8 +20,8 @@
   {
     "topic": "budget",
     "title": "Orçamento e custo",
-    "summary": "como o teto para a run sem corromper o resultado; pré-voo em ordem, códigos de recusa e o --dry-run com paridade (wouldRefuse/requires)",
-    "approxTokens": 1350
+    "summary": "como o teto para a run sem corromper o resultado; pré-voo em ordem, códigos de recusa, o --dry-run com paridade e a defesa anti-gasto N× (lock da config, --idempotency-key, teto diário da máquina, limite da key)",
+    "approxTokens": 1900
   },
   {
     "topic": "compare",
@@ -45,7 +45,7 @@
     "topic": "ndjson",
     "title": "Saída NDJSON",
     "summary": "tabela completa de eventos, o envelope de erro (kind/code/hint) e o que não vem no stream",
-    "approxTokens": 950
+    "approxTokens": 1000
   },
   {
     "topic": "results",
@@ -56,8 +56,8 @@
   {
     "topic": "troubleshooting",
     "title": "Problemas comuns",
-    "summary": "400 no esforço, 402 sem crédito, modelo fora do catálogo, tudo 'parcial', run travada",
-    "approxTokens": 850
+    "summary": "400 no esforço, 402 sem crédito, modelo fora do catálogo, run.locked, teto diário, doctor exit 4, tudo 'parcial', run travada",
+    "approxTokens": 1100
   },
   {
     "topic": "config",

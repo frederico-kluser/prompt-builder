@@ -65,6 +65,32 @@ O teto está dentro da faixa estimada: a run pode parar no meio (código `7`).
 Fora de um terminal isso exige `--yes` — ou suba o `--budget` acima do teto
 estimado (`error.details.estimateHighUsd`).
 
+## `run.locked` (código 2)
+
+Outro processo **vivo** roda a mesma config agora (`error.details.holder`: pid,
+comando, run). Rodar de novo gastaria o mesmo experimento em dobro. Espere-o
+terminar (`runs show <runId>`), ou repita com a mesma `--idempotency-key` que
+ele usou para se anexar sem gastar. Réplica intencional: `--allow-concurrent`.
+
+## `control.daily_cap_reached` (código 7)
+
+O teto diário da máquina (padrão US$ 20, dia UTC, somando todos os processos)
+acabou. `prompt-builder limits show` mostra quem gastou; o teto zera às 00:00
+UTC. Subir o teto é decisão humana: `limits set --daily <usd>`.
+
+## `usage.idempotency_conflict` (2) / `run.orphaned` (1)
+
+A `--idempotency-key` identifica UM experimento: reusada com outra config é
+conflito (use uma key nova). `run.orphaned` = a execução dona da key morreu sem
+terminar; o parcial fica em `runs show`, e rodar de novo exige outra key.
+
+## `doctor` com código 4
+
+Sem key válida (ausente ou recusada) o `doctor` falha com `4` e o relatório
+inteiro em `error.details.checks`. Com key boa ele sai `0` e, se a key não tem
+limite (ou não tem reset diário), recomenda `limit` + `limit_reset=daily` no
+OpenRouter — a única camada que vale entre máquinas.
+
 ## Run travada em `running`
 
 O processo morreu sem finalizar (SIGKILL, queda de energia). O próximo comando

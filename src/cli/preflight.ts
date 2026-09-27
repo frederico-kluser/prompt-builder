@@ -25,6 +25,7 @@ import type { KeyInfo } from '../openrouter.js';
 import type { OpenRouterModel, RunConfig } from '../types.js';
 import { CliError, EXIT, fmtUsd, isCliError, kindForExit, type ErrorKind } from './output.js';
 import { keyMissingError, type LoadedCatalog } from './context.js';
+import type { DailySnapshot } from './spendLedger.js';
 
 /** Como o orçamento chegou na linha de comando. */
 export type BudgetChoice =
@@ -63,9 +64,21 @@ export interface Requirement {
 
 export interface PreflightChecks {
   catalog: { source: LoadedCatalog['catalogSource']; scope: LoadedCatalog['catalogScope']; models: number } | null;
-  key: 'ok' | 'missing' | 'invalid';
+  /** `unchecked` = o `GET /key` falhou por rede (a key pode estar boa). */
+  key: 'ok' | 'missing' | 'invalid' | 'unchecked';
   /** Saldo da key (null = sem limite; ausente = não consultado). */
   creditRemainingUsd?: number | null;
+  /** Lock da MESMA config (IMPL-031): `skipped` = `--allow-concurrent`. Ausente = sem guarda. */
+  lock?: 'free' | 'held' | 'skipped';
+  /** Teto diário da máquina, somando processos (IMPL-031). Ausente = sem guarda. */
+  daily?: {
+    capUsd: number | null;
+    source: DailySnapshot['capSource'];
+    spentUsd: number;
+    pendingUsd: number;
+    remainingUsd: number | null;
+    resetsAt: string;
+  };
 }
 
 export interface PreflightReport {
@@ -90,6 +103,18 @@ export interface PreflightInput {
   agentContext: boolean;
 }
 
+/**
+ * Estado da MÁQUINA que também recusa (IMPL-031, anti-gasto-N×). Só leitura:
+ * o dry-run consulta sem efeito; a execução real toma o lock depois do pré-voo
+ * (e a tomada atômica recusa com o MESMO `run.locked` se alguém chegar antes).
+ */
+export interface PreflightGuard {
+  /** Recusa `run.locked` se outro processo VIVO roda a mesma config; `null` = livre. `undefined` = não checado. */
+  lockRefusal?(): CliError | null;
+  /** Teto diário e gasto de hoje (todos os processos). */
+  daily(): DailySnapshot;
+}
+
 /** I/O do pré-voo — injetado para os testes rodarem sem rede. */
 export interface PreflightDeps {
   loadCatalog(apiKey: string | null): Promise<LoadedCatalog>;
@@ -97,6 +122,8 @@ export interface PreflightDeps {
   checkKey(apiKey: string): Promise<KeyInfo>;
   info(msg: string): void;
   warn(msg: string): void;
+  /** Ausente = sem lock/teto diário (chamadores antigos e testes de unidade). */
+  guard?: PreflightGuard;
 }
 
 export type PreflightMode = 'real' | 'dry-run';
@@ -183,6 +210,19 @@ export async function runPreflight(
     deps.warn(msg);
   };
 
+  // 0. Lock da MESMA config (IMPL-031): outro processo vivo já roda este
+  //    experimento — a repetição gastaria em dobro. Primeiro de tudo: é grátis
+  //    (só disco) e é o que um agente em laço de retentativa precisa ouvir.
+  if (deps.guard) {
+    if (deps.guard.lockRefusal) {
+      const travado = deps.guard.lockRefusal();
+      checks.lock = travado ? 'held' : 'free';
+      if (travado) refuse(travado);
+    } else {
+      checks.lock = 'skipped';
+    }
+  }
+
   // 1. Orçamento explícito fora de TTY. Na execução real sai antes de qualquer
   //    rede (nada foi gasto, nem uma leitura).
   if (budget.kind === 'missing') refuse(budgetRequiredError());
@@ -260,6 +300,31 @@ export async function runPreflight(
     }
   }
 
+  // 6b. Teto DIÁRIO da máquina (IMPL-031): soma o gasto de hoje (UTC) de todos
+  //     os processos. Esgotado recusa sempre; abaixo do piso estimado recusa
+  //     salvo --force (a porta dura segue armada durante a run).
+  if (deps.guard) {
+    const dia = deps.guard.daily();
+    checks.daily = {
+      capUsd: dia.capUsd,
+      source: dia.capSource,
+      spentUsd: dia.spentUsd,
+      pendingUsd: dia.pendingUsd,
+      remainingUsd: dia.remainingUsd,
+      resetsAt: dia.resetsAt,
+    };
+    const resta = dia.remainingUsd;
+    if (resta !== null) {
+      if (resta <= 0) refuse(dailyCapError(dia, catalog ? est : null));
+      else if (catalog && est.low > resta && !input.force) refuse(dailyCapError(dia, est));
+      else if (catalog && est.high > resta) {
+        warn(`teto diário da máquina: restam ${fmtUsd(resta)} hoje (UTC) — a run pode parar cedo.`);
+      } else if (budgetUsd === undefined || budgetUsd > resta) {
+        warn(`teto real desta run: ${fmtUsd(resta)} (o que resta do teto diário da máquina hoje).`);
+      }
+    }
+  }
+
   // 7. Key — por ÚLTIMO, para toda recusa de config sair igual com e sem key.
   if (!apiKey) {
     if (mode === 'real') throw keyMissingError();
@@ -279,7 +344,7 @@ export async function runPreflight(
       info = await deps.checkKey(apiKey);
     } catch (err) {
       if (!isCliError(err)) throw err;
-      checks.key = 'invalid';
+      checks.key = err.code === EXIT.NETWORK ? 'unchecked' : 'invalid';
       refuse(err);
     }
 
@@ -312,6 +377,39 @@ export async function runPreflight(
 }
 
 // --- as recusas (mensagem/código/dica num lugar só) --------------------------
+
+/** Teto diário da máquina (IMPL-031) — esgotado, ou sem espaço para o piso estimado. */
+export function dailyCapError(dia: DailySnapshot, est: CostEstimate | null): CliError {
+  const cap = dia.capUsd ?? 0;
+  const resta = dia.remainingUsd ?? 0;
+  const esgotado = resta <= 0;
+  return new CliError(
+    esgotado
+      ? `Teto diário da máquina esgotado: ${fmtUsd(dia.spentUsd + dia.pendingUsd)} de ${fmtUsd(cap)} hoje (UTC), ` +
+          `somando todos os processos. Nada foi gasto; o teto zera em ${dia.resetsAt}.`
+      : `Restam ${fmtUsd(resta)} do teto diário da máquina (${fmtUsd(cap)}) e a run custa pelo menos ` +
+          `${fmtUsd(est?.low ?? 0)}. Nada foi gasto.`,
+    EXIT.BUDGET,
+    {
+      day: dia.day,
+      capUsd: dia.capUsd,
+      capSource: dia.capSource,
+      spentTodayUsd: dia.spentUsd,
+      pendingUsd: dia.pendingUsd,
+      remainingUsd: dia.remainingUsd,
+      resetsAt: dia.resetsAt,
+      estimateLowUsd: est?.low ?? null,
+    },
+    {
+      code: 'control.daily_cap_reached',
+      hint:
+        'O teto diário vale para TODOS os processos desta máquina (defesa contra gasto N×). Espere o reset ' +
+        '(00:00 UTC) ou, por decisão humana, `prompt-builder limits set --daily <usd>`' +
+        (esgotado ? '' : '; `--force` roda mesmo assim até o teto') +
+        '. `prompt-builder limits show` mostra quem gastou.',
+    },
+  );
+}
 
 /** A key como pré-condição (`requires`) — o mesmo erro que a execução lançaria. */
 export function keyRequirement(): Requirement {

@@ -206,7 +206,7 @@ export function sniffOutputFormat(argv: readonly string[]): OutputFormat {
 }
 
 /** Comandos com subcomando: o rotulo do envelope vira `runs.show`, `key.check`… */
-const FAMILIAS_COM_SUB = new Set(['models', 'key', 'runs', 'sessions', 'library', 'config', 'registry', 'agents']);
+const FAMILIAS_COM_SUB = new Set(['models', 'key', 'runs', 'sessions', 'library', 'config', 'registry', 'agents', 'limits']);
 
 /**
  * Rotulo `command` do envelope de erro, tirado do argv cru (o erro pode nascer
@@ -434,6 +434,13 @@ export async function buildNetworkContext(parsed: ParsedArgs): Promise<NetworkCo
 /** Valida a key e devolve saldo/limite (usado no pre-voo das runs). */
 export async function checkKey(apiKey: string): Promise<KeyInfo> {
   const res = await validateKey(apiKey);
+  if (!res.ok && res.network) {
+    // Nem chegou ao OpenRouter: a key pode estar boa — rede (8), nao auth (4).
+    throw new CliError(res.error, EXIT.NETWORK, undefined, {
+      code: 'network.key_check_failed',
+      hint: 'Confira a conexão com openrouter.ai e repita; `prompt-builder key check` valida sem gastar.',
+    });
+  }
   if (!res.ok) {
     throw new CliError(`Key do OpenRouter inválida: ${res.error}`, EXIT.AUTH, undefined, {
       code: 'auth.key_invalid',

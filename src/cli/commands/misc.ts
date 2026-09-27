@@ -20,12 +20,17 @@ import {
   buildNetworkContext,
   checkKey,
   keyFilePath,
+  loadCatalog,
   parse,
   readJsonFile,
   removeStoredKey,
+  resolveKey,
   writeStoredKey,
 } from '../context.js';
-import { CliError, EXIT, fmtUsd, renderSpend, type Output } from '../output.js';
+import { CliError, EXIT, fmtUsd, renderSpend, toCliError, type Output } from '../output.js';
+import type { KeyInfo } from '../../openrouter.js';
+import { DEFAULT_DAILY_CAP_USD, readDailySnapshot, resolveDailyCap } from '../spendLedger.js';
+import { listRunLocks } from '../runLock.js';
 import {
   evaluateHandoffGuards,
   normalizeOverrideReason,
@@ -812,10 +817,44 @@ export async function cmdRegistry(argv: string[]): Promise<number> {
   return EXIT.OK;
 }
 
+/**
+ * Recomendações sobre o LIMITE DA KEY no OpenRouter (IMPL-031, R-12:DEC-5): é
+ * a única camada anti-gasto que vale ENTRE MÁQUINAS e contra agente
+ * desgovernado — o teto diário local só vê esta máquina. O OpenRouter aplica o
+ * limite no servidor (`limit` em USD + `limit_reset`, o TIPO da janela:
+ * daily/weekly/monthly; o diário zera às 00:00 UTC). Pura: testável sem rede.
+ */
+export function keyLimitAdvice(info: KeyInfo | null, localDailyCapUsd: number | null): string[] {
+  if (!info) return [];
+  const sugestao = localDailyCapUsd ?? DEFAULT_DAILY_CAP_USD;
+  const onde = 'em https://openrouter.ai/settings/keys';
+  if (info.limitUsd === null || info.limitUsd === undefined) {
+    return [
+      `A key NÃO tem limite de crédito: defina limit + limit_reset=daily ${onde} (ex.: US$ ${sugestao}/dia; ` +
+        'o reset diário é 00:00 UTC). É a única camada que vale entre máquinas e contra um agente desgovernado — ' +
+        'o teto diário local (`prompt-builder limits`) só enxerga esta máquina.',
+    ];
+  }
+  const reset = info.limitReset ?? null;
+  if (reset === null) {
+    return [
+      `A key tem limite de ${fmtUsd(info.limitUsd)} SEM reset (teto vitalício): esgotado, tudo para até alguém ` +
+        `subir o limite. Prefira limit_reset=daily ${onde} — contém um estrago em 24 h e volta sozinho às 00:00 UTC.`,
+    ];
+  }
+  if (reset !== 'daily') {
+    return [
+      `O limite da key reseta "${reset}": um agente desgovernado pode gastar a janela inteira num dia. ` +
+        `limit_reset=daily ${onde} limita o estrago a 24 h (reset 00:00 UTC).`,
+    ];
+  }
+  return [];
+}
+
 export async function cmdDoctor(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
   const ctx = buildContext(parsed);
-  const { out } = ctx;
+  const { out, dataDir } = ctx;
   const checks: Record<string, unknown> = {
     node: process.version,
     dataDir: getDataDir(),
@@ -829,19 +868,70 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     checks.dataDirError = (err as Error).message;
   }
 
+  // Camadas locais anti-gasto-N× (IMPL-031): teto diário da máquina e runs
+  // ativas (lock por config). Só disco.
+  let capLocal: number | null = null;
   try {
-    const net = await buildNetworkContext(parsed);
-    const info = await checkKey(net.apiKey);
-    checks.key = 'ok';
-    checks.models = net.models.length;
-    checks.catalogSource = net.catalogSource;
-    checks.creditRemaining = info.limitRemainingUsd ?? null;
+    const cap = resolveDailyCap(dataDir);
+    capLocal = cap.capUsd;
+    const dia = readDailySnapshot(dataDir, cap);
+    checks.dailyCap = {
+      capUsd: cap.capUsd,
+      source: cap.source,
+      spentTodayUsd: dia.spentUsd,
+      pendingUsd: dia.pendingUsd,
+      remainingUsd: dia.remainingUsd,
+      resetsAt: dia.resetsAt,
+      processesToday: dia.processes,
+    };
   } catch (err) {
-    checks.key = `falhou: ${(err as Error).message}`;
+    checks.dailyCap = `inválido: ${(err as Error).message}`;
+  }
+  checks.activeRuns = listRunLocks(dataDir)
+    .filter((l) => !l.stale)
+    .map((l) => ({ pid: l.holder?.pid ?? null, command: l.holder?.command ?? null, runId: l.holder?.runId ?? l.holder?.sessionId ?? null }));
+
+  // Key: ausente ou recusada = o doctor FALHA (exit 4); rede = exit 8. Antes
+  // ele saía 0 com `ok:true` e "key: falhou: …" — um agente lia "saudável".
+  let falha: CliError | null = null;
+  let info: KeyInfo | null = null;
+  try {
+    const apiKey = await resolveKey(ctx.values);
+    info = await checkKey(apiKey);
+    checks.key = 'ok';
+    checks.creditRemaining = info.limitRemainingUsd ?? null;
+    checks.keyLimit = {
+      limitUsd: info.limitUsd ?? null,
+      limitRemainingUsd: info.limitRemainingUsd ?? null,
+      limitReset: info.limitReset ?? null,
+      usageDailyUsd: info.usageDailyUsd ?? null,
+    };
+    try {
+      const cat = await loadCatalog(ctx, apiKey);
+      checks.models = cat.models.length;
+      checks.catalogSource = cat.catalogSource;
+    } catch (err) {
+      falha = toCliError(err);
+      checks.models = `falhou: ${falha.message}`;
+    }
+  } catch (err) {
+    falha = toCliError(err);
+    checks.key = `falhou: ${falha.message}`;
   }
 
+  const recomendacoes = keyLimitAdvice(info, capLocal);
+  checks.recommendations = recomendacoes;
+
   if (out.isText) {
-    for (const [k, v] of Object.entries(checks)) out.line(`${k.padEnd(18)} ${String(v)}`);
+    for (const [k, v] of Object.entries(checks)) {
+      if (k === 'recommendations') continue;
+      out.line(`${k.padEnd(18)} ${typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)}`);
+    }
+    for (const r of recomendacoes) out.warn(r);
+  }
+  if (falha) {
+    // O relatório inteiro vai em details: o agente vê o que passou e o que não.
+    throw new CliError(falha.message, falha.code, { checks }, { code: falha.errorCode, hint: falha.hint });
   }
   out.result(true, 'doctor', checks);
   return EXIT.OK;

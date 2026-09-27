@@ -7,6 +7,8 @@ import { runToCompletion } from '../../orchestrator.js';
 import { trainToCompletion } from '../../trainer.js';
 import { prepareOptsFor } from '../../prepareRun.js';
 import { subscribe, subscribeSession } from '../../events.js';
+import { loadRun, loadSession } from '../../storage.js';
+import { makeCallEstimator } from '../../estimate.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
 import { parseArenaConfig } from '../../configFile.js';
 import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
@@ -29,8 +31,33 @@ import {
   runPreflight,
   type BudgetChoice,
   type PreflightDeps,
+  type PreflightGuard,
   type PreflightReport,
 } from '../preflight.js';
+import {
+  acquireRunLock,
+  claimIdempotency,
+  configHash,
+  dropIdempotency,
+  idempotencyConflictError,
+  idempotencyFile,
+  idempotencyOwnerAlive,
+  inspectRunLock,
+  readIdempotency,
+  runLockedError,
+  startHeartbeat,
+  updateIdempotency,
+  validateIdempotencyKey,
+  type IdempotencyRecord,
+  type RunLock,
+} from '../runLock.js';
+import {
+  openMachineLedger,
+  readDailySnapshot,
+  resolveDailyCap,
+  type FileSpendLedger,
+  type MachineBudgetLedger,
+} from '../spendLedger.js';
 import { emitRunEvent, emitSessionEventNdjson } from '../ndjson.js';
 import type {
   RunConfig,
@@ -78,6 +105,11 @@ const OPTIONS = {
   'dry-run': { type: 'boolean' },
   yes: { type: 'boolean', short: 'y' },
   force: { type: 'boolean' },
+  // IMPL-031 (anti-gasto-N×): repetir a MESMA key anexa à run existente (não
+  // gasta de novo); `--allow-concurrent` libera réplica intencional da mesma
+  // config (sem o lock `run.locked`).
+  'idempotency-key': { type: 'string' },
+  'allow-concurrent': { type: 'boolean' },
 } as const;
 
 function n(v: unknown, campo: string): number | undefined {
@@ -307,6 +339,7 @@ function preflightDeps(ctx: CliContext): PreflightDeps {
   };
 }
 
+
 /** Narracao do dry-run em texto (payload no stdout, como antes). */
 function renderDryRun(out: Output, config: RunConfig, rep: PreflightReport): void {
   if (!out.isText) return;
@@ -317,9 +350,18 @@ function renderDryRun(out: Output, config: RunConfig, rep: PreflightReport): voi
   out.line(
     'Pré-voo:        ' +
       (c.catalog ? `catálogo ${c.catalog.models} modelos (${c.catalog.source}, ${c.catalog.scope})` : 'catálogo indisponível') +
-      ` · key ${c.key === 'ok' ? 'ok' : c.key === 'missing' ? 'ausente' : 'inválida'}` +
+      ` · key ${c.key === 'ok' ? 'ok' : c.key === 'missing' ? 'ausente' : c.key === 'unchecked' ? 'não verificada (rede)' : 'inválida'}` +
       (typeof c.creditRemainingUsd === 'number' ? ` · saldo ${fmtUsd(c.creditRemainingUsd)}` : ''),
   );
+  if (c.daily) {
+    out.line(
+      'Máquina:        ' +
+        (c.daily.capUsd === null
+          ? `sem teto diário · ${fmtUsd(c.daily.spentUsd)} gastos hoje (UTC)`
+          : `teto diário ${fmtUsd(c.daily.capUsd)} (${c.daily.source}) · restam ${fmtUsd(c.daily.remainingUsd ?? 0)} hoje (UTC)`) +
+        (c.lock ? ` · lock ${c.lock === 'free' ? 'livre' : c.lock === 'held' ? 'OCUPADO' : 'ignorado (--allow-concurrent)'}` : ''),
+    );
+  }
   for (const r of rep.wouldRefuse) out.line(`  RECUSARIA  ${r.code} — ${r.message.split('\n')[0]}`);
   for (const r of rep.requires) out.line(`  REQUER     ${r.code} — ${r.message}`);
   if (!rep.wouldRefuse.length) {
@@ -342,8 +384,7 @@ function exitFor(stoppedReason: 'budget' | 'cancelled' | undefined, budgetExhaus
   return EXIT.OK;
 }
 
-function relatorioFinal(ctx: NetworkContext, record: RunRecord): void {
-  const { out } = ctx;
+function relatorioFinal(out: Output, record: RunRecord): void {
   if (!out.isText) return;
   out.line();
   for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy)) {
@@ -379,135 +420,35 @@ const COMMAND_BY_MODE: Record<RunMode, string> = {
   training: 'train',
 };
 
-export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
-  const parsed = parse(argv, OPTIONS);
-  // Key OPCIONAL aqui (IMPL-029): o pre-voo checa a config contra o catalogo
-  // publico antes e so exige a key no fim — e o dry-run roda sem ela.
-  const base = buildContext(parsed);
-  const { out, values } = base;
-
-  const config =
-    typeof values.config === 'string'
-      ? await readConfigFile(values.config)
-      : await buildFromFlags(mode, values);
-
-  if (config.mode !== mode && typeof values.config === 'string') {
-    out.warn(`o arquivo declara mode "${config.mode}"; usando o do arquivo.`);
-  }
-
-  const budget = resolveBudget(values, (m) => out.warn(m));
-  const budgetUsd = budgetUsdOf(budget);
-  const configComOrcamento: RunConfig = { ...config, ...(budgetUsd !== undefined ? { budgetUsd } : {}) };
-  const apiKey = await tryResolveKey(values);
-  const input = {
-    config: configComOrcamento,
-    budget,
-    apiKey,
-    yes: values.yes === true,
-    force: values.force === true,
-    agentContext: isAgentContext(),
-  };
-
-  // --dry-run: o pre-voo INTEIRO, sem gastar (so leituras gratuitas: catalogo
-  // publico e, com key, GET /key). Recusa sai com o MESMO error.code/exit da
-  // execucao real (paridade por construcao — ver ../preflight.ts); sem recusa,
-  // exit 0 com `wouldRefuse: []` e o que falta em `requires`.
-  if (values['dry-run'] === true) {
-    const rep = await runPreflight(input, preflightDeps(base), 'dry-run');
-    renderDryRun(out, configComOrcamento, rep);
-    const resumo = {
-      dryRun: true,
-      estimate: rep.estimate,
-      wouldRefuse: rep.wouldRefuse,
-      requires: rep.requires,
-      warnings: rep.warnings,
-      checks: rep.checks,
-    };
-    const primeira = rep.wouldRefuse[0];
-    if (primeira) {
-      // Mesmo code/exit/mensagem da recusa real; `details` traz o relatorio
-      // inteiro (todas as recusas, na ordem, + a estimativa).
-      throw new CliError(primeira.message, primeira.exit, resumo, {
-        code: primeira.code,
-        hint:
-          (primeira.hint ?? DEFAULT_HINT[primeira.kind]) +
-          (rep.wouldRefuse.length > 1
-            ? ` (${rep.wouldRefuse.length} recusas no total: veja details.wouldRefuse.)`
-            : ''),
-      });
-    }
-    out.result(true, `${mode}.dry-run`, { config: configComOrcamento, ...resumo });
-    return EXIT.OK;
-  }
-
-  // Execucao real: a mesma sequencia; a primeira recusa e lancada.
-  const rep = await runPreflight(input, preflightDeps(base), 'real');
-  const ctx: NetworkContext = {
-    ...base,
-    // Sem key ou sem catalogo o pre-voo real ja lancou (auth.key_missing /
-    // network.catalog_unavailable).
-    apiKey: apiKey as string,
-    models: rep.catalog!.models,
-    catalogSource: rep.catalog!.catalogSource,
-  };
-
-  // Ctrl-C: o primeiro aborta com elegancia (a run finaliza, salva e imprime o
-  // parcial); o segundo mata na hora.
-  const ac = new AbortController();
-  let interrupts = 0;
-  const onSigint = (): void => {
-    interrupts += 1;
-    if (interrupts === 1) {
-      out.warn('interrompendo… (Ctrl-C de novo para sair na hora)');
-      ac.abort('SIGINT');
-      return;
-    }
-    // Saida imediata ainda termina no envelope: o NDJSON nao fica sem `result`.
-    failAndExit(
-      out,
-      COMMAND_BY_MODE[mode],
-      new CliError('Interrompido (2º Ctrl-C): saída imediata, sem esperar a run fechar.', EXIT.SIGINT, undefined, {
-        code: 'control.interrupted',
-      }),
-    );
-  };
-  process.on('SIGINT', onSigint);
-
-  try {
-    if (configComOrcamento.mode === 'training') {
-      return await runTraining(ctx, configComOrcamento, ac.signal);
-    }
-    return await runSingle(ctx, configComOrcamento, ac.signal);
-  } finally {
-    process.off('SIGINT', onSigint);
-  }
+/** O que o resultado diz sobre a --idempotency-key (IMPL-031). */
+interface IdempotencyInfo {
+  key: string;
+  /** true = esta invocacao NAO rodou nada: devolveu a run existente (gasto novo = 0). */
+  reused: boolean;
+  /** true = a run ainda rodava e esta invocacao esperou por ela. */
+  attached?: boolean;
 }
 
-async function runSingle(
-  ctx: NetworkContext,
-  config: RunConfig,
-  signal: AbortSignal,
-): Promise<number> {
-  const { out } = ctx;
-  // Id proprio + assinatura ANTES de comecar: sem isso ha corrida com o
-  // primeiro evento emitido pelo loop.
-  const runId = randomUUID();
-  const unsub = subscribe(runId, (e) => emitRunEvent(out, e, { verbose: ctx.verbose }));
-  out.event('start', { command: config.mode, runId });
-  out.info(`run ${runId} — ${config.mode}`);
+/** Campos extras do resultado vindos das camadas anti-gasto-N×. */
+interface OutcomeExtras {
+  idempotency?: IdempotencyInfo;
+  /** A run parou (ou foi barrada) pelo teto DIARIO da maquina, nao pelo `--budget`. */
+  dailyCapReached?: boolean;
+}
 
-  let record: RunRecord;
-  try {
-    record = await runToCompletion(
-      config,
-      ctx.apiKey,
-      prepareOptsFor(config, ctx.apiKey, { runId, ctx: { signal } }),
-    );
-  } finally {
-    unsub();
-  }
+function extrasData(x: OutcomeExtras): Record<string, unknown> {
+  return {
+    ...(x.idempotency ? { idempotency: x.idempotency } : {}),
+    ...(x.dailyCapReached ? { dailyCapReached: true } : {}),
+  };
+}
 
-  relatorioFinal(ctx, record);
+/**
+ * Desfecho de uma run compare/vary — o MESMO para a run recem-rodada e para a
+ * reaproveitada por --idempotency-key (o agente nao distingue pelo formato, so
+ * por `idempotency.reused`).
+ */
+function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
   // Falha vira o envelope de erro (com o resumo em `details`), nunca um
   // `result` ok:false seguido de um segundo objeto — dois JSONs no stdout.
   if (record.status === 'error') {
@@ -519,12 +460,13 @@ async function runSingle(
         status: record.status,
         totalCostUsd: record.totalCostUsd,
         stoppedAtPhase: record.stoppedAtPhase ?? null,
+        ...extrasData(x),
       },
       { code: 'run.failed', hint: `Veja o record em \`prompt-builder runs show ${record.id} --json\`.` },
     );
   }
   // ok:true com exit != 0 so para PARCIAL (7/130): `stoppedReason` diz qual.
-  out.result(true, config.mode, {
+  out.result(true, record.config.mode, {
     runId: record.id,
     status: record.status,
     totalCostUsd: record.totalCostUsd,
@@ -533,49 +475,13 @@ async function runSingle(
     stoppedAtPhase: record.stoppedAtPhase,
     standings: record.standings,
     judgeScoreByContestant: record.judgeScoreByContestant,
+    ...extrasData(x),
   });
   return exitFor(record.stoppedReason, record.budgetExhausted);
 }
 
-async function runTraining(
-  ctx: NetworkContext,
-  config: RunConfig,
-  signal: AbortSignal,
-): Promise<number> {
-  const { out } = ctx;
-  const cfg = config as TrainingConfig;
-  let unsubSession = (): void => undefined;
-  const unsubRuns: (() => void)[] = [];
-  let sessionId = '';
-
-  const record: SessionRecord = await trainToCompletion(cfg, ctx.apiKey, {
-    signal,
-    onSession: (id) => {
-      sessionId = id;
-      out.event('start', { command: 'train', sessionId: id });
-      out.info(`sessão ${id} — até ${cfg.iterations} iterações`);
-      unsubSession = subscribeSession(id, (e) => {
-        emitSessionEventNdjson(out, e);
-        // Assina o bus de CADA iteracao assim que ela e anunciada — em NDJSON
-        // as linhas de run levam sessionId + runId para o stream nao ficar
-        // ambiguo com os dois niveis intercalados.
-        if (e.type === 'iteration.started') {
-          unsubRuns.push(
-            subscribe(e.runId, (re) =>
-              emitRunEvent(out, re, { verbose: ctx.verbose, sessionId: id }),
-            ),
-          );
-        }
-        if (e.type === 'iteration.promoted' && out.isText) {
-          out.info(`  iteração ${e.iteration + 1}: promovido (+${e.gain.toFixed(1)}pp)`);
-        }
-      });
-    },
-  });
-
-  unsubSession();
-  for (const u of unsubRuns) u();
-
+/** Desfecho de uma sessao de treino (recem-rodada ou reaproveitada). */
+function sessionOutcome(out: Output, record: SessionRecord, sessionId: string, x: OutcomeExtras): number {
   const campeao = record.bestPromptByIteration.at(-1);
 
   if (out.isText) {
@@ -621,19 +527,20 @@ async function runTraining(
       record.error ?? 'treino falhou',
       EXIT.ERROR,
       {
-        sessionId: sessionId || record.id,
+        sessionId,
         status: record.status,
         totalCostUsd: record.totalCostUsd,
         iterationsDone: record.bestPromptByIteration.length,
+        ...extrasData(x),
       },
       {
         code: 'session.failed',
-        hint: `Veja a sessão em \`prompt-builder sessions show ${sessionId || record.id} --json\`.`,
+        hint: `Veja a sessão em \`prompt-builder sessions show ${sessionId} --json\`.`,
       },
     );
   }
   out.result(true, 'train', {
-    sessionId: sessionId || record.id,
+    sessionId,
     status: record.status,
     totalCostUsd: record.totalCostUsd,
     iterationsDone: record.bestPromptByIteration.length,
@@ -643,6 +550,441 @@ async function runTraining(
     championPrompt: campeao?.systemPrompt,
     holdout: record.holdout,
     significance: record.significance,
+    ...extrasData(x),
   });
   return exitFor(record.stoppedReason, record.budgetExhausted);
+}
+
+// --- IMPL-031: anexar à run dona da --idempotency-key -----------------------
+
+/** Intervalo de leitura do record da run dona enquanto ela roda (em outro processo). */
+const ATTACH_POLL_MS = 400;
+
+function esperar(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(t);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
+function orphanError(key: string, rec: IdempotencyRecord, status: string | null): CliError {
+  const id = rec.runId ?? rec.sessionId;
+  return new CliError(
+    `A execução dona da --idempotency-key "${key}" (pid ${rec.pid}@${rec.host}) morreu sem concluir` +
+      (id ? ` a ${rec.sessionId ? 'sessão' : 'run'} ${id}` : ' (antes de criar a run)') +
+      '. Reusar a key devolve SEMPRE o mesmo desfecho: nada foi rodado de novo.',
+    EXIT.ERROR,
+    { idempotencyKey: key, runId: rec.runId, sessionId: rec.sessionId, pid: rec.pid, host: rec.host, status },
+    {
+      code: 'run.orphaned',
+      hint:
+        (id ? `O parcial está em \`prompt-builder ${rec.sessionId ? 'sessions' : 'runs'} show ${id} --json\`. ` : '') +
+        'Para rodar de novo (gastando de novo), use OUTRA --idempotency-key.',
+    },
+  );
+}
+
+/**
+ * Reuso pela --idempotency-key: a run dona ja terminou → devolve o desfecho
+ * dela; ainda roda (outro processo) → espera, lendo o record do disco, e
+ * devolve quando terminar. NADA e gasto aqui: nem pre-voo, nem rede, nem key.
+ * `'released'` = o dono desistiu antes de rodar (ex.: lock recusado) e apagou
+ * o registro — o chamador segue como invocacao nova.
+ */
+async function attachToExisting(
+  out: Output,
+  dataDir: string,
+  mode: RunMode,
+  key: string,
+  hash: string,
+): Promise<number | 'released'> {
+  const ehSessao = mode === 'training';
+  const ac = new AbortController();
+  const onSigint = (): void => ac.abort('SIGINT');
+  process.on('SIGINT', onSigint);
+  let anunciado = false;
+  try {
+    for (;;) {
+      const rec = readIdempotency(dataDir, key);
+      if (!rec) return 'released';
+      if (rec.configHash !== hash) throw idempotencyConflictError(key, rec, hash);
+      const id = ehSessao ? rec.sessionId : rec.runId;
+
+      const terminal = async (): Promise<RunRecord | SessionRecord | null> => {
+        if (!id) return null;
+        const r = ehSessao ? await loadSession(id) : await loadRun(id);
+        // Qualquer status != 'running' e terminal (inclui os que vierem a
+        // existir, como 'inconclusive') — sem lista solta de status.
+        return r && r.status !== 'running' ? r : null;
+      };
+
+      let fim = await terminal();
+      if (!fim && !idempotencyOwnerAlive(dataDir, rec)) {
+        // O dono pode ter gravado o fim logo antes de sair: uma ultima leitura.
+        fim = await terminal();
+        if (!fim) {
+          const r = id ? (ehSessao ? await loadSession(id) : await loadRun(id)) : null;
+          throw orphanError(key, rec, r?.status ?? null);
+        }
+      }
+      if (fim) {
+        const info: IdempotencyInfo = { key, reused: true, attached: anunciado };
+        out.info(
+          `${ehSessao ? 'sessão' : 'run'} ${fim.id} reaproveitada pela --idempotency-key "${key}" — ` +
+            'nada foi gasto por esta invocação.',
+        );
+        if (ehSessao) return sessionOutcome(out, fim as SessionRecord, fim.id, { idempotency: info });
+        relatorioFinal(out, fim as RunRecord);
+        return runOutcome(out, fim as RunRecord, { idempotency: info });
+      }
+
+      if (!anunciado) {
+        anunciado = true;
+        out.event('attached', {
+          command: COMMAND_BY_MODE[mode],
+          idempotencyKey: key,
+          ...(ehSessao ? { sessionId: id } : { runId: id }),
+          ownerPid: rec.pid,
+        });
+        out.info(
+          `anexando à ${ehSessao ? 'sessão' : 'run'} ${id ?? '(iniciando)'} da --idempotency-key "${key}" ` +
+            `(pid ${rec.pid}) — esperando ela terminar; nada será gasto por esta invocação.`,
+        );
+      }
+      await esperar(ATTACH_POLL_MS, ac.signal);
+      if (ac.signal.aborted) {
+        throw new CliError(
+          'Espera interrompida (Ctrl-C). A run dona da key segue rodando no outro processo.',
+          EXIT.SIGINT,
+          { idempotencyKey: key, ...(ehSessao ? { sessionId: id } : { runId: id }) },
+          {
+            code: 'control.cancelled',
+            hint: 'Repita o comando com a mesma --idempotency-key para se anexar de novo.',
+          },
+        );
+      }
+    }
+  } finally {
+    process.off('SIGINT', onSigint);
+  }
+}
+
+// --- o comando ------------------------------------------------------------------
+
+/** Tudo que a run recem-criada carrega das camadas anti-gasto-N× (IMPL-031). */
+interface SpendGuards {
+  root: MachineBudgetLedger;
+  machine: FileSpendLedger;
+  lock: RunLock | null;
+  claim: IdempotencyRecord | null;
+  dataDir: string;
+}
+
+export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
+  const parsed = parse(argv, OPTIONS);
+  // Key OPCIONAL aqui (IMPL-029): o pre-voo checa a config contra o catalogo
+  // publico antes e so exige a key no fim — e o dry-run roda sem ela.
+  const base = buildContext(parsed);
+  const { out, values, dataDir } = base;
+  const command = COMMAND_BY_MODE[mode];
+  const dryRun = values['dry-run'] === true;
+  const allowConcurrent = values['allow-concurrent'] === true;
+  const idemKey = values['idempotency-key'] !== undefined ? validateIdempotencyKey(values['idempotency-key']) : null;
+
+  const config =
+    typeof values.config === 'string'
+      ? await readConfigFile(values.config)
+      : await buildFromFlags(mode, values);
+
+  if (config.mode !== mode && typeof values.config === 'string') {
+    out.warn(`o arquivo declara mode "${config.mode}"; usando o do arquivo.`);
+  }
+
+  const budget = resolveBudget(values, (m) => out.warn(m));
+  const budgetUsd = budgetUsdOf(budget);
+  const configComOrcamento: RunConfig = { ...config, ...(budgetUsd !== undefined ? { budgetUsd } : {}) };
+  const hash = configHash(configComOrcamento);
+
+  // IMPL-031 — IDEMPOTENCIA ANTES DE TUDO: a key ja usada com a MESMA config
+  // anexa/devolve a run existente sem pre-voo, sem rede e sem key (nada vai ser
+  // gasto). Com config diferente e erro de uso — nunca reuso de outro
+  // experimento. O dry-run diz o que a real faria (reusar), com paridade.
+  if (idemKey) {
+    const existente = readIdempotency(dataDir, idemKey);
+    if (existente) {
+      if (existente.configHash !== hash) throw idempotencyConflictError(idemKey, existente, hash);
+      if (dryRun) {
+        const id = existente.runId ?? existente.sessionId;
+        out.line(`A execução real REUSARIA ${existente.sessionId ? 'a sessão' : 'a run'} ${id ?? '(iniciando)'} — nada seria gasto.`);
+        out.result(true, `${mode}.dry-run`, {
+          config: configComOrcamento,
+          dryRun: true,
+          wouldRefuse: [],
+          requires: [],
+          idempotency: {
+            key: idemKey,
+            wouldReuse: true,
+            runId: existente.runId,
+            sessionId: existente.sessionId,
+          },
+        });
+        return EXIT.OK;
+      }
+      const r = await attachToExisting(out, dataDir, mode, idemKey, hash);
+      if (r !== 'released') return r;
+    }
+  }
+
+  const cap = resolveDailyCap(dataDir);
+  const guard: PreflightGuard = {
+    ...(allowConcurrent
+      ? {}
+      : {
+          lockRefusal: () => {
+            const insp = inspectRunLock(dataDir, hash);
+            return insp && !insp.stale ? runLockedError(insp) : null;
+          },
+        }),
+    daily: () => readDailySnapshot(dataDir, cap),
+  };
+  const apiKey = await tryResolveKey(values);
+  const input = {
+    config: configComOrcamento,
+    budget,
+    apiKey,
+    yes: values.yes === true,
+    force: values.force === true,
+    agentContext: isAgentContext(),
+  };
+  const deps: PreflightDeps = { ...preflightDeps(base), guard };
+
+  // --dry-run: o pre-voo INTEIRO, sem gastar (so leituras gratuitas: catalogo
+  // publico e, com key, GET /key; lock e teto diario so leem o disco). Recusa
+  // sai com o MESMO error.code/exit da execucao real (paridade por construcao —
+  // ver ../preflight.ts); sem recusa, exit 0 com `wouldRefuse: []` e o que
+  // falta em `requires`.
+  if (dryRun) {
+    const rep = await runPreflight(input, deps, 'dry-run');
+    renderDryRun(out, configComOrcamento, rep);
+    const resumo = {
+      dryRun: true,
+      estimate: rep.estimate,
+      wouldRefuse: rep.wouldRefuse,
+      requires: rep.requires,
+      warnings: rep.warnings,
+      checks: rep.checks,
+      ...(idemKey ? { idempotency: { key: idemKey, wouldReuse: false } } : {}),
+    };
+    const primeira = rep.wouldRefuse[0];
+    if (primeira) {
+      // Mesmo code/exit/mensagem da recusa real; `details` traz o relatorio
+      // inteiro (todas as recusas, na ordem, + a estimativa).
+      throw new CliError(primeira.message, primeira.exit, resumo, {
+        code: primeira.code,
+        hint:
+          (primeira.hint ?? DEFAULT_HINT[primeira.kind]) +
+          (rep.wouldRefuse.length > 1
+            ? ` (${rep.wouldRefuse.length} recusas no total: veja details.wouldRefuse.)`
+            : ''),
+      });
+    }
+    out.result(true, `${mode}.dry-run`, { config: configComOrcamento, ...resumo });
+    return EXIT.OK;
+  }
+
+  // Execucao real: a mesma sequencia; a primeira recusa e lancada.
+  const rep = await runPreflight(input, deps, 'real');
+  const ctx: NetworkContext = {
+    ...base,
+    // Sem key ou sem catalogo o pre-voo real ja lancou (auth.key_missing /
+    // network.catalog_unavailable).
+    apiKey: apiKey as string,
+    models: rep.catalog!.models,
+    catalogSource: rep.catalog!.catalogSource,
+  };
+
+  // IMPL-031 — registra a key (atomico: de dois processos com a mesma key,
+  // exatamente um vence; o outro se ANEXA a ele) e so depois toma o lock da
+  // config. Lock recusado desfaz o registro: a run nem comecou.
+  const runId = mode === 'training' ? null : randomUUID();
+  let claim: IdempotencyRecord | null = null;
+  if (idemKey) {
+    for (let tentativa = 0; tentativa < 5 && !claim; tentativa++) {
+      claim = claimIdempotency(dataDir, { key: idemKey, configHash: hash, command, runId, sessionId: null });
+      if (claim) break;
+      const existente = readIdempotency(dataDir, idemKey);
+      if (!existente) continue;
+      if (existente.configHash !== hash) throw idempotencyConflictError(idemKey, existente, hash);
+      const r = await attachToExisting(out, dataDir, mode, idemKey, hash);
+      if (r !== 'released') return r;
+    }
+    if (!claim) {
+      throw new CliError(
+        `Não consegui registrar a --idempotency-key "${idemKey}" (disputa com outros processos).`,
+        EXIT.ERROR,
+        { idempotencyKey: idemKey, file: idempotencyFile(dataDir, idemKey) },
+        { code: 'run.idempotency_unavailable', hint: 'Repita o comando com a mesma key.' },
+      );
+    }
+  }
+  let lock: RunLock | null = null;
+  try {
+    if (!allowConcurrent) {
+      lock = acquireRunLock(dataDir, { command, configHash: hash, runId, idempotencyKey: idemKey });
+    }
+  } catch (err) {
+    if (claim) dropIdempotency(dataDir, claim);
+    throw err;
+  }
+  // Heartbeat do registro da key: quem se anexa decide "dono vivo" por ele.
+  const stopClaimHeartbeat = claim ? startHeartbeat(() => [idempotencyFile(dataDir, idemKey as string)]) : () => undefined;
+
+  // Ctrl-C: o primeiro aborta com elegancia (a run finaliza, salva e imprime o
+  // parcial); o segundo mata na hora.
+  const ac = new AbortController();
+  let interrupts = 0;
+  const onSigint = (): void => {
+    interrupts += 1;
+    if (interrupts === 1) {
+      out.warn('interrompendo… (Ctrl-C de novo para sair na hora)');
+      ac.abort('SIGINT');
+      return;
+    }
+    // Saida imediata ainda termina no envelope: o NDJSON nao fica sem `result`.
+    failAndExit(
+      out,
+      command,
+      new CliError('Interrompido (2º Ctrl-C): saída imediata, sem esperar a run fechar.', EXIT.SIGINT, undefined, {
+        code: 'control.interrupted',
+      }),
+    );
+  };
+  process.on('SIGINT', onSigint);
+
+  // Raiz do ledger da run que TAMBEM reserva no ledger em arquivo da maquina
+  // (teto diario somando processos). Vai como `parentLedger`: o teto da run
+  // continua na raiz, com a mesma semantica de antes.
+  const { root, machine } = openMachineLedger({
+    dataDir,
+    label: `${command}${runId ? ` run ${runId}` : ''}`,
+    budgetUsd: configComOrcamento.budgetUsd,
+    signal: ac.signal,
+    estimateCall: makeCallEstimator(rep.catalog!.models),
+    warn: (m) => out.warn(m),
+    cap,
+  });
+  const guards: SpendGuards = { root, machine, lock, claim, dataDir };
+
+  try {
+    if (configComOrcamento.mode === 'training') {
+      return await runTraining(ctx, configComOrcamento, ac.signal, guards);
+    }
+    return await runSingle(ctx, configComOrcamento, ac.signal, runId as string, guards);
+  } finally {
+    process.off('SIGINT', onSigint);
+    stopClaimHeartbeat();
+    lock?.release();
+    machine.close();
+  }
+}
+
+async function runSingle(
+  ctx: NetworkContext,
+  config: RunConfig,
+  signal: AbortSignal,
+  runId: string,
+  guards: SpendGuards,
+): Promise<number> {
+  const { out } = ctx;
+  // Id proprio + assinatura ANTES de comecar: sem isso ha corrida com o
+  // primeiro evento emitido pelo loop.
+  const unsub = subscribe(runId, (e) => emitRunEvent(out, e, { verbose: ctx.verbose }));
+  out.event('start', {
+    command: config.mode,
+    runId,
+    ...(guards.claim ? { idempotencyKey: guards.claim.key } : {}),
+  });
+  out.info(`run ${runId} — ${config.mode}`);
+
+  let record: RunRecord;
+  try {
+    record = await runToCompletion(config, ctx.apiKey, {
+      ...prepareOptsFor(config, ctx.apiKey, { runId, ctx: { signal } }),
+      parentLedger: guards.root,
+    });
+  } finally {
+    unsub();
+  }
+
+  relatorioFinal(out, record);
+  return runOutcome(out, record, {
+    ...(guards.claim ? { idempotency: { key: guards.claim.key, reused: false } } : {}),
+    dailyCapReached: guards.machine.capHit,
+  });
+}
+
+async function runTraining(
+  ctx: NetworkContext,
+  config: RunConfig,
+  signal: AbortSignal,
+  guards: SpendGuards,
+): Promise<number> {
+  const { out } = ctx;
+  const cfg = config as TrainingConfig;
+  let unsubSession = (): void => undefined;
+  const unsubRuns: (() => void)[] = [];
+  let sessionId = '';
+
+  const record: SessionRecord = await trainToCompletion(cfg, ctx.apiKey, {
+    signal,
+    parentLedger: guards.root,
+    onSession: (id) => {
+      sessionId = id;
+      // O id da sessao so nasce aqui: grava no lock e no registro da key
+      // (quem se anexar le a sessao por ele).
+      guards.lock?.update({ sessionId: id });
+      if (guards.claim) {
+        guards.claim = { ...guards.claim, sessionId: id };
+        updateIdempotency(guards.dataDir, guards.claim);
+      }
+      guards.machine.setLabel(`train sessão ${id}`);
+      out.event('start', {
+        command: 'train',
+        sessionId: id,
+        ...(guards.claim ? { idempotencyKey: guards.claim.key } : {}),
+      });
+      out.info(`sessão ${id} — até ${cfg.iterations} iterações`);
+      unsubSession = subscribeSession(id, (e) => {
+        emitSessionEventNdjson(out, e);
+        // Assina o bus de CADA iteracao assim que ela e anunciada — em NDJSON
+        // as linhas de run levam sessionId + runId para o stream nao ficar
+        // ambiguo com os dois niveis intercalados.
+        if (e.type === 'iteration.started') {
+          unsubRuns.push(
+            subscribe(e.runId, (re) =>
+              emitRunEvent(out, re, { verbose: ctx.verbose, sessionId: id }),
+            ),
+          );
+        }
+        if (e.type === 'iteration.promoted' && out.isText) {
+          out.info(`  iteração ${e.iteration + 1}: promovido (+${e.gain.toFixed(1)}pp)`);
+        }
+      });
+    },
+  });
+
+  unsubSession();
+  for (const u of unsubRuns) u();
+
+  return sessionOutcome(out, record, sessionId || record.id, {
+    ...(guards.claim ? { idempotency: { key: guards.claim.key, reused: false } } : {}),
+    dailyCapReached: guards.machine.capHit,
+  });
 }
