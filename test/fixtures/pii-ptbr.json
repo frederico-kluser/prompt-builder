@@ -3729,6 +3729,170 @@
       ],
       "realPii": false,
       "nota": "nome fora do dicionário"
+    },
+    {
+      "id": "cpf-valido-334",
+      "grupo": "cpf-valido",
+      "text": "CPF-604.913.827-31 consta no cadastro antigo.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "604.913.827-31"
+        }
+      ],
+      "realPii": true,
+      "nota": "fronteira: hífen colado em CPF"
+    },
+    {
+      "id": "cpf-valido-335",
+      "grupo": "cpf-valido",
+      "text": "Consulte cpf/24710596352 no sistema legado.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "24710596352"
+        }
+      ],
+      "realPii": true,
+      "nota": "fronteira: barra colada em cpf"
+    },
+    {
+      "id": "cpf-valido-336",
+      "grupo": "cpf-valido",
+      "text": "Titular CPF.735.216.498-73, conferir assinatura.",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "735.216.498-73"
+        }
+      ],
+      "realPii": true,
+      "nota": "fronteira: ponto colado em CPF"
+    },
+    {
+      "id": "cns-valido-337",
+      "grupo": "cns-valido",
+      "text": "Cartão CNS/151614345030000 do beneficiário.",
+      "pii": [
+        {
+          "kind": "cns",
+          "value": "151614345030000"
+        }
+      ],
+      "realPii": true,
+      "nota": "fronteira: barra colada em CNS"
+    },
+    {
+      "id": "distrator-338",
+      "grupo": "distrator",
+      "text": "Lote XCPF-604.913.827-31 do fornecedor (código interno).",
+      "pii": [],
+      "realPii": false,
+      "nota": "fronteira: gatilho colado em letra não conta"
+    },
+    {
+      "id": "persona-339",
+      "grupo": "persona",
+      "text": "Você é a Ana Paula, atendente da Clínica Vida, na Rua Augusta, 1500.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Ana Paula"
+        },
+        {
+          "kind": "endereco",
+          "value": "Rua Augusta, 1500"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "persona-340",
+      "grupo": "persona",
+      "text": "Você é o Dr. Carlos Mendes, clínico geral; agendamentos pelo (11) 3456-7890.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Carlos Mendes"
+        },
+        {
+          "kind": "telefone",
+          "value": "(11) 3456-7890"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "persona-341",
+      "grupo": "persona",
+      "text": "Você é a Maria Clara, recepcionista da unidade Paulista (CEP 01310-100).",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Maria Clara"
+        },
+        {
+          "kind": "cep",
+          "value": "01310-100"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "persona-342",
+      "grupo": "persona",
+      "text": "Atenda como a atendente virtual Ana Beatriz, da Loja Aurora — Av. Paulista, 1000, CEP 01310-100, tel (11) 3456-7890.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Ana Beatriz"
+        },
+        {
+          "kind": "endereco",
+          "value": "Av. Paulista, 1000"
+        },
+        {
+          "kind": "cep",
+          "value": "01310-100"
+        },
+        {
+          "kind": "telefone",
+          "value": "(11) 3456-7890"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "negocio-343",
+      "grupo": "negocio",
+      "text": "Hospital Santa Maria Silva — Av. Brasil, 200.",
+      "pii": [
+        {
+          "kind": "endereco",
+          "value": "Av. Brasil, 200"
+        }
+      ],
+      "realPii": false
+    },
+    {
+      "id": "ficha-344",
+      "grupo": "ficha",
+      "text": "Encaminhe o paciente Carlos Mendes, morador da Rua das Palmeiras, 45, telefone residencial (11) 3456-7891.",
+      "pii": [
+        {
+          "kind": "nome",
+          "value": "Carlos Mendes"
+        },
+        {
+          "kind": "endereco",
+          "value": "Rua das Palmeiras, 45"
+        },
+        {
+          "kind": "telefone",
+          "value": "(11) 3456-7891"
+        }
+      ],
+      "realPii": true
     }
   ]
 }

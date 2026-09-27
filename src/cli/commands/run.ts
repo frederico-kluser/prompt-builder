@@ -9,6 +9,7 @@ import { prepareOptsFor } from '../../prepareRun.js';
 import { subscribe, subscribeSession } from '../../events.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
 import { parseArenaConfig } from '../../configFile.js';
+import { checkRunPii, describeRunPii } from '../../engine/pii.js';
 import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
 import { hasGabarito, toStageSpec } from '../../engine/libraryCore.js';
@@ -62,7 +63,18 @@ const OPTIONS = {
   'dry-run': { type: 'boolean' },
   yes: { type: 'boolean', short: 'y' },
   force: { type: 'boolean' },
+  // LGPD (IMPL-042): 'synthetic' recusa dado de aparência real; `--allow-pii`
+  // = revisei o dado apontado e pode seguir pseudonimizado (modo 'redact').
+  'pii-mode': { type: 'string' },
+  'allow-pii': { type: 'boolean' },
 } as const;
+
+/** `--pii-mode` validado (uso errado = exit 2, nada gasto). */
+function piiModeFlag(v: unknown): 'redact' | 'synthetic' | undefined {
+  if (v === undefined) return undefined;
+  if (v === 'redact' || v === 'synthetic') return v;
+  throw new CliError('--pii-mode deve ser "redact" ou "synthetic".', EXIT.USAGE);
+}
 
 function n(v: unknown, campo: string): number | undefined {
   if (typeof v !== 'string' || !v.trim()) return undefined;
@@ -111,7 +123,10 @@ function resolveBudget(values: Record<string, unknown>, warn: (m: string) => voi
   return undefined;
 }
 
-async function readConfigFile(file: string): Promise<RunConfig> {
+async function readConfigFile(
+  file: string,
+  pii: { allowPii?: boolean; piiMode?: 'redact' | 'synthetic' } = {},
+): Promise<RunConfig> {
   let raw: string;
   try {
     raw = await fs.readFile(file, 'utf-8');
@@ -127,9 +142,13 @@ async function readConfigFile(file: string): Promise<RunConfig> {
 
   // Detecta o dialeto pela chave `format`: arena-config@1 (declarativo, o que a
   // ARENA-CONFIG.md documenta) vs RunConfig cru.
+  // As flags de dado pessoal valem sobre o arquivo (o dialeto cru e o arena).
+  if (pii.piiMode && json && typeof json === 'object') {
+    json = { ...(json as Record<string, unknown>), piiMode: pii.piiMode };
+  }
   const formato = (json as Record<string, unknown>)?.format;
   if (typeof formato === 'string') {
-    const parsed = parseArenaConfig(json);
+    const parsed = parseArenaConfig(json, { allowPii: pii.allowPii });
     if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG);
     const conv = arenaConfigToRunConfig(parsed.config);
     if (!conv.ok) throw new CliError(conv.error, EXIT.CONFIG);
@@ -163,7 +182,10 @@ async function readConfigFile(file: string): Promise<RunConfig> {
     }
     return conv.config;
   }
-  const parsed = parseRunConfig(json);
+  // RunConfig cru também é importação: o schema recusa dado pessoal de
+  // aparência real nomeando o campo, até a revisão explícita (`--allow-pii`).
+  const cru = pii.allowPii && json && typeof json === 'object' ? { ...(json as object), allowPii: true } : json;
+  const parsed = parseRunConfig(cru);
   if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG, parsed.details);
   return parsed.config;
 }
@@ -211,6 +233,8 @@ async function buildFromFlags(
       ? { scenarioBrief: values['scenario-brief'] }
       : {}),
     ...(Object.keys(reasoning).length ? { reasoning } : {}),
+    ...(piiModeFlag(values['pii-mode']) ? { piiMode: piiModeFlag(values['pii-mode']) } : {}),
+    ...(values['allow-pii'] === true ? { allowPii: true } : {}),
     maxOutputTokens: n(values['max-output-tokens'], '--max-output-tokens') ?? 1000,
     judgePasses: (n(values['judge-passes'], '--judge-passes') === 2 ? 2 : 1) as 1 | 2,
     finalists: n(values.finalists, '--finalists') ?? 3,
@@ -424,8 +448,16 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
 
   const config =
     typeof values.config === 'string'
-      ? await readConfigFile(values.config)
+      ? await readConfigFile(values.config, {
+          allowPii: values['allow-pii'] === true,
+          piiMode: piiModeFlag(values['pii-mode']),
+        })
       : await buildFromFlags(mode, values);
+
+  // LGPD (IMPL-042): o que sai pseudonimizado no envio é dito, nunca silencioso
+  // (stderr: narração; o record guarda o mesmo relatório em `piiReport`).
+  const piiNota = describeRunPii(checkRunPii(config));
+  if (piiNota) out.warn(piiNota);
 
   if (config.mode !== mode && typeof values.config === 'string') {
     out.warn(`o arquivo declara mode "${config.mode}"; usando o do arquivo.`);

@@ -11,14 +11,19 @@
 // Zero rede, zero gasto: todo LLM é o transporte falso de test/fakeOpenRouter.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, createHmac } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as pii from '../src/engine/pii.js';
 import * as nodeLgpd from '../src/lgpd.js';
 import * as webLgpd from '../web/src/lgpd.js';
-import { createGateway, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
+import { createGateway, pseudonymize, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
+import { BudgetLedger } from '../src/budget.js';
+import { judgeStageReference } from '../src/refJudge.js';
+import { runConfigToArenaConfig } from '../src/runArtifact.js';
+import { cmdConfig } from '../src/cli/commands/misc.js';
 import { getDataDir, setDataDir } from '../src/storage.js';
 import { runToCompletion as runNode } from '../src/orchestrator.js';
 import { trainToCompletion as trainNode } from '../src/trainer.js';
@@ -26,11 +31,11 @@ import { runToCompletion as runWeb } from '../web/src/engine/orchestrator.js';
 import { startTraining as startWebTraining } from '../web/src/engine/trainer.js';
 import { subscribeSession } from '../web/src/engine/events.js';
 import { parseScenarioPack } from '../src/scenarioPack.js';
-import { parseArenaConfig } from '../src/configFile.js';
+import { parseArenaAgentConfig, parseArenaConfig } from '../src/configFile.js';
 import { parseArenaConfig as parseArenaConfigWeb } from '../web/src/engine/configFile.js';
-import { arenaConfigToRunConfig } from '../src/arenaConfig.js';
+import { arenaAgentConfigToRunConfig, arenaConfigToRunConfig } from '../src/arenaConfig.js';
 import { importItems, listItems } from '../src/library.js';
-import { parseRunConfig } from '../src/runConfigSchema.js';
+import { parseRunConfig, runConfigSchema } from '../src/runConfigSchema.js';
 import type { RunConfig, TrainingConfig } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter, type FakeRequest } from './fakeOpenRouter.js';
 
@@ -298,12 +303,34 @@ describe('IMPL-042 (2) — importação: aparência de dado real bloqueia nomean
       expect(r.error).toMatch(/nome \+ telefone|telefone/);
       expect(r.error).toContain('nomes: não coberto');
     }
+    // "Revisei" na importação: o arquivo passa e a revisão é GRAVADA no config…
     const ok = parseArenaConfig(CONFIG_ARQ, { allowPii: true });
     expect(ok.ok).toBe(true);
     if (!ok.ok) return;
-    const conv = arenaConfigToRunConfig(ok.config);
-    expect(conv.ok).toBe(true);
-    if (conv.ok) expect(conv.config.piiMode).toBe('synthetic');
+    expect(ok.config.allowPii).toBe(true);
+    // …mas "só sintético" não tem exceção: a conversão p/ RunConfig recusa,
+    // nomeando o campo (o prompt vira basePrompt).
+    const sintetico = arenaConfigToRunConfig(ok.config);
+    expect(sintetico.ok).toBe(false);
+    if (!sintetico.ok) {
+      expect(sintetico.error).toMatch(/só sintético/);
+      expect(sintetico.error).toContain('basePrompt');
+    }
+    // No "redigir", a revisão segue até o RunConfig (e o pré-voo a respeita).
+    const { piiMode: _modo, ...redigir } = CONFIG_ARQ;
+    const okRedigir = parseArenaConfig(redigir, { allowPii: true });
+    expect(okRedigir.ok).toBe(true);
+    if (!okRedigir.ok) return;
+    const conv = arenaConfigToRunConfig(okRedigir.config);
+    expect(conv.ok, conv.ok ? '' : conv.error).toBe(true);
+    if (conv.ok) expect(conv.config.allowPii).toBe(true);
+    // `piiMode` chega ao RunConfig num arquivo limpo.
+    const limpo = parseArenaConfig({ ...CONFIG_ARQ, prompt: { text: 'Você é um atendente cordial.' } });
+    expect(limpo.ok).toBe(true);
+    if (limpo.ok) {
+      const c = arenaConfigToRunConfig(limpo.config);
+      expect(c.ok && c.config.piiMode).toBe('synthetic');
+    }
     // O schema do servidor (routes/MCP) também aceita o campo (não o descarta).
     const cfg = parseRunConfig({
       mode: 'compare',
@@ -387,7 +414,7 @@ describe('IMPL-042 (4) — nomes em texto livre: `nao-coberto`, sem promessa de 
   });
 
   it('o gateway NÃO reescreve nome (heurística mudaria o benchmark em silêncio): só conta', () => {
-    const guard = pii.createPiiGuard({ salt: 's' });
+    const guard = pii.createPiiGuard({ key: 's' });
     const [m] = guard.protect([{ role: 'user', content: 'Paciente Maria Souza, sem documento.' }]);
     expect(m.content).toBe('Paciente Maria Souza, sem documento.');
     expect(guard.stats().contextualSeen).toBe(1);
@@ -395,15 +422,15 @@ describe('IMPL-042 (4) — nomes em texto livre: `nao-coberto`, sem promessa de 
   });
 });
 
-describe('IMPL-042 — pseudonimização (token estável por instância, com sal)', () => {
-  it('mesmo documento em formatos diferentes ⇒ mesmo token; sal diferente ⇒ token diferente', () => {
-    const v = new pii.PiiVault({ salt: 'run-1' });
+describe('IMPL-042 — pseudonimização (token estável por escopo, HMAC com chave secreta)', () => {
+  it('mesmo documento em formatos diferentes ⇒ mesmo token; chave diferente ⇒ token diferente', () => {
+    const v = new pii.PiiVault({ key: 'run-1' });
     const a = v.redact('CPF 529.982.247-25').text;
     const b = v.redact('cpf: 52998224725').text;
-    const tokA = /\[CPF_[0-9a-f]{8}\]/.exec(a)?.[0];
+    const tokA = /\[CPF_[0-9a-f]{12}\]/.exec(a)?.[0];
     expect(tokA).toBeDefined();
     expect(b).toContain(tokA!);
-    expect(new pii.PiiVault({ salt: 'run-2' }).redact('CPF 529.982.247-25').text).not.toContain(tokA!);
+    expect(new pii.PiiVault({ key: 'run-2' }).redact('CPF 529.982.247-25').text).not.toContain(tokA!);
     // O token não é re-detectado quando a resposta volta ao juiz.
     expect(pii.scanPii(`O ${tokA} foi localizado`).findings).toEqual([]);
     // Telefone com e sem +55 é a mesma pessoa.
@@ -411,7 +438,7 @@ describe('IMPL-042 — pseudonimização (token estável por instância, com sal
   });
 
   it('placeholder, exemplo notório e número de serviço seguem intactos (não são pessoa)', () => {
-    const v = new pii.PiiVault({ salt: 'x' });
+    const v = new pii.PiiVault({ key: 'x' });
     const texto = 'Formato (11) 99999-9999, exemplo 123.456.789-09, usuario@example.com, 0800 123 4567, 4004-0001.';
     expect(v.redact(texto).text).toBe(texto);
   });
@@ -448,11 +475,13 @@ describe('IMPL-042 (3) — prova ESTÁTICA: o ponto único é o único caminho a
     for (const p of posts) expect(p).toContain('body: JSON.stringify(body)');
     expect(fonte.match(/const body = this\.buildBody\(/g)?.length).toBe(2);
     const buildBody = /private buildBody\([\s\S]*?\n {2}\}\n/.exec(fonte)?.[0] ?? '';
-    expect(buildBody).toContain('messages: this.protectMessages(messages)');
+    expect(buildBody).toContain('messages: this.protectMessages(messages, params.sink)');
     // A ÚNICA chave `messages` do corpo é a protegida, e ninguém a reescreve depois.
     expect(buildBody.match(/\bmessages\s*:/g)).toEqual(['messages:']);
     expect(fonte).not.toMatch(/\.messages\s*=|\[['"]messages['"]\]\s*=/);
-    expect(fonte).toMatch(/private protectMessages\([^)]*\)[^{]*\{\s*return this\.piiGuard\.protect\(messages\);/);
+    expect(fonte).toMatch(
+      /private protectMessages\([^)]*\)[^{]*\{\s*return this\.piiGuard\.protect\(messages, piiScopeOf\(sink\)\);/,
+    );
   });
 
   it('o shim do web é o MESMO gateway (a SPA não tem caminho próprio)', async () => {
@@ -477,10 +506,10 @@ describe('IMPL-042 (3) — prova DINÂMICA no gateway (chat e stream)', () => {
       ],
     });
     const [r1, r2] = fake.chatRequests();
-    const tok = /\[CPF_[0-9a-f]{8}\]/.exec(r1.user)?.[0];
+    const tok = /\[CPF_[0-9a-f]{12}\]/.exec(r1.user)?.[0];
     expect(tok).toBeDefined();
     expect(r2.user).toContain(tok!);
-    expect(r2.system).toMatch(/\[EMAIL_[0-9a-f]{8}\]/);
+    expect(r2.system).toMatch(/\[EMAIL_[0-9a-f]{12}\]/);
     const corpo = JSON.stringify(fake.chatRequests().map((r) => r.body));
     for (const cru of ['529.982.247-25', '52998224725', 'joana.prado@gmail.com']) expect(corpo).not.toContain(cru);
     expect(gw.piiStats()).toMatchObject({ scannedCalls: 2, scannedMessages: 3, redactedCalls: 2 });
@@ -592,7 +621,7 @@ function conferirSemPii(fake: FakeOpenRouter, gw: OpenRouterGateway): void {
   // Pseudonimizado, não apagado: o token aparece no papel que recebeu o dado.
   for (const p of ['datagen', 'rewriter', 'competitor', 'gabarito', 'judge'] as Papel[]) {
     expect(
-      chats.some((r) => papelDe(r) === p && /\[(CPF|TELEFONE|EMAIL)_[0-9a-f]{8}\]/.test(JSON.stringify(r.body))),
+      chats.some((r) => papelDe(r) === p && /\[(CPF|TELEFONE|EMAIL)_[0-9a-f]{12}\]/.test(JSON.stringify(r.body))),
       `papel ${p} recebeu token`,
     ).toBe(true);
   }
@@ -648,16 +677,34 @@ describe('IMPL-042 (3) — prova DINÂMICA nos 6 papéis, Node e SPA (dado do us
     });
   }
 
-  it('Node (trainer + orchestrator): modo redigir roda inteiro e nenhum corpo leva o dado cru', async () => {
-    const { fake, gw } = comFake();
+  it('"redigir" SEM revisão (Node e SPA): dado real no config recusa antes de qualquer LLM, nomeando o campo', async () => {
+    const node = comFake();
     const rec = await trainNode(treino() as unknown as TrainingConfig, KEY);
+    expect(rec.status).toBe('error');
+    expect(rec.error).toContain('basePrompt (CPF + telefone)');
+    expect(rec.error).toMatch(/allowPii: true/);
+    expect(rec.error).toMatch(/nomes em texto livre NÃO são cobertos/);
+    expect(node.fake.chatRequests()).toEqual([]);
+    while (restaurar.length) restaurar.pop()!();
+
+    const web = comFake();
+    const { sessionId, record } = await startWebTraining(treino() as never, KEY);
+    await esperarSessao(sessionId, record);
+    expect(record.status).toBe('error');
+    expect(record.error).toContain('scenarioSeed[0].question (CPF)');
+    expect(web.fake.chatRequests()).toEqual([]);
+  });
+
+  it('Node (trainer + orchestrator): modo redigir REVISADO roda inteiro e nenhum corpo leva o dado cru', async () => {
+    const { fake, gw } = comFake();
+    const rec = await trainNode(treino({ allowPii: true }) as unknown as TrainingConfig, KEY);
     expect(rec.status, rec.error).toBe('finished');
     conferirSemPii(fake, gw);
   });
 
   it('SPA (trainer + orchestrator client-side): mesma garantia pelo mesmo gateway', async () => {
     const { fake, gw } = comFake();
-    const { sessionId, record } = await startWebTraining(treino() as never, KEY);
+    const { sessionId, record } = await startWebTraining(treino({ allowPii: true }) as never, KEY);
     await esperarSessao(sessionId, record);
     expect(record.status, record.error).toBe('finished');
     conferirSemPii(fake, gw);
@@ -724,9 +771,380 @@ describe('IMPL-042 (3) — prova DINÂMICA nos 6 papéis, Node e SPA (dado do us
     for (const enforce of [nodeLgpd.enforceRunCompliance, webLgpd.enforceRunCompliance]) {
       const erro = await enforce(cfg).catch((e: unknown) => e);
       expect(pii.isPiiPolicyError(erro)).toBe(true);
-      await expect(enforce(cfg, Date.now(), { nested: true })).resolves.toBeDefined();
-      await expect(enforce({ ...cfg, piiMode: 'redact' })).resolves.toBeDefined();
+      // "só sintético" ignora a revisão manual.
+      expect(pii.isPiiPolicyError(await enforce({ ...cfg, allowPii: true }).catch((e: unknown) => e))).toBe(true);
+      // Aninhada (iteração de sessão): só relata — o config da sessão já passou.
+      const aninhada = await enforce(cfg, Date.now(), { nested: true });
+      expect(aninhada.piiReport?.fields).toEqual([{ path: 'basePrompt', kinds: ['cpf'], verdict: 'bloqueio' }]);
+      // "redigir": recusa sem revisão; com `allowPii`, segue e RELATA (campo + tipo, nunca o valor).
+      const semRevisao = await enforce({ ...cfg, piiMode: 'redact' }).catch((e: unknown) => e);
+      expect(pii.isPiiPolicyError(semRevisao)).toBe(true);
+      const revisado = await enforce({ ...cfg, piiMode: 'redact', allowPii: true });
+      expect(revisado.piiReport).toEqual({
+        mode: 'redact',
+        allowPii: true,
+        fields: [{ path: 'basePrompt', kinds: ['cpf'], verdict: 'bloqueio' }],
+      });
+      expect(JSON.stringify(revisado.piiReport)).not.toContain(CPF_1);
     }
     expect(webLgpd.scanPii).toBe(pii.scanPii); // shim: fonte única
+  });
+});
+
+// ===========================================================================
+// Correções da revisão independente do IMPL-042
+// ===========================================================================
+
+describe('IMPL-042 (revisão) — token é PRF com chave: par conhecido não prevê outro token', () => {
+  it('SHA-256 e HMAC-SHA-256 puros batem com node:crypto (vazio, multi-bloco, chave > 64 bytes, UTF-8)', () => {
+    const enc = (t: string) => new TextEncoder().encode(t);
+    const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
+    const msgs = ['', 'abc', 'x'.repeat(55), 'y'.repeat(56), 'z'.repeat(64), 'w'.repeat(200), 'cpf|52998224725', 'ação — São Paulo'];
+    for (const m of msgs) {
+      expect(hex(pii.sha256(enc(m))), `sha256(${m.slice(0, 12)})`).toBe(createHash('sha256').update(m).digest('hex'));
+      for (const k of ['k', 'chave-secreta', 'K'.repeat(64), 'L'.repeat(130)]) {
+        expect(hex(pii.hmacSha256(enc(k), enc(m)))).toBe(createHmac('sha256', k).update(m).digest('hex'));
+      }
+    }
+    // O token É o HMAC truncado (nada de hash não-criptográfico no caminho).
+    const v = new pii.PiiVault({ key: 'k' });
+    const esperado = createHmac('sha256', 'k').update('cpf|52998224725').digest('hex').slice(0, pii.PII_TOKEN_HEX);
+    expect(v.tokenFor({ kind: 'cpf', text: '529.982.247-25' })).toBe(`[CPF_${esperado}]`);
+  });
+
+  it('o ataque da revisão (inverter FNV-1a a partir de UM par conhecido) não prevê mais nada', () => {
+    // Reprodução do teste de rascunho da revisão: com FNV-1a, o par (CPF que o
+    // próprio provedor gerou → token) devolvia o estado pós-sal e dava o token
+    // de QUALQUER outro CPF. Aqui o mesmo ataque tem de falhar.
+    const P = 0x01000193n;
+    const MOD = 1n << 32n;
+    const inv = (a: bigint, m: bigint): bigint => {
+      let [g, x, g2, x2] = [a, 1n, m, 0n];
+      while (g2 !== 0n) {
+        const q = g / g2;
+        [g, g2] = [g2, g - q * g2];
+        [x, x2] = [x2, x - q * x2];
+      }
+      return ((x % m) + m) % m;
+    };
+    const PINV = inv(P, MOD);
+    const fnvFrom = (h: number, t: string): number => {
+      for (let i = 0; i < t.length; i++) h = Math.imul(h ^ t.charCodeAt(i), 0x01000193) >>> 0;
+      return h >>> 0;
+    };
+    const unfnv = (h: number, t: string): number => {
+      let x = BigInt(h);
+      for (let i = t.length - 1; i >= 0; i--) x = ((x * PINV) % MOD) ^ BigInt(t.charCodeAt(i));
+      return Number(x);
+    };
+    const vault = new pii.PiiVault(); // chave aleatória, como em produção
+    const tok = (cpf: string) => /\[CPF_([0-9a-f]+)\]/.exec(vault.redact(`CPF ${cpf}`).text)![1];
+    const conhecido = '52998224725';
+    const segredo = CPF_1.replace(/\D/g, '');
+    const alvo = tok(segredo);
+    // Tentativas do atacante com o par conhecido: estado pós-"sal" (FNV) e
+    // "hash sem chave" — nenhuma reproduz o token do segredo.
+    for (const sufixo of [`|cpf|${conhecido}`, `cpf|${conhecido}`]) {
+      const estado = unfnv(parseInt(tok(conhecido).slice(0, 8), 16), sufixo);
+      const previsto = fnvFrom(estado, sufixo.replace(conhecido, segredo)).toString(16).padStart(8, '0');
+      expect(alvo.startsWith(previsto)).toBe(false);
+    }
+    expect(alvo).not.toBe(createHash('sha256').update(`cpf|${segredo}`).digest('hex').slice(0, pii.PII_TOKEN_HEX));
+    // Duas instâncias (chaves aleatórias) nunca concordam: não há dicionário
+    // pré-computável do espaço de CPFs.
+    expect(new pii.PiiVault().tokenFor({ kind: 'cpf', text: segredo })).not.toBe(
+      new pii.PiiVault().tokenFor({ kind: 'cpf', text: segredo }),
+    );
+  });
+
+  it('cofre por RUN/SESSÃO: mesmo escopo (e forks do ledger) = mesmo token; runs diferentes = sem ligação', async () => {
+    const fake = fakeOpenRouter({ chat: () => ({ text: 'ok' }) });
+    const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
+    const sessao = new BudgetLedger();
+    const iteracao1 = sessao.fork();
+    const iteracao2 = sessao.fork();
+    const outraRun = new BudgetLedger();
+    const msg = [{ role: 'user' as const, content: `CPF ${CPF_1}` }];
+    for (const sink of [iteracao1, iteracao2, outraRun]) {
+      await gw.chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msg, sink });
+    }
+    const [a, b, c] = fake.chatRequests().map((r) => /\[CPF_[0-9a-f]+\]/.exec(r.user)?.[0]);
+    expect(a).toBeDefined();
+    expect(b).toBe(a); // gabarito da iteração 1 e competidor da 2 seguem comparáveis
+    expect(c).not.toBe(a); // outra run (outro usuário no servidor) não liga ao mesmo titular
+    // O que o ground truth compara localmente usa o MESMO token do envio.
+    expect(gw.pseudonymize(CPF_1, iteracao2)).toBe(a);
+  });
+});
+
+describe('IMPL-042 (revisão) — modo agente fora da cascata ⇒ fail-closed ("só sintético")', () => {
+  const agente = {
+    executor: 'pi',
+    executorVersion: '1.0.0',
+    limits: { maxCostUsd: 1 },
+  } as const;
+  const cfgAgente = {
+    mode: 'variation',
+    theme: 'correção de bug',
+    stages: 1,
+    datagenModelId: 'x/g',
+    judgeModelIds: ['x/j'],
+    contestantModelId: 'x/a',
+    basePrompt: 'Você corrige bugs.',
+    techniqueIds: ['persona', 'constraints'],
+    agent: agente,
+    customStages: [
+      {
+        question: `O cadastro do CPF ${CPF_1} quebra o formulário; corrija.`,
+        productContext: 'Formulário de cadastro.',
+        agentTask: { contextFiles: false, verify: [{ cmd: 'true' }] },
+      },
+    ],
+  };
+
+  it('pré-voo (Node e SPA) recusa mesmo com `allowPii` — nomeia o campo e diz por quê', async () => {
+    for (const enforce of [nodeLgpd.enforceRunCompliance, webLgpd.enforceRunCompliance]) {
+      const erro = await enforce({ ...cfgAgente, allowPii: true } as never).catch((e: unknown) => e);
+      expect(pii.isPiiPolicyError(erro)).toBe(true);
+      expect((erro as Error).message).toMatch(/Modo agente recusou a run/);
+      expect((erro as Error).message).toContain('customStages[0].question (CPF)');
+      expect((erro as Error).message).toMatch(/FORA da cascata/);
+      // Config de agente limpo passa.
+      const limpo = { ...cfgAgente, customStages: [{ ...cfgAgente.customStages[0], question: 'O formulário quebra; corrija.' }] };
+      await expect(enforce(limpo as never)).resolves.toBeDefined();
+    }
+  });
+
+  it('importação: RunConfig de agente e arena-agent-config@1 com dado real são recusados no parse', () => {
+    const cru = parseRunConfig({ ...cfgAgente, allowPii: true });
+    expect(cru.ok).toBe(false);
+    if (!cru.ok) expect(cru.error).toMatch(/Modo agente recusou/);
+    const arquivo = {
+      format: 'arena-agent-config@1',
+      mode: 'compare',
+      theme: 'correção de bug',
+      agent: agente,
+      models: { datagen: 'x/g', judges: ['x/j'], competitors: ['x/a', 'x/b'] },
+      scenarios: [{ question: `Paciente de celular ${CEL_1} não consegue logar.`, agentTask: { verify: [{ cmd: 'true' }] } }],
+    };
+    const lido = parseArenaAgentConfig(arquivo);
+    expect(lido.ok, lido.ok ? '' : lido.error).toBe(true);
+    if (!lido.ok) return;
+    const conv = arenaAgentConfigToRunConfig(lido.config);
+    expect(conv.ok).toBe(false);
+    if (!conv.ok) {
+      expect(conv.error).toMatch(/Modo agente recusou/);
+      expect(conv.error).toMatch(/customStages\[0\]\.question|scenarioSeed\[0\]\.question/);
+    }
+  });
+});
+
+describe('IMPL-042 (revisão) — RunConfig CRU também é importação (CLI/MCP/HTTP)', () => {
+  const FICHA = `Paciente João Silva, CPF ${CPF_1}, celular ${CEL_1}: cadê meu laudo?`;
+  const cru = {
+    mode: 'compare',
+    theme: 'suporte',
+    stages: 1,
+    datagenModelId: 'x/g',
+    judgeModelIds: ['x/j'],
+    competitorModelIds: ['x/a', 'x/b'],
+    customStages: [{ question: FICHA, productContext: 'Laudos em 3 dias.', maxTokens: 200 }],
+  };
+
+  it('parseRunConfig (CLI --config/flags, MCP, rotas de agente) bloqueia nomeando o campo; `allowPii` libera', () => {
+    const r = parseRunConfig(cru);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain('customStages[0].question (nome + CPF + telefone — nomes: não coberto)');
+      expect(r.error).toMatch(/Nada foi enviado/);
+    }
+    const ok = parseRunConfig({ ...cru, allowPii: true });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.config.customStages?.[0].question).toBe(FICHA); // nada corrigido
+    // "só sintético" não aceita a revisão manual.
+    expect(parseRunConfig({ ...cru, allowPii: true, piiMode: 'synthetic' }).ok).toBe(false);
+  });
+
+  it('o schema das rotas HTTP (POST /runs e /sessions) recusa igual', () => {
+    const r = runConfigSchema.safeParse(cru);
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.flatten().formErrors.join(' ')).toContain('customStages[0].question');
+    expect(runConfigSchema.safeParse({ ...cru, allowPii: true }).success).toBe(true);
+  });
+
+  it('`config validate raw.json`: exit 3 (config) com o campo; com `allowPii` no arquivo, válido', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'pb-impl042-cli-'));
+    const antes = getDataDir();
+    const silencio = [
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true),
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true),
+    ];
+    try {
+      const arq = join(tmp, 'raw.json');
+      writeFileSync(arq, JSON.stringify(cru));
+      const erro = await cmdConfig(['validate', arq, '--data-dir', tmp, '--json']).catch((e: unknown) => e);
+      expect(erro).toMatchObject({ code: 3 });
+      expect((erro as Error).message).toContain('customStages[0].question');
+      writeFileSync(arq, JSON.stringify({ ...cru, allowPii: true }));
+      await expect(cmdConfig(['validate', arq, '--data-dir', tmp, '--json'])).resolves.toBe(0);
+    } finally {
+      silencio.forEach((s) => s.mockRestore());
+      setDataDir(antes);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('`runs reproduce` (vista arena-config) preserva `piiMode` e a revisão `allowPii`', () => {
+    const cfg = { ...cru, customStages: undefined, piiMode: 'synthetic', allowPii: true } as unknown as RunConfig;
+    const arena = runConfigToArenaConfig(cfg);
+    expect(arena.piiMode).toBe('synthetic');
+    expect(arena.allowPii).toBe(true);
+    const volta = parseArenaConfig(arena);
+    expect(volta.ok).toBe(true);
+    if (volta.ok) {
+      const conv = arenaConfigToRunConfig(volta.config);
+      expect(conv.ok && conv.config.piiMode).toBe('synthetic');
+    }
+  });
+});
+
+describe('IMPL-042 (revisão) — "ficha" pede identificador FORTE ou ≥2 dados fracos de titular (persona não conta)', () => {
+  const veredito = (t: string) => pii.assessPii(pii.scanPii(t).findings);
+
+  it('personas de duas palavras e contatos comerciais viram só aviso (casos da revisão)', () => {
+    for (const t of [
+      'Você é a Ana Paula, atendente da Clínica Vida, na Rua Augusta, 1500',
+      'Você é o Dr. Carlos Mendes, cardiologista. Agendamentos: (11) 3456-7890',
+      'Você é a Maria Clara, da unidade Paulista (CEP 01310-100)',
+      'Hospital Santa Maria Silva — Av. Brasil, 200',
+    ]) {
+      expect(veredito(t).verdict, t).toBe('aviso');
+    }
+  });
+
+  it('titular com endereço + CEP/fixo, ou com qualquer identificador forte, segue bloqueado', () => {
+    expect(veredito('Olá, sou Carlos Eduardo Lima, moro na Av. Brasil, 1500 (CEP 22148-611).')).toMatchObject({
+      verdict: 'bloqueio',
+      reason: 'ficha',
+    });
+    expect(veredito(`Você é a Ana Paula; o CPF da cliente é ${CPF_1}.`).verdict).toBe('bloqueio');
+    expect(veredito('Paciente Maria Souza, Rua das Flores, 12.').verdict).toBe('aviso'); // 1 dado fraco só
+  });
+});
+
+describe('IMPL-042 (revisão) — fronteira: separador colado na palavra-gatilho', () => {
+  it('"CPF-…", "cpf/…", "CPF.…" e "CNS/…" são detectados e redigidos; gatilho colado em letra não', () => {
+    const v = new pii.PiiVault({ key: 'f' });
+    for (const t of ['CPF-529.982.247-25', 'cpf/52998224725', 'CPF.529.982.247-25', 'RG-12.345.678-9']) {
+      const r = v.redact(`dado: ${t}.`);
+      expect(r.redactions.length, t).toBe(1);
+      expect(r.text).not.toMatch(/529\.?982|12\.345/);
+    }
+    expect(pii.scanPii('Lote XCPF-529.982.247-25').findings).toEqual([]);
+    expect(pii.scanPii('versão 1-529.982.247-25').findings).toEqual([]);
+  });
+});
+
+describe('IMPL-042 (revisão) — ground truth compara no espaço dos tokens', () => {
+  const restaurar: Array<() => void> = [];
+  afterEach(() => {
+    while (restaurar.length) restaurar.pop()!();
+  });
+
+  it('rótulo `expected` com CPF: resposta com o token (o que o modelo viu) ou com o valor derivado resolve', async () => {
+    const fake = fakeOpenRouter({ chat: () => ({ text: 'ok' }) });
+    restaurar.push(((prev) => () => setDefaultGateway(prev))(setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }))));
+    const ledger = new BudgetLedger();
+    const token = pseudonymize(CPF_1, ledger);
+    expect(token).toMatch(/^\[CPF_[0-9a-f]{12}\]$/);
+    const contestants = ['a', 'b', 'c'].map((id) => ({ id, label: id, modelId: `x/${id}` }));
+    const resposta = (id: string, text: string) => ({
+      contestantId: id,
+      modelId: `x/${id}`,
+      text,
+      latencyMs: 1,
+      tokensIn: 1,
+      tokensOut: 1,
+      costUsd: 0,
+      status: 'ok' as const,
+    });
+    const r = await judgeStageReference({
+      stage: { question: `Extraia o CPF de "titular ${CPF_1}"`, productContext: 'x', maxTokens: 50, expected: CPF_1, reference: CPF_1 },
+      responses: [resposta('a', token), resposta('b', CPF_1.replace(/\D/g, '')), resposta('c', 'não sei')],
+      contestants,
+      judgeModelIds: ['x/j'],
+      apiKey: KEY,
+      ctx: { sink: ledger },
+    });
+    expect(r.judgeModelId).toBe('ground-truth');
+    expect(r.verdictByContestant).toEqual({ a: 'resolve', b: 'resolve', c: 'nao' });
+    expect(fake.chatRequests()).toEqual([]); // determinístico: nenhum LLM
+  });
+});
+
+describe('IMPL-042 (revisão) — run avulsa "redigir" revisada grava o relatório no record (Node e SPA)', () => {
+  let tmp: string;
+  let dirAnterior: string;
+  const restaurar: Array<() => void> = [];
+  beforeAll(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'pb-impl042-rep-'));
+    dirAnterior = getDataDir();
+    setDataDir(tmp);
+  });
+  afterEach(() => {
+    while (restaurar.length) restaurar.pop()!();
+  });
+  afterAll(() => {
+    setDataDir(dirAnterior);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('sem revisão: recusa sem chamar LLM; revisada: termina, pseudonimiza e o record diz o que (sem o valor)', async () => {
+    const silencio = [
+      vi.spyOn(console, 'log').mockImplementation(() => undefined),
+      vi.spyOn(console, 'error').mockImplementation(() => undefined),
+    ];
+    try {
+      for (const run of [runNode, runWeb] as const) {
+        const fake = fakeComPii();
+        const anterior = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));
+        restaurar.push(() => setDefaultGateway(anterior));
+        const cfg = {
+          mode: 'compare',
+          theme: 'atendimento de clínica',
+          stages: 1,
+          datagenModelId: M.gen,
+          judgeModelIds: [M.judge],
+          competitorModelIds: [M.a, M.opt],
+          customStages: [
+            { question: `Meu CPF é ${CPF_2}, cadê o laudo?`, productContext: `Central: ${CEL_1}.`, maxTokens: 200 },
+          ],
+          timeoutMs: 5_000,
+        };
+        const recusada = await run(cfg as never, KEY, {});
+        expect(recusada.status).toBe('error');
+        expect(recusada.error).toContain('customStages[0].question (CPF)');
+        expect(fake.chatRequests()).toEqual([]);
+
+        const rec = await run({ ...cfg, allowPii: true } as never, KEY, {});
+        expect(rec.status, rec.error).toBe('finished');
+        expect(fake.chatRequests().length).toBeGreaterThan(0);
+        for (const req of fake.chatRequests()) {
+          for (const cru of [CPF_2, CEL_1, '97351-2846']) expect(JSON.stringify(req.body)).not.toContain(cru);
+        }
+        expect(rec.piiReport).toEqual({
+          mode: 'redact',
+          allowPii: true,
+          fields: [
+            { path: 'customStages[0].question', kinds: ['cpf'], verdict: 'bloqueio' },
+            { path: 'customStages[0].productContext', kinds: ['telefone'], verdict: 'bloqueio' },
+          ],
+        });
+        expect(JSON.stringify(rec.piiReport)).not.toContain(CPF_2);
+        while (restaurar.length) restaurar.pop()!();
+      }
+    } finally {
+      silencio.forEach((s) => s.mockRestore());
+    }
   });
 });

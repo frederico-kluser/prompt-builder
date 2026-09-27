@@ -229,25 +229,36 @@ CLI, no servidor e na SPA — passa por uma **cascata PT-BR** no ponto único do
 
 1. **Identificadores estruturados** (regex + dígito verificador mod-11 onde existe): CPF, CNPJ
    (inclusive o **alfanumérico** de jul/2026), CNS, RG, CEP, telefone, e-mail e CRM saem
-   **pseudonimizados** com token estável por processo/aba (`[CPF_1a2b3c4d]` — o mesmo documento em
-   qualquer formatação vira o mesmo token; o sal é secreto, então o token não é revertido).
-   Placeholders (`(11) 99999-9999`), exemplos notórios e números de serviço (0800/4004) não mexem.
-2. **Nomes e endereços** (heurística local): detectados e contados, **não reescritos** —
-   marcados **"não coberto"**: não há promessa de recall (a literatura mede ~49% para nomes em
-   texto livre). Se os seus dados têm nomes reais, use o modo "só sintético".
+   **pseudonimizados** (`[CPF_1a2b3c4d5e6f]` — o mesmo documento em qualquer formatação vira o
+   mesmo token). O token é **HMAC-SHA-256 com chave secreta de 256 bits por run/sessão**: conhecer
+   pares valor→token (o CPF que o próprio modelo gerou volta pseudonimizado) não permite prever
+   nem reverter outro token, e runs diferentes não se ligam pelo mesmo titular. Placeholders
+   (`(11) 99999-9999`), exemplos notórios e números de serviço (0800/4004) não mexem.
+2. **Nomes e endereços** (heurística local de dicionário + gatilhos — **não** um NER): detectados
+   e contados, **não reescritos** — marcados **"não coberto"**: não há promessa de recall (a
+   literatura mede ~49% para nomes em texto livre). Se os seus dados têm nomes reais, use o modo
+   "só sintético".
 3. **Aparência de dado real** ⇒ **bloqueio com aviso nomeando o campo**, nunca correção silenciosa:
-   identificador forte realista (CPF, CNS, RG, CRM, celular, e-mail pessoal) ou "ficha" (nome junto
-   de outro dado pessoal). Vale na **importação** (JSON de cenários, pacote, `arena-config@1` na
-   SPA/CLI/MCP e `library add`); depois de revisar, dá para importar mesmo assim (botão na SPA,
-   `allowPii` na API) — os identificadores seguem pseudonimizados no envio.
+   identificador forte realista (CPF, CNS, RG, CRM, celular, e-mail pessoal) ou "ficha" de titular
+   (nome + identificador forte, ou nome + ≥2 dados fracos como endereço + CEP). Nome de **persona**
+   do prompt ("Você é a Ana Paula, atendente… Rua Augusta, 1500") e contato comercial viram só
+   aviso. Vale na **importação** — JSON de cenários, pacote, `arena-config@1`, `arena-agent-config@1`
+   e **RunConfig cru** (CLI `--config`/flags, `estimate`, `config validate`, MCP, `POST /runs` e
+   `/sessions`) e `library add` — e de novo no **pré-voo** da run (SPA inclusive).
 
-**Modo "só sintético"** (`piiMode: "synthetic"` no config; switch em Avançado na Nova Run): a
-run/sessão é **recusada no pré-voo**, antes de qualquer LLM, se qualquer campo fornecido tiver
-dado de aparência real — sem exceção manual. Medido na fixture própria
-[`test/fixtures/pii-ptbr.json`](./test/fixtures/pii-ptbr.json) (333 casos): recall 0,98 e
-precisão 1,00 nos estruturados, 0% de falso positivo no bloqueio da importação
-(`test/lgpd-pii.test.ts`). ⚠️ O modo agente (executor `pi`) fala com o provedor por conta própria
-e fica **fora** desta cascata.
+**Modo "redigir"** (padrão): o bloqueio acima exige **revisão explícita** — `allowPii: true` no
+config (CLI `--allow-pii`; SPA: "Revisei — importar/iniciar mesmo assim"). Revisado, os
+identificadores seguem pseudonimizados no envio e o record guarda em `piiReport` os campos achados
+(caminho + tipos, **nunca o valor**); o CLI narra o mesmo no stderr. Nomes em texto livre seguem
+como estão. **Modo "só sintético"** (`piiMode: "synthetic"`; `--pii-mode synthetic`; switch em
+Avançado na Nova Run): a run/sessão é **recusada**, antes de qualquer LLM, sem exceção manual. O
+**modo agente** (executor `pi`, que fala com o provedor por conta própria, fora do gateway) é
+sempre tratado como "só sintético" — fail-closed. O ground truth determinístico (`expected`)
+compara no espaço dos tokens, igual ao que o modelo viu.
+
+Medido na fixture própria [`test/fixtures/pii-ptbr.json`](./test/fixtures/pii-ptbr.json)
+(344 casos): recall 0,98 e precisão 1,00 nos estruturados, 0% de falso positivo no bloqueio
+(`test/lgpd-pii.test.ts`).
 
 Detalhes para agentes na memória CoALA do projeto (`coala.py search "lgpd"`).
 

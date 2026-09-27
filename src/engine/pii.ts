@@ -23,10 +23,17 @@
 //      a revisão humana.
 //
 // O que o gateway faz com isso: pseudonimiza os identificadores ESTRUTURADOS
-// realistas com um token estável por instância (`[CPF_1a2b3c4d]` — mesmo
-// valor ⇒ mesmo token, em qualquer formatação), e só CONTA os achados
-// contextuais: reescrever prompt com base numa heurística de nome mudaria o
-// benchmark em silêncio (persona "Maria Clara" virando token).
+// realistas com um token estável por run/sessão (`[CPF_1a2b3c4d5e6f]` — mesmo
+// valor ⇒ mesmo token, em qualquer formatação; HMAC-SHA-256 com chave secreta
+// por escopo, não reversível nem previsível a partir de pares conhecidos), e só
+// CONTA os achados contextuais: reescrever prompt com base numa heurística de
+// nome mudaria o benchmark em silêncio (persona "Maria Clara" virando token).
+//
+// ⚠️ Desvio registrado da ação do item: a camada 2 é heurística de dicionário +
+// gatilhos, NÃO um NER/LLM local — e por isso nomes nunca são redigidos, só
+// contados e (com identificador forte ou ≥2 dados fracos) bloqueados na
+// importação/pré-voo. Um NER local pode entrar atrás de `detectContextual` sem
+// mudar o contrato (`PiiFinding` com `coverage: 'nao-coberto'`).
 // ===========================================================================
 
 export type PiiKind =
@@ -101,7 +108,7 @@ export interface PiiFinding {
    */
   realistic: boolean;
   coverage: PiiCoverage;
-  /** telefone: 'celular' | 'fixo'; e-mail: 'pessoal' | 'funcional'. */
+  /** telefone: 'celular' | 'fixo'; e-mail: 'pessoal' | 'funcional'; nome: 'persona' (papel do modelo). */
   detail?: string;
 }
 
@@ -189,8 +196,12 @@ function contextBefore(text: string, index: number, re: RegExp, window = 32): bo
 }
 
 // Fronteiras: não pode estar colado em letra/dígito, nem continuar como parte
-// de um número maior (1.234.567-89.0, 12345-678/9 etc.).
-const L = String.raw`(?<![\p{L}\p{N}.\-\/])`;
+// de um número maior (1.234.567-89.0, 12345-678/9 etc.). EXCEÇÃO: `.`, `-` ou
+// `/` logo depois de uma palavra-gatilho inteira ("CPF-529.982.247-25",
+// "cpf/52998224725", "CNS.898…") é separador, não parte de número — sem ela o
+// documento seguia cru justamente quando o rótulo está colado nele.
+const TRIGGER = String.raw`(?:[Cc][Pp][Ff]|[Cc][Nn][Pp][Jj]|[Cc][Nn][Ss]|[Rr][Gg]|[Cc][Ee][Pp])`;
+const L = String.raw`(?:(?<![\p{L}\p{N}.\-\/])|(?<=(?<![\p{L}\p{N}])${TRIGGER}[.\-\/]))`;
 const R = String.raw`(?![\p{L}\p{N}]|[.\-\/]\p{N})`;
 
 const CTX_CNPJ = /\bcnpj\b/iu;
@@ -492,7 +503,24 @@ function words(seq: string): string[] {
   return seq.split(/\s+/).filter((w) => !/^(d[aeo]s?|e)$/.test(w));
 }
 
-function contextualCand(kind: PiiKind, raw: string, start: number, evidence: PiiEvidence): Candidate {
+// Nome de PERSONA do prompt ("Você é a Ana Paula, atendente…", "Atenda como a
+// atendente virtual Bia", "Você é o Dr. Carlos Mendes") é papel do modelo, não
+// titular de dado: conta como nome (aviso), mas não forma "ficha" com o
+// endereço/telefone comercial da persona. Gatilho olhado só ANTES do nome.
+const PERSONA_CUE =
+  /(?:voc[eê]\s+(?:[eé]|ser[aá]|vai\s+ser|atua\s+como|interpreta)|seu\s+nome\s+(?:[eé]|ser[aá])|atenda\s+como|aja\s+como|responda\s+como|assistente(?:\s+virtual)?|atendente(?:\s+virtual)?|persona(?:gem)?|chatbot|rob[oô])(?:\s+(?:o|a|um|uma|chamad[oa]|de\s+nome))?\s*(?:(?:Sr|Sra|Srta|Dr|Dra|Prof|Profa)\.?\s*)?[,:\-–—]?\s*$/iu;
+
+function isPersonaName(text: string, start: number): boolean {
+  return PERSONA_CUE.test(text.slice(Math.max(0, start - 48), start));
+}
+
+function contextualCand(
+  kind: PiiKind,
+  raw: string,
+  start: number,
+  evidence: PiiEvidence,
+  detail?: string,
+): Candidate {
   return {
     kind,
     layer: 'contextual',
@@ -502,8 +530,13 @@ function contextualCand(kind: PiiKind, raw: string, start: number, evidence: Pii
     evidence,
     realistic: true,
     coverage: PII_COVERAGE[kind],
+    ...(detail ? { detail } : {}),
     rank: EVIDENCE_RANK[evidence],
   };
+}
+
+function nameCand(text: string, raw: string, start: number, evidence: PiiEvidence): Candidate {
+  return contextualCand('nome', raw, start, evidence, isPersonaName(text, start) ? 'persona' : undefined);
 }
 
 /** Corta a sequência no primeiro termo que não é nome (NOT_NAME). */
@@ -526,7 +559,7 @@ function detectContextual(text: string): Candidate[] {
   while ((m = TITLE_CUE.exec(text)) !== null) {
     const seq = trimNameSeq(m[1]);
     if (!seq) continue;
-    out.push(contextualCand('nome', seq, m.index + m[0].indexOf(m[1]), 'contexto'));
+    out.push(nameCand(text, seq, m.index + m[0].indexOf(m[1]), 'contexto'));
   }
 
   WORD_CUE.lastIndex = 0;
@@ -535,7 +568,7 @@ function detectContextual(text: string): Candidate[] {
     const ws = words(seq).map(fold);
     // "Cliente Premium" não; "paciente Maria", "cliente Souza" sim.
     if (!seq || !ws.some((w) => FIRST_NAMES.has(w) || SURNAMES.has(w))) continue;
-    out.push(contextualCand('nome', seq, m.index + m[0].indexOf(m[1]), 'contexto'));
+    out.push(nameCand(text, seq, m.index + m[0].indexOf(m[1]), 'contexto'));
   }
 
   NAME_RUN.lastIndex = 0;
@@ -551,7 +584,7 @@ function detectContextual(text: string): Candidate[] {
     if (ws.length < 2) continue;
     const second = fold(ws[1]);
     if (NOT_NAME.has(second)) continue;
-    out.push(contextualCand('nome', seq, m.index, 'heuristica'));
+    out.push(nameCand(text, seq, m.index, 'heuristica'));
   }
 
   STREET.lastIndex = 0;
@@ -623,18 +656,33 @@ export interface PiiAssessment {
   reason?: 'identificador' | 'ficha';
 }
 
+/** Dado pessoal FRACO: sozinho é típico de empresa (endereço, CEP, telefone fixo). */
+function isWeakPersonal(f: PiiFinding): boolean {
+  if (!f.realistic) return false;
+  if (f.kind === 'endereco' || f.kind === 'cep') return true;
+  return f.kind === 'telefone' && f.detail === 'fixo';
+}
+
 /**
- * Heurística de "aparência de dado real" de UM campo. Bloqueia quando há
- * identificador forte realista (CPF, CNS, RG, CRM, celular, e-mail pessoal) ou
- * uma "ficha": nome junto de outro dado pessoal realista. CNPJ, CEP, fixo e
- * endereço sozinhos (dado típico de EMPRESA num contexto de produto) e nome
- * sozinho (persona) viram só aviso.
+ * Heurística de "aparência de dado real" de UM campo. BLOQUEIA quando há:
+ *  - identificador forte realista (CPF, CNS, RG, CRM, celular, e-mail pessoal)
+ *    — com nome junto, o motivo vira "ficha" (o nome não é redigido);
+ *  - "ficha fraca": nome de TITULAR (não de persona do prompt) com ≥2 tipos
+ *    fracos distintos (endereço + CEP, endereço + telefone fixo…) — o
+ *    cadastro de quem "mora na Rua X, CEP Y".
+ * Nome + UM dado fraco, nome de persona ("Você é a Ana Paula, atendente…,
+ * Rua Augusta, 1500"), CNPJ, e-mail funcional e endereço/CEP/fixo sozinhos
+ * (dado típico de EMPRESA num prompt de produto) viram só AVISO.
  */
 export function assessPii(findings: PiiFinding[]): PiiAssessment {
   const reais = findings.filter((f) => f.realistic);
   const kinds = [...new Set(reais.map((f) => f.kind))];
-  if (reais.some(isStrong)) return { verdict: 'bloqueio', kinds, reason: 'identificador' };
-  if (kinds.includes('nome') && kinds.length >= 2) return { verdict: 'bloqueio', kinds, reason: 'ficha' };
+  const titulares = reais.filter((f) => f.kind === 'nome' && f.detail !== 'persona');
+  if (reais.some(isStrong)) {
+    return { verdict: 'bloqueio', kinds, reason: titulares.length ? 'ficha' : 'identificador' };
+  }
+  const fracos = new Set(reais.filter(isWeakPersonal).map((f) => f.kind));
+  if (titulares.length && fracos.size >= 2) return { verdict: 'bloqueio', kinds, reason: 'ficha' };
   return { verdict: reais.length ? 'aviso' : 'limpo', kinds };
 }
 
@@ -739,20 +787,30 @@ export function checkImportPii(value: unknown, root = '', opts: ScanObjectOption
     message:
       `Importação bloqueada (LGPD): dado pessoal com aparência de dado real em ${blocked.length} campo(s) — ` +
       `${listFields(blocked)}. Revise o arquivo e use dados sintéticos (documento com dígito verificador ` +
-      `inválido ou mascarado, ex.: ***.***.***-**). Nada foi corrigido automaticamente.`,
+      `inválido ou mascarado, ex.: ***.***.***-**). Nada foi corrigido automaticamente. Se revisou e pode ` +
+      `seguir, reimporte com \`allowPii\` (CLI: \`--allow-pii\`): os identificadores saem pseudonimizados ` +
+      `no envio; nomes em texto livre não são cobertos.`,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Modo da run: "redigir" (default) × "só sintético"
+// Modo da run: "redigir" (default) × "só sintético" — e o modo agente
 // ---------------------------------------------------------------------------
 
 /**
  * - `redact` (default): identificadores estruturados são pseudonimizados no
- *   gateway antes de TODA chamada; nomes em texto livre NÃO são cobertos.
- * - `synthetic` ("só sintético"): além disso, a run é RECUSADA no pré-voo se
- *   qualquer campo fornecido pelo usuário tiver aparência de dado real — sem
- *   exceção manual. É o default recomendado pela R-16 para quem tem nomes.
+ *   gateway antes de TODA chamada; nomes em texto livre NÃO são cobertos. Dado
+ *   de aparência real num campo do config RECUSA a run até o usuário confirmar
+ *   que revisou (`allowPii: true`) — pseudonimizar sem avisar seria correção
+ *   silenciosa, e o nome junto do documento nem é redigido.
+ * - `synthetic` ("só sintético"): a run é RECUSADA no pré-voo se qualquer
+ *   campo fornecido pelo usuário tiver aparência de dado real — sem exceção
+ *   manual (`allowPii` é ignorado). É o default recomendado pela R-16 para
+ *   quem tem nomes.
+ * - Modo AGENTE (`config.agent`): o executor (`pi`) recebe a tarefa e o prompt
+ *   e fala com o provedor POR CONTA PRÓPRIA, fora do gateway — a cascata não o
+ *   alcança. Por isso é tratado como "só sintético" (fail-closed), qualquer que
+ *   seja o `piiMode`/`allowPii` declarado.
  */
 export type PiiMode = 'redact' | 'synthetic';
 
@@ -760,10 +818,17 @@ export const PII_MODES: readonly PiiMode[] = ['redact', 'synthetic'];
 
 export interface PiiConfigLike {
   piiMode?: PiiMode;
+  /** O usuário revisou o dado de aparência real e confirmou que pode seguir (pseudonimizado). */
+  allowPii?: boolean;
+  /** Presente = modo agente (executor fora da cascata). */
+  agent?: unknown;
 }
 
 export interface RunPiiCheck {
   mode: PiiMode;
+  /** Modo agente: tratado como "só sintético" (a cascata não alcança o executor). */
+  agent: boolean;
+  allowPii: boolean;
   blocked: PiiFieldReport[];
   warnings: PiiFieldReport[];
 }
@@ -780,12 +845,14 @@ export function checkRunPii(cfg: PiiConfigLike & object): RunPiiCheck {
   const reports = scanObjectPii(cfg);
   return {
     mode,
+    agent: cfg.agent !== undefined && cfg.agent !== null,
+    allowPii: cfg.allowPii === true,
     blocked: reports.filter((r) => r.assessment.verdict === 'bloqueio'),
     warnings: reports.filter((r) => r.assessment.verdict === 'aviso'),
   };
 }
 
-/** Erro de POLÍTICA (não de rede): a run "só sintético" não pode começar. */
+/** Erro de POLÍTICA (não de rede): a run não pode começar com esse dado. */
 export class PiiPolicyError extends Error {
   readonly code = 'PII_POLICY';
   readonly fields: PiiFieldReport[];
@@ -802,24 +869,81 @@ export function isPiiPolicyError(err: unknown): err is PiiPolicyError {
   return Boolean(err && typeof err === 'object' && (err as { code?: unknown }).code === 'PII_POLICY');
 }
 
+/** Por que a run seria recusada (ou `null` se pode seguir). */
+export type RunPiiRefusal = 'synthetic' | 'agent' | 'unreviewed';
+
+export function runPiiRefusal(check: RunPiiCheck): RunPiiRefusal | null {
+  if (!check.blocked.length) return null;
+  if (check.mode === 'synthetic') return 'synthetic';
+  if (check.agent) return 'agent';
+  return check.allowPii ? null : 'unreviewed';
+}
+
+/** Mensagem PT-BR da recusa — sempre NOMEIA os campos. */
 export function runPiiMessage(check: RunPiiCheck): string {
-  return (
-    `Modo "só sintético" recusou a run: dado pessoal com aparência de dado real em ` +
-    `${check.blocked.length} campo(s) — ${listFields(check.blocked)}. Troque por dados sintéticos ` +
-    `ou use o modo "redigir" (identificadores pseudonimizados no envio; nomes não cobertos).`
-  );
+  const campos = `${check.blocked.length} campo(s) — ${listFields(check.blocked)}`;
+  switch (runPiiRefusal(check)) {
+    case 'agent':
+      return (
+        `Modo agente recusou a run: dado pessoal com aparência de dado real em ${campos}. ` +
+        `O executor do agente fala com o provedor por conta própria, FORA da cascata de dado ` +
+        `pessoal — por isso o modo agente é "só sintético", sem exceção manual. Troque por dados sintéticos.`
+      );
+    case 'unreviewed':
+      return (
+        `Dado pessoal com aparência de dado real em ${campos}. Nada foi enviado. Se você revisou e ` +
+        `pode seguir, confirme com \`allowPii: true\` no config (CLI: \`--allow-pii\`; Nova Run: ` +
+        `"Revisei — iniciar mesmo assim"): CPF, telefone, e-mail e demais identificadores saem ` +
+        `pseudonimizados no envio, mas nomes em texto livre NÃO são cobertos e seguem como estão. ` +
+        `Ou troque por dados sintéticos (documento com dígito verificador inválido ou mascarado).`
+      );
+    default:
+      return (
+        `Modo "só sintético" recusou a run: dado pessoal com aparência de dado real em ${campos}. ` +
+        `Troque por dados sintéticos ou use o modo "redigir" (identificadores pseudonimizados no ` +
+        `envio; nomes não cobertos).`
+      );
+  }
 }
 
 /**
- * Pré-voo (antes de qualquer LLM): no modo "só sintético" lança
- * `PiiPolicyError` nomeando os campos. No modo "redigir" só relata.
+ * Pré-voo (antes de qualquer LLM), MESMA regra do schema de importação:
+ * lança `PiiPolicyError` nomeando os campos quando a run não pode seguir
+ * ("só sintético", modo agente, ou "redigir" sem revisão). Senão devolve o
+ * relatório (o orquestrador o grava no record: campos + tipos, nunca valores).
  */
 export function assertRunPii(cfg: PiiConfigLike & object): RunPiiCheck {
   const check = checkRunPii(cfg);
-  if (check.mode === 'synthetic' && check.blocked.length) {
-    throw new PiiPolicyError(runPiiMessage(check), check.blocked);
-  }
+  if (runPiiRefusal(check)) throw new PiiPolicyError(runPiiMessage(check), check.blocked);
   return check;
+}
+
+/** Resumo gravável no RunRecord: caminho + tipos + veredito — NUNCA o valor. */
+export interface PiiRunReport {
+  mode: PiiMode;
+  /** O usuário confirmou (`allowPii`) o dado de aparência real listado em `fields`. */
+  allowPii: boolean;
+  fields: { path: string; kinds: PiiKind[]; verdict: 'aviso' | 'bloqueio' }[];
+}
+
+export function summarizeRunPii(check: RunPiiCheck): PiiRunReport | undefined {
+  const fields = [...check.blocked, ...check.warnings].map((r) => ({
+    path: r.path,
+    kinds: r.assessment.kinds,
+    verdict: r.assessment.verdict as 'aviso' | 'bloqueio',
+  }));
+  if (!fields.length) return undefined;
+  return { mode: check.mode, allowPii: check.allowPii, fields };
+}
+
+/** Uma linha PT-BR para o CLI/UI: o que será pseudonimizado e o que não é coberto. */
+export function describeRunPii(check: RunPiiCheck): string | null {
+  const todos = [...check.blocked, ...check.warnings];
+  if (!todos.length) return null;
+  return (
+    `Dado pessoal em ${todos.length} campo(s) — ${listFields(todos)}: identificadores saem ` +
+    `pseudonimizados antes de cada envio ao modelo; nomes/endereços em texto livre não são cobertos.`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -856,22 +980,112 @@ function canonical(f: Pick<PiiFinding, 'kind' | 'text'>): string {
   }
 }
 
-function fnv1a(s: string, seed = 0x811c9dc5): number {
-  let h = seed >>> 0;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
+// --- HMAC-SHA-256 (puro, síncrono: o gateway monta o corpo sem `await`) -----
+//
+// O token de um identificador é uma PRF com chave: HMAC-SHA-256(chave, tipo|valor),
+// truncado. NÃO pode ser um hash não-criptográfico com sal (a 1ª versão usava
+// FNV-1a): FNV é inversível passo a passo, então UM par conhecido valor→token
+// (o CPF que o próprio provedor gerou no datagen volta pseudonimizado nas
+// chamadas seguintes) revelava o estado pós-sal e permitia calcular o token de
+// qualquer CPF — e reverter tudo por enumeração (10^9 bases). Com HMAC, conhecer
+// pares não ajuda a prever outro token sem a chave (256 bits, CSPRNG).
+
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+const rotr = (x: number, n: number): number => (x >>> n) | (x << (32 - n));
+
+/** SHA-256 (FIPS 180-4). Exportado só para o teste cruzar com `node:crypto`. */
+export function sha256(msg: Uint8Array): Uint8Array {
+  const len = msg.length;
+  const padded = new Uint8Array(((len + 9 + 63) >> 6) << 6);
+  padded.set(msg);
+  padded[len] = 0x80;
+  const dv = new DataView(padded.buffer);
+  const bits = len * 8;
+  dv.setUint32(padded.length - 8, Math.floor(bits / 0x100000000));
+  dv.setUint32(padded.length - 4, bits >>> 0);
+  const h = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]);
+  const w = new Uint32Array(64);
+  for (let off = 0; off < padded.length; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);
+    for (let i = 16; i < 64; i++) {
+      const a = w[i - 15];
+      const b = w[i - 2];
+      const s0 = rotr(a, 7) ^ rotr(a, 18) ^ (a >>> 3);
+      const s1 = rotr(b, 17) ^ rotr(b, 19) ^ (b >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, hh] = h;
+    for (let i = 0; i < 64; i++) {
+      const t1 = (hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i]) >>> 0;
+      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+      hh = g;
+      g = f;
+      f = e;
+      e = (d + t1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (t1 + t2) >>> 0;
+    }
+    h[0] = (h[0] + a) >>> 0;
+    h[1] = (h[1] + b) >>> 0;
+    h[2] = (h[2] + c) >>> 0;
+    h[3] = (h[3] + d) >>> 0;
+    h[4] = (h[4] + e) >>> 0;
+    h[5] = (h[5] + f) >>> 0;
+    h[6] = (h[6] + g) >>> 0;
+    h[7] = (h[7] + hh) >>> 0;
   }
-  return h >>> 0;
+  const out = new Uint8Array(32);
+  const odv = new DataView(out.buffer);
+  for (let i = 0; i < 8; i++) odv.setUint32(i * 4, h[i]);
+  return out;
 }
 
-function randomSalt(): string {
-  const c = (globalThis as { crypto?: { getRandomValues?: (a: Uint32Array) => Uint32Array } }).crypto;
-  const buf = new Uint32Array(4);
-  if (c?.getRandomValues) c.getRandomValues(buf);
-  else for (let i = 0; i < buf.length; i++) buf[i] = Math.floor(Math.random() * 0x100000000);
-  return Array.from(buf, (n) => n.toString(16).padStart(8, '0')).join('');
+const utf8 = (s: string): Uint8Array => new TextEncoder().encode(s);
+
+/** HMAC-SHA-256 (RFC 2104). Exportado só para o teste cruzar com `node:crypto`. */
+export function hmacSha256(key: Uint8Array, msg: Uint8Array): Uint8Array {
+  const k = key.length > 64 ? sha256(key) : key;
+  const inner = new Uint8Array(64 + msg.length);
+  const outer = new Uint8Array(64 + 32);
+  for (let i = 0; i < 64; i++) {
+    const b = i < k.length ? k[i] : 0;
+    inner[i] = b ^ 0x36;
+    outer[i] = b ^ 0x5c;
+  }
+  inner.set(msg, 64);
+  outer.set(sha256(inner), 64);
+  return sha256(outer);
 }
+
+const toHex = (bytes: Uint8Array): string => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+
+/** Chave de 256 bits do CSPRNG (Node ≥20 e navegadores têm `crypto.getRandomValues`). */
+function randomKey(): Uint8Array {
+  const c = (globalThis as { crypto?: { getRandomValues?: <T extends ArrayBufferView>(a: T) => T } }).crypto;
+  const buf = new Uint8Array(32);
+  if (c?.getRandomValues) return c.getRandomValues(buf);
+  // Sem CSPRNG (ambiente fora do `engines`): melhor que nada, e o teste de
+  // pseudonimização roda com o CSPRNG de verdade.
+  for (let i = 0; i < buf.length; i++) buf[i] = Math.floor(Math.random() * 256);
+  return buf;
+}
+
+/** Hex do token: 48 bits — colisão desprezível no escopo de uma run/sessão. */
+export const PII_TOKEN_HEX = 12;
 
 export interface PiiRedaction {
   kind: PiiKind;
@@ -889,26 +1103,27 @@ export interface RedactResult {
 
 export interface PiiVaultOptions {
   /**
-   * Sal do token. Default: aleatório por instância — sem ele, o hash de um CPF
-   * (espaço de 10^9) seria revertido por força bruta pelo provedor.
+   * Chave do HMAC. Default: 256 bits aleatórios por cofre (e há um cofre por
+   * run/sessão no gateway). Fixar a chave é só para teste.
    */
-  salt?: string;
+  key?: string;
 }
 
 /**
- * Cofre de pseudônimos: token ESTÁVEL por instância (mesmo valor ⇒ mesmo
- * token em toda a run, em qualquer papel), sem guardar o valor em claro — o
- * token é hash com sal secreto, então não há mapa que cresça nem que vaze.
+ * Cofre de pseudônimos: token ESTÁVEL no escopo do cofre (mesmo valor ⇒ mesmo
+ * token em todos os papéis da run, em qualquer formatação), sem guardar o valor
+ * em claro — o token é HMAC-SHA-256 com chave secreta, então não há mapa que
+ * cresça nem que vaze, e um par conhecido valor→token não prevê nenhum outro.
  */
 export class PiiVault {
-  private readonly salt: string;
+  private readonly key: Uint8Array;
   constructor(opts: PiiVaultOptions = {}) {
-    this.salt = opts.salt ?? randomSalt();
+    this.key = opts.key !== undefined ? utf8(opts.key) : randomKey();
   }
 
   tokenFor(f: Pick<PiiFinding, 'kind' | 'text'>): string {
-    const h = fnv1a(`${this.salt}|${f.kind}|${canonical(f)}`).toString(16).padStart(8, '0');
-    return `[${TOKEN_LABEL[f.kind]}_${h}]`;
+    const mac = hmacSha256(this.key, utf8(`${f.kind}|${canonical(f)}`));
+    return `[${TOKEN_LABEL[f.kind]}_${toHex(mac).slice(0, PII_TOKEN_HEX)}]`;
   }
 
   /** Redige os identificadores ESTRUTURADOS realistas de um texto. */
@@ -928,6 +1143,23 @@ export class PiiVault {
     out += text.slice(cursor);
     return { text: out, redactions, contextualSeen: contextual.length };
   }
+
+  /**
+   * Pseudonimiza toda string de um valor (string, lista, objeto plano) com os
+   * MESMOS tokens do envio — p/ comparar localmente com o que o modelo viu
+   * (ex.: rótulo `expected` do ground truth contra a resposta com token).
+   */
+  redactDeep<T>(value: T): T {
+    const visit = (v: unknown, depth: number): unknown => {
+      if (typeof v === 'string') return this.redact(v).text;
+      if (depth > 8 || v === null || typeof v !== 'object') return v;
+      if (Array.isArray(v)) return v.map((x) => visit(x, depth + 1));
+      const out: Record<string, unknown> = {};
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[k] = visit(x, depth + 1);
+      return out;
+    };
+    return visit(value, 0) as T;
+  }
 }
 
 export interface PiiGuardStats {
@@ -943,11 +1175,20 @@ export interface PiiGuardStats {
 
 /**
  * O guarda do gateway: TODA lista de mensagens passa por `protect` antes de
- * virar corpo de requisição. Mantém contadores por instância (1 por processo
- * ou aba) — é o que o teste usa para provar que nenhuma chamada escapa.
+ * virar corpo de requisição. Contadores por instância (1 por processo ou aba)
+ * — é o que o teste usa para provar que nenhuma chamada escapa.
+ *
+ * Cofre por ESCOPO: o gateway passa a raiz do ledger da chamada (a run avulsa,
+ * ou a sessão de treino inteira), então cada run/sessão tem chave própria — o
+ * mesmo CPF vira tokens diferentes em runs de usuários diferentes no servidor
+ * (sem ligação entre elas), mas o MESMO token em todos os papéis e iterações da
+ * sessão (gabarito, competidor e juiz continuam comparáveis). Chamada sem
+ * escopo (utilitários avulsos) usa o cofre da instância.
  */
 export class PiiGuard {
   readonly vault: PiiVault;
+  private readonly opts: PiiVaultOptions;
+  private readonly scoped = new WeakMap<object, PiiVault>();
   private readonly counters: PiiGuardStats = {
     scannedCalls: 0,
     scannedMessages: 0,
@@ -957,16 +1198,30 @@ export class PiiGuard {
   };
 
   constructor(opts: PiiVaultOptions = {}) {
+    this.opts = opts;
     this.vault = new PiiVault(opts);
   }
 
-  protect<M extends { content: string }>(messages: readonly M[]): M[] {
+  /** O cofre do escopo (criado na 1ª chamada; some com o escopo — WeakMap). */
+  vaultFor(scope?: object): PiiVault {
+    if (!scope) return this.vault;
+    let v = this.scoped.get(scope);
+    if (!v) {
+      // Chave fixa (só teste) ⇒ todos os escopos a usam; senão, chave nova por escopo.
+      v = new PiiVault(this.opts.key !== undefined ? this.opts : {});
+      this.scoped.set(scope, v);
+    }
+    return v;
+  }
+
+  protect<M extends { content: string }>(messages: readonly M[], scope?: object): M[] {
     this.counters.scannedCalls += 1;
+    const vault = this.vaultFor(scope);
     let redigiu = false;
     const out = messages.map((msg) => {
       this.counters.scannedMessages += 1;
       if (typeof msg.content !== 'string' || !msg.content) return msg;
-      const r = this.vault.redact(msg.content);
+      const r = vault.redact(msg.content);
       this.counters.contextualSeen += r.contextualSeen;
       if (!r.redactions.length) return msg;
       redigiu = true;

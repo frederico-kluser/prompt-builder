@@ -507,8 +507,9 @@ export async function cmdLgpd(argv: string[]): Promise<number> {
     // IMPL-042: o que a cascata de dado pessoal cobre (e o que NÃO cobre).
     ctx.out.info(
       'Dado pessoal: CPF/CNPJ/CNS (dígito verificador), RG, CEP, telefone, e-mail e CRM são pseudonimizados ' +
-        'antes de TODA chamada de LLM; nomes/endereços em texto livre: não coberto. `piiMode: "synthetic"` ' +
-        'recusa a run com dado de aparência real.',
+        'antes de TODA chamada de LLM; nomes/endereços em texto livre: não coberto. Dado de aparência real ' +
+        'no config recusa a run até a revisão (`--allow-pii`); `--pii-mode synthetic` e o modo agente ' +
+        'recusam sem exceção.',
     );
   }
   ctx.out.result(true, 'lgpd.areas', {

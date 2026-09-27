@@ -56,8 +56,8 @@
   {
     "topic": "troubleshooting",
     "title": "Problemas comuns",
-    "summary": "400 no esforço, 402 sem crédito, tudo 'parcial', run travada",
-    "approxTokens": 650
+    "summary": "400 no esforço, 402 sem crédito, dado pessoal recusado (--allow-pii/--pii-mode), tudo 'parcial', run travada",
+    "approxTokens": 950
   },
   {
     "topic": "config",

@@ -63,6 +63,7 @@ export {
   computeCost,
   chatCompletion,
   chatCompletionStream,
+  pseudonymize,
   primeModelsCache,
   peekModelsCache,
   currentConcurrency,
@@ -86,6 +87,9 @@ export {
   checkImportPii,
   checkRunPii,
   assertRunPii,
+  runPiiRefusal,
+  runPiiMessage,
+  summarizeRunPii,
   isPiiPolicyError,
   createPiiGuard,
   PiiGuard,
@@ -103,6 +107,7 @@ export type {
   PiiImportCheck,
   PiiGuardStats,
   PiiFieldReport,
+  PiiRunReport,
 } from './engine/pii.js';
 export { gatewayConfigFromEnv, configureGatewayFromEnv } from './gatewayEnv.js';
 export type { ChatCompletionParams, ChatCompletionResult, KeyInfo } from './openrouter.js';

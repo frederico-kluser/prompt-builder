@@ -387,6 +387,11 @@ export function NewRun() {
   // Importação bloqueada por dado pessoal: o arquivo fica pendente até o usuário
   // revisar (nunca corrigimos em silêncio) — ele pode confirmar e importar.
   const [piiImport, setPiiImport] = useState<{ file: File; message: string } | null>(null);
+  // Dado de aparência real nos campos no modo "redigir": a run só sai depois da
+  // revisão explícita (vira `allowPii: true` no config). Ref = leitura síncrona
+  // no submit disparado pelo próprio botão "Revisei".
+  const [piiSubmit, setPiiSubmit] = useState<string | null>(null);
+  const piiAck = useRef(false);
 
   // Filtro de preço dos PARTICIPANTES (USD por 1M tokens; '' = sem limite).
   const [maxInputPrice, setMaxInputPrice] = useState('');
@@ -772,6 +777,8 @@ export function NewRun() {
       setIncludeRessalvas(config.compliance.includeRessalvas);
     }
     if (config.piiMode) setPiiMode(config.piiMode);
+    // Importado com "Revisei" (ou `allowPii` no arquivo): a revisão vale no envio.
+    if (config.allowPii) piiAck.current = true;
   }
 
   // Import unificado: UM arquivo, três formatos possíveis (arena-config@1,
@@ -784,6 +791,7 @@ export function NewRun() {
       return setError(res.error);
     }
     setPiiImport(null);
+    if (allowPii) piiAck.current = true;
     if (res.data.kind === 'config') {
       applyArenaConfig(res.data.config);
       setConfigSummary(arenaConfigSummary(res.data.config));
@@ -997,7 +1005,20 @@ export function NewRun() {
     if (piiMode === 'synthetic') {
       const piiCheck = checkRunPii(config);
       if (piiCheck.blocked.length) return setError(runPiiMessage(piiCheck));
+    } else {
+      // Modo "redigir": nada sai com dado de aparência real sem revisão —
+      // pseudonimizar sem avisar seria correção silenciosa (e nome não é redigido).
+      const piiCheck = checkRunPii(config);
+      if (piiCheck.blocked.length) {
+        if (!piiAck.current) {
+          setPiiSubmit(runPiiMessage(piiCheck));
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          return setError('Dado pessoal com aparência de dado real — revise o aviso no topo da página.');
+        }
+        config = { ...config, allowPii: true };
+      }
     }
+    setPiiSubmit(null);
 
     setSubmitting(true);
     try {
@@ -1085,6 +1106,27 @@ export function NewRun() {
               )}
               <Button type="button" size="sm" variant="ghost" onClick={() => setPiiImport(null)}>
                 Dispensar
+              </Button>
+            </div>
+          </Banner>
+        )}
+
+        {piiSubmit && (
+          <Banner tone="warn" className="mt-4 flex flex-col gap-3">
+            <p>{piiSubmit}</p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="submit"
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  piiAck.current = true;
+                }}
+              >
+                Revisei — iniciar mesmo assim
+              </Button>
+              <Button type="button" size="sm" variant="ghost" onClick={() => setPiiSubmit(null)}>
+                Voltar e corrigir
               </Button>
             </div>
           </Banner>

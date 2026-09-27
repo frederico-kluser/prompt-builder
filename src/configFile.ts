@@ -142,6 +142,13 @@ export interface ArenaConfigFile {
   compliance?: { area: string; includeRessalvas: boolean };
   /** Dado pessoal (IMPL-042): 'synthetic' = "só sintético" (recusa dado de aparência real). */
   piiMode?: 'redact' | 'synthetic';
+  /**
+   * Revisei o dado pessoal apontado na importação e pode seguir (modo 'redact':
+   * identificadores pseudonimizados no envio; nomes NÃO cobertos). Explícito no
+   * arquivo ou via `parseArenaConfig(json, { allowPii: true })` (CLI `--allow-pii`,
+   * botão "Revisei" da SPA) — que o grava aqui para a run herdar a revisão.
+   */
+  allowPii?: boolean;
 }
 
 // ----------------------------------------------------------------------------
@@ -458,6 +465,7 @@ const arenaConfigSchema = z
         )
         .optional(),
       piiMode: z.enum(['redact', 'synthetic'], "piiMode deve ser 'redact' ou 'synthetic'").optional(),
+      allowPii: z.boolean('allowPii deve ser true ou false').optional(),
     },
     'O arquivo deve ser um objeto de configuração',
   )
@@ -575,11 +583,11 @@ export function parseArenaConfig(
   // LGPD (IMPL-042): dado pessoal de aparência real BLOQUEIA a importação com
   // aviso nomeando o campo — nunca corrige em silêncio. `allowPii` = o usuário
   // revisou e confirmou (os identificadores seguem pseudonimizados no envio).
-  if (!opts.allowPii) {
+  if (!opts.allowPii && result.data.allowPii !== true) {
     const pii = checkImportPii(result.data);
     if (!pii.ok) return { ok: false, error: pii.message!, pii };
   }
-  return { ok: true, config: result.data };
+  return { ok: true, config: opts.allowPii ? { ...result.data, allowPii: true } : result.data };
 }
 
 /**

@@ -380,9 +380,14 @@ async function runLoop(
   // LGPD (IMPL-041): área SENSÍVEL é fail-closed — todo papel que vê o dado
   // (competidor, juiz/duelo, gerador, gabarito, reescritor) precisa de endpoint
   // ZDR na allowlist fresca; senão a run é recusada AQUI, antes de qualquer LLM.
-  // IMPL-042: + modo "só sintético" (dado pessoal de aparência real recusa a
-  // run). Runs de uma sessão pulam essa parte: o config da SESSÃO já passou.
-  await enforceRunCompliance(record.config, undefined, { nested: Boolean(record.sessionId) });
+  // IMPL-042: + dado pessoal de aparência real recusa a run ("só sintético",
+  // modo agente, ou "redigir" sem `allowPii`). Runs de uma sessão só relatam:
+  // o config da SESSÃO já passou. O relatório (campo + tipos, nunca o valor)
+  // fica no record — pseudonimizar no envio nunca é correção silenciosa.
+  const preflight = await enforceRunCompliance(record.config, undefined, {
+    nested: Boolean(record.sessionId),
+  });
+  if (preflight.piiReport) record.piiReport = preflight.piiReport;
 
   // Resolve contestants on-demand (variacao: gera as variantes via optimizer).
   if (opts.prepare) {

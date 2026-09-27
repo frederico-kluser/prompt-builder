@@ -134,6 +134,11 @@ export class BudgetLedger implements CostSink {
     return new BudgetLedger({ parent: this });
   }
 
+  /** Escopo do cofre de pseudonimos (LGPD, IMPL-042): a raiz — a run avulsa ou a sessao. */
+  piiScope(): object {
+    return this.root();
+  }
+
   private root(): BudgetLedger {
     let node: BudgetLedger = this;
     while (node.parent) node = node.parent;

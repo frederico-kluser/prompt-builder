@@ -123,6 +123,7 @@ export function arenaConfigToRunConfig(
     ...(Object.keys(reasoning).length ? { reasoning } : {}),
     ...(file.compliance ? { compliance: file.compliance } : {}),
     ...(file.piiMode ? { piiMode: file.piiMode } : {}),
+    ...(file.allowPii ? { allowPii: true } : {}),
     // Contratos never-break (F2/P0.3): vivem no perfil do prompt, valem para
     // toda reescrita do variator.
     ...(file.prompt?.contracts ? { contracts: file.prompt.contracts } : {}),

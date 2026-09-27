@@ -35,6 +35,8 @@ prompt-builder train --config arena.json --budget 3 --output-format ndjson
 | `--effort-judge high` | o juiz é a tarefa mais sensível — vale gastar aqui |
 | `--effort-datagen low` | gerar cenários é mecânico |
 | `--finalists N` / `--no-duels` | tamanho da final / desliga a final |
+| `--pii-mode synthetic` | recusa dado pessoal de aparência real, sem exceção (vale em `compare`/`vary` também) |
+| `--allow-pii` | revisei o dado pessoal apontado: segue pseudonimizado (nomes não cobertos) |
 
 **Precisa de pelo menos 2 contestants**: `técnicas + (1 se houver prompt base)`.
 Uma técnica sem prompt base não basta.

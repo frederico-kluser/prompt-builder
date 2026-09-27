@@ -22,6 +22,7 @@ import type {
 import type { ExpectedSpec } from './engine/groundTruth.js';
 import type { PromptContracts } from './engine/contracts.js';
 import type { PromptGroup } from './engine/promptGroup.js';
+import type { PiiRunReport } from './engine/pii.js';
 
 export interface OpenRouterModelPricing {
   prompt: number; // USD per token
@@ -117,6 +118,13 @@ export interface CostSink {
       tokensOut: number;
     },
   ): void;
+  /**
+   * LGPD (IMPL-042): identidade do escopo do cofre de pseudonimos — a RAIZ do
+   * ledger (run avulsa ou sessao de treino). Mesmo escopo = mesmos tokens em
+   * todos os papeis; escopos diferentes = chaves diferentes (sem ligacao entre
+   * runs). Opcional: sem ele o proprio sink e o escopo.
+   */
+  piiScope?(): object;
 }
 
 /**
@@ -303,6 +311,13 @@ export interface RunConfigBase {
    * pessoal de aparencia real. Ausente = 'redact'.
    */
   piiMode?: 'redact' | 'synthetic';
+  /**
+   * O usuario REVISOU o dado pessoal de aparencia real apontado no config e
+   * confirmou que a run pode seguir no modo 'redact' (identificadores
+   * pseudonimizados no envio; nomes NAO cobertos). Sem ele a run e recusada
+   * no pre-voo nomeando o campo. Ignorado no 'synthetic' e no modo agente.
+   */
+  allowPii?: boolean;
   /**
    * Etapas fornecidas pelo usuario (JSON), substituindo o datagen automatico.
    * Quando presente e nao-vazio, o pipeline PULA a geracao de cenarios e usa
@@ -713,6 +728,13 @@ export interface RunRecord {
   finalists?: string[];
   /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
   fairnessWarnings?: string[];
+  /**
+   * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
+   * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
+   * `allowPii`. E o registro de que os identificadores foram pseudonimizados
+   * no envio — nao uma correcao silenciosa.
+   */
+  piiReport?: PiiRunReport;
   /** Diagnostico do juiz (F4.2): pin do contrato (hash) + vies de verbosidade medido. */
   judgeDiagnostics?: {
     contract: { hash: string; modelIds: string[]; pinnedAt: string };

@@ -6,7 +6,7 @@ import type { CostEntry, CostRole, RunCtx } from '../../src/types.js';
 export type { CostEntry, CostRole } from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
-import { checkImportPii, loadLgpdData, type LgpdData, type PiiImportCheck } from './lgpd';
+import { checkImportPii, loadLgpdData, type LgpdData, type PiiImportCheck, type PiiRunReport } from './lgpd';
 import { startRun } from './engine/orchestrator';
 import { startTraining } from './engine/trainer';
 import { generateContestants, generateBasePrompt as engineGenerateBasePrompt } from './engine/variator';
@@ -110,6 +110,8 @@ export interface RunConfig {
   compliance?: { area: string; includeRessalvas: boolean };
   /** Dado pessoal (IMPL-042): 'redact' (default) ou 'synthetic' ("so sintetico", recusa dado de aparencia real). */
   piiMode?: 'redact' | 'synthetic';
+  /** Revisei o dado pessoal apontado: pode seguir pseudonimizado ('redact'; nomes nao cobertos). */
+  allowPii?: boolean;
   /** Etapas fornecidas pelo usuario (JSON); pulam o datagen e fixam `stages`. */
   customStages?: StageSpec[];
   // evolucao de prompts / compare-llms:
@@ -327,6 +329,8 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
+  /** LGPD (IMPL-042): campos com dado pessoal achados no pré-voo (caminho + tipos, nunca o valor). */
+  piiReport?: PiiRunReport;
   startedAt: string;
   finishedAt?: string;
   error?: string;

@@ -525,6 +525,16 @@ interface GuardedResponse {
   finish: (ok: boolean) => void;
 }
 
+/**
+ * Escopo do cofre de pseudonimos: a RAIZ do ledger (run avulsa ou sessao de
+ * treino inteira), quando o sink sabe dize-la; senao o proprio sink. Sem sink
+ * (chamada avulsa) = cofre da instancia.
+ */
+function piiScopeOf(sink?: CostSink): object | undefined {
+  if (!sink) return undefined;
+  return typeof sink.piiScope === 'function' ? sink.piiScope() : sink;
+}
+
 // cache por key (sufixo curto) pra nao misturar contas
 function cacheKey(apiKey: string): string {
   return apiKey.slice(-12);
@@ -540,8 +550,9 @@ export class OpenRouterGateway {
   private cfg: GatewayConfig;
   readonly limiter: AimdLimiter;
   private readonly modelsCache = new Map<string, { fetchedAt: number; data: OpenRouterModel[] }>();
-  // LGPD (IMPL-042): cascata de dado pessoal — uma por instância (sal e
-  // contadores próprios), aplicada em `buildBody`, o ponto único dos 6 papéis.
+  // LGPD (IMPL-042): cascata de dado pessoal — uma por instância (contadores
+  // próprios; cofre de pseudônimos com chave HMAC própria POR RUN/SESSÃO),
+  // aplicada em `buildBody`, o ponto único dos 6 papéis.
   private readonly piiGuard = createPiiGuard();
 
   constructor(config: Partial<GatewayConfig> = {}) {
@@ -721,7 +732,7 @@ export class OpenRouterGateway {
     const model = this.cachedModel(apiKey, modelId);
     const body: Record<string, unknown> = {
       model: modelId,
-      messages: this.protectMessages(messages),
+      messages: this.protectMessages(messages, params.sink),
       ...deterministicSampling(model, modelId, temperature),
     };
     if (stream) body.stream = true;
@@ -739,11 +750,21 @@ export class OpenRouterGateway {
    * LGPD (IMPL-042): NENHUMA mensagem vira corpo de requisicao sem passar pela
    * cascata de dado pessoal (src/engine/pii.ts) — identificadores estruturados
    * realistas (CPF, CNPJ, CNS, RG, CEP, telefone, e-mail, CRM) saem
-   * pseudonimizados com token estavel por instancia; nomes/enderecos so sao
-   * contados (camada `nao-coberto`). Obrigatoria: nao ha parametro que desligue.
+   * pseudonimizados (HMAC com chave secreta POR RUN/SESSAO: o escopo e a raiz
+   * do ledger da chamada); nomes/enderecos so sao contados (camada
+   * `nao-coberto`). Obrigatoria: nao ha parametro que desligue.
    */
-  private protectMessages(messages: ChatMessage[]): ChatMessage[] {
-    return this.piiGuard.protect(messages);
+  private protectMessages(messages: ChatMessage[], sink?: CostSink): ChatMessage[] {
+    return this.piiGuard.protect(messages, piiScopeOf(sink));
+  }
+
+  /**
+   * Os MESMOS tokens que o envio usaria no escopo de `sink` — para comparar
+   * localmente com o que o modelo viu (ground truth deterministico). Nao conta
+   * como chamada.
+   */
+  pseudonymize<T>(value: T, sink?: CostSink): T {
+    return this.piiGuard.vaultFor(piiScopeOf(sink)).redactDeep(value);
   }
 
   /** Contadores da cascata (o teste prova: chamadas varridas == chamadas enviadas). */
@@ -1046,6 +1067,11 @@ export function chatCompletion(params: ChatCompletionParams): Promise<ChatComple
 
 export function chatCompletionStream(params: ChatStreamParams): Promise<ChatCompletionResult> {
   return defaultGateway.chatCompletionStream(params);
+}
+
+/** Pseudonimiza `value` com o cofre do escopo de `sink` na instancia padrao (ver o metodo). */
+export function pseudonymize<T>(value: T, sink?: CostSink): T {
+  return defaultGateway.pseudonymize(value, sink);
 }
 
 export function validateKey(apiKey: string): Promise<ValidateKeyResult> {

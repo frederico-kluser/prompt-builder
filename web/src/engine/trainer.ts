@@ -233,6 +233,8 @@ function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     compliance: cfg.compliance,
     // IMPL-042: o modo de dado pessoal vale para toda iteracao e o holdout.
     piiMode: cfg.piiMode,
+    // ...e a revisao do usuario (`allowPii`) vale para a sessao inteira.
+    allowPii: cfg.allowPii,
     reasoning: cfg.reasoning,
     referenceModelId: cfg.referenceModelId,
     referenceJudging: cfg.referenceJudging,

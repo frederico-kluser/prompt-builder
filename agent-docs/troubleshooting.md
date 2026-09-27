@@ -17,6 +17,22 @@ prompt-builder models show <id> --json | jq .model.thinkLevels
 pedido. Modelos com `canDisable: false` **ignoram** `off` — raciocínio é
 obrigatório neles.
 
+## `Dado pessoal com aparência de dado real em …` (código 3)
+
+O config (prompt, tema, cenários, gabarito…) tem CPF/CNS/RG/CRM, celular,
+e-mail pessoal com cara de real, ou nome + dados de contato. A mensagem **nomeia
+o campo** (`customStages[2].question (CPF)`). Nada foi enviado. Saídas:
+
+- troque por dado sintético (CPF com dígito verificador inválido, `***.***.***-**`);
+- ou, se revisou e pode seguir, `--allow-pii` (ou `"allowPii": true` no arquivo):
+  CPF, CNPJ, CNS, RG, CEP, telefone, e-mail e CRM saem **pseudonimizados** antes
+  de cada chamada; **nomes em texto livre não são cobertos** e seguem como estão.
+
+`--pii-mode synthetic` (ou `"piiMode": "synthetic"`) recusa **sem exceção** —
+`--allow-pii` não vale. O **modo agente** é sempre "só sintético": o executor
+fala com o provedor por conta própria, fora da cascata. O record guarda em
+`piiReport` os campos achados (caminho + tipos, nunca o valor).
+
 ## `OpenRouter sem crédito (HTTP 402)` (código 5)
 
 `prompt-builder key check` mostra uso, limite e saldo. O pré-voo recusa antes de

@@ -93,6 +93,9 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
     description: { type: 'string' },
     file: { type: 'string' },
     origin: { type: 'string' },
+    // LGPD (IMPL-042): revisei o dado pessoal apontado — o item entra (e segue
+    // pseudonimizado em toda chamada de LLM; nomes não cobertos).
+    'allow-pii': { type: 'boolean' },
     theme: { type: 'string' },
     model: { type: 'string' },
     generate: { type: 'string' },
@@ -189,7 +192,7 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
         parsed.values.origin === 'official' || parsed.values.origin === 'ai' || parsed.values.origin === 'manual'
           ? parsed.values.origin
           : 'import';
-      const res = await importItems(profileId, cru, { origin });
+      const res = await importItems(profileId, cru, { origin, allowPii: parsed.values['allow-pii'] === true });
       out.info(`+${res.added} itens · ${res.updated} atualizados · ${res.errors.length} recusados`);
       for (const e of res.errors) out.warn(e);
       out.result(res.errors.length === 0, 'library.add', res);

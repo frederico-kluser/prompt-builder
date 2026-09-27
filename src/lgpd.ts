@@ -8,7 +8,13 @@ import {
   type LgpdData,
   type RunComplianceCheck,
 } from './engine/lgpdCore.js';
-import { assertRunPii, type PiiConfigLike } from './engine/pii.js';
+import {
+  assertRunPii,
+  checkRunPii,
+  summarizeRunPii,
+  type PiiConfigLike,
+  type PiiRunReport,
+} from './engine/pii.js';
 
 /**
  * Conformidade LGPD — lado NODE (CLI + servidor). A classificação inteira é a
@@ -72,27 +78,35 @@ export function overrideLgpdData(data: LgpdData | null): () => void {
 export interface EnforceRunOptions {
   /**
    * Run ANINHADA numa sessão de treino (iteração, triagem, holdout): o
-   * pré-voo de dado pessoal já rodou no config da sessão, e os cenários/
-   * gabaritos que as iterações carregam foram gerados pelo nosso LLM.
+   * pré-voo de dado pessoal já RECUSOU/liberou o config da sessão; aqui só se
+   * relata (o record da iteração guarda o mesmo relatório).
    */
   nested?: boolean;
+}
+
+export interface RunPreflightResult extends RunComplianceCheck {
+  /** Campos com dado pessoal (caminho + tipos, nunca o valor) — vai para `RunRecord.piiReport`. */
+  piiReport?: PiiRunReport;
 }
 
 /**
  * Pré-voo da run (chamado pelo orquestrador ANTES de qualquer LLM): no modo
  * sensível, recusa com `LgpdPolicyError` se algum papel estiver fora da
- * allowlist ou se o snapshot estiver vencido; no modo "só sintético"
- * (`piiMode: 'synthetic'`, IMPL-042), recusa com `PiiPolicyError` nomeando o
- * campo com dado pessoal de aparência real.
+ * allowlist ou se o snapshot estiver vencido. Dado pessoal (IMPL-042): recusa
+ * com `PiiPolicyError` nomeando o campo com dado de aparência real no modo
+ * "só sintético", no modo AGENTE (o executor fala com o provedor fora da
+ * cascata — fail-closed, sem exceção) e no modo "redigir" sem `allowPii`
+ * (revisão explícita; nunca correção silenciosa).
  */
 export async function enforceRunCompliance(
   cfg: ComplianceConfigLike & PiiConfigLike,
   now: Date | number = Date.now(),
   opts: EnforceRunOptions = {},
-): Promise<RunComplianceCheck> {
+): Promise<RunPreflightResult> {
   const check: RunComplianceCheck = cfg.compliance
     ? assertRunCompliance(cfg, getLgpdData(), now)
     : { sensivel: false, violations: [] };
-  if (!opts.nested) assertRunPii(cfg);
-  return check;
+  const pii = opts.nested ? checkRunPii(cfg) : assertRunPii(cfg);
+  const piiReport = summarizeRunPii(pii);
+  return piiReport ? { ...check, piiReport } : check;
 }

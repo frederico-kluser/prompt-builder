@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import { sanitizeLlmVariants, MIN_LLM_VARIANTS, MAX_LLM_VARIANTS } from './llmVariants.js';
 import { validatePromptGroup } from './engine/promptGroup.js';
+import { checkRunPii, runPiiMessage, runPiiRefusal } from './engine/pii.js';
 import type { RunConfig } from './types.js';
 
 // Nivel de esforco de raciocinio (ReasoningLevel de types.ts / REASONING_LEVELS
@@ -177,6 +178,9 @@ const baseFields = {
   // Dado pessoal (IMPL-042): 'synthetic' recusa a run com dado de aparencia
   // real; a pseudonimizacao no gateway vale nos dois modos.
   piiMode: z.enum(['redact', 'synthetic']).optional(),
+  // Revisao explicita do dado pessoal apontado (modo 'redact'): sem ela, um
+  // RunConfig com dado de aparencia real e RECUSADO aqui, nomeando o campo.
+  allowPii: z.boolean().optional(),
   // Etapas fornecidas pelo usuario (JSON): pulam o datagen. Quando presentes,
   // `stages` e forcado ao tamanho desta lista (ver preprocess do runConfigSchema).
   customStages: z.array(stageSpecSchema).min(1).max(50).optional(),
@@ -336,6 +340,18 @@ export const runConfigSchema = z
     z.discriminatedUnion('mode', [compareObj, variationObj, trainingObj]),
   )
   .superRefine((cfg, ctx) => {
+    // ------------------------------------------------------------ dado pessoal
+    // LGPD (IMPL-042): um RunConfig CRU e importacao como qualquer outra — CLI
+    // (`--config`, flags, `estimate`, `config validate`), MCP, HTTP (POST
+    // /runs, /sessions, rotas de agente) e o arena-agent-config (que termina
+    // aqui). MESMA regra do pre-voo do orquestrador: dado de aparencia real
+    // bloqueia nomeando o campo — no "so sintetico" e no modo agente sem
+    // excecao; no "redigir" ate a revisao explicita (`allowPii: true`).
+    const pii = checkRunPii(cfg);
+    if (runPiiRefusal(pii)) {
+      ctx.addIssue({ code: 'custom', path: [], message: runPiiMessage(pii) });
+    }
+
     // ------------------------------------------------------------------ agente
     // Validacoes do modo agente, ativas quando `config.agent` existe (qualquer
     // `mode` — o eixo runner e ortogonal ao mode).
