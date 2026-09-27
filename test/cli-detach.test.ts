@@ -132,7 +132,9 @@ describe('IMPL-030 — --detach + runs status/wait/cancel', () => {
     // wait com prazo curto: exit DEDICADO (9), a run continua
     const w = await rodar(['runs', 'wait', jobId, '--timeout', '1', '--json', '--data-dir', dataDir]);
     expect(w.code).toBe(9);
-    expect(dadosDe(w.json).timedOut).toBe(true);
+    // Envelope único de erro (IMPL-028): o estado vai em error.details.
+    expect(w.json.ok).toBe(false);
+    expect(((w.json.error as Record<string, unknown>).details as Record<string, unknown>).timedOut).toBe(true);
     expect(pidAlive(pid)).toBe(true);
 
     // cancel: SIGTERM + marcador → processo encerrado e record 'aborted' em ≤ 2 s

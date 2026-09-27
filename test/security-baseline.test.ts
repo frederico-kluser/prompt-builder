@@ -854,7 +854,8 @@ describe.skipIf(process.platform === 'win32')('IMPL-024 — permissões do data 
 
     await saveProfile({ id: 'antigo', name: 'antigo' });
     const res = await importItems('antigo', [
-      { id: 'item-1', title: 't', tier: 'mft', question: 'q?', productContext: 'ctx', maxTokens: 256, expected: 'algo' },
+      // labelSet: rótulo curto exige o conjunto de rótulos válidos (IMPL-003).
+      { id: 'item-1', title: 't', tier: 'mft', question: 'q?', productContext: 'ctx', maxTokens: 256, expected: 'algo', labelSet: ['algo', 'outro'] },
     ]);
     expect(res.added).toBe(1);
     expect(modo(data)).toBe(0o755); // raiz compartilhada: só o que é nosso
@@ -926,7 +927,8 @@ describe.skipIf(process.platform === 'win32')('IMPL-024 — permissões do data 
     const raiz2 = path.join(raiz, 'outra-home');
     mkdirSync(raiz2);
     const doc = await runCli(['doctor', '--json'], { ...env, HOME: raiz2, USERPROFILE: raiz2 });
-    expect(doc.code, doc.stderr).toBe(0);
+    // Sem key o doctor sai 4 (auth — IMPL-031); o que importa aqui são as permissões.
+    expect(doc.code, doc.stderr).toBe(4);
     expect(modo(path.join(raiz2, '.prompt-builder'))).toBe(0o700);
     expect(modo(path.join(raiz2, '.prompt-builder', 'cache'))).toBe(0o700);
   }, 40_000);
@@ -957,6 +959,7 @@ describe('IMPL-024 — biblioteca: perfil/item viram segmento contido', () => {
         productContext: 'ctx',
         maxTokens: 256,
         expected: 'algo',
+        labelSet: ['algo', 'outro'], // IMPL-003
       };
       const res = await importItems('perfil-ok', [
         { ...base, id: '../../../fora' },

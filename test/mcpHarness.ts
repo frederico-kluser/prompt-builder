@@ -4,6 +4,7 @@
 // marca o que saiu depois de um cancelamento e o processo real `mcp` por stdio.
 // Zero rede externa, zero gasto.
 
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { spawn } from 'node:child_process';
@@ -90,10 +91,25 @@ export function papelDe(body: { model?: string; stream?: boolean; messages?: { r
 }
 
 /** Cenários sintéticos: `n` variações dos dois de base (runs de N etapas). */
+// Perguntas DISTINTAS de verdade: o datagen deduplica por ROUGE-L, e variar só
+// um sufixo "(caso N)" colapsava os N cenários nos 2 da base.
+const TEMAS = [
+  'devolucao de geladeira com defeito de fabrica',
+  'cancelamento de assinatura anual de streaming',
+  'segunda via de boleto vencido do condominio',
+  'troca de titularidade de linha telefonica movel',
+  'reembolso de passagem aerea por voo atrasado',
+  'agendamento de vacina contra gripe em farmacia',
+  'portabilidade de salario entre bancos digitais',
+  'rastreamento de encomenda internacional retida',
+  'renovacao de carteira de motorista vencida',
+  'desconto de estudante em plano de academia',
+];
+
 export function cenarios(n: number): typeof CENARIOS {
   return Array.from({ length: n }, (_, i) => ({
     ...CENARIOS[i % CENARIOS.length],
-    question: `${CENARIOS[i % CENARIOS.length].question} (caso ${i + 1})`,
+    question: `Como funciona ${TEMAS[i % TEMAS.length]}${i >= TEMAS.length ? ` — variante ${i + 1}` : ''}?`,
   }));
 }
 
@@ -112,8 +128,9 @@ export function fakeDoPipeline(stages: typeof CENARIOS = CENARIOS): FakeOpenRout
       }
       if (req.model === 'fake/ref') return { text: `Gabarito: ${req.user.slice(0, 40)}`, usage };
       if (req.stream) return { text: `Resposta de ${req.model}`, usage };
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}', usage };
-      return { text: '{"verdict":"resolve","explanation":"confere"}', usage };
+      // Contrato do IMPL-006: todo veredito devolve o canário do pedido.
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
+      return { text: pointwiseReply(req, 'resolve', 'confere'), usage };
     },
   });
 }

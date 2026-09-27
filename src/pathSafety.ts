@@ -219,10 +219,10 @@ export async function writePrivateFileAtomic(target: string, data: string | Buff
 // sequência, o `/x.json` que a troca do Windows acabou de produzir
 // (`<caminho>/x.json`) era casado de novo como caminho POSIX. Na mesma posição
 // vale a PRIMEIRA alternativa, e a varredura é da esquerda para a direita:
-//   0. caminho ENTRE ASPAS (`open '/home/John Doe/x.json'` — o formato dos
+//   0. caminho ENTRE ASPAS (`open '<home com espaço>/x.json'` — o formato dos
 //      erros do Node): redigido até a aspa de fecho, com espaço e tudo;
-//   1. raiz CONHECIDA (a home do usuário, que pode ter espaço — `C:\Users\John
-//      Doe` — e por isso não pode depender do corte no primeiro espaço);
+//   1. raiz CONHECIDA (a home do usuário, que pode ter espaço — no Windows é
+//      comum — e por isso não pode depender do corte no primeiro espaço);
 //   2. `file://...`;
 //   3. UNC `\\host\share`;
 //   4. Windows `C:\...`/`C:/...` (sem letra/dígito antes);
@@ -256,12 +256,12 @@ const regexCache = new Map<string, RegExp>();
 
 function absPathRegex(knownRoots: readonly string[]): RegExp {
   const roots = [...new Set(knownRoots.filter((r) => r.length > 1).map((r) => r.replace(/[\\/]+$/u, '')))]
-    // a mais longa primeiro: `/home/a b/proj` antes de `/home/a b`
+    // a mais longa primeiro: `<home>/proj` antes de `<home>`
     .sort((a, b) => b.length - a.length);
   const chave = roots.join('\0');
   let re = regexCache.get(chave);
   if (!re) {
-    // raiz inteira, sem continuar numa palavra (`/home/ana` não casa `/home/anab`)
+    // raiz inteira, sem continuar numa palavra (a raiz `<home>` não casa `<home>b`)
     const raizes = roots.map((r) => String.raw`(?<![\w:/.~-])${escapeRegExp(r)}(?![\w-])${PATH_END}`);
     re = new RegExp([QUOTED_ABS, ...raizes, ...GENERIC_ABS].join('|'), 'giu');
     regexCache.set(chave, re);

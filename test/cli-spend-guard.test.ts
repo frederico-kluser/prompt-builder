@@ -987,7 +987,26 @@ describe('CLI — 2 processos reais (tsx) contra OpenRouter falso em 127.0.0.1',
       { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18' } },
       ...calls.map((c, i) => ({ jsonrpc: '2.0', id: i + 1, method: 'tools/call', params: c })),
     ];
-    child.stdin.end(linhas.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    // Desde o IMPL-025 EOF no stdin = cliente foi embora => o servidor cancela
+    // o que está em voo. O stdin só fecha depois de TODAS as respostas.
+    child.stdin.write(linhas.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    const respondidas = (): number =>
+      stdout
+        .split('\n')
+        .filter(Boolean)
+        .filter((l) => {
+          try {
+            const id = (JSON.parse(l) as { id?: number }).id;
+            return typeof id === 'number' && id > 0;
+          } catch {
+            return false;
+          }
+        }).length;
+    const limite = Date.now() + 60_000;
+    while (respondidas() < calls.length && child.exitCode === null && Date.now() < limite) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    child.stdin.end();
     const status = await done;
     const respostas = stdout
       .split('\n')

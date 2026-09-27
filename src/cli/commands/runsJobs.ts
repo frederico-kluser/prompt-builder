@@ -22,6 +22,7 @@ import { isOwnerAlive, pidAlive } from '../../procOwner.js';
 import { loadRun, loadSession, ownerStateOf, sweepOrphanRecords, type OwnedRecordKind } from '../../storage.js';
 import type { CliContext } from '../context.js';
 import { CliError, EXIT, fmtUsd } from '../output.js';
+import { exitFor } from './run.js';
 
 /** O que `runs status/wait/cancel` devolvem sobre um alvo. */
 export interface RunStatusView {
@@ -59,12 +60,14 @@ export function exitCodeForRecord(r: {
   budgetExhausted?: boolean;
 }): number | null {
   if (r.status === 'running') return null;
-  if (r.status === 'error') return EXIT.ERROR;
-  if (r.stoppedReason === 'cancelled') return EXIT.SIGINT;
-  if (r.stoppedReason === 'budget' || r.budgetExhausted) return EXIT.BUDGET;
-  if (r.status === 'inconclusive') return EXIT.INCONCLUSIVE;
-  if (r.status === 'finished') return EXIT.OK;
-  return EXIT.ERROR;
+  const motivo = r.stoppedReason === 'budget' || r.stoppedReason === 'cancelled' ? r.stoppedReason : undefined;
+  // 'error' e ÓRFÃ ('aborted' sem motivo de controle) = falha; o resto segue a
+  // MESMA regra do foreground (`exitFor`, run.ts) — fonte única do código.
+  const falhou =
+    r.status === 'error' ||
+    (motivo === undefined && !r.budgetExhausted && r.status !== 'finished' && r.status !== 'inconclusive');
+  const code = falhou ? EXIT.ERROR : exitFor(motivo, r.budgetExhausted, r.status);
+  return code;
 }
 
 function exitCodeForJob(status: JobStatus, rec: { status: string } | null, own?: number): number | null {
@@ -227,17 +230,36 @@ export async function runsWait(ctx: CliContext): Promise<number> {
     narrar: (v) => out.info(`aguardando… ${linhaDeEstado(v)}`),
   });
   if (timedOut) {
-    out.warn(
-      `prazo de ${Math.round(timeoutMs / 1000)} s esgotado; a run segue (${view.status}). ` +
-        `Chame \`prompt-builder runs wait ${id}\` de novo.`,
-    );
     imprimir(ctx, view);
-    out.result(false, 'runs.wait', { ...view, timedOut: true });
-    return EXIT.WAIT_TIMEOUT;
+    // Desfecho negativo sai pelo envelope único de erro (IMPL-028): o estado
+    // da run vai em `error.details`, exit dedicado 9.
+    throw new CliError(
+      `prazo de ${Math.round(timeoutMs / 1000)} s esgotado; a run segue (${view.status}).`,
+      EXIT.WAIT_TIMEOUT,
+      { ...view, timedOut: true },
+      { code: 'runs.wait_timeout', hint: `Chame \`prompt-builder runs wait ${id}\` de novo.` },
+    );
   }
   imprimir(ctx, view);
+  const code = view.exitCode ?? EXIT.OK;
+  // IMPL-028: só o parcial (7/130) sai com `result` ok:true e exit ≠ 0; run
+  // que falhou (1) ou inconclusiva (6) sai pelo envelope de erro, com o
+  // estado em `error.details`.
+  if (code === EXIT.ERROR || code === EXIT.INCONCLUSIVE) {
+    throw new CliError(
+      code === EXIT.INCONCLUSIVE
+        ? `a run terminou inconclusiva (${view.status}): o resultado não sustenta conclusão.`
+        : `a run terminou com falha (${view.status})${view.statusMessage ? `: ${view.statusMessage}` : ''}.`,
+      code,
+      { ...view, timedOut: false },
+      {
+        code: code === EXIT.INCONCLUSIVE ? 'run.inconclusive' : 'run.failed',
+        hint: `Veja \`prompt-builder runs status ${id}\` e o record da run.`,
+      },
+    );
+  }
   out.result(true, 'runs.wait', { ...view, timedOut: false });
-  return view.exitCode ?? EXIT.OK;
+  return code;
 }
 
 /**
@@ -312,10 +334,13 @@ export async function runsCancel(ctx: CliContext): Promise<number> {
   const elapsedMs = Math.round(performance.now() - t0);
   const payload = { ...view, cancelRequested: true, signalled: sinalizado, elapsedMs, timedOut };
   if (timedOut) {
-    out.warn(`a run não confirmou a parada em ${Math.round(timeoutMs / 1000)} s (${view.status}).`);
     imprimir(ctx, view);
-    out.result(false, 'runs.cancel', payload);
-    return EXIT.WAIT_TIMEOUT;
+    throw new CliError(
+      `a run não confirmou a parada em ${Math.round(timeoutMs / 1000)} s (${view.status}).`,
+      EXIT.WAIT_TIMEOUT,
+      payload,
+      { code: 'runs.cancel_timeout', hint: `Acompanhe com \`prompt-builder runs status ${id}\`.` },
+    );
   }
   out.info(`cancelada em ${elapsedMs} ms.`);
   imprimir(ctx, view);
