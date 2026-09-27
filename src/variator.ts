@@ -134,6 +134,8 @@ Reescreva o prompt agora, aplicando a tecnica.`;
       ],
       temperature: 0.4,
       timeoutMs: p.timeoutMs ?? 90_000,
+      // IMPL-017: teto explicito — sem ele a saida era ilimitada.
+      maxTokens: 8192,
       reasoningLevel: p.reasoningLevel,
       role: 'rewriter',
       signal: p.ctx?.signal,
@@ -166,6 +168,7 @@ Reescreva o prompt agora, aplicando a tecnica.`;
         ],
         temperature: 0.3,
         timeoutMs: p.timeoutMs ?? 90_000,
+        maxTokens: 8192, // IMPL-017
         reasoningLevel: p.reasoningLevel,
         role: 'rewriter',
         signal: p.ctx?.signal,
@@ -327,6 +330,7 @@ export async function generateBasePrompt(p: GenerateBasePromptParams): Promise<s
     ],
     temperature: 0.4,
     timeoutMs: p.timeoutMs ?? 90_000,
+    maxTokens: 8192, // IMPL-017
     responseFormatJson: true,
     role: 'rewriter',
     signal: p.ctx?.signal,
@@ -395,6 +399,7 @@ Produza o bloco de licoes para a proxima rodada de reescrita.`;
     ],
     temperature: 0.3,
     timeoutMs: p.timeoutMs ?? 90_000,
+    maxTokens: 8192, // IMPL-017
     reasoningLevel: p.reasoningLevel,
     role: 'rewriter',
     signal: p.ctx?.signal,

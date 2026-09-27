@@ -68,6 +68,8 @@ Gere o cenario desta etapa em JSON conforme as regras.`;
     ],
     temperature: 0,
     timeoutMs: timeoutMs ?? 90_000,
+    // IMPL-017: sem teto a saida era ilimitada e a reserva assumia 1024.
+    maxTokens: 4096,
     responseFormatJson: true,
     role: 'datagen',
     signal: ctx?.signal,
@@ -219,6 +221,8 @@ Gere os ${count} cenarios em JSON conforme as regras.`;
     ],
     temperature: 0.8,
     timeoutMs: timeoutMs ?? 120_000,
+    // IMPL-017: teto explicito (lote de cenarios; o IMPL-016 afina por papel).
+    maxTokens: 8192,
     responseFormatJson: true,
     reasoningLevel,
     role: 'datagen',

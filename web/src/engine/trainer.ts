@@ -277,6 +277,7 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
     record.totalCostUsd = snap.spentUsd;
     record.costByRole = snap.byRole;
     record.costAccuracy = snap.accuracy;
+    record.costLedger = ledger.summary(); // IMPL-017: spent/committed/pending
     if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
   };
 
@@ -683,6 +684,7 @@ async function finalizeHoldout(
       record.totalCostUsd = snap.spentUsd;
       record.costByRole = snap.byRole;
       record.costAccuracy = snap.accuracy;
+      record.costLedger = ctxOpts.ledger.summary(); // IMPL-017: spent/committed/pending
     } else {
       record.totalCostUsd += holdoutRun.totalCostUsd;
     }

@@ -179,6 +179,7 @@ Em "verdicts", de para CADA rotulo: "acceptable" (bool) e "motivo" (<= 1 frase).
       ],
       temperature: 0,
       timeoutMs,
+      maxTokens: 4096, // IMPL-017: max_tokens em todo papel (listwise: N vereditos)
       responseFormatJson: true,
       reasoningLevel: extra.reasoningLevel,
       role: 'judge',

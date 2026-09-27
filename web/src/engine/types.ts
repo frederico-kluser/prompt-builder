@@ -19,11 +19,14 @@ import type {
 export type {
   CallCost,
   CostEntry,
+  CostLedgerSummary,
   CostRole,
   CostSink,
   CostSource,
+  PendingReason,
   PricingTier,
   Reservation,
+  ReservationStatus,
   RunCtx,
   TokenPrice,
 } from '../../../src/types.js';
@@ -566,6 +569,8 @@ export interface RunRecord {
   costByRole?: Record<CostRole, CostEntry>;
   /** Quantas chamadas tiveram preço exato, estimado ou desconhecido. */
   costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** Ledger: spent/committed/pending (IMPL-017). Ausente em records antigos. */
+  costLedger?: import('../../../src/types.js').CostLedgerSummary;
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
   /** Desfechos nao-ok dos competidores, separados (blocked/refused/error) — IMPL-010. */
@@ -614,6 +619,8 @@ export interface SessionRecord {
   /** Quebra do gasto por papel, somando todas as runs da sessão + reescritor. */
   costByRole?: Record<CostRole, CostEntry>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** Ledger da sessão: spent/committed/pending (IMPL-017). */
+  costLedger?: import('../../../src/types.js').CostLedgerSummary;
   upstreamCostUsd?: number;
   startedAt: string;
   finishedAt?: string;

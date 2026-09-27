@@ -96,6 +96,7 @@ function syncLedger(record: RunRecord, ledger: BudgetLedger): void {
   record.totalCostUsd = snap.spentUsd;
   record.costByRole = snap.byRole;
   record.costAccuracy = snap.accuracy;
+  record.costLedger = ledger.summary(); // IMPL-017: spent/committed/pending
   if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
   // IMPL-014 (espelho do Node): sinais de fim por papel + taxa de truncamento
   // da run, do MESMO ponto unico do custo — 100% das chamadas, juiz inclusive.

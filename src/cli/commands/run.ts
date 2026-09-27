@@ -575,6 +575,8 @@ async function runSingle(
     runId: record.id,
     status: record.status,
     totalCostUsd: record.totalCostUsd,
+    // IMPL-017: spent/committed/pending — pendente = abort/timeout sem custo medido.
+    ...(record.costLedger ? { costLedger: record.costLedger } : {}),
     budgetExhausted: Boolean(record.budgetExhausted),
     stoppedAtPhase: record.stoppedAtPhase,
     standings: record.standings,
@@ -672,6 +674,7 @@ async function runTraining(
     sessionId: sessionId || record.id,
     status: record.status,
     totalCostUsd: record.totalCostUsd,
+    ...(record.costLedger ? { costLedger: record.costLedger } : {}), // IMPL-017
     iterationsDone: record.bestPromptByIteration.length,
     budgetExhausted: Boolean(record.budgetExhausted),
     holdoutSkipped: Boolean(record.holdoutSkipped),

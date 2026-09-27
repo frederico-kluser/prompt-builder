@@ -342,6 +342,7 @@ async function trainingLoop(
     record.totalCostUsd = snap.spentUsd;
     record.costByRole = snap.byRole;
     record.costAccuracy = snap.accuracy;
+    record.costLedger = ledger.summary(); // IMPL-017: spent/committed/pending
     if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
   };
 
@@ -830,6 +831,7 @@ async function finalizeHoldout(
       const snap = ctxOpts.ledger.snapshot();
       record.totalCostUsd = snap.spentUsd;
       record.costByRole = snap.byRole;
+      record.costLedger = ctxOpts.ledger.summary(); // IMPL-017
     } else {
       record.totalCostUsd += holdoutRun.totalCostUsd;
     }

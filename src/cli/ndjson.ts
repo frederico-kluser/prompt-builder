@@ -240,6 +240,8 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         ...base,
         status: e.record.status,
         totalCostUsd: e.record.totalCostUsd,
+        // IMPL-017: spent/committed/pending (6 números, cabem no stream).
+        ...(e.record.costLedger ? { costLedger: e.record.costLedger } : {}),
         stages: e.record.stages.length,
         ...(agentSummary ? { agentSummary } : {}),
         ...(e.record.budgetExhausted ? { budgetExhausted: true } : {}),
@@ -361,6 +363,7 @@ export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {
         ...base,
         status: e.record.status,
         totalCostUsd: e.record.totalCostUsd,
+        ...(e.record.costLedger ? { costLedger: e.record.costLedger } : {}), // IMPL-017
         iterationsDone: e.record.bestPromptByIteration.length,
         ...(e.record.significance ? { significance: e.record.significance } : {}),
         ...(e.record.holdoutSkipped ? { holdoutSkipped: true } : {}),
