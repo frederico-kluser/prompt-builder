@@ -40,13 +40,14 @@
 // `selfTest` v1 é só o pré-cheque de `pi --version` que o pré-voo precisa.
 // ----------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import type { WriteStream } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AgentExecutor, AgentRunOutcome, AgentRunOpts, CleanRoomReport, PrepareOpts, SelfTestOpts } from './executor.js';
 import { createJsonlSplitter } from './jsonl.js';
 import { fromPi } from './trajectory.js';
+import { copyTreeBytes } from './sandboxExec.js';
 import { spawnAgent, type SpawnAgentResult } from './spawn.js';
 import type { AgentLimits, AgentStopReason, AgentTrajectory, AgentTurn } from './types.js';
 import {
@@ -742,10 +743,58 @@ async function runPiExecution(
   route: InferenceRoute | undefined,
   brake?: CostBrake,
 ): Promise<PiRunOutcome> {
+  const auditSessionDir = baseOpts.sessionDir ?? path.join(opts.workDir, 'session');
+  if (opts.config.isolation?.kind !== 'container') {
+    return runPiExecutionIn(opts, baseOpts, route, { sessionDir: auditSessionDir }, brake);
+  }
+  // IMPL-038 (R-15 REC-4) — COPY-IN / COPY-OUT. O que o sandbox monta com
+  // escrita (`session/`, `pi-home/`) mora num staging FORA do dir de execução:
+  // o dir de auditoria (exec.json, digests.json, events.raw.jsonl, argv.json)
+  // nunca é bind-mount, nem por subdiretório. Copy-in = o host escreve o
+  // `models.json`/system prompt no staging antes do `docker run`; copy-out = só
+  // os arquivos REGULARES da sessão voltam (symlink descartado, teto de bytes),
+  // e o staging é apagado.
+  const staging = mkdtempSync(path.join(tmpdir(), 'pb-sbx-'));
+  try {
+    return await runPiExecutionIn(
+      opts,
+      baseOpts,
+      route,
+      {
+        sessionDir: path.join(staging, 'session'),
+        piHomeDir: path.join(staging, 'pi-home'),
+      },
+      brake,
+    );
+  } finally {
+    try {
+      copyTreeBytes(path.join(staging, 'session'), auditSessionDir, {
+        symlinks: 'skip',
+        excludeGit: true,
+        maxBytes: SESSION_COPY_OUT_MAX_BYTES,
+      });
+    } catch {
+      /* sessão ausente/ilegível: a trajetória já saiu do stdout */
+    }
+    rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+/** Teto do copy-out da sessão do sandbox (o agente escreve ali sem limite de disco). */
+const SESSION_COPY_OUT_MAX_BYTES = 64 * 1024 * 1024;
+
+/** Corpo do `runPiExecution` com os diretórios (host: os de auditoria; container: o staging). */
+async function runPiExecutionIn(
+  opts: AgentRunOpts,
+  baseOpts: PiRunOptions,
+  route: InferenceRoute | undefined,
+  dirs: { sessionDir: string; piHomeDir?: string },
+  brake?: CostBrake,
+): Promise<PiRunOutcome> {
     const startedAt = Date.now();
 
     // --- diretórios por execução -------------------------------------------
-    const sessionDir = baseOpts.sessionDir ?? path.join(opts.workDir, 'session');
+    const sessionDir = dirs.sessionDir;
     mkdirSync(sessionDir, { recursive: true });
 
     // --- env da execução: base preparada + sessão ----------------------------
@@ -853,7 +902,7 @@ async function runPiExecution(
       // Garante os pontos de mount existirem ANTES do `docker run` (o `--mount`
       // recusa origem ausente; o antigo `-v` a criava como root:root no host).
       // `pi-home`/`session` sob workDir são criados como o usuário do host.
-      const hostPiHome = path.join(opts.workDir, 'pi-home');
+      const hostPiHome = dirs.piHomeDir ?? path.join(opts.workDir, 'pi-home');
       mkdirSync(hostPiHome, { recursive: true });
       mkdirSync(sessionDir, { recursive: true });
       // O provider do pi aponta para o relay no loopback do container.
@@ -889,6 +938,7 @@ async function runPiExecution(
           workspaceDir: opts.workspaceDir,
           workDir: opts.workDir,
           sessionDir,
+          piHomeDir: hostPiHome,
           profile,
           piArgv,
         });
@@ -1155,8 +1205,11 @@ function closeRawStreams(...streams: (WriteStream | undefined)[]): void {
 function findSessionFile(sessionDir: string): string | undefined {
   // Transcript do pi: <sessionDir>/<ts>_<uuid>.jsonl (plano §12.2 / 9.3).
   try {
-    const file = readdirSync(sessionDir)
-      .filter((f) => f.endsWith('.jsonl'))
+    // Só arquivo REGULAR (IMPL-038): um symlink plantado na sessão não vira
+    // "o transcript" (o copy-out o descarta).
+    const file = readdirSync(sessionDir, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith('.jsonl'))
+      .map((e) => e.name)
       .sort()
       .pop();
     return file;

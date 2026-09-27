@@ -101,8 +101,8 @@ duas coisas ao mesmo tempo. `agent.limits` é o **default** de todo
 
 | Campo | Tipo | Obr. | Default | Descrição |
 |---|---|---|---|---|
-| `kind` | string | não | `worktree` | `'worktree'` (default) \| `'clone'` \| `'container'`. **`worktree`** = `git worktree` raiz de mundo, artefatos no workspace local, nada de Docker. **`clone`** = clone descartável por execução (o executor o clona/descarta ao fim). **`container`** = cada execução do `pi` roda num **container Docker efêmero** (ver **Modo container** abaixo e em `docs agents`) — o agente fica isolado do host além da parede de processo; `setup[]`/`verify[]` (oráculo) seguem no **host** (ver nota). |
-| `keepWorkspace` | bool | não | `false` | Guardar o workspace ao fim ocupa disco rápido; o default é **não guardar** (descarta quando o modo permitir) — só ligue para debug. |
+| `kind` | string | não | `worktree` | `'worktree'` (default) \| `'clone'` \| `'container'`. **`worktree`** = `git worktree` raiz de mundo, artefatos no workspace local, nada de Docker. **`clone`** = clone descartável por execução (o executor o clona/descarta ao fim). **`container`** = cada execução do `pi` roda num **container Docker efêmero** (ver **Modo container** abaixo e em `docs agents`) — o agente fica isolado do host além da parede de processo; `setup[]`/`verify[]` (oráculo) também rodam em sandbox próprio (ver `docs agents`). |
+| `keepWorkspace` | bool | não | `false` | Guardar o workspace ocupa disco rápido; default **não guardar** — só para debug. `.workspace-kept` = caminhos do workspace e do repo de auditoria. |
 | `image` | string | não | `prompt-builder-pi:<executorVersion>` | Só tem efeito quando `kind === 'container'`. **Sobrescreve a tag** da imagem do `pi` (default `prompt-builder-pi:<executorVersion>`). Aceita tag **ou** referência por digest (`repo@sha256:…`/`sha256:…`). A tag só serve para achar a imagem: a preparação a resolve para o **digest sha256** e **todo `docker run` usa o digest** (gravado no `argv.json`). Digest ausente no daemon = erro pedindo `docker pull` (nada é puxado em silêncio). |
 | `runtime` | string | não | — (runc) | Só em `kind === 'container'`. Runtime OCI **opt-in** do Docker, ex. `"runsc"` (gVisor) — opção de **alto risco operacional**, fora do default (~2× em syscalls, muito pior em I/O de arquivos pequenos como `npm ci`). Validado no daemon **antes** da run. |
 
@@ -111,7 +111,7 @@ duas coisas ao mesmo tempo. `agent.limits` é o **default** de todo
 Cada execução do `pi` roda num container Docker efêmero por repetição, com perfil
 endurecido fixo (`--network none`, `--read-only`, `--cap-drop ALL`, usuário do host,
 imagem por digest) e a key do OpenRouter **fora** do sandbox (proxy de inferência
-local, token fictício por execução). `setup[]`/`verify[]` seguem no host. Detalhes —
+local, token fictício por execução). `setup[]`/`verify[]` em sandboxes próprios. Detalhes —
 imagem, binds, proxy, rede, `agents doctor --container` e a válvula do operador:
 `prompt-builder docs agents` → **Modo container**. Modelo inalcançável numa execução
 = **erro de infraestrutura** (`execution.infraError`): sem veredito, fora do placar;

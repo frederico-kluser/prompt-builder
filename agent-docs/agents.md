@@ -135,9 +135,9 @@ fica no `verdict.json`.
 
 ## Modo container (`agent.isolation.kind: "container"`)
 
-Quando `isolation.kind` é `'container'`, a **execução** do agente (e só ela — `setup[]`
-e `verify[]`/oráculo continuam no host) roda num container Docker **efêmero** por
-repetição:
+Quando `isolation.kind` é `'container'`, a **execução** do agente roda num container
+Docker **efêmero** por repetição (e `setup[]`/`verify[]` em sandboxes próprios — ver a
+nota no fim da seção):
 
 - **Imagem default:** `prompt-builder-pi:<executorVersion>` (ex. `prompt-builder-pi:0.84.2`),
   derivada da versão pinada do executor. Ela é **criada na primeira preparação de run
@@ -146,10 +146,11 @@ repetição:
   Dockerfile em produção: `node:22-bookworm-slim` + `git`/`ca-certificates`/`bash` +
   `npm i -g @earendil-works/pi-coding-agent@<versão>`.
 - **Execução efêmera por rep:** `docker run -i --rm` com o container nomeado
-  `pb-agent-<execId>`, binds `<workspace>` → `/ws` (cwd), `<execDir>/session` →
-  `/exec/session` e `<execDir>/pi-home` → `/exec/pi-home`. Os artefatos que o agente
-  grava **aparecem no host** sem `docker cp`; o resto do `<execDir>` (argv.json, logs
-  crus) **não** é montado — o agente não alcança a própria auditoria.
+  `pb-agent-<execId>`, binds `<workspace>` → `/ws` (cwd) e um staging **fora** do
+  `<execDir>` para `/exec/session` e `/exec/pi-home` (copy-in antes do `docker run`;
+  copy-out só dos arquivos regulares da sessão, sem symlink e com teto de bytes). O
+  `<execDir>` (exec.json, digests.json, argv.json, logs crus) **nunca** é montado — o
+  agente não alcança a própria auditoria (IMPL-038).
 - **Perfil endurecido FIXO (sem knob no arquivo):** `--cap-drop ALL --security-opt
   no-new-privileges --read-only` + `--tmpfs /tmp` e `--tmpfs /exec`, `--network none`,
   `--pids-limit 512`, `--cpus` ≤ 2, `--memory 2g --memory-swap 2g`, `--pull never` e imagem por
@@ -194,9 +195,16 @@ repetição:
   usaria; com `--config`, mede a `image`/`runtime` do arquivo — sem ele, a imagem
   default em runc).
 
-**Nota de escopo (TODO de fase futura):** hoje só a **execução** do agente é isolada
-pelo container. `setup[]` e `verify[]` (oráculo) rodam no HOST. Isolar esses também via
-`dockerExec` está no roadmap de uma fase futura.
+**Sandbox de `setup[]`/`verify[]`:** em `kind: "container"` cada comando roda num
+`docker run` endurecido NOVO, na **mesma imagem do executor** (pinada por digest:
+`node` + `git` + `bash` — toolchain que não seja node precisa estar na `isolation.image`).
+`setup[]` roda no workspace com rede `bridge` e um `.git` **próprio** (HEAD = árvore da
+`ref`, **sem histórico nem submódulos**); `verify[]` roda numa **cópia** do estado final
+do agente, **sem `.git`** e com os `files[]` prístinos reescritos — check que dependa de
+`git` (ex. `git diff`) não funciona ali. O diff sai de um repo de auditoria do produto
+(o `.git` do agente nunca é lido); arquivo rastreado na `ref` continua rastreado mesmo se
+o `.gitignore` o ignorar. Fora de `container` (modo host), `setup[]`/`verify[]` rodam
+**sem isolamento** e o `exec.json` registra `sandbox.isolated: false`.
 
 ### Métricas de agente no `RunRecord`
 

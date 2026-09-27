@@ -149,6 +149,44 @@ export interface WriteExecutionOpts {
   record: ExecutionRecord;
   /** nome de arquivo → conteúdo (events.jsonl, session/*.jsonl, trajectory.json…) */
   artifacts: Record<string, string | Buffer>;
+  /**
+   * IMPL-038: também cobre com digest os arquivos REGULARES que o host já
+   * gravou no dir de execução por fora do store (`events.raw.jsonl`,
+   * `stderr.raw.log`, `argv.json`, a sessão copiada para `session/`…). Symlink
+   * e `pi-home/` (estado do executor, não auditoria) ficam de fora.
+   */
+  includeExisting?: boolean;
+}
+
+/** Subdiretórios do dir de execução que NÃO são auditoria (estado do executor). */
+const DIGEST_SKIP_DIRS = new Set(['pi-home']);
+/**
+ * Arquivos da RAIZ do dir de execução gravados DEPOIS do digests.json e que não
+ * são auditoria: `.workspace-kept` (ponteiro de debug do `keepWorkspace`).
+ */
+const DIGEST_SKIP_FILES = new Set(['.workspace-kept']);
+
+/** Arquivos regulares sob `abs` (relativos, `/`), sem seguir symlink. */
+async function listRegularFiles(abs: string, rel = ''): Promise<string[]> {
+  const out: string[] = [];
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await fs.readdir(path.join(abs, rel), { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    const childRel = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      if (!rel && DIGEST_SKIP_DIRS.has(e.name)) continue;
+      out.push(...(await listRegularFiles(abs, childRel)));
+    } else if (e.isFile()) {
+      if (e.name.endsWith('.tmp')) continue; // escrita atômica em andamento
+      if (!rel && DIGEST_SKIP_FILES.has(e.name)) continue;
+      out.push(childRel);
+    }
+  }
+  return out.sort();
 }
 
 /**
@@ -185,6 +223,13 @@ export async function writeExecution(
   }
 
   // 2) exec.json com os digests dos artefatos no próprio record (sem se incluir).
+  if (opts.includeExisting) {
+    for (const rel of await listRegularFiles(abs)) {
+      if (rel === 'exec.json' || rel === 'digests.json' || rel in digests) continue;
+      digests[rel] = sha256Of(await fs.readFile(path.join(abs, rel)));
+    }
+  }
+
   const record: ExecutionRecord = { ...opts.record, ...{ digests: { ...digests } } };
   const execData = JSON.stringify(record, null, 2);
   await writeAtomic(execTarget, execData);
@@ -200,6 +245,48 @@ export async function writeExecution(
 // ---------------------------------------------------------------------------
 // Leitura
 // ---------------------------------------------------------------------------
+
+/** Resultado da conferência de `digests.json` contra o disco. */
+export interface DigestCheck {
+  ok: boolean;
+  /** Arquivos listados cujo sha256 não confere. */
+  mismatched: string[];
+  /** Listados e ausentes (ou que viraram symlink). */
+  missing: string[];
+  /** Arquivos regulares no dir que o `digests.json` NÃO cobre (fora `pi-home/`). */
+  unlisted: string[];
+}
+
+/**
+ * Confere `digests.json` de um dir de execução ABSOLUTO contra os bytes em
+ * disco (IMPL-038 — "digests.json confere com os artefatos após a coleta").
+ * Symlink nunca é seguido: artefato trocado por link conta como ausente.
+ */
+export async function verifyExecutionDigests(absDir: string): Promise<DigestCheck> {
+  const digests = JSON.parse(await fs.readFile(path.join(absDir, 'digests.json'), 'utf-8')) as Record<string, string>;
+  const mismatched: string[] = [];
+  const missing: string[] = [];
+  for (const [rel, sha] of Object.entries(digests)) {
+    const parts = rel.split('/');
+    if (parts.some((p) => p === '..' || p === '' || p === '.')) {
+      missing.push(rel);
+      continue;
+    }
+    const file = path.join(absDir, ...parts);
+    try {
+      const st = await fs.lstat(file);
+      if (!st.isFile()) {
+        missing.push(rel);
+        continue;
+      }
+      if (sha256Of(await fs.readFile(file)) !== sha) mismatched.push(rel);
+    } catch {
+      missing.push(rel);
+    }
+  }
+  const unlisted = (await listRegularFiles(absDir)).filter((rel) => rel !== 'digests.json' && !(rel in digests));
+  return { ok: mismatched.length === 0 && missing.length === 0 && unlisted.length === 0, mismatched, missing, unlisted };
+}
 
 /**
  * Resolve o dir de uma ref relativo a getDataDir() e VALIDA que fica sob

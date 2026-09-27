@@ -401,6 +401,25 @@ export interface ExecutionRecord {
   };
 
   digests: Record<string, string>; // arquivo → sha256
+
+  /**
+   * ONDE rodou cada fase de código não confiável (IMPL-038). `mode: 'host'` =
+   * SEM ISOLAMENTO (sem Docker): setup/verify rodaram com o uid do operador,
+   * só com env mínimo. Ausente em records antigos.
+   */
+  sandbox?: {
+    mode: 'host' | 'container';
+    isolated: boolean;
+    setup: 'host' | 'sandbox';
+    verify: 'host' | 'sandbox';
+    /** Como o artefato foi colhido: cópia de árvore + git do produto num --git-dir próprio. */
+    collect: 'tree-copy';
+    /** Rede do sandbox de setup (container): pré-agente, sem segredo no env. */
+    setupNetwork?: 'none' | 'bridge';
+    /** Digest da imagem do sandbox verificador (container). */
+    verifierImage?: string;
+    note?: string;
+  };
 }
 
 /**

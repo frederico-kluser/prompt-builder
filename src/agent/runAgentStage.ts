@@ -54,6 +54,8 @@ import {
   type RunCostMeter,
   type RunCostMeterLease,
 } from './costProxy.js';
+import { hostCommandRunner, removeTreeBestEffort, writeFileNoFollow, type CommandRunner } from './sandboxExec.js';
+import { isDigestRef, sandboxCommandRunner, sandboxProfile } from './container.js';
 import { isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
 import { blindRankMap, seedFromId } from '../duels.js';
@@ -149,6 +151,71 @@ export interface RunAgentStageParams {
   gateway?: AgentGateway;
   /** Fim pretendido: valor REAL. */
   judgeModelIds?: string[];
+  /**
+   * ONDE rodam `setup[]`/`verify[]` (IMPL-038). Default: `resolveStageRunners`
+   * pela `isolation.kind`. Injetável para o teste de contrato sem Docker.
+   */
+  runners?: StageRunners;
+}
+
+/**
+ * ONDE roda o código não confiável de UMA etapa (IMPL-038 / R-15 REC-4).
+ * - `container`: `setup[]` num sandbox endurecido sobre o workspace (antes do
+ *   agente) e `verify[]` num sandbox verificador NOVO, montado numa CÓPIA do
+ *   estado final do agente com os fixtures prístinos reescritos depois dele.
+ * - `host`: modo EXPLÍCITO sem Docker — SEM ISOLAMENTO (`isolated: false`),
+ *   registrado no `exec.json`; a única defesa é o env mínimo.
+ */
+export interface StageRunners {
+  mode: 'host' | 'container';
+  isolated: boolean;
+  setup: (workspaceDir: string) => CommandRunner;
+  verify: (verifierDir: string) => CommandRunner;
+  setupNetwork?: 'none' | 'bridge';
+  verifierImage?: string;
+}
+
+/** Aviso de "modo host = sem isolamento": uma vez por run (stderr — stdout do CLI é payload). */
+const hostModeWarned = new Set<string>();
+
+/**
+ * Monta os runners da etapa. Em modo container a imagem do verificador é a do
+ * executor, PINADA por digest no `prepare()` (`PI_CONTAINER_IMAGE`: node + git +
+ * bash); sem digest não há sandbox — e não há fallback silencioso para o host.
+ */
+export async function resolveStageRunners(
+  agentConfig: AgentRunnerConfig,
+  preparedEnv: Record<string, string>,
+): Promise<StageRunners> {
+  if (agentConfig.isolation?.kind !== 'container') {
+    return {
+      mode: 'host',
+      isolated: false,
+      setup: () => hostCommandRunner(),
+      verify: () => hostCommandRunner(),
+    };
+  }
+  const image = preparedEnv.PI_CONTAINER_IMAGE;
+  if (!image || !isDigestRef(image)) {
+    throw new Error(
+      `modo container exige a imagem do sandbox pinada por digest (PI_CONTAINER_IMAGE="${image ?? ''}") — ` +
+        'setup[]/verify[] não caem para o host em silêncio.',
+    );
+  }
+  const profile = await sandboxProfile({ runtime: agentConfig.isolation?.runtime });
+  // Setup COM rede (decisão IMPL-038): roda ANTES do agente, com comandos da
+  // TAREFA (npm ci/pip install precisam de registry), sem segredo no env e sem
+  // nada do host montado além do próprio workspace. O verificador roda depois
+  // do agente e fica com o perfil da execução (rede `none`, salvo a válvula).
+  const setupProfile = { ...profile, network: 'bridge' as const };
+  return {
+    mode: 'container',
+    isolated: true,
+    setup: (workspaceDir) => sandboxCommandRunner({ image, profile: setupProfile, mountDir: workspaceDir }),
+    verify: (verifierDir) => sandboxCommandRunner({ image, profile, mountDir: verifierDir }),
+    setupNetwork: 'bridge',
+    verifierImage: image,
+  };
 }
 
 export interface RunAgentStageResult {
@@ -315,6 +382,27 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
     };
   }
 
+  let runners: StageRunners;
+  try {
+    runners = opts.runners ?? (await resolveStageRunners(agentConfig, prepared.env));
+  } catch (err) {
+    if (isControlSignal(err)) throw err;
+    const errorMsg = `Falha ao preparar o sandbox de setup/verify: ${(err as Error).message}`;
+    return {
+      response: responseError(contestant, modelId, errorMsg, 0),
+      repResults: [],
+      incomplete: true,
+      errorMsg,
+    };
+  }
+  if (!runners.isolated && !hostModeWarned.has(runId)) {
+    hostModeWarned.add(runId);
+    console.error(
+      `[agent] ⚠️ modo host (isolation.kind="${agentConfig.isolation?.kind ?? 'worktree'}"): SEM ISOLAMENTO — ` +
+        'o agente, setup[] e verify[] rodam com o seu usuário. Use isolation.kind="container" para sandbox.',
+    );
+  }
+
   // Proxy de inferência da RUN (IMPL-037 / R-15 DEC-2): a key real (`apiKey`)
   // fica NELE; o agente recebe só base URL local + token fictício por execução.
   // Modo container: socket Unix (o sandbox roda com `--network none`); modo
@@ -371,7 +459,14 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
       prepared,
       proxy: proxyLease.proxy,
       meter: meterLease.meter,
+      runners,
     });
+  } catch (err) {
+    // Falha fora de uma rep (bug do produto): o contestant NÃO pode sumir da
+    // etapa em silêncio (o orquestrador descarta rejeição que não é controle).
+    if (isControlSignal(err)) throw err;
+    const errorMsg = `Falha inesperada na etapa do agente: ${(err as Error)?.message ?? String(err)}`;
+    return { response: responseError(contestant, modelId, errorMsg, 0), repResults: [], incomplete: true, errorMsg };
   } finally {
     await proxyLease.release();
     meterLease.release();
@@ -393,12 +488,14 @@ interface RepsContext {
   proxy: InferenceProxyLease['proxy'];
   /** Medidor de custo da run (freio + medição por chamada). */
   meter: RunCostMeter;
+  /** Onde setup/verify rodam (IMPL-038: sandbox em modo container). */
+  runners: StageRunners;
 }
 
 /** As N repetições da etapa (o laço do §10), com o proxy da run já no ar. */
 async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise<RunAgentStageResult> {
   const { runId, stageIndex, contestant, stage, agentConfig, apiKey, ctx, dataDir, catalog } = opts;
-  const { gateway, task, judgeModelIds, reps, promptMode, runConfig, limits, modelId, systemPrompt, prepared, proxy, meter } = rc;
+  const { gateway, task, judgeModelIds, reps, promptMode, runConfig, limits, modelId, systemPrompt, prepared, proxy, meter, runners } = rc;
 
   // Letra cega do candidato: MESMO mapa/shuffle que o orquestrador usa no ranking.
   const blindOrder = blindRankMap(opts.blindIds ?? [contestant.id], seedFromId(stage.question));
@@ -424,20 +521,27 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
       let workspaceDir = '';
       let seedCommit = '';
       let cacheRepoDir = '';
+      let auditGitDir = '';
+      let verifierDir: string | undefined;
       let credential: ReturnType<typeof proxy.issueCredential> | undefined;
       let execMeter: ReturnType<RunCostMeter['openExecution']> | undefined;
 
       try {
         // 1) workspace.prepare() — setup[] + files[] + seedCommit (§10.1).
-        const ws = await workspaceMgr.prepare({
-          repo: task.repo,
-          setup: task.setup,
-          files: task.files,
-          limits,
-        });
+        //    setup[] roda ONDE o runner da etapa manda (sandbox em container).
+        const ws = await workspaceMgr.prepare(
+          {
+            repo: task.repo,
+            setup: task.setup,
+            files: task.files,
+            limits,
+          },
+          { setupRunner: runners.setup },
+        );
         workspaceDir = ws.workspaceDir;
         seedCommit = ws.seedCommit;
         cacheRepoDir = ws.cacheRepoDir;
+        auditGitDir = ws.auditGitDir;
         // SHA-256 dos protegidos NO SEED, antes do agente acordar (IMPL-039):
         // pelo filesystem, não pelo git — pega arquivo ignorado e rename.
         const seedGuard = await captureSeedGuard(workspaceDir, task);
@@ -517,15 +621,34 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
               : rawOutcome;
 
         // 4) collect (diff/stat/files) + oráculo + trajetória (§10.4-9).
-        const collect = await workspaceMgr.collect(workspaceDir, seedCommit, limits.maxDiffBytes);
+        //    IMPL-038: collect por CÓPIA de árvore (nunca git no `.git` do
+        //    agente); a cópia vira a base do verificador NOVO, com os fixtures
+        //    PRÍSTINOS da tarefa reescritos DEPOIS do agente (padrão Harbor/
+        //    SWE-bench) — o agente não entrega o próprio teste adulterado.
+        // `rebuild` (IMPL-039) também roda na cópia: nunca no workspace do agente.
+        const needsVerifier = (task.verify?.length ?? 0) > 0 || task.rebuild !== undefined;
+        const collect = await workspaceMgr.collect(workspaceDir, seedCommit, limits.maxDiffBytes, {
+          keepSnapshot: needsVerifier,
+        });
+        verifierDir = collect.snapshotDir;
 
         let oracle: AgentOracleResult | undefined;
         let oracleAttempts = 0;
         if (task.verify?.length || task.forbiddenPaths?.length || task.rebuild) {
           const verify = task.verify ?? [];
           oracleAttempts = 1;
+          if (verifierDir) {
+            for (const f of task.files ?? []) writeFileNoFollow(verifierDir, f.path, f.content);
+          }
+          // Checks (e rebuild) na CÓPIA com os fixtures prístinos; o hash dos
+          // protegidos olha o workspace que o agente deixou (`guardDir`).
+          const verifierRunner = verifierDir ? runners.verify(verifierDir) : undefined;
           oracle = await runOracle({
-            workspaceDir,
+            workspaceDir: verifierDir ?? workspaceDir,
+            guardDir: workspaceDir,
+            runner: verifierRunner,
+            // Rebuild precisa do registry: sandbox COM rede (o de setup) na mesma cópia.
+            rebuildRunner: verifierDir ? runners.setup(verifierDir) : undefined,
             verify,
             forbiddenPaths: task.forbiddenPaths,
             diffFiles: collect.nameStatus,
@@ -554,8 +677,10 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
             oracleAttempts += 1;
             const attempt = oracleAttempts;
             const indices = recheckIndices(oracle);
+            // Mesma cópia e mesmo sandbox (IMPL-038): nunca o workspace do agente no host.
             const recheck = await runOracle({
-              workspaceDir,
+              workspaceDir: verifierDir ?? workspaceDir,
+              runner: verifierRunner,
               verify: indices.map((i) => ({ ...verify[i], label: oracle!.checks[i].label })),
               onCheck: (c) =>
                 emitEvent({
@@ -734,7 +859,21 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
               neutralized: dossier.neutralized,
             },
             digests: {},
+            sandbox: {
+              mode: runners.mode,
+              isolated: runners.isolated,
+              setup: runners.mode === 'container' ? 'sandbox' : 'host',
+              verify: runners.mode === 'container' ? 'sandbox' : 'host',
+              collect: 'tree-copy',
+              ...(runners.setupNetwork ? { setupNetwork: runners.setupNetwork } : {}),
+              ...(runners.verifierImage ? { verifierImage: runners.verifierImage } : {}),
+              ...(runners.isolated ? {} : { note: 'modo host: sem isolamento (setup/verify/agente com o uid do operador)' }),
+            },
           },
+          // Os arquivos crus que o executor gravou no dir (events.raw.jsonl,
+          // stderr.raw.log, argv.json, session/ do copy-out) também entram no
+          // digests.json — a conferência cobre o dir inteiro (IMPL-038).
+          includeExisting: true,
           artifacts: {
             'trajectory.json': JSON.stringify(trajectory, null, 2),
             'dossier.md': dossier.text,
@@ -898,13 +1037,32 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
           response = responseError(contestant, modelId, msg, 0);
         }
       } finally {
-        credential?.revoke();
-        execMeter?.close();
+        // NADA aqui pode lançar (revisão IMPL-038): o `verify` roda código do
+        // agente na cópia e pode deixar diretório 0555/0000 lá dentro — um
+        // EACCES neste `finally` derrubaria as reps seguintes, pularia o
+        // dispose e sumiria com o contestant da etapa (sem resposta, sem 'nao').
+        try {
+          credential?.revoke();
+        } catch {
+          /* melhor esforço */
+        }
+        try {
+          execMeter?.close();
+        } catch {
+          /* melhor esforço */
+        }
+        if (verifierDir && !removeTreeBestEffort(verifierDir)) {
+          console.error(`[agent] ⚠️ cópia do verificador não pôde ser apagada: ${verifierDir}`);
+        }
         // 9) dispose do workspace (preserva com isolation.keepWorkspace).
         const keep = agentConfig.isolation?.keepWorkspace === true;
         try {
           if (!keep && workspaceDir) await workspaceMgr.dispose(cacheRepoDir, workspaceDir);
-          else if (keep && workspaceDir) writeFileSync(path.join(repAbs, '.workspace-kept'), workspaceDir, 'utf8');
+          else if (keep && workspaceDir) {
+            // 1ª linha = workspace (formato antigo); 2ª = repo de AUDITORIA
+            // (seed/agent-result), que também fica para o debug.
+            writeFileSync(path.join(repAbs, '.workspace-kept'), `${workspaceDir}\n${auditGitDir}\n`, 'utf8');
+          }
         } catch {
           /* melhor esforço */
         }

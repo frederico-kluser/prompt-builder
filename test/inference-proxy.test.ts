@@ -735,11 +735,15 @@ describe('executor pi — a key nunca chega ao agente (modo host)', () => {
   });
 });
 
-/** `docker` falso: registra argv, copia o env-file do `run` e responde como o pi. */
-function fakeDocker(): { dir: string; log: string; envCopy: string } {
+/**
+ * `docker` falso: registra argv, copia o env-file e o `models.json` da casa do pi
+ * montada (copy-in do IMPL-038: o staging some depois do run) e responde como o pi.
+ */
+function fakeDocker(): { dir: string; log: string; envCopy: string; modelsCopy: string } {
   const dir = mkTmp('pb037-fakedocker-');
   const log = path.join(dir, 'calls.log');
   const envCopy = path.join(dir, 'env-file.copy');
+  const modelsCopy = path.join(dir, 'models.json.copy');
   const script = [
     '#!/bin/sh',
     `printf '%s\\n' "$*" >> '${log}'`,
@@ -753,6 +757,13 @@ function fakeDocker(): { dir: string; log: string; envCopy: string } {
     '    prev=""',
     '    for a in "$@"; do',
     `      if [ "$prev" = "--env-file" ]; then cp "$a" '${envCopy}'; fi`,
+    '      case "$a" in',
+    '        *target=/exec/pi-home*) src="${a#type=bind,source=}"; src="${src%%,target=*}";',
+    `          cp "$src/models.json" '${modelsCopy}' 2>/dev/null ;;`,
+    // O "agente" escreve na sessão montada: um transcript e um symlink hostil.
+    '        *target=/exec/session*) src="${a#type=bind,source=}"; src="${src%%,target=*}";',
+    `          printf '%s\\n' '{"type":"session"}' > "$src/2026-09-27_t.jsonl"; ln -s /etc/passwd "$src/zz-evil.jsonl" ;;`,
+    '      esac',
     '      prev="$a"',
     '    done',
     '    cat >/dev/null',
@@ -762,7 +773,7 @@ function fakeDocker(): { dir: string; log: string; envCopy: string } {
     '',
   ].join('\n');
   writeFileSync(path.join(dir, 'docker'), script, { mode: 0o755 });
-  return { dir, log, envCopy };
+  return { dir, log, envCopy, modelsCopy };
 }
 
 async function withFakeDocker<T>(dir: string, fn: () => Promise<T>): Promise<T> {
@@ -811,9 +822,23 @@ describe('executor pi — modo container: socket read-only + relay, env-file SEM
         expect(envFile).not.toMatch(/^OPENROUTER_API_KEY=/m);
         expect(envFile).not.toContain(cred.token);
         // O pi do container fala com o relay no loopback DELE, com o token no models.json.
-        expect(JSON.parse(readFileSync(path.join(opts.workDir, 'pi-home', 'models.json'), 'utf8'))).toEqual({
+        // IMPL-038: a casa do pi é um STAGING fora do dir de execução (copy-in),
+        // apagado depois do run — o dir de auditoria não é montado nem em parte.
+        expect(JSON.parse(readFileSync(fd.modelsCopy, 'utf8'))).toEqual({
           providers: { openrouter: { baseUrl: CONTAINER_INFERENCE_BASE_URL, apiKey: cred.token } },
         });
+        const sources = [...run.matchAll(/type=bind,source=([^,]+),target=(\/[^ ,]+)/g)].map((m) => ({ src: m[1], dst: m[2] }));
+        const writable = sources.filter((m) => m.dst === '/exec/pi-home' || m.dst === '/exec/session');
+        expect(writable).toHaveLength(2);
+        for (const m of writable) {
+          expect(path.relative(opts.workDir, m.src).startsWith('..')).toBe(true);
+          expect(existsSync(m.src)).toBe(false); // staging apagado
+        }
+        expect(existsSync(path.join(opts.workDir, 'pi-home'))).toBe(false);
+        // copy-out: só o transcript REGULAR volta ao dir de auditoria; o symlink não.
+        expect(readFileSync(path.join(opts.workDir, 'session', '2026-09-27_t.jsonl'), 'utf8')).toContain('"session"');
+        expect(existsSync(path.join(opts.workDir, 'session', 'zz-evil.jsonl'))).toBe(false);
+        expect(out.sessionFile).toBe('2026-09-27_t.jsonl');
         const audit = JSON.parse(readFileSync(path.join(opts.workDir, 'argv.json'), 'utf8'));
         expect(audit.inference).toMatchObject({
           route: 'unix-socket-relay',

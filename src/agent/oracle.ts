@@ -16,7 +16,9 @@
 //    arbitrário no cwd do experimento. `spawn` sem shell passa o argv como lista
 //    literal e deixa a "vitória suja" fora. Por isso a string `cmd` é tokenizada
 //    AQUI, na fronteira de confiança, respeitando aspas — nunca delegada a um
-//    shell (§11.2 do plano).
+//    shell (§11.2 do plano). ONDE o argv roda é do `CommandRunner` (IMPL-038):
+//    sandbox verificador em modo container, host explícito com env mínimo no
+//    modo host. Este módulo decide QUAIS checks e a pontuação, não o lugar.
 //
 // 2. **Exit code como régua, na ordem da lista.** `ok = exitCode === expected`;
 //    `score` é a soma ponderada dos `ok` sobre a soma dos pesos. Ordem SEMPRE a
@@ -40,8 +42,8 @@
 // ⚠️ ESPELHO CLIENT-SIDE: NÃO existe. O navegador não tem `child_process` —
 // rodar oráculo na SPA é impossível por construção (ver nota em `types.ts`).
 // ----------------------------------------------------------------------------
-import { spawn } from 'node:child_process';
 import type { AgentTaskSpec, OracleNotRun, OracleResult } from './types.js';
+import { hostCommandRunner, type CommandRunner } from './sandboxExec.js';
 import {
   detectSuspicious,
   diffProtected,
@@ -186,81 +188,47 @@ function lastLines(text: string, n: number): string {
 }
 
 /**
- * Roda UM `verify[].cmd` no workspace, com `spawn` + `shell:false`, matando o
- * GRUPO de processos no timeout. Nunca lança: bastou o comando não ter exit
- * normal para virar `inconclusive` com `NO_EXIT` (§17.1 — o oráculo não decidiu).
+ * Roda UM `verify[].cmd` pelo `runner` (IMPL-038: ONDE roda é do runner — o
+ * sandbox verificador em modo container, o host EXPLÍCITO com env mínimo no
+ * modo host). Nunca lança: bastou o comando não ter exit normal para virar
+ * `inconclusive` com `NO_EXIT` (§17.1 — o oráculo não decidiu).
  */
 async function runCheck(opts: {
   cmd: string;
   cwd: string;
   expected: number;
   timeoutMs: number;
+  runner: CommandRunner;
 }): Promise<CheckOutcome> {
   const argv = tokenize(opts.cmd);
   const started = Date.now();
-
-  return await new Promise<CheckOutcome>((resolve) => {
-    const child = spawn(argv[0] ?? '', argv.slice(1), {
-      cwd: opts.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true, // grupo próprio => `kill(-pid)` derruba a árvore inteira
-      // shell:false (default) — NUNCA true: o cmd vem de config do usuário.
-    });
-
-    const tail = new TailCollector(MAX_TAIL_BYTES);
-    let timedOut = false;
-    let spawnFailed = false;
-
-    // Ambos os pipes drenados desde o primeiro byte (regra 2 do spawn.ts):
-    // um pipe de 64 KiB cheio bloqueia o filho para sempre.
-    child.stdout?.on('data', (buf: Buffer) => tail.push(buf));
-    child.stderr?.on('data', (buf: Buffer) => tail.push(buf));
-
-    // Parede de tempo do CHECK — NÃO unref(): precisa disparar mesmo com o
-    // filho mudo (um verificação pendurada não pode segurar a run para sempre).
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        process.kill(-(child.pid as number), 'SIGTERM'); // grupo inteiro
-      } catch {
-        /* o grupo já morreu */
-      }
-    }, opts.timeoutMs);
-
-    // `error` para spawn que falha (binário ausente, permissão negada). Um
-    // comando que não existe é um oráculo que não rodou, não um "não passou".
-    child.on('error', () => {
-      spawnFailed = true;
-    });
-
-    child.on('close', (code, signal) => {
-      clearTimeout(timer);
-      if (timedOut) {
-        try {
-          process.kill(-(child.pid as number), 'SIGKILL'); // graça esgotada
-        } catch {
-          /* ok */
-        }
-      }
-      const durationMs = Date.now() - started;
-      // Ordem importa: spawn que falha não chega a pendurar; o nosso timeout
-      // mata por sinal, então `timeout` vem antes de `signal`.
-      const notRun: OracleNotRun | undefined = spawnFailed
-        ? 'spawn'
-        : timedOut
-          ? 'timeout'
-          : code === null
-            ? 'signal'
-            : undefined;
-      const inconclusive = notRun !== undefined;
-      // Spawn que falha fecha com o errno negativo (ex.: -2); normaliza.
-      const exitCode = inconclusive ? NO_EXIT : (code ?? NO_EXIT);
-      const ok = !inconclusive && exitCode === opts.expected;
-      const text = tail.text();
-      const tailText = lastLines(text, ok ? TAIL_LINES_PASS : TAIL_LINES_FAIL);
-      resolve({ exitCode, ok, inconclusive, ...(notRun ? { notRun } : {}), durationMs, tail: tailText });
-    });
+  const tail = new TailCollector(MAX_TAIL_BYTES);
+  // Ambos os pipes drenados desde o primeiro byte (regra 2 do spawn.ts); a
+  // parede de tempo do CHECK é do runner (kill do grupo / do container).
+  const r = await opts.runner.exec({
+    argv,
+    cwd: opts.cwd,
+    timeoutMs: opts.timeoutMs,
+    onOutput: (buf) => tail.push(buf),
   });
+  const durationMs = Date.now() - started;
+  // Um comando que não existe é um oráculo que não rodou, não um "não passou".
+  // Ordem importa (IMPL-033): spawn que falha não chega a pendurar; o nosso
+  // timeout mata por sinal, então `timeout` vem antes de `signal`.
+  const notRun: OracleNotRun | undefined = r.spawnFailed
+    ? 'spawn'
+    : r.timedOut
+      ? 'timeout'
+      : r.code === null
+        ? 'signal'
+        : undefined;
+  const inconclusive = notRun !== undefined;
+  // Spawn que falha fecha com o errno negativo (ex.: -2); normaliza.
+  const exitCode = inconclusive ? NO_EXIT : (r.code ?? NO_EXIT);
+  const ok = !inconclusive && exitCode === opts.expected;
+  const text = tail.text();
+  const tailText = lastLines(text, ok ? TAIL_LINES_PASS : TAIL_LINES_FAIL);
+  return { exitCode, ok, inconclusive, ...(notRun ? { notRun } : {}), durationMs, tail: tailText };
 }
 
 // ---------------------------------------------------------------------------
@@ -366,8 +334,29 @@ export async function runOracle(opts: {
   diff?: string;
   defaultTimeoutMs?: number;
   onCheck?: (c: { label: string; ok: boolean; exitCode: number }) => void;
+  /**
+   * ONDE os checks rodam (IMPL-038). Default: host EXPLÍCITO, sem isolamento,
+   * com env mínimo. O `runAgentStage` em modo container passa o sandbox
+   * verificador montado numa cópia do estado final do agente.
+   */
+  runner?: CommandRunner;
+  /**
+   * Onde roda o `rebuild` (precisa de rede para o registry). Default: `runner`.
+   * Em modo container o `runAgentStage` passa um sandbox COM rede montado na
+   * mesma cópia (nunca o host).
+   */
+  rebuildRunner?: CommandRunner;
+  /**
+   * Diretório com o estado que o AGENTE deixou, para o hash dos protegidos.
+   * Default `workspaceDir`. Com o verificador numa cópia com os `files[]`
+   * PRÍSTINOS reescritos (IMPL-038), o hash tem de olhar o workspace do agente
+   * — na cópia a adulteração já foi desfeita e passaria despercebida.
+   */
+  guardDir?: string;
 }): Promise<OracleResult> {
   const defaultTimeout = opts.defaultTimeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS;
+  const runner = opts.runner ?? hostCommandRunner();
+  const rebuildRunner = opts.rebuildRunner ?? runner;
   const diffFiles = opts.diffFiles ?? [];
 
   // --- 1. Barreiras determinísticas, sobre o estado que o AGENTE deixou.
@@ -375,7 +364,7 @@ export async function runOracle(opts: {
   let protectedChanges: OracleResult['protectedChanges'];
   let guardTruncated = false;
   if (opts.seedSnapshot) {
-    const post = await snapshotProtected(opts.workspaceDir, opts.seedSnapshot.patterns);
+    const post = await snapshotProtected(opts.guardDir ?? opts.workspaceDir, opts.seedSnapshot.patterns);
     if (opts.seedSnapshot.truncated || post.truncated) {
       // Percurso cortado pelo teto: o ponto de corte se DESLOCA com qualquer
       // arquivo que o agente cria/apaga — comparar daria `added`/`deleted`
@@ -423,6 +412,7 @@ export async function runOracle(opts: {
         cwd: opts.workspaceDir,
         expected: 0,
         timeoutMs: opts.rebuild.timeoutMs ?? DEFAULT_REBUILD_TIMEOUT_MS,
+        runner: rebuildRunner,
       });
       rebuild = { cmd, exitCode: out.exitCode, ok: out.ok, durationMs: out.durationMs, tail: out.tail, restored };
     }
@@ -444,7 +434,7 @@ export async function runOracle(opts: {
 
     const out: CheckOutcome = rebuildFailed
       ? { exitCode: NO_EXIT, ok: false, inconclusive: true, notRun: 'rebuild', durationMs: 0, tail: '' }
-      : await runCheck({ cmd: v.cmd, cwd: opts.workspaceDir, expected, timeoutMs });
+      : await runCheck({ cmd: v.cmd, cwd: opts.workspaceDir, expected, timeoutMs, runner });
 
     if (out.inconclusive) inconclusive = true;
     scored.push({ ok: out.ok, weight, kind, inconclusive: out.inconclusive, ...(out.notRun ? { reason: out.notRun } : {}) });
