@@ -13,7 +13,12 @@ import { RunsList } from './pages/RunsList';
 import { TrainingView } from './pages/TrainingView';
 import { SettingsPage } from './pages/Settings';
 import { PromptsPage } from './pages/PromptsPage';
+import { startOrphanWatch } from './api';
 import './index.css';
+
+// IMPL-023: na carga, runs/treinos 'running' sem dono (a aba que os executava
+// fechou ou recarregou) viram interrompidos — sem ninguém precisar abri-los.
+startOrphanWatch();
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

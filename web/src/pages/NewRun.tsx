@@ -7,6 +7,8 @@ import {
   arenaConfigSummary,
   createRun,
   createSession,
+  estimateConfigCost,
+  isCostConfirmationRequired,
   fetchLgpd,
   fetchModels,
   fetchTechniques,
@@ -24,9 +26,11 @@ import {
   type ScenarioPack,
   type StageSpec,
   type Technique,
+  type LaunchCostEstimate,
   effortOptions,
   modelCaps,
 } from '../api';
+import { CostConfirmDialog } from '../components/CostConfirmDialog';
 import { AREA_LIVRE, creatorPrefix, familiaFor, filterModels, type LgpdData } from '../lgpd';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
 import {
@@ -372,6 +376,12 @@ export function NewRun() {
   const [prunedNotice, setPrunedNotice] = useState<string | null>(null);
 
   // Filtro de preço dos PARTICIPANTES (USD por 1M tokens; '' = sem limite).
+  // Teto de gasto (US$) da run/sessão. '' = sem limite.
+  const [budget, setBudget] = useState('');
+  // Config aguardando o "sim" do diálogo de custo (+ a estimativa mostrada).
+  const [pendingLaunch, setPendingLaunch] = useState<{ config: RunConfig; estimate: LaunchCostEstimate } | null>(
+    null,
+  );
   const [maxInputPrice, setMaxInputPrice] = useState('');
   const [maxOutputPrice, setMaxOutputPrice] = useState('');
 
@@ -419,12 +429,6 @@ export function NewRun() {
       // JSON inválido: ignora (a chave já foi removida acima).
     }
   }, []);
-
-  const priceById = useMemo(() => {
-    const map = new Map<string, OpenRouterModel>();
-    for (const m of models) map.set(m.id, m);
-    return map;
-  }, [models]);
 
   // Catálogo filtrado pela área/LGPD. Em 'livre' devolve o catálogo inteiro.
   const filteredModels = useMemo(() => {
@@ -486,12 +490,6 @@ export function NewRun() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [participantModels]);
 
-  function costOf(modelId: string, tin: number, tout: number): number {
-    const m = priceById.get(modelId);
-    if (!m) return 0;
-    return tin * m.pricing.prompt + tout * m.pricing.completion;
-  }
-
   // nº de variantes (modos de 1 LLM) ou de competidores (compare).
   const variantCount = useMemo(() => {
     if (!isSingle) {
@@ -507,6 +505,12 @@ export function NewRun() {
     const v = parseFloat(maxOutputTokens);
     return Number.isFinite(v) && v >= 50 ? Math.round(v) : DEFAULT_MAX_OUTPUT_TOKENS;
   }, [maxOutputTokens]);
+
+  // Teto de gasto efetivo: vazio/inválido = sem limite (a validação avisa).
+  const budgetNum = useMemo(() => {
+    const v = parseFloat(budget);
+    return budget.trim() !== '' && Number.isFinite(v) && v > 0 ? v : undefined;
+  }, [budget]);
 
   // Cenários já prontos: etapas cruas mandam; senão o pacote entra como seed.
   const rawStages = customStages?.length ? customStages : null;
@@ -546,85 +550,6 @@ export function NewRun() {
       ? 'Configs repetidas (mesmo modelo + temperatura + reasoning) — ajuste para diferenciar.'
       : null;
   }, [compareAxis, competitorConfigs]);
-
-  const estimate = useMemo(() => {
-    const ctxIn = 500;
-    const n = variantCount;
-    // CostPreview (F3/§7.4): quebra por papel + chamadas, com os preços reais do
-    // catálogo — o mesmo cálculo de antes, só que nomeado em vez de fundido num
-    // `perStage` só.
-    const byRole: Record<string, number> = { datagen: 0, gabarito: 0, competidores: 0, juiz: 0, finais: 0 };
-    const callsByRole: Record<string, number> = { datagen: 0, gabarito: 0, competidores: 0, juiz: 0, finais: 0 };
-    const contestantIds = isSingle
-      ? contestantModel[0]
-        ? new Array(n).fill(contestantModel[0])
-        : []
-      : compareAxis === 'configs'
-        ? competitorConfigs.filter((r) => r.modelId).map((r) => r.modelId)
-        : competitors;
-    const passes = twoPassJudge ? 2 : 1;
-    let perStage = 0;
-    for (const id of contestantIds) {
-      perStage += costOf(id, ctxIn, maxTokensNum);
-      byRole.competidores += costOf(id, ctxIn, maxTokensNum);
-      callsByRole.competidores += 1;
-    }
-    if (precisaGerar && datagen[0]) {
-      const c = costOf(datagen[0], 300, 450);
-      perStage += c;
-      byRole.datagen += c;
-      callsByRole.datagen += 1;
-    }
-    if (referenceJudging) {
-      // gabarito: 1 chamada do modelo de referência por cenário.
-      const refId = referenceModel[0] ?? judge[0];
-      if (refId) {
-        const c = costOf(refId, ctxIn + 600, 1500);
-        perStage += c;
-        byRole.gabarito += c;
-        callsByRole.gabarito += 1;
-      }
-      // pointwise: cada juiz avalia CADA competidor contra o gabarito.
-      for (const jid of judge) {
-        const c = costOf(jid, ctxIn + maxTokensNum + 1500, 350) * n;
-        perStage += c;
-        byRole.juiz += c;
-        callsByRole.juiz += n;
-      }
-      // finais: C(finalistas,2) pares × 2 ordens, no 1º juiz, em cada cenário.
-      const k = duelsOn && finalists > 0 ? Math.min(finalists, n) : 0;
-      if (k >= 2 && judge[0]) {
-        const pairs = (k * (k - 1)) / 2;
-        const c = pairs * 2 * costOf(judge[0], ctxIn + 2 * maxTokensNum + 1500, 350);
-        perStage += c;
-        byRole.finais += c;
-        callsByRole.finais += pairs * 2;
-      }
-    } else {
-      // listwise: cada juiz lê o contexto + todas as respostas.
-      for (const jid of judge) {
-        const c = costOf(jid, ctxIn + n * maxTokensNum, 350) * passes;
-        perStage += c;
-        byRole.juiz += c;
-        callsByRole.juiz += passes;
-      }
-    }
-    const mult = plannedStages * (mode === 'training' ? iterations : 1);
-    const point = perStage * mult;
-    // por papel em USD (por etapa × etapas × iterações) e chamadas totais.
-    const byRoleUsd = Object.fromEntries(
-      Object.entries(byRole).map(([k, v]) => [k, v * mult]),
-    );
-    const calls = Object.fromEntries(
-      Object.entries(callsByRole).map(([k, v]) => [k, v * mult]),
-    );
-    return { low: point * 0.45, high: point, byRole: byRoleUsd, calls };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    mode, isSingle, competitors, compareAxis, competitorConfigs, contestantModel, variantCount, datagen, judge,
-    twoPassJudge, plannedStages, precisaGerar, referenceJudging, referenceModel, duelsOn, finalists, maxTokensNum,
-    iterations, priceById,
-  ]);
 
   function updateConfigRow(i: number, patch: Partial<ConfigRow>) {
     setCompetitorConfigs((rows) => rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
@@ -823,6 +748,8 @@ export function NewRun() {
             : 'Escreva ao menos 2 variantes manuais (ou 1 + prompt base).',
         });
     }
+    if (budget.trim() !== '' && !(parseFloat(budget) > 0))
+      out.push({ tab: 'avancado', text: 'Orçamento máximo: informe um valor em US$ maior que zero (ou deixe vazio).' });
     return out;
   }
 
@@ -835,16 +762,12 @@ export function NewRun() {
   }, [pendencias.map((p) => p.tab).join('|')]);
   const keyConnected = !!getStoredKey();
 
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    setError(null);
-    const faltas = problems();
-    if (faltas.length) {
-      setTried(true);
-      setTab(faltas[0].tab);
-      return setError(faltas[0].text);
-    }
-
+  /**
+   * Monta o RunConfig a partir do estado da tela. Sem efeitos colaterais: é a
+   * MESMA config que o rodapé estima e que o submit envia — a faixa de custo
+   * que o usuário confirma é a da run que vai rodar.
+   */
+  function buildConfig(): RunConfig {
     // Reasoning por papel: sai do ajuste do modelo daquele papel (o esforço mora
     // no modelo). No compare por modelos ele é POR competidor — vai lá embaixo,
     // em competitorConfigs.
@@ -895,6 +818,9 @@ export function NewRun() {
       ...(contestantTemp !== undefined ? { temperature: contestantTemp } : {}),
       // Contratos never-break do prompt base (F2/P0.3).
       ...(promptContracts ? { contracts: promptContracts } : {}),
+      // Teto de gasto (IMPL-020): o ledger do motor para a run numa porta de
+      // fase antes de passar dele. Em training o teto é da SESSÃO inteira.
+      ...(budgetNum !== undefined ? { budgetUsd: budgetNum } : {}),
     };
 
     let config: RunConfig;
@@ -956,18 +882,48 @@ export function NewRun() {
           : {}),
       };
     }
+    return config;
+  }
 
+  /** Inicia de fato. `costConfirmed` = o usuário viu a faixa e disse sim. */
+  async function launch(config: RunConfig, costConfirmed: boolean) {
     setSubmitting(true);
     try {
       if (mode === 'training') {
-        navigate(`/training/${await createSession(config)}`);
+        navigate(`/training/${await createSession(config, { costConfirmed })}`);
       } else {
-        navigate(`/runs/${await createRun(config)}`);
+        navigate(`/runs/${await createRun(config, { costConfirmed })}`);
       }
     } catch (err) {
-      setError((err as Error).message);
       setSubmitting(false);
+      // O portão do api.ts recusou (estimativa mudou desde a tela): mostra a
+      // faixa e pede o "sim" — nunca gasta calado.
+      if (isCostConfirmationRequired(err)) {
+        setPendingLaunch({ config, estimate: err.estimate });
+        return;
+      }
+      setError((err as Error).message);
     }
+  }
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const faltas = problems();
+    if (faltas.length) {
+      setTried(true);
+      setTab(faltas[0].tab);
+      return setError(faltas[0].text);
+    }
+    const config = buildConfig();
+    // Confirmação de custo (IMPL-020): faixa alta > US$ 1 (ou preço
+    // desconhecido) exige um "sim" explícito com a faixa e os drivers à vista.
+    const est = estimateConfigCost(config, models);
+    if (est.requiresConfirmation) {
+      setPendingLaunch({ config, estimate: est });
+      return;
+    }
+    await launch(config, false);
   }
 
   /** Rótulo da aba, com o ponto de pendência quando ela tem alguma. */
@@ -986,6 +942,9 @@ export function NewRun() {
   }
 
   const primeira = pendencias[0];
+  // Estimativa do rodapé: a MESMA conta do diálogo de confirmação e das portas
+  // de orçamento do motor (src/estimate.ts), sobre a config que vai ser enviada.
+  const launchEstimate = modelsLoading ? null : estimateConfigCost(buildConfig(), models);
 
   return (
     <form onSubmit={submit}>
@@ -1342,6 +1301,19 @@ export function NewRun() {
                   max={12}
                 />
                 <TxtNumRow
+                  label="Orçamento máx. (US$)"
+                  sub={
+                    mode === 'training'
+                      ? 'Teto de gasto da sessão inteira (todas as rodadas + holdout). A execução para numa fronteira de fase antes de passar dele, com resultado parcial. Vazio = sem limite.'
+                      : 'Teto de gasto da run. Ela para numa fronteira de fase antes de passar dele, com resultado parcial — nunca com notas inventadas. Vazio = sem limite.'
+                  }
+                  value={budget}
+                  onChange={setBudget}
+                  min={0}
+                  step={0.5}
+                  placeholder="sem limite"
+                />
+                <TxtNumRow
                   label="Máx. tokens por resposta"
                   sub="Teto de tamanho de cada resposta. Modelos de raciocínio precisam de folga: deixe alto."
                   value={maxOutputTokens}
@@ -1623,19 +1595,24 @@ export function NewRun() {
 
           <span
             className="shrink-0 text-right text-[12px] text-muted-foreground tabular"
-            title={`Estimativa pelo teto de tokens; inclui gabaritos e finais.\n${Object.entries(
-              estimate.byRole,
-            )
-              .map(([papel, usd]) => `${papel}: ${estimate.calls[papel]} chamada(s) · ~${fmtUsd(usd)}`)
-              .join('\n')}`}
+            title={
+              launchEstimate
+                ? `Estimativa pelo teto de tokens; inclui gabaritos, finais e o holdout do treino.\n${launchEstimate.drivers
+                    .map((d) => `${d.label}: ${d.calls} chamada(s) · até ${fmtUsd(d.usd)}`)
+                    .join('\n')}`
+                : undefined
+            }
           >
-            <span className="block text-[10px] tracking-wide uppercase">custo estimado</span>
-            {modelsLoading ? '—' : `~${fmtUsd(estimate.low)} – ${fmtUsd(estimate.high)}`}
-            {/* CostPreview (F3/§7.4): quebra por papel, uma linha compacta. */}
+            <span className="block text-[10px] tracking-wide uppercase">
+              custo estimado{budgetNum !== undefined ? ` · teto ${fmtUsd(budgetNum)}` : ''}
+            </span>
+            {launchEstimate ? `~${fmtUsd(launchEstimate.low)} – ${fmtUsd(launchEstimate.high)}` : '—'}
+            {/* CostPreview (F3/§7.4): os 3 drivers que mais pesam, numa linha. */}
             <span className="block text-[10px] text-muted-foreground/80">
-              {Object.entries(estimate.byRole)
-                .filter(([, usd]) => usd > 0)
-                .map(([papel, usd]) => `${papel} ${fmtUsd(usd)}`)
+              {launchEstimate?.drivers
+                .filter((d) => d.usd > 0)
+                .slice(0, 3)
+                .map((d) => `${d.label} ${fmtUsd(d.usd)}`)
                 .join(' · ')}
             </span>
           </span>
@@ -1658,6 +1635,17 @@ export function NewRun() {
           </MultiStateButton>
         </div>
       </div>
+
+      <CostConfirmDialog
+        estimate={pendingLaunch?.estimate ?? null}
+        mode={mode}
+        onClose={() => setPendingLaunch(null)}
+        onConfirm={() => {
+          const p = pendingLaunch;
+          setPendingLaunch(null);
+          if (p) void launch(p.config, true);
+        }}
+      />
     </form>
   );
 }

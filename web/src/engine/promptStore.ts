@@ -1,7 +1,8 @@
 // Biblioteca de prompts salvos/evoluídos do usuário (client-only, store 'prompts'
 // do IndexedDB). Cada prompt tem versionamento próprio: mudar o TEXTO cria uma
-// nova versão e registra no history; renomear não versiona. Degrada para no-op
-// quando o IndexedDB está indisponível (mesmo padrão do storage.ts).
+// nova versão e registra no history; renomear não versiona. Leitura degrada
+// para vazio quando o IndexedDB está indisponível; ESCRITA rejeita com
+// `IdbWriteError` (IMPL-022) — a tela avisa em vez de fingir que salvou.
 
 import { idbGet, idbGetAll, idbPut, idbDelete } from '../idb';
 import type { SavedPrompt } from './types';

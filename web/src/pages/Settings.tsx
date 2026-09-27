@@ -1,4 +1,5 @@
 import { KeySetup } from '../components/KeySetup';
+import { StorageSettings } from '../components/StorageNotice';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
 import { PageHeader, Screen, SectionHead } from '../components/primitives';
 import { useTheme, type Theme } from '../theme';
@@ -16,7 +17,7 @@ export function SettingsPage() {
     <Screen>
       <PageHeader
         title="Configurações"
-        subtitle="A chave usada para falar com a OpenRouter e a aparência do app."
+        subtitle="A chave usada para falar com a OpenRouter, a aparência do app e o armazenamento local."
       />
 
       <KeySetup />
@@ -37,6 +38,9 @@ export function SettingsPage() {
           ))}
         </SegmentedToggle>
       </div>
+
+      <SectionHead>Armazenamento local</SectionHead>
+      <StorageSettings />
     </Screen>
   );
 }

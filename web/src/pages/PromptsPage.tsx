@@ -91,6 +91,9 @@ function PromptItem({ prompt: p, onUpdated, onDeleted }: PromptItemProps) {
       const updated = await updatePrompt(p.id, { name });
       if (updated) onUpdated(updated);
       setEditing(false);
+    } catch (err) {
+      // IMPL-022: o IndexedDB agora REJEITA (antes engolia e o nome "voltava").
+      notify(`Não foi possível renomear: ${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setSaving(false);
     }
@@ -102,7 +105,12 @@ function PromptItem({ prompt: p, onUpdated, onDeleted }: PromptItemProps) {
   }
 
   async function confirmDelete() {
-    await deletePrompt(p.id);
+    try {
+      await deletePrompt(p.id);
+    } catch (err) {
+      notify(`Não foi possível excluir: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      return;
+    }
     onDeleted(p.id);
     notify(`“${p.name}” excluído.`);
   }

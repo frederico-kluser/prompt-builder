@@ -4,7 +4,10 @@ import { ArrowRight, Download } from 'lucide-react';
 import type { RunRecord, SessionRecord, StageSpec } from '../api';
 import {
   cacheSession,
+  canCancelSession,
+  cancelSession,
   fetchSession,
+  markSessionInterrupted,
   openSessionStream,
   fetchRun,
   getLiveRun,
@@ -40,6 +43,8 @@ import {
   Tag,
 } from '../components/primitives';
 import { useToasts } from '../components/AppShell';
+import { CancelHoldButton, OwnershipBanner, StopBanner } from '../components/RunControls';
+import { StorageNotice } from '../components/StorageNotice';
 import { cn } from '@/lib/utils';
 
 // ---------------------------------------------------------------------------
@@ -270,8 +275,10 @@ function BestPromptStudio({
       setSaved(true);
       setSaveOpen(false);
       notify('Prompt salvo na biblioteca.');
-    } catch {
-      notify('Não foi possível salvar na biblioteca.', 'error');
+    } catch (err) {
+      // IMPL-022: agora a falha do IndexedDB chega aqui (antes o idbPut a engolia
+      // e este aviso nunca aparecia) — com a causa (ex.: sem espaço).
+      notify(`Não foi possível salvar na biblioteca: ${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setSaving(false);
     }
@@ -417,11 +424,17 @@ export function TrainingView() {
   const [drawerVariant, setDrawerVariant] = useState<string | null>(null);
   const [pastRuns, setPastRuns] = useState<Record<string, RunRecord>>({});
   const [duelProgress, setDuelProgress] = useState<{ done: number; total: number } | null>(null);
+  // Cancelar pedido: esconde o botão até o session.finished chegar.
+  const [cancelRequested, setCancelRequested] = useState(false);
+  // IMPL-023: o treino 'running' aberto aqui roda em OUTRA aba (ou sem Web Locks).
+  const [ownership, setOwnership] = useState<'elsewhere' | 'unsupported' | null>(null);
 
   // Efeito A: eventos da SESSAO (iteracoes, snapshot, fim).
   useEffect(() => {
     if (!sessionId) return;
     let cancelled = false;
+    setCancelRequested(false);
+    setOwnership(null);
     const refetch = () =>
       fetchSession(sessionId)
         .then((s) => {
@@ -439,9 +452,14 @@ export function TrainingView() {
       sessionId,
       (event) => {
         if (cancelled) return;
+        if (event.type === 'ownership') {
+          setOwnership(event.state);
+          return;
+        }
         if (event.type === 'snapshot') {
           const rec = event.record as SessionRecord;
           setSession(rec);
+          if (rec.status !== 'running') setOwnership(null);
           void cacheSession(rec);
           const doneN = rec.bestPromptByIteration.length;
           const cur = rec.runIds.length > doneN ? rec.runIds[rec.runIds.length - 1] : undefined;
@@ -576,6 +594,8 @@ export function TrainingView() {
   const done = session.bestPromptByIteration.length;
   const planned = session.config.iterations ?? 0;
   const isRunning = session.status === 'running';
+  // Só a aba que roda o treino consegue abortá-lo (o motor vive nela).
+  const cancellable = isRunning && !cancelRequested && canCancelSession(session.id);
   // A run de holdout e marcada com iteracao == planned ("rodada H"): em toda
   // lista de rodadas ela vira "Holdout", nunca "Rodada N+1".
   const holdoutAt = planned > 0 ? planned : undefined;
@@ -644,19 +664,36 @@ export function TrainingView() {
               </div>
             </div>
             <div className="min-w-[5rem]">
-              <div className="text-[11px] tracking-wide text-muted-foreground uppercase">custo</div>
+              <div className="text-[11px] tracking-wide text-muted-foreground uppercase">
+                {session.budgetUsd !== undefined ? 'custo / teto' : 'custo'}
+              </div>
               <div className="mt-0.5 font-heading text-lg font-medium tabular">
                 ${session.totalCostUsd.toFixed(4)}
+                {session.budgetUsd !== undefined && (
+                  <span className="text-sm text-muted-foreground"> / ${session.budgetUsd.toFixed(2)}</span>
+                )}
               </div>
             </div>
           </div>
         </div>
 
-        <div className="mt-4 border-t border-border pt-4">
+        <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-4">
           <Button variant="outline" size="sm" onClick={downloadPack} disabled={!packScenarios.length}>
             <Download aria-hidden="true" />
             Pacote
           </Button>
+          {cancellable && (
+            <div className="ml-auto">
+              <CancelHoldButton
+                onConfirm={() => {
+                  if (cancelSession(session.id)) setCancelRequested(true);
+                }}
+              />
+            </div>
+          )}
+          {isRunning && cancelRequested && (
+            <span className="ml-auto text-[13px] text-muted-foreground">Cancelando…</span>
+          )}
         </div>
       </header>
 
@@ -665,8 +702,37 @@ export function TrainingView() {
           <strong>Treino falhou:</strong> {session.error}
         </Banner>
       )}
-      {session.status === 'aborted' && (
-        <Banner className="mt-4">Treino interrompido — o servidor reiniciou enquanto ele rodava.</Banner>
+      <StopBanner
+        className="mt-4"
+        subject="treino"
+        info={session}
+        legacyText="Treino interrompido — o servidor reiniciou enquanto ele rodava."
+      />
+      <OwnershipBanner
+        className="mt-4"
+        subject="treino"
+        state={isRunning ? ownership : null}
+        onMarkInterrupted={() => {
+          void markSessionInterrupted(session.id).then((s) => {
+            if (!s) return;
+            setSession(s);
+            if (s.status !== 'running') setOwnership(null);
+          });
+        }}
+      />
+      {/* IMPL-022: a sessão e as runs das rodadas gravam no IndexedDB. */}
+      <StorageNotice
+        className="mt-4"
+        targets={[
+          { subject: 'session', id: session.id },
+          ...session.runIds.map((id) => ({ subject: 'run' as const, id })),
+        ]}
+      />
+      {session.holdoutSkipped && (
+        <Banner tone="warn" className="mt-4">
+          <strong>Holdout pulado</strong> (orçamento/cancelamento): o campeão NÃO foi validado nos cenários
+          reservados — o ganho pode ser sobreajuste à seleção de treino.
+        </Banner>
       )}
       {gates.length > 0 && (
         <Banner tone={session.holdout?.regressed ? 'error' : 'neutral'} className="mt-4">

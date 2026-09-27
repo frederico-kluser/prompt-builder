@@ -2,7 +2,7 @@
 import type { ExpectedSpec } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
-import type { CostEntry, CostRole, PricingTier } from '../../../src/types.js';
+import type { CostEntry, CostRole, PricingTier, RunPhase } from '../../../src/types.js';
 import type { ModelLifecycleSnapshot } from '../../../src/engine/modelLifecycle.js';
 
 // Ciclo de vida de modelos (IMPL-019): fonte única em src/engine/modelLifecycle.ts.
@@ -27,6 +27,7 @@ export type {
   PricingTier,
   Reservation,
   RunCtx,
+  RunPhase,
 } from '../../../src/types.js';
 export { COST_ROLES } from '../../../src/types.js';
 
@@ -217,6 +218,16 @@ export interface RunConfigBase {
    * verbatim e piso de comprimento — o pos-rewriter rejeita o que quebrar.
    */
   contracts?: PromptContracts;
+  /**
+   * Teto de gasto em USD para a run (ou para a SESSAO inteira, em training).
+   * Ausente = sem limite. Espelho de src/types.ts (IMPL-020: a SPA passou a
+   * respeitar o teto — antes o campo nem existia aqui).
+   *
+   * ⚠️ `variationConfigFrom` (trainer.ts) NAO copia este campo de proposito:
+   * cada uma das N iteracoes receberia o teto inteiro da sessao. O ledger da
+   * sessao (parentLedger) e quem controla.
+   */
+  budgetUsd?: number;
 }
 
 /** Campos comuns aos modos de 1 LLM (variation/training). */
@@ -483,6 +494,14 @@ export interface StageRecord {
   evaluation?: StageEvaluation;
   /** Preenchido quando a etapa falhou (ex.: datagen) e foi pulada sem matar a run. */
   error?: string;
+  /**
+   * Etapa interrompida no meio (orcamento/cancelamento) — NAO entra no placar
+   * nem nas medias. E o que separa "parou cedo, honesto" de "terminou,
+   * mentindo": sem a marca, uma etapa cortada viraria veredito inventado.
+   */
+  incomplete?: boolean;
+  /** Por que a etapa ficou incompleta (CONVENTIONS §4). */
+  incompleteReason?: 'budget' | 'cancelled' | 'truncation';
   startedAt: string;
   finishedAt?: string;
 }
@@ -542,6 +561,18 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
+  /** Teto de gasto configurado (ausente = sem limite). */
+  budgetUsd?: number;
+  /** true = a run parou porque o orcamento acabou. */
+  budgetExhausted?: boolean;
+  /** Fase em que a run parou (so quando parou cedo). */
+  stoppedAtPhase?: RunPhase;
+  /**
+   * Por que parou cedo. Discrimina o status 'aborted'. 'orphan' (IMPL-023, só
+   * na SPA): a aba que executava foi fechada/recarregada/travou — o lock da run
+   * (Web Locks) ficou livre com o record ainda 'running'.
+   */
+  stoppedReason?: 'budget' | 'cancelled' | 'orphan';
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -581,6 +612,17 @@ export interface SessionRecord {
   costByRole?: Record<CostRole, CostEntry>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   upstreamCostUsd?: number;
+  budgetUsd?: number;
+  budgetExhausted?: boolean;
+  stoppedAtPhase?: RunPhase;
+  stoppedReason?: 'budget' | 'cancelled' | 'orphan';
+  /** Iteracao em que o orcamento/cancelamento interrompeu a sessao. */
+  stoppedAtIteration?: number;
+  /**
+   * true = o campeao NAO passou pelo gate de holdout (pulado por orcamento ou
+   * cancelamento): nao validado contra sobreajuste — a UI precisa dizer isso.
+   */
+  holdoutSkipped?: boolean;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -674,8 +716,39 @@ export type RunEvent =
     }
   | { type: 'stage.dueled'; runId: string; stageIndex: number; duels: StageDuels }
   | { type: 'duel.progress'; runId: string; done: number; total: number }
+  /** Gasto acumulado (espelho de src/types.ts). */
+  | {
+      type: 'run.spend';
+      runId: string;
+      spentUsd: number;
+      budgetUsd?: number;
+      byRole: Record<CostRole, CostEntry>;
+    }
+  /** Decisao de uma porta de orcamento numa fronteira de fase. */
+  | {
+      type: 'run.budget';
+      runId: string;
+      phase: RunPhase;
+      projectedUsd: number;
+      remainingUsd: number;
+      decision: 'go' | 'stop';
+    }
   | { type: 'run.finished'; runId: string; record: RunRecord }
-  | { type: 'run.error'; runId: string; error: string };
+  | { type: 'run.error'; runId: string; error: string }
+  /**
+   * IMPL-022: a gravação no IndexedDB falhou — SÓ a SPA emite (o Node grava em
+   * disco e lança). A run segue viva na memória da aba; o aviso na UI oferece
+   * baixar o JSON. Um evento por episódio (a batida periódica não repete).
+   */
+  | StorageEvent<{ runId: string }>;
+
+/** Tipo da falha de gravação local (espelha `IdbFailureKind` de web/src/idb.ts). */
+export type StorageFailureKind = 'quota' | 'unavailable' | 'failed';
+
+/** Falha de gravação local, no barramento da run OU da sessão. */
+export type StorageEvent<Scope> =
+  | ({ type: 'storage.quota_exceeded'; kind: 'quota'; error: string } & Scope)
+  | ({ type: 'storage.write_failed'; kind: Exclude<StorageFailureKind, 'quota'>; error: string } & Scope);
 
 export type SessionEvent =
   | { type: 'session.started'; sessionId: string; record: SessionRecord }
@@ -691,4 +764,6 @@ export type SessionEvent =
   | { type: 'session.holdout'; sessionId: string; holdout: SessionRecord['holdout'] }
   | { type: 'session.converged'; sessionId: string; iteration: number }
   | { type: 'session.finished'; sessionId: string; record: SessionRecord }
-  | { type: 'session.error'; sessionId: string; error: string };
+  | { type: 'session.error'; sessionId: string; error: string }
+  /** IMPL-022: gravação da sessão no IndexedDB falhou (só a SPA emite). */
+  | StorageEvent<{ sessionId: string }>;

@@ -1,5 +1,6 @@
 import { applyReasoning } from './reasoning.js';
 import { parseLifecycleMeta } from './engine/modelLifecycle.js';
+import { isControlSignal, toControlSignal } from './budget.js';
 import type {
   CallCost,
   CostRole,
@@ -62,8 +63,12 @@ export interface GatewayConfig {
    * "Illegal invocation". Aqui ele e sempre copiado para uma variavel local.
    */
   fetch?: FetchLike;
-  /** Espera entre re-tentativas (testes injetam uma espera nula). */
-  sleep?: (ms: number) => Promise<void>;
+  /**
+   * Espera entre re-tentativas (testes injetam uma espera nula). O `signal` é
+   * só uma dica para liberar o timer cedo: o gateway já corre a espera contra o
+   * abort por fora, então uma espera que o ignore continua cancelável.
+   */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 const DEFAULT_CONFIG: GatewayConfig = {
@@ -103,8 +108,18 @@ function mergeConfig(base: GatewayConfig, patch: Partial<GatewayConfig>): Gatewa
   return out;
 }
 
-const defaultSleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    const t = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    // Abortou: solta o timer já (quem decide o que o abort significa é o
+    // `backoff` do gateway, que rejeita com o sinal de controle).
+    signal?.addEventListener('abort', done, { once: true });
+  });
 
 // ---------------------------------------------------------------------------
 // Limitador de concorrencia ADAPTATIVO (AIMD), por instancia de gateway.
@@ -134,12 +149,30 @@ export class AimdLimiter {
     this.limit = Math.min(this.limit, max);
   }
 
-  acquire(): Promise<void> {
+  /**
+   * Vaga no limitador. Com `signal` (IMPL-020, Cancelar): sinal já abortado nem
+   * entra na fila, e quem estava ESPERANDO sai dela no abort — sem isso a
+   * chamada enfileirada ganharia a vaga depois do clique e iria ao transporte.
+   */
+  acquire(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(toControlSignal(signal.reason));
     if (this.active < this.limit) {
       this.active += 1;
       return Promise.resolve();
     }
-    return new Promise<void>((resolve) => this.waiters.push(resolve));
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => {
+        const i = this.waiters.indexOf(grant);
+        if (i >= 0) this.waiters.splice(i, 1);
+        reject(toControlSignal(signal?.reason));
+      };
+      const grant = (): void => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.waiters.push(grant);
+    });
   }
 
   release(): void {
@@ -399,6 +432,16 @@ function applyMaxPrice(
   body.provider = { ...provider, max_price: cap };
 }
 
+/**
+ * Erro de uma chamada cujo sinal EXTERNO abortou (Cancelar/Ctrl-C) sai como
+ * sinal de controle (IMPL-020). Cobre o abort no MEIO do corpo (JSON/stream
+ * chegando): o leitor rejeita com o que o runtime quiser, e um erro comum seria
+ * degradado pelos papeis em nota inventada ('parcial', competidor 'error').
+ */
+function controlIfAborted(err: unknown, signal?: AbortSignal): unknown {
+  return signal?.aborted && !isControlSignal(err) ? toControlSignal(signal.reason) : err;
+}
+
 function isRetryableStatus(status: number): boolean {
   return status === 429 || (status >= 500 && status < 600);
 }
@@ -579,9 +622,32 @@ export class OpenRouterGateway {
     return f(url, init);
   }
 
-  private sleep(ms: number): Promise<void> {
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
     const s = this.cfg.sleep ?? defaultSleep;
-    return s(ms);
+    return s(ms, signal);
+  }
+
+  /**
+   * Espera de backoff SENSÍVEL ao Cancelar (IMPL-020). O backoff chega a ~8 s
+   * por tentativa: sem isto, cancelar durante um 429/5xx não mandava chamada
+   * nova, mas a run só fechava quando o sono acabava (a UI ficava presa em
+   * "Cancelando…"). Abortou antes ou durante => sinal de controle na hora.
+   */
+  private async backoff(attempt: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) return this.sleep(backoffMs(attempt));
+    if (signal.aborted) throw toControlSignal(signal.reason);
+    let onAbort: () => void = () => undefined;
+    const abortou = new Promise<never>((_, reject) => {
+      onAbort = () => reject(toControlSignal(signal.reason));
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      await Promise.race([this.sleep(backoffMs(attempt), signal), abortou]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+    // A espera injetada pode resolver no próprio abort: nesse caso, controle.
+    if (signal.aborted) throw toControlSignal(signal.reason);
   }
 
   // --- catalogo ---------------------------------------------------------------
@@ -656,7 +722,13 @@ export class OpenRouterGateway {
     const limiter = this.limiter;
     let attempt = 0;
     for (;;) {
-      await limiter.acquire();
+      await limiter.acquire(externalSignal);
+      // Abortou entre ganhar a vaga e enviar: devolve a vaga SEM tocar o
+      // transporte (zero chamadas novas depois do Cancelar — IMPL-020).
+      if (externalSignal?.aborted) {
+        limiter.release();
+        throw toControlSignal(externalSignal.reason);
+      }
       const controller = new AbortController();
       const timeoutHandle = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
       const onExternalAbort = () => controller.abort(externalSignal?.reason);
@@ -676,9 +748,13 @@ export class OpenRouterGateway {
       } catch (err) {
         cleanup();
         limiter.release();
-        // abort (timeout/externo) nao repete; erro de rede repete com backoff.
+        // Abort EXTERNO (Cancelar/Ctrl-C) sai como SINAL DE CONTROLE, aqui no
+        // ponto unico: o que o transporte rejeita varia por runtime, e um erro
+        // comum seria degradado pelos papeis em nota inventada (IMPL-020).
+        if (externalSignal?.aborted) throw toControlSignal(externalSignal.reason);
+        // abort (timeout) nao repete; erro de rede repete com backoff.
         if (controller.signal.aborted || attempt >= MAX_RETRIES) throw err;
-        await this.sleep(backoffMs(attempt));
+        await this.backoff(attempt, externalSignal);
         attempt += 1;
         continue;
       }
@@ -690,13 +766,14 @@ export class OpenRouterGateway {
           await res.body?.cancel().catch(() => undefined);
           cleanup();
           limiter.release();
-          await this.sleep(backoffMs(attempt));
+          await this.backoff(attempt, externalSignal);
           attempt += 1;
           continue;
         }
         const errText = await res.text().catch(() => '');
         cleanup();
         limiter.release();
+        if (externalSignal?.aborted) throw toControlSignal(externalSignal.reason);
         throw new Error(describeOpenRouterError(status, errText));
       }
 
@@ -811,6 +888,8 @@ export class OpenRouterGateway {
         cachedTokensIn: usage.cachedTokensIn,
         reasoningTokens: usage.reasoningTokens,
       };
+    } catch (err) {
+      throw controlIfAborted(err, externalSignal);
     } finally {
       if (!ok) reservation?.release();
       finish(ok);
@@ -908,6 +987,8 @@ export class OpenRouterGateway {
         cachedTokensIn: usage.cachedTokensIn,
         reasoningTokens: usage.reasoningTokens,
       };
+    } catch (err) {
+      throw controlIfAborted(err, externalSignal);
     } finally {
       if (!ok) reservation?.release();
       finish(ok);

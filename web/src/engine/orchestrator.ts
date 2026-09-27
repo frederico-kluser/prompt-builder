@@ -17,8 +17,18 @@ import { emitEvent } from './events';
 import { saveRun } from './storage';
 import { contestantsFromConfig } from './normalize';
 import { listModels } from './openrouter';
-import { BudgetLedger, isControlSignal } from '../../../src/budget.js';
-import type { Contestant, RunConfig, RunCtx, RunRecord, StageRecord, StageSpec } from './types';
+import { BudgetLedger, isControlSignal, RunCancelled, toControlSignal } from './budget';
+import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
+import { acquireLock } from './runLocks';
+import type {
+  Contestant,
+  RunConfig,
+  RunCtx,
+  RunPhase,
+  RunRecord,
+  StageRecord,
+  StageSpec,
+} from './types';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -27,6 +37,35 @@ function nowIso(): string {
 function log(runId: string, msg: string, extra?: Record<string, unknown>): void {
   const payload = extra ? ` ${JSON.stringify(extra)}` : '';
   console.log(`[bench ${runId}] ${msg}${payload}`);
+}
+
+// ---------------------------------------------------------------------------
+// Cancelamento (IMPL-020, R-10:REC-3). Cada run tem UM AbortController RAIZ,
+// criado aqui e propagado a TODAS as chamadas pelo `ctx.signal` (o gateway o
+// repassa ao fetch e à fila do limitador). O botão Cancelar da UI aborta a
+// raiz: o que está em voo morre, o que está na fila do limitador sai dela e as
+// portas de fase recusam novo grupo — nenhuma chamada nova começa depois do
+// clique. O motivo do abort já é um RunCancelled: qualquer rejeição que o
+// transporte devolva carrega o sinal de CONTROLE, nunca um erro comum que os
+// papéis degradariam em nota inventada.
+// ---------------------------------------------------------------------------
+const runControllers = new Map<string, AbortController>();
+
+/**
+ * Cancela uma run em andamento NESTA aba. Devolve false se a run não está
+ * rodando aqui (já terminou, ou é de outra aba/sessão do navegador).
+ */
+export function cancelRun(runId: string, reason = 'cancelada pelo usuario'): boolean {
+  const ctrl = runControllers.get(runId);
+  if (!ctrl || ctrl.signal.aborted) return false;
+  ctrl.abort(new RunCancelled(reason));
+  return true;
+}
+
+/** true = a run está rodando nesta aba e ainda pode ser cancelada. */
+export function isRunCancellable(runId: string): boolean {
+  const ctrl = runControllers.get(runId);
+  return Boolean(ctrl && !ctrl.signal.aborted);
 }
 
 function applyScoreboard(
@@ -65,8 +104,14 @@ export interface StartRunOpts {
   iteration?: number;
   parentRunId?: string;
   /**
+   * Sinal EXTERNO (a sessão de treino): abortá-lo aborta a raiz desta run. A
+   * run tem sempre a PRÓPRIA raiz (cancelável por `cancelRun`), ligada a este.
+   */
+  signal?: AbortSignal;
+  /**
    * Ledger EXTERNO (sessão de treino): a run reporta o próprio total e escreve
-   * no pai (espelho de src/orchestrator.ts). Ausente => a run cria o próprio.
+   * no pai (espelho de src/orchestrator.ts). Ausente => a run cria o próprio,
+   * com o teto `config.budgetUsd`.
    */
   parentLedger?: BudgetLedger;
 }
@@ -128,26 +173,107 @@ function buildRecord(config: RunConfig, opts: StartRunOpts): RunRecord {
   };
 }
 
-/** Executa o loop e SEMPRE resolve com o record final (status finished/error). */
+/**
+ * Recusa de executar (IMPL-023): o lock da run já tem dono — outra aba a está
+ * executando. Executar de novo somaria gasto na mesma key sem ninguém ver.
+ */
+export const RUN_LOCKED_ELSEWHERE =
+  'Esta run já está em execução em outra aba deste navegador — nada foi executado aqui.';
+
+/** Estado que o runLoop publica para o fechamento em executeRun. */
+interface RunState {
+  /** Criado no runLoop, depois do catálogo (a reserva otimista precisa dele). */
+  ledger?: BudgetLedger;
+  /** Grupo de fase em curso — vira `stoppedAtPhase` se um sinal de controle subir. */
+  phase?: RunPhase;
+}
+
+/**
+ * Executa o loop e SEMPRE resolve com o record final (finished/aborted/error).
+ * Espelho do fechamento de src/orchestrator.ts: orçamento/cancelamento são
+ * CONTROLE, não erro — a run sai `aborted` com `stoppedReason` e o resultado
+ * parcial honesto (etapas cortadas marcadas `incomplete`, fora do placar).
+ */
 async function executeRun(
   record: RunRecord,
   apiKey: string,
   opts: StartRunOpts,
 ): Promise<RunRecord> {
-  // Ledger: filho do da sessão (treino) ou próprio. Sem teto no web por ora —
-  // aqui ele é a contabilidade de ponto único (role + sink) do gateway.
-  const ledger = opts.parentLedger?.fork() ?? new BudgetLedger();
+  const root = new AbortController();
+  const onParentAbort = (): void => root.abort(opts.signal?.reason);
+  if (opts.signal?.aborted) root.abort(opts.signal.reason);
+  else opts.signal?.addEventListener('abort', onParentAbort, { once: true });
+  runControllers.set(record.id, root);
+
+  // IMPL-023 (R-10:REC-1): lock EXCLUSIVO da run (Web Locks) ANTES da primeira
+  // gravação e segurado até DEPOIS da última. Assim nenhuma outra aba vê este
+  // record 'running' sem dono (não o marca órfão) e nenhuma o executa de novo.
+  // Se a aba morrer, o navegador solta o lock e a próxima carga marca a órfã.
+  const lock = await acquireLock('run', record.id);
+  if (!lock) {
+    // Outra aba é a dona: NÃO grava (o record no disco é dela) e não executa.
+    runControllers.delete(record.id);
+    opts.signal?.removeEventListener('abort', onParentAbort);
+    record.status = 'error';
+    record.error = RUN_LOCKED_ELSEWHERE;
+    record.finishedAt = nowIso();
+    console.warn(`[bench ${record.id}] ${RUN_LOCKED_ELSEWHERE}`);
+    emitEvent({ type: 'run.error', runId: record.id, error: record.error });
+    return record;
+  }
+
+  const state: RunState = {};
   try {
-    await runLoop(record, apiKey, opts, ledger);
+    await runLoop(record, apiKey, opts, root.signal, state);
+    // As portas suaves saem do runLoop com `return` (sem lançar) — é o que
+    // preserva o parcial. O fechamento terminal acontece aqui.
+    if (record.status === 'running') {
+      if (state.ledger) syncLedger(record, state.ledger);
+      record.status = record.stoppedReason ? 'aborted' : 'finished';
+      record.finishedAt = nowIso();
+      await saveRun(record);
+      emitEvent({ type: 'run.finished', runId: record.id, record });
+      log(record.id, `run encerrada cedo (${record.stoppedReason ?? 'sem fase executavel'})`, {
+        totalCostUsd: record.totalCostUsd,
+      });
+    }
   } catch (err) {
     // Mesmo falhando, o que já foi gasto aparece no record.
-    syncLedger(record, ledger);
-    console.error(`[bench ${record.id}] run.error:`, err);
-    record.status = 'error';
-    record.error = err instanceof Error ? err.message : String(err);
-    record.finishedAt = nowIso();
-    await saveRun(record).catch(() => undefined);
-    emitEvent({ type: 'run.error', runId: record.id, error: record.error });
+    if (state.ledger) syncLedger(record, state.ledger);
+    if (isControlSignal(err)) {
+      record.status = 'aborted';
+      record.stoppedReason = err.benchControl === 'budget' ? 'budget' : 'cancelled';
+      if (err.benchControl === 'budget') record.budgetExhausted = true;
+      record.stoppedAtPhase ??= state.phase;
+      for (const st of record.stages) {
+        // Etapa que não chegou a ser julgada foi CORTADA: fica fora do placar e
+        // das médias — sem veredito inventado para completar o quadro.
+        if (st.spec && !st.error && !st.judge && !st.incomplete) {
+          st.incomplete = true;
+          st.incompleteReason = record.stoppedReason;
+          st.finishedAt ??= nowIso();
+        }
+      }
+      record.finishedAt = nowIso();
+      log(record.id, `run interrompida (${record.stoppedReason})`, {
+        totalCostUsd: record.totalCostUsd,
+      });
+      await saveRun(record);
+      emitEvent({ type: 'run.finished', runId: record.id, record });
+    } else {
+      console.error(`[bench ${record.id}] run.error:`, err);
+      record.status = 'error';
+      record.error = err instanceof Error ? err.message : String(err);
+      record.finishedAt = nowIso();
+      await saveRun(record);
+      emitEvent({ type: 'run.error', runId: record.id, error: record.error });
+    }
+  } finally {
+    runControllers.delete(record.id);
+    opts.signal?.removeEventListener('abort', onParentAbort);
+    // Só depois do checkpoint final (os `await saveRun` acima): soltar antes
+    // abriria a janela em que outra aba vê 'running' sem dono.
+    lock.release();
   }
   return record;
 }
@@ -173,18 +299,20 @@ async function runLoop(
   record: RunRecord,
   apiKey: string,
   opts: StartRunOpts,
-  ledger: BudgetLedger,
+  signal: AbortSignal,
+  state: RunState,
 ): Promise<void> {
   const { id: runId } = record;
-  // Contexto que atravessa todos os módulos de papel: o gateway contabiliza
-  // cada chamada no ledger com o papel certo (datagen/gabarito/competitor/
-  // judge/duel) — um ponto só, o mesmo do Node.
-  const ctx: RunCtx = { signal: ledger.signal, sink: ledger };
 
   // --- Persistencia com THROTTLE: as etapas paralelas geram MUITAS escritas;
   // coalescemos em no max. 1x/SAVE_INTERVAL_MS (trailing) e damos flush nos
   // marcos. O estado ao vivo ja vai por SSE, entao o disco nao precisa de cada
-  // delta. storage.saveRun continua serializando por run (escrita atomica). ---
+  // delta. O IndexedDB serializa as transacoes de escrita da mesma store na
+  // ordem de criacao (record + resumo numa transacao so — storage.ts).
+  // IMPL-022: saveRun NUNCA rejeita — falha de gravacao vira evento
+  // `storage.*` + aviso na UI (nada de `.catch(() => undefined)` aqui). A batida
+  // periodica e 'relaxed' (a proxima a sobrescreve); marcos e fechamento sao
+  // checkpoint 'strict' (default do saveRun). ---
   const SAVE_INTERVAL_MS = 800;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let lastSave = 0;
@@ -194,7 +322,7 @@ async function runLoop(
     saveTimer = setTimeout(() => {
       saveTimer = null;
       lastSave = Date.now();
-      void saveRun(record).catch(() => undefined);
+      void saveRun(record, { durability: 'relaxed' });
     }, delay);
   };
   const flushSave = async (): Promise<void> => {
@@ -215,8 +343,8 @@ async function runLoop(
   });
 
   // Catálogo QUENTE antes do primeiro gasto (espelho do Node): é o fallback de
-  // preço quando falta `usage.cost` e a allowlist de esforço/amostragem por
-  // modelo. Antes só o competidor esquentava — depois de o datagen já ter ido.
+  // preço quando falta `usage.cost`, a allowlist de esforço/amostragem por
+  // modelo e a base das portas de orçamento (sem ele tudo "custa zero").
   // Vem DEPOIS do run.started para a tela da run abrir sem esperar a rede.
   const catalogo = await listModels(apiKey).catch((err: unknown) => {
     console.warn(`[bench ${runId}] catalogo indisponivel: ${(err as Error).message}`);
@@ -242,6 +370,75 @@ async function runLoop(
   };
   captureLifecycle();
 
+  // Ledger (fonte ÚNICA em src/budget.ts, via shim): filho do da sessão
+  // (treino — o teto é da SESSÃO e vive na raiz) ou próprio, com o teto da run.
+  const ledger =
+    opts.parentLedger?.fork() ??
+    new BudgetLedger({
+      budgetUsd: record.config.budgetUsd,
+      signal,
+      estimateCall: makeCallEstimator(catalogo),
+    });
+  state.ledger = ledger;
+  // Contexto que atravessa todos os módulos de papel: o gateway contabiliza
+  // cada chamada no ledger com o papel certo e repassa o sinal RAIZ da run ao
+  // fetch e à fila do limitador — um ponto só, o mesmo do Node.
+  const ctx: RunCtx = { signal, sink: ledger };
+  // Com `parentLedger` (rodada de treino) este é o teto da SESSÃO — é ele que
+  // governa a run; a tela o rotula como tal pelo `sessionId` (RunView).
+  record.budgetUsd = ledger.snapshot().budgetUsd;
+
+  // Estimativa por papel — base das PORTAS SUAVES (espelho do Node).
+  // ⚠️ Em variation standalone (`opts.prepare`) os contestants ainda NÃO
+  // existem aqui: `contestantIds: []` estimaria ZERO competidores e a porta
+  // atômica G2 nunca dispararia (a run pagava as respostas e parava sem nota,
+  // passando do teto). Lista vazia => deixa o estimador contar técnicas+base,
+  // e a estimativa é refeita com os contestants reais depois do `prepare`.
+  const estimar = (contestantIds: string[]) =>
+    estimateRunCost(
+      estimateInputFromConfig(
+        record.config as never,
+        contestantIds.length > 0 ? { contestantIds } : {},
+      ),
+      catalogo,
+    );
+  let est = estimar(record.contestants.map((c) => c.id));
+
+  /** Cancelamento: a raiz da run (ou a sessão, via ledger) abortou => controle. */
+  const throwIfCancelled = (): void => {
+    if (signal.aborted) throw toControlSignal(signal.reason);
+    ledger.throwIfCancelled();
+  };
+
+  /**
+   * Porta suave (espelho do Node). A unidade NÃO é "uma fase", é um GRUPO que
+   * produz resultado coerente: competidores+julgamento são atômicos, porque
+   * autorizar respostas sem poder pagar o julgamento produz etapas com resposta
+   * e sem nota. Checa o cancelamento ANTES de autorizar novo grupo. Devolver
+   * false NÃO lança: o controle cai no fechamento (aborted/budget).
+   */
+  const gate = (phase: RunPhase, projectedUsd: number): boolean => {
+    state.phase = phase;
+    throwIfCancelled();
+    if (ledger.canAfford(projectedUsd)) return true;
+    record.budgetExhausted = true;
+    record.stoppedAtPhase = phase;
+    record.stoppedReason = 'budget';
+    emitEvent({
+      type: 'run.budget',
+      runId,
+      phase,
+      projectedUsd,
+      remainingUsd: ledger.remainingUsd() ?? 0,
+      decision: 'stop',
+    });
+    log(runId, `orcamento insuficiente para ${phase}`, {
+      projectedUsd,
+      remainingUsd: ledger.remainingUsd(),
+    });
+    return false;
+  };
+
   // compare-llms: falha a run CEDO (antes de qualquer chamada de LLM) se as
   // variantes forem invalidas. buildRecord nao pode lancar (e sincrono e a
   // rota espera o record de volta); sanitize e puro/barato, rodar 2x e inocuo.
@@ -256,8 +453,14 @@ async function runLoop(
 
   // Resolve contestants on-demand (variacao: gera as variantes via optimizer).
   if (opts.prepare) {
+    if (!gate('variants', est.byRole.rewriter)) {
+      record.stages = [];
+      syncLedger(record, ledger);
+      return;
+    }
     emitEvent({ type: 'variants.generating', runId });
     const contestants = await opts.prepare(ctx);
+    throwIfCancelled();
     if (contestants.length < 2) {
       throw new Error(
         'Variacao precisa de ao menos 2 contestants validos (verifique as tecnicas/variantes ou o modelo optimizer).',
@@ -267,6 +470,8 @@ async function runLoop(
     record.scoreboard = Object.fromEntries(contestants.map((c) => [c.id, 0]));
     record.costByContestant = Object.fromEntries(contestants.map((c) => [c.id, 0]));
     captureLifecycle();
+    // As portas seguintes (G1, G2 atômica, finais) medem com os contestants REAIS.
+    est = estimar(contestants.map((c) => c.id));
     await saveRun(record);
     emitEvent({ type: 'variants.generated', runId, contestants });
   }
@@ -321,6 +526,13 @@ async function runLoop(
     emitEvent({ type: 'stage.generating', runId, stageIndex: i });
   }
 
+  // G1 = datagen + gabaritos: descartável inteiro, antes de gastar com respostas.
+  const custoG1 = est.byRole.datagen + est.byRole.gabarito;
+  if (!gate('datagen', custoG1)) {
+    syncLedger(record, ledger);
+    return;
+  }
+
   let specs: StageSpec[];
   if (pinado) {
     specs = pinnedStages!;
@@ -343,6 +555,8 @@ async function runLoop(
       timeoutMs: datagenTimeout,
       ctx,
     });
+    // Cancelou no meio do lote: "nenhum cenário" seria um erro falso.
+    throwIfCancelled();
     specs = mergeScenarios(seed, gerados).map(saneMaxTokens);
     if (specs.length === 0) {
       throw new Error(
@@ -356,6 +570,7 @@ async function runLoop(
   // passam intactas; falha num gabarito so deixa a etapa sem reference
   // (degrada na fase 3). ===
   if (referenceJudging) {
+    state.phase = 'gabarito';
     specs = await generateReferences({
       stages: specs,
       apiKey,
@@ -398,10 +613,29 @@ async function runLoop(
     record.contestants[0]?.id;
   const labelOf = (id: string): string => record.contestants.find((c) => c.id === id)?.label ?? id;
 
-  // === FASE 2: rodar TODAS as etapas (com spec) EM PARALELO. ===
-  // Cada etapa e isolada (try/catch): uma falha nao derruba a run nem as outras.
-  // O placar e ADITIVO (applyScoreboard) — independe da ordem de termino.
-  await Promise.all(
+  // === FASE 2+3: G2 — respostas E julgamento são UM grupo indivisível. ===
+  // Autorizar os competidores sem reservar o julgamento na MESMA decisão
+  // produziria etapas com resposta e sem nota (ou metade julgada), que é o
+  // resultado incompleto com aparência de completo.
+  const custoG2 = est.byRole.competitor + est.byRole.judge;
+  if (!gate('competitors', custoG2)) {
+    for (const st of record.stages) {
+      if (st.spec && !st.error) {
+        st.incomplete = true;
+        st.incompleteReason = 'budget';
+      }
+    }
+    syncLedger(record, ledger);
+    return;
+  }
+
+  // Cada etapa é isolada (try/catch): uma falha não derruba a run nem as outras.
+  // O placar é ADITIVO (applyScoreboard) — independe da ordem de término.
+  // allSettled em vez de all (espelho do Node): com `all`, a primeira rejeição
+  // desenrola o loop enquanto as irmãs seguem gastando, e o resultado delas se
+  // perde DEPOIS de o dinheiro sair. Aqui todas terminam e só então o sinal de
+  // controle sobe.
+  const etapasSettled = await Promise.allSettled(
     record.stages.map(async (stageRecord) => {
       const i = stageRecord.index;
       const stageSpec = stageRecord.spec;
@@ -409,7 +643,7 @@ async function runLoop(
 
       try {
         // Competidores em paralelo — SEM cap local; o limitador global throttla.
-        await Promise.all(
+        const respSettled = await Promise.allSettled(
           record.contestants.map(async (contestant) => {
             const response = await runCompetitor({
               apiKey,
@@ -445,6 +679,13 @@ async function runLoop(
             return response;
           }),
         );
+        // Sinal de controle tem prioridade sobre qualquer outra rejeição.
+        const rejeitada =
+          respSettled.find((r) => r.status === 'rejected' && isControlSignal(r.reason)) ??
+          respSettled.find((r) => r.status === 'rejected');
+        if (rejeitada?.status === 'rejected') throw rejeitada.reason;
+        // Cancelou enquanto as respostas chegavam: nem começa o julgamento.
+        throwIfCancelled();
 
         // === FASE 3: julgamento. Com gabarito: pointwise vs referencia (os
         // duelos sairam daqui — agora sao a FASE 4, so entre os finalistas).
@@ -464,6 +705,10 @@ async function runLoop(
               timeoutMs: record.config.timeoutMs,
               ctx,
             });
+            // Defesa em profundidade: veredito que chegou DEPOIS do Cancelar
+            // pode ter sido degradado por um abort ('parcial' inventado) —
+            // descarta e deixa a etapa incompleta.
+            throwIfCancelled();
             stageRecord.referenceJudge = refJudge;
 
             // JudgeResult SINTETIZADO para nao quebrar scoreboard/medals/UI:
@@ -498,7 +743,7 @@ async function runLoop(
               inconclusive: refJudge.inconclusive,
             };
           } else {
-            stageRecord.judge = await judgeStage({
+            const listwise = await judgeStage({
               apiKey,
               stage: stageSpec,
               responses: stageRecord.responses,
@@ -507,6 +752,8 @@ async function runLoop(
               passes: record.config.judgePasses,
               ctx,
             });
+            throwIfCancelled();
+            stageRecord.judge = listwise;
           }
         } catch (judgeErr) {
           // Sinal de controle (orcamento/cancelamento) nao e "juiz inconclusivo".
@@ -547,10 +794,23 @@ async function runLoop(
           scoreboard: { ...record.scoreboard },
           totalCostUsd: record.totalCostUsd,
         });
+        emitEvent({
+          type: 'run.spend',
+          runId,
+          spentUsd: ledger.spentUsd,
+          budgetUsd: ledger.snapshot().budgetUsd,
+          byRole: ledger.byRole,
+        });
       } catch (stageErr) {
         // rede de seguranca: qualquer imprevisto na etapa NAO mata a run —
-        // MENOS orcamento/cancelamento, que sao decisao, nao acidente.
-        if (isControlSignal(stageErr)) throw stageErr;
+        // MENOS orcamento/cancelamento, que sao decisao, nao acidente: a etapa
+        // cortada fica `incomplete` (fora do placar e das medias).
+        if (isControlSignal(stageErr)) {
+          stageRecord.incomplete = true;
+          stageRecord.incompleteReason = stageErr.benchControl === 'budget' ? 'budget' : 'cancelled';
+          stageRecord.finishedAt = nowIso();
+          throw stageErr;
+        }
         const msg = stageErr instanceof Error ? stageErr.message : String(stageErr);
         stageRecord.error = stageRecord.error ?? msg;
         stageRecord.finishedAt = nowIso();
@@ -559,9 +819,15 @@ async function runLoop(
       }
     }),
   );
+  for (const r of etapasSettled) {
+    if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
+  }
+  syncLedger(record, ledger);
 
   // === Agregados do julgamento por referencia (trainer/UI consomem). ===
-  const stagesComRef = record.stages.filter((s) => s.referenceJudge);
+  // Etapas `incomplete` (cortadas) ficam de fora: contar uma etapa sem
+  // julgamento como 'nao' rebaixaria todo mundo por falta de dinheiro.
+  const stagesComRef = record.stages.filter((s) => s.referenceJudge && !s.incomplete);
   if (stagesComRef.length > 0) {
     // judge-score = (resolve + 0.5*parcial) / total * 100, por contestant,
     // sobre as etapas com juiz de referencia (ausente conta como 'nao').
@@ -579,13 +845,23 @@ async function runLoop(
   // bracket; agora a final e uma so, global, e roda depois de tudo. ===
   const finalsOn = record.config.duels !== false;
   const finalistCount = record.config.finalists ?? 3;
-  const stagesParaDuelo = record.stages.filter((s) => s.spec?.reference?.trim() && !s.error);
-  if (
+  const stagesParaDuelo = record.stages.filter(
+    (s) => s.spec?.reference?.trim() && !s.error && !s.incomplete,
+  );
+  // Porta das finais: cancelamento checado sempre; orçamento só quando as
+  // finais vão MESMO rodar (sem gabarito não há final — parar "por orçamento"
+  // ali seria marcar como parcial uma run completa). Sem orçamento, a run fecha
+  // com o que já foi julgado (aborted/budget) — sem duelo pela metade.
+  throwIfCancelled();
+  const finaisPlanejadas =
     finalsOn &&
     finalistCount !== 0 &&
     stagesParaDuelo.length > 0 &&
-    record.contestants.length >= 2 &&
-    record.judgeScoreByContestant
+    record.contestants.length >= 2;
+  if (
+    finaisPlanejadas &&
+    record.judgeScoreByContestant &&
+    (est.byRole.duel === 0 || gate('finals', est.byRole.duel))
   ) {
     const scores = record.judgeScoreByContestant;
     const finalistas = pickFinalists(
@@ -605,7 +881,7 @@ async function runLoop(
       let duelosDone = 0;
       const total = stagesParaDuelo.length;
       emitEvent({ type: 'duel.progress', runId, done: 0, total });
-      await Promise.all(
+      const dueloSettled = await Promise.allSettled(
         stagesParaDuelo.map(async (st) => {
           try {
             st.duels = await runStageDuels({
@@ -644,6 +920,12 @@ async function runLoop(
           }
         }),
       );
+      for (const r of dueloSettled) {
+        if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
+      }
+      // Duelo decidido depois do Cancelar pode ter sido degradado para empate.
+      throwIfCancelled();
+      syncLedger(record, ledger);
     }
   }
 
@@ -725,9 +1007,13 @@ async function runLoop(
   }
 
   syncLedger(record, ledger);
-  record.status = 'finished';
+  // Parou numa porta (finais sem orçamento): o resultado é PARCIAL e diz isso —
+  // `aborted` + `stoppedReason`, nunca 'finished' com cara de completo.
+  record.status = record.stoppedReason ? 'aborted' : 'finished';
   record.finishedAt = nowIso();
   await flushSave();
   emitEvent({ type: 'run.finished', runId, record });
-  log(runId, 'finished', { totalCostUsd: record.totalCostUsd });
+  log(runId, record.stoppedReason ? `encerrada (${record.stoppedReason})` : 'finished', {
+    totalCostUsd: record.totalCostUsd,
+  });
 }

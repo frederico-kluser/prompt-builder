@@ -47,6 +47,12 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   judge: 'shim',
   refJudge: 'shim',
   variator: 'shim',
+  // IMPL-020 (R-10:REC-3): o ledger de orçamento e o estimador são FONTE ÚNICA
+  // em src/ — o motor do navegador injeta só o teto, o AbortSignal raiz e o
+  // `estimateCall` do catálogo. Duas implementações de ledger divergiriam
+  // justamente no dinheiro.
+  budget: 'shim',
+  estimate: 'shim',
   // Pares mantidos à mão (seams diferentes). Ao mudar UM lado, mude o outro.
   configFile: 'mirror',
   duels: 'mirror', // a MATEMÁTICA é compartilhada via src/engine/duelCore.ts (src lê dossiê de agente do disco)
@@ -57,6 +63,11 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   types: 'mirror',
   // Client-only de propósito.
   promptStore: 'web-only',
+  // IMPL-023 (R-10:REC-1): Web Locks por run/sessão e detecção de órfãs no
+  // carregamento. Só existe no navegador — no Node a run vive no processo e a
+  // órfã é detectada no boot do servidor (src/storage.ts markOrphansAsAborted).
+  runLocks: 'web-only',
+  orphans: 'web-only',
 };
 
 /**
@@ -186,6 +197,40 @@ describe('guarda de sincronia src/ × web/src/engine/', () => {
       expect(vistos.has(join(SRC, `${nome}.ts`)), `src/${nome}.ts no grafo do web`).toBe(true);
     }
     expect(violacoes).toEqual([]);
+  });
+
+  it('ledger e estimador do web são os de src/ (IMPL-020: src/budget.ts é a ÚNICA implementação)', async () => {
+    const budget = await import('../src/budget.js');
+    const budgetWeb = await import('../web/src/engine/budget.js');
+    for (const nome of ['BudgetLedger', 'BudgetExceeded', 'RunCancelled', 'isControlSignal', 'toControlSignal'] as const) {
+      expect(budgetWeb[nome], `web/src/engine/budget.${nome}`).toBe(budget[nome]);
+    }
+    const estimate = await import('../src/estimate.js');
+    const estimateWeb = await import('../web/src/engine/estimate.js');
+    for (const nome of ['estimateRunCost', 'estimateInputFromConfig', 'makeCallEstimator'] as const) {
+      expect(estimateWeb[nome], `web/src/engine/estimate.${nome}`).toBe(estimate[nome]);
+    }
+    // Nenhum outro ledger escondido no web: a classe só existe em src/budget.ts.
+    const WEB_SRC = join(ROOT, 'web', 'src');
+    const achados: string[] = [];
+    const varrer = (dir: string): void => {
+      for (const ent of readdirSync(dir, { withFileTypes: true })) {
+        const caminho = join(dir, ent.name);
+        if (ent.isDirectory()) {
+          if (ent.name !== 'node_modules') varrer(caminho);
+        } else if (/\.(ts|tsx)$/.test(ent.name)) {
+          const texto = readFileSync(caminho, 'utf8');
+          if (/class\s+\w*Ledger\b|implements\s+CostSink/.test(texto)) achados.push(caminho.slice(ROOT.length));
+        }
+      }
+    };
+    varrer(WEB_SRC);
+    expect(achados, 'implementação de ledger fora de src/budget.ts').toEqual([]);
+    // O motor do navegador consome o ledger PELO SHIM (não por caminho solto).
+    for (const nome of ['orchestrator', 'trainer']) {
+      const fonte = readFileSync(join(WEB_ENGINE, `${nome}.ts`), 'utf8');
+      expect(fonte, `web/src/engine/${nome}.ts importa o ledger pelo shim`).toMatch(/from '\.\/budget'/);
+    }
   });
 
   it('shim é IDÊNTICO em objeto: importar pelos dois caminhos devolve a mesma função', async () => {

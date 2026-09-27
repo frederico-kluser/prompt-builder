@@ -685,6 +685,8 @@ export interface StageRecord {
    * mentindo": sem esta marca, uma etapa cortada viraria veredito 'parcial'.
    */
   incomplete?: boolean;
+  /** Por que a etapa ficou incompleta (CONVENTIONS §4). */
+  incompleteReason?: 'budget' | 'cancelled' | 'truncation';
   startedAt: string;
   finishedAt?: string;
 }

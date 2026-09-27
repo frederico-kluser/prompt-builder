@@ -5,12 +5,17 @@ import type { Contestant, RunRecord, StageRecord, StageSpec, Verdict } from '../
 import {
   buildScenarioPack,
   cacheRun,
+  canCancelRun,
+  cancelRun,
   downloadScenarioPack,
   fetchRun,
+  markRunInterrupted,
   normalizeContestants,
   openRunStream,
   runMode,
 } from '../api';
+import { CancelHoldButton, OwnershipBanner, StopBanner } from '../components/RunControls';
+import { StorageNotice } from '../components/StorageNotice';
 import {
   Accordion,
   AccordionItem,
@@ -123,11 +128,18 @@ export function RunView() {
   const [duelProgress, setDuelProgress] = useState<{ done: number; total: number } | null>(null);
   // F3: drawer do prompt da variante (aberto pelo DeltaBars).
   const [drawerVariant, setDrawerVariant] = useState<string | null>(null);
+  // Cancelar pedido: esconde o botão até o run.finished chegar.
+  const [cancelRequested, setCancelRequested] = useState(false);
+  // IMPL-023: a run 'running' aberta aqui roda em OUTRA aba (ou o navegador não
+  // tem Web Locks para saber). Some quando o record chega terminal.
+  const [ownership, setOwnership] = useState<'elsewhere' | 'unsupported' | null>(null);
 
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
     setDuelProgress(null);
+    setCancelRequested(false);
+    setOwnership(null);
 
     fetchRun(id)
       .then((r) => !cancelled && setRecord(r))
@@ -137,8 +149,13 @@ export function RunView() {
       id,
       (event) => {
         if (cancelled) return;
+        if (event.type === 'ownership') {
+          setOwnership(event.state);
+          return;
+        }
         if (event.type === 'snapshot') {
           setRecord(event.record);
+          if (event.record.status !== 'running') setOwnership(null);
           void cacheRun(event.record);
           return;
         }
@@ -251,6 +268,8 @@ export function RunView() {
   const canExportPack =
     record.status === 'finished' && mode === 'variation' && packRefCount > 0 && Boolean(packPrompt);
   const stagesOpen = listOpen ?? !isRunning;
+  // Só a aba que roda a run consegue abortá-la (o motor vive nela).
+  const cancellable = isRunning && !cancelRequested && canCancelRun(record.id);
 
   function exportScenarioPack() {
     if (!record || !packPrompt) return;
@@ -289,7 +308,22 @@ export function RunView() {
             <Stat label="cenários">
               {doneStages}/{totalStages}
             </Stat>
-            <Stat label="custo">{formatUsd(record.totalCostUsd)}</Stat>
+            {/* Em run de rodada de treino o teto é o da SESSÃO (ledger da sessão):
+                sem o rótulo, "custo desta run / teto" leria como folga que não existe. */}
+            <Stat
+              label={
+                record.budgetUsd === undefined
+                  ? 'custo'
+                  : record.sessionId
+                    ? 'custo / teto da sessão'
+                    : 'custo / teto'
+              }
+            >
+              {formatUsd(record.totalCostUsd)}
+              {record.budgetUsd !== undefined && (
+                <span className="text-sm text-muted-foreground"> / {formatUsd(record.budgetUsd)}</span>
+              )}
+            </Stat>
           </div>
         </div>
 
@@ -326,6 +360,18 @@ export function RunView() {
               Pacote
             </Button>
           )}
+          {cancellable && (
+            <div className="ml-auto">
+              <CancelHoldButton
+                onConfirm={() => {
+                  if (cancelRun(record.id)) setCancelRequested(true);
+                }}
+              />
+            </div>
+          )}
+          {isRunning && cancelRequested && (
+            <span className="ml-auto text-[13px] text-muted-foreground">Cancelando…</span>
+          )}
         </div>
       </header>
 
@@ -334,9 +380,27 @@ export function RunView() {
           <strong>A run falhou:</strong> {record.error}
         </Banner>
       )}
-      {record.status === 'aborted' && (
-        <Banner className="mt-4">Run interrompida — o servidor reiniciou enquanto ela rodava.</Banner>
-      )}
+      <StopBanner
+        className="mt-4"
+        subject="run"
+        info={record}
+        legacyText="Run interrompida — o servidor reiniciou enquanto ela rodava."
+      />
+      <OwnershipBanner
+        className="mt-4"
+        subject="run"
+        state={isRunning ? ownership : null}
+        onMarkInterrupted={() => {
+          void markRunInterrupted(record.id).then((r) => {
+            if (!r) return;
+            setRecord(r);
+            if (r.status !== 'running') setOwnership(null);
+          });
+        }}
+      />
+      {/* IMPL-022: gravação local que falhou (run só na memória da aba) ou
+          persistência negada pelo navegador — visível, nunca só no console. */}
+      <StorageNotice className="mt-4" targets={[{ subject: 'run', id: record.id }]} />
 
       <SectionHead>Resultados</SectionHead>
       <ScoreHeatmap record={record} ranked={!isRunning} onStageClick={openStageFromHeatmap} />
@@ -390,7 +454,13 @@ export function RunView() {
           className="divide-y divide-border overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10"
         >
           {stages.map((stage) => (
-            <StageRow key={stage.index} stage={stage} byId={byId} contestants={contestants} />
+            <StageRow
+              key={stage.index}
+              stage={stage}
+              byId={byId}
+              contestants={contestants}
+              interrupted={record.status === 'aborted'}
+            />
           ))}
         </Accordion>
       ) : (
@@ -423,11 +493,13 @@ interface StageRowProps {
   byId: Map<string, Contestant>;
   /** Contestants na ordem da run — desempate estavel da lista de respostas. */
   contestants: Contestant[];
+  /** A run parou (orçamento/cancelamento): cenário sem spec não está "gerando". */
+  interrupted?: boolean;
 }
 
 // Um cenario do accordion: cabecalho "01 · pergunta" e, aberto, o enunciado
 // completo + as respostas ordenadas por veredito.
-function StageRow({ stage, byId, contestants }: StageRowProps) {
+function StageRow({ stage, byId, contestants, interrupted }: StageRowProps) {
   const orderOf = new Map<string, number>(contestants.map((c, i) => [c.id, i] as [string, number]));
   const sortedResponses = stage.responses.slice().sort((a, b) => {
     const va = stageVerdict(stage, a.contestantId);
@@ -439,7 +511,13 @@ function StageRow({ stage, byId, contestants }: StageRowProps) {
   });
 
   const numLabel = String(stage.index + 1).padStart(2, '0');
-  const snippet = stage.spec ? trunc(stage.spec.question, 110) : stage.error ? 'Cenário pulado' : 'Gerando cenário…';
+  const snippet = stage.spec
+    ? trunc(stage.spec.question, 110)
+    : stage.error
+      ? 'Cenário pulado'
+      : interrupted
+        ? 'Não gerado — a run parou antes'
+        : 'Gerando cenário…';
 
   return (
     <AccordionItem value={`stage-${stage.index}`}>
@@ -448,12 +526,24 @@ function StageRow({ stage, byId, contestants }: StageRowProps) {
           <span className="shrink-0 font-mono text-[12px] text-muted-foreground tabular">{numLabel}</span>
           <span className="min-w-0 flex-1 truncate text-[13px]">{snippet}</span>
           {stage.error && <Tag className="shrink-0">pulado</Tag>}
+          {stage.incomplete && !stage.error && <Tag className="shrink-0">incompleto</Tag>}
         </span>
       </AccordionTrigger>
       <AccordionPanel className="px-4 pb-4">
         {stage.error && (
           <Banner className="mb-4">
             <strong>Cenário pulado:</strong> {stage.error}
+          </Banner>
+        )}
+        {stage.incomplete && !stage.error && (
+          <Banner className="mb-4">
+            <strong>Cenário incompleto:</strong>{' '}
+            {stage.incompleteReason === 'budget'
+              ? 'cortado pelo teto de orçamento'
+              : stage.incompleteReason === 'cancelled'
+                ? 'interrompido pelo cancelamento'
+                : 'interrompido'}{' '}
+            antes de ser julgado — fica fora do placar e das médias.
           </Banner>
         )}
 
