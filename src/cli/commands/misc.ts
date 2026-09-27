@@ -4,7 +4,7 @@
 import { promises as fs, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { listRuns, loadRun, listSessions, loadSession, getDataDir } from '../../storage.js';
+import { listRuns, loadRun, listSessions, loadSession, getDataDir, setDataDir } from '../../storage.js';
 import { listTechniques } from '../../techniques.js';
 import { allowlistHealth, getLgpdData, isSensitiveArea, PII_COVERAGE, PII_MODES } from '../../lgpd.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
@@ -30,6 +30,7 @@ import {
   keyFilePath,
   loadCatalog,
   parse,
+  resolveHome,
   readJsonFile,
   removeStoredKey,
   resolveKey,
@@ -52,6 +53,7 @@ import {
   overrideTrailers,
 } from '../handoff.js';
 import type { SessionRecord } from '../../types.js';
+import { readConfigFile, resolveArenaLibrary } from './run.js';
 
 // --- key ---------------------------------------------------------------------
 
@@ -125,25 +127,15 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
       hint: 'Passe `--config <arquivo.json>` (`prompt-builder config example -o arena.json` gera um).',
     });
   }
+  // Mesma leitura do `vary/evolve --config` (inclui `scenarios.from: 'library'`,
+  // a checagem de labelSet dos itens e o aviso de chave descontinuada) — e
+  // ANTES da rede: config inválida sai com exit 3 sem baixar o catálogo. O
+  // data-dir (onde mora a biblioteca) é fixado antes, como o buildContext faria.
+  setDataDir(resolveHome(parsed.values));
+  const config = await readConfigFile(file);
   // Estimar e ler preco do catalogo PUBLICO: nao exige key (IMPL-029).
   const ctx = await buildCatalogContext(parsed);
   const { out } = ctx;
-
-  const json = await readJsonFile(file);
-  const formato = (json as Record<string, unknown>)?.format;
-  let config;
-  if (typeof formato === 'string') {
-    const p = parseArenaConfig(json);
-    if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
-    for (const w of p.warnings ?? []) out.warn(w); // chave descontinuada (IMPL-012)
-    const c = arenaConfigToRunConfig(p.config);
-    if (!c.ok) throw new CliError(c.error, EXIT.CONFIG);
-    config = c.config;
-  } else {
-    const p = parseRunConfig(json);
-    if (!p.ok) throw new CliError(p.error, EXIT.CONFIG, p.details);
-    config = p.config;
-  }
 
   const est = estimateRunCost(estimateInputFromConfig(config), ctx.models);
   if (out.isText) {
@@ -753,8 +745,10 @@ export async function cmdConfig(argv: string[]): Promise<number> {
     for (const w of p.warnings ?? []) out.warn(w); // chave descontinuada (IMPL-012)
     const c = arenaConfigToRunConfig(p.config);
     if (!c.ok) throw new CliError(c.error, EXIT.CONFIG);
+    // `scenarios.from: 'library'`: mesma resolução/checagem do `vary --config`.
+    const config = await resolveArenaLibrary(p.config, c.config);
     out.info(`válido — ${arenaConfigSummary(p.config)}`);
-    out.result(true, 'config.validate', { format: formato, config: c.config });
+    out.result(true, 'config.validate', { format: formato, config });
     return EXIT.OK;
   }
   const p = parseRunConfig(json);

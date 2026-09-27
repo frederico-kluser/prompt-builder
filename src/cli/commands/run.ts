@@ -10,7 +10,7 @@ import { subscribe, subscribeSession } from '../../events.js';
 import { loadRun, loadSession } from '../../storage.js';
 import { makeCallEstimator } from '../../estimate.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
-import { parseArenaConfig } from '../../configFile.js';
+import { parseArenaConfig, type ArenaConfigFile } from '../../configFile.js';
 import { checkRunPii, describeRunPii } from '../../engine/pii.js';
 import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
@@ -179,6 +179,59 @@ function resolveBudget(values: Record<string, unknown>, warn: (m: string) => voi
 }
 
 /**
+ * `scenarios.from: 'library'` do arena-config@1: resolve os itens da
+ * biblioteca em customStages e RECUSA (exit 3) itens sem gabarito ou com
+ * rótulo curto sem labelSet. Exportado para `config validate` e `estimate`
+ * (misc.ts) — revisão IMPL-003: antes só o `readConfigFile` conferia, e
+ * `config validate` dizia "válido" para um arquivo que `vary --config` recusa.
+ */
+export async function resolveArenaLibrary(file: ArenaConfigFile, config: RunConfig): Promise<RunConfig> {
+  // F1/P0.1: `scenarios.from: 'library'` — o config aponta o banco curado
+  // estável em <data-dir>/library/. Resolvido AQUI (fs é assíncrono): os
+  // itens viram customStages e os SEM GABARITO são RECUSADOS (paridade com o
+  // 409 do prompt-arena — sem âncora não há evolução comparável).
+  const lib = libraryRefFrom(file);
+  if (lib) {
+    const itens = await listItems(lib.profile);
+    const selecionados = lib.ids?.length
+      ? itens.filter((i) => lib.ids!.includes(i.id))
+      : itens;
+    if (!selecionados.length) {
+      throw new CliError(
+        `Biblioteca "${lib.profile}" sem itens${lib.ids?.length ? ` para os ids ${lib.ids.join(', ')}` : ''}. Rode \`prompt-builder library add/seed --profile ${lib.profile}\`.`,
+        EXIT.CONFIG,
+      );
+    }
+    const semGabarito = selecionados.filter((i) => !hasGabarito(i));
+    if (semGabarito.length) {
+      throw new CliError(
+        `Evolve recusa itens SEM gabarito (reference ou expected) — paridade com o 409 do prompt-arena: ${semGabarito
+          .map((i) => i.id)
+          .join(', ')}. Corrija com \`prompt-builder library verify --profile ${lib.profile}\`.`,
+        EXIT.CONFIG,
+      );
+    }
+    // IMPL-003: os itens viram customStages DEPOIS do parseRunConfig da
+    // tradução — sem esta checagem um item antigo de rótulo curto sem
+    // labelSet escaparia da regra do schema.
+    const semLabelSet = selecionados
+      .map((i) => ({ id: i.id, erro: labelIssue(i) }))
+      .filter((x): x is { id: string; erro: string } => x.erro !== null);
+    if (semLabelSet.length) {
+      throw new CliError(
+        `Itens com rótulo esperado sem labelSet válido: ${semLabelSet
+          .map((x) => `${x.id} (${x.erro})`)
+          .join('; ')}. Corrija com \`prompt-builder library verify --profile ${lib.profile}\`.`,
+        EXIT.CONFIG,
+      );
+    }
+    config.customStages = selecionados.map((i) => toStageSpec(i));
+    config.stages = selecionados.length;
+  }
+  return config;
+}
+
+/**
  * Lê e valida `--config` (arena-config@1 ou RunConfig cru). Todo problema de
  * config sai como `CliError(EXIT.CONFIG)` = exit 3 — exportado para o teste
  * de contrato do exit code (IMPL-003).
@@ -203,49 +256,7 @@ export async function readConfigFile(
     for (const w of parsed.warnings ?? []) process.stderr.write(`! ${w}\n`);
     const conv = arenaConfigToRunConfig(parsed.config);
     if (!conv.ok) throw new CliError(conv.error, EXIT.CONFIG);
-    // F1/P0.1: `scenarios.from: 'library'` — o config aponta o banco curado
-    // estável em <data-dir>/library/. Resolvido AQUI (fs é assíncrono): os
-    // itens viram customStages e os SEM GABARITO são RECUSADOS (paridade com o
-    // 409 do prompt-arena — sem âncora não há evolução comparável).
-    const lib = libraryRefFrom(parsed.config);
-    if (lib) {
-      const itens = await listItems(lib.profile);
-      const selecionados = lib.ids?.length
-        ? itens.filter((i) => lib.ids!.includes(i.id))
-        : itens;
-      if (!selecionados.length) {
-        throw new CliError(
-          `Biblioteca "${lib.profile}" sem itens${lib.ids?.length ? ` para os ids ${lib.ids.join(', ')}` : ''}. Rode \`prompt-builder library add/seed --profile ${lib.profile}\`.`,
-          EXIT.CONFIG,
-        );
-      }
-      const semGabarito = selecionados.filter((i) => !hasGabarito(i));
-      if (semGabarito.length) {
-        throw new CliError(
-          `Evolve recusa itens SEM gabarito (reference ou expected) — paridade com o 409 do prompt-arena: ${semGabarito
-            .map((i) => i.id)
-            .join(', ')}. Corrija com \`prompt-builder library verify --profile ${lib.profile}\`.`,
-          EXIT.CONFIG,
-        );
-      }
-      // IMPL-003: os itens viram customStages DEPOIS do parseRunConfig da
-      // tradução — sem esta checagem um item antigo de rótulo curto sem
-      // labelSet escaparia da regra do schema.
-      const semLabelSet = selecionados
-        .map((i) => ({ id: i.id, erro: labelIssue(i) }))
-        .filter((x): x is { id: string; erro: string } => x.erro !== null);
-      if (semLabelSet.length) {
-        throw new CliError(
-          `Itens com rótulo esperado sem labelSet válido: ${semLabelSet
-            .map((x) => `${x.id} (${x.erro})`)
-            .join('; ')}. Corrija com \`prompt-builder library verify --profile ${lib.profile}\`.`,
-          EXIT.CONFIG,
-        );
-      }
-      conv.config.customStages = selecionados.map((i) => toStageSpec(i));
-      conv.config.stages = selecionados.length;
-    }
-    return conv.config;
+    return resolveArenaLibrary(parsed.config, conv.config);
   }
   // RunConfig cru também é importação: o schema recusa dado pessoal de
   // aparência real nomeando o campo, até a revisão explícita (`--allow-pii`).
