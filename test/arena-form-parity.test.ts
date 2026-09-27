@@ -60,6 +60,8 @@ const cenarios = [
     rubric: 'Deve citar o jejum de 8h.',
     reference: 'Não: apenas água durante o jejum.',
     expected: ['nao', 'não'],
+    // IMPL-003: rótulo curto exige o conjunto de rótulos válidos.
+    labelSet: ['nao', 'não', 'sim'],
   },
   {
     id: 'c2',
@@ -82,6 +84,8 @@ const comum = {
   judging: { reference: true, passes: 2 },
   limits: { maxOutputTokens: 900, timeoutMs: 45000, concurrency: 4 },
   compliance: { area: 'saude', includeRessalvas: false },
+  // LGPD (IMPL-040): 'synthetic' é o único valor que o export escreve.
+  piiMode: 'synthetic',
 } as const;
 
 const FIXTURES: Record<string, Record<string, unknown>> = {
@@ -146,7 +150,17 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
     prompt: {
       text: 'Você é o assistente da clínica.',
       generateFrom: 'assistente de preparo',
-      contracts: { neverBreak: ['nunca diagnostique'], placeholders: ['{{nome}}'], minLengthRatio: 0.6 },
+      contracts: {
+        neverBreak: ['nunca diagnostique'],
+        placeholders: ['{{nome}}'],
+        minLengthRatio: 0.6,
+        // IMPL-011: camadas 2 e 3 do contrato.
+        judgeDiff: false,
+        canaries: [
+          { id: 'fmt', kind: 'format', input: 'Liste os horários.', json: true, requiredKeys: ['horario'], forbid: 'segredo', maxTokens: 300 },
+          { kind: 'placeholder', input: 'Olá', fill: { '{{nome}}': 'Zulmira' }, pattern: 'Zulmira' },
+        ],
+      },
       group: [{ id: 'unico', text: 'Você é o assistente da clínica.' }],
       promptId: 'unico',
     },
@@ -222,7 +236,7 @@ describe('IMPL-045 (a) — todo campo do schema tem controle na UI OU entrada s�
   it('as fixtures cobrem TODO campo aplicável (ui + só-JSON aplicado, fora sinônimos legados)', () => {
     const cobertos = new Set(Object.values(FIXTURES).flatMap((f) => presentArenaFieldPaths(f)));
     const faltando = Object.entries(ARENA_FIELD_HANDLING)
-      .filter(([, h]) => !h.aliasOf && !(h.kind === 'json-only' && h.status === 'ignorado'))
+      .filter(([, h]) => !h.aliasOf && !(h.kind === 'json-only' && (h.status === 'ignorado' || h.oneShot)))
       .map(([p]) => p)
       .filter((p) => !cobertos.has(p));
     expect(faltando).toEqual([]);
@@ -259,7 +273,16 @@ describe('IMPL-045 (c) — round-trip export→import preserva todos os campos a
   it('os campos do gap sobrevivem e CHEGAM ao RunConfig (antes: validados e descartados)', () => {
     const t = importar(FIXTURES.training).state;
     expect(jsonOnlyRunPatch(t)).toEqual({
-      contracts: { neverBreak: ['nunca diagnostique'], placeholders: ['{{nome}}'], minLengthRatio: 0.6 },
+      contracts: {
+        neverBreak: ['nunca diagnostique'],
+        placeholders: ['{{nome}}'],
+        minLengthRatio: 0.6,
+        judgeDiff: false,
+        canaries: [
+          { id: 'fmt', kind: 'format', input: 'Liste os horários.', json: true, requiredKeys: ['horario'], forbid: 'segredo', maxTokens: 300 },
+          { kind: 'placeholder', input: 'Olá', fill: { '{{nome}}': 'Zulmira' }, pattern: 'Zulmira' },
+        ],
+      },
       promptGroup: { prompts: [{ id: 'unico', text: 'Você é o assistente da clínica.' }] },
       promptId: 'unico',
       reflection: 'llm',
@@ -284,6 +307,13 @@ describe('IMPL-045 (c) — round-trip export→import preserva todos os campos a
     const { reread } = exportarEReler(state);
     expect(reread).toMatchObject({ duels: false, finalists: 2, repeats: 2 });
     expect(reread.training).toBeUndefined();
+  });
+
+  it('allowPii (one-shot, IMPL-040) é aceito sem aviso e NUNCA vai para o arquivo exportado', () => {
+    const { state, warnings } = importar({ ...FIXTURES.variation, allowPii: true });
+    expect(warnings).toEqual([]);
+    const { config } = exportArenaConfig(state);
+    expect('allowPii' in config).toBe(false);
   });
 
   it('um import novo não herda campo só-JSON invisível do anterior', () => {

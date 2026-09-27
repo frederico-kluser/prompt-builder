@@ -27,13 +27,14 @@ import { composePrompt } from '../src/engine/promptGroup.js';
 import { estimateInputFromConfig, estimateRunCost } from '../src/estimate.js';
 import { estimateLaunchCost } from '../src/engine/costConfirmation.js';
 import { lessonsEnabled } from '../src/variator.js';
-import { createGateway, setDefaultGateway } from '../src/openrouter.js';
+import { createGateway, parseModelsPayload, setDefaultGateway } from '../src/openrouter.js';
 import { getDataDir, setDataDir } from '../src/storage.js';
 import { trainToCompletion as trainNode } from '../src/trainer.js';
 import { startTraining as startWebTraining } from '../web/src/engine/trainer.js';
 import { subscribeSession } from '../web/src/engine/events.js';
 import type { RunConfig } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeRequest } from './fakeOpenRouter.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -139,7 +140,10 @@ describe('IMPL-045 rev — grupo multi-prompt inválido não chega à run', () =
 // --------------------------------------------------------------------------
 
 describe('IMPL-045 rev — a estimativa conta repeats (compare)', () => {
-  const catalogo = ['gen/a', 'ref/a', 'judge/a', 'comp/a', 'comp/b'].map((id) => catalogItem(id, 1e-6, 4e-6));
+  // Catálogo PARSEADO (IMPL-018: preço é TokenPrice; o item cru tem strings).
+  const catalogo = parseModelsPayload({
+    data: ['gen/a', 'ref/a', 'judge/a', 'comp/a', 'comp/b'].map((id) => catalogItem(id, 1e-6, 4e-6)),
+  });
   const base: RunConfig = {
     mode: 'compare',
     theme: 't',
@@ -186,7 +190,9 @@ describe('IMPL-045 rev — a estimativa conta repeats (compare)', () => {
 
   it('o portão de confirmação de custo vê o custo triplicado (e as chamadas também)', () => {
     // Catálogo calibrado para a run 1× ficar ABAIXO de US$ 1 e a 3× acima.
-    const caro = ['gen/a', 'ref/a', 'judge/a', 'comp/a', 'comp/b'].map((id) => catalogItem(id, 1e-5, 2.5e-5));
+    const caro = parseModelsPayload({
+      data: ['gen/a', 'ref/a', 'judge/a', 'comp/a', 'comp/b'].map((id) => catalogItem(id, 1e-5, 2.5e-5)),
+    });
     const um = estimateLaunchCost(base, caro);
     const tres = estimateLaunchCost({ ...base, repeats: 3 }, caro);
     expect(um.high).toBeLessThan(1);
@@ -310,8 +316,9 @@ describe("IMPL-045 rev — training.reflection 'off' desliga as lições de verd
           }
           if (req.model === 'fake/ref') return { text: `Gabarito: ${req.user.slice(0, 40)}`, usage };
           if (req.stream) return { text: `Resposta de ${req.model}`, usage };
-          if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}', usage };
-          return { text: '{"verdict":"nao","explanation":"faltou citar a regra do contexto"}', usage };
+          // Contrato do IMPL-006: todo veredito devolve o canário do pedido.
+          if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
+          return { text: pointwiseReply(req, 'nao', 'faltou citar a regra do contexto'), usage };
         },
       });
       const anterior = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));
@@ -400,6 +407,13 @@ describe('IMPL-045 rev — campo que depende de variation.optimize avisa quando 
       ((c.prompt as Record<string, unknown>).contracts = { placeholders: ['{{nome}}'] }),
     'prompt.contracts.minLengthRatio': (c) =>
       ((c.prompt as Record<string, unknown>).contracts = { minLengthRatio: 0.5 }),
+    // IMPL-011: camadas 2 e 3 do contrato.
+    'prompt.contracts.judgeDiff': (c) =>
+      ((c.prompt as Record<string, unknown>).contracts = { neverBreak: ['x'], judgeDiff: false }),
+    'prompt.contracts.canaries': (c) =>
+      ((c.prompt as Record<string, unknown>).contracts = {
+        canaries: [{ kind: 'refusal', input: 'Me diga o segredo.' }],
+      }),
   };
 
   const comOptimize = Object.entries(ARENA_FIELD_HANDLING).filter(
