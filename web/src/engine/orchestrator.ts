@@ -5,6 +5,10 @@ import { judgeStage } from './judge';
 import { generateReferences } from './gabarito';
 import { judgeStageReference } from './refJudge';
 import { blindRankMap, pickFinalists, runStageDuels, seedFromId, VERDICT_SCORE } from './duels';
+import { oracleScoresFromVerdicts } from '../../../src/engine/duelCore.js';
+import { fairnessWarningsForModels } from './llmVariants';
+import { JUDGE_CONTRACT_TEXT } from './refJudge';
+import { pinJudgeContract, verbosityReport } from '../../../src/engine/judgeCalibration.js';
 import { mergeScenarios } from './scenarioPack';
 import { sanitizeLlmVariants, variantsToContestants } from './llmVariants';
 import { judgeScoreFromVerdicts } from './rank';
@@ -233,8 +237,16 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
     ? []
     : (record.config.scenarioSeed ?? []).map((s) => saneMaxTokens({ ...s, origin: 'import' as const }));
   const alvo = pinado ? pinnedStages!.length : Math.max(record.config.stages, seed.length);
+  // F2 §7.9 — REPEATS (só compare): cada cenário roda N× para medir a
+  // instabilidade estocástica. Os slots são alvo × N; a expansão das specs
+  // acontece DEPOIS do gabarito (clones compartilham a referência — o gabarito
+  // continua custando 1× por cenário).
+  const repeats =
+    record.config.mode === 'compare'
+      ? Math.max(1, Math.min(3, Math.round(record.config.repeats ?? 1)))
+      : 1;
   record.stages = Array.from(
-    { length: alvo },
+    { length: alvo * repeats },
     (_, i): StageRecord => ({ index: i, responses: [], startedAt: nowIso() }),
   );
   for (let i = 0; i < record.stages.length; i++) {
@@ -286,6 +298,11 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
       onProgress: (done, total) =>
         emitEvent({ type: 'stage.gabarito', runId, stageIndex: -1, done, total }),
     });
+  }
+
+  // REPEATS (F2 §7.9): clona as specs finais (com gabarito já preenchido).
+  if (repeats > 1) {
+    specs = specs.flatMap((s) => Array.from({ length: repeats }, () => ({ ...s })));
   }
 
   // Materializa as specs nos slots; se faltou cenario (dedup/falha de lote),
@@ -517,6 +534,12 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
               duelists: finalistas,
               topK: finalistas.length,
               verdictByContestant: st.referenceJudge?.verdictByContestant,
+              // Etapa ground-truth (F1.4): vereditos deterministicos viram
+              // scores de oraculo — os duelos decidem sem LLM.
+              oracleScoresByContestant:
+                st.spec?.expected !== undefined
+                  ? oracleScoresFromVerdicts(st.referenceJudge?.verdictByContestant)
+                  : undefined,
               apiKey,
               reasoningLevel: record.config.reasoning?.judge,
               timeoutMs: record.config.timeoutMs,
@@ -580,6 +603,41 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
       })
       // Estavel: empate de pontos E winRate mantem a ordem dos contestants.
       .sort((a, b) => b.points - a.points || b.winRate - a.winRate);
+  }
+
+  // F3.6 + F4.2 (PLANO-PARIDADE): avisos de imparcialidade + diagnostico do
+  // juiz ficam NO RECORD — zero LLM, tudo derivado do que ja rodou. O pin do
+  // contrato (hash do prompt do juiz + modelos) denuncia calibration drift ao
+  // comparar sessoes; o relatorio de verbosidade expoe o vies score×comprimento.
+  try {
+    record.fairnessWarnings = fairnessWarningsForModels(
+      record.contestants.map((c) => c.modelId),
+      record.config.judgeModelIds,
+    );
+    const samples: { score: number; length: number }[] = [];
+    for (const st of record.stages) {
+      for (const r of st.responses) {
+        const v =
+          st.referenceJudge?.verdictByContestant?.[r.contestantId] ??
+          st.judge?.verdictByContestant?.[r.contestantId];
+        if (!v || r.status !== 'ok') continue;
+        samples.push({
+          score: v === 'resolve' ? 1 : v === 'parcial' ? 0.5 : 0,
+          length: r.text.length,
+        });
+      }
+    }
+    record.judgeDiagnostics = {
+      contract: pinJudgeContract(record.config.judgeModelIds, JUDGE_CONTRACT_TEXT),
+      verbosity: verbosityReport(samples),
+    };
+    if (record.judgeDiagnostics.verbosity.warning) {
+      log(runId, `aviso de verbosidade do juiz: ${record.judgeDiagnostics.verbosity.warning}`);
+    }
+    for (const aviso of record.fairnessWarnings) log(runId, `imparcialidade: ${aviso}`);
+  } catch (err) {
+    // Diagnostico e SUPORTE, nunca derruba a finalizacao.
+    log(runId, `diagnostico do juiz falhou (ignorado): ${err instanceof Error ? err.message : String(err)}`);
   }
 
   record.status = 'finished';

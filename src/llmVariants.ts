@@ -210,6 +210,21 @@ export function fairnessWarnings(variants: LlmVariant[], judgeModelIds: string[]
 }
 
 /**
+ * Avisos de imparcialidade para o caso GENÉRICO (variation/training: o eixo é
+ * um modelo só; compare clássico usa `fairnessWarnings` com variantes). Mesma
+ * regra: auto-preferência (juiz compete) e mesmo vendor (viés de família).
+ */
+export function fairnessWarningsForModels(
+  modelIds: string[],
+  judgeModelIds: string[],
+): string[] {
+  return fairnessWarnings(
+    modelIds.map((m) => ({ id: m, label: m, modelId: m, reasoningLevel: null, temperature: null })),
+    judgeModelIds,
+  );
+}
+
+/**
  * Converte variantes saneadas em contestants do modo compare. Usa `undefined`
  * (não null) nos opcionais: ausente = default do pipeline (temperatura 0 e
  * reasoning do RunConfig, aplicados pelo competitor).

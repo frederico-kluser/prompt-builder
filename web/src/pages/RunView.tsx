@@ -31,6 +31,7 @@ import {
   Tag,
 } from '../components/primitives';
 import { VERDICT_META, verdictOf, trunc, denseStages, applyEvent, ScoreHeatmap, FinalsPanel } from './runShared';
+import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
 import { cn } from '@/lib/utils';
 
 // Notacao decimal sempre: "$4.00e-4" e ilegivel para quem so quer saber quanto
@@ -120,6 +121,8 @@ export function RunView() {
   // Progresso agregado dos duelos (evento `duel.progress`) — NUNCA passa pelo
   // reducer: o evento nem stageIndex tem. Fica local e alimenta o FinalsPanel.
   const [duelProgress, setDuelProgress] = useState<{ done: number; total: number } | null>(null);
+  // F3: drawer do prompt da variante (aberto pelo DeltaBars).
+  const [drawerVariant, setDrawerVariant] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -344,6 +347,22 @@ export function RunView() {
           <FinalsPanel record={record} progress={duelProgress} />
         </>
       )}
+
+      {/* F3 (PLANO-PARIDADE): delta vs controle, "onde falhou" e diagnóstico do
+          juiz — só depois de rodar (durante, a tela é o heatmap). O DeltaBars
+          abre o drawer do prompt da variante no clique. */}
+      {!isRunning && (
+        <>
+          <DeltaBars record={record} onVariantClick={setDrawerVariant} />
+          <FailureDigest record={record} />
+          <JudgeDiagnostics record={record} />
+        </>
+      )}
+      <VariantPromptDrawer
+        record={record}
+        variantId={drawerVariant}
+        onClose={() => setDrawerVariant(null)}
+      />
 
       {/* Enquanto roda, a tela e SO o heatmap: o drill-down por cenario fica
           recolhido por default (aberto so quando a run termina), mas o usuario

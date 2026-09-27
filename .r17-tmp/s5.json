@@ -1,0 +1,37 @@
+{
+  "query": "Helicone OpenTelemetry OTLP endpoint LLM logging proxy",
+  "answer": "Helicone supports OpenTelemetry for LLM logging via OTLP endpoint, enabling detailed observability and cost attribution. OpenTelemetry integration allows tracing and monitoring of LLM applications. Use environment variables to configure OTLP endpoint and API keys for authentication.",
+  "results": [
+    {
+      "title": "Helicone OpenTelemetry: Python Proxy Middleware LLM Costs Attribution 2025",
+      "url": "https://johal.in/helicone-opentelemetry-python-proxy-middleware-llm-costs-attribution-2025",
+      "content": "## Implementation: Building Systems\n\nSetting up a production-grade proxy starts with environment prep: Python 3.12+, pip install helicone opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp fastapi uvicorn openai. Configure Helicone by signing up at their dashboard, grabbing your API key, and pointing your LLM client to their proxy endpoint (oai.helicone.ai/v1). [...] Key concepts include head-based sampling (decide to trace at ingress), tail-based sampling (post-process for high-cost requests), and semantic conventions for LLMs (e.g., llm.prompt, llm.usage.input\\_tokens). The proxy middleware, built on FastAPI or Flask, intercepts requests, adds OTel instrumentation, and forwards to providers like Anthropic or Grok. This isn't just logging; it's actionable telemetry linking costs to business KPIs like ROI per feature. [...] BatchSpanProcessor(OTLPSpanExporter(endpoint=\" ) Configure Helicone proxy (sets OPENAI_API_KEY to Helicone endpoint) os.environ[\"OPENAI_API_KEY\"] = \"your-helicone-key\" helicone_openai.configure(api_key=os.environ[\"OPENAI_API_KEY\"]) client = openai.OpenAI() def proxy_llm_call(prompt, user_id=\"anonymous\"): tracer = trace.get_tracer(__name__) with tracer.start_as_current_span(\"llm-call\", attributes={\"user.id\": user_id}): response = client.chat.completions.create( model=\"gpt-4o-mini\",",
+      "score": 0.95791227
+    },
+    {
+      "title": "Does Helicone support Open Telemetry (OTEL) · Helicone/helicone · Discussion #3863 · GitHub",
+      "url": "https://github.com/Helicone/helicone/discussions/3863",
+      "content": "|  |\n\n| I was looking at Helicone to determine if the proxy would also support OTEL logging as well as the AI API proxy. OTEL is supported by platforms like langfuse and logfire and I have found it really useful for observing and debugging LLM applications.  When I asked the search assistant about this it mentioned that you have support for OpenLLMetry which sounds very similar so maybe a simple api adapter implementation is possible if OTEL support is not already available? | [...] I was looking at Helicone to determine if the proxy would also support OTEL logging as well as the AI API proxy. OTEL is supported by platforms like langfuse and logfire and I have found it really useful for observing and debugging LLM applications.\n\nWhen I asked the search assistant about this it mentioned that you have support for OpenLLMetry which sounds very similar so maybe a simple api adapter implementation is possible if OTEL support is not already available?\n\n## Replies: 0 comments",
+      "score": 0.938576
+    },
+    {
+      "title": "OpenTelemetry v1 | liteLLM",
+      "url": "https://docs.litellm.ai/docs/observability/opentelemetry_integration",
+      "content": "```\nOTEL_EXPORTER_OTLP_ENDPOINT=\"\n```\n\n> Note: OTLP gRPC requires `grpcio`. Install via `uv add \"litellm[grpc]\"` (or `grpcio`).\n\n```\nOTEL_EXPORTER=\"otlp_grpc\"OTEL_EXPORTER=\"otlp_grpc\"OTEL_ENDPOINT=\" \"OTEL_HEADERS=\"authorization=Bearer \"\n```\n\n> Note: OTLP gRPC requires `grpcio`. Install via `uv add \"litellm[grpc]\"` (or `grpcio`).\n\n```\nOTEL_EXPORTER_OTLP_ENDPOINT=\"\n```\n\nFor LiteLLM Proxy setup, ingest token patterns, and trace verification, see Splunk Observability Cloud (OpenTelemetry). [...] Use just 1 line of code, to instantly log your LLM responses across all providers with OpenTelemetry:\n\n```\nlitellm.callbacks = [\"otel\"] litellm. callbacks =  [\"otel\"]\n```\n\n## Span Hierarchy​\n\nEvery LLM request handled by the LiteLLM Proxy produces a tree of spans rooted at `Received Proxy Server Request`. Conditional spans below are only emitted when their controlling flag is set or their feature is in use. [...] ```\nuv add opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlpuv add opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp\n```\n\nSet the environment variables (different providers may require different variables):\n\n Log to Traceloop Cloud\n Log to OTEL HTTP Collector\n Log to OTEL GRPC Collector\n Log to Laminar\n Splunk Observability Cloud\n\n```\nOTEL_EXPORTER=\"otlp_http\"OTEL_EXPORTER=\"otlp_http\"OTEL_ENDPOINT=\"\n```\n\n```\nOTEL_EXPORTER_OTLP_ENDPOINT=\"\n```",
+      "score": 0.9323302
+    },
+    {
+      "title": "OpenTelemetry for LLM Observability - Portkey Docs",
+      "url": "https://portkey.ai/docs/product/observability/opentelemetry#content-area",
+      "content": "```\n# Portkey's OTLP HTTP Endpoint for traces and logs # Portkey's OTLP HTTP Endpoint for traces and logsOTEL_EXPORTER_OTLP_ENDPOINT=\" OTEL_EXPORTER_OTLP_ENDPOINT =\" Your Portkey API Key (ensure it's a Server Key)# Your Portkey API Key (ensure it's a Server Key)OTEL_EXPORTER_OTLP_HEADERS=\"x-portkey-api-key=YOUR_PORTKEY_API_KEY\" OTEL_EXPORTER_OTLP_HEADERS =\"x-portkey-api-key=YOUR_PORTKEY_API_KEY\"\n``` [...] To send your OpenTelemetry data to Portkey, configure your OTel exporter to point to Portkey’s OTLP endpoint and provide your Portkey API Key for authentication. Key Environment Variables:",
+      "score": 0.91274774
+    }
+  ],
+  "response_time": 1.1,
+  "meta": {
+    "attempts": 1,
+    "keyless_used": false,
+    "truncated": false,
+    "keys_total": 2
+  }
+}

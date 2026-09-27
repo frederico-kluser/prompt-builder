@@ -137,6 +137,8 @@ const ROLE_LABEL_PT: Record<CostRole, string> = {
   gabarito: 'gabarito',
   datagen: 'datagen',
   rewriter: 'reescritor',
+  /** Gasto de LLM feito DENTRO de uma execução de agente. */
+  agent: 'agente de execução',
 };
 
 /** Bloco de gasto por papel, ordenado do mais caro para o mais barato. */

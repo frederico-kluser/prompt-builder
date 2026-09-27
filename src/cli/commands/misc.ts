@@ -1,7 +1,8 @@
 // Comandos menores: `key`, `estimate`, `runs`, `sessions`, `techniques`,
-// `lgpd`, `config`, `doctor`.
+// `lgpd`, `config`, `registry`, `doctor`.
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { listRuns, loadRun, listSessions, loadSession, getDataDir } from '../../storage.js';
 import { listTechniques } from '../../techniques.js';
@@ -10,8 +11,11 @@ import { parseRunConfig } from '../../runConfigSchema.js';
 import { parseArenaConfig, arenaConfigSummary } from '../../configFile.js';
 import { arenaConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
+import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
+import { sampleSizeWarning } from '../../engine/judgeCalibration.js';
+import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import { buildContext, buildNetworkContext, checkKey, keyFilePath, parse, removeStoredKey, writeStoredKey } from '../context.js';
-import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
+import { CliError, EXIT, fmtUsd, renderSpend, type Output } from '../output.js';
 
 // --- key ---------------------------------------------------------------------
 
@@ -127,6 +131,7 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     limit: { type: 'string' },
     status: { type: 'string' },
     'prompt-only': { type: 'boolean' },
+    out: { type: 'string', short: 'o' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -154,6 +159,45 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   if (!id) throw new CliError(`Uso: prompt-builder runs ${sub} <id>`, EXIT.USAGE);
   const record = await loadRun(id);
   if (!record) throw new CliError(`Run "${id}" não encontrada em ${getDataDir()}.`, EXIT.USAGE);
+
+  if (sub === 'reproduce') {
+    // Reprodutibilidade: o config equivalente ao da run salva + o comando EXATO
+    // para re-rodá-la. A vista arena-config@1 vem junto no --json (o `config` é
+    // a fonte de verdade lossless — ver src/runArtifact.ts).
+    const art = buildReproduceArtifact(record);
+    if (out.isText) {
+      out.line(JSON.stringify(art.config, null, 2));
+      out.line();
+      out.line(`Comando sugerido (grave o JSON acima em ${configFileForRun(record.id)}):`);
+      out.line(`  ${art.suggestedCommand}`);
+    }
+    out.result(true, 'runs.reproduce', {
+      runId: art.runId,
+      config: art.config,
+      arenaConfig: art.arenaConfig,
+      suggestedCommand: art.suggestedCommand,
+    });
+    return EXIT.OK;
+  }
+
+  if (sub === 'export') {
+    // Artefato auto-contido: record + etapas com gabaritos + system prompts +
+    // vereditos do juiz — auditável/reproduzível sem o disco original.
+    const artifact = buildRunArtifact(record);
+    const texto = `${JSON.stringify(artifact, null, 2)}\n`;
+    const alvo =
+      typeof parsed.values.out === 'string' && parsed.values.out.trim()
+        ? parsed.values.out.trim()
+        : undefined;
+    if (alvo) {
+      await fs.writeFile(alvo, texto, 'utf-8');
+      out.info(`artefato gravado em ${alvo}`);
+    } else if (out.isText) {
+      out.raw(texto);
+    }
+    out.result(true, 'runs.export', { runId: record.id, file: alvo ?? null, artifact });
+    return EXIT.OK;
+  }
 
   if (sub === 'winner') {
     const ranking = record.standings?.length
@@ -200,9 +244,136 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     )) {
       out.line(l);
     }
+    // F4.2/F4.4 — diagnostico do juiz e orientacao de amostra: o que faz a
+    // comparacao entre sessoes ser (ou nao) confiavel, junto do resultado.
+    const diag = record.judgeDiagnostics;
+    if (diag) {
+      out.line();
+      out.line(`juiz: contrato ${diag.contract.hash.slice(0, 12)} (${diag.contract.modelIds.join(', ')})`);
+      if (diag.verbosity.warning) out.line(`! ${diag.verbosity.warning}`);
+    }
+    for (const aviso of record.fairnessWarnings ?? []) out.line(`! ${aviso}`);
+    const amostra = sampleSizeWarning(record.stages.length, 'etapas');
+    if (amostra) out.line(`! ${amostra}`);
   }
-  out.result(true, 'runs.show', { run: record });
+  out.result(true, 'runs.show', {
+    run: record,
+    judgeDiagnostics: record.judgeDiagnostics ?? null,
+    fairnessWarnings: record.fairnessWarnings ?? [],
+    sampleWarnings: [sampleSizeWarning(record.stages.length, 'etapas')].filter(Boolean),
+  });
   return EXIT.OK;
+}
+
+// --- handoff versionado (`sessions winner --apply`) ---------------------------
+//
+// O prompt campeão sai do disco da sessão e entra num arquivo de produção. O
+// fluxo NUNCA perde o anterior: backup antes de sobrescrever, diff sempre, e
+// qualquer falha de git vira AVISO (o prompt já está salvo — derrubar o
+// comando depois disso seria perder o movimento inteiro por causa do enfeite).
+
+/** Resultado do `--apply` (payload do `--json`). */
+export interface ApplyReport {
+  applied: boolean;
+  file: string;
+  backup: string | null;
+  committed: boolean;
+}
+
+type GitResult = { ok: true; out: string } | { ok: false; error: string };
+
+function git(args: string[]): GitResult {
+  try {
+    return {
+      ok: true,
+      out: execFileSync('git', args, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }),
+    };
+  } catch (err) {
+    const e = err as { stderr?: string; stdout?: string; message?: string };
+    return { ok: false, error: (e.stderr ?? e.stdout ?? e.message ?? 'erro desconhecido').trim() };
+  }
+}
+
+/** `git diff --no-index`: exit 1 = há diferenças (não é erro). */
+function gitNoIndexDiff(antes: string, depois: string): GitResult {
+  try {
+    return {
+      ok: true,
+      out: execFileSync('git', ['diff', '--no-index', '--', antes, depois], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    };
+  } catch (err) {
+    const e = err as { status?: number; stderr?: string; stdout?: string; message?: string };
+    if (e.status === 1 && typeof e.stdout === 'string') return { ok: true, out: e.stdout };
+    return { ok: false, error: (e.stderr ?? e.stdout ?? e.message ?? 'erro desconhecido').trim() };
+  }
+}
+
+/** `git add` + `git commit` SÓ do arquivo aplicado (não arrasta o index alheio). */
+function commitAppliedFile(file: string, sessionId: string, out: Output): boolean {
+  const dir = path.dirname(file);
+  const base = path.basename(file);
+  const top = git(['-C', dir, 'rev-parse', '--show-toplevel']);
+  if (!top.ok) {
+    out.warn('destino fora de um repositório git — commit pulado.');
+    return false;
+  }
+  const add = git(['-C', dir, 'add', '--', base]);
+  if (!add.ok) {
+    out.warn(`git add falhou (${add.error}) — commit pulado.`);
+    return false;
+  }
+  const commit = git(['-C', dir, 'commit', '-m', `prompt: atualiza ${base} (sessão ${sessionId})`, '--', base]);
+  if (!commit.ok) {
+    out.warn(`git commit falhou (${commit.error}) — o prompt já está aplicado em ${file}.`);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Aplica o prompt campeão em `destino`: backup `<destino>.bak-<ISO-ts>` quando o
+ * arquivo existe, escrita com `\n` final, diff do que mudou e commit opcional.
+ */
+async function applyPromptFile(
+  destino: string,
+  prompt: string,
+  opts: { commit: boolean; sessionId: string; out: Output },
+): Promise<ApplyReport> {
+  const { out } = opts;
+  const file = path.resolve(destino);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+
+  let backup: string | null = null;
+  const existia = await fs
+    .access(file)
+    .then(() => true)
+    .catch(() => false);
+  if (existia) {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    backup = `${file}.bak-${ts}`;
+    await fs.copyFile(file, backup);
+  }
+
+  await fs.writeFile(file, prompt.endsWith('\n') ? prompt : `${prompt}\n`, 'utf-8');
+
+  // Diff no stdout (payload de texto); fora do formato text o report do --json
+  // é que carrega o resultado — nada de sujar o JSON com diff.
+  if (backup) {
+    const diff = gitNoIndexDiff(backup, file);
+    if (diff.ok) {
+      if (diff.out.trim()) out.line(diff.out.replace(/\n+$/, ''));
+    } else {
+      out.warn(`não consegui gerar o diff: ${diff.error}`);
+    }
+  } else {
+    out.line('(arquivo criado)');
+  }
+
+  const committed = opts.commit ? commitAppliedFile(file, opts.sessionId, out) : false;
+  return { applied: true, file, backup, committed };
 }
 
 export async function cmdSessions(argv: string[]): Promise<number> {
@@ -210,6 +381,8 @@ export async function cmdSessions(argv: string[]): Promise<number> {
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     'prompt-only': { type: 'boolean' },
     limit: { type: 'string' },
+    apply: { type: 'string' },
+    commit: { type: 'boolean' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -234,8 +407,47 @@ export async function cmdSessions(argv: string[]): Promise<number> {
   const campeao = record.bestPromptByIteration.at(-1);
 
   if (sub === 'winner') {
+    // Handoff versionado: --apply leva o campeão para um arquivo de produção,
+    // com backup + diff + commit opcional (ver applyPromptFile acima).
+    const applyRaw = parsed.values.apply;
+    const applyTo = typeof applyRaw === 'string' ? applyRaw.trim() : undefined;
+    const wantCommit = parsed.values.commit === true;
+    if (typeof applyRaw === 'string' && !applyTo) {
+      throw new CliError('--apply exige um caminho de arquivo.', EXIT.USAGE);
+    }
+    if (parsed.values['prompt-only'] === true && applyTo) {
+      throw new CliError('Use --prompt-only OU --apply, nunca os dois.', EXIT.USAGE);
+    }
+    if (wantCommit && !applyTo) {
+      throw new CliError('--commit só faz sentido junto de --apply <arquivo>.', EXIT.USAGE);
+    }
     if (parsed.values['prompt-only'] === true) {
       out.raw(campeao?.systemPrompt ?? '');
+      return EXIT.OK;
+    }
+    if (applyTo) {
+      const prompt = campeao?.systemPrompt;
+      if (!campeao || !prompt || !prompt.trim()) {
+        throw new CliError(`A sessão "${id}" não tem prompt campeão para aplicar.`, EXIT.ERROR);
+      }
+      if (record.holdoutSkipped) {
+        out.warn('campeão NÃO validado em holdout — pode estar sobreajustado.');
+      }
+      const report = await applyPromptFile(applyTo, prompt, {
+        commit: wantCommit,
+        sessionId: record.id,
+        out,
+      });
+      out.info(
+        `prompt aplicado em ${report.file}${report.backup ? ` (backup: ${report.backup})` : ''}`,
+      );
+      if (wantCommit) out.info(report.committed ? 'commit criado.' : 'commit não criado (ver aviso).');
+      out.result(true, 'sessions.winner', {
+        applied: report.applied,
+        file: report.file,
+        backup: report.backup,
+        committed: report.committed,
+      });
       return EXIT.OK;
     }
     if (out.isText && campeao) {
@@ -267,7 +479,7 @@ export async function cmdSessions(argv: string[]): Promise<number> {
   return EXIT.OK;
 }
 
-// --- techniques / lgpd / config / doctor -------------------------------------
+// --- techniques / lgpd / config / registry / doctor --------------------------
 
 export async function cmdTechniques(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
@@ -350,6 +562,100 @@ export async function cmdConfig(argv: string[]): Promise<number> {
   out.info('válido (RunConfig)');
   out.result(true, 'config.validate', { format: 'run-config', config: p.config });
   return EXIT.OK;
+}
+
+// --- registry (guarda de drift de prompts) -----------------------------------
+
+export async function cmdRegistry(argv: string[]): Promise<number> {
+  const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'validate';
+  const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
+    file: { type: 'string' },
+    out: { type: 'string', short: 'o' },
+  });
+  const ctx = buildContext(parsed);
+  const { out } = ctx;
+
+  if (sub === 'init') {
+    const alvo =
+      typeof parsed.values.out === 'string' && parsed.values.out.trim()
+        ? parsed.values.out.trim()
+        : path.join(getDataDir(), 'prompt-registry.json');
+    const existe = await fs
+      .access(alvo)
+      .then(() => true)
+      .catch(() => false);
+    if (existe) {
+      // O registro é versionado junto com o código — nunca sobrescrever em silêncio.
+      throw new CliError(`"${alvo}" já existe — não vou sobrescrever um registro.`, EXIT.CONFIG);
+    }
+    await fs.mkdir(path.dirname(alvo), { recursive: true });
+    await fs.writeFile(alvo, exampleRegistryJson(), 'utf-8');
+    out.info(`registro-exemplo gravado em ${alvo}`);
+    out.result(true, 'registry.init', { file: alvo });
+    return EXIT.OK;
+  }
+
+  if (sub !== 'validate') {
+    throw new CliError(
+      `Subcomando desconhecido: "${sub}". Uso: prompt-builder registry <validate|init>.`,
+      EXIT.USAGE,
+    );
+  }
+
+  const file =
+    typeof parsed.values.file === 'string' && parsed.values.file.trim()
+      ? path.resolve(parsed.values.file.trim())
+      : path.join(getDataDir(), 'prompt-registry.json');
+
+  let raw: string;
+  try {
+    raw = await fs.readFile(file, 'utf-8');
+  } catch {
+    throw new CliError(
+      `Registro "${file}" não encontrado ou ilegível. ` +
+        'Crie um com `prompt-builder registry init -o <arquivo>`.',
+      EXIT.CONFIG,
+    );
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch (err) {
+    throw new CliError(`"${file}" não é um JSON válido: ${(err as Error).message}`, EXIT.CONFIG);
+  }
+  const p = parseRegistry(json);
+  if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
+
+  // A checagem de drift é PURA (src/registry.ts); aqui só se injeta a leitura
+  // real. Caminhos relativos de `source.file` resolvem contra o diretório de
+  // trabalho (o registro default mora no data-dir, o fonte mora no projeto).
+  const report = validateRegistry(p.registry, (alvo) => {
+    try {
+      return readFileSync(path.resolve(alvo), 'utf-8');
+    } catch {
+      return undefined;
+    }
+  });
+
+  if (out.isText) {
+    out.line(`registro: ${file}`);
+    out.line(
+      `prompts: ${report.total} · ok: ${report.ok.length} · drift: ${report.drifted.length}`,
+    );
+    if (report.ok.length) {
+      out.line();
+      out.line('ok:');
+      for (const pid of report.ok) out.line(`  ${pid}`);
+    }
+    if (report.drifted.length) {
+      out.line();
+      out.line('drift:');
+      for (const d of report.drifted) out.line(`  ${d.id} — ${d.reason}`);
+    }
+  }
+  out.result(report.drifted.length === 0, 'registry.validate', { file, report });
+  // Drift = config: o registro não descreve mais o fonte de produção (exit 3).
+  return report.drifted.length === 0 ? EXIT.OK : EXIT.CONFIG;
 }
 
 export async function cmdDoctor(argv: string[]): Promise<number> {

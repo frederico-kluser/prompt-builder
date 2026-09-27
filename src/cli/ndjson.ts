@@ -7,13 +7,73 @@
 // enxuto; o record completo fica no disco, acessivel por `runs show`.
 
 import type { Output } from './output.js';
-import type { RunEvent, SessionEvent } from '../types.js';
+import type { RunEvent, SessionEvent, RunRecord } from '../types.js';
 
 export interface NdjsonMapperOptions {
   /** Com --verbose, inclui config e systemPrompt (que sao grandes). */
   verbose?: boolean;
   /** Marca as linhas de run com o sessionId, quando dentro de um treino. */
   sessionId?: string;
+}
+
+export interface AgentSummary {
+  /** Quantas respostas carregam ExecutionRef (execuções de agente). */
+  executions: number;
+  /** Execuções que morreram em erro de infra/processo (stopReason 'error'). */
+  failed: number;
+  /** Execuções cortadas por nossos tetos (maxTurns/maxCost/timeout/maxOutput/cancelled). */
+  incomplete: number;
+  /** Média de turnos por execução (0 quando não há execuções). */
+  avgTurns: number;
+  /** Média de custo (USD, do response.costUsd) por execução (0 quando não há). */
+  avgCostUsd: number;
+  /** Razão passed/(passed+failed) do oráculo, agregada (0 quando não há oráculo). */
+  oracleRate: number;
+}
+
+/**
+ * Agrega as execuções de agente de uma run para a linha `run.finished` (e o
+ * `result` do CLI). É o resumo que um agente-cliente usa para decidir o próximo
+ * passo sem abrir arquivo. Campos sem dados viram 0. `undefined` quando a run
+ * não tem NENHUMA resposta com `execution` — aí o resumo não faz sentido no
+ * stream (run de chat pura não perde a linha atual).
+ */
+function buildAgentSummary(record: RunRecord): AgentSummary | undefined {
+  const exes = record.stages
+    .flatMap((s) => s.responses)
+    .filter((r): r is typeof r & { execution: NonNullable<typeof r['execution']> } => Boolean(r.execution));
+  if (exes.length === 0) return undefined;
+
+  let failed = 0;
+  let incomplete = 0;
+  let turnsSum = 0;
+  let costSum = 0;
+  let oraclePassed = 0;
+  let oracleTotal = 0;
+  for (const r of exes) {
+    turnsSum += r.execution.turns;
+    costSum += r.costUsd;
+    if (r.execution.stopReason === 'error') {
+      failed += 1;
+    } else if (r.execution.stopReason !== 'completed') {
+      // maxTurns/maxCost/timeout/maxOutput/cancelled: a culpa é do NOSSO teto,
+      // não do agente — conta como incompleta, nunca como erro (§15.2 do plano).
+      incomplete += 1;
+    }
+    if (r.execution.oracle) {
+      oraclePassed += r.execution.oracle.passed;
+      oracleTotal += r.execution.oracle.passed + r.execution.oracle.failed;
+    }
+  }
+
+  return {
+    executions: exes.length,
+    failed,
+    incomplete,
+    avgTurns: turnsSum / exes.length,
+    avgCostUsd: costSum / exes.length,
+    oracleRate: oracleTotal > 0 ? oraclePassed / oracleTotal : 0,
+  };
 }
 
 export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions = {}): void {
@@ -124,18 +184,78 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         decision: e.decision,
       });
       break;
-    case 'run.finished':
+    case 'run.finished': {
+      const agentSummary = buildAgentSummary(e.record);
       out.event('run.finished', {
         ...base,
         status: e.record.status,
         totalCostUsd: e.record.totalCostUsd,
         stages: e.record.stages.length,
+        ...(agentSummary ? { agentSummary } : {}),
         ...(e.record.budgetExhausted ? { budgetExhausted: true } : {}),
         ...(e.record.stoppedAtPhase ? { stoppedAtPhase: e.record.stoppedAtPhase } : {}),
         ...(e.record.standings ? { standings: e.record.standings } : {}),
         ...(e.record.judgeScoreByContestant
           ? { judgeScoreByContestant: e.record.judgeScoreByContestant }
           : {}),
+      });
+      break;
+    }
+    // ----------------------------------------------------------------------
+    // Eventos ADITIVOS do modo agente (§6.4/§23 do plano). Todos enxutos: a
+    // trajetória, o texto dos turnos e a saída das ferramentas ficam em disco
+    // (ExecutionRef/dossier) e NUNCA cruzam o stream — um agente emite dezenas
+    // de tool calls por etapa e o conteúdo quebraria a janela de quem faz tail.
+    case 'agent.started':
+      out.event('agent.started', {
+        ...base,
+        stageIndex: e.stageIndex,
+        contestantId: e.contestantId,
+        execId: e.execId,
+        repetition: e.repetition,
+      });
+      break;
+    case 'agent.turn':
+      out.event('agent.turn', {
+        ...base,
+        stageIndex: e.stageIndex,
+        contestantId: e.contestantId,
+        execId: e.execId,
+        turn: e.turn,
+        costUsd: e.costUsd,
+      });
+      break;
+    case 'agent.tool':
+      out.event('agent.tool', {
+        ...base,
+        stageIndex: e.stageIndex,
+        contestantId: e.contestantId,
+        execId: e.execId,
+        toolName: e.toolName,
+        ok: e.ok,
+        // Só com --verbose (summary já vem truncado no evento). NUNCA a saída.
+        ...(opts.verbose && e.summary ? { summary: e.summary } : {}),
+      });
+      break;
+    case 'agent.finished':
+      out.event('agent.finished', {
+        ...base,
+        stageIndex: e.stageIndex,
+        contestantId: e.contestantId,
+        execId: e.execId,
+        stopReason: e.stopReason,
+        turns: e.turns,
+        costUsd: e.costUsd,
+        ...(e.diffStat ? { diffStat: e.diffStat } : {}),
+      });
+      break;
+    case 'agent.verified':
+      out.event('agent.verified', {
+        ...base,
+        stageIndex: e.stageIndex,
+        contestantId: e.contestantId,
+        execId: e.execId,
+        results: e.results,
       });
       break;
     case 'run.error':

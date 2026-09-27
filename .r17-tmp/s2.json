@@ -1,0 +1,43 @@
+{
+  "query": "knip unused exports dead code detection CI",
+  "answer": "Knip is a tool for detecting unused exports and dead code in JavaScript and TypeScript projects. It integrates with CI pipelines to enforce strict dependency hygiene. Knip-action is a GitHub Action that automates this process in CI.",
+  "results": [
+    {
+      "title": "GitHub - icgriggs14/knip-action: GitHub Action for knip: detect unused exports & dead code in CI · posts PR comments · zero config · 7.97M downloads · GitHub",
+      "url": "https://github.com/icgriggs14/knip-action",
+      "content": "# knip-action\n\n> GitHub Action CI companion for knip — automatically detects unused exports, files, and dependencies on every PR.\n\nGitHub Stars GitHub Marketplace knip GitHub Sponsors\n\nknip is the leading TypeScript dead-code elimination tool (7.97M weekly npm downloads, 11,371 stars). knip-action brings it into your CI pipeline — every PR gets automatic dead-code detection, with inline comments and configurable failure gates.\n\n## Quick start [...] ## Quick start\n\n```\n# .github/workflows/knip.yml # name knip on pull_request types[opened, synchronize, reopened] jobs knipruns-onubuntu-latest permissionspull-requests write steps usesactions/checkout@v4 usesactions/setup-node@v4 withnode-version '20' ' ' run npm ci usesicgriggs14/knip-action@v1 with threshold 0# fail CI if any unused exports/deps found # fail_on_error true reporter compact env GITHUB_TOKEN${{ secrets.GITHUB_TOKEN }}\n```\n\n## Inputs [...] ## Why knip in CI?\n\nThe official knip CI guide endorses GitHub Actions integration — knip exits with code 1 when unused exports/dependencies are found, making it natural to enforce as a CI gate. knip-action is the ready-to-use Action the guide implies.\n\n## Portfolio\n\n claude-pr-review — AI code review on every PR\n claude-changelog-action — AI changelog generation\n claude-test-writer — AI unit test generation\n react-doctor-action — React diagnostics CI\n\n## Support",
+      "score": 0.9817007
+    },
+    {
+      "title": "knip-dead-code skill by laurigates/claude-plugins",
+      "url": "https://playbooks.com/skills/laurigates/claude-plugins/knip-dead-code",
+      "content": "## Overview\n\nThis skill detects dead code in JavaScript and TypeScript projects by finding unused files, dependencies, exports, types, and enum members. It includes a plugin system for popular frameworks, test runners, and build tools so it works with real-world projects out of the box. Reports are actionable, fast, and CI-friendly with configurable exit codes.\n\n## How this skill works [...] --- model: haiku created: 2025-12-16 modified: 2026-02-14 reviewed: 2025-12-16 name: knip-dead-code description: | Knip finds unused files, dependencies, exports, and types in JavaScript/TypeScript projects. Plugin system for frameworks (React, Next.js, Vite), test runners (Vitest, Jest), and build tools. Use when cleaning up codebases, optimizing bundle size, or enforcing strict dependency hygiene in CI. allowed-tools: Glob, Grep, Read, Bash, Edit, Write, TodoWrite, WebFetch, WebSearch, [...] CI gate that fails when unused dependencies are introduced\n Library maintenance: detect and prune unused exports from the public API\n Monorepo hygiene: check specific workspaces or changed files only (--workspace, --changed)\n Pre-release audit to remove unused types and enum members before publishing\n Fast local scan to find and delete unused files after refactors\n\n## FAQ\n\nCan I run only specific checks?\n\nYes — use flags like --dependencies, --exports, or --files to scope the scan.",
+      "score": 0.9773276
+    },
+    {
+      "title": "Dead Code Guard",
+      "url": "https://cuberoot.me/dev/dead-code",
+      "content": "CI guard\n\n```\n# .github/workflows/test.yml — 只卡已清零的四类, # 不卡 unused exports/types(过度导出噪声,另行收敛) pnpm exec knip \\ --include files,dependencies,unlisted,binaries \\ --no-config-hints\n```\n\nrun locally\n\n```\n# 本地全量扫(含 exports/types 噪声) pnpm exec knip # 只看 CI 卡的四类(应为空) pnpm exec knip --include files,dependencies,unlisted,binaries\n``` [...] 01\n\n## Why knip\n\nknip is the de-facto standard for dead-code detection in JS/TS monorepos: starting from the entry points you declare, it does reachability analysis and reports unused files, exports, dependencies, and phantom binaries in one pass. It sees the whole-project dependency graph — exactly the blind spot a per-file linter has.",
+      "score": 0.9721515
+    },
+    {
+      "title": "knip-dead-code-detection - Skill | Smithery",
+      "url": "https://smithery.ai/skills/laurigates/knip-dead-code-detection",
+      "content": "| Flag | Description |\n --- |\n| `--dependencies` | Check only unused dependencies |\n| `--exports` | Check only unused exports |\n| `--files` | Check only unused files |\n| `--production` | Production dependencies only |\n| `--max-issues N` | Fail if more than N issues |\n| `--reporter json` | JSON output for CI |\n| `--reporter compact` | Compact output |\n| `--debug` | Show configuration details |\n| `--changed` | Check only changed files |\n| `--changed --base main` | Changed files since main | [...] `# Fastest check - only dependencies\nbunx knip --dependencies\n# Exit with error if any unused dependencies\nbunx knip --dependencies --max-issues 0`\n\nUse in CI to enforce strict dependency hygiene.\n\n### Check Only Exports (Library Development)\n\n`# Check for unused exports\nbunx knip --exports\n# Allow exports used in same file\nbunx knip --exports --exclude-exports-used-in-file`\n\nUse for libraries to ensure clean public API.\n\n### Production vs Development Dependencies [...] ## About\n\nKnip finds unused files, dependencies, exports, and types in JavaScript/TypeScript projects.\nPlugin system for frameworks (React, Next.js, Vite), test runners (Vitest, Jest), and build tools.\nUse...\n\n## SKILL.md\n\n# Knip Dead Code Detection\n\nKnip is a comprehensive tool for finding unused code, dependencies, and exports in JavaScript and TypeScript projects. It helps maintain clean codebases and catch dead code before it accumulates.",
+      "score": 0.96891505
+    },
+    {
+      "title": "unused-exports · GitHub Topics · GitHub",
+      "url": "https://github.com/topics/unused-exports?l=javascript",
+      "content": "GitHub Action for knip: detect unused exports & dead code in CI · posts PR comments · zero config · 7.97M downloads\n\n### sulthonzh / deadcode-hunter\n\nFind unused exports and dead code paths in JS/TS projects. Zero deps.\n\n## Add this topic to your repo\n\nTo associate your repository with the\nunused-exports\ntopic, visit your repo's landing page and select \"manage topics.\"\n\nLearn more\n\n## Footer\n\n### Footer navigation",
+      "score": 0.96826136
+    }
+  ],
+  "response_time": 0.8,
+  "meta": {
+    "attempts": 1,
+    "keyless_used": false,
+    "truncated": false,
+    "keys_total": 2
+  }
+}

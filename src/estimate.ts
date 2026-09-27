@@ -59,6 +59,13 @@ export interface EstimateInput {
   /** Cenarios reservados para o holdout (training). */
   holdoutStages?: number;
   ctxInTokens?: number;
+  /**
+   * Modo agente — numero de execucoes de agente planejadas
+   * (= contestants x stages x repetitions). >0 liga o papel `agent`.
+   */
+  agentRuns?: number;
+  /** Teto de gasto POR execucao de agente (USD). Vindo de `agent.limits.maxCostUsd`. */
+  agentMaxCostUsd?: number;
 }
 
 export interface CostEstimate {
@@ -128,6 +135,8 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
     judge: 0,
     duel: 0,
     rewriter: 0,
+    // Onda 4 (estimativa de agente) computa o valor real — aqui só satisfaz o Record.
+    agent: 0,
   };
 
   // --- datagen: LOTES, nao um por cenario ---
@@ -181,6 +190,18 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
       duelPairs *
       2 *
       priceCall(m, ctxIn + 2 * maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_DUEL);
+  }
+
+  // --- agente: custo declarado por construção (§20.1) ---
+  // O agente NAO e precificado por tokens aqui: `maxCostUsd` e um TETO por
+  // execucao, entao `agentRuns * maxCostUsd` e o limite superior da faixa e e
+  // EXATO por construcao (o executor mata no teto). Entra em `byRole.agent`,
+  // soma ao ponto e a `perIteration`. `unpricedModelIds` fica intocado: o
+  // agente nao consulta o catalogo por tokens — nada a marcar como imprecificavel.
+  const agentRuns = input.agentRuns ?? 0;
+  const agentMaxCostUsd = input.agentMaxCostUsd ?? 0;
+  if (agentRuns > 0 && agentMaxCostUsd > 0) {
+    byRole.agent = agentRuns * agentMaxCostUsd;
   }
 
   const perIteration = Object.values(byRole).reduce((a, b) => a + b, 0);
@@ -260,6 +281,14 @@ export function estimateInputFromConfig(
   // Datagen so e chamado se o seed nao cobre o alvo e nao ha etapas pinadas.
   const precisaGerar = pinned === 0 && seed < config.stages;
 
+  // Modo agente: numero de execucoes planejadas = contestants x cenarios x
+  // repeticoes; teto por execucao = `agent.limits.maxCostUsd` (o schema ja exige
+  // o campo em modo agente, entao aqui `undefined` = config invalida / nao caiu
+  // por schema).
+  const repetitions = config.agent?.repetitions ?? 1;
+  const agentRuns = config.agent ? contestantModelIds.length * plannedStages * repetitions : 0;
+  const agentMaxCostUsd = config.agent?.limits?.maxCostUsd;
+
   return {
     mode: config.mode,
     plannedStages,
@@ -276,6 +305,7 @@ export function estimateInputFromConfig(
     optimizerModelId: config.optimizerModelId ?? config.datagenModelId,
     variantsPerIteration,
     holdoutStages: opts.holdoutStages,
+    ...(config.agent ? { agentRuns, agentMaxCostUsd } : {}),
   };
 }
 

@@ -23,6 +23,15 @@ Não instale nada: `npx prompt-builder-cli <comando>`.
 | "otimize esse prompt" | `train` |
 | "que think level esse modelo aceita?" | `models show <id>` |
 | "quanto isso vai custar?" | `estimate` ou `--dry-run` |
+| "qual agente/prompt de agente resolve melhor?" | `agents run` |
+
+## Modo agente (Agent Arena)
+
+Quando a resposta não é um texto e sim **agente que executa tarefas** (edita
+arquivos, roda `bash`, `verify`), o competidor vira um processo e o juiz lê um
+dossiê determinístico do que ele fez. O contrato é `arena-agent-config@1` e o
+caminho é `agents doctor` → `agents run --config x.json --budget N`. Leia
+`docs agents` para o básico e `docs agent-task` para o contrato campo a campo.
 
 ## O caminho feliz
 
@@ -84,3 +93,54 @@ npx prompt-builder-cli docs quickstart
 
 `0` ok · `2` uso inválido · `3` config inválida · `4` auth · `5` sem crédito ·
 `7` parcial (orçamento esgotado) · `8` rede · `130` interrompido
+
+## Agentes desta máquina (configuração local do autor)
+
+> Esta seção é específica da máquina do autor (útil para QUALQUER agente rodando
+> nela; irrelevante para usuários do pacote). Nenhum segredo aparece aqui — as
+> chaves vivem em `~/.secrets`, no `config.yaml` do LiteLLM
+> (`~/.config/azureclaude/config.yaml`) e nos arquivos `*.key` de cada conta.
+
+Esta máquina tem **4 agentes de código** configurados para rodar o CLI
+(`npx prompt-builder-cli ...` / `npm run cli -- ...` do repo) e — no caso do modo
+agente — **para serem os próprios avaliados**:
+
+| Agente | O que é | Conta/dir | Como disparar |
+|---|---|---|---|
+| `pi` | **pi-coding-agent** (executor nativo do modo agente) | `pi.frederico` → `~/.pi/agent` (skills globais em `~/.pi/agent/skills`) | `pi [args]` |
+| `azureclaude` | Claude Code → **LiteLLM local** (127.0.0.1:4000) → Azure AI Foundry, deployment **DeepSeek-V4-Flash-0731**; expõe UM modelo: `claude-opus-4-7` | `azureclaude` → `~/.claude-azureclaude` | `azureclaude [args do claude]`; `--proxy-status` (health), `--setup-config` (gera config.yaml) |
+| `deepclaude` | Claude Code → **DeepSeek direto** (`api.deepseek.com/anthropic`, DeepSeek V4 Pro); usado pelas funções `asd`/`qwe` via `_claude_deepseek` | `deepseek-claude` → `~/.claude-deepseek` (`deepseek.key` 0600) | `deepclaude [args do claude]`; `--setup-key` |
+| `asd` | **Seletor de contas** (fzf) dos conjuntos de agentes — `asd-functions.zsh` (também `qwe`/`123`/`zxc`) | contas: `k2.rodrigo`, `k2.frederico` (claude), `deepseek-claude` (dsclaude), `azureclaude`, `pi.frederico` | `asd` (menu) · registro: `claude-contas ls` |
+
+**Como usar o CLI com cada um:** o CLI roda igual DENTRO de qualquer um deles
+(via ferramenta `bash`/terminal — não é preciso nada especial). Para o modo
+agente (Agent Arena), o executor do motor é o `pi`; os demais entram como
+**participantes/avaliados** numa run de compare de agentes
+(`arena-agent-config@1` + `agents run`), cada um no seu container `--env-file` 0600.
+
+- **Quer medir qual agente resolve melhor tarefas de arquivo?** monte
+  `arena-agent-config@1` com `scenarios[].agentTask` e oráculo `verify[]`, e rode
+  `agents run --config x.json --budget N` (executor `pi`; modelos dos contestants
+  definidos em `models.competitors`).
+- **Quer benchmarkar os 4 agentes ENTRE si?** o motor compara modelos OpenRouter
+  como contestants (o `pi` executa todos). Para comparar `asd × azureclaude ×
+  deepclaude × pi` como executores locais, é um passo futuro dos adaptadores
+  (`AgentExecutor`) — hoje o executor é sempre `pi`.
+- **Segurança:** nunca imprima/commite chaves. O CLI lê a key de
+  `OPENROUTER_API_KEY`/`key set`; o modo container recebe por `--env-file` 0600
+  efêmero (fora dos volumes) e o `argv.json` mascara o caminho.
+
+
+## Dataset estável e evolução segura (paridade prompt-arena)
+
+- **`prompt-builder library`** — banco persistente de cenários+gabaritos por perfil
+  (`<data-dir>/library/<perfil>/`): `init`/`add`/`seed` (idempotente)/`verify`/`coverage`/
+  `export`/`rm`/`drop`. Item enriquecido: `tier`, `dimensionTags`, `persona`, `rationale` e
+  **gabarito obrigatório** (`reference` textual OU `expected` de rótulo — o evolve recusa sem).
+- **`expected`** (ground-truth): veredito determinístico sem juiz LLM — `"edit"`, `["edit","help"]`
+  ou `{"campo":"valor"}`.
+- **arena-config@1**: `scenarios: {"from":"library","profile","ids"}` · `prompt.contracts`
+  (never-break) · `prompt.group`+`promptId` (multi-prompt coordinate ascent) · `training.reflection`
+  (`deterministic|llm|off`) · `training.paretoPool` (população Pareto) · `repeats` (compare, 1–3).
+- **Reprodutibilidade**: `runs reproduce` · `runs export` · `sessions winner --apply [--commit]` ·
+  `registry validate` (drift do prompt em código).

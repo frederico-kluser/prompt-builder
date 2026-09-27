@@ -11,7 +11,7 @@
 // abaixo, cada uma marcando o que se perde se ela for esquecida.
 
 import { parseRunConfig } from './runConfigSchema.js';
-import type { ArenaConfigFile } from './configFile.js';
+import type { ArenaAgentConfigFile, ArenaConfigFile } from './configFile.js';
 import type { ReasoningConfig, RunConfig, StageSpec } from './types.js';
 
 /** Defaults da UI, aplicados quando o arquivo omite o campo. */
@@ -35,6 +35,20 @@ const DEFAULTS: Required<ArenaConfigDefaults> = {
 
 const clamp = (n: number, min: number, max: number): number => Math.max(min, Math.min(max, n));
 
+/**
+ * Referência à biblioteca de cenários do config (`scenarios.from: 'library'`),
+ * quando presente. A RESOLUÇÃO é assíncrona e vive no CLI (fs em
+ * `<data-dir>/library/<profile>/`): quem chama carrega os itens, RECUSA os sem
+ * gabarito (paridade com o 409 do prompt-arena) e vira `customStages`.
+ */
+export function libraryRefFrom(
+  file: ArenaConfigFile,
+): { profile: string; ids?: string[] } | undefined {
+  const s = file.scenarios;
+  if (Array.isArray(s) || !s) return undefined;
+  return { profile: s.profile, ids: s.ids };
+}
+
 export type ArenaConfigToRunConfigResult =
   | { ok: true; config: RunConfig }
   | { ok: false; error: string };
@@ -48,12 +62,17 @@ export function arenaConfigToRunConfig(
 
   // Cenarios pinados viram `scenarioSeed` — sem o `id` (o motor re-rotula) e
   // herdando `maxTokens` do limite global quando o arquivo nao especifica.
-  const scenarioSeed: StageSpec[] = (file.scenarios ?? []).map((s) => ({
+  // `scenarios` tambem pode ser uma REFERENCIA a biblioteca (F1/P0.1): ela e
+  // resolvida pelo CLI (filesystem) via `libraryRefFrom` + `customStages` —
+  // aqui so a forma de LISTA vira seed.
+  const pinados = Array.isArray(file.scenarios) ? file.scenarios : [];
+  const scenarioSeed: StageSpec[] = pinados.map((s) => ({
     question: s.question,
     productContext: s.productContext ?? '',
     maxTokens: s.maxTokens && s.maxTokens > 0 ? s.maxTokens : maxOutputTokens,
     ...(s.rubric ? { rubric: s.rubric } : {}),
     ...(s.reference ? { reference: s.reference } : {}),
+    ...(s.expected !== undefined ? { expected: s.expected } : {}),
     origin: 'import' as const,
   }));
 
@@ -95,11 +114,25 @@ export function arenaConfigToRunConfig(
     finalists,
     judgePasses: (file.judging?.passes === 2 ? 2 : 1) as 1 | 2,
     ...(semFinais ? { duels: false } : {}),
+    // Repeticoes por cenario (F2 §7.9): so o compare expande; nos demais modos
+    // a chave e descartada pelo schema (retrocompat).
+    ...(file.mode === 'compare' && file.repeats ? { repeats: file.repeats } : {}),
     ...(scenarioSeed.length ? { scenarioSeed } : {}),
     ...(file.scenarioBrief?.trim() ? { scenarioBrief: file.scenarioBrief.trim() } : {}),
     ...(file.models.reference ? { referenceModelId: file.models.reference } : {}),
     ...(Object.keys(reasoning).length ? { reasoning } : {}),
     ...(file.compliance ? { compliance: file.compliance } : {}),
+    // Contratos never-break (F2/P0.3): vivem no perfil do prompt, valem para
+    // toda reescrita do variator.
+    ...(file.prompt?.contracts ? { contracts: file.prompt.contracts } : {}),
+    // Multi-prompt (F2/P0.4): grupo de fragmentos + fragmento-alvo. O
+    // `prompt.text` do arquivo e o texto ATUAL do fragmento-alvo (basePrompt).
+    ...(file.prompt?.group?.length
+      ? {
+          promptGroup: { prompts: file.prompt.group },
+          ...(file.prompt.promptId ? { promptId: file.prompt.promptId } : {}),
+        }
+      : {}),
   };
 
   let candidate: Record<string, unknown>;
@@ -139,6 +172,9 @@ export function arenaConfigToRunConfig(
             minGain: clamp(file.training?.minGain ?? 1, 0, 100),
             holdoutRatio: clamp(file.training?.holdoutRatio ?? 0.2, 0, 0.5),
             feedbackDriven: file.training?.feedbackDriven !== false,
+            ...(file.training?.reflection ? { reflection: file.training.reflection } : {}),
+            ...(file.training?.halving !== undefined ? { halving: file.training.halving } : {}),
+            ...(file.training?.paretoPool !== undefined ? { paretoPool: file.training.paretoPool } : {}),
           }
         : {}),
     };
@@ -149,4 +185,169 @@ export function arenaConfigToRunConfig(
   const parsed = parseRunConfig(candidate);
   if (!parsed.ok) return { ok: false, error: parsed.error };
   return { ok: true, config: parsed.config };
+}
+
+// ----------------------------------------------------------------------------
+// Traducao `arena-agent-config@1` -> `RunConfig` (modo agente, §25).
+//
+// Diferente do chat, aqui o ROUTER do contestant fica preso em 'agent' para
+// TODOS os contestants quando mode==='compare': eles sao `models.competitors`
+// (os agentes sendo comparados). `agent.limits` e default para o
+// `scenario[].agentTask.limits` ausente; sem essa heranca, cada cenario
+// repetiria o bloco e uma divergencia acidental viraria experimento invalido
+// silencioso. `stages` e forcado a `scenarios.length` — datagen de tarefa de
+// agente nao existe na v1 (um LLM nao gera repo+setup+verify que rodem sem
+// executa-los). `judging.dossierTokens` vira `agent.dossierTokens`.
+//
+// Fase 4 (§29.2): variation/training tambem sao aceitos. Como o arquivo de
+// agente nao traz modelo sob teste nem basePrompt (o `ArenaAgentConfigFile` só
+// tem `models.competitors`), o caminho varia o prompt do PRIMEIRO competidor —
+// as variações (systemPrompts) são geradas pelo variator com runner='agent'.
+// ----------------------------------------------------------------------------
+
+export type ArenaAgentConfigToRunConfigResult =
+  | { ok: true; config: RunConfig }
+  | { ok: false; error: string };
+
+export function arenaAgentConfigToRunConfig(
+  file: ArenaAgentConfigFile,
+  overrides: Pick<ArenaConfigDefaults, 'finalists' | 'maxOutputTokens' | 'timeoutMs'> = {},
+): ArenaAgentConfigToRunConfigResult {
+  // `agent.limits` e o default de todo `scenario.agentTask.limits` ausente.
+  const agentLimits = file.agent.limits;
+  const maxOutputTokens = Math.max(50, overrides.maxOutputTokens ?? 1000);
+  const timeoutMs = clamp(Math.round(overrides.timeoutMs ?? agentLimits.timeoutMs ?? 600_000), 1_000, 300_000);
+
+  // Cenarios: cada um vira uma StageSpec de agentTask. `stages` = scenarios.length
+  // (datagen de tarefa de agente nao existe na v1). scenario SEM agentTask => ERRO,
+  // nao fallback para chat (cair em silencio mediria outra coisa, §25).
+  const stageSpecs: StageSpec[] = [];
+  for (const s of file.scenarios) {
+    if (!s.agentTask) {
+      return {
+        ok: false,
+        error: 'Em modo agente, todo cenário precisa de agentTask (não vira chat)',
+      };
+    }
+    const taskLimits = agentLimitsSchemaToAgentLimits(s.agentTask.limits) ?? agentLimitsSchemaToAgentLimits(file.agent.limits);
+    if (!taskLimits) {
+      return { ok: false, error: 'agent.limits.maxCostUsd é obrigatório em modo agente (§20.1)' };
+    }
+    stageSpecs.push({
+      question: s.question,
+      // productContext e OPTIONAL no arquivo — o schema do StageSpec exige min(1),
+      // entao quando ausente herdamos o contexto mais proximo (brief ou tema).
+      productContext: s.productContext?.trim() || file.scenarioBrief?.trim() || file.theme.trim(),
+      maxTokens: maxOutputTokens,
+      ...(s.rubric ? { rubric: s.rubric } : {}),
+      origin: 'import' as const,
+      agentTask: {
+        ...(s.agentTask.repo ? { repo: s.agentTask.repo } : {}),
+        ...(s.agentTask.setup ? { setup: s.agentTask.setup } : {}),
+        ...(s.agentTask.files ? { files: s.agentTask.files } : {}),
+        ...(s.agentTask.verify ? { verify: s.agentTask.verify } : {}),
+        ...(s.agentTask.forbiddenPaths ? { forbiddenPaths: s.agentTask.forbiddenPaths } : {}),
+        ...(s.agentTask.contextFiles ? { contextFiles: s.agentTask.contextFiles } : {}),
+        limits: taskLimits,
+      },
+    });
+  }
+
+  const finalists = clamp(
+    Math.round(overrides.finalists ?? file.finalists ?? 3),
+    0,
+    12,
+  );
+  const duelsOn = file.duels ?? true;
+  const semFinais = !duelsOn || finalists === 0;
+
+  // Reasoning no modo agente: juiz e datagen vao em `config.reasoning` (o agente
+  // em si usa `agent.thinking`). Sem ajuste por papel aqui — defaults do pipeline.
+  const reasoning: ReasoningConfig = {};
+
+  const referenceJudging = file.judging?.reference ?? true;
+
+  const common = {
+    theme: file.theme.trim(),
+    stages: stageSpecs.length,
+    datagenModelId: file.models.datagen,
+    judgeModelIds: file.models.judges,
+    concurrency: 4, // execucoes de agente sao pesadas de CPU — gateado pelo maxParallel do agente
+    timeoutMs,
+    maxOutputTokens,
+    referenceJudging,
+    finalists,
+    judgePasses: (file.judging?.passes === 2 ? 2 : 1) as 1 | 2,
+    customStages: stageSpecs,
+    ...(semFinais ? { duels: false } : {}),
+    ...(file.scenarioBrief?.trim() ? { scenarioBrief: file.scenarioBrief.trim() } : {}),
+    ...(file.models.reference ? { referenceModelId: file.models.reference } : {}),
+    // O agente controla os proprios tokens; maxOutputTokens/timeoutMs ficam
+    // preenchidos aqui pois a etapa tambem pode rodar em modo chat (§29.11).
+    ...(Object.keys(reasoning).length ? { reasoning } : {}),
+    agent: {
+      executor: 'pi' as const,
+      executorVersion: file.agent.executorVersion,
+      ...(file.agent.install ? { install: file.agent.install } : {}),
+      ...(file.agent.provider ? { provider: file.agent.provider } : {}),
+      ...(file.agent.promptMode ? { promptMode: file.agent.promptMode } : {}),
+      ...(file.agent.thinking ? { thinking: file.agent.thinking } : {}),
+      ...(file.agent.tools ? { tools: file.agent.tools } : {}),
+      ...(file.agent.repetitions ? { repetitions: file.agent.repetitions } : {}),
+      ...(file.agent.maxParallel ? { maxParallel: file.agent.maxParallel } : {}),
+      ...(file.agent.isolation ? { isolation: file.agent.isolation } : {}),
+      limits: agentLimitsSchemaToAgentLimits(file.agent.limits),
+      ...(file.judging?.dossierTokens ? { dossierTokens: file.judging.dossierTokens } : {}),
+    },
+  };
+
+  // Fase 4 (§29.2): variation/training com agente também são aceitos.
+  // `agent` (incl. limits/promptMode etc.) é preservado verbatim no `common`
+  // acima; quem dirige o runner='agent' dos contestants é o variator/trainer
+  // quando `config.agent` presente.
+  const candidate: Record<string, unknown> = file.mode === 'compare'
+    ? {
+        mode: 'compare',
+        ...common,
+        // TODOS os contestants rodam como agentes (runner preso em 'agent').
+        competitorConfigs: file.models.competitors.map((id) => ({ modelId: id })),
+      }
+    : {
+        mode: file.mode,
+        ...common,
+        // O arena-agent-config@1 nao traz modelo sob teste, promp base nem
+        // tecnicas (so `models.competitors`, min 2, para o compare). No caminho
+        // variation/training com agente, o modelo sob teste e o primeiro
+        // competidor e as variacoes de prompt (systemPrompts) sao geradas pelo
+        // variator com runner='agent'. Para um single-model VALIDO (o schema de
+        // run exige >= 2 candidatos), defaultamos a otimizacao ligada com duas
+        // tecnicas gerais (`getTechnique` aceita so ids reais — conferidas no
+        // catalogo). TODO: quando o arena-agent-config@1 ganhar base/tecnicas
+        // p/ variation/training, leia daqui em vez de defaultar.
+        contestantModelId: file.models.competitors[0],
+        promptOptimization: true,
+        techniqueIds: ['specificity', 'constraints'],
+        ...(file.mode === 'training'
+          ? { iterations: clamp(Math.round(3), 2, 10) }
+          : {}),
+      };
+
+  const parsed = parseRunConfig(candidate);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+  return { ok: true, config: parsed.config };
+}
+
+// `ArenaAgentConfigLimits` exige maxCostUsd; `AgentLimits` o tem opcional. Converte
+// o objeto do arquivo para o tipo do dominio (remove extras, normaliza para AgentLimits).
+function agentLimitsSchemaToAgentLimits(
+  l: { maxTurns?: number; maxCostUsd: number; timeoutMs?: number; maxOutputBytes?: number; maxDiffBytes?: number } | undefined,
+): { maxTurns?: number; maxCostUsd?: number; timeoutMs?: number; maxOutputBytes?: number; maxDiffBytes?: number } | undefined {
+  if (!l) return undefined;
+  return {
+    ...(l.maxTurns !== undefined ? { maxTurns: l.maxTurns } : {}),
+    ...(l.maxCostUsd !== undefined ? { maxCostUsd: l.maxCostUsd } : {}),
+    ...(l.timeoutMs !== undefined ? { timeoutMs: l.timeoutMs } : {}),
+    ...(l.maxOutputBytes !== undefined ? { maxOutputBytes: l.maxOutputBytes } : {}),
+    ...(l.maxDiffBytes !== undefined ? { maxDiffBytes: l.maxDiffBytes } : {}),
+  };
 }

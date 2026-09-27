@@ -64,3 +64,20 @@ com `--verbose`.
 
 Se o OpenRouter estiver fora do ar, o CLI usa o cache em disco (até 24 h) e
 avisa no stderr. `models list` funciona offline; runs, não.
+
+## Modo container — `docker: comando não encontrado` / daemon indisponível
+
+Quando `isolation.kind` é `"container"`, o run precisa do Docker **CLI** no PATH e de um
+**daemon acessível sem sudo** (o container chama o OpenRouter pela rede padrão). Se o CLI
+falta ou o daemon está inacessível, a preparação/execução falha. Instale/ative o Docker e
+garanta acesso sem sudo. Confirme com `agents doctor --container`: o pré-voo ecoa o estado
+do Docker (`· docker ok (prompt-builder-pi:<ver>)` ou `docker CLI AUSENTE` / `imagem ausente`)
+e **falha com exit `3`** quando o CLI/imagem faltam.
+
+## Modo container — imagem docker `prompt-builder-pi:<ver>` ausente
+
+A imagem default `prompt-builder-pi:<executorVersion>` (ex. `prompt-builder-pi:0.84.2`) é
+**criada e cacheada na primeira preparação de run em container** (`ensurePiImage` — o
+`doctor` não builda). Se o pré-voo acusar a imagem ausente, rode uma run em container para
+buildá-la automaticamente; ou adiante com `docker build` seguindo o Dockerfile (em produção,
+embutido em `src/agent/container.ts`).

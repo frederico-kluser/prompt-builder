@@ -1,4 +1,5 @@
 import { chatCompletion } from './openrouter';
+import { matchExpected } from '../../../src/engine/groundTruth.js';
 import type {
   CompetitorResponse,
   Contestant,
@@ -18,6 +19,14 @@ import type {
 
 // Head portado do prompt-arena (fixa o contrato de veredito JSON).
 const SYSTEM_PROMPT = `Você é um juiz técnico estrito. Um modelo mais forte já produziu a RESPOSTA DE REFERÊNCIA (correta). Compare o CANDIDATO com ela. Ignore redação/estilo — julgue se o candidato alcança o MESMO resultado e intenção. Responda APENAS com um objeto JSON {"verdict": "resolve"|"parcial"|"nao", "explanation": "<uma frase curta em pt-BR>"} onde resolve = corresponde plenamente à referência, parcial = parcialmente/impreciso/faltando parte, nao = errado ou fez outra coisa.`;
+
+/**
+ * O CONTRATO do juiz pointwise (F4.2): o texto fixo que define a escala de
+ * veredito. Vai hasheado no record (`judgeDiagnostics.contract`) para o
+ * calibration drift aparecer — mesma rúbrica com juiz/contrato diferente
+ * quebra comparacao entre sessoes.
+ */
+export const JUDGE_CONTRACT_TEXT = SYSTEM_PROMPT;
 
 const VERDICT_ORDINAL: Record<Verdict, number> = { nao: 0, parcial: 1, resolve: 2 };
 
@@ -189,6 +198,18 @@ export async function judgeStageReference(
     } else {
       judgeable.push(r);
     }
+  }
+
+  // F1.4 (PLANO-PARIDADE P0.5): rotulo ESPERADO => veredito DETERMINISTICO,
+  // sem gastar LLM. `judgeModelId` vira 'ground-truth' para o registro mostrar
+  // que NENHUM juiz LLM opinou.
+  if (stage.expected !== undefined) {
+    for (const r of judgeable) {
+      const gt = matchExpected(r.text, stage.expected);
+      verdictByContestant[r.contestantId] = gt.verdict;
+      explanationByContestant[r.contestantId] = gt.explanation;
+    }
+    return { verdictByContestant, explanationByContestant, judgeModelId: 'ground-truth' };
   }
 
   const reference = stage.reference?.trim() ?? '';

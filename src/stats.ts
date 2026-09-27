@@ -39,16 +39,41 @@ export function mulberry32(seed: number): () => number {
  * Determinístico (mulberry32 semeado): recomputar um resultado salvo reproduz o
  * mesmo p-valor. `pValue` é unilateral na direção da promoção (H1: campeão >
  * controle) = fração dos resamples com média de diff ≤ 0.
+ *
+ * **Pareamento.** Por padrão os pares são posicionais (indice i do campeão
+ * emparelha com o indice i do controle). Quando os dados têm repeticoes por
+ * cenario (§18.4), o par correto é `(cenario, repeticão)`, e a chamada deve
+ * passar `pairKeys`: um vetor de chaves (uma por score, mesma ordem) usado
+ * para emparelhar por CHAVE em vez de por indice. Chaves presentes nos dois
+ * lados formam os pares; a ordem preservada é a de `controlScores` (a chamada
+ * deve fornecer os lacos na mesma ordem). Sem `pairKeys`, comportamento
+ * idêntico ao legado (posicional) — `opts` ausente nao muda nada.
  */
 export function pairedSignificance(
   controlScores: number[],
   championScores: number[],
-  opts?: { iterations?: number; seed?: number },
+  opts?: { iterations?: number; seed?: number; pairKeys?: string[] },
 ): { n: number; meanDiffPp: number; ci95Pp: [number, number]; pValue: number } | null {
-  const n = Math.min(controlScores.length, championScores.length);
+  let diffs: number[];
+  if (opts?.pairKeys) {
+    // Pareamento por (cenario x repeticão): a chave e a identidade do par.
+    const champByName = new Map<string, number>();
+    const nChamp = Math.min(championScores.length, opts.pairKeys.length);
+    for (let i = 0; i < nChamp; i += 1) champByName.set(opts.pairKeys[i], championScores[i]);
+    diffs = [];
+    const nCtrl = Math.min(controlScores.length, opts.pairKeys.length);
+    for (let i = 0; i < nCtrl; i += 1) {
+      const v = champByName.get(opts.pairKeys[i]);
+      if (v !== undefined) diffs.push(v - controlScores[i]);
+    }
+  } else {
+    // Legado: pareamento posicional pelas primeiras min(length) posicoes.
+    const n = Math.min(controlScores.length, championScores.length);
+    diffs = [];
+    for (let i = 0; i < n; i += 1) diffs.push(championScores[i] - controlScores[i]);
+  }
+  const n = diffs.length;
   if (n < 5) return null;
-  const diffs: number[] = [];
-  for (let i = 0; i < n; i += 1) diffs.push(championScores[i] - controlScores[i]);
 
   const iterations = opts?.iterations ?? 2000;
   const rng = mulberry32(opts?.seed ?? 1337);

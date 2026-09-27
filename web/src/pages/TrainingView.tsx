@@ -15,6 +15,7 @@ import {
 } from '../api';
 import { useTheme } from '../theme';
 import { applyEvent, denseStages, rankColor, ScoreHeatmap, FinalsPanel } from './runShared';
+import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
 import { diffLines } from '../diff';
 import {
   SmoothTabs,
@@ -205,6 +206,7 @@ function BestPromptStudio({
   );
 
   const [selRunId, setSelRunId] = useState<string | undefined>(defaultRunId ?? data[data.length - 1]?.runId);
+  // F3: drawer do prompt da variante (aberto pelo DeltaBars).
   const [selCid, setSelCid] = useState<string | undefined>(defaultCid);
   const [view, setView] = useState<'diff' | 'prompt'>('diff');
   const [saveOpen, setSaveOpen] = useState(false);
@@ -411,6 +413,8 @@ export function TrainingView() {
   const [error, setError] = useState<string | null>(null);
   const [liveRun, setLiveRun] = useState<RunRecord | null>(null);
   const [currentRunId, setCurrentRunId] = useState<string | undefined>(undefined);
+  // F3: drawer do prompt da variante (aberto pelo DeltaBars).
+  const [drawerVariant, setDrawerVariant] = useState<string | null>(null);
   const [pastRuns, setPastRuns] = useState<Record<string, RunRecord>>({});
   const [duelProgress, setDuelProgress] = useState<{ done: number; total: number } | null>(null);
 
@@ -698,10 +702,26 @@ export function TrainingView() {
               <FinalsPanel record={roundShown} progress={duelProgress} />
             </>
           )}
+
+          {/* F3 (PLANO-PARIDADE): delta vs controle, onde falhou e diagnóstico
+              do juiz — só depois de rodar o delta abre o drawer da variante. */}
+          {!isRunning && (
+            <>
+              <DeltaBars record={roundShown} onVariantClick={setDrawerVariant} />
+              <FailureDigest record={roundShown} />
+              <JudgeDiagnostics record={roundShown} />
+            </>
+          )}
         </>
       ) : (
         <EmptyState>Preparando a rodada…</EmptyState>
       )}
+
+      <VariantPromptDrawer
+        record={roundShown ?? rounds[rounds.length - 1]}
+        variantId={drawerVariant}
+        onClose={() => setDrawerVariant(null)}
+      />
 
       {rounds.length > 1 && (
         <>

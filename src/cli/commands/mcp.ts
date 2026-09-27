@@ -11,6 +11,7 @@
 // imposto permanente de tokens.
 
 import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { PKG_DOCS_DIR, PKG_ROOT, pkgVersion } from '../../paths.js';
@@ -19,14 +20,15 @@ import { ensureCatalog } from '../../modelsCache.js';
 import { toExportRow } from '../../modelCaps.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
-import { parseArenaConfig } from '../../configFile.js';
-import { arenaConfigToRunConfig } from '../../arenaConfig.js';
+import { parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
+import { arenaConfigToRunConfig, arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { runToCompletion } from '../../orchestrator.js';
+import { readArtifact } from '../../agent/store.js';
 import { prepareOptsFor } from '../../prepareRun.js';
 import { trainToCompletion } from '../../trainer.js';
 import { resolveHome, resolveKey, parse } from '../context.js';
 import { EXIT } from '../output.js';
-import type { RunConfig } from '../../types.js';
+import type { RunConfig, RunRecord } from '../../types.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const SERVER_INFO = { name: 'prompt-builder', version: pkgVersion() };
@@ -59,6 +61,44 @@ async function toRunConfig(raw: unknown): Promise<RunConfig> {
   const p = parseRunConfig(raw);
   if (!p.ok) throw new Error(p.error);
   return p.config;
+}
+
+// Config de agente chega como STRING JSON (arena-agent-config@1). Aceita tambem
+// objeto por robustez, mas o contrato do schema e a string.
+function parseAgentConfigRaw(config: unknown): RunConfig {
+  let raw: unknown = config;
+  if (typeof config === 'string') {
+    try {
+      raw = JSON.parse(config);
+    } catch {
+      throw new Error('config não é um JSON válido de arena-agent-config@1.');
+    }
+  }
+  const p = parseArenaAgentConfig(raw);
+  if (!p.ok) throw new Error(p.error);
+  const c = arenaAgentConfigToRunConfig(p.config);
+  if (!c.ok) throw new Error(c.error);
+  return c.config;
+}
+
+// Derivado do record, nao inferido: conta so respostas de agente (com execution).
+// "cut" = a execucao parou pela parede/teto (nao e um veredito 'nao').
+const AGENT_CUT_REASONS = new Set(['maxTurns', 'maxCost', 'timeout', 'maxOutput', 'cancelled']);
+
+function agentSummary(rec: { stages: { responses: { costUsd: number; execution?: { turns: number; stopReason: string; oracle?: { score: number } } }[] }[] }) {
+  const execs = rec.stages.flatMap((s) => s.responses.filter((r) => r.execution));
+  if (execs.length === 0) return undefined;
+  const executions = execs.length;
+  const failed = execs.filter((r) => r.execution!.stopReason === 'error').length;
+  const incomplete = execs.filter((r) => AGENT_CUT_REASONS.has(r.execution!.stopReason)).length;
+  const avgTurns = execs.reduce((a, r) => a + r.execution!.turns, 0) / executions;
+  const avgCostUsd = execs.reduce((a, r) => a + r.costUsd, 0) / executions;
+  const withOracle = execs.filter((r) => r.execution!.oracle !== undefined);
+  const oracleRate =
+    withOracle.length > 0
+      ? withOracle.reduce((a, r) => a + (r.execution!.oracle!.score ?? 0), 0) / withOracle.length
+      : undefined;
+  return { executions, failed, incomplete, avgTurns, avgCostUsd, oracleRate };
 }
 
 const TOOLS: Tool[] = [
@@ -199,6 +239,69 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: 'run_agent_benchmark',
+    description:
+      'Roda um benchmark de AGENTES (arena-agent-config@1) até o fim e devolve um resumo. ' +
+      'config é um JSON string; budgetUsd é OBRIGATÓRIO.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        config: { type: 'string', description: 'JSON string de arena-agent-config@1' },
+        budgetUsd: { type: 'number', description: 'teto de gasto em USD' },
+      },
+      required: ['config', 'budgetUsd'],
+    },
+    run: async (args, apiKey) => {
+      // Validacao nunca derruba o servidor: erros viram {ok:false, error}.
+      let cfg: RunConfig;
+      try {
+        cfg = parseAgentConfigRaw(args.config);
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+      const budgetUsd = numOf(args.budgetUsd);
+      if (budgetUsd === undefined || budgetUsd <= 0) {
+        return { ok: false, error: 'budgetUsd é obrigatório e deve ser maior que zero.' };
+      }
+      let rec: RunRecord;
+      try {
+        await ensureCatalog(apiKey);
+        rec = await runToCompletion({ ...cfg, budgetUsd }, apiKey, prepareOptsFor(cfg, apiKey));
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+      return { ok: true, runId: rec.id, totalCostUsd: rec.totalCostUsd, agentSummary: agentSummary(rec) };
+    },
+  },
+  {
+    name: 'get_agent_dossier',
+    description:
+      'Lê o dossiê (dossier.md) de uma execução de agente — o MESMO texto que o juiz viu. ' +
+      'Diagnóstico: para entender por que um contestant perdeu uma etapa.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        runId: { type: 'string' },
+        stageIndex: { type: 'number' },
+        contestantId: { type: 'string' },
+        repetition: { type: 'number', description: '0-based; default 0' },
+      },
+      required: ['runId', 'stageIndex', 'contestantId'],
+    },
+    run: async (args) => {
+      const rec = await loadRun(str(args.runId) ?? '');
+      const stage = rec?.stages[numOf(args.stageIndex) ?? 0];
+      const ref = stage?.responses.find(
+        (r) => r.contestantId === str(args.contestantId) && r.execution && r.execution.repetition === (numOf(args.repetition) ?? 0),
+      )?.execution;
+      if (!ref) return { ok: false, error: 'dossier não encontrado' };
+      const content = await readArtifact(ref, 'dossier.md');
+      if (content === null) return { ok: false, error: 'dossier não encontrado' };
+      const sha256 = createHash('sha256').update(content).digest('hex');
+      return { ok: true, dossier: content, sha256, truncated: Boolean(ref.dossierTruncated) };
+    },
+  },
+  {
     name: 'read_docs',
     description:
       'Lê a documentação embarcada nesta versão do prompt-builder. ' +
@@ -299,7 +402,10 @@ export async function cmdMcp(argv: string[]): Promise<number> {
             break;
           }
           try {
-            const key = tool.name === 'read_docs' || tool.name === 'get_result' ? '' : await getKey();
+            const key =
+              tool.name === 'read_docs' || tool.name === 'get_result' || tool.name === 'get_agent_dossier'
+                ? ''
+                : await getKey();
             const out = await tool.run(params.arguments ?? {}, key);
             reply(req.id, {
               content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],

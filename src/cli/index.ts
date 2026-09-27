@@ -12,16 +12,19 @@ import { cmdModels } from './commands/models.js';
 import { cmdRun } from './commands/run.js';
 import { cmdDocs, cmdInit, cmdSkill } from './commands/knowledge.js';
 import { cmdMcp } from './commands/mcp.js';
+import { cmdAgents } from './commands/agents.js';
 import {
   cmdConfig,
   cmdDoctor,
   cmdEstimate,
   cmdKey,
   cmdLgpd,
+  cmdRegistry,
   cmdRuns,
   cmdSessions,
   cmdTechniques,
 } from './commands/misc.js';
+import { cmdLibrary } from './commands/library.js';
 
 const VERSION = pkgVersion();
 
@@ -55,11 +58,34 @@ RUNS
 
 RESULTADOS
   runs list | show <id> | winner <id> [--prompt-only]
-  sessions list | show <id> | winner <id> [--prompt-only]
+  runs reproduce <id>      config reconstruído + comando p/ re-rodar a run
+  runs export <id> [-o <arq>]
+                           artefato auto-contido (config, gabaritos, prompts, juiz)
+  sessions list | show <id> | winner <id>
+          [--prompt-only | --apply <arq> [--commit]]   handoff com backup + diff
+
+BIBLIOTECA (dataset estável de cenários+gabaritos)
+  library list | init | show | add | seed | verify | coverage | export | rm | drop
+          veja \`prompt-builder library --help\`
 
 OUTROS
   techniques · lgpd · config validate <arq> · config example · doctor
+  registry validate [--file <arq>]   guarda de drift dos prompts de produção
+  registry init [-o <arq>]           grava um registro-exemplo comentado
   mcp                      servidor MCP por stdio (mesmo binário)
+
+AGENTES (modo agente — mesmo motor, executor pi)
+  agents doctor [--deep] [--container]   pré-voo do executor (canário real com --deep; valida Docker em --container)
+  agents run --config <arq> --budget <usd|none> [--dry-run]
+                           roda a arena de agentes até o fim
+  agents show <runId>      record + execuções de agente
+  agents list              varre <data-dir>/agent-runs
+  agents logs <runId> --stage N --contestant <id>
+          [--rep N] [--what dossier|diff|trajectory|events|session|stderr|oracle]
+  agents replay <runId> --stage N --contestant <id> [--rep N]
+                           imprime o comando EXATO (env redigido) p/ reproduzir
+  agents gc [--older-than 30d] [--dry-run]
+                           apaga artefatos de runs antigas (enche disco)
 
 OPÇÕES GLOBAIS
   --budget <usd|none>      teto de gasto (OBRIGATÓRIO fora de um terminal)
@@ -119,16 +145,22 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdRuns(argv);
     case 'sessions':
       return cmdSessions(argv);
+    case 'library':
+      return cmdLibrary(argv);
     case 'techniques':
       return cmdTechniques(argv);
     case 'lgpd':
       return cmdLgpd(argv);
     case 'config':
       return cmdConfig(argv);
+    case 'registry':
+      return cmdRegistry(argv);
     case 'doctor':
       return cmdDoctor(argv);
     case 'mcp':
       return cmdMcp(argv);
+    case 'agents':
+      return cmdAgents(argv);
     default:
       throw new CliError(
         `Comando desconhecido: "${cmd}". Veja \`prompt-builder --help\`.`,

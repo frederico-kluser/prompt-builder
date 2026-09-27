@@ -1,4 +1,8 @@
 import { idbGet, idbGetAll, idbPut, idbPutMany } from './idb';
+import type { ExpectedSpec } from '../../src/engine/groundTruth.js';
+import type { PromptContracts } from '../../src/engine/contracts.js';
+import type { PromptGroup } from '../../src/engine/promptGroup.js';
+export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
 import type { LgpdData } from './lgpd';
 import lgpdData from './data/lgpd-compliance.json';
@@ -86,6 +90,8 @@ export interface Technique {
 
 export interface RunConfig {
   mode?: RunMode;
+  /** compare: repeticoes por cenario (1–3) p/ medir instabilidade (F2 §7.9). */
+  repeats?: 1 | 2 | 3;
   theme: string;
   stages: number;
   // compare:
@@ -120,6 +126,11 @@ export interface RunConfig {
   duels?: boolean;
   /** Descricao detalhada do que testar — guia o datagen. */
   scenarioBrief?: string;
+  /** Contratos never-break do prompt base (pos-rewriter rejeita o que quebrar). */
+  contracts?: PromptContracts;
+  /** Multi-prompt (F2/P0.4): grupo de fragmentos; evolui-se `promptId` por sessao. */
+  promptGroup?: PromptGroup;
+  promptId?: string;
   /** Cenarios importados de pacote JSON (seed). */
   scenarioSeed?: StageSpec[];
   /** compare-llms: variantes de config {modelo, temp, reasoning}. */
@@ -130,6 +141,8 @@ export interface RunConfig {
   holdoutRatio?: number;
   /** training: variantes recebem licoes das falhas do campeao (GEPA). */
   feedbackDriven?: boolean;
+  /** Reflexao GEPA: 'deterministic' (default) | 'llm' (meta-modelo reescreve as licoes) | 'off'. */
+  reflection?: 'off' | 'deterministic' | 'llm';
   // meta:
   datagenModelId: string;
   /** Um ou mais juizes — rodam em paralelo. */
@@ -159,6 +172,8 @@ export interface StageSpec {
   rubric?: string;
   /** Gabarito: resposta de referencia ideal (juiz pointwise + duelos). */
   reference?: string;
+  /** Rotulo esperado (ground-truth): veredito deterministico sem juiz LLM. */
+  expected?: ExpectedSpec;
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
 }
@@ -413,6 +428,11 @@ export async function createRun(config: RunConfig): Promise<string> {
         optimizerModelId,
         reasoningLevel: cfg.reasoning?.rewriter,
         timeoutMs: cfg.timeoutMs,
+        // Contratos never-break (F2/P0.3): o gate pós-rewriter vale na SPA igual.
+        contracts: cfg.contracts,
+        // Multi-prompt (F2/P0.4): grupo + fragmento-alvo.
+        promptGroup: cfg.promptGroup,
+        promptId: cfg.promptId,
       });
   }
   const { runId, record } = startRun(config as never, apiKey, opts as never);

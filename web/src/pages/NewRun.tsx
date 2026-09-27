@@ -16,6 +16,7 @@ import {
   type ArenaConfigFile,
   type ManualVariant,
   type OpenRouterModel,
+  type PromptContracts,
   type ReasoningConfig,
   type ReasoningLevel,
   type RunConfig,
@@ -337,6 +338,9 @@ export function NewRun() {
   // Cenários prontos: pacote importado (seed do datagen) OU etapas cruas (array
   // JSON), que substituem o gerador por completo.
   const [pack, setPack] = useState<ScenarioPack | null>(null);
+  // Contratos never-break (F2/P0.3): chegam pelo arena-config importado
+  // (`prompt.contracts`) — sem controle de UI, vão direto no RunConfig.
+  const [promptContracts, setPromptContracts] = useState<PromptContracts | undefined>(undefined);
   const [customStages, setCustomStages] = useState<StageSpec[] | null>(null);
   // Import: resumo da arena-config aplicada + flag do prompt que já veio pronto.
   const [configSummary, setConfigSummary] = useState<string | null>(null);
@@ -546,6 +550,11 @@ export function NewRun() {
   const estimate = useMemo(() => {
     const ctxIn = 500;
     const n = variantCount;
+    // CostPreview (F3/§7.4): quebra por papel + chamadas, com os preços reais do
+    // catálogo — o mesmo cálculo de antes, só que nomeado em vez de fundido num
+    // `perStage` só.
+    const byRole: Record<string, number> = { datagen: 0, gabarito: 0, competidores: 0, juiz: 0, finais: 0 };
+    const callsByRole: Record<string, number> = { datagen: 0, gabarito: 0, competidores: 0, juiz: 0, finais: 0 };
     const contestantIds = isSingle
       ? contestantModel[0]
         ? new Array(n).fill(contestantModel[0])
@@ -555,26 +564,61 @@ export function NewRun() {
         : competitors;
     const passes = twoPassJudge ? 2 : 1;
     let perStage = 0;
-    for (const id of contestantIds) perStage += costOf(id, ctxIn, maxTokensNum);
-    if (precisaGerar && datagen[0]) perStage += costOf(datagen[0], 300, 450);
+    for (const id of contestantIds) {
+      perStage += costOf(id, ctxIn, maxTokensNum);
+      byRole.competidores += costOf(id, ctxIn, maxTokensNum);
+      callsByRole.competidores += 1;
+    }
+    if (precisaGerar && datagen[0]) {
+      const c = costOf(datagen[0], 300, 450);
+      perStage += c;
+      byRole.datagen += c;
+      callsByRole.datagen += 1;
+    }
     if (referenceJudging) {
       // gabarito: 1 chamada do modelo de referência por cenário.
       const refId = referenceModel[0] ?? judge[0];
-      if (refId) perStage += costOf(refId, ctxIn + 600, 1500);
+      if (refId) {
+        const c = costOf(refId, ctxIn + 600, 1500);
+        perStage += c;
+        byRole.gabarito += c;
+        callsByRole.gabarito += 1;
+      }
       // pointwise: cada juiz avalia CADA competidor contra o gabarito.
-      for (const jid of judge) perStage += costOf(jid, ctxIn + maxTokensNum + 1500, 350) * n;
+      for (const jid of judge) {
+        const c = costOf(jid, ctxIn + maxTokensNum + 1500, 350) * n;
+        perStage += c;
+        byRole.juiz += c;
+        callsByRole.juiz += n;
+      }
       // finais: C(finalistas,2) pares × 2 ordens, no 1º juiz, em cada cenário.
       const k = duelsOn && finalists > 0 ? Math.min(finalists, n) : 0;
       if (k >= 2 && judge[0]) {
         const pairs = (k * (k - 1)) / 2;
-        perStage += pairs * 2 * costOf(judge[0], ctxIn + 2 * maxTokensNum + 1500, 350);
+        const c = pairs * 2 * costOf(judge[0], ctxIn + 2 * maxTokensNum + 1500, 350);
+        perStage += c;
+        byRole.finais += c;
+        callsByRole.finais += pairs * 2;
       }
     } else {
       // listwise: cada juiz lê o contexto + todas as respostas.
-      for (const jid of judge) perStage += costOf(jid, ctxIn + n * maxTokensNum, 350) * passes;
+      for (const jid of judge) {
+        const c = costOf(jid, ctxIn + n * maxTokensNum, 350) * passes;
+        perStage += c;
+        byRole.juiz += c;
+        callsByRole.juiz += passes;
+      }
     }
-    const point = perStage * plannedStages * (mode === 'training' ? iterations : 1);
-    return { low: point * 0.45, high: point };
+    const mult = plannedStages * (mode === 'training' ? iterations : 1);
+    const point = perStage * mult;
+    // por papel em USD (por etapa × etapas × iterações) e chamadas totais.
+    const byRoleUsd = Object.fromEntries(
+      Object.entries(byRole).map(([k, v]) => [k, v * mult]),
+    );
+    const calls = Object.fromEntries(
+      Object.entries(callsByRole).map(([k, v]) => [k, v * mult]),
+    );
+    return { low: point * 0.45, high: point, byRole: byRoleUsd, calls };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     mode, isSingle, competitors, compareAxis, competitorConfigs, contestantModel, variantCount, datagen, judge,
@@ -610,7 +654,9 @@ export function NewRun() {
     if (config.scenarioBrief !== undefined) setScenarioBrief(config.scenarioBrief);
     if (config.stages !== undefined) setStages(Math.max(1, Math.min(50, Math.round(config.stages))));
     // Cenários pinados: viram seed no MESMO estado do pacote de cenários.
-    if (config.scenarios) {
+    // `scenarios.from: 'library'` NÃO é resolvível na SPA (sem filesystem) — a
+    // resolução vive no CLI (`pb library`); o resumo já anuncia a biblioteca.
+    if (Array.isArray(config.scenarios)) {
       const tokensFallback = config.limits?.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
       setCustomStages(null);
       setPack({
@@ -625,10 +671,12 @@ export function NewRun() {
           maxTokens: sc.maxTokens ?? tokensFallback,
           rubric: sc.rubric ?? '',
           reference: sc.reference,
+          expected: sc.expected,
           origin: 'import' as const,
         })),
       });
     }
+    if (config.prompt?.contracts !== undefined) setPromptContracts(config.prompt.contracts);
     if (config.prompt?.text !== undefined) {
       setBasePrompt(config.prompt.text);
       setPromptImported(!!config.prompt.text.trim());
@@ -845,6 +893,8 @@ export function NewRun() {
       ...(Object.keys(reasoning).length ? { reasoning } : {}),
       // Só nos modos de 1 modelo (no compare a temperatura é por concorrente).
       ...(contestantTemp !== undefined ? { temperature: contestantTemp } : {}),
+      // Contratos never-break do prompt base (F2/P0.3).
+      ...(promptContracts ? { contracts: promptContracts } : {}),
     };
 
     let config: RunConfig;
@@ -1573,10 +1623,21 @@ export function NewRun() {
 
           <span
             className="shrink-0 text-right text-[12px] text-muted-foreground tabular"
-            title="Estimativa pelo teto de tokens; inclui gabaritos e finais."
+            title={`Estimativa pelo teto de tokens; inclui gabaritos e finais.\n${Object.entries(
+              estimate.byRole,
+            )
+              .map(([papel, usd]) => `${papel}: ${estimate.calls[papel]} chamada(s) · ~${fmtUsd(usd)}`)
+              .join('\n')}`}
           >
             <span className="block text-[10px] tracking-wide uppercase">custo estimado</span>
             {modelsLoading ? '—' : `~${fmtUsd(estimate.low)} – ${fmtUsd(estimate.high)}`}
+            {/* CostPreview (F3/§7.4): quebra por papel, uma linha compacta. */}
+            <span className="block text-[10px] text-muted-foreground/80">
+              {Object.entries(estimate.byRole)
+                .filter(([, usd]) => usd > 0)
+                .map(([papel, usd]) => `${papel} ${fmtUsd(usd)}`)
+                .join(' · ')}
+            </span>
           </span>
 
           <MultiStateButton

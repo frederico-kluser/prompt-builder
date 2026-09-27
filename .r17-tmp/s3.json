@@ -1,0 +1,43 @@
+{
+  "query": "eslint-plugin-boundaries typescript layer restrictions allowed imports",
+  "answer": "eslint-plugin-boundaries enforces architectural layer restrictions in TypeScript projects, allowing imports only between defined layers, preventing cross-layer dependencies. It uses TypeScript's resolver for accurate import path matching. The plugin's rules can specify allowed imports between layers.",
+  "results": [
+    {
+      "title": "Ensuring dependency rules in a NodeJS application with typescript using eslint-plugin-boundaries",
+      "url": "https://medium.com/@taynan_duarte/ensuring-dependency-rules-in-a-nodejs-application-with-typescript-using-eslint-plugin-boundaries-68b70ce32437",
+      "content": "YEEAHH, It works!\n\nNotice, there’s an error in UserController import, but not in User import. It’s right. Our dependency rules allows services to import from models but not from controllers layer. It’s exactly what we wanted.\n\n## we are done\n\nNow our project has dependency rules in order to prevent not allowed imports. Eslint-plugin-boundaries makes easy to find any disa",
+      "score": 0.92121595
+    },
+    {
+      "title": "eslint-plugin-boundaries - npm",
+      "url": "https://npm.im/package/eslint-plugin-boundaries/v/3.3.0?activeTab=dependencies",
+      "content": "Read the docs of the `boundaries/element-types` rule for further info.\n\n### Allowed external modules\n\nExternal dependencies used by each type of element in your project can be checked using this rule. For example, you can define that \"helpers\" can't import `react`, or \"components\" can't import `react-router-dom`, or modules can't import `{ Link } from react-router-dom`.\n\nRead the docs of the `boundaries/external` rule for further info.\n\n### Private elements [...] ## Rules\n\n boundaries/element-types: Check allowed dependencies between element types\n boundaries/external: Check allowed external dependencies by element type\n boundaries/entry-point: Check entry point used for each element type\n boundaries/no-private: Prevent importing private elements of another element\n boundaries/no-unknown: Prevent importing unknown elements from the known ones\n [boundaries/no-ignored]( [...] Define types in your project as \"components\", \"views\", \"layouts\", \"pages\", \"helpers\". Then ensure that \"components\" can only import \"helpers\", that \"views\" can only import \"components\" or \"helpers\", that \"layouts\" can only import \"views\", \"components\" or \"helpers\", and that \"pages\" can import any other element type.",
+      "score": 0.9079672
+    },
+    {
+      "title": "boundaries — Architectural Boundary Enforcement Plugin | Open Awesome",
+      "url": "https://open-awesome.com/projects/eslint-plugin-boundaries",
+      "content": "ESLint Plugin Boundaries is an ESLint plugin that enforces architectural boundaries in JavaScript and TypeScript projects. It helps developers define architectural layers and dependency rules, then automatically checks imports to ensure they comply with the defined architecture, preventing violations that lead to messy codebases.\n\nTarget Audience",
+      "score": 0.9024378
+    },
+    {
+      "title": "Struggling to match relative imports · javierbrea/eslint-plugin-boundaries · Discussion #416 · GitHub",
+      "url": "https://github.com/javierbrea/eslint-plugin-boundaries/discussions/416",
+      "content": "const{} = require(\"typescript-eslint\"); const configuration = defineConfig([{plugins{}, languageOptions{parser parser, parserOptions{projectService true,// project: [\"src/tsconfig.json\"], tsconfigRootDir __dirname,},}, settings{\"boundaries/elements\"[{type \"application\", pattern \"application\"},{type \"domain\", pattern \"domain\"},{type \"infrastructure\", pattern \"infrastructure\"},],}, rules{\"boundaries/element-types\"[\"error\",{default \"disallow\", rules[{from \"application\", allow[\"domain\", [...] First error,}, settings{\"import/resolver\"{// Second Error typescript{alwaysTryTypes true,},},\"boundaries/elements\"[{type \"application\", pattern\"application/\"},{type \"domain\", pattern\"domain/\"},{type \"infrastructure\", pattern\"infrastructure/\"},],} satisfies Settings, rules{\"boundaries/element-types\"[\"error\",{default \"disallow\", rules[{from \"application\", allow[\"domain\", \"infrastructure\"]},{from \"domain\", disallow[\"\"]},{from \"infrastructure\", allow[\"domain\"]},],},],} satisfies Rules,} satisfies [...] `source` string: the `pattern` fields in the `boundaries/elements` settings are actually matched against the resolved file paths, not against the import source strings. This is intentional—it allows the plugin to work correctly with path aliases, relative imports, and any other resolution mechanism that TypeScript supports. That's precisely why the plugin depends on TypeScript being properly configured: it needs the resolver to turn `\"../../../infrastructure/infra-example\"` into an actual file",
+      "score": 0.9019207
+    },
+    {
+      "title": "no-restricted-imports | typescript-eslint",
+      "url": "https://typescript-eslint.io/rules/no-restricted-imports",
+      "content": "`allowTypeImports`\n\nWhether to allow type-only imports for a path.\nDefault: `false`.\n\n`false`\n\nYou can specify this option for a specific path or pattern as follows:\n\n`{\n\n\"rules\": {\n\n\"@typescript-eslint/no-restricted-imports\": [\n\n\"error\",\n\n{\n\n\"paths\": [\n\n{\n\n\"name\": \"import-foo\",\n\n\"message\": \"Please use import-bar instead.\",\n\n\"allowTypeImports\": true,\n\n},\n\n{\n\n\"name\": \"import-baz\",\n\n\"message\": \"Please use import-quux instead.\",\n\n\"allowTypeImports\": true,\n\n},\n\n],\n\n},\n\n],\n\n},\n\n}`",
+      "score": 0.9007046
+    }
+  ],
+  "response_time": 0.82,
+  "meta": {
+    "attempts": 1,
+    "keyless_used": false,
+    "truncated": false,
+    "keys_total": 2
+  }
+}
