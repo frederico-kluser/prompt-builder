@@ -2,7 +2,7 @@
 import type { ExpectedSpec } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
-import type { CostEntry, CostRole, PricingTier } from '../../../src/types.js';
+import type { CostEntry, CostRole, PricingTier, TokenPrice } from '../../../src/types.js';
 
 // Contabilidade de custo: FONTE ÚNICA em src/types.ts (IMPL-021). Desde que os
 // módulos de papel e o gateway viraram shims, o web usa o MESMO ledger
@@ -16,12 +16,14 @@ export type {
   PricingTier,
   Reservation,
   RunCtx,
+  TokenPrice,
 } from '../../../src/types.js';
 export { COST_ROLES } from '../../../src/types.js';
 
 export interface OpenRouterModelPricing {
-  prompt: number; // USD per token
-  completion: number; // USD per token
+  /** USD por token. `null` = desconhecido ("-1"/roteador, ausente, inválido) — ver src/types.ts. */
+  prompt: TokenPrice;
+  completion: TokenPrice;
   /** Faixas de preço por tamanho de prompt (`pricing.overrides` do catálogo). */
   overrides?: PricingTier[];
 }
@@ -35,7 +37,8 @@ export interface OpenRouterModel {
    * Parametros de amostragem que o modelo aceita (campo `supported_parameters`
    * do OpenRouter). Fonte de verdade para enviar `temperature`/`seed` so a quem
    * suporta — reasoning models (gpt-5*, serie o*) NAO listam `temperature` e
-   * respondem vazio (HTTP 400) se ela for enviada. Ausente = desconhecido.
+   * respondem vazio (HTTP 400) se ela for enviada. Ausente = desconhecido;
+   * `[]` = declara que não aceita nenhum (também o fail-closed de campo malformado).
    */
   supportedParameters?: string[];
   /** Metadados de raciocinio declarados pelo modelo (campo `reasoning` de /models). */

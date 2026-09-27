@@ -26,6 +26,9 @@ import {
   type Technique,
   effortOptions,
   modelCaps,
+  priceTokens,
+  withinMaxPricePerMTok,
+  UNKNOWN_PRICE_LABEL,
 } from '../api';
 import { AREA_LIVRE, creatorPrefix, familiaFor, filterModels, type LgpdData } from '../lgpd';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
@@ -440,9 +443,11 @@ export function NewRun() {
     const hasIn = Number.isFinite(maxIn);
     const hasOut = Number.isFinite(maxOut);
     if (!hasIn && !hasOut) return filteredModels;
+    // Preço desconhecido (roteador, "-1") NÃO passa num teto: não dá para
+    // garantir que fique abaixo dele (antes o -1 passava em qualquer filtro).
     return filteredModels.filter((m) => {
-      if (hasIn && m.pricing.prompt * 1_000_000 > maxIn) return false;
-      if (hasOut && m.pricing.completion * 1_000_000 > maxOut) return false;
+      if (hasIn && !withinMaxPricePerMTok(m.pricing.prompt, maxIn)) return false;
+      if (hasOut && !withinMaxPricePerMTok(m.pricing.completion, maxOut)) return false;
       return true;
     });
   }, [filteredModels, maxInputPrice, maxOutputPrice]);
@@ -486,10 +491,20 @@ export function NewRun() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [participantModels]);
 
-  function costOf(modelId: string, tin: number, tout: number): number {
+  /**
+   * Custo de uma chamada pelo catálogo. Preço desconhecido (roteador, "-1")
+   * fica FORA da soma e o modelo vai para `unknown` — a estimativa é declarada
+   * incompleta ("+ variável"), nunca negativa nem "grátis" (IMPL-018).
+   */
+  function costOf(modelId: string, tin: number, tout: number, unknown?: Set<string>): number {
     const m = priceById.get(modelId);
     if (!m) return 0;
-    return tin * m.pricing.prompt + tout * m.pricing.completion;
+    const v = priceTokens(m.pricing, tin, tout);
+    if (v === null) {
+      unknown?.add(modelId);
+      return 0;
+    }
+    return v;
   }
 
   // nº de variantes (modos de 1 LLM) ou de competidores (compare).
@@ -563,14 +578,15 @@ export function NewRun() {
         ? competitorConfigs.filter((r) => r.modelId).map((r) => r.modelId)
         : competitors;
     const passes = twoPassJudge ? 2 : 1;
+    const unknown = new Set<string>();
     let perStage = 0;
     for (const id of contestantIds) {
-      perStage += costOf(id, ctxIn, maxTokensNum);
-      byRole.competidores += costOf(id, ctxIn, maxTokensNum);
+      perStage += costOf(id, ctxIn, maxTokensNum, unknown);
+      byRole.competidores += costOf(id, ctxIn, maxTokensNum, unknown);
       callsByRole.competidores += 1;
     }
     if (precisaGerar && datagen[0]) {
-      const c = costOf(datagen[0], 300, 450);
+      const c = costOf(datagen[0], 300, 450, unknown);
       perStage += c;
       byRole.datagen += c;
       callsByRole.datagen += 1;
@@ -579,14 +595,14 @@ export function NewRun() {
       // gabarito: 1 chamada do modelo de referência por cenário.
       const refId = referenceModel[0] ?? judge[0];
       if (refId) {
-        const c = costOf(refId, ctxIn + 600, 1500);
+        const c = costOf(refId, ctxIn + 600, 1500, unknown);
         perStage += c;
         byRole.gabarito += c;
         callsByRole.gabarito += 1;
       }
       // pointwise: cada juiz avalia CADA competidor contra o gabarito.
       for (const jid of judge) {
-        const c = costOf(jid, ctxIn + maxTokensNum + 1500, 350) * n;
+        const c = costOf(jid, ctxIn + maxTokensNum + 1500, 350, unknown) * n;
         perStage += c;
         byRole.juiz += c;
         callsByRole.juiz += n;
@@ -595,7 +611,7 @@ export function NewRun() {
       const k = duelsOn && finalists > 0 ? Math.min(finalists, n) : 0;
       if (k >= 2 && judge[0]) {
         const pairs = (k * (k - 1)) / 2;
-        const c = pairs * 2 * costOf(judge[0], ctxIn + 2 * maxTokensNum + 1500, 350);
+        const c = pairs * 2 * costOf(judge[0], ctxIn + 2 * maxTokensNum + 1500, 350, unknown);
         perStage += c;
         byRole.finais += c;
         callsByRole.finais += pairs * 2;
@@ -603,7 +619,7 @@ export function NewRun() {
     } else {
       // listwise: cada juiz lê o contexto + todas as respostas.
       for (const jid of judge) {
-        const c = costOf(jid, ctxIn + n * maxTokensNum, 350) * passes;
+        const c = costOf(jid, ctxIn + n * maxTokensNum, 350, unknown) * passes;
         perStage += c;
         byRole.juiz += c;
         callsByRole.juiz += passes;
@@ -618,7 +634,7 @@ export function NewRun() {
     const calls = Object.fromEntries(
       Object.entries(callsByRole).map(([k, v]) => [k, v * mult]),
     );
-    return { low: point * 0.45, high: point, byRole: byRoleUsd, calls };
+    return { low: point * 0.45, high: point, byRole: byRoleUsd, calls, unknownPriceIds: [...unknown] };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     mode, isSingle, competitors, compareAxis, competitorConfigs, contestantModel, variantCount, datagen, judge,
@@ -1627,10 +1643,15 @@ export function NewRun() {
               estimate.byRole,
             )
               .map(([papel, usd]) => `${papel}: ${estimate.calls[papel]} chamada(s) · ~${fmtUsd(usd)}`)
-              .join('\n')}`}
+              .join('\n')}${
+              estimate.unknownPriceIds.length
+                ? `\nPreço ${UNKNOWN_PRICE_LABEL} (fora da soma — o custo real será maior): ${estimate.unknownPriceIds.join(', ')}`
+                : ''
+            }`}
           >
             <span className="block text-[10px] tracking-wide uppercase">custo estimado</span>
             {modelsLoading ? '—' : `~${fmtUsd(estimate.low)} – ${fmtUsd(estimate.high)}`}
+            {!modelsLoading && estimate.unknownPriceIds.length > 0 && ` + ${UNKNOWN_PRICE_LABEL}`}
             {/* CostPreview (F3/§7.4): quebra por papel, uma linha compacta. */}
             <span className="block text-[10px] text-muted-foreground/80">
               {Object.entries(estimate.byRole)

@@ -1,14 +1,18 @@
 import { applyReasoning } from './reasoning.js';
+import { classifyPrice, priceTokens, type PriceFieldKind } from './engine/pricing.js';
 import type {
   CallCost,
   CostRole,
   CostSink,
   ModelReasoningMeta,
   OpenRouterModel,
-  OpenRouterModelPricing,
   PricingTier,
   ReasoningLevel,
 } from './types.js';
+
+// Preco por faixa: a implementacao mora no modulo puro `engine/pricing.ts`
+// (fonte unica com o estimador e a SPA); re-exportado aqui por compatibilidade.
+export { tierFor } from './engine/pricing.js';
 
 // ===========================================================================
 // GATEWAY UNICO de LLM — o MESMO codigo roda no Node (CLI, servidor, API de
@@ -196,7 +200,10 @@ function deterministicSampling(
   desiredTemperature: number,
 ): { temperature?: number; seed?: number } {
   const supported = model?.supportedParameters;
-  if (supported && supported.length > 0) {
+  // Lista PRESENTE manda, inclusive vazia: `[]` = o catalogo declara que nao
+  // aceita nenhum parametro (roteadores) ou o campo veio malformado e o parse
+  // fechou em fail-closed (IMPL-018) — em ambos, nada opcional vai no fio.
+  if (supported) {
     const out: { temperature?: number; seed?: number } = {};
     if (supported.includes('temperature')) out.temperature = desiredTemperature;
     if (supported.includes('seed')) out.seed = DETERMINISTIC_SEED;
@@ -227,9 +234,10 @@ export function modelTuningCaps(m?: {
   mandatory: boolean;
 } {
   const supported = m?.supportedParameters;
-  if (!supported || supported.length === 0) {
+  if (!supported) {
     return { temperature: true, reasoning: false, effort: false, mandatory: false };
   }
+  // `[]` (declarado vazio ou fail-closed) cai aqui: nenhuma capacidade.
   const effort = supported.includes('reasoning_effort');
   return {
     temperature: supported.includes('temperature'),
@@ -259,65 +267,62 @@ function describeOpenRouterError(status: number, body: string): string {
   return `OpenRouter falhou (HTTP ${status})${snippet ? `: ${snippet}` : ''}`;
 }
 
-function parsePrice(value: unknown): number {
-  if (typeof value === 'number') return value;
-  if (typeof value === 'string') {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : 0;
-  }
-  return 0;
-}
-
 /**
  * Faixas de preco por tamanho de prompt (`pricing.overrides`). O campo existe
  * no catalogo mas nao esta documentado; sem ele, o custo de runs de contexto
- * longo sai 3-7x menor que o real.
+ * longo sai 3-7x menor que o real. Preco invalido na faixa vira desconhecido
+ * (`null`), NUNCA e descartado: descartar faria a faixa cara cair no preco base
+ * (subestimando); desconhecido obriga o consumidor a tratar.
  */
-function parsePricingTiers(value: unknown): PricingTier[] | undefined {
-  if (!Array.isArray(value) || value.length === 0) return undefined;
+function parsePricingTiers(value: unknown, issue: IssueFn, modelId: string): PricingTier[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    issue(modelId, 'pricing.overrides', 'warn', 'nao e uma lista — faixas ignoradas');
+    return undefined;
+  }
+  if (value.length === 0) return undefined;
   const tiers: PricingTier[] = [];
   for (const item of value) {
     if (!item || typeof item !== 'object') continue;
     const t = item as Record<string, unknown>;
     const min = typeof t.min_prompt_tokens === 'number' ? t.min_prompt_tokens : Number(t.min_prompt_tokens);
-    if (!Number.isFinite(min)) continue;
+    if (!Number.isFinite(min)) {
+      issue(modelId, 'pricing.overrides', 'warn', 'faixa sem min_prompt_tokens numerico — ignorada');
+      continue;
+    }
     tiers.push({
       minPromptTokens: min,
-      prompt: parsePrice(t.prompt),
-      completion: parsePrice(t.completion),
+      prompt: priceField(t.prompt, issue, modelId, 'pricing.overrides.prompt'),
+      completion: priceField(t.completion, issue, modelId, 'pricing.overrides.completion'),
     });
   }
   return tiers.length > 0 ? tiers.sort((a, b) => a.minPromptTokens - b.minPromptTokens) : undefined;
 }
 
-/** Preco efetivo do modelo para um prompt deste tamanho (respeita as faixas). */
-export function tierFor(
-  pricing: OpenRouterModelPricing,
-  promptTokens: number,
-): { prompt: number; completion: number } {
-  let melhor = { prompt: pricing.prompt, completion: pricing.completion };
-  let melhorMin = -1;
-  for (const t of pricing.overrides ?? []) {
-    if (promptTokens >= t.minPromptTokens && t.minPromptTokens > melhorMin) {
-      melhor = { prompt: t.prompt, completion: t.completion };
-      melhorMin = t.minPromptTokens;
-    }
-  }
-  return melhor;
+/** Le um campo de preco; "-1" (roteador) vira desconhecido SEM alerta, lixo vira desconhecido COM alerta. */
+function priceField(value: unknown, issue: IssueFn, modelId: string, field: string): number | null {
+  const { price, kind } = classifyPrice(value);
+  const motivo: Partial<Record<PriceFieldKind, string>> = {
+    missing: 'ausente — tratado como preco desconhecido',
+    invalid: `valor invalido (${JSON.stringify(value)}) — tratado como preco desconhecido`,
+  };
+  if (motivo[kind]) issue(modelId, field, 'warn', motivo[kind]!);
+  return price;
 }
 
 /**
  * Custo derivado do CATALOGO. E o plano B de `priceUsage` (a fonte primaria e
  * `usage.cost`) e a base do estimador de pre-voo. Respeita `pricing.overrides`.
+ * `null` = impossivel precificar: modelo fora do catalogo OU preco desconhecido
+ * (ex.: roteador com "-1"). Nunca negativo, nunca "0 por omissao".
  */
 export function computeCost(
   tokensIn: number,
   tokensOut: number,
   model: OpenRouterModel | undefined,
-): number {
-  if (!model) return 0;
-  const preco = tierFor(model.pricing, tokensIn);
-  return tokensIn * preco.prompt + tokensOut * preco.completion;
+): number | null {
+  if (!model) return null;
+  return priceTokens(model.pricing, tokensIn, tokensOut);
 }
 
 // ---------------------------------------------------------------------------
@@ -368,8 +373,11 @@ export function priceUsage(u: UsageInfo, model: OpenRouterModel | undefined): Ca
   if (typeof u.cost === 'number' && Number.isFinite(u.cost)) {
     return { usd: u.cost, source: 'usage', upstreamUsd: u.upstreamCost };
   }
-  if (model) {
-    return { usd: computeCost(u.tokensIn, u.tokensOut, model), source: 'catalog' };
+  // Catalogo so vale com preco CONHECIDO: um roteador ("-1") sem usage.cost e
+  // 'unknown', nunca um custo derivado (antes saia negativo). IMPL-018.
+  const doCatalogo = computeCost(u.tokensIn, u.tokensOut, model);
+  if (doCatalogo !== null) {
+    return { usd: doCatalogo, source: 'catalog' };
   }
   return { usd: 0, source: 'unknown' };
 }
@@ -407,52 +415,205 @@ function backoffMs(attempt: number): number {
   return base + Math.floor(Math.random() * 250); // jitter
 }
 
+// ---------------------------------------------------------------------------
+// Validacao do catalogo (IMPL-018 / R-07b:REC-7). O /models nao tem changelog
+// nem politica de versao; cada campo e classificado:
+//   - FAIL-OPEN (alerta `warn`): campos NAO contratuais — preco, faixas,
+//     contexto, default_effort, flags informativas. Valor ruim vira
+//     desconhecido/ausente e o modelo segue utilizavel.
+//   - FAIL-CLOSED (alerta `error`): o que MUDA O FIO — `supported_parameters`,
+//     `reasoning.supported_efforts` e `reasoning.mandatory`. Valor ruim NUNCA
+//     vira palpite: `supported_parameters` malformado vira `[]` (nada opcional
+//     vai no corpo), allowlist de esforco malformada tira a capacidade de
+//     raciocinio da UI/CLI e `mandatory` malformado vira `true` ('off' nao e
+//     enviado — o provedor rejeitaria 'none').
+//   - item sem `id` e descartado (nao da para referencia-lo).
+// ---------------------------------------------------------------------------
+
+export type CatalogIssueSeverity = 'warn' | 'error';
+
+export interface CatalogIssue {
+  /** Id do modelo (ou `#<indice>` quando o proprio id e invalido). */
+  modelId: string;
+  /** Campo do /models, em notacao de ponto (ex.: `pricing.prompt`). */
+  field: string;
+  /** `warn` = fail-open (seguiu com desconhecido); `error` = fail-closed. */
+  severity: CatalogIssueSeverity;
+  message: string;
+}
+
+type IssueFn = (modelId: string, field: string, severity: CatalogIssueSeverity, message: string) => void;
+
+const REASONING_WIRE_PARAMS = new Set(['reasoning', 'reasoning_effort', 'include_reasoning']);
+
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === 'string');
+}
+
 /**
  * Le o objeto `reasoning` de um item de /models. E ele que diz QUAIS degraus de
  * esforco o modelo aceita (`supported_efforts`, ordem decrescente; ausente = sem
  * restricao) e se raciocinio pode ser desligado (`mandatory`). Sem ele, so daria
- * para chutar o esforco e levar 400.
+ * para chutar o esforco e levar 400. `stripReasoning` = fail-closed: a
+ * allowlist veio malformada, entao a capacidade de raciocinio sai do modelo.
  */
-function parseReasoningMeta(raw: unknown): ModelReasoningMeta | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
+function parseReasoningMeta(
+  raw: unknown,
+  issue: IssueFn,
+  modelId: string,
+): { meta: ModelReasoningMeta | undefined; stripReasoning: boolean } {
+  if (raw === undefined || raw === null) return { meta: undefined, stripReasoning: false };
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    issue(modelId, 'reasoning', 'error', 'nao e um objeto — capacidade de raciocinio desligada (fail-closed)');
+    return { meta: undefined, stripReasoning: true };
+  }
   const r = raw as Record<string, unknown>;
-  const efforts = Array.isArray(r.supported_efforts)
-    ? (r.supported_efforts as unknown[]).map((e) => String(e))
-    : undefined;
-  return {
-    mandatory: typeof r.mandatory === 'boolean' ? r.mandatory : undefined,
-    defaultEnabled: typeof r.default_enabled === 'boolean' ? r.default_enabled : undefined,
-    supportedEfforts: efforts,
-    defaultEffort: typeof r.default_effort === 'string' ? r.default_effort : undefined,
-    supportsMaxTokens: typeof r.supports_max_tokens === 'boolean' ? r.supports_max_tokens : undefined,
+  let stripReasoning = false;
+
+  let supportedEfforts: string[] | undefined;
+  if (r.supported_efforts !== undefined && r.supported_efforts !== null) {
+    if (isStringArray(r.supported_efforts)) {
+      supportedEfforts = [...r.supported_efforts];
+    } else {
+      issue(
+        modelId,
+        'reasoning.supported_efforts',
+        'error',
+        'allowlist de esforco malformada — capacidade de raciocinio desligada (fail-closed)',
+      );
+      stripReasoning = true;
+    }
+  }
+
+  let mandatory: boolean | undefined;
+  if (r.mandatory !== undefined && r.mandatory !== null) {
+    if (typeof r.mandatory === 'boolean') {
+      mandatory = r.mandatory;
+    } else {
+      issue(modelId, 'reasoning.mandatory', 'error', 'nao booleano — tratado como obrigatorio (fail-closed)');
+      mandatory = true;
+    }
+  }
+
+  const optBool = (campo: string, v: unknown): boolean | undefined => {
+    if (v === undefined || v === null) return undefined;
+    if (typeof v === 'boolean') return v;
+    issue(modelId, `reasoning.${campo}`, 'warn', 'nao booleano — ignorado');
+    return undefined;
   };
+  let defaultEffort: string | undefined;
+  if (r.default_effort !== undefined && r.default_effort !== null) {
+    if (typeof r.default_effort === 'string') defaultEffort = r.default_effort;
+    else issue(modelId, 'reasoning.default_effort', 'warn', 'nao e texto — ignorado');
+  }
+
+  // Allowlist malformada: a capacidade INTEIRA sai (meta + parametros de
+  // raciocinio em `supported_parameters`) — com isso `catalogDeniesReasoning`
+  // impede que qualquer `reasoning` va no fio. Mandar um degrau sem encaixe e
+  // exatamente o HTTP 400 que a allowlist existe para evitar.
+  if (stripReasoning) return { meta: undefined, stripReasoning };
+  return {
+    meta: {
+      mandatory,
+      defaultEnabled: optBool('default_enabled', r.default_enabled),
+      supportedEfforts,
+      defaultEffort,
+      supportsMaxTokens: optBool('supports_max_tokens', r.supports_max_tokens),
+    },
+    stripReasoning,
+  };
+}
+
+/**
+ * true = o catalogo DECLARA que o modelo nao aceita raciocinio: lista de
+ * parametros presente (inclusive `[]`) sem nenhum parametro de raciocinio E sem
+ * objeto `reasoning`. E tambem o estado do fail-closed de allowlist malformada.
+ * Fora do catalogo / sem lista = desconhecido => false (comportamento de antes).
+ */
+export function catalogDeniesReasoning(model: OpenRouterModel | undefined): boolean {
+  if (!model || !model.supportedParameters || model.reasoning) return false;
+  return !model.supportedParameters.some((p) => REASONING_WIRE_PARAMS.has(p));
+}
+
+/** `supported_parameters`: contrato do fio. Malformado => `[]` (fail-closed). */
+function parseSupportedParameters(raw: unknown, issue: IssueFn, modelId: string): string[] | undefined {
+  if (raw === undefined || raw === null) return undefined; // ausente = desconhecido (heuristica)
+  if (isStringArray(raw)) return [...raw];
+  issue(
+    modelId,
+    'supported_parameters',
+    'error',
+    'malformado — nenhum parametro opcional sera enviado a este modelo (fail-closed)',
+  );
+  return [];
+}
+
+/**
+ * Converte o payload cru de /models no tipo de dominio E devolve o que estava
+ * errado nele (puro; exportado p/ testes e para o snapshot de contrato).
+ */
+export function validateModelsPayload(json: unknown): {
+  models: OpenRouterModel[];
+  issues: CatalogIssue[];
+} {
+  const issues: CatalogIssue[] = [];
+  const issue: IssueFn = (modelId, field, severity, message) =>
+    issues.push({ modelId, field, severity, message });
+  const raw = Array.isArray((json as { data?: unknown[] } | null)?.data)
+    ? ((json as { data: unknown[] }).data)
+    : [];
+  const models: OpenRouterModel[] = [];
+  raw.forEach((m, i) => {
+    if (!m || typeof m !== 'object') {
+      issue(`#${i}`, '', 'error', 'item nao e um objeto — descartado');
+      return;
+    }
+    const item = m as Record<string, unknown>;
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (!id) {
+      issue(`#${i}`, 'id', 'error', 'sem id — modelo descartado');
+      return;
+    }
+
+    let pricing = item.pricing as Record<string, unknown> | undefined;
+    if (!pricing || typeof pricing !== 'object' || Array.isArray(pricing)) {
+      issue(id, 'pricing', 'warn', 'ausente ou malformado — preco desconhecido');
+      pricing = {};
+    }
+
+    let contextLength: number | undefined;
+    if (typeof item.context_length === 'number' && Number.isFinite(item.context_length) && item.context_length > 0) {
+      contextLength = item.context_length;
+    } else if (item.context_length !== undefined && item.context_length !== null) {
+      issue(id, 'context_length', 'warn', 'nao numerico — contexto desconhecido');
+    }
+
+    const { meta, stripReasoning } = parseReasoningMeta(item.reasoning, issue, id);
+    let supportedParameters = parseSupportedParameters(item.supported_parameters, issue, id);
+    if (stripReasoning && supportedParameters) {
+      supportedParameters = supportedParameters.filter((p) => !REASONING_WIRE_PARAMS.has(p));
+    }
+
+    models.push({
+      id,
+      name: typeof item.name === 'string' && item.name.trim() ? item.name : id,
+      contextLength,
+      pricing: {
+        prompt: priceField(pricing.prompt, issue, id, 'pricing.prompt'),
+        completion: priceField(pricing.completion, issue, id, 'pricing.completion'),
+        overrides: parsePricingTiers(pricing.overrides, issue, id),
+      },
+      supportedParameters,
+      reasoning: meta,
+      raw: item,
+    });
+  });
+  return { models, issues };
 }
 
 /** Converte o payload cru de /models no tipo de dominio (puro; exportado p/ testes). */
 export function parseModelsPayload(json: unknown): OpenRouterModel[] {
-  const raw = Array.isArray((json as { data?: unknown[] } | null)?.data)
-    ? ((json as { data: unknown[] }).data)
-    : [];
-  return raw.map((m) => {
-    const item = m as Record<string, unknown>;
-    const pricing = (item.pricing ?? {}) as Record<string, unknown>;
-    return {
-      id: String(item.id ?? ''),
-      name: String(item.name ?? item.id ?? ''),
-      contextLength:
-        typeof item.context_length === 'number' ? (item.context_length as number) : undefined,
-      pricing: {
-        prompt: parsePrice(pricing.prompt),
-        completion: parsePrice(pricing.completion),
-        overrides: parsePricingTiers(pricing.overrides),
-      },
-      supportedParameters: Array.isArray(item.supported_parameters)
-        ? (item.supported_parameters as unknown[]).map((p) => String(p))
-        : undefined,
-      reasoning: parseReasoningMeta(item.reasoning),
-      raw: item,
-    };
-  });
+  return validateModelsPayload(json).models;
 }
 
 export interface ChatMessage {
@@ -539,6 +700,8 @@ export class OpenRouterGateway {
   private cfg: GatewayConfig;
   readonly limiter: AimdLimiter;
   private readonly modelsCache = new Map<string, { fetchedAt: number; data: OpenRouterModel[] }>();
+  /** Alertas da ultima validacao de /models, por key (ver `validateModelsPayload`). */
+  private readonly modelsIssues = new Map<string, CatalogIssue[]>();
 
   constructor(config: Partial<GatewayConfig> = {}) {
     this.cfg = mergeConfig(DEFAULT_CONFIG, config);
@@ -621,9 +784,19 @@ export class OpenRouterGateway {
       throw new Error(`OpenRouter /models falhou: ${res.status} ${res.statusText} ${text.slice(0, 200)}`);
     }
 
-    const data = parseModelsPayload(await res.json());
+    const { models: data, issues } = validateModelsPayload(await res.json());
     this.modelsCache.set(ck, { fetchedAt: Date.now(), data });
+    this.modelsIssues.set(ck, issues);
     return data;
+  }
+
+  /**
+   * Alertas da ultima busca de /models (fail-open `warn` e fail-closed
+   * `error`). Vazio = catalogo limpo ou ainda nao buscado nesta instancia.
+   * O gateway nao imprime nada (stdout do CLI e payload); quem mostra decide.
+   */
+  catalogIssues(apiKey: string): CatalogIssue[] {
+    return [...(this.modelsIssues.get(cacheKey(apiKey)) ?? [])];
   }
 
   async getModel(apiKey: string, id: string): Promise<OpenRouterModel | undefined> {
@@ -726,7 +899,11 @@ export class OpenRouterGateway {
     // O esforco pedido e ENCAIXADO no que este modelo declara aceitar (ver
     // fitEffort/applyReasoning): allowlist propria por modelo e raciocinio
     // obrigatorio em alguns (onde 'off' nao pode ser enviado).
-    if (params.reasoningLevel) applyReasoning(body, params.reasoningLevel, model?.reasoning);
+    // Fail-closed (IMPL-018): o catalogo declara que o modelo nao aceita
+    // raciocinio (ou a allowlist veio malformada) => nada de `reasoning` no fio.
+    if (params.reasoningLevel && !catalogDeniesReasoning(model)) {
+      applyReasoning(body, params.reasoningLevel, model?.reasoning);
+    }
     applyMaxPrice(body, params.maxPricePerMTok);
     return body;
   }

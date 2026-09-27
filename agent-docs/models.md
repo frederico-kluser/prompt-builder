@@ -22,7 +22,7 @@ prompt-builder models list --format ids         # só os ids, um por linha
 `--max-prompt-price N` / `--max-completion-price N` (**USD por milhão de
 tokens**) · `--free` · `--lgpd-area <área> [--include-ressalvas]` · `--limit N`.
 
-## O formato de export (`prompt-builder-models@1`)
+## O formato de export (`prompt-builder-models@2`)
 
 ```json
 {
@@ -51,6 +51,19 @@ tokens**) · `--free` · `--lgpd-area <área> [--include-ressalvas]` · `--limit
 **Duas unidades diferentes convivem, e confundi-las erra por 1.000.000×:**
 `pricing.*` é **USD por token** (o formato do catálogo) e `pricePerMTok.*` é
 **USD por milhão** (o que humanos usam e o que os filtros de preço esperam).
+
+**Preço desconhecido = a string `"unknown"`** (novo no `@2`; no `@1` saía `-1`).
+Roteadores como `openrouter/auto` vêm do catálogo com `"-1"` — preço variável,
+depende do modelo para onde a chamada for roteada — e campos de preço
+ausentes/inválidos também viram `"unknown"`. Na tabela aparece `variável`.
+Trate como "não sei", **nunca** como número: `--max-*-price` e `--free` excluem
+esses modelos, e a estimativa de custo os deixa fora da soma com aviso (ver
+`budget`).
+
+O catálogo é validado ao carregar: campo de preço/contexto ruim segue como
+desconhecido (fail-open, com alerta); `supported_parameters` ou
+`reasoning.supported_efforts` malformados desligam o que eles controlariam
+(fail-closed: nada opcional vai no corpo daquele modelo).
 
 ## `thinkLevels` — o campo que evita HTTP 400
 

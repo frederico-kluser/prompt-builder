@@ -15,10 +15,35 @@ import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { getGateway, listModels, primeModelsCache } from './openrouter.js';
+import { isKnownPrice } from './engine/pricing.js';
 import { getDataDir } from './storage.js';
-import type { OpenRouterModel } from './types.js';
+import type { OpenRouterModel, OpenRouterModelPricing } from './types.js';
 
-const CACHE_VERSION = 1;
+/**
+ * v2 (IMPL-018): preco desconhecido e `null`. Um arquivo v1 ainda e LIDO (o
+ * modo offline depende dele), mas passa por `sanitizePricing`: no v1 o "-1"
+ * dos roteadores foi gravado como -1 numerico.
+ */
+const CACHE_VERSION = 2;
+const READABLE_VERSIONS = new Set([1, CACHE_VERSION]);
+
+/** Preco negativo/nao finito vindo do disco vira desconhecido (nunca -1). */
+function sanitizePricing(p: OpenRouterModelPricing | undefined): OpenRouterModelPricing {
+  const fix = (v: unknown): number | null => (isKnownPrice(v as number | null) ? (v as number) : null);
+  return {
+    prompt: fix(p?.prompt),
+    completion: fix(p?.completion),
+    ...(p?.overrides
+      ? {
+          overrides: p.overrides.map((t) => ({
+            minPromptTokens: t.minPromptTokens,
+            prompt: fix(t.prompt),
+            completion: fix(t.completion),
+          })),
+        }
+      : {}),
+  };
+}
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 
 interface CatalogFile {
@@ -49,10 +74,10 @@ async function readCatalog(apiKey: string): Promise<CatalogFile | null> {
   try {
     const raw = await fs.readFile(catalogPath(apiKey), 'utf-8');
     const parsed = JSON.parse(raw) as CatalogFile;
-    if (parsed.v !== CACHE_VERSION) return null;
+    if (!READABLE_VERSIONS.has(parsed.v)) return null;
     if (parsed.base !== baseUrl()) return null;
     if (!Array.isArray(parsed.data) || parsed.data.length === 0) return null;
-    return parsed;
+    return { ...parsed, data: parsed.data.map((m) => ({ ...m, pricing: sanitizePricing(m.pricing) })) };
   } catch {
     return null;
   }
@@ -108,6 +133,20 @@ export async function ensureCatalog(
   try {
     const data = await listModels(apiKey, true);
     await writeCatalog(apiKey, data);
+    // Validacao do /models (IMPL-018): so os fail-closed viram alerta — o "-1"
+    // dos roteadores e esperado e nao gera ruido.
+    const graves = getGateway()
+      .catalogIssues(apiKey)
+      .filter((i) => i.severity === 'error');
+    if (graves.length > 0) {
+      const amostra = graves
+        .slice(0, 3)
+        .map((i) => `${i.modelId} ${i.field}`)
+        .join('; ');
+      opts.onWarn?.(
+        `catálogo: ${graves.length} campo(s) contratual(is) malformado(s) — tratados em fail-closed (${amostra}${graves.length > 3 ? '; …' : ''}).`,
+      );
+    }
     return { models: data, fetchedAt: Date.now(), source: 'network' };
   } catch (err) {
     if (disk) {

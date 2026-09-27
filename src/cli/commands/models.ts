@@ -9,7 +9,12 @@ import { MODELS_EXPORT_FORMAT, modelCaps, toExportRow, type ModelExportRow } fro
 import { filterModels, getLgpdData } from '../../lgpd.js';
 import { REASONING_LEVELS } from '../../reasoning.js';
 import { promises as fs } from 'node:fs';
-import { CliError, EXIT, fmtPerMTok } from '../output.js';
+import {
+  formatPricePerMTok,
+  isFreePricing,
+  withinMaxPricePerMTok,
+} from '../../engine/pricing.js';
+import { CliError, EXIT } from '../output.js';
 import { buildNetworkContext, parse, type ParsedArgs } from '../context.js';
 import type { OpenRouterModel, ReasoningLevel } from '../../types.js';
 
@@ -77,14 +82,15 @@ function applyFilters(models: OpenRouterModel[], v: Record<string, unknown>): Op
   if (minCtx !== undefined) out = out.filter((m) => (m.contextLength ?? 0) >= minCtx);
 
   // Precos de filtro sao em USD por MILHAO (o que humanos usam); o catalogo e
-  // por token. A conversao acontece so aqui.
+  // por token. Preco DESCONHECIDO (roteador, "-1") nao passa em teto nenhum nem
+  // conta como gratis — antes o -1 passava em qualquer `--max-*-price`.
   const maxIn = num(v['max-prompt-price'], '--max-prompt-price');
-  if (maxIn !== undefined) out = out.filter((m) => m.pricing.prompt * 1_000_000 <= maxIn);
+  if (maxIn !== undefined) out = out.filter((m) => withinMaxPricePerMTok(m.pricing.prompt, maxIn));
   const maxOut = num(v['max-completion-price'], '--max-completion-price');
-  if (maxOut !== undefined) out = out.filter((m) => m.pricing.completion * 1_000_000 <= maxOut);
+  if (maxOut !== undefined) out = out.filter((m) => withinMaxPricePerMTok(m.pricing.completion, maxOut));
 
   if (v.free === true) {
-    out = out.filter((m) => m.pricing.prompt === 0 && m.pricing.completion === 0);
+    out = out.filter((m) => isFreePricing(m.pricing));
   }
 
   const area = typeof v['lgpd-area'] === 'string' ? v['lgpd-area'].trim() : '';
@@ -103,12 +109,17 @@ function applyFilters(models: OpenRouterModel[], v: Record<string, unknown>): Op
   return out;
 }
 
+/** Preco de uma linha de export ("variável" quando desconhecido — nunca "-1"). */
+function fmtRowPrice(p: ModelExportRow['pricing']['prompt']): string {
+  return formatPricePerMTok(typeof p === 'number' ? p : null);
+}
+
 function renderTable(rows: ModelExportRow[]): string[] {
   return rows.map((r) => {
     const think = r.thinkLevels.accepted.length
       ? r.thinkLevels.accepted.join(',')
       : '—';
-    const preco = `in ${fmtPerMTok(r.pricing.prompt)} / out ${fmtPerMTok(r.pricing.completion)}`;
+    const preco = `in ${fmtRowPrice(r.pricing.prompt)} / out ${fmtRowPrice(r.pricing.completion)}`;
     return `${r.id}\n    ${preco} /1M · ctx ${r.contextLength ?? '?'} · think: ${think}`;
   });
 }
@@ -172,7 +183,7 @@ export async function cmdModels(argv: string[]): Promise<number> {
       out.line(`${row.id}  —  ${row.name}`);
       out.line(`  contexto        ${row.contextLength ?? '?'} tokens`);
       out.line(
-        `  preço           in ${fmtPerMTok(row.pricing.prompt)} / out ${fmtPerMTok(row.pricing.completion)} por 1M tokens`,
+        `  preço           in ${fmtRowPrice(row.pricing.prompt)} / out ${fmtRowPrice(row.pricing.completion)} por 1M tokens`,
       );
       out.line(`  temperature     ${row.caps.temperature ? 'aceita' : 'NÃO aceita'}`);
       out.line(

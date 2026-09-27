@@ -118,6 +118,9 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
     if (est.unpricedModelIds.length) {
       out.warn(`sem preço no catálogo: ${est.unpricedModelIds.join(', ')}`);
     }
+    if (est.unknownPriceModelIds.length) {
+      out.warn(`preço variável (fora da estimativa): ${est.unknownPriceModelIds.join(', ')}`);
+    }
   }
   out.result(true, 'estimate', { estimate: est });
   return EXIT.OK;

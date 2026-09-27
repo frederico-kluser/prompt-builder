@@ -13,6 +13,7 @@ import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
 import { hasGabarito, toStageSpec } from '../../engine/libraryCore.js';
 import { estimateInputFromConfig, estimateRunCost, toPerMTok } from '../../estimate.js';
+import { isKnownPrice } from '../../engine/pricing.js';
 import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
 import { buildNetworkContext, checkKey, isAgentContext, parse, type NetworkContext } from '../context.js';
 import { emitRunEvent, emitSessionEventNdjson } from '../ndjson.js';
@@ -297,9 +298,37 @@ async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: num
     }
     out.warn(msg);
   }
+  // IMPL-018: preço "-1" no catálogo (roteadores) = VARIÁVEL. Na estimativa
+  // REPORTADA fica fora da soma (nunca número negativo nem "grátis"). Com
+  // orçamento, a conta passa a ser pelo PIOR CASO dos endpoints elegíveis — que
+  // só é limitável com teto de preço nos DOIS lados (sem teto, o pior caso é o
+  // modelo mais caro do catálogo). Sem teto completo: recusa, nada gasto.
+  let estOrcamento = est;
+  if (est.unknownPriceModelIds.length > 0) {
+    const msg = `preço variável no catálogo: ${est.unknownPriceModelIds.join(', ')}`;
+    if (budgetUsd !== undefined) {
+      const teto = config.maxPricePerMTok;
+      if (teto?.prompt === undefined || teto?.completion === undefined) {
+        throw new CliError(
+          `Não dá para garantir um orçamento com ${msg}. Passe --max-price-in e --max-price-out ` +
+            '(USD por MILHÃO — limitam o pior caso) ou escolha modelos com preço fixo ' +
+            '(`models list --max-prompt-price N` já os exclui).',
+          EXIT.CONFIG,
+        );
+      }
+      estOrcamento = estimateRunCost(estimateInputFromConfig(config), ctx.models, { unknownPrice: 'worst-case' });
+      out.warn(
+        `${msg} — o orçamento é conferido pelo pior caso limitado pelo teto ` +
+          `(${fmtUsd(estOrcamento.low)} – ${fmtUsd(estOrcamento.high)}).`,
+      );
+    } else {
+      out.warn(`${msg} — fora da estimativa; o custo real será maior.`);
+    }
+  }
 
   out.info(
-    `Custo estimado: ${fmtUsd(est.low)} – ${fmtUsd(est.high)} ` +
+    `Custo estimado: ${fmtUsd(est.low)} – ${fmtUsd(est.high)}` +
+      (est.unknownPriceModelIds.length > 0 ? ' + variável ' : ' ') +
       `(${est.assumptions.stages} cenários × ${est.assumptions.contestants} participantes` +
       (est.assumptions.iterations > 1 ? ` × até ${est.assumptions.iterations} iterações` : '') +
       ')',
@@ -320,17 +349,26 @@ async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: num
     for (const id of usados) {
       const m = ctx.models.find((x) => x.id === id);
       if (!m) continue;
-      if (cap.prompt !== undefined && toPerMTok(m.pricing.prompt) > cap.prompt) {
+      const { prompt, completion } = m.pricing;
+      // Preço desconhecido (roteador): o teto vai no pedido, mas não dá para
+      // conferir aqui — avisa em vez de comparar com um -1 (que sempre "cabia").
+      if (
+        (cap.prompt !== undefined && !isKnownPrice(prompt)) ||
+        (cap.completion !== undefined && !isKnownPrice(completion))
+      ) {
+        out.warn(`"${id}" tem preço variável: o teto por requisição não pode ser conferido antes da run.`);
+      }
+      if (cap.prompt !== undefined && isKnownPrice(prompt) && toPerMTok(prompt) > cap.prompt) {
         throw new CliError(
           `--max-price-in ${cap.prompt} está abaixo do preço de "${id}" ` +
-            `(${toPerMTok(m.pricing.prompt).toFixed(2)} por 1M). Lembre: a flag é USD por MILHÃO de tokens.`,
+            `(${toPerMTok(prompt).toFixed(2)} por 1M). Lembre: a flag é USD por MILHÃO de tokens.`,
           EXIT.CONFIG,
         );
       }
-      if (cap.completion !== undefined && toPerMTok(m.pricing.completion) > cap.completion) {
+      if (cap.completion !== undefined && isKnownPrice(completion) && toPerMTok(completion) > cap.completion) {
         throw new CliError(
           `--max-price-out ${cap.completion} está abaixo do preço de "${id}" ` +
-            `(${toPerMTok(m.pricing.completion).toFixed(2)} por 1M). A flag é USD por MILHÃO de tokens.`,
+            `(${toPerMTok(completion).toFixed(2)} por 1M). A flag é USD por MILHÃO de tokens.`,
           EXIT.CONFIG,
         );
       }
@@ -355,10 +393,12 @@ async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: num
 
   if (budgetUsd === undefined) return;
 
-  if (est.high <= budgetUsd) return;
-  if (est.low > budgetUsd && values.force !== true) {
+  // Daqui em diante a conta é a do ORÇAMENTO (pior caso p/ preço variável).
+  const { low: estLow, high: estHigh } = estOrcamento;
+  if (estHigh <= budgetUsd) return;
+  if (estLow > budgetUsd && values.force !== true) {
     throw new CliError(
-      `Orçamento ${fmtUsd(budgetUsd)} abaixo do piso estimado ${fmtUsd(est.low)}.\n` +
+      `Orçamento ${fmtUsd(budgetUsd)} abaixo do piso estimado ${fmtUsd(estLow)}.\n` +
         'Reduza --stages, desligue as finais (--no-duels), use menos juízes, ' +
         'ou passe --force para rodar mesmo assim (as portas de orçamento seguem armadas).',
       EXIT.USAGE,
@@ -366,13 +406,13 @@ async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: num
   }
   if (values.yes !== true && isAgentContext()) {
     throw new CliError(
-      `Orçamento ${fmtUsd(budgetUsd)} está dentro da faixa estimada (${fmtUsd(est.low)} – ${fmtUsd(est.high)}), ` +
+      `Orçamento ${fmtUsd(budgetUsd)} está dentro da faixa estimada (${fmtUsd(estLow)} – ${fmtUsd(estHigh)}), ` +
         'então a run pode parar no meio. Confirme com --yes.',
       EXIT.USAGE,
     );
   }
   out.warn(
-    `orçamento ${fmtUsd(budgetUsd)} pode não cobrir o teto (${fmtUsd(est.high)}) — a run pode parar cedo.`,
+    `orçamento ${fmtUsd(budgetUsd)} pode não cobrir o teto (${fmtUsd(estHigh)}) — a run pode parar cedo.`,
   );
 }
 

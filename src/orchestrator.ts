@@ -305,18 +305,21 @@ async function runLoop(
     new BudgetLedger({
       budgetUsd: record.config.budgetUsd,
       signal: opts.ctx?.signal ?? opts.signal,
-      estimateCall: makeCallEstimator(catalogo),
+      estimateCall: makeCallEstimator(catalogo, { maxPricePerMTok: record.config.maxPricePerMTok }),
     });
   const ctx: RunCtx = { signal: opts.ctx?.signal ?? opts.signal ?? ledger.signal, sink: ledger };
   const maxPricePerMTok = record.config.maxPricePerMTok;
   record.budgetUsd = ledger.remainingUsd() !== undefined ? ledger.snapshot().budgetUsd : undefined;
 
-  // Estimativa por papel — base das PORTAS SUAVES de orcamento.
+  // Estimativa por papel — base das PORTAS SUAVES de orcamento. Preco
+  // desconhecido (roteador, "-1") entra pelo PIOR CASO: projetar de menos
+  // deixaria a fase comecar e a porta dura corta-la no meio (IMPL-018).
   const est = estimateRunCost(
     estimateInputFromConfig(record.config, {
       contestantIds: record.contestants.map((c) => c.id),
     }),
     catalogo,
+    { unknownPrice: 'worst-case' },
   );
 
   /**

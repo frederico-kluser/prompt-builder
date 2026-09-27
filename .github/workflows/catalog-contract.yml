@@ -1,0 +1,51 @@
+# Contrato do catálogo /models do OpenRouter (IMPL-018 / R-07b:REC-7).
+#
+# Diário: confere o /models AO VIVO (GET público e gratuito, sem key e sem
+# chamada paga) contra a baseline versionada test/fixtures/catalog-contract.json.
+# Reprova quando muda, num modelo VIGIADO, algo que muda o fio
+# (supported_parameters do gateway, reasoning.supported_efforts,
+# reasoning.mandatory) ou quando um vigiado some. O diff sai como artefato;
+# aceitar é humano: `npx tsx scripts/catalog-contract.ts --accept` versiona o
+# diff em test/fixtures/catalog-drift/ (guarda-se o diff, não o dump).
+#
+# Só o pacote raiz é instalado: o web/ (que exige MOTION_TOKEN) não entra aqui.
+name: catalog-contract
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - 'src/openrouter.ts'
+      - 'src/engine/pricing.ts'
+      - 'src/engine/catalogContract.ts'
+      - 'scripts/catalog-contract.ts'
+      - 'test/fixtures/catalog-contract.json'
+      - '.github/workflows/catalog-contract.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Testes de contrato offline (pricing + snapshot)
+        run: npx vitest run test/catalog-pricing.test.ts
+      - name: Contrato do /models ao vivo
+        run: npx tsx scripts/catalog-contract.ts --out catalog-drift.json
+      - name: Diff do catálogo (se houver)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-drift
+          path: catalog-drift.json
+          if-no-files-found: ignore

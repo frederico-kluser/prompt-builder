@@ -36,7 +36,8 @@ export interface OpenRouterModel {
   id: string;
   name: string;
   contextLength?: number;
-  pricing: { prompt: number; completion: number };
+  /** USD por token. `null` = preço DESCONHECIDO/variável (ex.: roteadores; "-1" no catálogo). */
+  pricing: { prompt: number | null; completion: number | null };
   /** `supported_parameters` do OpenRouter — usado p/ determinismo por modelo. */
   supportedParameters?: string[];
   /** Metadados de raciocínio: quais degraus de esforço este modelo aceita. */
@@ -47,6 +48,16 @@ export interface OpenRouterModel {
 // porta única (api.ts), a regra mora em modelCaps.ts.
 export type { ModelCaps, ModelReasoningMeta } from './modelCaps';
 export { modelCaps, effortOptions, EFFORT_LABEL } from './modelCaps';
+// Preço com "desconhecido" explícito (IMPL-018): fonte única em src/engine/pricing.ts.
+export {
+  formatPricePerMTok,
+  formatPricingLabel,
+  isKnownPrice,
+  knownPricing,
+  priceTokens,
+  withinMaxPricePerMTok,
+  UNKNOWN_PRICE_LABEL,
+} from '../../src/engine/pricing.js';
 
 export type RunMode = 'compare' | 'variation' | 'training';
 

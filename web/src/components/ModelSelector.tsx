@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Plus, Search, SlidersHorizontal, X } from 'lucide-react';
 import type { ModelCaps, OpenRouterModel, ReasoningLevel } from '../api';
-import { EFFORT_LABEL, effortOptions, fetchModels, modelCaps } from '../api';
+import { EFFORT_LABEL, effortOptions, fetchModels, formatPricingLabel, modelCaps } from '../api';
 import { useMotionUITransition, useMotionUITheme } from '@/components/motion-ui/ui-theme';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -36,15 +36,13 @@ interface Props {
 
 const ALL_TUNING_FIELDS: ('effort' | 'temperature')[] = ['effort', 'temperature'];
 
-function formatPricePerMTok(usdPerToken: number): string {
-  const perM = usdPerToken * 1_000_000;
-  if (perM === 0) return '$0';
-  if (perM < 0.01) return `$${perM.toFixed(4)}`;
-  return `$${perM.toFixed(2)}`;
-}
-
+/**
+ * Rótulo de preço. Desconhecido ("-1" no catálogo: roteadores) vira "preço
+ * variável" — nunca "-1" nem "$-1000000.00" (IMPL-018). Regra única em
+ * src/engine/pricing.ts (a mesma do CLI).
+ */
 function priceLabel(model: OpenRouterModel): string {
-  return `in ${formatPricePerMTok(model.pricing.prompt)} / out ${formatPricePerMTok(model.pricing.completion)} /1M`;
+  return formatPricingLabel(model.pricing);
 }
 
 /** Nome curto do modelo: o que vem depois da última '/' do id. */

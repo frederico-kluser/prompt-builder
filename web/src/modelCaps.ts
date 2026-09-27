@@ -52,12 +52,14 @@ interface ModelLike {
 export function modelCaps(m?: ModelLike): ModelCaps {
   const supported = m?.supportedParameters;
   const r = m?.reasoning;
-  if (!supported || supported.length === 0) {
+  if (!supported) {
     // Sem metadados (modelo fora do catálogo carregado): oferece temperatura e
     // esconde esforço. No envio, a heurística por nome do engine ainda pode
     // omitir a temperatura de modelos de raciocínio — igual a hoje.
     return { temperature: true, reasoning: false, effort: false, mandatory: false };
   }
+  // `[]` = declarado vazio (roteadores) ou fail-closed de campo malformado
+  // (IMPL-018): o gateway não envia nada opcional, então nada é oferecido.
   const effort = supported.includes('reasoning_effort');
   return {
     temperature: supported.includes('temperature'),

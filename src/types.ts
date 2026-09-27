@@ -23,9 +23,19 @@ import type { ExpectedSpec } from './engine/groundTruth.js';
 import type { PromptContracts } from './engine/contracts.js';
 import type { PromptGroup } from './engine/promptGroup.js';
 
+/**
+ * Preco em USD por token. `null` = DESCONHECIDO (IMPL-018 / R-07b:REC-7): o
+ * catalogo trouxe "-1" (roteadores como `openrouter/auto` — preco variavel),
+ * valor ausente, nao numerico, nao finito ou negativo. Nunca vira 0 ("gratis")
+ * nem numero negativo: antes o "-1" entrava como -1 e produzia estimativa e
+ * reserva de orcamento NEGATIVAS em silencio. Quem precisa do numero trata o
+ * `null` explicitamente (a tipagem obriga).
+ */
+export type TokenPrice = number | null;
+
 export interface OpenRouterModelPricing {
-  prompt: number; // USD per token
-  completion: number; // USD per token
+  prompt: TokenPrice; // USD per token (null = desconhecido)
+  completion: TokenPrice; // USD per token (null = desconhecido)
   /**
    * Precificacao POR FAIXA de tamanho de prompt (campo `pricing.overrides`,
    * vivo no catalogo mas nao documentado). Ignorar isto subestima runs de
@@ -37,8 +47,8 @@ export interface OpenRouterModelPricing {
 
 export interface PricingTier {
   minPromptTokens: number;
-  prompt: number; // USD per token
-  completion: number; // USD per token
+  prompt: TokenPrice; // USD per token (null = desconhecido)
+  completion: TokenPrice; // USD per token (null = desconhecido)
 }
 
 // ----------------------------------------------------------------------------
@@ -151,7 +161,10 @@ export interface OpenRouterModel {
    * Parametros de amostragem que o modelo aceita (campo `supported_parameters`
    * do OpenRouter). Fonte de verdade para enviar `temperature`/`seed` so a quem
    * suporta — reasoning models (gpt-5*, serie o*) NAO listam `temperature` e
-   * respondem vazio (HTTP 400) se ela for enviada. Ausente = desconhecido.
+   * respondem vazio (HTTP 400) se ela for enviada. Ausente = desconhecido
+   * (heuristica por nome). `[]` = o catalogo declara que NAO aceita nenhum —
+   * tambem e o valor FAIL-CLOSED quando o campo vem malformado (IMPL-018):
+   * nada opcional vai no fio.
    */
   supportedParameters?: string[];
   /** Metadados de raciocinio declarados pelo modelo (campo `reasoning` de /models). */

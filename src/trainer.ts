@@ -328,12 +328,14 @@ async function trainingLoop(
   const ledger = new BudgetLedger({
     budgetUsd: cfg.budgetUsd,
     signal: opts.signal,
-    estimateCall: makeCallEstimator(catalogo),
+    estimateCall: makeCallEstimator(catalogo, { maxPricePerMTok: cfg.maxPricePerMTok }),
   });
   const ctx: RunCtx = { signal: opts.signal, sink: ledger };
   record.budgetUsd = cfg.budgetUsd;
 
-  const estIter = estimateRunCost(estimateInputFromConfig(cfg), catalogo).perIteration;
+  // Porta de orcamento: preco desconhecido pelo pior caso (IMPL-018).
+  const estIter = estimateRunCost(estimateInputFromConfig(cfg), catalogo, { unknownPrice: 'worst-case' })
+    .perIteration;
 
   const syncLedger = (): void => {
     const snap = ledger.snapshot();
