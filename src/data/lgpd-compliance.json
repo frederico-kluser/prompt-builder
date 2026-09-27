@@ -1,7 +1,7 @@
 {
   "data_referencia": "2026-06-17",
   "aviso": "Análise técnica/informativa de conformidade — NÃO constitui aconselhamento jurídico. Antes de tratar dados pessoais reais, valide com o DPO/Encarregado e com assessoria jurídica especializada em LGPD.",
-  "principio_central": "No OpenRouter, o mesmo modelo é servido por múltiplos providers de infraestrutura com políticas distintas. A adequação à LGPD depende PRINCIPALMENTE do provider (ZDR, não-treinamento, localização) e não do modelo. Este filtro é CONSULTIVO: orienta a escolha por família de modelo, mas não força o roteamento — ative ZDR e restrinja providers na sua conta OpenRouter para garantir a conformidade.",
+  "principio_central": "No OpenRouter, o mesmo modelo é servido por múltiplos providers de infraestrutura com políticas distintas. A adequação à LGPD depende PRINCIPALMENTE do provider (ZDR, não-treinamento, localização) e não do modelo. Em área sensível o prompt-builder FORÇA o roteamento em toda requisição (provider.only com os endpoints ZDR da allowlist, zdr, data_collection deny, allow_fallbacks false) e recusa a chamada que ficaria sem esses campos; na área geral o filtro segue CONSULTIVO. Mantenha também ZDR e o logging desativado na sua conta OpenRouter.",
   "status_adequacao_anpd": {
     "unica_decisao_publicada": "União Europeia + EEE (Islândia, Liechtenstein, Noruega) — Resolução CD/ANPD nº 32/2026, publicada no DOU em 27/01/2026 (30 jurisdições).",
     "eua": "NÃO adequado — exige cláusulas-padrão da ANPD (SCCs/CCPs) + DPA; risco residual do CLOUD Act.",

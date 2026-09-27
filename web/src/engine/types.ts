@@ -250,9 +250,11 @@ export interface RunConfigBase {
   /** Passes do juiz: 2 = avalia em duas ordens e media (anti-vies de posicao). Default 1. */
   judgePasses?: 1 | 2;
   /**
-   * Perfil de conformidade LGPD escolhido no assistente (passo Tema). CONSULTIVO:
-   * gravado para transparencia/rastreabilidade do run; NAO forca roteamento de
-   * providers no OpenRouter. Ausente = "livre" (sem filtro de conformidade).
+   * Perfil de conformidade LGPD escolhido no assistente (passo Tema). Em area
+   * SENSIVEL e fail-closed: pre-voo contra a allowlist ZDR (IMPL-041) e TODA
+   * requisicao sai com `provider { zdr, data_collection:'deny', only,
+   * allow_fallbacks:false }` (IMPL-040, src/engine/sensitiveRouting.ts). A area
+   * "geral" segue consultiva. Ausente = "livre" (sem filtro de conformidade).
    */
   compliance?: { area: string; includeRessalvas: boolean };
   /**

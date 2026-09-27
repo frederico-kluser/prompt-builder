@@ -764,7 +764,13 @@ export function NewRun() {
     setGenBaseError(null);
     try {
       setBasePrompt(
-        await generateBasePrompt(taskDescription.trim(), datagen[0] ?? DEFAULT_DATAGEN, theme.trim() || undefined),
+        await generateBasePrompt(
+          taskDescription.trim(),
+          datagen[0] ?? DEFAULT_DATAGEN,
+          theme.trim() || undefined,
+          // IMPL-040: em área sensível a geração também sai com o roteamento ZDR forçado.
+          isLivre ? undefined : { area: complianceArea, includeRessalvas },
+        ),
       );
     } catch (err) {
       setGenBaseError((err as Error).message);

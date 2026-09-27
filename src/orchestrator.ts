@@ -461,6 +461,9 @@ async function runLoop(
     nested: Boolean(record.sessionId),
   });
   if (preflight.piiReport) record.piiReport = preflight.piiReport;
+  // IMPL-040: área sensível ⇒ o gateway força o roteamento ZDR em TODA chamada
+  // desta run (a política viaja no ledger, que todo papel recebe via ctx.sink).
+  ledger.setSensitiveRouting(preflight.sensitiveRouting);
 
   // Resolve contestants on-demand (variacao: gera as variantes via optimizer).
   if (opts.prepare) {

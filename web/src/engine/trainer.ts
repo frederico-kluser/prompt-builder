@@ -443,7 +443,9 @@ async function trainingLoop(
   try {
     // LGPD (IMPL-041): recusa a sessão sensível fora da allowlist ANTES do
     // reescritor da iteração 0 (que roda antes da 1ª run e do pré-voo dela).
-    await enforceRunCompliance(cfg);
+    // IMPL-040: + liga o roteamento ZDR forçado no ledger da SESSÃO (o
+    // reescritor e todas as runs aninhadas, que são forks dele, herdam).
+    ledger.setSensitiveRouting((await enforceRunCompliance(cfg)).sensitiveRouting);
     for (let i = 0; i < cfg.iterations; i++) {
       iterAtual = i;
       // Porta suave por ITERAÇÃO (espelho do Node): uma iteração inteira é

@@ -26,6 +26,7 @@ import type {
 } from './types.js';
 import { COST_ROLES } from './types.js';
 import { cloneFinishCounts, emptyFinishCounts, tallyFinish } from './engine/truncation.js';
+import type { SensitiveRouting } from './engine/sensitiveRouting.js';
 
 // ---------------------------------------------------------------------------
 // Sinais de controle
@@ -166,6 +167,24 @@ export class BudgetLedger implements CostSink {
   /** Escopo do cofre de pseudonimos (LGPD, IMPL-042): a raiz — a run avulsa ou a sessao. */
   piiScope(): object {
     return this.root();
+  }
+
+  // LGPD (IMPL-040): politica do modo "dados sensiveis". So LIGA, nunca
+  // desliga (fail-closed: um `undefined` posterior nao afrouxa a run), e vale
+  // para a cadeia inteira abaixo — as runs de uma sessao sensivel herdam.
+  private sensitive?: SensitiveRouting;
+
+  /** Liga o modo sensivel neste ledger (e nos filhos). `undefined` = no-op. */
+  setSensitiveRouting(routing: SensitiveRouting | undefined): void {
+    if (routing) this.sensitive = routing;
+  }
+
+  /** A politica mais proxima subindo a cadeia (este ledger → raiz). */
+  sensitiveRouting(): SensitiveRouting | undefined {
+    for (let n: BudgetLedger | undefined = this; n; n = n.parent) {
+      if (n.sensitive) return n.sensitive;
+    }
+    return undefined;
   }
 
   private root(): BudgetLedger {

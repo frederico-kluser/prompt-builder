@@ -67,7 +67,15 @@ export type {
   ModelLifecycleSnapshot,
 } from '../../src/engine/modelLifecycle.js';
 import type { ModelReasoningMeta } from './modelCaps';
-import { checkImportPii, loadLgpdData, type LgpdData, type PiiImportCheck, type PiiRunReport } from './lgpd';
+import {
+  checkImportPii,
+  loadLgpdData,
+  sensitiveRoutingFor,
+  type LgpdData,
+  type PiiImportCheck,
+  type PiiRunReport,
+} from './lgpd';
+import { BudgetLedger } from '../../src/budget.js';
 import { cancelRun as engineCancelRun, isRunCancellable, startRun } from './engine/orchestrator';
 import { cancelTraining, isTrainingCancellable, startTraining } from './engine/trainer';
 import { generateContestants, generateBasePrompt as engineGenerateBasePrompt } from './engine/variator';
@@ -210,7 +218,7 @@ export interface RunConfig {
   optimizerModelId?: string;
   judgePasses?: 1 | 2;
   iterations?: number;
-  /** Perfil de conformidade LGPD (consultivo; gravado no record). Ausente = "livre". */
+  /** Perfil de conformidade LGPD (área sensível: fail-closed, roteamento ZDR forçado — IMPL-040). Ausente = "livre". */
   compliance?: { area: string; includeRessalvas: boolean };
   /** Dado pessoal (IMPL-042): 'redact' (default) ou 'synthetic' ("so sintetico", recusa dado de aparencia real). */
   piiMode?: 'redact' | 'synthetic';
@@ -768,8 +776,20 @@ export async function generateBasePrompt(
   taskDescription: string,
   modelId: string,
   theme?: string,
+  compliance?: { area: string; includeRessalvas: boolean },
 ): Promise<string> {
-  return engineGenerateBasePrompt({ apiKey: getStoredKey(), modelId, taskDescription, theme });
+  // IMPL-040 (revisão): a descrição da tarefa é dado da run — em área sensível
+  // esta chamada (fora da run, papel 'rewriter') também sai pelo modo sensível:
+  // o ledger carrega a política e o gateway força os 4 campos ou recusa antes
+  // do fetch (fail-closed, mesmo ponto único das runs).
+  const routing = compliance ? sensitiveRoutingFor({ compliance }, await loadLgpdData()) : undefined;
+  let ctx: RunCtx | undefined;
+  if (routing) {
+    const sink = new BudgetLedger();
+    sink.setSensitiveRouting(routing);
+    ctx = { sink };
+  }
+  return engineGenerateBasePrompt({ apiKey: getStoredKey(), modelId, taskDescription, theme, ctx });
 }
 
 // -------------- Telemetria / subscricao ao vivo (cockpit de treino) --------------

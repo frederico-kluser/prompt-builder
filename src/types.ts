@@ -44,6 +44,7 @@ export type {
  */
 export type TokenPrice = number | null;
 import type { PiiRunReport } from './engine/pii.js';
+import type { SensitiveRouting } from './engine/sensitiveRouting.js';
 
 export interface OpenRouterModelPricing {
   prompt: TokenPrice; // USD per token (null = desconhecido)
@@ -153,6 +154,13 @@ export interface CostSink {
    * runs). Opcional: sem ele o proprio sink e o escopo.
    */
   piiScope?(): object;
+  /**
+   * LGPD (IMPL-040): politica do modo "dados sensiveis" da run/sessao, ou
+   * `undefined` fora dele. O gateway a le em TODA chamada e injeta
+   * `provider { zdr, data_collection:'deny', only, allow_fallbacks:false }` —
+   * faltou campo, lanca antes do fetch. Opcional: sink sem ele = modo desligado.
+   */
+  sensitiveRouting?(): SensitiveRouting | undefined;
 }
 
 /**
@@ -339,9 +347,11 @@ export interface RunConfigBase {
   /** Passes do juiz: 2 = avalia em duas ordens e media (anti-vies de posicao). Default 1. */
   judgePasses?: 1 | 2;
   /**
-   * Perfil de conformidade LGPD escolhido no assistente (passo Tema). CONSULTIVO:
-   * gravado para transparencia/rastreabilidade do run; NAO forca roteamento de
-   * providers no OpenRouter. Ausente = "livre" (sem filtro de conformidade).
+   * Perfil de conformidade LGPD escolhido no assistente (passo Tema). Em area
+   * SENSIVEL e fail-closed: pre-voo contra a allowlist ZDR (IMPL-041) e TODA
+   * requisicao sai com `provider { zdr, data_collection:'deny', only,
+   * allow_fallbacks:false }` (IMPL-040, src/engine/sensitiveRouting.ts). A area
+   * "geral" segue consultiva. Ausente = "livre" (sem filtro de conformidade).
    */
   compliance?: { area: string; includeRessalvas: boolean };
   /**

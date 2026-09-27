@@ -184,8 +184,9 @@ const baseFields = {
   promptOptimization: z.boolean().optional(),
   optimizerModelId: z.string().min(1).optional(),
   judgePasses: z.union([z.literal(1), z.literal(2)]).optional(),
-  // Perfil de conformidade LGPD escolhido no assistente (CONSULTIVO: gravado
-  // para transparência/rastreabilidade, não força roteamento). Ausente = "livre".
+  // Perfil de conformidade LGPD escolhido no assistente. Área sensível é
+  // fail-closed: pré-voo (IMPL-041) + roteamento ZDR forçado em toda requisição
+  // (IMPL-040); "geral" segue consultiva. Ausente = "livre".
   compliance: z.object({ area: z.string().min(1), includeRessalvas: z.boolean() }).optional(),
   // Dado pessoal (IMPL-042): 'synthetic' recusa a run com dado de aparencia
   // real; a pseudonimizacao no gateway vale nos dois modos.
