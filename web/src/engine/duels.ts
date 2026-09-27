@@ -11,6 +11,7 @@
 
 import { chatCompletion } from './openrouter';
 import { callJudgeWithRetry, withReminder, type JudgeAttempt } from '../../../src/engine/judgeRetry.js';
+import { buildDuelPrompt, DUEL_SCHEMA, parseDuelVerdict } from '../../../src/engine/duelPrompt.js';
 import type {
   CompetitorResponse,
   Contestant,
@@ -46,75 +47,10 @@ export {
   VERDICT_SCORE,
 } from '../../../src/engine/duelCore.js';
 
-// Head do prompt de duelo — fixa o contrato do veredito head-to-head (portado).
-const DUEL_HEAD = `Você é um juiz técnico estrito decidindo um DUELO DIRETO entre DUAS respostas candidatas para a MESMA tarefa. Um modelo mais forte já produziu a RESPOSTA DE REFERÊNCIA (correta). Decida qual candidato alcança melhor o MESMO resultado e intenção da referência; ignore redação, estilo e tamanho. Os rótulos A/B são neutros e a ordem não significa nada. Responda APENAS com um objeto JSON {"winner": "A"|"B"|"tie", "explanation": "<uma frase curta>"} — "tie" SOMENTE quando ambos alcançam resultado genuinamente equivalente (ou falham igualmente).`;
-
-function buildDuelUserPrompt(
-  stage: StageSpec,
-  reference: string,
-  textA: string,
-  textB: string,
-): string {
-  const rubricBlock = stage.rubric?.trim()
-    ? `\nRUBRICA DA ETAPA (critério de corretude):\n${stage.rubric.trim()}\n`
-    : '';
-  return `REFERÊNCIA (resposta correta):
-${reference}
-
-PERGUNTA DO USUÁRIO:
-${stage.question}
-${rubricBlock}
-Candidato A:
-${textA || '(vazio)'}
-
-Candidato B:
-${textB || '(vazio)'}
-
-Qual candidato alcança melhor o resultado e a intenção da referência — A, B ou tie?`;
-}
-
-// Mesmo helper do judge.ts (extrai o objeto JSON mesmo com markdown ao redor).
-function extractJson(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed.startsWith('{')) return trimmed;
-  const match = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (match) return match[1].trim();
-  const firstBrace = trimmed.indexOf('{');
-  const lastBrace = trimmed.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return trimmed.slice(firstBrace, lastBrace + 1);
-  }
-  return trimmed;
-}
-
-/**
- * Parse ESTRITO da resposta do duelo: objeto JSON com `winner` em A|B|tie
- * (aceita "empate"). Qualquer outra coisa => `null` (saída inválida) — quem
- * chama pede UMA vez de novo com lembrete de formato e, persistindo, o duelo
- * fica SEM resultado (IMPL-004). O antigo fallback por regex (1º A/B isolado
- * no texto cru; lixo => 'tie') foi removido: o empate imputado pontuava 0,5.
- */
-function parseDuelVerdict(text: string): { winner: 'A' | 'B' | 'tie'; explanation: string } | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(extractJson(text));
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-  const p = parsed as Record<string, unknown>;
-  const raw = typeof p.winner === 'string' ? p.winner.trim().toUpperCase() : '';
-  const winner: 'A' | 'B' | 'tie' | null =
-    raw === 'A' || raw === 'B' ? raw : raw === 'TIE' || raw === 'EMPATE' ? 'tie' : null;
-  if (!winner) return null;
-  const explanation = (typeof p.explanation === 'string' && p.explanation.trim().slice(0, 300)) || '';
-  return { winner, explanation };
-}
-
-/** Lembrete anexado ao 2º pedido depois de uma saída fora do contrato. */
-const DUEL_FORMAT_REMINDER =
-  'LEMBRETE DE FORMATO: a resposta anterior não seguiu o contrato. Responda APENAS com um objeto JSON ' +
-  '{"winner": "A"|"B"|"tie", "explanation": "<uma frase curta>"} — sem markdown e sem texto antes ou depois.';
+// Prompt + parse do juiz de duelo: fonte ÚNICA em `src/engine/duelPrompt.ts`
+// (IMPL-006 — marcador aleatório por ordem, INSTRUÇÕES anti-injeção, JSON
+// estrito com canário). Reexportados para os consumidores/testes.
+export { buildDuelPrompt, parseDuelVerdict, DUEL_HEAD, DUEL_SCHEMA } from '../../../src/engine/duelPrompt.js';
 
 export interface RunStageDuelsOptions {
   stage: StageSpec;
@@ -238,8 +174,9 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
   const judgeOnce = (
     firstId: string,
     secondId: string,
-  ): Promise<JudgeAttempt<{ winner: 'A' | 'B' | 'tie'; explanation: string }>> => {
-    const userPrompt = buildDuelUserPrompt(
+  ): Promise<JudgeAttempt<{ winner: 'A' | 'B' | 'tie'; explanation: string; canary: string }>> => {
+    // Marcador + canário sorteados AQUI: cada ORDEM é um veredito próprio.
+    const prompt = buildDuelPrompt(
       stage,
       reference,
       textById.get(firstId) ?? '',
@@ -252,13 +189,14 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
             apiKey,
             modelId: judgeModelId,
             messages: [
-              { role: 'system', content: DUEL_HEAD },
-              { role: 'user', content: withReminder(userPrompt, reminder) },
+              { role: 'system', content: prompt.system },
+              { role: 'user', content: withReminder(prompt.user, reminder) },
             ],
             temperature: 0,
             maxTokens: 512,
             timeoutMs,
             responseFormatJson: true,
+            responseSchema: { name: 'veredito_duelo', schema: DUEL_SCHEMA },
             reasoningLevel,
             // Papel 'duel' no ledger (IMPL-021): sem isto o gateway contaria o
             // duelo como 'competitor' (o default de role).
@@ -268,8 +206,8 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
             maxPricePerMTok,
           })
         ).text,
-      parse: parseDuelVerdict,
-      formatReminder: DUEL_FORMAT_REMINDER,
+      parse: (text) => parseDuelVerdict(text, prompt.guard.canary),
+      formatReminder: prompt.formatReminder,
       signal: ctx?.signal,
     });
   };
@@ -336,8 +274,8 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
           failure: {
             a,
             b,
-            ...(v1.ok && o1 ? { order1: { winner: o1, explanation: v1.value.explanation } } : {}),
-            ...(v2.ok && o2 ? { order2: { winner: o2, explanation: v2.value.explanation } } : {}),
+            ...(v1.ok && o1 ? { order1: { winner: o1, explanation: v1.value.explanation, canary: v1.value.canary } } : {}),
+            ...(v2.ok && o2 ? { order2: { winner: o2, explanation: v2.value.explanation, canary: v2.value.canary } } : {}),
             error: falha ?? { kind: 'judge_failed', message: 'Ordem do duelo sem resultado.' },
           },
         };
@@ -345,8 +283,8 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
       const duel: DuelOutcome = {
         a,
         b,
-        order1: { winner: o1, explanation: v1.value.explanation },
-        order2: { winner: o2, explanation: v2.value.explanation },
+        order1: { winner: o1, explanation: v1.value.explanation, canary: v1.value.canary },
+        order2: { winner: o2, explanation: v2.value.explanation, canary: v2.value.canary },
         outcome: combineDuelOrders(o1, o2),
         source: 'judge',
       };

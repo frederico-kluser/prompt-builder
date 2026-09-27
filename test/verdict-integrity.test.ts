@@ -37,6 +37,7 @@ import {
   MIN_JUDGED_SCENARIOS,
 } from '../src/engine/verdictIntegrity.js';
 import { callJudgeWithRetry, isTimeoutError, MAX_JUDGE_CALLS } from '../src/engine/judgeRetry.js';
+import { readMarkedBlock } from '../src/engine/judgeGuard.js';
 import { BudgetLedger, isControlSignal } from '../src/budget.js';
 import { EXIT } from '../src/cli/output.js';
 import { exitFor } from '../src/cli/commands/run.js';
@@ -57,6 +58,7 @@ import {
 } from '../src/types.js';
 import { isTerminalRunStatus as isTerminalWeb } from '../web/src/engine/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter, type FakeRequest } from './fakeOpenRouter.js';
+import { candidateOf, duelReply, listwiseReply, pointwiseReply, questionOf } from './judgeReplies.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -91,7 +93,9 @@ const resp = (id: string, text: string, status: CompetitorStatus = 'ok'): Compet
 });
 const cont = (id: string): Contestant => ({ id, label: id, modelId: 'fake/a' });
 
-const OK_JSON = (verdict: Verdict, explanation = 'confere'): string => JSON.stringify({ verdict, explanation });
+/** Veredito pointwise válido — com o canário do pedido (IMPL-006). */
+const OK_JSON = (req: FakeRequest, verdict: Verdict, explanation = 'confere'): string =>
+  pointwiseReply(req, verdict, explanation);
 
 async function comGateway<T>(fetch: FetchLike, fn: () => Promise<T>): Promise<T> {
   const anterior = setDefaultGateway(createGateway({ fetch, sleep: noSleep }));
@@ -104,7 +108,7 @@ async function comGateway<T>(fetch: FetchLike, fn: () => Promise<T>): Promise<T>
 
 /** Pedidos de juiz pointwise para o candidato com `texto`. */
 const pedidosDo = (fake: FakeOpenRouter, texto: string): FakeRequest[] =>
-  fake.chatRequests().filter((r) => r.user.includes(`CANDIDATO:\n${texto}`));
+  fake.chatRequests().filter((r) => candidateOf(r) === texto);
 
 /**
  * fetch que TRAVA (até o abort do timeout do gateway) os pedidos escolhidos —
@@ -230,7 +234,7 @@ describe('refJudge — falha do juiz vira veredito AUSENTE, nunca parcial', () =
   it('falha de chamada (HTTP 400): sem chave, motivo judge_failed; média e irmãos intactos', async () => {
     const fake = fakeOpenRouter({
       chat: (req) =>
-        req.user.includes('CANDIDATO:\nRESP-A') ? { status: 400, bodyText: 'FALHA-DO-JUIZ' } : { text: OK_JSON('resolve') },
+        candidateOf(req) === 'RESP-A' ? { status: 400, bodyText: 'FALHA-DO-JUIZ' } : { text: OK_JSON(req, 'resolve') },
     });
     const r = await comGateway(fake.fetch, () =>
       judgeStageReference({
@@ -254,9 +258,9 @@ describe('refJudge — falha do juiz vira veredito AUSENTE, nunca parcial', () =
   it('JSON inválido: 1 novo pedido com lembrete; persistindo => invalid_output (o regex antigo daria parcial)', async () => {
     const fake = fakeOpenRouter({
       chat: (req) =>
-        req.user.includes('CANDIDATO:\nRESP-A')
+        candidateOf(req) === 'RESP-A'
           ? { text: 'o candidato resolve parcialmente a questão' }
-          : { text: OK_JSON('nao') },
+          : { text: OK_JSON(req, 'nao') },
     });
     const r = await comGateway(fake.fetch, () =>
       judgeStageReference({
@@ -278,7 +282,7 @@ describe('refJudge — falha do juiz vira veredito AUSENTE, nunca parcial', () =
   it('JSON inválido e depois válido: o lembrete recupera um veredito LEGÍTIMO', async () => {
     const fake = fakeOpenRouter({
       chat: (req) =>
-        req.user.includes('LEMBRETE DE FORMATO') ? { text: OK_JSON('parcial') } : { text: 'lixo sem json' },
+        req.user.includes('LEMBRETE DE FORMATO') ? { text: OK_JSON(req, 'parcial') } : { text: 'lixo sem json' },
     });
     const r = await comGateway(fake.fetch, () =>
       judgeStageReference({ ...base, responses: [resp('a', 'RESP-A')], contestants: [cont('a')] }),
@@ -290,7 +294,7 @@ describe('refJudge — falha do juiz vira veredito AUSENTE, nunca parcial', () =
   });
 
   it('timeout re-tenta 1× (recupera); dois timeouts => kind timeout, sem 3ª chamada', async () => {
-    const fake = fakeOpenRouter({ chat: () => ({ text: OK_JSON('resolve') }) });
+    const fake = fakeOpenRouter({ chat: (req) => ({ text: OK_JSON(req, 'resolve') }) });
     let primeiro = true;
     const umaVez = comTravamento(fake, (body) => {
       if (!body.includes('RESP-A') || !primeiro) return false;
@@ -314,7 +318,7 @@ describe('refJudge — falha do juiz vira veredito AUSENTE, nunca parcial', () =
   });
 
   it('regra de origem: error/sem resposta => competitor_error, blocked => blocked, refused é julgado, vazia => nao automático', async () => {
-    const fake = fakeOpenRouter({ chat: () => ({ text: OK_JSON('nao', 'recusou') }) });
+    const fake = fakeOpenRouter({ chat: (req) => ({ text: OK_JSON(req, 'nao', 'recusou') }) });
     const r = await comGateway(fake.fetch, () =>
       judgeStageReference({
         ...base,
@@ -342,7 +346,7 @@ describe('refJudge — falha do juiz vira veredito AUSENTE, nunca parcial', () =
 
   it('multi-juiz com um juiz caído => veredito do painel reduzido, fonte degraded', async () => {
     const fake = fakeOpenRouter({
-      chat: (req) => (req.model === 'fake/j2' ? { status: 400, bodyText: 'caiu' } : { text: OK_JSON('resolve') }),
+      chat: (req) => (req.model === 'fake/j2' ? { status: 400, bodyText: 'caiu' } : { text: OK_JSON(req, 'resolve') }),
     });
     const r = await comGateway(fake.fetch, () =>
       judgeStageReference({
@@ -357,7 +361,7 @@ describe('refJudge — falha do juiz vira veredito AUSENTE, nunca parcial', () =
   });
 
   it('sem gabarito: nenhum veredito (no_reference), zero chamadas, etapa inconclusiva', async () => {
-    const fake = fakeOpenRouter({ chat: () => ({ text: OK_JSON('resolve') }) });
+    const fake = fakeOpenRouter({ chat: (req) => ({ text: OK_JSON(req, 'resolve') }) });
     const r = await comGateway(fake.fetch, () =>
       judgeStageReference({
         ...base,
@@ -373,7 +377,7 @@ describe('refJudge — falha do juiz vira veredito AUSENTE, nunca parcial', () =
   });
 
   it('orçamento e cancelamento SOBEM como controle (não viram judge_failed)', async () => {
-    const fake = fakeOpenRouter({ chat: () => ({ text: OK_JSON('resolve') }) });
+    const fake = fakeOpenRouter({ chat: (req) => ({ text: OK_JSON(req, 'resolve') }) });
     await comGateway(fake.fetch, async () => {
       const sink = new BudgetLedger({ budgetUsd: 1, estimateCall: () => 5 });
       await expect(
@@ -403,13 +407,11 @@ describe('refJudge — falha do juiz vira veredito AUSENTE, nunca parcial', () =
 
 describe('judge (listwise) — saída estrita, nenhum parcial por omissão', () => {
   const base = { apiKey: KEY, stage: STAGE, judgeModelIds: ['fake/judge'], timeoutMs: 2_000 };
-  const completo = JSON.stringify({
-    ranking: ['A', 'B'],
-    verdicts: [
+  const completo = (req: FakeRequest): string =>
+    listwiseReply(req, ['A', 'B'], [
       { label: 'A', justificativa: 'ok', veredito: 'resolve' },
       { label: 'B', justificativa: 'ok', veredito: 'resolve' },
-    ],
-  });
+    ]);
 
   it('saída inválida 2× => todos SEM veredito (invalid_output), sem aceitável, etapa inconclusiva', async () => {
     const fake = fakeOpenRouter({ chat: () => ({ text: 'A é melhor, B parcial' }) });
@@ -426,12 +428,10 @@ describe('judge (listwise) — saída estrita, nenhum parcial por omissão', () 
   });
 
   it('ranking incompleto ou veredito ambíguo => lembrete; a 2ª saída completa vale', async () => {
-    const incompleta = JSON.stringify({
-      ranking: ['A'],
-      verdicts: [{ label: 'A', justificativa: 'x', veredito: 'talvez' }],
-    });
+    const incompleta = (req: FakeRequest): string =>
+      listwiseReply(req, ['A'], [{ label: 'A', justificativa: 'x', veredito: 'talvez' }]);
     const fake = fakeOpenRouter({
-      chat: (req) => ({ text: req.user.includes('LEMBRETE DE FORMATO') ? completo : incompleta }),
+      chat: (req) => ({ text: req.user.includes('LEMBRETE DE FORMATO') ? completo(req) : incompleta(req) }),
     });
     const r = await comGateway(fake.fetch, () =>
       judgeStage({ ...base, responses: [resp('a', 'RESP-A'), resp('b', 'RESP-B')] }),
@@ -444,7 +444,7 @@ describe('judge (listwise) — saída estrita, nenhum parcial por omissão', () 
 
   it('um de dois juízes falha => fonte degraded; erro/bloqueio sem veredito; vazia => nao automático', async () => {
     const fake = fakeOpenRouter({
-      chat: (req) => (req.model === 'fake/j2' ? { status: 400, bodyText: 'caiu' } : { text: completo }),
+      chat: (req) => (req.model === 'fake/j2' ? { status: 400, bodyText: 'caiu' } : { text: completo(req) }),
     });
     const r = await comGateway(fake.fetch, () =>
       judgeStage({
@@ -482,9 +482,8 @@ describe.each([
   };
   /** Vence quem tem o texto TXT-C; a/b nunca decidem entre si. */
   const juizC = (req: FakeRequest) => {
-    const posB = req.user.indexOf('Candidato B');
-    const posC = req.user.indexOf('TXT-C');
-    return { text: JSON.stringify({ winner: posC >= 0 && posC < posB ? 'A' : 'B', explanation: 'c melhor' }) };
+    const cEmA = readMarkedBlock(req.user, 'CANDIDATO A') === 'TXT-C';
+    return { text: duelReply(req, cEmA ? 'A' : 'B', 'c melhor') };
   };
 
   it('ordem que falha => failedDuels (fora do placar); a e b NÃO ganham 0,5 de um empate imputado', async () => {
@@ -806,13 +805,13 @@ function fakePipeline(falhaDoB: (question: string) => boolean): FakeOpenRouter {
     catalog: ['fake/judge', 'fake/a', 'fake/b', 'fake/ref', 'fake/gen'].map((id) => catalogItem(id, 1e-6, 1e-6)),
     chat: (req) => {
       if (req.stream) return { text: `Resposta de ${req.model}` };
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"x"}' };
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A') };
       if (req.model === 'fake/ref') return { text: 'gabarito' };
-      const question = /PERGUNTA:\n(.*)/.exec(req.user)?.[1] ?? '';
-      if (req.user.includes('CANDIDATO:\nResposta de fake/b') && falhaDoB(question)) {
+      const question = questionOf(req);
+      if (candidateOf(req) === 'Resposta de fake/b' && falhaDoB(question)) {
         return { status: 400, bodyText: 'FALHA-DO-JUIZ' };
       }
-      return { text: OK_JSON('resolve') };
+      return { text: OK_JSON(req, 'resolve') };
     },
   });
 }
@@ -921,15 +920,15 @@ describe('pipeline — juiz que falha em > 10% termina inconclusive (Node e SPA)
           };
         }
         if (req.stream) return { text: req.system.includes('(persona)') ? 'Resposta boa' : 'Resposta ruim' };
-        if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"x"}' };
+        if (req.system.includes('DUELO')) return { text: duelReply(req, 'A') };
         if (req.model === 'fake/ref') return { text: 'gabarito' };
-        const question = /PERGUNTA:\n(.*)/.exec(req.user)?.[1] ?? '';
-        if (req.user.includes('CANDIDATO:\nResposta boa')) {
+        const question = questionOf(req);
+        if (candidateOf(req) === 'Resposta boa') {
           if (question.startsWith('CEN-0')) return { status: 400, bodyText: 'FALHA-DO-JUIZ-X' };
-          if (question.startsWith('CEN-1')) return { text: OK_JSON('nao', 'EXPLICACAO-Y') };
-          return { text: OK_JSON('resolve') };
+          if (question.startsWith('CEN-1')) return { text: OK_JSON(req, 'nao', 'EXPLICACAO-Y') };
+          return { text: OK_JSON(req, 'resolve') };
         }
-        return { text: OK_JSON('nao', 'ruim') };
+        return { text: OK_JSON(req, 'nao', 'ruim') };
       },
     });
     const cfg: TrainingConfig = {

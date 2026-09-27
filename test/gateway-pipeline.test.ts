@@ -21,6 +21,7 @@ import { subscribeRun, subscribeSession, getRunRecord } from '../web/src/engine/
 import { prepareOptsFor } from '../src/prepareRun.js';
 import { COST_ROLES, type CostEntry, type CostRole, type RunConfig } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -73,8 +74,9 @@ function fakeDoPipeline(): FakeOpenRouter {
       }
       if (req.model === 'fake/ref') return { text: `Gabarito: ${req.user.slice(0, 40)}`, usage };
       if (req.stream) return { text: `Resposta de ${req.model}`, usage };
-      if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}', usage };
-      return { text: '{"verdict":"resolve","explanation":"confere"}', usage };
+      // Juízes no contrato do IMPL-006: JSON estrito com o canário do pedido.
+      if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
+      return { text: pointwiseReply(req, 'resolve'), usage };
     },
   });
 }

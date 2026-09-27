@@ -210,6 +210,8 @@ export interface JudgeVerdict {
   motivo: string;
   /** @deprecated compat: records antigos guardavam so o binario. */
   acceptable?: boolean;
+  /** Canário do veredito (IMPL-006). */
+  canary?: string;
 }
 
 export interface SingleJudgeResult {
@@ -248,6 +250,8 @@ export interface ReferenceJudgeResult {
   verdictSourceByContestant?: Record<string, VerdictSource>;
   /** Motivo de cada veredito AUSENTE (IMPL-004) — sem chave em verdictByContestant. */
   verdictErrorByContestant?: Record<string, VerdictError>;
+  /** Canário de cada voto legítimo, 1 por juiz (IMPL-006). */
+  canaryByContestant?: Record<string, string[]>;
   judgeModelId: string;
   inconclusive?: boolean;
 }
@@ -256,8 +260,8 @@ export interface ReferenceJudgeResult {
 export interface DuelOutcome {
   a: string;
   b: string;
-  order1: { winner: 'a' | 'b' | 'tie'; explanation: string };
-  order2: { winner: 'a' | 'b' | 'tie'; explanation: string };
+  order1: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string };
+  order2: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string };
   /** Resultado combinado das 2 ordens. */
   outcome: 'a' | 'b' | 'tie';
   /** Quem decidiu (IMPL-004): juiz LLM ou oráculo. */
