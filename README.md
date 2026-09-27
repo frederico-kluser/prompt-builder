@@ -205,9 +205,15 @@ criador do modelo:
   allowlist, ela é recusada com o papel e o motivo na mensagem.
 - **Geral** segue consultiva (classificação por criador; China/SG → não recomendado).
 
-> ⚠️ **Não é aconselhamento jurídico.** O roteamento forçado por requisição (`provider.only` +
-> `zdr` + `data_collection: deny`) é a fase seguinte; a allowlist já expõe as tags de endpoint
-> que irão em `provider.only` (`models allowlist --area saude`).
+- **Roteamento forçado (modo "dados sensíveis", fail-closed):** em área sensível, TODA requisição
+  dos 6 papéis sai com `provider: { zdr: true, data_collection: "deny", only: [tags ZDR da
+  allowlist do modelo], allow_fallbacks: false }` — sem fallback silencioso para endpoint que
+  retém dados. Se faltar qualquer um dos 4 campos (modelo sem rota, snapshot ausente/vencido), a
+  chamada é recusada **antes** do envio. Ponto único: o gateway (`src/engine/sensitiveRouting.ts`,
+  aplicado em `OpenRouterGateway.buildBody`), igual no CLI/servidor e na SPA. As tags de cada
+  modelo: `models allowlist --area saude`.
+
+> ⚠️ **Não é aconselhamento jurídico.**
 
 - Classificação: **um só** núcleo puro, [`src/engine/lgpdCore.ts`](./src/engine/lgpdCore.ts),
   usado pelo CLI/servidor (`src/lgpd.ts`), pela SPA (`web/src/lgpd.ts`) e pelo gerador.
@@ -676,8 +682,9 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
   exatas vs estimadas). `costByContestant` é a fatia **só dos competidores**: gasto de juiz/duelo
   não é atribuível a um contestant. Os comandos `runs show`/`sessions show` trazem a quebra por
   papel (`costByRole`).
-- **LGPD:** áreas sensíveis bloqueiam o que está fora da allowlist de endpoints ZDR, mas o
-  roteamento por requisição (`provider.only`) ainda não é forçado — ver
+- **LGPD:** áreas sensíveis bloqueiam o que está fora da allowlist de endpoints ZDR e forçam o
+  roteamento por requisição (`provider.only` + `zdr` + `data_collection: deny` +
+  `allow_fallbacks: false`); a área "geral" segue consultiva — ver
   [Conformidade LGPD](#conformidade-lgpd-allowlist-por-endpoint). **Não é aconselhamento jurídico.**
 - **Sem autenticação de usuário / multiusuário:** ferramenta local; o histórico é compartilhado por
   quem acessa o servidor.

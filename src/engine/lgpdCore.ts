@@ -340,7 +340,9 @@ export type LgpdBlockReason =
   | 'nao_recomendado'
   | 'modelo_desconhecido'
   | 'sem_endpoint_zdr'
-  | 'ressalvas_excluidas';
+  | 'ressalvas_excluidas'
+  /** IMPL-040: a requisição sensível ficaria sem algum dos 4 campos de privacidade. */
+  | 'roteamento_incompleto';
 
 /** Texto curto (PT-BR) de cada motivo — UI, CLI e mensagens de erro. */
 export const LGPD_BLOCK_REASON_TEXT: Record<LgpdBlockReason, string> = {
@@ -353,6 +355,8 @@ export const LGPD_BLOCK_REASON_TEXT: Record<LgpdBlockReason, string> = {
   modelo_desconhecido: 'modelo fora do snapshot da allowlist (desconhecido ⇒ bloqueado)',
   sem_endpoint_zdr: 'sem endpoint ZDR elegível na allowlist',
   ressalvas_excluidas: 'só permitido com ressalvas, e o rigor escolhido exclui ressalvas',
+  roteamento_incompleto:
+    'requisição sensível sem os 4 campos de privacidade (zdr, data_collection, only, allow_fallbacks)',
 };
 
 export interface ModelPermission {

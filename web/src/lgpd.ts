@@ -26,10 +26,13 @@ import {
   type PiiConfigLike,
   type PiiRunReport,
 } from '../../src/engine/pii.js';
+import { sensitiveRoutingFor, type SensitiveRouting } from '../../src/engine/sensitiveRouting.js';
 
 export * from '../../src/engine/lgpdCore.js';
 // Cascata de dado pessoal PT-BR (IMPL-042) — shim do núcleo puro, igual ao Node.
 export * from '../../src/engine/pii.js';
+// Enforcement do modo sensível no gateway (IMPL-040) — o MESMO módulo do Node.
+export * from '../../src/engine/sensitiveRouting.js';
 
 let cache: Promise<LgpdData> | null = null;
 let override: LgpdData | null = null;
@@ -76,13 +79,19 @@ export async function enforceRunCompliance(
   cfg: ComplianceConfigLike & PiiConfigLike,
   now: Date | number = Date.now(),
   opts: { nested?: boolean } = {},
-): Promise<RunComplianceCheck & { piiReport?: PiiRunReport }> {
+): Promise<RunComplianceCheck & { piiReport?: PiiRunReport; sensitiveRouting?: SensitiveRouting }> {
   const check: RunComplianceCheck = cfg.compliance
     ? assertRunCompliance(cfg, await loadLgpdData(), now)
     : { sensivel: false, violations: [] };
   const pii = opts.nested ? checkRunPii(cfg) : assertRunPii(cfg);
   const piiReport = summarizeRunPii(pii);
-  return piiReport ? { ...check, piiReport } : check;
+  // IMPL-040: política do modo sensível — o chamador a liga no ledger.
+  const sensitiveRouting = check.sensivel ? sensitiveRoutingFor(cfg, await loadLgpdData(), now) : undefined;
+  return {
+    ...check,
+    ...(piiReport ? { piiReport } : {}),
+    ...(sensitiveRouting ? { sensitiveRouting } : {}),
+  };
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   type PiiConfigLike,
   type PiiRunReport,
 } from './engine/pii.js';
+import { sensitiveRoutingFor, type SensitiveRouting } from './engine/sensitiveRouting.js';
 
 /**
  * Conformidade LGPD — lado NODE (CLI + servidor). A classificação inteira é a
@@ -30,6 +31,8 @@ import {
 export * from './engine/lgpdCore.js';
 // Cascata de dado pessoal PT-BR (IMPL-042): mesma porta de entrada da LGPD.
 export * from './engine/pii.js';
+// Enforcement do modo sensível no gateway (IMPL-040).
+export * from './engine/sensitiveRouting.js';
 
 // Resolvido pela raiz do PACOTE, nao pelo cwd: instalado via npm o cwd e o
 // projeto do usuario e a leitura falharia com ENOENT. Ver src/paths.ts.
@@ -87,6 +90,12 @@ export interface EnforceRunOptions {
 export interface RunPreflightResult extends RunComplianceCheck {
   /** Campos com dado pessoal (caminho + tipos, nunca o valor) — vai para `RunRecord.piiReport`. */
   piiReport?: PiiRunReport;
+  /**
+   * IMPL-040: política do modo sensível (só em área sensível). O chamador a
+   * liga no ledger (`ledger.setSensitiveRouting`) e o gateway força
+   * `provider { zdr, data_collection:'deny', only, allow_fallbacks:false }`.
+   */
+  sensitiveRouting?: SensitiveRouting;
 }
 
 /**
@@ -108,5 +117,10 @@ export async function enforceRunCompliance(
     : { sensivel: false, violations: [] };
   const pii = opts.nested ? checkRunPii(cfg) : assertRunPii(cfg);
   const piiReport = summarizeRunPii(pii);
-  return piiReport ? { ...check, piiReport } : check;
+  const sensitiveRouting = check.sensivel ? sensitiveRoutingFor(cfg, getLgpdData(), now) : undefined;
+  return {
+    ...check,
+    ...(piiReport ? { piiReport } : {}),
+    ...(sensitiveRouting ? { sensitiveRouting } : {}),
+  };
 }

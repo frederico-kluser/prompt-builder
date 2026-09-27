@@ -1,5 +1,6 @@
 import { applyReasoning } from './reasoning.js';
 import { createPiiGuard, type PiiGuardStats } from './engine/pii.js';
+import { applySensitiveRouting } from './engine/sensitiveRouting.js';
 import type {
   CallCost,
   CostRole,
@@ -743,6 +744,10 @@ export class OpenRouterGateway {
     // obrigatorio em alguns (onde 'off' nao pode ser enviado).
     if (params.reasoningLevel) applyReasoning(body, params.reasoningLevel, model?.reasoning);
     applyMaxPrice(body, params.maxPricePerMTok);
+    // LGPD (IMPL-040): modo "dados sensiveis" FAIL-CLOSED — por ULTIMO, para
+    // nada montado acima afrouxar os 4 campos de privacidade; faltou algum,
+    // lanca aqui (antes da reserva e do fetch). Politica vem do ledger da run.
+    applySensitiveRouting(body, params.sink?.sensitiveRouting?.(), modelId, params.role ?? 'competitor');
     return body;
   }
 

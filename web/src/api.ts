@@ -106,7 +106,7 @@ export interface RunConfig {
   optimizerModelId?: string;
   judgePasses?: 1 | 2;
   iterations?: number;
-  /** Perfil de conformidade LGPD (consultivo; gravado no record). Ausente = "livre". */
+  /** Perfil de conformidade LGPD (área sensível: fail-closed, roteamento ZDR forçado — IMPL-040). Ausente = "livre". */
   compliance?: { area: string; includeRessalvas: boolean };
   /** Dado pessoal (IMPL-042): 'redact' (default) ou 'synthetic' ("so sintetico", recusa dado de aparencia real). */
   piiMode?: 'redact' | 'synthetic';
