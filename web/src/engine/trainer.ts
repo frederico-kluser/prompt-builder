@@ -1,6 +1,7 @@
 const randomUUID = (): string => crypto.randomUUID();
 import { runToCompletion } from './orchestrator';
 import { listModels } from './openrouter';
+import { enforceRunCompliance } from '../lgpd';
 import { generateContestants, llmReflectLessons } from './variator';
 import { composePrompt } from '../../../src/engine/promptGroup.js';
 import { addToPool, pickParent, sliceScores, type ParetoEntry } from '../../../src/engine/pareto.js';
@@ -302,6 +303,9 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
   let championIdInLastRun = '';
 
   try {
+    // LGPD (IMPL-041): recusa a sessão sensível fora da allowlist ANTES do
+    // reescritor da iteração 0 (que roda antes da 1ª run e do pré-voo dela).
+    await enforceRunCompliance(cfg);
     for (let i = 0; i < cfg.iterations; i++) {
       // 1) Resolve as variantes desta iteracao.
       let contestants: Contestant[];

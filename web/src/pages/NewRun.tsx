@@ -27,7 +27,15 @@ import {
   effortOptions,
   modelCaps,
 } from '../api';
-import { AREA_LIVRE, creatorPrefix, familiaFor, filterModels, type LgpdData } from '../lgpd';
+import {
+  AREA_LIVRE,
+  allowlistNotice,
+  checkRunCompliance,
+  creatorPrefix,
+  familiaFor,
+  filterModels,
+  type LgpdData,
+} from '../lgpd';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
 import {
   SmoothTabs,
@@ -957,6 +965,18 @@ export function NewRun() {
       };
     }
 
+    // LGPD (IMPL-041): área sensível é fail-closed para TODO papel que vê o
+    // dado (gerador, juiz e gabarito inclusive, que não passam pelo filtro dos
+    // participantes). Avisa aqui em vez de a run nascer e morrer no pré-voo.
+    if (lgpd) {
+      const lgpdCheck = checkRunCompliance(config, lgpd);
+      if (lgpdCheck.violations.length) {
+        return setError(
+          `LGPD (${complianceArea}): ${lgpdCheck.violations.map((v) => v.message).join('; ')}.`,
+        );
+      }
+    }
+
     setSubmitting(true);
     try {
       if (mode === 'training') {
@@ -1522,7 +1542,7 @@ export function NewRun() {
 
                 <SettingRow
                   label="Conformidade LGPD"
-                  sub="Filtra o catálogo de modelos pela área de uso. É consultivo: orienta a escolha, não muda o roteamento no OpenRouter."
+                  sub="Filtra o catálogo pela área de uso. Geral é consultiva; nas áreas sensíveis só passam modelos com endpoint ZDR na allowlist (vale também para gerador, juiz e gabarito) e o desconhecido é bloqueado."
                   wide
                 >
                   <div className="flex flex-wrap gap-1.5">
@@ -1538,6 +1558,10 @@ export function NewRun() {
                     ))}
                   </div>
                   {prunedNotice && <Banner tone="warn">{prunedNotice}</Banner>}
+                  {(() => {
+                    const aviso = allowlistNotice(lgpd, complianceArea);
+                    return aviso ? <Banner tone={aviso.tone}>{aviso.text}</Banner> : null;
+                  })()}
                 </SettingRow>
 
                 {!isLivre && (

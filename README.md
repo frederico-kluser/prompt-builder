@@ -80,7 +80,7 @@ foi consolidada na memória em 2026-09-26.)
 - [Como funciona (visão geral)](#como-funciona-visão-geral)
 - [Os três modos](#os-três-modos)
 - [Os papéis dos modelos](#os-papéis-dos-modelos)
-- [Conformidade LGPD (filtro consultivo)](#conformidade-lgpd-filtro-consultivo)
+- [Conformidade LGPD (allowlist por endpoint)](#conformidade-lgpd-allowlist-por-endpoint)
 - [Anatomia de uma etapa](#anatomia-de-uma-etapa)
 - [Sistema de pontuação](#sistema-de-pontuação)
 - [Stack tecnológica](#stack-tecnológica)
@@ -185,31 +185,40 @@ Toda run tem **modelos de apoio** (gerador + juiz) além dos participantes:
 
 ---
 
-## Conformidade LGPD (filtro consultivo)
+## Conformidade LGPD (allowlist por endpoint)
 
-No passo **Tema** do assistente há um bloco **"Propósito / Conformidade LGPD"** que **filtra o
-catálogo de modelos** conforme a área de uso e a adequação à LGPD — útil porque este repositório é
-do **Grupo Fleury** (dados de saúde = sensíveis). Você escolhe um **propósito/área** (Geral,
-Jurídico, Saúde, Financeiro, Crianças e adolescentes, Setor público — ou **"Livre"**, que mostra
-tudo) e um **rigor** (incluir ou não modelos "permitido com ressalvas"). O filtro vale para **todos**
-os seletores (participantes, gerador, juiz) e **poda** automaticamente seleções que ficaram fora —
-inclusive os defaults de origem chinesa.
+No passo **Tema** do assistente há um bloco **"Conformidade LGPD"** que **filtra o catálogo de
+modelos** conforme a área de uso — útil porque este repositório é do **Grupo Fleury** (dados de
+saúde = sensíveis). Você escolhe uma **área** (Geral, Jurídico, Saúde, Financeiro, Crianças e
+adolescentes, Setor público — ou **"Livre"**, que mostra tudo) e um **rigor** (incluir ou não
+modelos "permitido com ressalvas").
 
-> ⚠️ É **consultivo** e **não é aconselhamento jurídico**: orienta e esconde modelos, mas **não força**
-> o roteamento de providers no OpenRouter. O perfil escolhido é apenas **gravado** em
-> `RunConfig.compliance` (gancho para uma futura fase de *enforcement* — ZDR + `provider.only`).
+A unidade da política é o **endpoint** (provedor + região/variante), como no OpenRouter — não o
+criador do modelo:
 
-**Como classifica** (`web/src/lgpd.ts` + `src/data/lgpd-compliance.json`): pelo **criador** do modelo
-(prefixo do id) quando ele está nas 9 famílias do relatório; senão, por **heurística de origem**
-(China/SG → não recomendado; ocidental → permitido com ressalvas). Status ∈ `permitido` /
-`permitido com ressalvas` / `não recomendado`.
+- **Áreas sensíveis** (todas menos Geral) são **fail-closed**: um modelo só passa com criador
+  conhecido **e** ≥ 1 endpoint ZDR de provedor mapeado no snapshot. Desconhecido ⇒ bloqueado
+  (criador fora da base, provedor fora do mapa, modelo que surgiu depois da geração, área
+  inexistente). Snapshot com mais de **90 dias** (alvo 30) bloqueia a área inteira.
+- A run/sessão sensível passa por um **pré-voo** antes de qualquer chamada de LLM: se QUALQUER
+  papel que vê o dado (competidor, juiz/duelo, gerador, gabarito, reescritor) estiver fora da
+  allowlist, ela é recusada com o papel e o motivo na mensagem.
+- **Geral** segue consultiva (classificação por criador; China/SG → não recomendado).
 
-- Base de conhecimento: [`src/data/lgpd-compliance.json`](./src/data/lgpd-compliance.json) (áreas,
-  famílias, origem de providers/criadores, status ANPD, config ZDR recomendada).
-- Snapshot de referência dos modelos atuais por área:
+> ⚠️ **Não é aconselhamento jurídico.** O roteamento forçado por requisição (`provider.only` +
+> `zdr` + `data_collection: deny`) é a fase seguinte; a allowlist já expõe as tags de endpoint
+> que irão em `provider.only` (`models allowlist --area saude`).
+
+- Classificação: **um só** núcleo puro, [`src/engine/lgpdCore.ts`](./src/engine/lgpdCore.ts),
+  usado pelo CLI/servidor (`src/lgpd.ts`), pela SPA (`web/src/lgpd.ts`) e pelo gerador.
+- Base de conhecimento: [`src/data/lgpd-compliance.json`](./src/data/lgpd-compliance.json) (áreas
+  com `sensivel`, famílias, origem de providers/criadores, status ANPD, config ZDR recomendada).
+- Snapshot por endpoint (consumido em runtime, viaja no pacote npm):
   [`src/data/lgpd-allowlist.generated.json`](./src/data/lgpd-allowlist.generated.json).
-- Regenerar o snapshot: `node scripts/gen-lgpd-allowlist.mjs` (usa os endpoints **públicos**
-  `/models` e `/endpoints/zdr` — sem key).
+- Regenerar: `npm run lgpd:allowlist` (endpoints **públicos** `/models` e `/endpoints/zdr` — sem
+  key). A CI regenera toda semana e abre PR (`.github/workflows/lgpd-allowlist.yml`).
+- Conferir idade e contagens: `prompt-builder models allowlist --check [--max-age 30] [--json]`
+  (exit 3 se vencida/ausente ou com desconhecido liberado).
 - Servido em `GET /v1/benchmark/lgpd`.
 
 Detalhes para agentes na memória CoALA do projeto (`coala.py search "lgpd"`).
@@ -335,7 +344,8 @@ prompt-builder/
 │  ├─ llmVariants.ts / reasoning.ts / dedup.ts / scenarioPack.ts   # compare-llms, reasoning por papel, dedup, pacote de cenários
 │  ├─ openrouter.ts          # Cliente OpenRouter: models, chat, stream, custo, validateKey
 │  ├─ techniques.ts          # Biblioteca curada de técnicas de prompt
-│  ├─ lgpd.ts                # Serve a base de conhecimento LGPD (GET /lgpd)
+│  ├─ lgpd.ts                # Base LGPD + allowlist do pacote e pré-voo da run (Node)
+│  ├─ engine/lgpdCore.ts     # Núcleo PURO da LGPD: classificação ÚNICA, allowlist por endpoint, pré-voo
 │  ├─ events.ts / normalize.ts / storage.ts / types.ts
 │  └─ data/                  # JSON estático VERSIONADO (lgpd-compliance, lgpd-allowlist.generated)
 │
@@ -344,12 +354,12 @@ prompt-builder/
 │     ├─ main.tsx            # Router, layout, navegação
 │     ├─ api.ts              # Cliente HTTP/SSE + tipos + key no localStorage
 │     ├─ idb.ts              # Cache IndexedDB v2 (incl. store `prompts`); theme.ts / help.ts (contexts)
-│     ├─ lgpd.ts             # Classificação/filtragem de conformidade
+│     ├─ lgpd.ts             # Shim do núcleo LGPD + loader do bundle (SPA)
 │     ├─ styles.css          # Design tokens (claro/escuro)
 │     ├─ components/         # ModelSelector, Toggle, TechniqueSelector, ManualVariantsEditor, KeySetup, HelpModal
 │     └─ pages/              # NewRun (assistente 5 passos), RunsList, RunView, TrainingView, PromptsPage, Settings
 │
-├─ scripts/gen-lgpd-allowlist.mjs   # Regenera o snapshot LGPD (endpoints públicos)
+├─ scripts/gen-lgpd-allowlist.mjs   # Regenera a allowlist LGPD por endpoint (npm run lgpd:allowlist)
 ├─ .agents/skills/          # Biblioteca de Knowledge Skills (fonte única) — ver seção abaixo
 ├─ .claude/skills           # symlink → ../.agents/skills (portabilidade Claude Code)
 ├─ AGENTS.md                # Instruções mínimas para agentes de código (CLAUDE.md é symlink)
@@ -626,8 +636,9 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
   exatas vs estimadas). `costByContestant` é a fatia **só dos competidores**: gasto de juiz/duelo
   não é atribuível a um contestant. Os comandos `runs show`/`sessions show` trazem a quebra por
   papel (`costByRole`).
-- **Filtro LGPD é consultivo**, não garante conformidade (não força roteamento) — ver
-  [Conformidade LGPD](#conformidade-lgpd-filtro-consultivo). **Não é aconselhamento jurídico.**
+- **LGPD:** áreas sensíveis bloqueiam o que está fora da allowlist de endpoints ZDR, mas o
+  roteamento por requisição (`provider.only`) ainda não é forçado — ver
+  [Conformidade LGPD](#conformidade-lgpd-allowlist-por-endpoint). **Não é aconselhamento jurídico.**
 - **Sem autenticação de usuário / multiusuário:** ferramenta local; o histórico é compartilhado por
   quem acessa o servidor.
 - **Persistência em arquivo** (não em banco): ótimo para uso local, não pensado para alta escala.

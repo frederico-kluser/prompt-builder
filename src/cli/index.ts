@@ -44,6 +44,7 @@ MODELOS
   models list [filtros]    lista o catálogo do OpenRouter
   models show <id>         o que aquele modelo aceita (think levels, temperatura)
   models export -o <arq>   exporta o catálogo com capacidades de ajuste
+  models allowlist --check idade/contagem da allowlist LGPD por endpoint (sem key)
 
 CUSTO
   estimate -c <arquivo>    estima o custo antes de gastar

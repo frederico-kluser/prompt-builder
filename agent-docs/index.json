@@ -14,8 +14,8 @@
   {
     "topic": "models",
     "title": "Modelos e think levels",
-    "summary": "filtros, schema de export e como não tomar HTTP 400 no esforço",
-    "approxTokens": 900
+    "summary": "filtros, allowlist LGPD por endpoint, schema de export e como não tomar HTTP 400 no esforço",
+    "approxTokens": 1100
   },
   {
     "topic": "budget",

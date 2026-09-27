@@ -19,6 +19,7 @@ import { contestantsFromConfig } from './normalize.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { listModels } from './openrouter.js';
+import { enforceRunCompliance } from './lgpd.js';
 import { runAgentStage, aggregateAgentVerdict } from './agent/runAgentStage.js';
 import type {
   Contestant,
@@ -375,6 +376,11 @@ async function runLoop(
     const sane = sanitizeLlmVariants(record.config.competitorConfigs);
     if (sane.error) throw new Error(sane.error);
   }
+
+  // LGPD (IMPL-041): área SENSÍVEL é fail-closed — todo papel que vê o dado
+  // (competidor, juiz/duelo, gerador, gabarito, reescritor) precisa de endpoint
+  // ZDR na allowlist fresca; senão a run é recusada AQUI, antes de qualquer LLM.
+  await enforceRunCompliance(record.config);
 
   // Resolve contestants on-demand (variacao: gera as variantes via optimizer).
   if (opts.prepare) {

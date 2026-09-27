@@ -16,6 +16,7 @@ import { emitEvent } from './events';
 import { saveRun } from './storage';
 import { contestantsFromConfig } from './normalize';
 import { listModels } from './openrouter';
+import { enforceRunCompliance } from '../lgpd';
 import { BudgetLedger, isControlSignal } from '../../../src/budget.js';
 import type { Contestant, RunConfig, RunCtx, RunRecord, StageRecord, StageSpec } from './types';
 
@@ -233,6 +234,11 @@ async function runLoop(
     const sane = sanitizeLlmVariants(record.config.competitorConfigs);
     if (sane.error) throw new Error(sane.error);
   }
+
+  // LGPD (IMPL-041): área SENSÍVEL é fail-closed — todo papel que vê o dado
+  // (competidor, juiz/duelo, gerador, gabarito, reescritor) precisa de endpoint
+  // ZDR na allowlist fresca; senão a run é recusada AQUI, antes de qualquer LLM.
+  await enforceRunCompliance(record.config);
 
   // Resolve contestants on-demand (variacao: gera as variantes via optimizer).
   if (opts.prepare) {

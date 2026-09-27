@@ -6,8 +6,7 @@ import type { CostEntry, CostRole, RunCtx } from '../../src/types.js';
 export type { CostEntry, CostRole } from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
-import type { LgpdData } from './lgpd';
-import lgpdData from './data/lgpd-compliance.json';
+import { loadLgpdData, type LgpdData } from './lgpd';
 import { startRun } from './engine/orchestrator';
 import { startTraining } from './engine/trainer';
 import { generateContestants, generateBasePrompt as engineGenerateBasePrompt } from './engine/variator';
@@ -489,8 +488,9 @@ export function subscribeRunLive(id: string, onEvent: (e: any) => void): () => v
 }
 
 export async function fetchLgpd(): Promise<LgpdData> {
-  // Client-side: a base de conhecimento LGPD é empacotada no bundle.
-  return lgpdData as unknown as LgpdData;
+  // Client-side: base + allowlist de endpoints ZDR do bundle, lidas de
+  // `src/data/` (fonte única; a cópia em web/src/data sumiu — IMPL-041).
+  return loadLgpdData();
 }
 
 // -------------- Sessões de treino --------------
