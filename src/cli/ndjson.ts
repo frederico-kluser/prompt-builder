@@ -292,6 +292,12 @@ export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {
         iteration: e.iteration,
         championId: e.championId,
         gain: e.gain,
+        // IMPL-002: ganho corrigido e p ajustado lado a lado com o bruto.
+        ...(e.gainCorrected !== undefined ? { gainCorrected: e.gainCorrected } : {}),
+        ...(e.pAdjusted !== undefined ? { pAdjusted: e.pAdjusted } : {}),
+        ...(e.k !== undefined ? { k: e.k } : {}),
+        ...(e.method ? { method: e.method } : {}),
+        ...(e.minGain !== undefined ? { minGain: e.minGain } : {}),
       });
       break;
     case 'session.holdout':
@@ -307,6 +313,8 @@ export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {
         totalCostUsd: e.record.totalCostUsd,
         iterationsDone: e.record.bestPromptByIteration.length,
         ...(e.record.significance ? { significance: e.record.significance } : {}),
+        // IMPL-005: n nominal × efetivo do pareamento final (mesmo sem significância).
+        ...(e.record.pairing ? { pairing: e.record.pairing } : {}),
         ...(e.record.holdoutSkipped ? { holdoutSkipped: true } : {}),
         ...(e.record.budgetExhausted ? { budgetExhausted: true } : {}),
       });

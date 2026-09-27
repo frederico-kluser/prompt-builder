@@ -20,6 +20,7 @@ import { useTheme } from '../theme';
 import { applyEvent, denseStages, rankColor, ScoreHeatmap, FinalsPanel } from './runShared';
 import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
 import { diffLines } from '../diff';
+import { formatIterationGate, formatPValue, reportPValue } from '../engine/stats';
 import {
   SmoothTabs,
   SmoothTabsList,
@@ -627,8 +628,19 @@ export function TrainingView() {
   }
   if (session.significance !== undefined) {
     const sig = session.significance;
-    gates.push(sig === null ? 'amostra insuficiente p/ significância' : sig.pValue < 0.001 ? 'p<0.001' : `p=${sig.pValue.toFixed(3)}`);
+    // IMPL-001: relatório mostra o p BILATERAL do teste exato (o unilateral é o do gate).
+    const rep = sig === null ? null : reportPValue(sig);
+    gates.push(
+      rep === null
+        ? 'amostra insuficiente p/ significância'
+        : `${formatPValue(rep.p)} ${rep.kind === 'two-sided' ? 'bilateral' : '(bootstrap, legado)'}`,
+    );
   }
+
+  // IMPL-002: gate de cada rodada — ganho bruto × corrigido × p ajustado (max-T).
+  const gateLines = session.bestPromptByIteration
+    .filter((it) => it.gate?.test)
+    .map((it) => ({ key: it.iteration, text: `Rodada ${it.iteration + 1} — ${formatIterationGate(it.gate!)}` }));
 
   function downloadPack() {
     if (!session || !packScenarios.length) return;
@@ -738,6 +750,13 @@ export function TrainingView() {
         <Banner tone={session.holdout?.regressed ? 'error' : 'neutral'} className="mt-4">
           {gates.join(' · ')}
         </Banner>
+      )}
+      {gateLines.length > 0 && (
+        <ul className="mt-2 space-y-0.5 text-xs text-muted-foreground" aria-label="Gate de promoção por rodada">
+          {gateLines.map((l) => (
+            <li key={l.key}>{l.text}</li>
+          ))}
+        </ul>
       )}
 
       {roundShown ? (

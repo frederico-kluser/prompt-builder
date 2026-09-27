@@ -158,8 +158,9 @@ e atende três objetivos. O que muda é **quem é o "participante"** (`Contestan
   é a semente da próxima — mas **só é promovida se superar o campeão por `minGain`** (default 1
   p.p.); sem margem, a sessão **converge** e para. Os cenários são **congelados** após a iteração 0
   (`pinnedStages`, com split de **holdout**) para comparação justa; o feedback vem de **lições
-  determinísticas** das falhas do campeão (sem LLM extra). Ao final, uma run de **holdout** e uma
-  **significância bootstrap** validam o campeão. Acompanhe em `TrainingView`.
+  determinísticas** das falhas do campeão (sem LLM extra). Ao final, uma run de **holdout** e um
+  **teste pareado exato** (troca de sinais + IC por inversão) validam o campeão. Acompanhe em
+  `TrainingView`.
 - Nos modos de um modelo, o **juiz nunca é o modelo sob teste** (anti-viés de auto-preferência), e
   há a opção **"juiz em 2 ordens"** (`judgePasses: 2`) contra viés de posição.
 
@@ -334,7 +335,7 @@ prompt-builder/
 │  ├─ competitor.ts          # Roda 1 participante (streaming, retry, progresso, custo)
 │  ├─ judge.ts               # Juiz listwise (fallback — ranking cego + vereditos)
 │  ├─ gabarito.ts / refJudge.ts / duels.ts   # Julgamento por referência: gabarito, vereditos pointwise, duelos Copeland
-│  ├─ rank.ts / holdout.ts / stats.ts        # Promoção (minGain), holdout, significância bootstrap
+│  ├─ rank.ts / holdout.ts / stats.ts        # Promoção (minGain), holdout, significância pareada exata
 │  ├─ llmVariants.ts / reasoning.ts / dedup.ts / scenarioPack.ts   # compare-llms, reasoning por papel, dedup, pacote de cenários
 │  ├─ openrouter.ts          # Cliente OpenRouter: models, chat, stream, custo, validateKey
 │  ├─ techniques.ts          # Biblioteca curada de técnicas de prompt

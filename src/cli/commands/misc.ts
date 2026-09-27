@@ -13,6 +13,13 @@ import { arenaConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
 import { sampleSizeWarning } from '../../engine/judgeCalibration.js';
+import {
+  formatIterationGate,
+  formatPairCoverage,
+  formatRunCompleteness,
+  formatSignificance,
+  runCompleteness,
+} from '../../stats.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import { buildContext, buildNetworkContext, checkKey, keyFilePath, parse, removeStoredKey, writeStoredKey } from '../context.js';
 import { CliError, EXIT, fmtUsd, renderSpend, type Output } from '../output.js';
@@ -95,6 +102,7 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   if (typeof formato === 'string') {
     const p = parseArenaConfig(json);
     if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
+    for (const w of p.warnings ?? []) out.warn(w); // chave descontinuada (IMPL-012)
     const c = arenaConfigToRunConfig(p.config);
     if (!c.ok) throw new CliError(c.error, EXIT.CONFIG);
     config = c.config;
@@ -231,10 +239,14 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   }
 
   // show
+  // IMPL-005: n nominal × efetivo SEMPRE visível (runs antigas: recalculado das etapas).
+  const completeness = record.completeness ?? runCompleteness(record);
   if (out.isText) {
     out.line(`${record.id}  ${record.status}  ${record.mode}`);
     out.line(`tema: ${record.config.theme}`);
     out.line(`etapas: ${record.stages.length} · participantes: ${record.contestants.length}`);
+    const labelOf = (cid: string): string => record.contestants.find((c) => c.id === cid)?.label ?? cid;
+    for (const l of formatRunCompleteness(completeness, labelOf)) out.line(l);
     out.line();
     for (const l of renderSpend(
       record.costByRole,
@@ -263,6 +275,7 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   }
   out.result(true, 'runs.show', {
     run: record,
+    completeness,
     judgeDiagnostics: record.judgeDiagnostics ?? null,
     fairnessWarnings: record.fairnessWarnings ?? [],
     lifecycleAlerts: record.modelLifecycle?.alerts ?? [],
@@ -478,6 +491,15 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     out.line(`${record.id}  ${record.status}`);
     out.line(`tema: ${record.config.theme}`);
     out.line(`iterações: ${record.bestPromptByIteration.length}/${record.config.iterations}`);
+    // IMPL-002: gate de cada iteração — bruto × corrigido × p ajustado (max-T).
+    for (const it of record.bestPromptByIteration) {
+      if (it.gate) out.line(`  iteração ${it.iteration + 1}: ${formatIterationGate(it.gate)}`);
+    }
+    // IMPL-005: pareamento final (n nominal × efetivo) e significância.
+    if (record.pairing) {
+      out.line(`pareamento (${record.pairing.source}): ${formatPairCoverage(record.pairing)}`);
+    }
+    if (record.significance) out.line(`significância: ${formatSignificance(record.significance)}`);
     out.line();
     for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd)) out.line(l);
   }
@@ -535,7 +557,8 @@ export async function cmdConfig(argv: string[]): Promise<number> {
       },
       effort: { judge: 'high', datagen: 'low' },
       variation: { optimize: true, techniques: ['persona', 'constraints', 'format'] },
-      training: { iterations: 3, minGain: 1, holdoutRatio: 0.2 },
+      // minGain ausente = margem prática default max(1; 50/n) (IMPL-002).
+      training: { iterations: 3, holdoutRatio: 0.2 },
       finalists: 3,
       limits: { maxOutputTokens: 600 },
     };
@@ -557,6 +580,7 @@ export async function cmdConfig(argv: string[]): Promise<number> {
   if (typeof formato === 'string') {
     const p = parseArenaConfig(json);
     if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
+    for (const w of p.warnings ?? []) out.warn(w); // chave descontinuada (IMPL-012)
     const c = arenaConfigToRunConfig(p.config);
     if (!c.ok) throw new CliError(c.error, EXIT.CONFIG);
     out.info(`válido — ${arenaConfigSummary(p.config)}`);

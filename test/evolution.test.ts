@@ -127,27 +127,45 @@ describe('holdout.ts — split intercalado com piso', () => {
   });
 });
 
-describe('stats.ts — bootstrap pareado determinístico', () => {
+// IMPL-001: o bootstrap percentil saiu (não é p-valor); o golden abaixo passou
+// a ser o do teste EXATO por troca de sinais + IC por inversão. As sondas N2 e
+// a força bruta de referência vivem em test/stats-exact.test.ts.
+describe('stats.ts — teste pareado exato determinístico', () => {
   it('n < 5 pares → null (amostra insuficiente)', () => {
     expect(pairedSignificance([1, 1, 1, 1], [1, 1, 1, 1])).toBeNull();
     expect(pairedSignificance([1, 1, 1, 1, 1], [1, 1, 1, 1, 1])).not.toBeNull();
   });
 
-  it('mesma seed ⇒ mesmo resultado (golden)', () => {
+  it('golden: p exato 2^−6 (6 diffs +0,5, 4 zeros) e IC por inversão [12,5; 50]', () => {
     const control = [0.5, 0, 1, 0.5, 1, 0, 0.5, 1, 1, 0];
     const champion = [1, 0.5, 1, 1, 1, 0.5, 1, 1, 1, 0.5];
     expect(pairedSignificance(control, champion)).toMatchInlineSnapshot(`
       {
         "ci95Pp": [
-          15,
-          45,
+          12.5,
+          50,
         ],
+        "ciMethod": "exact",
+        "completeness": 1,
+        "excludedPairs": 0,
         "meanDiffPp": 30,
+        "method": "exact",
         "n": 10,
-        "pValue": 0,
+        "nEfetivo": 10,
+        "nNonZero": 6,
+        "pMinUnilateral": 0.015625,
+        "pValue": 0.015625,
+        "pValueTwoSided": 0.03125,
+        "signTest": {
+          "negative": 0,
+          "pValue": 0.015625,
+          "pValueTwoSided": 0.03125,
+          "positive": 6,
+        },
       }
     `);
-    // Determinismo puro: recalcular não pode mover o p-valor.
+    // Determinismo puro: recalcular não pode mover o p-valor (o caminho exato
+    // não sorteia nada; o Monte Carlo é semeado).
     expect(pairedSignificance(control, champion)).toEqual(pairedSignificance(control, champion));
   });
 

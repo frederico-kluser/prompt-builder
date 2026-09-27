@@ -2,7 +2,7 @@ import { requestPersistentStorage, type StorageSubject } from './storageHealth';
 import type { ExpectedSpec } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
-import type { CostEntry, CostRole, RunCtx, RunPhase } from '../../src/types.js';
+import type { CostEntry, CostRole, RunCtx, RunPhase, StoredSignificance } from '../../src/types.js';
 export type { CostEntry, CostRole, RunPhase } from '../../src/types.js';
 import {
   estimateLaunchCost,
@@ -14,6 +14,22 @@ export type {
   LaunchCostEstimate,
 } from '../../src/engine/costConfirmation.js';
 export { COST_CONFIRM_THRESHOLD_USD, costConfirmationReason } from '../../src/engine/costConfirmation.js';
+// Significância pareada: fonte única em src/types.ts (IMPL-001), como os tipos de custo.
+export type { PairedSignificance, SignificanceMethod, StoredSignificance } from '../../src/types.js';
+// Pareamento honesto (IMPL-005): fonte única em src/types.ts, como a significância.
+import type { IterationGate, RunCompleteness, SessionPairing } from '../../src/types.js';
+export type {
+  BestOfKEntry,
+  BestOfKTest,
+  GateHoldReason,
+  IterationGate,
+  MultiplicityMethod,
+  ObservationCoverage,
+  PairCoverage,
+  PairSensitivity,
+  RunCompleteness,
+  SessionPairing,
+} from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelLifecycleSnapshot } from '../../src/engine/modelLifecycle.js';
 export type {
@@ -177,7 +193,11 @@ export interface RunConfig {
   scenarioSeed?: StageSpec[];
   /** compare-llms: variantes de config {modelo, temp, reasoning}. */
   competitorConfigs?: { modelId: string; temperature?: number; reasoningLevel?: ReasoningLevel }[];
-  /** training: margem minima de ganho (pp) p/ promover; sem ganho = convergiu. Default 1.0. */
+  /**
+   * training: margem PRATICA minima de ganho (pp) p/ promover; sem ganho =
+   * convergiu. Ausente = max(1; 50/n) (meia granularidade — IMPL-002); o gate
+   * tambem exige p ajustado (max-T sobre as K variantes) <= 0,05.
+   */
   minGain?: number;
   /** training: fracao de cenarios p/ holdout (clamp [0, 0.5]). Default 0.2. */
   holdoutRatio?: number;
@@ -354,6 +374,8 @@ export interface RunRecord {
   costByContestant?: Record<string, number>;
   /** Judge-score agregado por contestant: (resolve + 0.5*parcial) / total * 100. */
   judgeScoreByContestant?: Record<string, number>;
+  /** n nominal × efetivo por contestant e pares com a regua (IMPL-005). */
+  completeness?: RunCompleteness;
   /** Ids dos finalistas (top-N por judge-score) que disputaram os duelos. */
   finalists?: string[];
   /** Classificacao final agregada (Copeland dos duelos / pontos do placar). */
@@ -660,6 +682,8 @@ export interface SessionIterationSummary {
   golds?: number;
   silvers?: number;
   bronzes?: number;
+  /** Gate da iteracao com o pareamento honesto (IMPL-005). */
+  gate?: IterationGate;
 }
 
 export interface SessionRecord {
@@ -692,14 +716,19 @@ export interface SessionRecord {
     championScore: number;
     gain: number;
     regressed: boolean;
+    /** IMPL-005: pares com veredito nos DOIS lados (scores sao medias SO sobre eles). */
+    nEfetivo?: number;
+    excludedPairs?: number;
+    completeness?: number;
   };
-  /** Significancia estatistica (bootstrap pareado). null = amostra insuficiente. */
-  significance?: {
-    n: number;
-    meanDiffPp: number;
-    ci95Pp: [number, number];
-    pValue: number;
-  } | null;
+  /**
+   * Significancia estatistica: teste pareado EXATO por troca de sinais + IC por
+   * inversao (IMPL-001; antes era bootstrap percentil). null = < 5 pares. Tipo
+   * canonico em src/types.ts (fonte unica, sessoes antigas so tem os 4 campos base).
+   */
+  significance?: StoredSignificance | null;
+  /** Pareamento final (IMPL-005): n nominal × efetivo, mesmo com significance null. */
+  pairing?: SessionPairing;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
 }
@@ -976,6 +1005,8 @@ export async function readImportFile(
       : undefined;
   if (formato === ARENA_CONFIG_FORMAT) {
     const r = parseArenaConfig(json);
+    // Chave descontinuada (ex.: training.halving, IMPL-012): lida e ignorada.
+    if (r.ok) for (const w of r.warnings ?? []) console.warn(w);
     return r.ok ? { ok: true, data: { kind: 'config', config: r.config } } : r;
   }
   // Aceita tambem o nome legado: pacotes ja exportados pelo usuario nao podem

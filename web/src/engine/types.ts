@@ -2,7 +2,7 @@
 import type { ExpectedSpec } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
-import type { CostEntry, CostRole, PricingTier, RunPhase } from '../../../src/types.js';
+import type { CostEntry, CostRole, PricingTier, RunPhase, StoredSignificance } from '../../../src/types.js';
 import type { ModelLifecycleSnapshot } from '../../../src/engine/modelLifecycle.js';
 
 // Ciclo de vida de modelos (IMPL-019): fonte única em src/engine/modelLifecycle.ts.
@@ -30,6 +30,31 @@ export type {
   RunPhase,
 } from '../../../src/types.js';
 export { COST_ROLES } from '../../../src/types.js';
+
+// Significância pareada: FONTE ÚNICA em src/types.ts (IMPL-001). O cálculo já é
+// shim (src/stats.ts), então o shape que ele devolve também não se duplica.
+export type {
+  PairedSignificance,
+  SignificanceMethod,
+  StoredSignificance,
+} from '../../../src/types.js';
+// Pareamento honesto (IMPL-005): FONTE ÚNICA em src/types.ts, como a significância.
+import type { IterationGate, MultiplicityMethod, RunCompleteness, SessionPairing } from '../../../src/types.js';
+export type {
+  BestOfKEntry,
+  BestOfKTest,
+  GateConclusion,
+  GateHoldReason,
+  IterationGate,
+  MultiplicityMethod,
+  ObservationCoverage,
+  PairCoverage,
+  PairSensitivity,
+  RunCompleteness,
+  SensitivityCase,
+  SessionPairing,
+  SignificanceConclusion,
+} from '../../../src/types.js';
 
 export interface OpenRouterModelPricing {
   prompt: number; // USD per token
@@ -271,7 +296,12 @@ export interface TrainingConfig extends RunConfigBase, SingleModelFields {
   mode: 'training';
   /** Numero fixo de iteracoes. */
   iterations: number;
-  /** Margem minima de ganho (pp) sobre o campeao para promover; sem ganho = convergiu. Default 1.0. */
+  /**
+   * Margem PRATICA minima de ganho (pp) sobre o campeao para promover; sem ganho
+   * = convergiu. Ausente = max(1; 50/n), n = pares com veredito nos dois lados
+   * (meia granularidade — IMPL-002). Alem da margem, o gate exige p ajustado
+   * (max-T sobre as K variantes) <= 0,05.
+   */
   minGain?: number;
   /** Fracao de cenarios reservada p/ holdout (clamp [0, 0.5]). Default 0.2. */
   holdoutRatio?: number;
@@ -285,13 +315,9 @@ export interface TrainingConfig extends RunConfigBase, SingleModelFields {
    * 0/ausente = comportamento clássico (1).
    */
   paretoPool?: number;
-  /**
-   * Sequential halving (F4.3, §8.5): com muitas variantes, uma passada de
-   * TRIAGEM num subconjunto de cenários corta as piores antes da rodada
-   * completa (o controle nunca é eliminado). Reduz custo sem afetar o ranking
-   * final. Ausente/false = comportamento atual.
-   */
-  halving?: boolean;
+  // `halving` (F4.3) foi REMOVIDO no IMPL-012 (R-02b:REC-3, H4/H5/H6 — ver o
+  // comentário no laço de `trainer.ts`). Records antigos que ainda o tragam
+  // são lidos normalmente; o campo é ignorado.
 }
 export type RunConfig = CompareConfig | VariationConfig | TrainingConfig;
 
@@ -520,6 +546,8 @@ export interface RunRecord {
   costByContestant?: Record<string, number>;
   /** Judge-score agregado por contestant: (resolve + 0.5*parcial) / total * 100. */
   judgeScoreByContestant?: Record<string, number>;
+  /** n nominal × efetivo por contestant e pares com a regua (IMPL-005). */
+  completeness?: RunCompleteness;
   /** Ids dos finalistas (top-N por judge-score) que disputaram os duelos. */
   finalists?: string[];
   /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
@@ -598,6 +626,8 @@ export interface SessionIterationSummary {
   golds?: number;
   silvers?: number;
   bronzes?: number;
+  /** Gate da iteracao com o pareamento honesto (IMPL-005). */
+  gate?: IterationGate;
 }
 
 export interface SessionRecord {
@@ -633,14 +663,19 @@ export interface SessionRecord {
     championScore: number;
     gain: number;
     regressed: boolean;
+    /** IMPL-005: pares com veredito nos DOIS lados (scores sao medias SO sobre eles). */
+    nEfetivo?: number;
+    excludedPairs?: number;
+    completeness?: number;
   };
-  /** Significancia estatistica (bootstrap pareado). null = amostra insuficiente. */
-  significance?: {
-    n: number;
-    meanDiffPp: number;
-    ci95Pp: [number, number];
-    pValue: number;
-  } | null;
+  /**
+   * Significancia estatistica: teste pareado EXATO por troca de sinais + IC por
+   * inversao (IMPL-001; antes era bootstrap percentil). null = < 5 pares. Tipo
+   * canonico em src/types.ts (fonte unica, sessoes antigas so tem os 4 campos base).
+   */
+  significance?: StoredSignificance | null;
+  /** Pareamento final (IMPL-005): n nominal × efetivo, mesmo com significance null. */
+  pairing?: SessionPairing;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
   /** Pool Pareto final (F4.1): prompts não-dominados por fatia que sobreviveram. */
@@ -760,7 +795,24 @@ export type SessionEvent =
       runId: string;
       winnerContestantId: string;
     }
-  | { type: 'iteration.promoted'; sessionId: string; iteration: number; championId: string; gain: number }
+  | {
+      type: 'iteration.promoted';
+      sessionId: string;
+      iteration: number;
+      championId: string;
+      /** Ganho BRUTO (p.p.) — o máximo entre K (mantido por compatibilidade). */
+      gain: number;
+      /** IMPL-002: ganho corrigido do winner's curse (p.p.), lado a lado com o bruto. */
+      gainCorrected?: number;
+      /** IMPL-002: p ajustado (FWER sobre as K variantes) da promovida. */
+      pAdjusted?: number;
+      /** IMPL-002: variantes testadas na iteração (a família do FWER). */
+      k?: number;
+      /** IMPL-002: correção de multiplicidade aplicada. */
+      method?: MultiplicityMethod;
+      /** IMPL-002: margem aplicada (p.p.). */
+      minGain?: number;
+    }
   | { type: 'session.holdout'; sessionId: string; holdout: SessionRecord['holdout'] }
   | { type: 'session.converged'; sessionId: string; iteration: number }
   | { type: 'session.finished'; sessionId: string; record: SessionRecord }

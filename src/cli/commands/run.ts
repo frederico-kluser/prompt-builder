@@ -13,6 +13,7 @@ import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
 import { hasGabarito, toStageSpec } from '../../engine/libraryCore.js';
 import { estimateInputFromConfig, estimateRunCost, toPerMTok } from '../../estimate.js';
+import { formatGateSummary, formatSignificance } from '../../stats.js';
 import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
 import { buildNetworkContext, checkKey, isAgentContext, parse, type NetworkContext } from '../context.js';
 import { emitRunEvent, emitSessionEventNdjson } from '../ndjson.js';
@@ -131,6 +132,8 @@ async function readConfigFile(file: string): Promise<RunConfig> {
   if (typeof formato === 'string') {
     const parsed = parseArenaConfig(json);
     if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG);
+    // Chave descontinuada (ex.: training.halving, IMPL-012): narração no stderr.
+    for (const w of parsed.warnings ?? []) process.stderr.write(`! ${w}\n`);
     const conv = arenaConfigToRunConfig(parsed.config);
     if (!conv.ok) throw new CliError(conv.error, EXIT.CONFIG);
     // F1/P0.1: `scenarios.from: 'library'` — o config aponta o banco curado
@@ -543,7 +546,17 @@ async function runTraining(
           );
         }
         if (e.type === 'iteration.promoted' && out.isText) {
-          out.info(`  iteração ${e.iteration + 1}: promovido (+${e.gain.toFixed(1)}pp)`);
+          // IMPL-002: bruto (máximo entre K) e corrigido lado a lado com o p ajustado.
+          out.info(
+            `  iteração ${e.iteration + 1}: promovido — ${formatGateSummary({
+              gainPp: e.gain,
+              gainCorrectedPp: e.gainCorrected,
+              pAdjusted: e.pAdjusted,
+              k: e.k,
+              method: e.method,
+              minGain: e.minGain,
+            })}`,
+          );
         }
       });
     },
@@ -571,10 +584,8 @@ async function runTraining(
       );
     }
     if (record.significance) {
-      out.line(
-        `Significância  p=${record.significance.pValue.toFixed(3)} · ` +
-          `IC95 [${record.significance.ci95Pp[0].toFixed(1)}, ${record.significance.ci95Pp[1].toFixed(1)}]pp`,
-      );
+      // IMPL-001: relatório mostra o p BILATERAL (o unilateral é o do gate).
+      out.line(`Significância  ${formatSignificance(record.significance)}`);
     }
     if (record.holdoutSkipped) {
       out.line();

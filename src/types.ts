@@ -417,7 +417,12 @@ export interface TrainingConfig extends RunConfigBase, SingleModelFields {
   mode: 'training';
   /** Numero fixo de iteracoes. */
   iterations: number;
-  /** Margem minima de ganho (pp) sobre o campeao para promover; sem ganho = convergiu. Default 1.0. */
+  /**
+   * Margem PRATICA minima de ganho (pp) sobre o campeao para promover; sem ganho
+   * = convergiu. Ausente = max(1; 50/n), n = pares com veredito nos dois lados
+   * (meia granularidade — IMPL-002). Alem da margem, o gate exige p ajustado
+   * (max-T sobre as K variantes) <= 0,05.
+   */
   minGain?: number;
   /** Fracao de cenarios reservada p/ holdout (clamp [0, 0.5]). Default 0.2. */
   holdoutRatio?: number;
@@ -438,13 +443,9 @@ export interface TrainingConfig extends RunConfigBase, SingleModelFields {
    * 0/ausente = comportamento clássico (1).
    */
   paretoPool?: number;
-  /**
-   * Sequential halving (F4.3, §8.5): com muitas variantes, uma passada de
-   * TRIAGEM num subconjunto de cenários corta as piores antes da rodada
-   * completa (o controle nunca é eliminado). Reduz custo sem afetar o ranking
-   * final. Ausente/false = comportamento atual.
-   */
-  halving?: boolean;
+  // `halving` (F4.3) foi REMOVIDO no IMPL-012 (R-02b:REC-3, H4/H5/H6 — ver o
+  // comentário no laço de `trainer.ts`). Records antigos que ainda o tragam
+  // são lidos normalmente; o campo é ignorado.
 }
 export type RunConfig = CompareConfig | VariationConfig | TrainingConfig;
 
@@ -706,6 +707,11 @@ export interface RunRecord {
   /** Judge-score agregado por contestant: (resolve + 0.5*parcial) / total * 100. */
   judgeScoreByContestant?: Record<string, number>;
   /**
+   * n nominal × efetivo por contestant e pareamento com a régua (IMPL-005).
+   * Ausente em runs antigas — `runs show` recalcula a partir das etapas.
+   */
+  completeness?: RunCompleteness;
+  /**
    * Fração de 'resolve' entre os vereditos PLANOS (todas as etapas x todas as
    * repetições) por contestant, em 0..1 com 3 casas. Presente apenas quando ha
    * contestants de runner 'agent' (§18.4): e o numero que separa "resolve
@@ -789,7 +795,240 @@ export interface SessionIterationSummary {
   golds?: number;
   silvers?: number;
   bronzes?: number;
+  /** Gate da iteração com o pareamento honesto (IMPL-005); ausente em sessões antigas. */
+  gate?: IterationGate;
 }
+
+/** Como um p-valor/IC de troca de sinais foi calculado. */
+export type SignificanceMethod = 'exact' | 'monte-carlo';
+
+/**
+ * Teste pareado campeão − controle (`pairedSignificance`, src/stats.ts — IMPL-001,
+ * R-04:REC-1). Tudo em PONTOS de judge-score. `pValue` é UNILATERAL (H1: campeão >
+ * controle, o do gate); o relatório mostra `pValueTwoSided`.
+ */
+export interface PairedSignificance {
+  /** Pares nominais oferecidos ao teste (inclui os excluídos por observação ausente). */
+  n: number;
+  meanDiffPp: number;
+  /** IC95% bilateral por inversão do teste; [-100, 100] = n sem resolução p/ excluir nada. */
+  ci95Pp: [number, number];
+  /** p unilateral (H1: campeão > controle). */
+  pValue: number;
+  /** p bilateral — o que o relatório exibe. */
+  pValueTwoSided: number;
+  /** Pares com observação nos DOIS lados (n − excludedPairs): os que entraram no teste. */
+  nEfetivo: number;
+  /** n′: pares com diferença ≠ 0 — os únicos que informam o teste. */
+  nNonZero: number;
+  /** Menor p unilateral atingível (2^−n′): com n′ = 5 nem o bilateral alcança 0,05. */
+  pMinUnilateral: number;
+  /** Pares excluídos por observação ausente em algum lado (nunca imputados). */
+  excludedPairs: number;
+  /** nEfetivo / n. */
+  completeness: number;
+  /** Método do p-valor: enumeração exata ou Monte Carlo semeado (B = 10.000). */
+  method: SignificanceMethod;
+  /** Método do IC (pode ser Monte Carlo com p exato quando há muitos valores distintos). */
+  ciMethod: SignificanceMethod;
+  /** Teste do sinal exato (sensibilidade): positivos/negativos entre os não nulos. */
+  signTest: { positive: number; negative: number; pValue: number; pValueTwoSided: number };
+  /**
+   * Sensibilidade pior/melhor caso (IMPL-005) — só quando os pares excluídos
+   * passam de 10% de `n`. `inconclusive` = a conclusão muda entre os casos.
+   */
+  sensitivity?: PairSensitivity<SignificanceConclusion>;
+}
+
+// ----------------------------------------------------------------------------
+// Pareamento honesto (IMPL-005, R-04:REC-2). Par sem veredito sai DOS DOIS
+// lados — nunca é imputado como 0/'nao' — e a diferença entre n nominal e n
+// efetivo fica gravada e visível. Fonte única aqui; o web re-exporta.
+// ----------------------------------------------------------------------------
+
+/**
+ * Cobertura de um pareamento campeão × controle: quantos pares havia, quantos
+ * entraram (observação nos DOIS lados) e as médias SÓ sobre os pares completos.
+ */
+export interface PairCoverage {
+  /** Pares nominais (etapas oferecidas ao pareamento, inclusive as sem veredito). */
+  n: number;
+  /** Pares com observação nos DOIS lados — os únicos que entram em médias e teste. */
+  nEfetivo: number;
+  /** n − nEfetivo: pares excluídos dos dois lados (nunca imputados). */
+  excludedPairs: number;
+  /** nEfetivo / n (4 casas); 1 quando n = 0 (nada faltou). */
+  completeness: number;
+  /** Judge-score médio do controle sobre os pares completos (p.p.); null sem par completo. */
+  controlMeanPp: number | null;
+  /** Judge-score médio do campeão sobre os pares completos (p.p.); null sem par completo. */
+  championMeanPp: number | null;
+  /** Δ = campeão − controle sobre os pares completos (p.p.); null sem par completo. */
+  meanDiffPp: number | null;
+  /**
+   * Δ imputando os ausentes no PIOR caso (campeão perde todos: 0; controle ganha
+   * todos: 1) — só quando as exclusões passam de 10% de `n`.
+   */
+  worstMeanDiffPp?: number;
+  /** Δ imputando os ausentes no MELHOR caso (o inverso do pior) — idem. */
+  bestMeanDiffPp?: number;
+}
+
+/** Conclusão do relatório de significância (teste BILATERAL a 5%). */
+export type SignificanceConclusion = 'better' | 'worse' | 'no-difference';
+/** Conclusão do gate de promoção (Δ ≥ minGain e p ajustado ≤ α — IMPL-002). */
+export type GateConclusion = 'promote' | 'hold';
+
+/** Um dos três cenários da análise de sensibilidade. */
+export interface SensitivityCase<C extends string = string> {
+  /** Δ campeão − controle neste cenário (p.p.). */
+  meanDiffPp: number;
+  /** p unilateral (H1: campeão > controle), quando a conclusão vem de um teste. */
+  pValue?: number;
+  /** p bilateral, idem. */
+  pValueTwoSided?: number;
+  conclusion: C;
+}
+
+/**
+ * Análise de sensibilidade pior/melhor caso (R-04:REC-2): obrigatória quando as
+ * exclusões passam de 10% dos pares. `observed` usa só os pares completos;
+ * `worst`/`best` usam TODOS os pares, com os ausentes imputados no extremo.
+ * Conclusão que muda entre os cenários → `inconclusive` ("inconclusivo").
+ */
+export interface PairSensitivity<C extends string = string> {
+  /** excludedPairs / n que disparou a análise. */
+  excludedFraction: number;
+  /** Limiar aplicado (0,1) — gravado para a decisão ser reproduzível. */
+  threshold: number;
+  observed: SensitivityCase<C>;
+  worst: SensitivityCase<C>;
+  best: SensitivityCase<C>;
+  inconclusive: boolean;
+}
+
+/** Correção de multiplicidade do gate da melhor de K (IMPL-002). */
+export type MultiplicityMethod = 'max-t' | 'holm';
+
+/** Uma variante no teste da melhor de K (escala p.p.). */
+export interface BestOfKEntry {
+  /** Δ pareado variante − régua (p.p.) sobre os pares completos. */
+  gainPp: number;
+  /** Pares completos com a régua. */
+  nEfetivo: number;
+  /** p unilateral marginal (sem correção). */
+  pRaw: number;
+  /** p unilateral ajustado (FWER sobre as K). */
+  pAdjusted: number;
+}
+
+/**
+ * Teste da melhor de K de UMA iteração (IMPL-002, R-04:REC-3): max-T por
+ * permutação (Westfall-Young step-down, troca de sinais CONJUNTA por cenário)
+ * ou Holm (fallback). Tudo UNILATERAL (H1: variante > régua).
+ */
+export interface BestOfKTest {
+  method: MultiplicityMethod;
+  /** Distribuição nula por enumeração exata ou Monte Carlo semeado. */
+  enumeration: SignificanceMethod;
+  /** 2^m vetores de sinais (exato) ou B (Monte Carlo). */
+  permutations: number;
+  /** Seed do Monte Carlo (ausente no exato). */
+  seed?: number;
+  /** α do gate (FWER unilateral). */
+  alpha: number;
+  /** Variantes testadas — a família do FWER (as que têm ≥ 1 par completo). */
+  k: number;
+  /** Cenários com ≥ 1 par completo. */
+  nScenarios: number;
+  /** p ajustado do `bestId` — o que o gate compara com `alpha`. */
+  pAdjusted: number;
+  /** p marginal do `bestId` (sem correção) — referência. */
+  pRaw: number;
+  /** Por variante (chave = contestantId). */
+  byContestant: Record<string, BestOfKEntry>;
+}
+
+/** Condição do gate que segurou a promoção (IMPL-002). */
+export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance';
+
+/**
+ * Gate de promoção de UMA iteração do treino, com o pareamento honesto
+ * best × régua (IMPL-005) e o teste da melhor de K (IMPL-002). Promove só se
+ * Δ ≥ minGain E p ajustado ≤ α E a decisão sobrevive à sensibilidade.
+ */
+export interface IterationGate {
+  controlId: string;
+  bestId: string;
+  /** Margem aplicada (p.p.): a do config, ou o default max(1; 50/nEfetivo). */
+  minGain: number;
+  /** IMPL-002: `config` = minGain explícito; `default` = max(1; 50/n). Ausente em sessões antigas. */
+  minGainSource?: 'config' | 'default';
+  /**
+   * Δ best − régua (p.p.) só sobre os pares completos (0 sem par completo). É o
+   * ganho BRUTO — o máximo entre K, inflado pela seleção (winner's curse).
+   */
+  gainPp: number;
+  /**
+   * IMPL-002: ganho CORRIGIDO do winner's curse (p.p.) = bruto − inflação
+   * esperada da seleção entre K. Conservador; igual ao bruto com K = 1.
+   */
+  gainCorrectedPp?: number;
+  pairing: PairCoverage;
+  /** IMPL-002: o teste da melhor de K (ausente em sessões antigas). */
+  test?: BestOfKTest;
+  /** IMPL-002: o que segurou a promoção (ausente quando promoveu). */
+  heldBy?: GateHoldReason[];
+  /** Presente quando exclusões > 10%: a promoção só vale se for robusta. */
+  sensitivity?: PairSensitivity<GateConclusion>;
+  /** `inconclusive` = a decisão muda no pior/melhor caso → NÃO promove. */
+  decision: 'promoted' | 'held' | 'inconclusive';
+}
+
+/** Pareamento final da sessão (holdout, ou a última run de treino sem holdout). */
+export interface SessionPairing extends PairCoverage {
+  source: 'holdout' | 'training';
+  controlId: string;
+  championId: string;
+}
+
+/** Observações de UM contestant numa run (IMPL-005). */
+export interface ObservationCoverage {
+  /** Etapas nominais da run (todas, inclusive puladas/cortadas). */
+  n: number;
+  /** Etapas com veredito na régua primária da run. */
+  nEfetivo: number;
+  /** n − nEfetivo. */
+  missing: number;
+  /** nEfetivo / n (4 casas). */
+  completeness: number;
+  /**
+   * Por que faltou: o `kind` do `verdictErrorByContestant` do juiz (IMPL-004),
+   * `stage_error` (etapa pulada), `stage_incomplete` (cortada), `no_reference`
+   * (etapa fora da régua primária) ou `no_verdict` (sem motivo registrado).
+   */
+  missingByReason?: Record<string, number>;
+}
+
+/** Completude da run: n nominal × efetivo por contestant e pares com a régua. */
+export interface RunCompleteness {
+  /** Etapas nominais da run. */
+  n: number;
+  /** Régua primária das observações: juiz por referência (pointwise) ou listwise. */
+  ruler: 'reference' | 'listwise';
+  byContestant: Record<string, ObservationCoverage>;
+  /** Régua da run (`holdout-control` > `carry` > `original`), quando existe. */
+  controlId?: string;
+  /** Pareamento de cada contestant com a régua (chave = contestantId). */
+  vsControl?: Record<string, PairCoverage>;
+}
+
+/**
+ * `PairedSignificance` como fica gravado na sessão: sessões anteriores ao
+ * IMPL-001 (bootstrap) só têm os 4 campos de base — os demais são opcionais.
+ */
+export type StoredSignificance = Pick<PairedSignificance, 'n' | 'meanDiffPp' | 'ci95Pp' | 'pValue'> &
+  Partial<Omit<PairedSignificance, 'n' | 'meanDiffPp' | 'ci95Pp' | 'pValue'>>;
 
 export interface SessionRecord {
   id: string;
@@ -802,21 +1041,33 @@ export interface SessionRecord {
   startedAt: string;
   finishedAt?: string;
   error?: string;
-  /** Gate de holdout: re-score campeao vs controle nos cenarios reservados. */
+  /**
+   * Gate de holdout: re-score campeao vs controle nos cenarios reservados.
+   * Desde o IMPL-005 os scores sao medias SO sobre os pares com veredito nos
+   * DOIS lados (`n` segue nominal; `nEfetivo`/`excludedPairs`/`completeness`
+   * dizem quantos entraram — ausentes em sessoes antigas).
+   */
   holdout?: {
     n: number;
     controlScore: number;
     championScore: number;
     gain: number;
     regressed: boolean;
+    nEfetivo?: number;
+    excludedPairs?: number;
+    completeness?: number;
   };
-  /** Significancia estatistica (bootstrap pareado). null = amostra insuficiente. */
-  significance?: {
-    n: number;
-    meanDiffPp: number;
-    ci95Pp: [number, number];
-    pValue: number;
-  } | null;
+  /**
+   * Significancia estatistica: teste pareado EXATO por troca de sinais + IC por
+   * inversao (IMPL-001; antes era bootstrap percentil). null = < 5 pares.
+   */
+  significance?: StoredSignificance | null;
+  /**
+   * Pareamento final (IMPL-005): n nominal × efetivo, pares excluidos e
+   * completude da comparacao campeao × controle — presente MESMO quando
+   * `significance` e null (n efetivo < 5), que e justamente quando importa.
+   */
+  pairing?: SessionPairing;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
   /** Pool Pareto final (F4.1): prompts não-dominados por fatia que sobreviveram. */
@@ -962,7 +1213,24 @@ export type SessionEvent =
       runId: string;
       winnerContestantId: string;
     }
-  | { type: 'iteration.promoted'; sessionId: string; iteration: number; championId: string; gain: number }
+  | {
+      type: 'iteration.promoted';
+      sessionId: string;
+      iteration: number;
+      championId: string;
+      /** Ganho BRUTO (p.p.) — o máximo entre K (mantido por compatibilidade). */
+      gain: number;
+      /** IMPL-002: ganho corrigido do winner's curse (p.p.), lado a lado com o bruto. */
+      gainCorrected?: number;
+      /** IMPL-002: p ajustado (FWER sobre as K variantes) da promovida. */
+      pAdjusted?: number;
+      /** IMPL-002: variantes testadas na iteração (a família do FWER). */
+      k?: number;
+      /** IMPL-002: correção de multiplicidade aplicada. */
+      method?: MultiplicityMethod;
+      /** IMPL-002: margem aplicada (p.p.). */
+      minGain?: number;
+    }
   | { type: 'session.holdout'; sessionId: string; holdout: SessionRecord['holdout'] }
   | { type: 'session.converged'; sessionId: string; iteration: number }
   | { type: 'session.finished'; sessionId: string; record: SessionRecord }

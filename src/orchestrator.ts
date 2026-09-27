@@ -14,6 +14,7 @@ import { modelRolesForRun, snapshotModelLifecycle } from './engine/modelLifecycl
 import { mergeScenarios } from './scenarioPack.js';
 import { sanitizeLlmVariants, variantsToContestants } from './llmVariants.js';
 import { judgeScoreFromVerdicts } from './rank.js';
+import { runCompleteness } from './stats.js';
 import { emitEvent } from './events.js';
 import { saveRun, getDataDir } from './storage.js';
 import { contestantsFromConfig } from './normalize.js';
@@ -1130,6 +1131,11 @@ async function runLoop(
       'Repetições 1 — a diferença entre contestants pode ser ruído; use 3+ para decidir.',
     );
   }
+
+  // IMPL-005 (R-04:REC-2): n nominal × efetivo por contestant, motivo de cada
+  // veredito ausente e pares com a regua — a diferenca fica NO RECORD, visivel
+  // em `runs show`/UI, em vez de sumir numa media com ausente contado como 'nao'.
+  record.completeness = runCompleteness(record);
 
   // F3.6 + F4.2 (PLANO-PARIDADE): avisos de imparcialidade + diagnostico do
   // juiz ficam NO RECORD — zero LLM, tudo derivado do que ja rodou. O pin do

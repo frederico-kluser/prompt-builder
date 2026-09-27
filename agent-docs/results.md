@@ -30,6 +30,7 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 | `costAccuracy` | quantas chamadas tiveram preço exato / estimado / desconhecido |
 | `stages[].incomplete` | etapa cortada no meio — **fora** do placar e do julgamento |
 | `stages[].referenceJudge` | vereditos pointwise por contestant, com o motivo |
+| `completeness` | n **nominal** × n **efetivo** por contestant (`byContestant[id]`: `nEfetivo`, `missing`, `completeness`, `missingByReason`) e o pareamento com a régua (`vsControl[id]`: `nEfetivo`, `excludedPairs`, Δ só sobre pares completos). `runs show` sempre mostra — e recalcula para runs antigas |
 | `finalists` | ids que disputaram a final |
 | `judgeDiagnostics` | pin do **contrato do juiz** (hash do prompt + modelos) + viés de verbosidade medido (correlação score×comprimento) |
 | `fairnessWarnings` | avisos de imparcialidade (juiz da família do competidor) — não-bloqueantes |
@@ -38,14 +39,19 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 Uma etapa `incomplete` é o que separa "parou cedo, honesto" de "terminou,
 mentindo": ela não vira veredito `parcial` nem entra na média.
 
+Veredito **ausente** (juiz falhou, etapa pulada ou cortada) é "sem observação",
+nunca `nao`: o par sai **dos dois lados** das médias e do teste. Compare sempre
+`nEfetivo` com `n` antes de confiar num Δ.
+
 ## `SessionRecord` (treino)
 
 | Campo | O que é |
 |---|---|
-| `bestPromptByIteration[]` | o campeão pós-gate de cada iteração, com o prompt |
+| `bestPromptByIteration[]` | o campeão pós-gate de cada iteração, com o prompt e o `gate` (Δ pareado BRUTO `gainPp`, `gainCorrectedPp` do winner's curse, `test` da melhor de K com `pAdjusted`/`k`/`method`, `minGain` + `minGainSource`, `heldBy`, `pairing`, `sensitivity`, `decision`: `promoted` \| `held` \| `inconclusive`) |
 | `convergedAtIteration` | parou por falta de ganho (bom sinal) |
-| `holdout` | `{ n, controlScore, championScore, gain, regressed }` |
-| `significance` | `{ n, meanDiffPp, ci95Pp, pValue }` ou `null` |
+| `holdout` | `{ n, controlScore, championScore, gain, regressed, nEfetivo, excludedPairs, completeness }` — scores são médias só sobre os pares completos |
+| `pairing` | o pareamento final (`source`: `holdout` \| `training`): `n`, `nEfetivo`, `excludedPairs`, `completeness`, Δ — presente mesmo quando `significance` é `null` |
+| `significance` | teste pareado exato (troca de sinais): `pValue` (unilateral, o do gate), `pValueTwoSided` (o do relatório), `ci95Pp` (IC95 por inversão), `n`/`nEfetivo`/`excludedPairs`, `pMinUnilateral`, `signTest`, `sensitivity` (exclusões > 10%) — ou `null` (< 5 pares) |
 | `holdoutSkipped` | **campeão não validado** contra sobreajuste |
 | `stoppedAtIteration` | onde o orçamento interrompeu |
 | `pool` | front Pareto final (com `paretoPool` > 1) |

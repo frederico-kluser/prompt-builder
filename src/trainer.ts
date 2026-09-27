@@ -3,8 +3,6 @@ import { runToCompletion } from './orchestrator.js';
 import { generateContestants, llmReflectLessons } from './variator.js';
 import { composePrompt } from './engine/promptGroup.js';
 import { addToPool, pickParent, sliceScores, type ParetoEntry } from './engine/pareto.js';
-import { planHalving, survivorsOf } from './engine/halving.js';
-import { seedFromId } from './engine/duelCore.js';
 import {
   judgeIdentity,
   judgeIdentityChanged,
@@ -14,9 +12,10 @@ import {
 import { emitSessionEvent } from './events.js';
 import { saveSession } from './storage.js';
 import { computeMedals } from './medals.js';
-import { judgeScoreFromVerdicts, pickWinner, type RankEntry } from './rank.js';
+import { judgeScoreFromVerdicts, pickWinner, promotionEventFields, type RankEntry } from './rank.js';
 import { MIN_HOLDOUT_SCENARIOS, splitHoldout } from './holdout.js';
-import { pairedSignificance, VERDICT_SCORE } from './stats.js';
+import { pairCoverage, pairedStageScores, stageScoresByContestant } from './stats.js';
+import { formatIterationGate, pairedSignificance, VERDICT_SCORE } from './stats.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { listModels } from './openrouter.js';
@@ -137,31 +136,6 @@ function buildLessons(run: RunRecord, championId: string): string {
   }
   if (!items.length) return '';
   return (LESSONS_PREFIX + items.join('\n')).slice(0, 4000);
-}
-
-/**
- * Scores por estagio (escala 0-1 de `VERDICT_SCORE`) de controle e campeao,
- * posicao a posicao, para o bootstrap pareado. Veredito ausente conta como
- * 'nao' (0) — mesma convencao de `judgeScoreFromVerdicts`.
- */
-function pairedStageScores(
-  run: RunRecord,
-  controlId: string,
-  championId: string,
-): { controlScores: number[]; championScores: number[] } {
-  const controlScores: number[] = [];
-  const championScores: number[] = [];
-  for (const s of run.stages) {
-    const vc =
-      s.referenceJudge?.verdictByContestant?.[controlId] ??
-      s.judge?.verdictByContestant?.[controlId];
-    const vh =
-      s.referenceJudge?.verdictByContestant?.[championId] ??
-      s.judge?.verdictByContestant?.[championId];
-    controlScores.push(VERDICT_SCORE[vc ?? 'nao']);
-    championScores.push(VERDICT_SCORE[vh ?? 'nao']);
-  }
-  return { controlScores, championScores };
 }
 
 
@@ -324,7 +298,9 @@ async function trainingLoop(
   const optimizerModelId = cfg.optimizerModelId ?? cfg.datagenModelId;
   const promptOptimization = cfg.promptOptimization !== false;
   const hasBase = Boolean(cfg.basePrompt && cfg.basePrompt.trim());
-  const minGain = cfg.minGain ?? 1;
+  // IMPL-002: ausente = margem pratica default max(1; 50/n), resolvida NO GATE
+  // (depende do n de pares da iteracao). O gate tambem exige p ajustado <= 0,05.
+  const minGain = cfg.minGain;
 
   // Catalogo quente antes do primeiro gasto (senao o custo sai 0 e a porta de
   // orcamento acha que tudo e de graca).
@@ -351,7 +327,7 @@ async function trainingLoop(
 
   await saveSession(record);
   emitSessionEvent({ type: 'session.started', sessionId, record });
-  log(sessionId, `started: ${cfg.iterations} iteracoes (minGain=${minGain})`);
+  log(sessionId, `started: ${cfg.iterations} iteracoes (minGain=${minGain ?? 'auto max(1; 50/n)'}, gate max-T a 5%)`);
 
   let pinnedStages: StageSpec[] | undefined;
   // Fatia de holdout (split anti-overfit na iteracao 0): fica so EM MEMORIA —
@@ -498,49 +474,16 @@ async function trainingLoop(
       }
 
       // 2) Roda a iteracao (benchmark pinado a partir da iteracao 1).
-      // F4.3 — SEQUENTIAL HALVING (opt-in `training.halving`): antes da rodada
-      // completa, uma TRIAGEM barata num subconjunto de cenários corta as piores
-      // variantes (o controle nunca cai). O custo da triagem é real e entra no
-      // ledger; o ganho é rodar o benchmark completo só com os sobreviventes.
-      // Com dataset conhecido (customStages/scenarioSeed/pinos) e variantes > 3.
-      const estagiosConhecidos = pinnedStages ?? cfg.customStages ?? cfg.scenarioSeed ?? [];
-      if (cfg.halving && contestants.length > 3 && estagiosConhecidos.length >= 8) {
-        const seed = seedFromId(`halving:${sessionId}:${i}`);
-        const plano = planHalving(
-          contestants.map((c) => c.id),
-          estagiosConhecidos.map((s) => s.question),
-          seed,
-          { protectedIds: ['original', 'carry'] },
-        );
-        const rodada1 = plano.rounds[0];
-        const subset = estagiosConhecidos.filter((s) => rodada1.scenarioIds.includes(s.question));
-        log(sessionId, `halving: triagem de ${contestants.length} variantes em ${subset.length} cenarios`);
-        const rascunho = await runToCompletion(
-          { ...variationConfigFrom(cfg), stages: subset.length, customStages: subset, scenarioSeed: undefined },
-          apiKey,
-          {
-            runId: randomUUID(),
-            contestants,
-            sessionId,
-            iteration: i,
-            parentRunId: prevRun?.id,
-            parentLedger: ledger,
-            signal: opts.signal,
-          },
-        );
-        syncLedger();
-        const { survivors, eliminated } = survivorsOf(
-          rascunho.contestants.map((c) => ({ id: c.id, score: judgeScoreOf(rascunho, c.id) })),
-          rodada1.keepCount,
-          { seed, protectedIds: ['original', 'carry'] },
-        );
-        const antes = contestants.length;
-        contestants = contestants.filter((c) => survivors.includes(c.id));
-        log(
-          sessionId,
-          `halving: ${antes - contestants.length} variante(s) eliminada(s) na triagem (${eliminated.join(', ')})`,
-        );
-      }
+      // IMPL-012 (R-02b:REC-3): o sequential halving (F4.3, `training.halving`)
+      // foi REMOVIDO daqui. A triagem rodava uma run completa (competidores +
+      // juiz + finais), a rodada 1 mantinha keep = V (0 eliminadas sempre) e o
+      // rascunho era descartado: custo puro. As simulacoes da pesquisa vetam
+      // religar como estava: H4 — P(eliminar a verdadeira melhor) 21,7–24,3% com
+      // c <= 3 cenarios por rodada; H5 — nenhuma configuracao economiza >= 20%
+      // com P(melhor sobreviver) >= 0,9; H6 — reusar as avaliacoes da triagem
+      // infla o ganho reportado do vencedor em 4,9–8,7 p.p. So reimplementar do
+      // zero se K >= 8 e n >= 20 virarem rotina: corte real (keepCount < V desde
+      // a rodada 1), re-avaliacao limpa e as simulacoes como teste de regressao.
 
       const runId = randomUUID();
       record.runIds.push(runId);
@@ -604,12 +547,23 @@ async function trainingLoop(
         record.pinnedStages = pinnedStages;
       }
 
-      // 4) Gate de promocao por margem (port do evolve.mjs): a melhor variante
+      // 4) Gate de promocao (port do evolve.mjs + IMPL-002): a melhor variante
       //    so vira campea se superar a REGUA desta iteracao por >= minGain
-      //    pontos de judge-score. A regua e o 'original' (base) na iteracao 0 e
-      //    o 'carry' (campeao anterior re-testado verbatim) nas demais.
+      //    pontos de judge-score E passar no max-T sobre as K variantes (p
+      //    ajustado <= 0,05 — a "melhor de K" nao ganha mais sozinha). A regua e
+      //    o 'original' (base) na iteracao 0 e o 'carry' (campeao anterior
+      //    re-testado verbatim) nas demais.
       const controlId = i === 0 ? 'original' : 'carry';
-      const pick = pickWinner(buildRankEntries(runRec, controlId), { minGain });
+      // IMPL-005: o ganho e o Δ PAREADO (so etapas com veredito nos DOIS
+      // lados; ausente nunca vira 'nao') e, com >10% de pares excluidos, a
+      // promocao so vale se sobreviver ao pior/melhor caso (ver pickWinner).
+      const pick = pickWinner(buildRankEntries(runRec, controlId), {
+        minGain,
+        scoresById: stageScoresByContestant(
+          runRec.stages,
+          runRec.contestants.map((c) => c.id),
+        ),
+      });
       let promoted = false;
       if (pick.isWinner && pick.best) {
         const wc = runRec.contestants.find((c) => c.id === pick.best!.id);
@@ -649,6 +603,7 @@ async function trainingLoop(
         golds: medalRow?.golds ?? 0,
         silvers: medalRow?.silvers ?? 0,
         bronzes: medalRow?.bronzes ?? 0,
+        ...(pick.gate ? { gate: pick.gate } : {}),
       });
 
       // F4.1: promocao entra no POOL (nunca derruba o campeao unico — o pool
@@ -681,18 +636,33 @@ async function trainingLoop(
           iteration: i,
           championId: champion.contestantId,
           gain: pick.gain,
+          // IMPL-002: bruto (gain) e corrigido lado a lado, com o p ajustado.
+          ...promotionEventFields(pick.gate),
         });
-        log(sessionId, `iteracao ${i + 1}: promovido ${champion.contestantId} (ganho +${pick.gain.toFixed(1)}pp)`);
+        log(
+          sessionId,
+          `iteracao ${i + 1}: promovido ${champion.contestantId} (${
+            pick.gate ? formatIterationGate(pick.gate) : `ganho +${pick.gain.toFixed(1)}pp`
+          })`,
+        );
       }
       await saveSession(record);
 
       if (!promoted) {
-        // Convergiu: a promocao exige margem real sobre o campeao. Sem ganho —
-        // mesmo ja na iteracao 0 — nao ha campeao NOVO de onde derivar a
+        // Convergiu: a promocao exige margem real E significativa (max-T)
+        // sobre o campeao. Sem ganho — mesmo ja na iteracao 0 — nao ha
+        // campeao NOVO de onde derivar a
         // proxima geracao; continuar so queimaria custo re-testando a regua.
         record.convergedAtIteration = i;
         emitSessionEvent({ type: 'session.converged', sessionId, iteration: i });
-        log(sessionId, `convergiu na iteracao ${i + 1} (ganho ${pick.gain.toFixed(1)}pp < minGain ${minGain})`);
+        log(
+          sessionId,
+          pick.gate?.decision === 'inconclusive'
+            ? `parou sem promocao na iteracao ${i + 1}: gate INCONCLUSIVO (${pick.gate.pairing.excludedPairs} de ${pick.gate.pairing.n} pares sem veredito; a decisao muda no pior/melhor caso)`
+            : pick.gate
+              ? `convergiu na iteracao ${i + 1} (${formatIterationGate(pick.gate)})`
+              : `convergiu na iteracao ${i + 1} (ganho ${pick.gain.toFixed(1)}pp < minGain ${minGain ?? 1})`,
+        );
         await saveSession(record);
         break;
       }
@@ -764,9 +734,10 @@ async function trainingLoop(
 /**
  * Gate final do treino (port do evolve.mjs): re-score do campeao contra o
  * controle (base) nos cenarios de HOLDOUT — que ficaram fora da selecao — mais
- * significancia estatistica (bootstrap pareado). E SUPORTE A DECISAO (a UI
- * mostra ganho/regressao/p-valor); nao bloqueia a promocao nem derruba a
- * sessao (o chamador envolve em try/catch).
+ * significancia estatistica (teste pareado exato por troca de sinais + IC por
+ * inversao, IMPL-001). E SUPORTE A DECISAO (a UI mostra ganho/regressao/
+ * p-valor); nao bloqueia a promocao nem derruba a sessao (o chamador envolve
+ * em try/catch).
  */
 async function finalizeHoldout(
   record: SessionRecord,
@@ -859,21 +830,33 @@ async function finalizeHoldout(
   }
 
   if (holdoutRun) {
-    const controlScore = judgeScoreOf(holdoutRun, 'holdout-control');
-    const championScore = judgeScoreOf(holdoutRun, 'holdout-champion');
+    // IMPL-005: medias, ganho e teste sobre OS MESMOS pares — so etapas com
+    // veredito nos DOIS lados (ausente sai dos dois, nunca vira 'nao').
+    const { controlScores, championScores } = pairedStageScores(
+      holdoutRun.stages,
+      'holdout-control',
+      'holdout-champion',
+    );
+    const coverage = pairCoverage(controlScores, championScores);
+    const controlScore = coverage.controlMeanPp ?? 0;
+    const championScore = coverage.championMeanPp ?? 0;
     record.holdout = {
       n: holdoutStages.length,
       controlScore,
       championScore,
-      gain: championScore - controlScore,
+      gain: coverage.meanDiffPp ?? 0,
       regressed: championScore < controlScore,
+      nEfetivo: coverage.nEfetivo,
+      excludedPairs: coverage.excludedPairs,
+      completeness: coverage.completeness,
+    };
+    record.pairing = {
+      source: 'holdout',
+      controlId: 'holdout-control',
+      championId: 'holdout-champion',
+      ...coverage,
     };
     emitSessionEvent({ type: 'session.holdout', sessionId, holdout: record.holdout });
-    const { controlScores, championScores } = pairedStageScores(
-      holdoutRun,
-      'holdout-control',
-      'holdout-champion',
-    );
     record.significance = pairedSignificance(controlScores, championScores);
   } else if (lastRun && champion) {
     // Sem run de holdout (split invalido, campeao == base ou run falhou): a
@@ -891,10 +874,16 @@ async function finalizeHoldout(
       lastRun.contestants.some((c) => c.id === championIdInLastRun);
     if (pairable) {
       const { controlScores, championScores } = pairedStageScores(
-        lastRun,
+        lastRun.stages,
         pairingControl,
         championIdInLastRun,
       );
+      record.pairing = {
+        source: 'training',
+        controlId: pairingControl,
+        championId: championIdInLastRun,
+        ...pairCoverage(controlScores, championScores),
+      };
       record.significance = pairedSignificance(controlScores, championScores);
     } else {
       // Campeao == controle (convergiu sem ganho) ou ids ausentes na run:
