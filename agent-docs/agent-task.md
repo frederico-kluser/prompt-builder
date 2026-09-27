@@ -103,7 +103,8 @@ duas coisas ao mesmo tempo. `agent.limits` é o **default** de todo
 |---|---|---|---|---|
 | `kind` | string | não | `worktree` | `'worktree'` (default) \| `'clone'` \| `'container'`. **`worktree`** = `git worktree` raiz de mundo, artefatos no workspace local, nada de Docker. **`clone`** = clone descartável por execução (o executor o clona/descarta ao fim). **`container`** = cada execução do `pi` roda num **container Docker efêmero** (ver `#### Modo container` abaixo) — o agente fica isolado do host além da parede de processo; `setup[]`/`verify[]` (oráculo) seguem no **host** (ver nota). |
 | `keepWorkspace` | bool | não | `false` | Guardar o workspace ao fim ocupa disco rápido; o default é **não guardar** (descarta quando o modo permitir) — só ligue para debug. |
-| `image` | string | não | `prompt-builder-pi:<executorVersion>` | Só tem efeito quando `kind === 'container'`. **Sobrescreve a tag** da imagem do `pi` (default `prompt-builder-pi:<executorVersion>`). Use para apontar uma imagem pré-buildada/alternativa. |
+| `image` | string | não | `prompt-builder-pi:<executorVersion>` | Só tem efeito quando `kind === 'container'`. **Sobrescreve a tag** da imagem do `pi` (default `prompt-builder-pi:<executorVersion>`). Aceita tag **ou** referência por digest (`repo@sha256:…`/`sha256:…`). A tag só serve para achar a imagem: a preparação a resolve para o **digest sha256** e **todo `docker run` usa o digest** (gravado no `argv.json`). Digest ausente no daemon = erro pedindo `docker pull` (nada é puxado em silêncio). |
+| `runtime` | string | não | — (runc) | Só em `kind === 'container'`. Runtime OCI **opt-in** do Docker, ex. `"runsc"` (gVisor) — opção de **alto risco operacional**, fora do default (~2× em syscalls, muito pior em I/O de arquivos pequenos como `npm ci`). Validado no daemon **antes** da run. |
 
 #### `Modo container` (`kind: "container"`)
 
@@ -118,19 +119,53 @@ repetição:
   Dockerfile em produção: `node:22-bookworm-slim` + `git`/`ca-certificates`/`bash` +
   `npm i -g @earendil-works/pi-coding-agent@<versão>`.
 - **Execução efêmera por rep:** `docker run -i --rm` com o container nomeado
-  `pb-agent-<execId>`, mounts `-v <workspace>:/ws` + `-v <execDir>:/exec`, cwd `/ws`.
-  Os artefatos que o agente grava **aparecem no host** sem `docker cp`. Limites de
-  contenção: `-m 2g --pids-limit 512`.
-- **Usuário:** `--user <uid>:<gid>` = o **usuário do host** — os artefatos criados no
-  container são legíveis pelo host **sem sudo**.
-- **Key do OpenRouter:** entra por um **`--env-file` tmp 0600 no HOST** (fora dos
-  volumes, via `os.tmpdir()`), que é **apagado ao fim** do run. Nunca em arquivo de
-  volume/container, nunca em `argv` (o `argv.json` de auditoria mascara o caminho como
-  `<env-file-tmp-0600>`); a key só existe no env do processo do container.
+  `pb-agent-<execId>`, binds `<workspace>` → `/ws` (cwd), `<execDir>/session` →
+  `/exec/session` e `<execDir>/pi-home` → `/exec/pi-home`. Os artefatos que o agente
+  grava **aparecem no host** sem `docker cp`; o resto do `<execDir>` (argv.json, logs
+  crus) **não** é montado — o agente não alcança a própria auditoria.
+- **Perfil endurecido FIXO (sem knob no arquivo):** `--cap-drop ALL --security-opt
+  no-new-privileges --read-only` + `--tmpfs /tmp` e `--tmpfs /exec`, `--network none`,
+  `--pids-limit 512`, `--cpus` ≤ 2, `--memory 2g --memory-swap 2g`, `--pull never` e imagem por
+  **digest**. O `argv.json` da execução registra o digest e o perfil efetivo
+  (`hardening`) para conferir contra o `docker inspect`. Graváveis dentro do container:
+  só `/ws`, `/tmp`, `/exec/session` e `/exec/pi-home` (= `$HOME`).
+- **Usuário:** `--user <uid>:<gid>` = o **usuário do host**, **nunca root** — os
+  artefatos criados no container são legíveis pelo host **sem sudo**. Rodar o
+  prompt-builder como root com `kind: "container"` é recusado (use um usuário comum ou
+  Docker rootless).
+- **Key do OpenRouter: NUNCA entra no sandbox.** Ela fica num **proxy de inferência
+  local** do host (um por run), que a injeta só na perna HTTPS até o provedor. O agente
+  recebe uma base URL local + um **token fictício por execução** (no `models.json` do
+  `pi`, não no env — `printenv OPENROUTER_API_KEY` dentro do container é vazio), revogado
+  quando a execução termina. O `--env-file` tmp 0600 do host leva só as `PI_*`; o
+  `argv.json` registra os NOMES das variáveis (`inference.envKeys`) e o sha256 do relay.
+  O log **redigido** do proxy fica em `<dataDir>/agent-runs/<runId>/inference-proxy.jsonl`
+  (método, rota, status, bytes, tempos, `upstreamAuth: "injected"` e o `keyFingerprint`
+  — nunca a key, o token, headers ou corpos). Rotas de gerência da conta (`/keys`,
+  `/credits`, `/key`) são recusadas pelo proxy.
 - **Timeout/cancelamento:** mata o container **por nome** → `docker kill <nome>` +
   `docker rm -f <nome>` (fire-and-forget, idempotente). Nenhum órfão no host.
-- **Pré-requisito:** Docker **CLI** no PATH **e** daemon acessível (sem sudo), rede padrão
-  (o container chama o OpenRouter). Confira com `agents doctor --container`.
+- **Rede:** `--network none` por default — o agente **não** tem rota para fora (DNS, IP
+  direto e os serviços do host falham). A ÚNICA saída é o proxy de inferência: o socket
+  Unix dele é montado **read-only** em `/exec/proxy` e um relay (PID 1 do container)
+  o expõe como `http://127.0.0.1:47100/api/v1` no loopback do próprio container. O
+  `agents doctor --container` **mede** essa rota no sandbox da run (relay → proxy, key
+  ausente, egress bloqueado) e **falha (exit `3`)** se ela não fechar — ex.: Docker
+  Desktop (macOS/Windows) ou gVisor sem `--host-uds=open`, onde o socket do host não
+  atravessa. Se o modelo não responder numa execução (proxy/upstream fora), ela termina
+  como **erro de infraestrutura**: `stopReason: "error"` com `execution.infraError` e a
+  dica no `stderr.log` — **sem veredito, fora do placar e das médias; nunca `nao`**.
+  Válvula **do operador** (variável de ambiente, nunca campo do arquivo):
+  `PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK=bridge` devolve a rede padrão para tarefas
+  cujas tools precisam de rede — a key continua só no proxy, mas o agente ganha egress
+  (pode exfiltrar o workspace); o uso é avisado no stderr, no `agents doctor` e
+  registrado em `hardening.unsafe` do `argv.json`.
+- **`--cpus`** é encaixado nas CPUs do **daemon** (`docker info` → `NCPU`), não nas da
+  máquina que roda o CLI — `DOCKER_HOST` remoto e a VM do Docker Desktop têm menos.
+- **Pré-requisito:** Docker **CLI** no PATH **e** daemon acessível (sem sudo). Confira
+  com `agents doctor --container --config x.json` (mostra a tag → digest que a run
+  usaria; com `--config`, mede a `image`/`runtime` do arquivo — sem ele, a imagem
+  default em runc).
 
 **Nota de escopo (TODO de fase futura):** hoje só a **execução** do agente é isolada
 pelo container. `setup[]` e `verify[]` (oráculo) rodam no HOST. Isolar esses também via

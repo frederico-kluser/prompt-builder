@@ -107,7 +107,12 @@ export interface AgentTaskSpec {
 export interface AgentLimits {
   /** Turnos do agente (contados por evento `turn_start`). Default 30. */
   maxTurns?: number;
-  /** Teto de gasto DESTA execução, em USD. Default: obrigatório em modo agente. */
+  /**
+   * Teto de gasto DESTA execução, em USD. Default: obrigatório em modo agente.
+   * Imposto ANTES da chamada (IMPL-035): o proxy de custo recusa (429
+   * `budget_exhausted`) a chamada cujo custo projetado não cabe mais; o kill
+   * pelo custo derivado do executor fica como segunda barreira.
+   */
   maxCostUsd?: number;
   /** Parede de tempo da execução inteira, ms. Default 600_000 (10 min). */
   timeoutMs?: number;
@@ -190,8 +195,18 @@ export interface AgentRunnerConfig {
     kind?: 'worktree' | 'clone' | 'container';
     /** Guarda o workspace ao fim (debug). Default false — ocupa disco rápido. */
     keepWorkspace?: boolean;
-    /** Imagem, quando kind==='container'. */
+    /**
+     * Imagem, quando kind==='container': tag (resolvida para o digest sha256 na
+     * preparação) ou referência por digest (`repo@sha256:…`/`sha256:…`). O
+     * `docker run` usa SEMPRE o digest — nunca a tag (IMPL-036).
+     */
     image?: string;
+    /**
+     * Runtime OCI alternativo do Docker (ex.: `runsc` = gVisor), opt-in de ALTO
+     * RISCO operacional, fora do default (R-15 DEC-1: ~2× em syscalls, ~11× em
+     * I/O de arquivos pequenos). Ausente = runc do daemon + perfil endurecido.
+     */
+    runtime?: string;
   };
 
   /** Nível de esforço do agente. MESMA escada do repo (7 degraus). */
@@ -201,11 +216,20 @@ export interface AgentRunnerConfig {
   dossierTokens?: number;
 }
 
+/**
+ * De onde veio o custo de uma execução (R-14b DEC-4). `usage` = medido pelo
+ * proxy de custo (`usage.cost` que o OpenRouter cobrou, em TODAS as chamadas);
+ * `catalog` = medido pelo proxy, mas alguma chamada sem `usage.cost` (catálogo ou
+ * desconhecido); `agent-derived` = o que o executor calculou por tabela própria
+ * (sem chamadas pelo proxy); `reconciled` = conferido com `/generation`.
+ */
+export type AgentCostSource = 'usage' | 'catalog' | 'agent-derived' | 'reconciled';
+
 /** Por que a execução de um agente terminou. */
 export type AgentStopReason =
   | 'completed' // o agente terminou por conta própria
   | 'maxTurns' // bateu o teto de turnos
-  | 'maxCost' // bateu o teto de custo DA EXECUÇÃO
+  | 'maxCost' // teto de custo: o proxy recusou a chamada seguinte (execução OU run) / kill pelo derivado
   | 'timeout' // bateu a parede de tempo
   | 'maxOutput' // vomitou mais bytes que o permitido
   | 'error' // o processo morreu / o executor falhou
@@ -225,6 +249,12 @@ export interface ExecutionRef {
   durationMs: number;
   /** Por que a execução terminou. */
   stopReason: AgentStopReason;
+  /**
+   * Mensagem do provedor quando a execução terminou por erro de INFRA
+   * (`stopReason: 'error'` sem culpa do agente) — a repetição fica sem veredito,
+   * salvo oráculo conclusivo (IMPL-036, `infraError.ts`). Ausente em records antigos.
+   */
+  infraError?: string;
   /** Linhas +/- e nº de arquivos, do diff seed..HEAD. */
   diffStat?: { files: number; added: number; removed: number };
   /** Resultado do oráculo, quando houve. */
@@ -296,7 +326,24 @@ export interface ExecutionRecord {
     cacheRead: number;
     cacheWrite: number;
     costUsd: number;
-    costSource: 'agent-derived' | 'reconciled';
+    /** Ver `AgentCostSource`. Records antigos: 'agent-derived'. */
+    costSource: AgentCostSource;
+    /** O custo que o EXECUTOR reportou (tabela própria) — auditoria contra o medido. */
+    agentDerivedCostUsd?: number;
+    /**
+     * O que o proxy de custo MEDIU desta execução (IMPL-035): chamadas, quantas com
+     * `usage.cost`, recusadas pelo freio e os ids de geração (ponte com a fatura).
+     */
+    proxy?: {
+      calls: number;
+      exact: number;
+      estimated: number;
+      unknown: number;
+      refused: number;
+      generationIds: string[];
+      /** A recusa por orçamento que parou a execução, se houve. */
+      budgetStop?: { scope: 'execution' | 'run'; committedUsd: number; projectedUsd: number; limitUsd: number };
+    };
   };
 
   oracle?: OracleResult;
@@ -339,7 +386,9 @@ export interface AgentTrajectory {
     cacheRead: number;
     cacheWrite: number;
     costUsd: number;
-    costSource: 'agent-derived' | 'reconciled';
+    costSource: AgentCostSource;
+    /** O custo que o executor reportou, quando `costUsd` passou a ser o MEDIDO. */
+    agentDerivedCostUsd?: number;
   };
   /** Linhas do stream que não deram parse. > 0 ⇒ trajetória incompleta. */
   parseErrors: number;

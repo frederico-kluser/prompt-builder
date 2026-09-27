@@ -43,10 +43,19 @@ import {
   type SettledRepVerdict,
   type VerdictPath,
 } from './verdictTree.js';
+import { decideInfraError } from './infraError.js';
+import { acquireRunInferenceProxy, type InferenceProxyLease } from './inferenceProxy.js';
+import {
+  acquireRunCostMeter,
+  applyMeasuredCost,
+  COST_PROXY_VERSION,
+  type RunCostMeter,
+  type RunCostMeterLease,
+} from './costProxy.js';
 import { isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
 import { blindRankMap, seedFromId } from '../duels.js';
-import { tierFor } from '../openrouter.js';
+import { getGateway, tierFor } from '../openrouter.js';
 import { isKnownPrice } from '../engine/pricing.js';
 import type {
   AgentLimits,
@@ -108,6 +117,12 @@ export interface AgentRepResult {
   judgeRubric?: AgentJudgeRubric;
   /** Vezes que o oráculo rodou (> 1 = re-verificação cega de check que nem começou). */
   oracleAttempts?: number;
+  /**
+   * Erro de INFRA (provedor/rede — IMPL-036) que deixou a rep SEM veredito
+   * (`verdict: null`, oráculo não conclusivo). É falha do ambiente, não do
+   * agente nem do juiz: a procedência vira `competitor_error`.
+   */
+  infraError?: string;
   costUsd: number;
 }
 
@@ -241,7 +256,7 @@ function summarizeResponse(rep: AgentRepResult): string {
  * julgamento de cada uma. Ver fluxo em §10 do plano.
  */
 export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgentStageResult> {
-  const { runId, stageIndex, contestant, stage, agentConfig, apiKey, ctx, dataDir, catalog, forcedPromptMode } = opts;
+  const { runId, contestant, stage, agentConfig, apiKey, dataDir, forcedPromptMode } = opts;
   const gateway = opts.gateway ?? DEFAULT_GATEWAY;
   const task = stage.agentTask;
   const judgeModelIds = opts.judgeModelIds ?? [];
@@ -294,6 +309,89 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
     };
   }
 
+  // Proxy de inferência da RUN (IMPL-037 / R-15 DEC-2): a key real (`apiKey`)
+  // fica NELE; o agente recebe só base URL local + token fictício por execução.
+  // Modo container: socket Unix (o sandbox roda com `--network none`); modo
+  // host: TCP no loopback. Upstream = gateway do processo (OPENROUTER_BASE_URL).
+  // UM por run: as etapas paralelas pegam empréstimos do mesmo proxy e o último
+  // a devolver o fecha. O log redigido fica em `<runDir>/inference-proxy.jsonl`,
+  // fora de qualquer mount do sandbox.
+  // Pendurado nele, o proxy de CUSTO da run (IMPL-035): mede o `usage.cost` de
+  // cada chamada do agente no MESMO ledger (`ctx.sink`), recusa a chamada que não
+  // cabe (429 `budget_exhausted`) ANTES de ir ao provedor e limita a taxa.
+  const meterLease: RunCostMeterLease = acquireRunCostMeter(runId, {
+    sink: opts.ctx.sink,
+    signal: opts.ctx.signal,
+    catalog: opts.catalog,
+  });
+  let proxyLease: InferenceProxyLease;
+  try {
+    const gw = getGateway().config;
+    const inContainer = agentConfig.isolation?.kind === 'container';
+    proxyLease = await acquireRunInferenceProxy(runId, {
+      apiKey,
+      upstreamBaseUrl: gw.baseUrl,
+      appUrl: gw.appUrl,
+      appTitle: gw.appTitle,
+      listen: inContainer ? { unix: true } : { tcp: true },
+      logFile: path.join(runDir, 'inference-proxy.jsonl'),
+      hooks: meterLease.meter.hooks,
+      logMeta: { costProxy: COST_PROXY_VERSION },
+    });
+  } catch (err) {
+    meterLease.release();
+    if (isControlSignal(err)) throw err;
+    const errorMsg = `Falha ao subir o proxy de inferência local: ${(err as Error).message}`;
+    return {
+      response: responseError(contestant, modelId, errorMsg, 0),
+      repResults: [],
+      incomplete: true,
+      errorMsg,
+    };
+  }
+  try {
+    return await runAgentReps(opts, {
+      gateway,
+      task,
+      judgeModelIds,
+      reps,
+      promptMode,
+      runConfig,
+      limits,
+      modelId,
+      systemPrompt,
+      prepared,
+      proxy: proxyLease.proxy,
+      meter: meterLease.meter,
+    });
+  } finally {
+    await proxyLease.release();
+    meterLease.release();
+  }
+}
+
+/** O que `runAgentReps` herda da preparação da etapa. */
+interface RepsContext {
+  gateway: AgentGateway;
+  task: NonNullable<StageSpec['agentTask']>;
+  judgeModelIds: string[];
+  reps: number;
+  promptMode: 'replace' | 'append' | 'none';
+  runConfig: AgentRunnerConfig;
+  limits: AgentLimits & { maxDiffBytes: number };
+  modelId: string;
+  systemPrompt: string;
+  prepared: { bin: string; env: Record<string, string> };
+  proxy: InferenceProxyLease['proxy'];
+  /** Medidor de custo da run (freio + medição por chamada). */
+  meter: RunCostMeter;
+}
+
+/** As N repetições da etapa (o laço do §10), com o proxy da run já no ar. */
+async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise<RunAgentStageResult> {
+  const { runId, stageIndex, contestant, stage, agentConfig, apiKey, ctx, dataDir, catalog } = opts;
+  const { gateway, task, judgeModelIds, reps, promptMode, runConfig, limits, modelId, systemPrompt, prepared, proxy, meter } = rc;
+
   // Letra cega do candidato: MESMO mapa/shuffle que o orquestrador usa no ranking.
   const blindOrder = blindRankMap(opts.blindIds ?? [contestant.id], seedFromId(stage.question));
   const contestantLabel = String.fromCharCode(65 + (blindOrder.get(contestant.id) ?? 0));
@@ -318,6 +416,8 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
       let workspaceDir = '';
       let seedCommit = '';
       let cacheRepoDir = '';
+      let credential: ReturnType<typeof proxy.issueCredential> | undefined;
+      let execMeter: ReturnType<RunCostMeter['openExecution']> | undefined;
 
       try {
         // 1) workspace.prepare() — setup[] + files[] + seedCommit (§10.1).
@@ -338,15 +438,26 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
         // 3) executor.run() — cwd=workspace, workDir=repetitionDir, limites.
         const execId = randomUUID();
         emitEvent({ type: 'agent.started', runId, stageIndex, contestantId: contestant.id, execId, repetition: rep });
+        // A key NUNCA vai ao env do executor (IMPL-037) — nem se um `prepare`
+        // antigo/injetado a estampar: quem a detém é o proxy da run.
+        const { OPENROUTER_API_KEY: _keyFora, ...preparedEnv } = prepared.env;
+        void _keyFora;
         const env = {
-          ...prepared.env,
+          ...preparedEnv,
           PI_MODEL_ID: modelId,
           PI_TASK: stage.question,
           PI_SYSTEM_PROMPT: systemPrompt,
         };
+        // Freio/medidor de custo DESTA execução (IMPL-035), registrado ANTES do
+        // token: a 1ª chamada já é medida contra o teto `maxCostUsd`.
+        execMeter = meter.openExecution({ execId, modelId, maxCostUsd: limits.maxCostUsd });
+        // Token fictício DESTA execução (mapeamento execução → chamada conhecido
+        // só do produto); revogado assim que a execução termina.
+        credential = proxy.issueCredential({ runId, stageIndex, contestantId: contestant.id, repetition: rep, execId, role: 'agent' });
+        const inference = proxy.route(credential);
 
-        const outcome = await gateway.run(
-          { execId, task, config: runConfig, workspaceDir, workDir: repAbs, bin: prepared.bin, env },
+        const rawOutcome = await gateway.run(
+          { execId, task, config: runConfig, workspaceDir, workDir: repAbs, bin: prepared.bin, env, inference, costBrake: execMeter },
           {
             signal: ctx.signal,
             priceTokensIn: price.priceTokensIn,
@@ -369,11 +480,30 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           },
         );
 
+        // As chamadas em voo desta execução terminam de ser anotadas (o agente
+        // morto no meio de um stream fecha a troca logo em seguida).
+        await execMeter.settled();
+
         // §18.3/§29.3: cancelamento da RUN é sinal de controle e SOBE — não vira
         // 'incomplete' mudo (o pipeline precisa saber que a run foi abortada).
-        if (ctx.signal?.aborted || outcome.stopReason === 'cancelled') {
+        if (ctx.signal?.aborted || rawOutcome.stopReason === 'cancelled') {
           throw new RunCancelled(ctx.signal?.reason);
         }
+        // IMPL-035: o proxy recusou a chamada seguinte por falta de saldo DA RUN
+        // → o `BudgetExceeded` do ledger SOBE como de qualquer papel (a run sai
+        // parcial por orçamento, exit 7). O gasto já está no ledger, por chamada.
+        const brakeStop = execMeter.stopped();
+        const runBudget = brakeStop?.scope === 'run' ? execMeter.budgetSignal() : undefined;
+        if (runBudget) throw runBudget;
+        // Teto da EXECUÇÃO: a recusa é controle traduzido em 'maxCost' — mesmo que
+        // o executor (um fake, um adaptador novo) não o tenha traduzido. Não é erro
+        // do provedor: sem `infraError`.
+        const outcome: typeof rawOutcome =
+          brakeStop && (rawOutcome.stopReason === 'completed' || rawOutcome.stopReason === 'error' || rawOutcome.stopReason === 'maxOutput')
+            ? { ...rawOutcome, stopReason: 'maxCost', infraError: undefined, trajectory: { ...rawOutcome.trajectory, stopReason: 'maxCost' } }
+            : brakeStop
+              ? { ...rawOutcome, infraError: undefined }
+              : rawOutcome;
 
         // 4) collect (diff/stat/files) + oráculo + trajetória (§10.4-9).
         const collect = await workspaceMgr.collect(workspaceDir, seedCommit, limits.maxDiffBytes);
@@ -428,7 +558,10 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           if (ctx.signal?.aborted) throw new RunCancelled(ctx.signal.reason);
         }
 
-        const trajectory: AgentTrajectory = outcome.trajectory;
+        // Custo MEDIDO pelo proxy (`usage.cost` de cada chamada) substitui o
+        // derivado do executor; o derivado fica como auditoria.
+        const measured = execMeter.measured();
+        const trajectory: AgentTrajectory = applyMeasuredCost(outcome.trajectory, measured);
         // F1 (§14 + reconciliação futura do proxy §20.4): persiste os
         // `responseIds` capturados pelo executor no próprio `trajectory.json`
         // como campo ADITIVO (cast — não altera o tipo `AgentTrajectory`). É a
@@ -437,6 +570,13 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
         (trajectory as unknown as { responseIds?: string[] }).responseIds = outcome.responseIds ?? [];
         const stopReason = outcome.stopReason;
         const durationMs = outcome.durationMs;
+        // Erro de INFRA (provedor/rede — IMPL-036): sem veredito, salvo oráculo
+        // conclusivo. Decidido AQUI, na fronteira do executor, ANTES da árvore:
+        // para ela, `stopReason: 'error'` é "processo morreu" e contaria `nao`.
+        const infra = decideInfraError(outcome.infraError, oracle);
+        // A execução "falhou" de verdade? Infra resgatada pelo oráculo NÃO: ela
+        // tem resultado verificável, fica `ok` e duela nas finais.
+        const execFailed = stopReason === 'error' && infra.kind !== 'oracle-decides';
 
         // 5) dossiê (full, cego) + writeExecution (§16).
         const dossier = buildDossier({
@@ -537,6 +677,27 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
               cacheWrite: trajectory.usage.cacheWrite,
               costUsd: trajectory.usage.costUsd,
               costSource: trajectory.usage.costSource,
+              ...(trajectory.usage.agentDerivedCostUsd !== undefined
+                ? { agentDerivedCostUsd: trajectory.usage.agentDerivedCostUsd }
+                : {}),
+              proxy: {
+                calls: measured.calls,
+                exact: measured.exact,
+                estimated: measured.estimated,
+                unknown: measured.unknown,
+                refused: measured.refused,
+                generationIds: measured.generationIds,
+                ...(brakeStop
+                  ? {
+                      budgetStop: {
+                        scope: brakeStop.scope,
+                        committedUsd: brakeStop.committedUsd,
+                        projectedUsd: brakeStop.projectedUsd,
+                        limitUsd: brakeStop.limitUsd,
+                      },
+                    }
+                  : {}),
+              },
             },
             oracle,
             dossier: {
@@ -577,6 +738,7 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           toolCalls: outcome.toolCalls,
           durationMs,
           stopReason,
+          ...(outcome.infraError ? { infraError: outcome.infraError } : {}),
           diffStat: { files: collect.files, added: collect.added, removed: collect.removed },
           oracle: oracle
             ? {
@@ -594,17 +756,24 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
         //    juiz LLM só roda nos caminhos que graduam (oráculo 100%/parcial ou
         //    sem oráculo com diff), CONFINADO à faixa do oráculo; corte por
         //    limite é 'nao' sem juiz; check que não terminou já é falho no score.
-        const adjudication = await adjudicateRep({
-          stopReason,
-          oracle,
-          diffEmpty: collect.files === 0 && collect.added === 0 && collect.removed === 0,
-          stage,
-          dossierText: dossier.text,
-          contestantId: contestant.id,
-          judgeModelIds,
-          apiKey,
-          ctx,
-        });
+        //    Erro de INFRA (IMPL-036) sem oráculo conclusivo: SEM veredito (a
+        //    árvore contaria 'error' como processo morto => 'nao'); com oráculo
+        //    conclusivo, a árvore decide como numa execução concluída (o
+        //    `stopReason` gravado continua 'error').
+        const adjudication: SettledRepVerdict & { path: VerdictPath } =
+          infra.kind === 'no-verdict'
+            ? { verdict: null, explanation: infra.explanation, judgeUsed: false, path: 'error' }
+            : await adjudicateRep({
+                stopReason: infra.kind === 'oracle-decides' ? 'completed' : stopReason,
+                oracle,
+                diffEmpty: collect.files === 0 && collect.added === 0 && collect.removed === 0,
+                stage,
+                dossierText: dossier.text,
+                contestantId: contestant.id,
+                judgeModelIds,
+                apiKey,
+                ctx,
+              });
 
         const repResult: AgentRepResult = {
           repetition: rep,
@@ -623,26 +792,33 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           ...(adjudication.judgeRubric ? { judgeRubric: adjudication.judgeRubric } : {}),
           ...(oracleAttempts > 0 ? { oracleAttempts } : {}),
           costUsd: trajectory.usage.costUsd,
+          ...(infra.kind === 'no-verdict' ? { infraError: infra.explanation } : {}),
         };
         repResults.push(repResult);
         // Auditoria POR REP depois da run: o exec.json é gravado ANTES da
         // adjudicação e o RunRecord só guarda contagens — sem isto não dá para
         // saber qual execução teve o juiz falho ou confinado.
         writeVerdictArtifact(repAbs, repResult);
-        anyError = anyError || stopReason === 'error';
+        anyError = anyError || execFailed;
 
-        // 7) Ledger: UMA nota por rep (§20.3) — custo derivado, nunca 'unknown'.
-        try {
-          const reservation = ctx.sink?.reserve('agent', modelId, 0, 0) ?? { release: () => undefined };
-          ctx.sink?.note(reservation, {
-            role: 'agent',
-            modelId,
-            cost: { usd: trajectory.usage.costUsd, source: 'catalog' },
-            tokensIn: trajectory.usage.tokensIn,
-            tokensOut: trajectory.usage.tokensOut,
-          });
-        } catch (err) {
-          if (isControlSignal(err)) throw err; // fronteira de controle
+        // 7) Ledger. Com chamadas pelo proxy, CADA uma já foi anotada lá (papel
+        //    'agent', `usage.cost` medido) — anotar de novo aqui contaria em
+        //    dobro. Só um executor que NÃO passou pelo proxy (fake, adaptador sem
+        //    base URL configurável) cai no custo DERIVADO dele, como antes —
+        //    source 'catalog' (tabela), nunca 'unknown'.
+        if (measured.calls === 0 && trajectory.usage.costUsd > 0) {
+          try {
+            const reservation = ctx.sink?.reserve('agent', modelId, 0, 0) ?? { release: () => undefined };
+            ctx.sink?.note(reservation, {
+              role: 'agent',
+              modelId,
+              cost: { usd: trajectory.usage.costUsd, source: 'catalog' },
+              tokensIn: trajectory.usage.tokensIn,
+              tokensOut: trajectory.usage.tokensOut,
+            });
+          } catch (err) {
+            if (isControlSignal(err)) throw err; // fronteira de controle
+          }
         }
 
         totalCostUsd += trajectory.usage.costUsd;
@@ -670,8 +846,8 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
             tokensIn: trajectory.usage.tokensIn,
             tokensOut: trajectory.usage.tokensOut,
             costUsd: trajectory.usage.costUsd,
-            status: stopReason === 'error' ? 'error' : 'ok',
-            errorMsg: stopReason === 'error' ? (outcome.stderrTail ?? 'execução falhou') : undefined,
+            status: execFailed ? 'error' : 'ok',
+            errorMsg: execFailed ? (outcome.stderrTail ?? 'execução falhou') : undefined,
             execution,
           };
         }
@@ -699,6 +875,8 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           response = responseError(contestant, modelId, msg, 0);
         }
       } finally {
+        credential?.revoke();
+        execMeter?.close();
         // 9) dispose do workspace (preserva com isolation.keepWorkspace).
         const keep = agentConfig.isolation?.keepWorkspace === true;
         try {

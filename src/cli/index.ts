@@ -98,7 +98,9 @@ OUTROS
   mcp                      servidor MCP por stdio (mesmo binário)
 
 AGENTES (modo agente — mesmo motor, executor pi)
-  agents doctor [--deep] [--container]   pré-voo do executor (canário real com --deep; valida Docker em --container)
+  agents doctor [--deep] [--container] [--config <arq>]
+                           pré-voo do executor (canário real com --deep; valida Docker/sandbox em
+                           --container; --config mede a imagem/runtime daquela run)
   agents run --config <arq> --budget <usd|none> [--dry-run] [--allow-concurrent]
                            roda a arena de agentes até o fim (mesmo teto
                            diário e lock por config dos comandos de run)

@@ -22,17 +22,33 @@ import path from 'node:path';
 import type { CleanRoomReport } from './executor.js';
 import type { AgentStopReason } from './types.js';
 import {
+  assertDockerRuntime,
+  buildSandboxRunArgv,
   defaultPiImageTag,
-  CONTAINER_MEM_LIMIT,
+  CONTAINER_INFERENCE_BASE_URL,
   CONTAINER_NAME_PREFIX,
-  CONTAINER_PIDS_LIMIT,
   dockerCliEnv,
+  HARDENING_PROFILE_VERSION,
+  hardeningProfile,
+  inferenceProxyMount,
+  inferenceRelayCommand,
+  inferenceRouteHint,
+  isDigestRef,
+  probeSandboxInferenceRoute,
+  resolveContainerNetwork,
+  resolveImageDigest,
+  sandboxProfile,
   writeEnvFile,
   killContainer,
+  type HardeningProfile,
+  type InferenceRouteProbe,
 } from './container.js';
+import { INFERENCE_PROXY_VERSION, startInferenceProxy, type InferenceProxy } from './inferenceProxy.js';
 import { createJsonlSplitter } from './jsonl.js';
+import { piProviderError, writePiInferenceConfig } from './pi.js';
 import { spawnAgent } from './spawn.js';
 import { getDataDir } from '../storage.js';
+import { getGateway } from '../openrouter.js';
 
 // ----------------------------------------------------------------------------
 // API pública
@@ -50,8 +66,17 @@ export interface PreflightResult {
   git: boolean;
   diskFreeGb: number;
   canary?: CleanRoomReport;
-  /** Estado do Docker — presente SÓ quando `isolation.kind === 'container'`. */
-  docker?: { present: boolean; image?: string; imagePresent: boolean };
+  /**
+   * Estado do Docker — presente SÓ quando `isolation.kind === 'container'`.
+   * `digest` = sha256 que a run usaria (a tag só serve para achá-lo).
+   */
+  docker?: { present: boolean; image?: string; imagePresent: boolean; digest?: string };
+  /**
+   * Sonda da rota de inferência no sandbox da run (IMPL-037) — presente SÓ em
+   * modo container com a imagem no daemon. Mede, sem gastar: relay → proxy ok,
+   * key ausente do ambiente do sandbox e egress bloqueado com `--network none`.
+   */
+  inferenceRoute?: InferenceRouteProbe;
   errors: string[];
 }
 
@@ -73,7 +98,7 @@ export interface PreflightOpts {
    * Modo de isolamento a verificar (mesmo `isolation.kind` de `RunConfig`). Quando
    * `kind === 'container'`, o pré-voo também checa o Docker CLI e a imagem do pi.
    */
-  isolation?: { kind?: 'worktree' | 'clone' | 'container'; image?: string };
+  isolation?: { kind?: 'worktree' | 'clone' | 'container'; image?: string; runtime?: string };
 }
 
 /**
@@ -113,13 +138,18 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
   // Aqui só afirmamos que o CLI e a imagem existem, ou listamos o que falta em
   // `errors` para o CLI/endpoint ecoar de forma legível.
   let dockerFail = false;
+  /** Sandbox sem rota até o provedor (ou perfil recusado): nenhuma execução julgaria. */
+  let sandboxFail = false;
   let dockerInfo: PreflightResult['docker'];
+  let inferenceRoute: InferenceRouteProbe | undefined;
   if (opts.isolation?.kind === 'container') {
     const dockerPresent = await detectDockerCli();
     const tag =
       opts.isolation.image ?? defaultPiImageTag(opts.expectedVersion ?? '');
-    const imagePresent = dockerPresent ? await dockerImagePresent(tag) : false;
-    dockerInfo = { present: dockerPresent, image: tag, imagePresent };
+    // Resolve a tag para o DIGEST — é ele (nunca a tag) que o `docker run` usa.
+    const pinned = dockerPresent ? await resolveImageDigest(tag) : null;
+    const imagePresent = pinned !== null;
+    dockerInfo = { present: dockerPresent, image: tag, imagePresent, ...(pinned ? { digest: pinned.digest } : {}) };
     if (!dockerPresent) {
       dockerFail = true;
       errors.push(
@@ -134,6 +164,36 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
           'em container (ou o smoke da Onda 2) para buildá-la.',
       );
     }
+    // Runtime opt-in (gVisor): o MESMO gate que a preparação da run aplica.
+    if (dockerPresent && opts.isolation.runtime) {
+      try {
+        await assertDockerRuntime(opts.isolation.runtime);
+      } catch (err) {
+        dockerFail = true;
+        errors.push((err as Error).message);
+      }
+    }
+    // Perfil endurecido (IMPL-036) + rota até o provedor (IMPL-037). A rota é o
+    // proxy de inferência do host (socket Unix + relay) — o pré-voo não a
+    // PRESUME: roda a sonda no sandbox DESTA run (mesma imagem/perfil/runtime) e
+    // mede relay → proxy, key fora do ambiente e egress bloqueado. Sem rota, toda
+    // execução terminaria em erro de infra: falhar AQUI, antes de gastar.
+    let profile: HardeningProfile | undefined;
+    try {
+      profile = dockerPresent ? await sandboxProfile({ runtime: opts.isolation.runtime }) : hardeningProfile({ runtime: opts.isolation.runtime });
+      // Válvula do operador ligada: não falha, mas fica À VISTA no pré-voo.
+      for (const u of profile.unsafe) errors.push(`⚠️ sandbox FORA do perfil endurecido: ${u}`);
+    } catch (err) {
+      sandboxFail = true;
+      errors.push(`perfil endurecido do sandbox recusado: ${(err as Error).message}`);
+    }
+    if (profile && pinned && !dockerFail) {
+      inferenceRoute = await probeSandboxInferenceRoute({ imageDigest: pinned.digest, profile });
+      if (!inferenceRoute.ok) {
+        sandboxFail = true;
+        errors.push(`modo container: rota de inferência do sandbox reprovada — ${inferenceRoute.errors.join('; ')}. ${inferenceRouteHint()}`);
+      }
+    }
   }
 
   // --- disco ---------------------------------------------------------------
@@ -146,10 +206,12 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
   }
 
   // --- canário de sala limpa (cacheado) -----------------------------------
-  // Só roda quando há chave de API — sem LLM, o canário não prova nada.
+  // Só roda quando há chave de API — sem LLM, o canário não prova nada. Com o
+  // sandbox sem rota até o provedor, também não: o modelo nunca responderia. E
+  // sem Docker/imagem o canário em container não tem o que subir.
   let canary: CleanRoomReport | undefined;
   let canaryFail = false;
-  if (opts.apiKey) {
+  if (opts.apiKey && !sandboxFail && !dockerFail) {
     canary = await cachedOrRunCanary(opts);
     if (!canary.ok) {
       canaryFail = true;
@@ -157,7 +219,7 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
     }
   }
 
-  const ok = !piFail && gitPresent && !canaryFail && !dockerFail;
+  const ok = !piFail && gitPresent && !canaryFail && !dockerFail && !sandboxFail;
   return {
     ok,
     pi,
@@ -165,6 +227,7 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
     diskFreeGb,
     canary,
     docker: dockerInfo,
+    ...(inferenceRoute ? { inferenceRoute } : {}),
     errors,
   };
 }
@@ -181,8 +244,13 @@ export interface CleanRoomCoreOpts {
    * parser/coleta de leaks é IDÊNTICO ao modo host.
    */
   container?: boolean;
-  /** Tag da imagem do pi a usar no modo container. Default `prompt-builder-pi:<versão>`. */
+  /**
+   * Imagem do pi no modo container: tag (resolvida para o digest sha256 antes do
+   * `docker run`) ou referência por digest. Obrigatória com `container: true`.
+   */
   image?: string;
+  /** Runtime OCI opt-in (ex.: `runsc`) — o canário mede o MESMO sandbox da run. */
+  runtime?: string;
 }
 
 /**
@@ -205,7 +273,7 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
       'runCleanRoomCanary: modo container exige `image` (tag da imagem do pi) explicitamente.',
     );
   }
-  const containerImage = opts.image ?? defaultPiImageTag('');
+  const containerImageRef = opts.image ?? defaultPiImageTag('');
 
   // Tokens por camada (Apêndice E). Cada camada da "sala" que o pi supostamente
   // isola recebe um marcador único: se qualquer um aparecer na resposta, há um
@@ -253,7 +321,9 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
     PI_OFFLINE: '1',
     PI_SKIP_VERSION_CHECK: '1',
     PI_TELEMETRY: '0',
-    OPENROUTER_API_KEY: apiKey,
+    // SEM `OPENROUTER_API_KEY` (IMPL-037): o canário mede a MESMA rota da run —
+    // a key fica num proxy de inferência local e o pi recebe um token fictício
+    // no `models.json` da casa (envenenada) dele.
     GIT_TERMINAL_PROMPT: '0',
   };
 
@@ -312,6 +382,9 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
         modelChanged = JSON.stringify(rec);
       }
     }
+    // Erro do provedor: vale o da ÚLTIMA mensagem do assistente.
+    const msg = rec.message as Record<string, unknown> | undefined;
+    if (rec.type === 'message_end' && msg?.role === 'assistant') providerError = piProviderError(rec);
     // Vazamento de token: procura em TODO valor de string do record (uma
     // resposta de agente pode aninhar texto em `content`/`text`/etc).
     collectCanaryLeaks(rec, canaries, leaks);
@@ -320,8 +393,8 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
 
   // --- spawn: host vs container -------------------------------------------
   // Em container, o `bin` vira `docker`, o argv é o `docker run` montado a partir
-  // dos helpers de container.ts, o env do CLI é SÓ o do host (a key e as PI_*
-  // entram pelo env-file 0600), cwd = o diretório do projeto do HOST, e o kill
+  // dos helpers de container.ts, o env do CLI é SÓ o do host (as PI_* entram
+  // pelo env-file 0600; a key fica no proxy), cwd = o diretório do projeto do HOST, e o kill
   // por timeout/cancelamento aponta para `killContainer(<nome>)`. O resto do
   // canário (splitter, parse, coleta de leaks, parede de tempo) NÃO muda.
   let agentBin: string;
@@ -331,38 +404,89 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
   let onKill: ((reason: AgentStopReason) => void) | undefined;
   let envFilePath: string | undefined;
   let containerName: string | undefined;
+  /** Por onde o pi fala com o modelo: dica acionável se ele não responder. */
+  let networkHint: string | undefined;
+  /** Proxy de inferência do canário (detém a key; fechado no `finally`). */
+  let proxy: InferenceProxy | undefined;
+  const proxyLog = path.join(runDir, 'inference-proxy.jsonl');
+  const startCanaryProxy = async (listen: { tcp?: boolean; unix?: boolean }): Promise<InferenceProxy> => {
+    const gw = getGateway().config;
+    return startInferenceProxy({
+      apiKey,
+      upstreamBaseUrl: gw.baseUrl,
+      appUrl: gw.appUrl,
+      appTitle: gw.appTitle,
+      listen,
+      logFile: proxyLog,
+    });
+  };
+  /** Erro do provedor na ÚLTIMA resposta do modelo (o pi sai 0 mesmo assim). */
+  let providerError: string | undefined;
 
   if (isContainer) {
+    // O canário mede o MESMO sandbox da run: perfil endurecido + imagem pelo
+    // DIGEST. Sem digest resolvível ou com perfil recusado (host root, válvula
+    // de rede inválida) não há o que medir — relatório honesto, sem spawn.
+    let profile: HardeningProfile;
+    let imageDigest: string | undefined;
+    try {
+      profile = await sandboxProfile({ runtime: opts.runtime });
+      imageDigest = isDigestRef(containerImageRef)
+        ? containerImageRef
+        : (await resolveImageDigest(containerImageRef))?.digest;
+    } catch (err) {
+      return { ok: false, leaks: [`sandbox do canário recusado: ${(err as Error).message}`], flagsUsed };
+    }
+    if (!imageDigest) {
+      return {
+        ok: false,
+        leaks: [`imagem ${containerImageRef} não encontrada no daemon — não há digest sha256 para rodar o canário.`],
+        flagsUsed,
+      };
+    }
+    try {
+      proxy = await startCanaryProxy({ unix: true });
+      const cred = proxy.issueCredential({ role: 'doctor-canary' });
+      writePiInferenceConfig(homeDir, 'openrouter', CONTAINER_INFERENCE_BASE_URL, cred.token);
+    } catch (err) {
+      await proxy?.close();
+      return { ok: false, leaks: [`proxy de inferência do canário indisponível: ${(err as Error).message}`], flagsUsed };
+    }
+    networkHint = inferenceRouteHint(proxyLog);
     containerName = `${CONTAINER_NAME_PREFIX}doctor-${uuid}`;
-    envFilePath = writeEnvFile({
-      OPENROUTER_API_KEY: apiKey,
-      PI_MODEL: wantModel,
-      PI_PROVIDER: 'openrouter',
-      PI_CODING_AGENT_DIR: containerHomeDir,
-      PI_CODING_AGENT_SESSION_DIR: containerSessDir,
-      HOME: containerHomeDir,
-      PI_OFFLINE: '1',
-      PI_SKIP_VERSION_CHECK: '1',
-      PI_TELEMETRY: '0',
-      GIT_TERMINAL_PROMPT: '0',
-    });
-    const uid = typeof process.getuid === 'function' ? process.getuid() ?? 0 : 0;
-    const gid = typeof process.getgid === 'function' ? process.getgid() ?? 0 : 0;
-    agentArgv = [
-      'run', '-i', '--rm',
-      '--name', containerName,
-      '--env-file', envFilePath,
-      '-v', `${projDir}:${containerProjDir}`,
-      '-v', `${homeDir}:${containerHomeDir}`,
-      '-v', `${sessDir}:${containerSessDir}`,
-      '-w', containerProjDir,
-      '-m', CONTAINER_MEM_LIMIT,
-      '--pids-limit', String(CONTAINER_PIDS_LIMIT),
-      '--user', `${uid}:${gid}`,
-      containerImage,
-      'pi',
-      ...argv,
-    ];
+    try {
+      envFilePath = writeEnvFile({
+        PI_MODEL: wantModel,
+        PI_PROVIDER: 'openrouter',
+        PI_CODING_AGENT_DIR: containerHomeDir,
+        PI_CODING_AGENT_SESSION_DIR: containerSessDir,
+        HOME: containerHomeDir,
+        PI_OFFLINE: '1',
+        PI_SKIP_VERSION_CHECK: '1',
+        PI_TELEMETRY: '0',
+        GIT_TERMINAL_PROMPT: '0',
+      });
+      agentArgv = buildSandboxRunArgv({
+        image: imageDigest,
+        containerName,
+        profile,
+        interactive: true,
+        envFile: envFilePath,
+        mounts: [
+          { host: projDir, container: containerProjDir },
+          { host: homeDir, container: containerHomeDir },
+          { host: sessDir, container: containerSessDir },
+          inferenceProxyMount(proxy.socketDir as string),
+        ],
+        workdir: containerProjDir,
+        command: inferenceRelayCommand(['pi', ...argv]),
+      });
+    } catch (err) {
+      // Antes do `finally` do spawn: nada pode ficar para trás (env-file, proxy).
+      if (envFilePath) rmSync(envFilePath, { force: true });
+      await proxy.close();
+      return { ok: false, leaks: [`sandbox do canário não montou: ${(err as Error).message}`], flagsUsed };
+    }
     agentBin = 'docker';
     agentEnv = dockerCliEnv();
     agentCwd = projDir;
@@ -372,6 +496,15 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
       if (containerName) void killContainer(containerName);
     };
   } else {
+    try {
+      proxy = await startCanaryProxy({ tcp: true });
+      const cred = proxy.issueCredential({ role: 'doctor-canary' });
+      writePiInferenceConfig(homeDir, 'openrouter', proxy.tcpBaseUrl as string, cred.token);
+    } catch (err) {
+      await proxy?.close();
+      return { ok: false, leaks: [`proxy de inferência do canário indisponível: ${(err as Error).message}`], flagsUsed };
+    }
+    networkHint = `o pi fala com o provedor pelo proxy de inferência local — veja o log redigido (${proxyLog}).`;
     agentBin = bin ?? path.join(cleanPathPrefix(), 'pi');
     agentArgv = argv;
     agentEnv = env;
@@ -402,8 +535,8 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
     leaks.push(`falha ao spawnar o pi no canário: ${(err as Error).message}`);
     splitter.end();
   } finally {
-    // Modo container: remove o env-file do host (a key NUNCA permanece em disco
-    // além da janela do canário). `--rm` + `killContainer` já cuidam do container.
+    // Modo container: remove o env-file do host. `--rm` + `killContainer` já
+    // cuidam do container. O proxy (e o token) morre com o canário.
     if (envFilePath) {
       try {
         rmSync(envFilePath, { force: true });
@@ -411,8 +544,17 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
         /* limpeza best-effort — não derruba o canário */
       }
     }
+    await proxy?.close();
   }
 
+  if (providerError) {
+    // O pi sai com exit 0 mesmo sem resposta do modelo — sem resposta, a ausência
+    // de canários não prova isolamento nenhum.
+    leaks.push(
+      `o modelo não respondeu ao canário (erro do provedor: ${providerError}) — não foi possível afirmar isolamento.` +
+        (networkHint ? ` ${networkHint}` : ''),
+    );
+  }
   if (thinkingChanged) {
     leaks.push(`thinking_level_change divergente (pedido ${wantThinking}): ${thinkingChanged}`);
   }
@@ -480,19 +622,6 @@ async function detectDockerCli(): Promise<boolean> {
   }
 }
 
-/**
- * A imagem `<tag>` existe no daemon do host? `docker image inspect` SILENCIOSO
- * (stdout/stderr descartados) — o pré-voo NÃO builda (o build é da preparação).
- */
-async function dockerImagePresent(tag: string): Promise<boolean> {
-  try {
-    const out = await runSimple(['docker', 'image', 'inspect', tag], { env: dockerCliEnv() });
-    return out.code === 0;
-  } catch {
-    return false;
-  }
-}
-
 /** Espaço livre (GB) no filesystem de `dir`, via `fs.statfs` + 1 casa decimal. */
 function dfGb(dir: string): number {
   try {
@@ -537,7 +666,25 @@ async function cachedOrRunCanary(opts: PreflightOpts): Promise<CleanRoomReport> 
   // adicionado AQUI (no doctor), e não no cmdDoctor, para centralizar a regra:
   // qualquer chamador (CLI OU endpoint) herda a distinção de graça.
   const isContainer = opts.isolation?.kind === 'container';
-  const cacheKey = opts.cacheKey ? `${opts.cacheKey}${isContainer ? ':container' : ''}` : undefined;
+  // Em container, a chave inclui a versão do perfil endurecido, a rede, o
+  // runtime e o DIGEST da imagem: um "ok" medido num sandbox MAIS FRACO (perfil
+  // antigo, válvula `bridge`, runc em vez de runsc) ou noutro conteúdo de imagem
+  // (tag rebuildada) não vale para o sandbox de agora.
+  const containerImageRef = opts.isolation?.image ?? defaultPiImageTag(opts.expectedVersion ?? '');
+  let containerSuffix = '';
+  if (isContainer) {
+    let network = 'invalid';
+    try {
+      network = resolveContainerNetwork().network;
+    } catch {
+      /* válvula inválida: o canário vai recusar e o relatório não é cacheado */
+    }
+    const digest = (await resolveImageDigest(containerImageRef))?.digest ?? 'sem-imagem';
+    containerSuffix = `:container:h${HARDENING_PROFILE_VERSION}:${network}:${opts.isolation?.runtime ?? 'runc'}:${digest}`;
+  }
+  // A rota de inferência entra na chave (IMPL-037): um "ok" medido com a key no
+  // ambiente do pi (sem proxy) não vale para a rota de agora, e vice-versa.
+  const cacheKey = opts.cacheKey ? `${opts.cacheKey}${containerSuffix}:proxy${INFERENCE_PROXY_VERSION}` : undefined;
   if (cacheKey) {
     const cacheFile = path.join(getDataDir(), 'agent-doctor-cache', `${createHash('sha256').update(cacheKey).digest('hex')}.json`);
     if (existsSync(cacheFile)) {
@@ -555,7 +702,8 @@ async function cachedOrRunCanary(opts: PreflightOpts): Promise<CleanRoomReport> 
     model: opts.model,
     bin: opts.bin,
     container: isContainer,
-    image: isContainer ? (opts.isolation?.image ?? defaultPiImageTag(opts.expectedVersion ?? '')) : undefined,
+    image: isContainer ? containerImageRef : undefined,
+    runtime: isContainer ? opts.isolation?.runtime : undefined,
   });
   if (cacheKey && report.ok) {
     try {

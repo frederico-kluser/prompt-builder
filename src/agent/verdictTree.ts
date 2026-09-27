@@ -499,6 +499,8 @@ export interface ProvenanceRep {
   explanation: string;
   source?: VerdictSource;
   judgeError?: VerdictError;
+  /** Rep sem veredito por erro de INFRA do provedor/rede (IMPL-036). */
+  infraError?: string;
 }
 
 /**
@@ -522,6 +524,9 @@ export function agentStageProvenance(reps: ProvenanceRep[]): { source?: VerdictS
   }
   const semVeredito = reps.filter((r) => r.path !== 'cancelled');
   if (semVeredito.length === 0) return {};
+  // Infra (IMPL-036): a falha é do ambiente — papel do executor, não do juiz.
+  const infra = semVeredito.find((r) => r.infraError);
+  if (infra?.infraError) return { error: { kind: 'competitor_error', message: infra.infraError.slice(0, 200) } };
   const comErro = semVeredito.find((r) => r.judgeError);
   if (comErro?.judgeError) return { error: comErro.judgeError };
   return { error: { kind: 'no_reference', message: semVeredito[0].explanation.slice(0, 200) } };
