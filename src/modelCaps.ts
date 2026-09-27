@@ -142,6 +142,11 @@ export interface ModelExportRow {
   supportedParameters?: string[];
   caps: ModelCaps;
   thinkLevels: ThinkLevels;
+  /**
+   * Ciclo de vida do catálogo (IMPL-019): snapshot datado por trás do id, data
+   * de deprecação (AAAA-MM-DD) e alvo do alias. null = o catálogo não informa.
+   */
+  lifecycle: { canonicalSlug: string | null; expirationDate: string | null; aliasTarget: string | null };
 }
 
 export function toExportRow(m: OpenRouterModel): ModelExportRow {
@@ -157,5 +162,10 @@ export function toExportRow(m: OpenRouterModel): ModelExportRow {
     supportedParameters: m.supportedParameters,
     caps: modelCaps(m),
     thinkLevels: thinkLevelsFor(m),
+    lifecycle: {
+      canonicalSlug: m.canonicalSlug ?? null,
+      expirationDate: m.expirationDate ?? null,
+      aliasTarget: m.aliasTarget ?? null,
+    },
   };
 }

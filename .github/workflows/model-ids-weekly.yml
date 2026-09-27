@@ -1,0 +1,61 @@
+# Job SEMANAL (IMPL-019, R-07b:REC-8): os ids de modelo citados em agent-docs/,
+# skills/ e README.md ainda existem no catálogo do OpenRouter?
+#
+# - id ausente ou expirado          → o job FALHA (exit 1);
+# - expiration_date em ≤ 30 dias    → aviso com sucedâneo (não falha);
+# - data futura além disso          → passa.
+#
+# Usa só GET /models, que é PÚBLICO e gratuito: nenhum segredo, nenhuma key,
+# nenhum MOTION_TOKEN (só o pacote raiz é instalado; o web/ não entra).
+name: model-ids (semanal)
+
+on:
+  schedule:
+    # Segunda-feira, 09:17 UTC (fora do minuto cheio, que o GitHub congestiona).
+    - cron: '17 9 * * 1'
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - 'agent-docs/**'
+      - 'skills/**'
+      - 'README.md'
+      - 'scripts/check-model-ids.ts'
+      - 'src/modelIdsCheck.ts'
+      - 'src/engine/modelLifecycle.ts'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-ids-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Cache de 24 h do catálogo (a chave muda por dia): re-execuções no mesmo
+      # dia não batem de novo no OpenRouter.
+      - name: Data do cache do catálogo
+        id: day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/prompt-builder
+          key: models-public-${{ steps.day.outputs.day }}
+
+      # Só o pacote raiz (tsx). --ignore-scripts: nenhum script de dependência roda.
+      - name: Instalar dependências (raiz)
+        run: npm ci --ignore-scripts
+
+      - name: Conferir ids citados contra GET /models
+        run: npx tsx scripts/check-model-ids.ts

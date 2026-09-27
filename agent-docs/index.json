@@ -15,7 +15,13 @@
     "topic": "models",
     "title": "Modelos e think levels",
     "summary": "filtros, schema de export e como não tomar HTTP 400 no esforço",
-    "approxTokens": 900
+    "approxTokens": 1100
+  },
+  {
+    "topic": "lifecycle",
+    "title": "Ciclo de vida dos modelos",
+    "summary": "o que a run grava do catálogo, alertas 30/14/7 dias, política de remoção e o gate `baseline check`",
+    "approxTokens": 1300
   },
   {
     "topic": "budget",

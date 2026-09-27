@@ -10,6 +10,7 @@ import { oracleScoresFromVerdicts } from './engine/duelCore.js';
 import { fairnessWarningsForModels } from './llmVariants.js';
 import { JUDGE_CONTRACT_TEXT } from './refJudge.js';
 import { pinJudgeContract, verbosityReport } from './engine/judgeCalibration.js';
+import { modelRolesForRun, snapshotModelLifecycle } from './engine/modelLifecycle.js';
 import { mergeScenarios } from './scenarioPack.js';
 import { sanitizeLlmVariants, variantsToContestants } from './llmVariants.js';
 import { judgeScoreFromVerdicts } from './rank.js';
@@ -356,6 +357,29 @@ async function runLoop(
     if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
   };
 
+  /**
+   * IMPL-019 (R-07b:REC-8) — ciclo de vida de TODO modelo da run, do catálogo
+   * já carregado (zero rede extra): canonicalSlug/expirationDate/aliasTarget por
+   * papel + alertas 30/14/7 dias / expirado / ausente. NUNCA migra sozinho: só
+   * grava e avisa — trocar o modelo em silêncio quebraria a comparação pareada.
+   * Roda no início (cobre a run que para cedo) e de novo quando o `prepare`
+   * troca os contestants; `avisados` evita repetir o mesmo aviso no log.
+   */
+  const avisados = new Set<string>();
+  const captureLifecycle = (): void => {
+    record.modelLifecycle = snapshotModelLifecycle(
+      modelRolesForRun(record.config, record.contestants),
+      catalogo,
+      new Date(),
+    );
+    for (const a of record.modelLifecycle.alerts) {
+      if (avisados.has(a.modelId)) continue;
+      avisados.add(a.modelId);
+      log(runId, `ciclo de vida: ${a.message}`);
+    }
+  };
+  captureLifecycle();
+
   await saveRun(record);
   emitEvent({ type: 'run.started', runId, record });
   log(runId, 'started', {
@@ -393,6 +417,7 @@ async function runLoop(
     record.contestants = contestants;
     record.scoreboard = Object.fromEntries(contestants.map((c) => [c.id, 0]));
     record.costByContestant = Object.fromEntries(contestants.map((c) => [c.id, 0]));
+    captureLifecycle();
     await saveRun(record);
     emitEvent({ type: 'variants.generated', runId, contestants });
   }

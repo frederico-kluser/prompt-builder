@@ -253,6 +253,11 @@ export async function cmdRuns(argv: string[]): Promise<number> {
       if (diag.verbosity.warning) out.line(`! ${diag.verbosity.warning}`);
     }
     for (const aviso of record.fairnessWarnings ?? []) out.line(`! ${aviso}`);
+    // IMPL-019: alertas de ciclo de vida gravados NO INÍCIO da run (30/14/7
+    // dias, expirado, ausente). Para o estado de hoje: `baseline check`.
+    for (const a of record.modelLifecycle?.alerts ?? []) {
+      out.line(`! ciclo de vida (em ${record.modelLifecycle!.capturedAt.slice(0, 10)}): ${a.message}`);
+    }
     const amostra = sampleSizeWarning(record.stages.length, 'etapas');
     if (amostra) out.line(`! ${amostra}`);
   }
@@ -260,6 +265,7 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     run: record,
     judgeDiagnostics: record.judgeDiagnostics ?? null,
     fairnessWarnings: record.fairnessWarnings ?? [],
+    lifecycleAlerts: record.modelLifecycle?.alerts ?? [],
     sampleWarnings: [sampleSizeWarning(record.stages.length, 'etapas')].filter(Boolean),
   });
   return EXIT.OK;

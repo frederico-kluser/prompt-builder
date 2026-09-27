@@ -6,6 +6,12 @@ import { composePrompt } from '../../../src/engine/promptGroup.js';
 import { addToPool, pickParent, sliceScores, type ParetoEntry } from '../../../src/engine/pareto.js';
 import { planHalving, survivorsOf } from '../../../src/engine/halving.js';
 import { seedFromId } from '../../../src/engine/duelCore.js';
+import {
+  judgeIdentity,
+  judgeIdentityChanged,
+  mergeJudgeIdentity,
+  type JudgeIdentity,
+} from '../../../src/engine/modelLifecycle.js';
 import { emitSessionEvent } from './events';
 import { saveSession } from './storage';
 import { computeMedals } from './medals';
@@ -294,7 +300,7 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
   let pool: PoolMember[] = [];
   const usoPai: Record<string, number> = {};
   // F4.2: 1o hash do contrato do juiz visto na sessao (detecta drift).
-  let primeiroHashJuiz: string | undefined;
+  let primeiroIdJuiz: JudgeIdentity | undefined;
   let champion: Champion | undefined;
   // Id que o campeao teve na run MAIS RECENTE (promovido: o id da variante;
   // convergido: a regua, que segurou o titulo). Usado na linhagem e no
@@ -473,10 +479,13 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
 
       // F4.2: calibration drift — contrato do juiz diferente no meio da sessao
       // significa que o delta entre iteracoes pode ser do JUIZ, nao do prompt.
-      const hashJuiz = runRec.judgeDiagnostics?.contract.hash;
-      if (hashJuiz) {
-        if (primeiroHashJuiz && hashJuiz !== primeiroHashJuiz) record.judgeDrift = true;
-        primeiroHashJuiz ??= hashJuiz;
+      // IMPL-019: a identidade inclui o snapshot (canonicalSlug/aliasTarget) do
+      // juiz e do gabarito — alias `~…-latest` movido no meio da sessao e outro
+      // modelo com o MESMO id, e o hash sozinho nao veria.
+      const idJuiz = judgeIdentity(runRec);
+      if (idJuiz) {
+        if (primeiroIdJuiz && judgeIdentityChanged(primeiroIdJuiz, idJuiz)) record.judgeDrift = true;
+        primeiroIdJuiz = primeiroIdJuiz ? mergeJudgeIdentity(primeiroIdJuiz, idJuiz) : idJuiz;
       }
 
       // 3) Pina o benchmark depois da iteracao 0 (mesmas perguntas em todas),

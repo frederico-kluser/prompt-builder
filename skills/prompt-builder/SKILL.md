@@ -143,4 +143,6 @@ agente (Agent Arena), o executor do motor é o `pi`; os demais entram como
   (never-break em 3 camadas: local + juiz do diff + `canaries[]`; ver `agent-docs/train.md`) · `prompt.group`+`promptId` (multi-prompt coordinate ascent) · `training.reflection`
   (`deterministic|llm|off`) · `training.paretoPool` (população Pareto) · `repeats` (compare, 1–3).
 - **Reprodutibilidade**: `runs reproduce` · `runs export` · `sessions winner --apply [--commit]` ·
-  `registry validate` (drift do prompt em código).
+  `registry validate` (drift do prompt em código) · `baseline pin|check|declare` (gate de CI:
+  juiz/gabarito só mudam com re-baseline declarada; ver `docs lifecycle`) ·
+  `models list --expiring 30` (o que sai do catálogo em breve).

@@ -1,4 +1,5 @@
 import { applyReasoning } from './reasoning.js';
+import { parseLifecycleMeta } from './engine/modelLifecycle.js';
 import type {
   CallCost,
   CostRole,
@@ -450,6 +451,9 @@ export function parseModelsPayload(json: unknown): OpenRouterModel[] {
         ? (item.supported_parameters as unknown[]).map((p) => String(p))
         : undefined,
       reasoning: parseReasoningMeta(item.reasoning),
+      // IMPL-019: canonical_slug/expiration_date/alias_target/created — a run
+      // grava o snapshot e o CLI alerta 30/14/7 dias (src/engine/modelLifecycle.ts).
+      ...parseLifecycleMeta(item),
       raw: item,
     };
   });

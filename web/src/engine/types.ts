@@ -3,6 +3,17 @@ import type { ExpectedSpec } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
 import type { CostEntry, CostRole, PricingTier } from '../../../src/types.js';
+import type { ModelLifecycleSnapshot } from '../../../src/engine/modelLifecycle.js';
+
+// Ciclo de vida de modelos (IMPL-019): fonte única em src/engine/modelLifecycle.ts.
+export type {
+  ModelLifecycleAlert,
+  ModelLifecycleEntry,
+  ModelLifecycleSnapshot,
+  ModelUsageRole,
+  RemovalAction,
+  SuccessorSuggestion,
+} from '../../../src/engine/modelLifecycle.js';
 
 // Contabilidade de custo: FONTE ÚNICA em src/types.ts (IMPL-021). Desde que os
 // módulos de papel e o gateway viraram shims, o web usa o MESMO ledger
@@ -40,6 +51,16 @@ export interface OpenRouterModel {
   supportedParameters?: string[];
   /** Metadados de raciocinio declarados pelo modelo (campo `reasoning` de /models). */
   reasoning?: ModelReasoningMeta;
+  /**
+   * Ciclo de vida (IMPL-019, campos `canonical_slug`/`expiration_date`/
+   * `alias_target`/`created` de /models): o snapshot datado por tras do id, a
+   * data de deprecacao do endpoint (AAAA-MM-DD; null = catalogo diz "sem data")
+   * e, para aliases `~…-latest`, o id para o qual apontam HOJE.
+   */
+  canonicalSlug?: string;
+  expirationDate?: string | null;
+  aliasTarget?: string;
+  created?: number;
   raw?: unknown;
 }
 
@@ -489,6 +510,14 @@ export interface RunRecord {
     contract: { hash: string; modelIds: string[]; pinnedAt: string };
     verbosity: { n: number; r: number; biased: boolean; warning: string };
   };
+  /**
+   * Ciclo de vida de TODO modelo da run (IMPL-019): canonicalSlug/
+   * expirationDate/aliasTarget do catalogo no inicio da run, por papel, + os
+   * alertas 30/14/7 dias / expirado / ausente. E o que permite, meses depois,
+   * saber se o id de hoje ainda e o snapshot que foi medido (alias movido =
+   * outro modelo com o mesmo nome). Ausente em records antigos.
+   */
+  modelLifecycle?: ModelLifecycleSnapshot;
 
   /** Classificacao final agregada (Copeland dos duelos / pontos do placar). */
   standings?: {

@@ -20,7 +20,8 @@ prompt-builder models list --format ids         # só os ids, um por linha
 `--no-reasoning` · `--effort <nível>` (só modelos que aceitam **aquele** degrau) ·
 `--supports <param>` (repetível, ex.: `temperature`, `seed`) · `--min-context N` ·
 `--max-prompt-price N` / `--max-completion-price N` (**USD por milhão de
-tokens**) · `--free` · `--lgpd-area <área> [--include-ressalvas]` · `--limit N`.
+tokens**) · `--free` · `--lgpd-area <área> [--include-ressalvas]` ·
+`--expiring N` (só quem sai do catálogo em até N dias) · `--limit N`.
 
 ## O formato de export (`prompt-builder-models@1`)
 
@@ -44,9 +45,18 @@ tokens**) · `--free` · `--lgpd-area <área> [--include-ressalvas]` · `--limit
       "off": "none", "minimal": "minimal", "low": "low", "medium": "medium",
       "high": "high", "xhigh": "high", "max": "high"
     }
+  },
+  "lifecycle": {
+    "canonicalSlug": "openai/gpt-5-mini-2025-08-07",
+    "expirationDate": null,
+    "aliasTarget": null
   }
 }
 ```
+
+`lifecycle` diz qual snapshot está por trás do id, quando ele sai do catálogo
+e, para aliases `~…-latest`, para onde apontam hoje. Alertas 30/14/7 dias,
+política de remoção e o gate de baseline: `prompt-builder docs lifecycle`.
 
 **Duas unidades diferentes convivem, e confundi-las erra por 1.000.000×:**
 `pricing.*` é **USD por token** (o formato do catálogo) e `pricePerMTok.*` é

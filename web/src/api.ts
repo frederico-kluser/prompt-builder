@@ -5,6 +5,12 @@ import type { PromptGroup } from '../../src/engine/promptGroup.js';
 import type { CostEntry, CostRole, RunCtx } from '../../src/types.js';
 export type { CostEntry, CostRole } from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
+import type { ModelLifecycleSnapshot } from '../../src/engine/modelLifecycle.js';
+export type {
+  ModelLifecycleAlert,
+  ModelLifecycleEntry,
+  ModelLifecycleSnapshot,
+} from '../../src/engine/modelLifecycle.js';
 import type { ModelReasoningMeta } from './modelCaps';
 import type { LgpdData } from './lgpd';
 import lgpdData from './data/lgpd-compliance.json';
@@ -41,6 +47,11 @@ export interface OpenRouterModel {
   supportedParameters?: string[];
   /** Metadados de raciocínio: quais degraus de esforço este modelo aceita. */
   reasoning?: ModelReasoningMeta;
+  /** Ciclo de vida (IMPL-019): snapshot datado, data de deprecação e alvo do alias. */
+  canonicalSlug?: string;
+  expirationDate?: string | null;
+  aliasTarget?: string;
+  created?: number;
 }
 
 // Capacidades de ajuste por modelo (temperatura/esforço) — a UI consome pela
@@ -326,6 +337,8 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
+  /** Ciclo de vida de todo modelo da run + alertas 30/14/7 dias (IMPL-019). */
+  modelLifecycle?: ModelLifecycleSnapshot;
   startedAt: string;
   finishedAt?: string;
   error?: string;
