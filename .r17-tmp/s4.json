@@ -1,0 +1,43 @@
+{
+  "query": "Arize Phoenix OpenInference OpenTelemetry GenAI tracing self-host",
+  "answer": "Arize Phoenix is an open-source observability tool for AI applications, using OpenTelemetry and OpenInference for self-hosted tracing and evaluation. It captures detailed traces and allows local evaluations without vendor lock-in. It's free and can be deployed on your own infrastructure.",
+  "results": [
+    {
+      "title": "Tool Highlight: Arize Phoenix — OpenTelemetry-native agent observability you can self-host for free",
+      "url": "https://dreaming.press/posts/tool-highlight-arize-phoenix-self-host-agent-tracing-evals.html",
+      "content": "Arize Phoenix is an open-source-style observability and evaluation tool for LLM and agent applications, built by Arize AI. It captures traces of your app — spans, prompts, tool calls, token usage, latency — using OpenTelemetry and the OpenInference semantic conventions, then gives you a local UI to inspect them, run LLM-as-judge evaluations, build datasets, and run experiments comparing prompts or models. Because it speaks OpenTelemetry, it's vendor-, language-, and framework-agnostic. [...] If you read one line: Arize Phoenix is an OpenTelemetry-native tracing-plus-evals tool for LLM and agent apps that you can self-host for free with one `pip install`. It captures every span, prompt, tool call, and token count using open standards, then lets you run LLM-as-judge evals over that data locally — no SaaS contract to see what your agent actually did. The honest asterisk: it's source-available under the Elastic License 2.0, not OSI open source, and self-hosting means you own the ops. [...] That's the gap Arize Phoenix fills. Its one idea: instrument your app with open standards — OpenTelemetry for the transport, the OpenInference semantic conventions for LLM-specific detail — so every prompt, completion, tool call, retrieval, and token count lands as a structured trace you can actually read. Then, on the same data, run evaluations to turn \"looks fine\" into a score. And you can run the whole thing on your own machine before you pay anyone a cent.\n\n## 1. What it is#",
+      "score": 0.97334224
+    },
+    {
+      "title": "Telemetry vs Arize Phoenix | Telemetry",
+      "url": "https://telemetry.sh/compare/arize-phoenix",
+      "content": "## Arize Phoenix\n\n Open-source tracing for LLM, agent, retrieval, and tool workflows using OpenTelemetry and OpenInference.\n Evaluation, prompt, dataset, and experiment workflows for inspecting and improving AI applications.\n A stronger fit when a team needs self-hosted trace inspection, detailed LLM records, or tools for AI experiments.\n\n## Telemetry [...] 1. 1Decide whether OpenInference traces, prompt inspection, datasets, evaluators, experiments, or a self-hosted AI workspace are requirements.\n2. 2Test one agent failure and one release comparison in both systems, including the handoff between aggregate outcome and detailed trace.\n3. 3Compare deployment operations, storage, retention, access controls, instrumentation ownership, and current hosted-service packaging.\n\nMigration path\n\n## Plan the query and event migration before changing tools [...] No direct equivalent because Telemetry has no OTLP endpoint; retain Phoenix or another trace backend and correlate selected outcomes.\n3. 3\n\n   ### Dual-run the fixture\n\n   Verify that the trace backend receives the full test trace while Telemetry receives only the approved terminal fields and trace ID.\n4. 4\n\n   ### Record the decision\n\n   Decide whether OpenInference traces, prompt inspection, datasets, evaluators, experiments, or a self-hosted AI workspace are requirements.",
+      "score": 0.9694979
+    },
+    {
+      "title": "Deploy & Host arize-phoenix-observability | Railway",
+      "url": "https://railway.com/deploy/arize-phoenix-observability",
+      "content": "What makes Phoenix different from vendor observability tools? Phoenix uses OpenTelemetry-standard instrumentation via OpenInference, so you trace with the open standard rather than a proprietary SDK — your instrumentation stays portable — and it's self-hosted, keeping your trace data on your own infrastructure. [...] ---\n\n# Deploy arize-phoenix-observability\n\nSelf-host Phoenix — OpenTelemetry LLM tracing & evaluation\n\nDeploy arize-phoenix-observability\n\nJust deployed\n\n/var/lib/postgresql/data\n\nphoenix\n\narizephoenix/phoenix\n\nJust deployed\n\n## Deploy and Host Arize Phoenix on Railway [...] OpenTelemetry-native — instrument once, no vendor lock-in. Phoenix's defining trait is that it ingests standard OpenTelemetry spans via OpenInference instrumentation, so you trace your app with the open OTel standard rather than a proprietary SDK. Instrument with `arize-phoenix-otel` and the OpenInference libraries for your framework (OpenAI, LangChain, LlamaIndex, and more), point them at your Phoenix `/v1/traces` endpoint, and every LLM call, retrieval, and tool step appears as a span —",
+      "score": 0.96095175
+    },
+    {
+      "title": "Phoenix · tomrochette.com",
+      "url": "https://tomrochette.com/agents/phoenix",
+      "content": "Phoenix is Arize AI’s open-source AI observability and evaluation platform: OpenTelemetry-native tracing, LLM and code evals, versioned datasets and experiments, a prompt playground, and a built-in AI engineering agent, self-hostable or running on the Arize AX cloud. Facts below verified as of 2026-09-13. [...] A Python platform (`pip install arize-phoenix`, web UI on localhost:6006) built on OpenTelemetry with instrumentation from the companion OpenInference project: dozens of auto-instrumentors for OpenAI, Anthropic, LangChain, LlamaIndex, CrewAI, the Vercel AI SDK, and MCP. Traces flow over OTLP, evals attach to spans (LLM judges, code evaluators, human annotations, with documented interop for Ragas and deepeval), datasets and experiments version prompts, and span replay re-runs a captured step. A",
+      "score": 0.9604354
+    },
+    {
+      "title": "What Is OpenInference | Arize AI",
+      "url": "https://arize.com/glossary/openinference",
+      "content": "### Build better agents with Arize\n\nTrace, evaluate, and learn. Build agents that work with Arize AX and start tracing your runs today.\n\nPrefer open source?\nTry Arize Phoenix for self-hosted, open source agent observability.\n\n## Key takeaways\n\n`openinference.span.kind`\n\n## How it relates to OpenTelemetry",
+      "score": 0.9596866
+    }
+  ],
+  "response_time": 0.81,
+  "meta": {
+    "attempts": 1,
+    "keyless_used": false,
+    "truncated": false,
+    "keys_total": 2
+  }
+}
