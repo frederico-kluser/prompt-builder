@@ -105,9 +105,14 @@ vi.mock('../web/src/engine/orchestrator', async (orig) => ({
   runToCompletion: vi.fn(async (c: unknown, k: string, o: Record<string, unknown>) => dubles.fakeRun(c, k, o)),
 }));
 // O web re-exporta o variator de src/ (shim): o mesmo dublê vale nos dois.
+// Como o real, o dublê respeita `includeOriginal` e acrescenta o 'carry' (a
+// régua das iterações ≥ 1) — com paciência 2 (IMPL-013) o laço passa da 1ª.
 vi.mock('../src/variator.js', async (orig) => ({
   ...(await orig<typeof import('../src/variator.js')>()),
-  generateContestants: vi.fn(async () => dubles.estado.contestants),
+  generateContestants: vi.fn(async (p: { includeOriginal?: boolean; carryPrompt?: string }) => [
+    ...dubles.estado.contestants.filter((c) => c.id !== 'original' || p.includeOriginal !== false),
+    ...(p.carryPrompt ? [{ id: 'carry', label: 'Carry', modelId: 'fake/a', systemPrompt: p.carryPrompt }] : []),
+  ]),
 }));
 vi.mock('../web/src/engine/storage', () => ({
   saveRun: async () => undefined,
@@ -303,8 +308,11 @@ describe('IMPL-005 — gate inconclusivo não promove', () => {
       expect(it0.gate?.gainPp).toBe(50);
       expect(it0.gate?.sensitivity?.worst.conclusion).toBe('hold');
       expect(it0.winnerContestantId).toBe('original');
-      expect(rec.bestPromptByIteration).toHaveLength(1);
-      expect(rec.convergedAtIteration).toBe(0);
+      // IMPL-013 (paciência 2): a 1ª iteração sem promoção não encerra mais; a
+      // 2ª (carry = base, v1 igual a ele) também não promove → converge nela.
+      expect(rec.bestPromptByIteration).toHaveLength(2);
+      expect(rec.bestPromptByIteration[1].winnerContestantId).toBe('carry');
+      expect(rec.convergedAtIteration).toBe(1);
     });
   }
 });
@@ -416,8 +424,10 @@ describe('IMPL-002 — melhor de K por acaso: o gate segura (o antigo promovia)'
       expect(gate).toMatchObject({ bestId: 'v1', decision: 'held', gainPp: 2.5, minGain: 2.5 });
       expect(gate.heldBy).toEqual(['significance']);
       expect(gate.test!.pAdjusted).toBeGreaterThan(0.05);
-      expect(rec.bestPromptByIteration).toHaveLength(1);
-      expect(rec.convergedAtIteration).toBe(0);
+      // IMPL-013 (paciência 2): segura de novo na iteração 1 e só então converge.
+      expect(rec.bestPromptByIteration).toHaveLength(2);
+      expect(rec.bestPromptByIteration[1].gate?.heldBy).toEqual(['significance']);
+      expect(rec.convergedAtIteration).toBe(1);
       expect(eventos.some((e) => e.type === 'iteration.promoted')).toBe(false);
     });
   }

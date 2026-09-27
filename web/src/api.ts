@@ -37,6 +37,7 @@ export type {
   ObservationCoverage,
   PairCoverage,
   PairSensitivity,
+  PromotionReeval,
   RunCompleteness,
   SessionPairing,
 } from '../../src/types.js';

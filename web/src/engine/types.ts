@@ -71,6 +71,7 @@ export type {
   ObservationCoverage,
   PairCoverage,
   PairSensitivity,
+  PromotionReeval,
   RunCompleteness,
   SensitivityCase,
   SessionPairing,

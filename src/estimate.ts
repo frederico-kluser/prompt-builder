@@ -38,6 +38,7 @@ import {
   worstCasePricing,
   type PriceCapPerMTok,
 } from './engine/pricing.js';
+import { selectionMinibatchSize, TECHNIQUES_PER_ITERATION } from './engine/trainingPolicy.js';
 import type { CostRole, OpenRouterModel, RunConfig, RunMode } from './types.js';
 
 /** USD por token -> USD por milhao. A conversao 1e6 mora SO aqui e em toPerToken. */
@@ -93,6 +94,13 @@ export interface EstimateInput {
     /** Teto de saida de cada canario ativo (vazio = sem camada 3). */
     canaryMaxTokens: number[];
   };
+  /**
+   * IMPL-013 (training): cenarios do minibatch de RE-AVALIACAO LIMPA por
+   * iteracao — candidato + regua respondem e sao julgados de novo, sem finais.
+   * Entra em `perIteration` (e na porta de orcamento pre-iteracao) como teto:
+   * so roda quando o gate da melhor de K promove, mas pode rodar em toda.
+   */
+  reevalStages?: number;
   ctxInTokens?: number;
   /**
    * Modo agente — numero de execucoes de agente planejadas
@@ -153,6 +161,8 @@ export interface CostEstimate {
     judges: number;
     datagenBatches: number;
     duelPairs: number;
+    /** IMPL-013: cenarios da re-avaliacao limpa por iteracao (0 fora de training). */
+    reevalStages: number;
     lowFactor: number;
   };
 }
@@ -304,6 +314,23 @@ export function estimateRunCost(
       price(m, ctxIn + 2 * maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_DUEL);
   }
 
+  // --- re-avaliacao limpa (IMPL-013, training): 2 contestants x m cenarios ---
+  // Avaliacao EXTRA da iteracao: sem ela a porta pre-iteracao deixava passar
+  // uma iteracao que o orcamento nao cobre. Gabarito nao conta (os cenarios sao
+  // os pinados, ja com referencia) e nao ha finais (duels: false).
+  const reevalStages =
+    input.mode === 'training' ? Math.max(0, Math.floor(input.reevalStages ?? 0)) : 0;
+  if (reevalStages > 0) {
+    const mComp = model(input.contestantModelIds[0]);
+    byRole.competitor += reevalStages * 2 * priceCall(mComp, ctxIn, maxOut);
+    for (const jid of input.judgeModelIds) {
+      const m = model(jid);
+      byRole.judge += input.referenceJudging
+        ? reevalStages * 2 * priceCall(m, ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE)
+        : reevalStages * input.judgePasses * priceCall(m, ctxIn + 2 * maxOut, 800);
+    }
+  }
+
   // --- agente: custo declarado por construção (§20.1) ---
   // O agente NAO e precificado por tokens aqui: `maxCostUsd` e um TETO por
   // execucao, entao `agentRuns * maxCostUsd` e o limite superior da faixa e e
@@ -354,6 +381,7 @@ export function estimateRunCost(
       judges,
       datagenBatches,
       duelPairs,
+      reevalStages,
       lowFactor: LOW_FACTOR,
     },
   };
@@ -380,11 +408,20 @@ export function estimateInputFromConfig(
       config.competitorConfigs?.map((c) => c.modelId) ?? config.competitorModelIds ?? [];
   } else {
     const base = config.basePrompt?.trim() ? 1 : 0;
-    const tecnicas = config.techniqueIds?.length ?? 0;
+    const training = config.mode === 'training';
+    // IMPL-013: no treino, no maximo 6 tecnicas por iteracao (as demais rodam
+    // nas iteracoes seguintes — ver `techniquesForIteration`).
+    const tecnicas = Math.min(
+      config.techniqueIds?.length ?? 0,
+      training ? TECHNIQUES_PER_ITERATION.max : Infinity,
+    );
     const manuais = (config.manualVariants ?? []).length;
+    // O carry (campeao re-testado verbatim) e um contestant EXTRA em toda
+    // iteracao a partir da 2a — a porta pre-iteracao so age nelas.
+    const carry = training ? 1 : 0;
     const n =
       opts.contestantIds?.length ??
-      Math.max(2, (config.promptOptimization !== false ? tecnicas : manuais) + base);
+      Math.max(2, (config.promptOptimization !== false ? tecnicas : manuais) + base) + carry;
     contestantModelIds = Array.from({ length: n }, () => config.contestantModelId);
     variantsPerIteration = config.promptOptimization !== false ? tecnicas : 0;
   }
@@ -392,6 +429,9 @@ export function estimateInputFromConfig(
   const pinned = config.customStages?.length ?? 0;
   const seed = config.scenarioSeed?.length ?? 0;
   const plannedStages = pinned > 0 ? pinned : Math.max(config.stages, seed);
+  // IMPL-013: minibatch sobre TODOS os cenarios planejados (o de treino e menor
+  // depois do holdout — teto conservador).
+  const reevalStages = config.mode === 'training' ? selectionMinibatchSize(plannedStages) : 0;
   // Datagen so e chamado se o seed nao cobre o alvo e nao ha etapas pinadas.
   const precisaGerar = pinned === 0 && seed < config.stages;
 
@@ -400,7 +440,10 @@ export function estimateInputFromConfig(
   // o campo em modo agente, entao aqui `undefined` = config invalida / nao caiu
   // por schema).
   const repetitions = config.agent?.repetitions ?? 1;
-  const agentRuns = config.agent ? contestantModelIds.length * plannedStages * repetitions : 0;
+  // IMPL-013: a re-avaliacao limpa do treino tambem executa o agente (2 x m).
+  const agentRuns = config.agent
+    ? (contestantModelIds.length * plannedStages + 2 * reevalStages) * repetitions
+    : 0;
   const agentMaxCostUsd = config.agent?.limits?.maxCostUsd;
   // IMPL-034: em modo agente (todo contestant e agente), etapa com verify[] nao
   // gera gabarito nem duelo LLM — o oraculo decide.
@@ -426,6 +469,7 @@ export function estimateInputFromConfig(
     variantsPerIteration,
     holdoutStages: opts.holdoutStages,
     contract: contractEstimateFrom(config, variantsPerIteration),
+    ...(reevalStages > 0 ? { reevalStages } : {}),
     ...(config.agent ? { agentRuns, agentMaxCostUsd } : {}),
     ...(referenceStages !== undefined ? { referenceStages } : {}),
     ...(config.maxPricePerMTok ? { maxPricePerMTok: config.maxPricePerMTok } : {}),

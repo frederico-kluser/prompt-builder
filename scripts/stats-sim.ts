@@ -8,6 +8,8 @@
 //   npm run stats:sim -- --holm            # fallback Holm no lugar do max-T
 //   npm run stats:sim -- --out sim.jsonl   # uma célula por linha (JSONL)
 //   npm run stats:sim -- --jobs 8          # processos em paralelo (default: nº de CPUs − 1)
+//   npm run stats:sim -- --sessions        # IMPL-013: SESSÃO inteira sob H0 (paciência 2 +
+//                                          # re-avaliação limpa) × laço antigo; default 5.000 sessões/célula
 //
 // Saída: a tabela por célula no stderr e o veredito dos dois critérios de aceite
 // (promoção falsa ≤ 5,5% em 100% das células H0; |viés| do ganho corrigido
@@ -22,7 +24,9 @@ import {
   acceptanceGrid,
   MAX_ABS_BIAS_PP,
   MAX_FALSE_PROMOTION,
+  MAX_SESSION_FALSE_PROMOTION,
   simulateCell,
+  simulateSession,
   type CellResult,
   type CellSpec,
 } from './stats-sim-core.js';
@@ -77,8 +81,10 @@ async function main(): Promise<number> {
       out: { type: 'string' },
       sparse: { type: 'boolean', default: false },
       holm: { type: 'boolean', default: false },
+      sessions: { type: 'boolean', default: false },
     },
   });
+  if (values.sessions) return runSessions(values.trials === '20000' ? 5000 : Math.max(1, Number(values.trials)));
   if (values.cell) {
     // Modo filho: uma célula, uma linha JSON no stdout.
     process.stdout.write(`${JSON.stringify(simulateCell(JSON.parse(values.cell) as CellSpec))}\n`);
@@ -152,6 +158,41 @@ async function main(): Promise<number> {
     })}\n`,
   );
   return h0Fail.length === 0 && h1Fail.length === 0 ? 0 : 1;
+}
+
+/**
+ * IMPL-013: promoção falsa por SESSÃO sob H0 (laço novo × antigo). Em processo
+ * (as células são baratas). Critério: < 30% em toda célula — o item fixa n = 8,
+ * K = 4, flip 0,15 (hoje 60,8%).
+ */
+function runSessions(trials: number): number {
+  const cells = [];
+  for (const flip of [0.15, 0.3]) for (const n of [5, 8, 12, 20]) for (const K of [4, 6]) cells.push({ n, K, flip, trials });
+  console.error(`stats:sim --sessions — ${cells.length} células × ${trials} sessões (H0; até 5 iterações, paciência 2, re-avaliação limpa)`);
+  const results = cells.map((c) => {
+    const r = simulateSession(c);
+    console.error(
+      `n=${String(r.n).padStart(2)} K=${r.K} flip=${r.flip.toFixed(2)}  sessão ${pct(r.sessionFalsePromotionRate).padStart(7)} ` +
+        `(≤ ${pct(r.sessionFalsePromotionUpper95)}; antigo ${pct(r.legacySessionFalsePromotionRate).padStart(7)})  ` +
+        `iterações ${r.meanIterations.toFixed(2)}  re-avaliação barrou ${r.reevalRejectionRate === null ? '—' : pct(r.reevalRejectionRate)}  ${(r.ms / 1000).toFixed(1)}s`,
+    );
+    return r;
+  });
+  const fail = results.filter((r) => r.sessionFalsePromotionRate >= MAX_SESSION_FALSE_PROMOTION);
+  process.stdout.write(
+    `${JSON.stringify({
+      sessions: true,
+      cells: results.length,
+      trials,
+      pass: results.length - fail.length,
+      maxSessionFalsePromotion: Math.max(...results.map((r) => r.sessionFalsePromotionRate)),
+      legacyRange: [
+        Math.min(...results.map((r) => r.legacySessionFalsePromotionRate)),
+        Math.max(...results.map((r) => r.legacySessionFalsePromotionRate)),
+      ],
+    })}\n`,
+  );
+  return fail.length === 0 ? 0 : 1;
 }
 
 main().then(

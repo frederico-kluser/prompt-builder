@@ -20,6 +20,7 @@
 import { mulberry32 } from '../src/stats.js';
 import { judgeScoreFromVerdicts, pickWinner, type RankEntry } from '../src/rank.js';
 import type { MultiplicityMethod, Verdict } from '../src/types.js';
+import { pickReevalMinibatch, reevalDecision, shouldStopForPatience, TRAINING_PATIENCE } from '../src/engine/trainingPolicy.js';
 
 /** Efeito verdadeiro de H1 (p.p.). */
 export const H1_EFFECT_PP = 10;
@@ -193,3 +194,144 @@ export function acceptanceGrid(trials: number, modes: SimMode[] = ['h0', 'h1']):
   }
   return cells;
 }
+
+// ---------------------------------------------------------------------------
+// IMPL-013 (R-02b:REC-2) — simulação da SESSÃO inteira (o laço, não só o gate).
+//
+// A pergunta do item é a do usuário: "o treino promoveu um prompt que não é
+// melhor?". Sob H0 as variantes de TODA iteração têm a qualidade do campeão, então
+// qualquer promoção na sessão é falsa. O laço simulado é o do trainer, com as
+// MESMAS funções puras (`pickWinner`, `pickReevalMinibatch`, `reevalDecision`,
+// `shouldStopForPatience`):
+// - cenários pinados: o veredito "verdadeiro" de cada cenário é sorteado uma vez
+//   por sessão (60/25/15) e vale em todas as iterações;
+// - cada iteração: régua (carry) + K variantes redesenham com `flip`; gate da
+//   melhor de K; se passar, re-avaliação LIMPA do candidato contra a régua no
+//   minibatch max(5, ceil(0,3·n)) com respostas NOVAS; promove só com melhora
+//   estrita;
+// - paciência 2 e teto de `maxIterations` (5, o topo da faixa 3–5).
+// A linha de base (`legacy*`) é o laço antigo nos mesmos parâmetros: Δ ≥ 1 p.p.
+// sem teste, sem re-avaliação e paciência 1 — a sessão para na 1ª iteração sem
+// promoção. Sob H0 a taxa de sessão dele é a de promoção falsa da iteração 0
+// (≈ 60,8% com n = 8, K = 4, flip 0,15 — o "hoje" do item).
+
+export interface SessionSpec {
+  n: number;
+  K: number;
+  flip: number;
+  trials: number;
+  /** Teto de iterações da sessão (default 5). */
+  maxIterations?: number;
+  /** Paciência (default {@link TRAINING_PATIENCE} = 2). */
+  patience?: number;
+  /** Re-avaliação limpa antes de promover (default true). */
+  reeval?: boolean;
+}
+
+export interface SessionResult extends SessionSpec {
+  seed: number;
+  /** Sessões com ≥ 1 promoção (sob H0: promoção FALSA na sessão). */
+  sessionFalsePromotionRate: number;
+  sessionFalsePromotionUpper95: number;
+  /** Promoções / iterações rodadas (taxa por iteração dentro do laço novo). */
+  perIterationPromotionRate: number;
+  /** Iterações médias por sessão (a paciência faz rodar mais que 1). */
+  meanIterations: number;
+  /** Candidatos que passaram no gate e a re-avaliação barrou / que passaram no gate. */
+  reevalRejectionRate: number | null;
+  /** Laço antigo (Δ ≥ 1 p.p., paciência 1, sem re-avaliação) nas mesmas condições. */
+  legacySessionFalsePromotionRate: number;
+  ms: number;
+}
+
+/** Seed da sessão: independe da seed das células por iteração. */
+export function sessionSeed(s: Pick<SessionSpec, 'n' | 'K' | 'flip'>): number {
+  return cellSeed({ n: s.n, K: s.K, flip: s.flip, mode: 'h0' }) ^ 0x5e55_1013;
+}
+
+/** Roda `trials` sessões sob H0 com o laço IMPL-013 e o laço antigo. Determinística. */
+export function simulateSession(spec: SessionSpec): SessionResult {
+  const t0 = performance.now();
+  const seed = sessionSeed(spec) >>> 0;
+  const rng = mulberry32(seed);
+  const pick = (): Verdict => {
+    const u = rng();
+    return u < 0.6 ? 'resolve' : u < 0.85 ? 'parcial' : 'nao';
+  };
+  const { n, K, flip, trials } = spec;
+  const maxIterations = spec.maxIterations ?? 5;
+  const patience = spec.patience ?? TRAINING_PATIENCE;
+  const useReeval = spec.reeval !== false;
+  const redraw = (b: Verdict): Verdict => (rng() < flip ? pick() : b);
+  const score = (v: Verdict): number => SCORE[v];
+
+  const gate = (base: Verdict[], legacy: boolean) => {
+    const ctrl = base.map(redraw);
+    const vars = Array.from({ length: K }, () => base.map(redraw));
+    const scoresById: Record<string, number[]> = { ctl: ctrl.map(score) };
+    const entries: RankEntry[] = [
+      { id: 'ctl', label: 'ctl', isControl: true, judgeScore: judgeScoreFromVerdicts(ctrl), errored: 0, promptLen: 0 },
+    ];
+    vars.forEach((v, k) => {
+      scoresById[`v${k}`] = v.map(score);
+      entries.push({ id: `v${k}`, label: `v${k}`, isControl: false, judgeScore: judgeScoreFromVerdicts(v), errored: 0, promptLen: 100 + k });
+    });
+    const res = pickWinner(entries, legacy ? { minGain: 1 } : { scoresById });
+    return legacy ? res.gain >= 1 : res.isWinner;
+  };
+
+  let sessionsPromoted = 0;
+  let promotions = 0;
+  let iterations = 0;
+  let gatePassed = 0;
+  let reevalRejected = 0;
+  let legacyPromoted = 0;
+  for (let t = 0; t < trials; t += 1) {
+    const base: Verdict[] = Array.from({ length: n }, pick);
+    // Laço IMPL-013.
+    let streak = 0;
+    let promotedHere = false;
+    for (let it = 0; it < maxIterations; it += 1) {
+      iterations += 1;
+      let promoted = gate(base, false);
+      if (promoted && useReeval) {
+        gatePassed += 1;
+        // Minibatch de cenários de treino + respostas NOVAS de régua e candidato.
+        const idx = pickReevalMinibatch(Array.from(base.keys()), Math.floor(rng() * 2 ** 32));
+        const d = reevalDecision(
+          idx.map((i) => score(redraw(base[i]))),
+          idx.map((i) => score(redraw(base[i]))),
+        );
+        if (!d.confirmed) reevalRejected += 1;
+        promoted = d.confirmed;
+      }
+      if (promoted) {
+        promotions += 1;
+        promotedHere = true;
+      }
+      streak = promoted ? 0 : streak + 1;
+      if (!promoted && shouldStopForPatience(streak, patience)) break;
+    }
+    if (promotedHere) sessionsPromoted += 1;
+    // Laço antigo: sob H0 só a iteração 0 importa — sem promoção ele para ali, e
+    // com promoção a sessão já promoveu algo falso.
+    if (gate(base, true)) legacyPromoted += 1;
+  }
+  return {
+    ...spec,
+    maxIterations,
+    patience,
+    reeval: useReeval,
+    seed,
+    sessionFalsePromotionRate: r4(sessionsPromoted / trials),
+    sessionFalsePromotionUpper95: r4(wilsonUpper(sessionsPromoted, trials)),
+    perIterationPromotionRate: r4(promotions / iterations),
+    meanIterations: r2(iterations / trials),
+    reevalRejectionRate: gatePassed ? r4(reevalRejected / gatePassed) : null,
+    legacySessionFalsePromotionRate: r4(legacyPromoted / trials),
+    ms: Math.round(performance.now() - t0),
+  };
+}
+
+/** Limiar de aceite do IMPL-013: promoção falsa por SESSÃO < 30% (n = 8, K = 4, flip 0,15). */
+export const MAX_SESSION_FALSE_PROMOTION = 0.3;
