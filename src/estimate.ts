@@ -11,9 +11,13 @@
 //   3. `high` era ficticio (`high = point`). Agora sai dos tetos que o codigo
 //      realmente envia (`ROLE_MAX_TOKENS` de roleLimits.ts, IMPL-016: gabarito,
 //      juiz pointwise/listwise e duelo com sala p/ raciocinio) e, no
-//      competidor, da RESPOSTA `min(maxOutputTokens, stage.maxTokens)` — a
-//      folga de raciocinio do competidor NAO e precificada aqui (previsao de
-//      reasoning_tokens por esforco x familia e o R-08:DEC-5).
+//      competidor, do MESMO teto que a porta dura reserva: resposta
+//      (`maxOutputTokens`) + folga de raciocinio do degrau EFETIVO
+//      (`competitorMaxTokens`). Sem a folga aqui a porta suave aprovava G2 e a
+//      reserva (resposta + folga, todas em paralelo) estourava no meio da fase
+//      — o cenario que a porta suave existe para impedir (revisao IMPL-016).
+//      E pior caso por construcao; prever os reasoning_tokens reais por
+//      esforco x familia e o R-08:DEC-5.
 //   4. O HOLDOUT do treino nao era contado (uma run extra de N cenarios x 2).
 //
 // A faixa `low..high` e larga de proposito (~2.2x). Quem consome deve olhar
@@ -40,8 +44,9 @@ import {
   worstCasePricing,
   type PriceCapPerMTok,
 } from './engine/pricing.js';
-import { ROLE_MAX_TOKENS } from './roleLimits.js';
-import type { CostRole, OpenRouterModel, RunConfig, RunMode } from './types.js';
+import { competitorModelHint } from './competitor.js';
+import { competitorMaxTokens, ROLE_MAX_TOKENS } from './roleLimits.js';
+import type { CostRole, OpenRouterModel, ReasoningLevel, RunConfig, RunMode } from './types.js';
 
 /** USD por token -> USD por milhao. A conversao 1e6 mora SO aqui e em toPerToken. */
 export const PER_MTOK = 1_000_000;
@@ -70,6 +75,12 @@ export interface EstimateInput {
   iterations: number;
   /** Um id por contestant (variantes repetem o mesmo modelo). */
   contestantModelIds: string[];
+  /**
+   * Degrau de raciocinio de cada contestant (alinhado a `contestantModelIds`;
+   * ja com a prioridade contestant ?? `reasoning.competitor`). Ausente = padrao
+   * do modelo. Dimensiona a folga do teto do competidor (IMPL-016).
+   */
+  contestantReasoningLevels?: Array<ReasoningLevel | undefined>;
   /** Ausente = nada a gerar (tudo pinado/seed). */
   datagenModelId?: string;
   /** Modelo do gabarito. Ausente = sem julgamento por referencia. */
@@ -238,9 +249,14 @@ export function estimateRunCost(
   }
 
   // --- competidores: cada contestant responde cada cenario ---
-  for (const id of input.contestantModelIds) {
-    byRole.competitor += stages * price(model(id), ctxIn, maxOut);
-  }
+  // Teto = o que a porta dura RESERVA (resposta + folga do degrau efetivo);
+  // a ENTRADA do juiz segue so `maxOut` (o raciocinio nao volta no texto).
+  const competitorCap = (m: OpenRouterModel | undefined, i: number): number =>
+    competitorMaxTokens(maxOut, input.contestantReasoningLevels?.[i], competitorModelHint(m, ctxIn));
+  input.contestantModelIds.forEach((id, i) => {
+    const m = model(id);
+    byRole.competitor += stages * price(m, ctxIn, competitorCap(m, i));
+  });
 
   // --- julgamento ---
   if (input.referenceJudging) {
@@ -290,7 +306,7 @@ export function estimateRunCost(
   const holdoutStages = input.mode === 'training' ? (input.holdoutStages ?? 0) : 0;
   if (holdoutStages > 0) {
     const mComp = model(input.contestantModelIds[0]);
-    const holdoutComp = holdoutStages * 2 * price(mComp, ctxIn, maxOut);
+    const holdoutComp = holdoutStages * 2 * price(mComp, ctxIn, competitorCap(mComp, 0));
     let holdoutJudge = 0;
     for (const jid of input.judgeModelIds) {
       holdoutJudge +=
@@ -333,7 +349,12 @@ export function estimateRunCost(
  */
 export function estimateInputFromConfig(
   config: RunConfig,
-  opts: { contestantIds?: string[]; holdoutStages?: number } = {},
+  opts: {
+    contestantIds?: string[];
+    holdoutStages?: number;
+    /** Degrau efetivo de cada contestant real (alinhado a `contestantIds`). */
+    contestantReasoningLevels?: Array<ReasoningLevel | undefined>;
+  } = {},
 ): EstimateInput {
   const judgeModelIds = config.judgeModelIds ?? [];
   const referenceJudging =
@@ -341,10 +362,16 @@ export function estimateInputFromConfig(
     (config.mode !== 'compare' || Boolean(config.competitorConfigs?.length));
 
   let contestantModelIds: string[];
+  let contestantReasoningLevels: Array<ReasoningLevel | undefined>;
   let variantsPerIteration = 0;
+  // Mesma prioridade do orquestrador: contestant.reasoningLevel ?? reasoning.competitor.
+  const nivelRun = config.reasoning?.competitor;
   if (config.mode === 'compare') {
     contestantModelIds =
       config.competitorConfigs?.map((c) => c.modelId) ?? config.competitorModelIds ?? [];
+    contestantReasoningLevels =
+      config.competitorConfigs?.map((c) => c.reasoningLevel ?? nivelRun) ??
+      contestantModelIds.map(() => nivelRun);
   } else {
     const base = config.basePrompt?.trim() ? 1 : 0;
     const tecnicas = config.techniqueIds?.length ?? 0;
@@ -353,6 +380,7 @@ export function estimateInputFromConfig(
       opts.contestantIds?.length ??
       Math.max(2, (config.promptOptimization !== false ? tecnicas : manuais) + base);
     contestantModelIds = Array.from({ length: n }, () => config.contestantModelId);
+    contestantReasoningLevels = contestantModelIds.map(() => nivelRun);
     variantsPerIteration = config.promptOptimization !== false ? tecnicas : 0;
   }
 
@@ -375,6 +403,7 @@ export function estimateInputFromConfig(
     plannedStages,
     iterations: config.mode === 'training' ? config.iterations : 1,
     contestantModelIds,
+    contestantReasoningLevels: opts.contestantReasoningLevels ?? contestantReasoningLevels,
     datagenModelId: precisaGerar ? config.datagenModelId : undefined,
     referenceModelId: config.referenceModelId ?? judgeModelIds[0],
     judgeModelIds,

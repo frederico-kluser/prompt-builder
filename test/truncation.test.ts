@@ -358,6 +358,12 @@ const STAGE: StageSpec = { question: 'Explique a política de trocas.', productC
 // IMPL-016: o teto enviado é TOTAL — resposta + folga de raciocínio do degrau (aqui o padrão do modelo).
 const C300 = competitorMaxTokens(300);
 const C200 = competitorMaxTokens(200); // maxOutputTokens: 200 limita a RESPOSTA
+/**
+ * Na run inteira o catálogo está QUENTE e o `catalogItem` padrão não lista
+ * parâmetro de raciocínio: nada de `reasoning` vai no fio, então não há folga
+ * a reservar (revisão IMPL-016) — o teto é só a resposta.
+ */
+const C300_SEM_RACIOCINIO = competitorMaxTokens(300, undefined, { deniesReasoning: true });
 const GAB = ROLE_MAX_TOKENS.gabarito;
 
 describe('IMPL-014 — competidor: 1 retry com max_tokens x2', () => {
@@ -574,7 +580,7 @@ function conferirTruncamento(rec: RunRecord, fake: ReturnType<typeof fakeDaRun>,
   expect(fake.chatRequests().filter((r) => r.model === 'fake/judge' && r.user.includes('Pergunta 1'))).toHaveLength(0);
   // O competidor truncado foi repetido 1x com teto x2 — e só 1x.
   const longP1 = fake.chatRequests().filter((r) => r.model === 'fake/long' && r.user.includes('Pergunta 1'));
-  expect(longP1.map((r) => r.body?.max_tokens)).toEqual([C300, retryMaxTokens(C300)]);
+  expect(longP1.map((r) => r.body?.max_tokens)).toEqual([C300_SEM_RACIOCINIO, retryMaxTokens(C300_SEM_RACIOCINIO)]);
 
   // Fora do PLACAR: 3 contestants numa só etapa julgada => 2+1+0 = 3 pontos.
   expect(Object.values(rec.scoreboard).reduce((a, b) => a + b, 0)).toBe(3);
@@ -596,7 +602,7 @@ function conferirTruncamento(rec: RunRecord, fake: ReturnType<typeof fakeDaRun>,
     expect(r.maxTokens).toBeGreaterThan(0);
   }
   const truncada = st1.responses.find((r) => r.contestantId === 'fake/long')!;
-  expect(truncada).toMatchObject({ truncated: true, truncationRetried: true, maxTokens: retryMaxTokens(C300), finishReason: 'length' });
+  expect(truncada).toMatchObject({ truncated: true, truncationRetried: true, maxTokens: retryMaxTokens(C300_SEM_RACIOCINIO), finishReason: 'length' });
   // …e de gabarito (1 chamada por cenário).
   for (const st of [st1, st2]) {
     expect(st.gabaritoCall).toMatchObject({ finishReason: 'stop', nativeFinishReason: 'end_turn', truncated: false });
@@ -606,7 +612,7 @@ function conferirTruncamento(rec: RunRecord, fake: ReturnType<typeof fakeDaRun>,
     finishReason: 'length',
     nativeFinishReason: 'max_tokens',
     truncated: true,
-    maxTokens: C300,
+    maxTokens: C300_SEM_RACIOCINIO,
     truncationSignals: ['finish_length', 'native_length'],
   });
   // O custo das DUAS tentativas fica na fatia do contestant (usage.cost default 0.001).

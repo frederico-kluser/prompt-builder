@@ -15,9 +15,15 @@
 //         gabarito, juiz e duelo — e a MESMA fixture com os tetos antigos trunca.
 // Nenhuma chamada paga: tudo passa pelo `fakeOpenRouter`.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createGateway, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
-import { runCompetitor } from '../src/competitor.js';
+import { competitorModelHint, runCompetitor } from '../src/competitor.js';
+import { estimateInputFromConfig, estimateRunCost } from '../src/estimate.js';
+import { runToCompletion } from '../src/orchestrator.js';
+import { getDataDir, setDataDir } from '../src/storage.js';
 import { generateReferences } from '../src/gabarito.js';
 import { judgeStageReference } from '../src/refJudge.js';
 import { judgeStage } from '../src/judge.js';
@@ -28,6 +34,7 @@ import { BudgetLedger } from '../src/budget.js';
 import { truncationStatsByRole } from '../src/engine/truncation.js';
 import {
   COMPETITOR_REASONING_HEADROOM,
+  competitorContextRoom,
   competitorMaxTokens,
   competitorReasoningHeadroom,
   ROLE_MAX_TOKENS,
@@ -36,7 +43,7 @@ import {
 } from '../src/roleLimits.js';
 import * as roleLimitsWeb from '../web/src/engine/roleLimits.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeChatReply, type FakeRequest } from './fakeOpenRouter.js';
-import type { CompetitorResponse, Contestant, CostRole, ReasoningLevel, StageSpec } from '../src/types.js';
+import type { CompetitorResponse, Contestant, CostRole, ReasoningLevel, RunConfig, StageSpec } from '../src/types.js';
 
 const KEY = 'sk-or-test';
 
@@ -440,5 +447,206 @@ describe('IMPL-016 (iii) — smoke 10 cenários × 1 modelo mandatory: finish_re
     expect(depois.map((r) => [r.truncated, r.finishReason])).toEqual(
       Array.from({ length: 4 }, () => [false, 'stop']),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Revisão IMPL-016 — folga pelo degrau EFETIVO, catálogo e porta de orçamento
+// ---------------------------------------------------------------------------
+
+const META_MANDATORY = { mandatory: true, supportedEfforts: ['high', 'medium', 'low'], defaultEffort: 'medium' };
+
+describe('revisão IMPL-016 — folga do competidor pelo degrau que VAI no fio', () => {
+  it('mandatory: `off` não é enviado => folga do default_effort; degrau fora da allowlist => folga do encaixado', () => {
+    const hint = { reasoning: META_MANDATORY };
+    // `off` em mandatory: o modelo raciocina no default (medium) — nunca a folga de `off`.
+    expect(competitorReasoningHeadroom('off', hint)).toBe(COMPETITOR_REASONING_HEADROOM.medium);
+    // 'minimal' em [high, medium, low] vai como 'low' (fitEffort): folga de 'low'.
+    expect(competitorReasoningHeadroom('minimal', hint)).toBe(COMPETITOR_REASONING_HEADROOM.low);
+    // 'max' em [high, medium, low] vai como 'high'.
+    expect(competitorReasoningHeadroom('max', hint)).toBe(COMPETITOR_REASONING_HEADROOM.high);
+    // Nada pedido => default_effort do catálogo.
+    expect(competitorReasoningHeadroom(undefined, { reasoning: { ...META_MANDATORY, defaultEffort: 'high' } })).toBe(
+      COMPETITOR_REASONING_HEADROOM.high,
+    );
+    // Não-mandatory: `off` vai como { enabled: false } e fica com a folga mínima.
+    expect(competitorReasoningHeadroom('off', { reasoning: { mandatory: false } })).toBe(COMPETITOR_REASONING_HEADROOM.off);
+  });
+
+  it('catálogo nega raciocínio => folga 0; contexto limita só a FOLGA (a resposta nunca é cortada)', () => {
+    expect(competitorMaxTokens(300, 'max', { deniesReasoning: true })).toBe(300);
+    // 8k de contexto, 2k de prompt: cabe 6000 no max_tokens; 'max' pediria 300+16384.
+    expect(competitorMaxTokens(300, 'max', { contextLength: 8192, promptTokens: 2192 })).toBe(6000);
+    // Sem sala nem para a resposta: fica a resposta (o teto de antes do IMPL-016).
+    expect(competitorMaxTokens(300, 'max', { contextLength: 1000, promptTokens: 900 })).toBe(300);
+    expect(competitorContextRoom({ contextLength: 8192, promptTokens: 2192 })).toBe(6000);
+    expect(competitorContextRoom({})).toBeUndefined();
+    // O hint vem do catálogo: `catalogItem` padrão não lista parâmetro de raciocínio.
+    expect(competitorModelHint(undefined)).toEqual({});
+  });
+
+  it('no fio: modelo que não raciocina manda só a resposta; contexto pequeno limita o teto E o retry x2', async () => {
+    let n = 0;
+    const fake = fakeOpenRouter({
+      catalog: [
+        catalogItem('fake/sem-raciocinio', 1e-9, 1e-9),
+        catalogItem('fake/8k', 1e-9, 1e-9, {
+          context_length: 8192,
+          supported_parameters: ['max_tokens', 'reasoning'],
+        }),
+      ],
+      // 1a chamada do 8k trunca (dispara o retry), o resto responde.
+      chat: (req) =>
+        req.model === 'fake/8k' && n++ === 0
+          ? { text: 'Você tem', finishReason: 'length', nativeFinishReason: 'max_tokens' }
+          : { text: 'Você tem 30 dias.', finishReason: 'stop' },
+    });
+    const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
+    const anterior = setDefaultGateway(gw);
+    const silencio = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await gw.listModels(KEY);
+      await runCompetitor({ apiKey: KEY, contestantId: 'c', modelId: 'fake/sem-raciocinio', stage: STAGE, reasoningLevel: 'max' });
+      const r8k = await runCompetitor({ apiKey: KEY, contestantId: 'c', modelId: 'fake/8k', stage: STAGE, reasoningLevel: 'max' });
+      const [semRac, primeira, retry] = fake.chatRequests();
+      expect(semRac.body?.max_tokens).toBe(STAGE.maxTokens);
+      expect(semRac.body?.reasoning).toBeUndefined();
+      const prompt = Math.ceil((STAGE.productContext.length + STAGE.question.length) / 4);
+      expect(primeira.body?.max_tokens).toBe(8192 - prompt);
+      expect(r8k.truncationRetried).toBe(true);
+      // O retry x2 também não passa do contexto (prompt + max_tokens > contexto = HTTP 400).
+      expect(retry.body?.max_tokens).toBe(8192 - prompt);
+    } finally {
+      silencio.mockRestore();
+      setDefaultGateway(anterior);
+    }
+  });
+
+  it('(iii) mandatory com `off` e `minimal` pedidos: 0 truncamento (o teto segue o degrau efetivo)', async () => {
+    const fake = simuladorMandatory();
+    const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
+    const anterior = setDefaultGateway(gw);
+    try {
+      await gw.listModels(KEY);
+      const ledger = new BudgetLedger();
+      const ctx = { signal: ledger.signal, sink: ledger };
+      for (const reasoningLevel of ['off', 'minimal'] as const) {
+        const rs = await Promise.all(
+          CENARIOS.map((stage) =>
+            runCompetitor({ apiKey: KEY, contestantId: 'c', modelId: MANDATORY, stage, reasoningLevel, ctx }),
+          ),
+        );
+        expect(rs.map((r) => [r.status, r.truncated, r.truncationRetried ?? false])).toEqual(
+          CENARIOS.map(() => ['ok', false, false]),
+        );
+      }
+      const c = ledger.snapshot().finishByRole.competitor!;
+      expect(c.calls).toBe(20);
+      expect(c.truncated).toBe(0);
+      expect(fake.chatRequests()).toHaveLength(20);
+      // off em mandatory: nada de `reasoning` no corpo (o provedor rejeita 'none').
+      expect(fake.chatRequests()[0].body?.reasoning).toBeUndefined();
+      expect(fake.chatRequests()[10].body?.reasoning).toEqual({ effort: 'low' });
+    } finally {
+      setDefaultGateway(anterior);
+    }
+  });
+});
+
+describe('revisão IMPL-016 — porta suave e porta dura usam o MESMO teto do competidor', () => {
+  let dirAnterior: string;
+  let tmp: string;
+  let silencio: Array<{ mockRestore(): void }> = [];
+  beforeAll(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'pb-impl016-'));
+    dirAnterior = getDataDir();
+    setDataDir(tmp);
+    silencio = (['log', 'warn', 'error'] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => undefined));
+  });
+  afterAll(() => {
+    silencio.forEach((s) => s.mockRestore());
+    setDataDir(dirAnterior);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const CEN: StageSpec[] = [0, 1, 2, 3].map((i) => ({
+    question: `Pergunta ${i} sobre prazo de troca?`,
+    productContext: 'Trocas em 30 dias.',
+    maxTokens: 300,
+  }));
+  const RAC = { supported_parameters: ['max_tokens', 'reasoning', 'response_format'] };
+
+  function fakeDaRun(): ReturnType<typeof fakeOpenRouter> {
+    return fakeOpenRouter({
+      // Competidor caro (1e-6/token) — o teto dele domina a reserva.
+      catalog: ['fake/ref', 'fake/judge', 'fake/a', 'fake/b'].map((id) => catalogItem(id, 1e-6, 1e-6, RAC)),
+      chat: (req) => {
+        const usage = { prompt_tokens: 100, completion_tokens: 50, cost: 0.00015 };
+        if (req.model === 'fake/ref') return { text: 'Gabarito: 30 dias', usage };
+        if (req.stream) return { text: 'Resposta', usage };
+        return { text: '{"verdict":"resolve","explanation":"ok"}', usage };
+      },
+    });
+  }
+
+  function configCom(budgetUsd?: number): RunConfig {
+    return {
+      mode: 'compare',
+      theme: 'suporte',
+      stages: 4,
+      customStages: CEN,
+      judgeModelIds: ['fake/judge'],
+      referenceModelId: 'fake/ref',
+      referenceJudging: true,
+      competitorModelIds: ['fake/a', 'fake/b'],
+      finalists: 0,
+      duels: false,
+      timeoutMs: 5000,
+      maxOutputTokens: 300,
+      reasoning: { competitor: 'max' },
+      ...(budgetUsd !== undefined ? { budgetUsd } : {}),
+    } as unknown as RunConfig;
+  }
+
+  it('estimativa cabe no orçamento => a run termina inteira (nenhuma etapa cortada pela porta dura no meio de G2)', async () => {
+    const fake = fakeDaRun();
+    const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
+    const anterior = setDefaultGateway(gw);
+    try {
+      const models = await gw.listModels(KEY);
+      const est = estimateRunCost(estimateInputFromConfig(configCom()), models, { unknownPrice: 'worst-case' });
+      // A estimativa precifica o teto que a reserva usa (resposta + folga de 'max').
+      const teto = competitorMaxTokens(300, 'max', competitorModelHint(models.find((m) => m.id === 'fake/a')));
+      expect(teto).toBe(300 + COMPETITOR_REASONING_HEADROOM.max);
+      expect(est.byRole.competitor).toBeCloseTo(4 * 2 * (500 + teto) * 1e-6, 9);
+
+      const rec = await runToCompletion(configCom(est.point), KEY, {});
+      expect(rec.stoppedReason).toBeUndefined();
+      expect(rec.status).toBe('finished');
+      expect(rec.stages.map((s) => s.incomplete ?? false)).toEqual([false, false, false, false]);
+      // O teto enviado é o mesmo que a estimativa precificou.
+      const tetos = fake.chatRequests().filter((r) => r.stream).map((r) => r.body?.max_tokens);
+      expect(tetos).toEqual(Array.from({ length: 8 }, () => teto));
+    } finally {
+      setDefaultGateway(anterior);
+    }
+  });
+
+  it('orçamento abaixo da estimativa => a PORTA SUAVE para antes de G2 (nunca metade das etapas)', async () => {
+    const fake = fakeDaRun();
+    const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
+    const anterior = setDefaultGateway(gw);
+    try {
+      const models = await gw.listModels(KEY);
+      const est = estimateRunCost(estimateInputFromConfig(configCom()), models, { unknownPrice: 'worst-case' });
+      const rec = await runToCompletion(configCom(est.point * 0.5), KEY, {});
+      expect(rec.stoppedReason).toBe('budget');
+      expect(rec.stoppedAtPhase).toBe('competitors');
+      expect(new Set(rec.stages.map((s) => s.incompleteReason))).toEqual(new Set(['budget']));
+      // Nenhum competidor chegou a ser chamado: a porta suave decidiu antes.
+      expect(fake.chatRequests().filter((r) => r.stream)).toHaveLength(0);
+    } finally {
+      setDefaultGateway(anterior);
+    }
   });
 });

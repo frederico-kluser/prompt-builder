@@ -1,16 +1,44 @@
-import { chatCompletionStream, isGatewayBlocked } from './openrouter.js';
+import {
+  catalogDeniesReasoning,
+  chatCompletionStream,
+  guessPromptTokens,
+  isGatewayBlocked,
+  peekModelsCache,
+  type ChatMessage,
+} from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { finishSignalsOf, retryMaxTokens } from './engine/truncation.js';
-import { competitorMaxTokens } from './roleLimits.js';
+import { competitorContextRoom, competitorMaxTokens, type CompetitorModelHint } from './roleLimits.js';
 import type {
   CallFinishSignals,
   CompetitorOutcomeCounts,
   CompetitorResponse,
   CompetitorStatus,
+  OpenRouterModel,
   ReasoningLevel,
   RunCtx,
   StageSpec,
 } from './types.js';
+
+/**
+ * O que o catálogo diz do competidor para dimensionar o teto (IMPL-016): o
+ * degrau EFETIVO (allowlist/`mandatory`/`default_effort`), se o catálogo nega
+ * raciocínio (nada vai no fio) e o contexto. Fora do catálogo = `{}` (só o
+ * degrau pedido). Fonte única de competidor.ts, estimate.ts e da prévia de
+ * custo do SPA — a porta suave precifica o mesmo teto que a porta dura reserva.
+ */
+export function competitorModelHint(
+  model: Pick<OpenRouterModel, 'reasoning' | 'supportedParameters' | 'contextLength'> | undefined,
+  promptTokens?: number,
+): CompetitorModelHint {
+  if (!model) return {};
+  return {
+    ...(model.reasoning ? { reasoning: model.reasoning } : {}),
+    ...(catalogDeniesReasoning(model) ? { deniesReasoning: true } : {}),
+    ...(model.contextLength ? { contextLength: model.contextLength } : {}),
+    ...(typeof promptTokens === 'number' ? { promptTokens } : {}),
+  };
+}
 
 export interface RunCompetitorParams {
   apiKey: string;
@@ -57,14 +85,25 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
   } = params;
 
   // Teto TOTAL (IMPL-016 / R-07b:REC-1): a RESPOSTA (stage.maxTokens, limitada
-  // por maxOutputTokens) + folga de raciocinio do degrau pedido. Raciocinio
-  // conta contra max_tokens: sem a folga, um modelo que pensa comia o teto da
-  // resposta inteiro e saia `length` com conteudo vazio.
+  // por maxOutputTokens) + folga de raciocinio do degrau EFETIVO (o que o
+  // gateway envia, lido do catalogo em cache). Raciocinio conta contra
+  // max_tokens: sem a folga, um modelo que pensa comia o teto da resposta
+  // inteiro e saia `length` com conteudo vazio.
+  const messages: ChatMessage[] = [
+    { role: 'system', content: systemPrompt ?? stage.productContext },
+    { role: 'user', content: stage.question },
+  ];
   const answerTokens =
     typeof maxOutputTokens === 'number' && maxOutputTokens > 0
       ? Math.min(maxOutputTokens, stage.maxTokens)
       : stage.maxTokens;
-  const effectiveMaxTokens = competitorMaxTokens(answerTokens, reasoningLevel);
+  const hint = competitorModelHint(
+    peekModelsCache(apiKey)?.data.find((m) => m.id === modelId),
+    guessPromptTokens(messages),
+  );
+  const effectiveMaxTokens = competitorMaxTokens(answerTokens, reasoningLevel, hint);
+  /** Contexto livre (catalogo): o retry x2 nao passa dele (prompt + max_tokens > contexto = HTTP 400). */
+  const contextRoom = competitorContextRoom(hint);
 
   // Truncamento (IMPL-014 / R-07b:DEC-2): UM retry com teto x2, fora da conta
   // dos retries de erro (truncar nao e falha de infra). O teto dobrado passa
@@ -92,10 +131,7 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
       const res = await chatCompletionStream({
         apiKey,
         modelId,
-        messages: [
-          { role: 'system', content: systemPrompt ?? stage.productContext },
-          { role: 'user', content: stage.question },
-        ],
+        messages,
         // deterministicSampling (openrouter.ts) so envia temperature a quem
         // suporta — reasoning models ignoram sem quebrar.
         temperature,
@@ -131,7 +167,8 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
         truncationRetried = true;
         spentOnTruncated += res.cost.usd;
         firstAttempt = finishSignalsOf(res, maxTokens);
-        maxTokens = retryMaxTokens(maxTokens);
+        const doubled = retryMaxTokens(maxTokens);
+        maxTokens = contextRoom !== undefined ? Math.max(maxTokens, Math.min(doubled, contextRoom)) : doubled;
         console.error(
           `[competitor ${modelId}] resposta truncada no teto (${(res.truncationSignals ?? []).join(', ')}); ` +
             `repetindo 1x com max_tokens=${maxTokens}`,

@@ -31,6 +31,9 @@ import {
   filterByMaxPrice,
   unestimableCostNotice,
   UNKNOWN_PRICE_LABEL,
+  ROLE_MAX_TOKENS,
+  competitorMaxTokens,
+  competitorModelHint,
 } from '../api';
 import { AREA_LIVRE, creatorPrefix, familiaFor, filterModels, type LgpdData } from '../lgpd';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
@@ -559,13 +562,16 @@ export function NewRun() {
     // `perStage` só.
     const byRole: Record<string, number> = { datagen: 0, gabarito: 0, competidores: 0, juiz: 0, finais: 0 };
     const callsByRole: Record<string, number> = { datagen: 0, gabarito: 0, competidores: 0, juiz: 0, finais: 0 };
-    const contestantIds = isSingle
+    // Cada competidor com o degrau que VAI na run (mesma regra do submit).
+    const contestants: Array<{ id: string; level?: ReasoningLevel }> = isSingle
       ? contestantModel[0]
-        ? new Array(n).fill(contestantModel[0])
+        ? new Array(n).fill({ id: contestantModel[0], level: effortOf(contestantModel[0]) })
         : []
       : compareAxis === 'configs'
-        ? competitorConfigs.filter((r) => r.modelId).map((r) => r.modelId)
-        : competitors;
+        ? competitorConfigs
+            .filter((r) => r.modelId)
+            .map((r) => ({ id: r.modelId, level: r.reasoningLevel || undefined }))
+        : competitors.map((id) => ({ id, level: effortOf(id) }));
     const passes = twoPassJudge ? 2 : 1;
     // Custo de uma chamada pelo catálogo. Preço desconhecido (roteador, "-1") ou
     // modelo fora do catálogo contribuem 0 (NEUTRO) e vão para o aviso "custo não
@@ -574,9 +580,13 @@ export function NewRun() {
     const pricer = createCostPreviewPricer(priceById);
     const costOf = (id: string, tin: number, tout: number) => pricer.cost(id, tin, tout);
     let perStage = 0;
-    for (const id of contestantIds) {
-      perStage += costOf(id, ctxIn, maxTokensNum);
-      byRole.competidores += costOf(id, ctxIn, maxTokensNum);
+    // Tetos = os que o motor ENVIA e o ledger reserva (IMPL-016): competidor =
+    // resposta + folga de raciocínio do degrau efetivo; juízo = ROLE_MAX_TOKENS.
+    for (const { id, level } of contestants) {
+      const teto = competitorMaxTokens(maxTokensNum, level, competitorModelHint(priceById.get(id), ctxIn));
+      const c = costOf(id, ctxIn, teto);
+      perStage += c;
+      byRole.competidores += c;
       callsByRole.competidores += 1;
     }
     if (precisaGerar && datagen[0]) {
@@ -589,14 +599,14 @@ export function NewRun() {
       // gabarito: 1 chamada do modelo de referência por cenário.
       const refId = referenceModel[0] ?? judge[0];
       if (refId) {
-        const c = costOf(refId, ctxIn + 600, 1500);
+        const c = costOf(refId, ctxIn + 600, ROLE_MAX_TOKENS.gabarito);
         perStage += c;
         byRole.gabarito += c;
         callsByRole.gabarito += 1;
       }
       // pointwise: cada juiz avalia CADA competidor contra o gabarito.
       for (const jid of judge) {
-        const c = costOf(jid, ctxIn + maxTokensNum + 1500, 350) * n;
+        const c = costOf(jid, ctxIn + maxTokensNum + 1500, ROLE_MAX_TOKENS.judge) * n;
         perStage += c;
         byRole.juiz += c;
         callsByRole.juiz += n;
@@ -605,7 +615,7 @@ export function NewRun() {
       const k = duelsOn && finalists > 0 ? Math.min(finalists, n) : 0;
       if (k >= 2 && judge[0]) {
         const pairs = (k * (k - 1)) / 2;
-        const c = pairs * 2 * costOf(judge[0], ctxIn + 2 * maxTokensNum + 1500, 350);
+        const c = pairs * 2 * costOf(judge[0], ctxIn + 2 * maxTokensNum + 1500, ROLE_MAX_TOKENS.duel);
         perStage += c;
         byRole.finais += c;
         callsByRole.finais += pairs * 2;
@@ -613,7 +623,7 @@ export function NewRun() {
     } else {
       // listwise: cada juiz lê o contexto + todas as respostas.
       for (const jid of judge) {
-        const c = costOf(jid, ctxIn + n * maxTokensNum, 350) * passes;
+        const c = costOf(jid, ctxIn + n * maxTokensNum, ROLE_MAX_TOKENS.judge) * passes;
         perStage += c;
         byRole.juiz += c;
         callsByRole.juiz += passes;
@@ -643,7 +653,7 @@ export function NewRun() {
   }, [
     mode, isSingle, competitors, compareAxis, competitorConfigs, contestantModel, variantCount, datagen, judge,
     twoPassJudge, plannedStages, precisaGerar, referenceJudging, referenceModel, duelsOn, finalists, maxTokensNum,
-    iterations, priceById,
+    iterations, priceById, tuning,
   ]);
 
   function updateConfigRow(i: number, patch: Partial<ConfigRow>) {

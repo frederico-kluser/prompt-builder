@@ -603,8 +603,11 @@ export function priceUsage(u: UsageInfo, model: OpenRouterModel | undefined): Ca
   return { usd: 0, source: 'unknown' };
 }
 
-/** Estimativa grosseira de tokens de prompt — so dimensiona a reserva otimista. */
-function guessPromptTokens(messages: ChatMessage[]): number {
+/**
+ * Estimativa grosseira de tokens de prompt — so dimensiona a reserva otimista
+ * (e o limite de contexto do teto do competidor, IMPL-016).
+ */
+export function guessPromptTokens(messages: ChatMessage[]): number {
   let chars = 0;
   for (const m of messages) chars += m.content.length;
   return Math.ceil(chars / 4);
@@ -751,7 +754,9 @@ function parseReasoningMeta(
  * objeto `reasoning`. E tambem o estado do fail-closed de allowlist malformada.
  * Fora do catalogo / sem lista = desconhecido => false (comportamento de antes).
  */
-export function catalogDeniesReasoning(model: OpenRouterModel | undefined): boolean {
+export function catalogDeniesReasoning(
+  model: Pick<OpenRouterModel, 'supportedParameters' | 'reasoning'> | undefined,
+): boolean {
   if (!model || !model.supportedParameters || model.reasoning) return false;
   return !model.supportedParameters.some((p) => REASONING_WIRE_PARAMS.has(p));
 }

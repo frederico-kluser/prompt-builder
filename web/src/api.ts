@@ -58,6 +58,11 @@ export interface OpenRouterModel {
   reasoning?: ModelReasoningMeta;
 }
 
+// Tetos de max_tokens por papel (IMPL-016): a prévia de custo usa os MESMOS
+// números que o motor envia e o ledger reserva (fonte única em src/roleLimits.ts).
+export { ROLE_MAX_TOKENS, competitorMaxTokens } from './engine/roleLimits';
+export { competitorModelHint } from './engine/competitor';
+
 // Capacidades de ajuste por modelo (temperatura/esforço) — a UI consome pela
 // porta única (api.ts), a regra mora em modelCaps.ts.
 export type { ModelCaps, ModelReasoningMeta } from './modelCaps';

@@ -330,6 +330,10 @@ async function runLoop(
   const est = estimateRunCost(
     estimateInputFromConfig(record.config, {
       contestantIds: record.contestants.map((c) => c.id),
+      // O MESMO degrau que o competidor recebe (linha do runCompetitor abaixo).
+      contestantReasoningLevels: record.contestants.map(
+        (c) => c.reasoningLevel ?? record.config.reasoning?.competitor,
+      ),
     }),
     catalogo,
     { unknownPrice: 'worst-case' },
