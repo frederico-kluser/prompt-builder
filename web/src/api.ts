@@ -6,7 +6,15 @@ import type { CostEntry, CostRole, RunCtx } from '../../src/types.js';
 export type { CostEntry, CostRole } from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
-import { checkImportPii, loadLgpdData, type LgpdData, type PiiImportCheck, type PiiRunReport } from './lgpd';
+import {
+  checkImportPii,
+  loadLgpdData,
+  sensitiveRoutingFor,
+  type LgpdData,
+  type PiiImportCheck,
+  type PiiRunReport,
+} from './lgpd';
+import { BudgetLedger } from '../../src/budget.js';
 import { startRun } from './engine/orchestrator';
 import { startTraining } from './engine/trainer';
 import { generateContestants, generateBasePrompt as engineGenerateBasePrompt } from './engine/variator';
@@ -468,8 +476,20 @@ export async function generateBasePrompt(
   taskDescription: string,
   modelId: string,
   theme?: string,
+  compliance?: { area: string; includeRessalvas: boolean },
 ): Promise<string> {
-  return engineGenerateBasePrompt({ apiKey: getStoredKey(), modelId, taskDescription, theme });
+  // IMPL-040 (revisão): a descrição da tarefa é dado da run — em área sensível
+  // esta chamada (fora da run, papel 'rewriter') também sai pelo modo sensível:
+  // o ledger carrega a política e o gateway força os 4 campos ou recusa antes
+  // do fetch (fail-closed, mesmo ponto único das runs).
+  const routing = compliance ? sensitiveRoutingFor({ compliance }, await loadLgpdData()) : undefined;
+  let ctx: RunCtx | undefined;
+  if (routing) {
+    const sink = new BudgetLedger();
+    sink.setSensitiveRouting(routing);
+    ctx = { sink };
+  }
+  return engineGenerateBasePrompt({ apiKey: getStoredKey(), modelId, taskDescription, theme, ctx });
 }
 
 // -------------- Telemetria / subscricao ao vivo (cockpit de treino) --------------

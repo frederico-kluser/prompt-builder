@@ -173,6 +173,8 @@ function conferirLedger(
   }
 }
 
+// 'agent' fica de fora de propósito: o executor do agente não passa pelo
+// gateway, então o modo sensível RECUSA a run no pré-voo (bloco (3) abaixo).
 const SNAPSHOT_ESPERADO: Record<Exclude<CostRole, 'agent'>, unknown[]> = {
   datagen: [PRIVACIDADE(M.gen)],
   gabarito: [PRIVACIDADE(M.ref)],
@@ -521,6 +523,127 @@ describe('IMPL-040 (2) — política sensível sem allowlist ⇒ lança ANTES do
       }
     } finally {
       restaurar.forEach((r) => r());
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (3) caminhos que NÃO passam pelo gateway (revisão do IMPL-040)
+// ---------------------------------------------------------------------------
+
+describe('IMPL-040 (3) — modo agente em área sensível é recusado no pré-voo; "Gerar prompt base" sai no modo sensível', () => {
+  // O executor do agente (`pi --provider openrouter`) fala com o provedor por
+  // FORA de `OpenRouterGateway.buildBody`: sem este corte, as chamadas dele
+  // sairiam sem os 4 campos e com fallback livre.
+  const AGENTE = { executor: 'pi', executorVersion: '1.0.0' };
+  const restaurar: Array<() => void> = [];
+  let silencio: Array<{ mockRestore(): void }> = [];
+  let tmp: string;
+  let dirAnterior: string;
+
+  beforeAll(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'pb-impl040-agente-'));
+    dirAnterior = getDataDir();
+    setDataDir(tmp);
+    silencio = [
+      vi.spyOn(console, 'log').mockImplementation(() => undefined),
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined),
+      vi.spyOn(console, 'error').mockImplementation(() => undefined),
+    ];
+  });
+  afterEach(() => {
+    while (restaurar.length) restaurar.pop()!();
+    vi.unstubAllGlobals();
+  });
+  afterAll(() => {
+    silencio.forEach((s) => s.mockRestore());
+    setDataDir(dirAnterior);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function comFake(fakeDe: () => FakeOpenRouter = fakePipeline): FakeOpenRouter {
+    const data = dadosLiberando();
+    restaurar.push(nodeLgpd.overrideLgpdData(data), webLgpd.overrideLgpdData(data));
+    const fake = fakeDe();
+    const anterior = nodeGw.setDefaultGateway(nodeGw.createGateway({ fetch: fake.fetch, sleep: noSleep }));
+    restaurar.push(() => nodeGw.setDefaultGateway(anterior));
+    return fake;
+  }
+
+  it('núcleo: área sensível + `agent` ⇒ violação roteamento_incompleto do competidor; fora do modo, nada', () => {
+    const data = dadosLiberando();
+    const cfg = { compliance: { area: 'saude', includeRessalvas: true }, competitorModelIds: [M.a], agent: AGENTE };
+    // Modelo NA allowlist: a única violação é o caminho fora do gateway.
+    expect(core.checkRunCompliance(cfg, data).violations).toEqual([
+      expect.objectContaining({ role: 'competitor', motivo: 'roteamento_incompleto' }),
+    ]);
+    expect(core.checkRunCompliance({ ...cfg, agent: undefined }, data).violations).toEqual([]);
+    expect(core.checkRunCompliance({ ...cfg, compliance: { area: 'geral', includeRessalvas: true } }, data).violations).toEqual([]);
+    expect(core.checkRunCompliance({ competitorModelIds: [M.a], agent: AGENTE }, data).violations).toEqual([]);
+  });
+
+  it('pré-voo (Node e SPA) lança LgpdPolicyError em PT-BR nomeando o executor do agente', async () => {
+    comFake();
+    const cfg = { compliance: { area: 'saude', includeRessalvas: true }, competitorModelIds: [M.a], agent: AGENTE };
+    for (const enforce of [nodeLgpd.enforceRunCompliance, webLgpd.enforceRunCompliance]) {
+      const err = await enforce(cfg).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(core.isLgpdPolicyError(err), String(err)).toBe(true);
+      expect((err as Error).message).toMatch(/Modo sensível LGPD.*modo agente.*FORA do gateway/);
+      expect((err as core.LgpdPolicyError).violations[0]).toMatchObject({ role: 'competitor', motivo: 'roteamento_incompleto' });
+    }
+  });
+
+  it('run compare com agente (Node e SPA) e treino (Node) ⇒ recusa ANTES de qualquer LLM', async () => {
+    for (const run of [runNode, runWeb] as const) {
+      const fake = comFake();
+      const rec = await run({ ...COMPARE, agent: AGENTE } as never, KEY, {});
+      expect(rec.status).toBe('error');
+      expect(rec.error).toMatch(/LGPD.*modo agente.*FORA do gateway/);
+      expect(fake.chatRequests()).toEqual([]);
+      while (restaurar.length) restaurar.pop()!();
+    }
+    const fake = comFake();
+    const sessao = await trainNode({ ...TREINO, agent: AGENTE } as unknown as TrainingConfig, KEY);
+    expect(sessao.status).toBe('error');
+    expect(sessao.error).toMatch(/modo agente.*FORA do gateway/);
+    expect(fake.chatRequests()).toEqual([]);
+  });
+
+  it('"Gerar prompt base" (api.ts) em área sensível: 4 campos ou recusa antes do fetch; fora do modo, sem campos', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => KEY, setItem: () => undefined, removeItem: () => undefined });
+    const { generateBasePrompt } = await import('../web/src/api.js');
+    const SAUDE_C = { area: 'saude', includeRessalvas: true };
+    const fakeBase = (): FakeOpenRouter =>
+      fakeOpenRouter({
+        catalog: Object.values(M).map((id) => catalogItem(id, 1e-6, 1e-6)),
+        chat: () => ({
+          text: JSON.stringify({ systemPrompt: 'Voce e um atendente de clinica cordial e preciso.' }),
+          usage: { prompt_tokens: 50, completion_tokens: 10, cost: 0.0001 },
+        }),
+      });
+
+    let fake = comFake(fakeBase);
+    expect(await generateBasePrompt('Atender pacientes', M.opt, undefined, SAUDE_C)).toMatch(/atendente/);
+    expect(fake.chatRequests()).toHaveLength(1);
+    expect(fake.chatRequests()[0].body?.provider).toEqual(PRIVACIDADE(M.opt));
+
+    const err = await generateBasePrompt('Atender pacientes', 'mistralai/fora-da-allowlist', undefined, SAUDE_C).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(core.isLgpdPolicyError(err), String(err)).toBe(true);
+    expect(fake.chatRequests(), 'a recusa não chega ao fetch').toHaveLength(1);
+    while (restaurar.length) restaurar.pop()!();
+
+    for (const compliance of [undefined, { area: 'geral', includeRessalvas: true }]) {
+      fake = comFake(fakeBase);
+      await generateBasePrompt('Atender pacientes', M.opt, undefined, compliance);
+      expect(fake.chatRequests()).toHaveLength(1);
+      expect(fake.chatRequests()[0].body?.provider).toBeUndefined();
+      while (restaurar.length) restaurar.pop()!();
     }
   });
 });

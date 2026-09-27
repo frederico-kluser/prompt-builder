@@ -368,7 +368,7 @@ export interface ModelPermission {
   sensivel: boolean;
   /** Por que está bloqueado (só quando `status === 'não recomendado'`). */
   motivo?: LgpdBlockReason;
-  /** Área sensível liberada: os endpoints ZDR elegíveis (a futura `provider.only`). */
+  /** Área sensível liberada: os endpoints ZDR elegíveis (vão em `provider.only` — IMPL-040). */
   endpoints?: AllowlistEndpoint[];
 }
 
@@ -559,6 +559,8 @@ export interface ComplianceConfigLike {
   competitorModelIds?: string[];
   competitorConfigs?: { modelId: string }[];
   contestantModelId?: string;
+  /** Presente = modo agente: o executor (`pi`) fala com o provedor FORA do gateway. */
+  agent?: unknown;
 }
 
 /** O config liga o modo sensível? (compliance numa área sensível; área fora da base conta). */
@@ -636,6 +638,20 @@ export function checkRunCompliance(
       modelId,
       motivo,
       message: `${ROLE_TEXT[role]} ${modelId}: ${LGPD_BLOCK_REASON_TEXT[motivo]}`,
+    });
+  }
+  // IMPL-040 (revisão): o executor do agente (`pi --provider openrouter`) chama
+  // o provedor por conta própria, por FORA de `OpenRouterGateway.buildBody` —
+  // as requisições sairiam sem os 4 campos e com fallback livre. Fail-closed
+  // até o proxy do sandbox injetar a política (mesma lógica do IMPL-042).
+  if (cfg.agent !== undefined && cfg.agent !== null) {
+    violations.push({
+      role: 'competitor',
+      motivo: 'roteamento_incompleto',
+      message:
+        'modo agente: o executor do agente fala com o provedor FORA do gateway e não envia os 4 ' +
+        'campos de privacidade (zdr, data_collection, only, allow_fallbacks) — em área sensível, ' +
+        'rode sem agente',
     });
   }
   return { sensivel: true, area, health, violations };

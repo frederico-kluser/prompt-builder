@@ -210,8 +210,11 @@ criador do modelo:
   allowlist do modelo], allow_fallbacks: false }` — sem fallback silencioso para endpoint que
   retém dados. Se faltar qualquer um dos 4 campos (modelo sem rota, snapshot ausente/vencido), a
   chamada é recusada **antes** do envio. Ponto único: o gateway (`src/engine/sensitiveRouting.ts`,
-  aplicado em `OpenRouterGateway.buildBody`), igual no CLI/servidor e na SPA. As tags de cada
-  modelo: `models allowlist --area saude`.
+  aplicado em `OpenRouterGateway.buildBody`), igual no CLI/servidor e na SPA — inclusive o
+  "Gerar prompt base" da tela Nova Run. **Modo agente não roda em área sensível:** o executor do
+  agente (`pi`) chama o provedor por fora do gateway e não enviaria os 4 campos, então o pré-voo
+  recusa a run (`roteamento_incompleto`) antes de qualquer LLM. As tags de cada modelo:
+  `models allowlist --area saude`.
 
 > ⚠️ **Não é aconselhamento jurídico.**
 
