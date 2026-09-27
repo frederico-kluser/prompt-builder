@@ -132,6 +132,9 @@ export const agentJudgeRubricSchema = z
 
 export type AgentJudgeRubric = z.infer<typeof agentJudgeRubricSchema>;
 
+/** Ordem dos vereditos (pior → melhor) — só para comparar com o teto da rubrica. */
+const VERDICT_ORDINAL: Record<Verdict, number> = { nao: 0, parcial: 1, resolve: 2 };
+
 /** Teto do veredito que a própria rubrica do juiz autoriza. */
 export function rubricCeiling(r: AgentJudgeRubric): Verdict {
   if (r.burla === 'detectada' || r.resultado === 'nao_cumpre') return 'nao';

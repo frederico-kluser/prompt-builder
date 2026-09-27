@@ -52,7 +52,7 @@ import { runToCompletion as runNode } from '../src/orchestrator.js';
 import { runToCompletion as runWeb } from '../web/src/engine/orchestrator.js';
 import { subscribeRun } from '../web/src/engine/events.js';
 import { cmdRun } from '../src/cli/commands/run.js';
-import { Output, resetOutputState } from '../src/cli/output.js';
+import { EXIT, Output, resetOutputState } from '../src/cli/output.js';
 import { emitRunEvent, truncationFields } from '../src/cli/ndjson.js';
 import type {
   CallFinishSignals,
@@ -64,6 +64,7 @@ import type {
   TrainingConfig,
 } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeChatReply } from './fakeOpenRouter.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 vi.mock('../web/src/engine/storage', () => ({
   saveRun: async () => undefined,
@@ -533,6 +534,14 @@ function fakeDaRun() {
         return { text: `Resposta de ${req.model}`, finishReason: 'stop', nativeFinishReason: 'end_turn' };
       }
       if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}' };
+      // Juiz LISTWISE (compare sem gabarito): ranking + veredito por rótulo no
+      // schema estrito — desde o IMPL-004 saída fora do contrato é veredito PERDIDO.
+      const rotulos = /ordene TODOS estes rotulos da melhor para a pior: (\[[^\]]*\])/.exec(req.user)?.[1];
+      if (rotulos) {
+        const labels = JSON.parse(rotulos) as string[];
+        const verdicts = labels.map((label) => ({ label, justificativa: 'confere', veredito: 'resolve' }));
+        return { text: JSON.stringify({ ranking: labels, verdicts }), finishReason: 'stop' };
+      }
       return { text: '{"verdict":"resolve","explanation":"confere"}', finishReason: 'stop' };
     },
   });
@@ -552,7 +561,7 @@ const CONFIG = {
 } as const;
 
 function conferirTruncamento(rec: RunRecord, fake: ReturnType<typeof fakeDaRun>, eventos: RunEvent[]): void {
-  expect(rec.status, rec.error).toBe('finished');
+  expectPipelineDone(rec);
   const i1 = rec.stages.findIndex((s) => s.spec?.question.includes('Pergunta 1'));
   const i2 = rec.stages.findIndex((s) => s.spec?.question.includes('Pergunta 2'));
   const [st1, st2] = [rec.stages[i1], rec.stages[i2]];
@@ -800,7 +809,11 @@ const CONFIG_JUIZ = {
 } as const;
 
 function conferirJuizEGabarito(rec: RunRecord, fake: ReturnType<typeof fakeJuizEGabaritoTruncados>, eventos: RunEvent[]): void {
-  expect(rec.status, rec.error).toBe('finished');
+  // IMPL-004: gabarito truncado e descartado é régua PERDIDA (1 de 2) — a run
+  // termina, mas inconclusiva, e o motivo nomeia o papel.
+  expect(rec.status, rec.error).toBe('inconclusive');
+  expect(rec.failureCountByRole?.gabarito).toBe(1);
+  expect(rec.verdictIntegrity?.reasons.some((r) => /^papel gabarito: 1 de 2/.test(r))).toBe(true);
   const i1 = rec.stages.findIndex((s) => s.spec?.question.includes('Pergunta 1'));
   const i2 = rec.stages.findIndex((s) => s.spec?.question.includes('Pergunta 2'));
   const [st1, st2] = [rec.stages[i1], rec.stages[i2]];
@@ -941,9 +954,9 @@ describe('IMPL-014 (iii) — `run --json` emite truncationRate e o alerta acima 
       vi.spyOn(console, 'warn').mockImplementation(() => undefined),
       vi.spyOn(console, 'error').mockImplementation(() => undefined),
     ];
-    let code: number;
+    let erro: unknown;
     try {
-      code = await cmdRun('compare', [
+      await cmdRun('compare', [
         '--theme', 'suporte',
         '--stages', '2',
         '--models', 'fake/a,fake/b,fake/long',
@@ -959,12 +972,17 @@ describe('IMPL-014 (iii) — `run --json` emite truncationRate e o alerta acima 
         '--data-dir', dir,
         '--refresh-models',
       ]);
+    } catch (e) {
+      erro = e;
     } finally {
       spies.forEach((s) => s.mockRestore());
     }
-    expect(code).toBe(0);
-    const payload = JSON.parse(stdout.join('')) as { ok: boolean; data: Record<string, unknown> };
-    expect(payload.ok).toBe(true);
+    // IMPL-004 × IMPL-028: 2 cenários (< piso de 5 julgados) => run inconclusiva,
+    // exit 6 pelo envelope único de erro; o resumo inteiro vai em `details` (o
+    // `main` o imprime no stdout como {ok:false, error:{…, details}}).
+    expect(erro).toMatchObject({ code: EXIT.INCONCLUSIVE, errorCode: 'run.inconclusive' });
+    const payload = { data: (erro as { details: Record<string, unknown> }).details };
+    expect(payload.data.inconclusiveReasons).toEqual([expect.stringMatching(/^n efetivo < 5 cenários julgados/)]);
     const counts = payload.data.truncationCounts as { calls: number; truncated: number };
     expect(counts.truncated).toBe(2); // fake/long na Pergunta 1: 1ª + retry x2
     expect(payload.data.truncationRate).toBe(Number((counts.truncated / counts.calls).toFixed(4)));
@@ -1166,7 +1184,7 @@ describe('IMPL-014 (iv) — whitelists: normalizeRunRecord e variationConfigFrom
         { id: 'v1', label: 'verbosa', modelId: 'fake/c', systemPrompt: 'Seja VERBOSA.' },
       ];
       const rec = await runNode(cfg, KEY, { contestants });
-      expect(rec.status, rec.error).toBe('finished');
+      expectPipelineDone(rec);
       const st1 = rec.stages.find((s) => s.spec?.question.includes('Pergunta 1'))!;
       expect(st1).toMatchObject({ incomplete: true, incompleteReason: 'truncation' });
       expect(rec.judgeScoreByContestant).toEqual({ original: 100, v1: 100 });

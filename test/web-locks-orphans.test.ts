@@ -35,6 +35,7 @@ import type { RunRecord, SessionRecord } from '../web/src/engine/types.js';
 import { FakeIdb } from './fakeIndexedDb.js';
 import { FakeLockBroker, type FakeLockContext } from './fakeWebLocks.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const KEY = 'sk-or-v1-fake-key-para-teste-0000000000';
@@ -517,13 +518,13 @@ describe('IMPL-023 (ii) duas abas nunca executam a mesma run', () => {
       const executadas = [r1, r2].filter((r) => r.status !== 'error');
       if (executadas.length > 1 || datagen() - antes > 1) duplas++;
       expect(executadas, `tentativa ${k}`).toHaveLength(1);
-      expect(executadas[0].status).toBe('finished');
+      expectPipelineDone(executadas[0]);
       const recusada = r1.status === 'error' ? r1 : r2;
       expect(recusada.error).toBe(a.orchestrator.RUN_LOCKED_ELSEWHERE);
       expect(recusada.stages).toEqual([]); // não executou nada
-      vencedoras[r1.status === 'finished' ? (k % 2 === 0 ? 'A' : 'B') : k % 2 === 0 ? 'B' : 'A']++;
+      vencedoras[r1.status !== 'error' ? (k % 2 === 0 ? 'A' : 'B') : k % 2 === 0 ? 'B' : 'A']++;
       // O disco tem a run que EXECUTOU — a recusa não gravou por cima.
-      expect(runNoDisco(disco, runId)).toMatchObject({ status: 'finished' });
+      expect(runNoDisco(disco, runId)).toMatchObject({ status: executadas[0].status });
       await esperar(() => broker.holder(lockName('run', runId)) === undefined); // lock solto no fim
     }
     expect(duplas).toBe(0);
@@ -547,8 +548,9 @@ describe('IMPL-023 (ii) duas abas nunca executam a mesma run', () => {
     expect(fake.chatRequests().length).toBe(chamadasAntes); // B não chamou nada
     expect(runNoDisco(disco, 'no-meio')).toMatchObject({ status: 'running' }); // nem gravou
     soltar();
-    expect((await pa).status).toBe('finished');
-    expect(runNoDisco(disco, 'no-meio')).toMatchObject({ status: 'finished' });
+    const ra = await pa;
+    expectPipelineDone(ra);
+    expect(runNoDisco(disco, 'no-meio')).toMatchObject({ status: ra.status });
   });
 
   it('a sessão de treino segura o próprio lock até a última gravação', async () => {
@@ -608,13 +610,13 @@ describe('IMPL-023 (iii) aba congelada não é órfã', () => {
     soltar();
     await esperar(() => c.eventos.some((e) => e.type === 'run.finished'), 5000);
     const fim = c.eventos.at(-1).record as RunRecord;
-    expect(fim.status).toBe('finished');
+    expectPipelineDone(fim);
     expect(fim.stoppedReason).toBeUndefined();
-    expect(runNoDisco(disco, runId)).toMatchObject({ status: 'finished' });
+    expect(runNoDisco(disco, runId)).toMatchObject({ status: fim.status });
     expect(runNoDisco(disco, runId)?.stoppedReason).toBeUndefined();
     // Cópia velha 'running' regravada DEPOIS do fim também é recusada.
     await b.api.cacheRun(gravadoAntes as never);
-    expect(runNoDisco(disco, runId)).toMatchObject({ status: 'finished' });
+    expect(runNoDisco(disco, runId)).toMatchObject({ status: fim.status });
     c.parar();
   });
 });
@@ -652,8 +654,8 @@ describe('IMPL-023 feature detection: navegador sem Web Locks', () => {
     const disco = new FakeIdb();
     const aba = await abrirAba(disco, null, pipeline());
     const rec = await aba.orchestrator.runToCompletion(COMPARE as never, KEY, { runId: 'sem-locks-ok' });
-    expect(rec.status).toBe('finished');
-    expect(runNoDisco(disco, 'sem-locks-ok')).toMatchObject({ status: 'finished' });
+    expectPipelineDone(rec);
+    expect(runNoDisco(disco, 'sem-locks-ok')).toMatchObject({ status: rec.status });
   });
 
   it('com Web Locks, a marcação manual NUNCA derruba uma run viva', async () => {

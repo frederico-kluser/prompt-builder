@@ -30,6 +30,7 @@ import { startTraining as startWebTraining } from '../web/src/engine/trainer.js'
 import { subscribeSession } from '../web/src/engine/events.js';
 import type { RunConfig, TrainingConfig } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -554,7 +555,7 @@ describe('IMPL-041 — runtime fail-closed nos dois motores (pré-voo antes de q
   it('Node: com os endpoints na allowlist a run sensível roda normalmente', async () => {
     const fake = comDados(dadosLiberando());
     const rec = await runNode(COMPARE_SAUDE as unknown as RunConfig, KEY, {});
-    expect(rec.status, rec.error).toBe('finished');
+    expectPipelineDone(rec);
     expect(fake.chatRequests().length).toBeGreaterThan(0);
   });
 
@@ -586,13 +587,13 @@ describe('IMPL-041 — runtime fail-closed nos dois motores (pré-voo antes de q
       KEY,
       {},
     );
-    expect(geral.status, geral.error).toBe('finished');
+    expectPipelineDone(geral);
   });
 
   it('SPA: mesmo pré-voo no motor client-side (liberado roda; fora da allowlist recusa sem LLM)', async () => {
     const ok = comDados(dadosLiberando());
     const recOk = await runWeb(COMPARE_SAUDE as never, KEY, {});
-    expect(recOk.status, recOk.error).toBe('finished');
+    expectPipelineDone(recOk);
     expect(ok.chatRequests().length).toBeGreaterThan(0);
     while (restaurar.length) restaurar.pop()!();
 

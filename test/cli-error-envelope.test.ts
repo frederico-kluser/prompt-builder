@@ -516,9 +516,15 @@ describe('varredura: 100% dos caminhos de erro de src/cli passam pelo envelope',
         const antes = src.slice(0, m.index);
         const fn = /function\s+(\w+)[^]*$/.exec(antes.slice(antes.lastIndexOf('function ')))?.[1];
         expect(fn, `${rel}: return EXIT.${m[1]} fora de exitFor`).toBe('exitFor');
-        expect(['BUDGET', 'SIGINT', 'ERROR'], rel).toContain(m[1]);
+        // INCONCLUSIVE (IMPL-004): o exitFor decide o código, mas quem o recebe
+        // o transforma no envelope (throw) — conferido logo abaixo.
+        expect(['BUDGET', 'SIGINT', 'ERROR', 'INCONCLUSIVE'], rel).toContain(m[1]);
       }
     }
+    const run = fontes.find((f) => f.rel === path.join('commands', 'run.ts'))!.src;
+    expect(run).toMatch(/if \(exit === EXIT\.INCONCLUSIVE\) \{[\s\S]{0,200}?throw new CliError/);
+    const agentes = fontes.find((f) => f.rel === path.join('commands', 'agents.ts'))!.src;
+    expect(agentes).toMatch(/if \(code === EXIT\.INCONCLUSIVE\) \{[\s\S]{0,200}?throw new CliError/);
     const agents = fontes.find((f) => f.rel === path.join('commands', 'agents.ts'))!.src;
     expect(agents).toMatch(/if \(code === EXIT\.ERROR\) \{[\s\S]{0,600}?throw new CliError/);
   });

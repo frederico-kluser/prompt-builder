@@ -149,6 +149,10 @@ export function assessVerdictIntegrity(
   // MESMA régua (uma etapa que caiu no listwise por falta de gabarito não
   // entra na média, então também não conta como cenário julgado).
   const primaryIsReference = counted.some((s) => s.referenceJudge);
+  // IMPL-034: numa run SÓ de agentes, etapa com `verify[]` não gera gabarito de
+  // propósito (o oráculo decide) — mesma regra de `needsTextReference`
+  // (src/agent/verdictTree.ts). Gabarito ausente ali não é falha do papel.
+  const hasChatContestant = input.contestants.some((c) => c.runner !== 'agent');
   const judged = new Map<string, Set<string>>(input.contestants.map((c) => [c.id, new Set<string>()]));
 
   for (const s of counted) {
@@ -156,7 +160,8 @@ export function assessVerdictIntegrity(
     // contam uma vez só (n efetivo é de cenários, não de observações).
     const scenarioKey = `${s.spec!.question ?? ''}\u0000${s.spec!.productContext ?? ''}`;
     // Gabarito: 1 por cenário quando a run pediu julgamento por referência.
-    if (input.referenceJudging) {
+    const precisaGabarito = hasChatContestant || !((s.spec!.agentTask?.verify?.length ?? 0) > 0);
+    if (input.referenceJudging && precisaGabarito) {
       bump(expected, 'gabarito');
       if (!s.spec!.reference?.trim()) bump(failures, 'gabarito');
     }

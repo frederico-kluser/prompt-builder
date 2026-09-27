@@ -43,6 +43,7 @@ import { normalizeRunRecord } from '../web/src/engine/normalize.js';
 import type { RunEvent, RunRecord, SessionRecord } from '../web/src/engine/types.js';
 import type { OpenRouterModel, RunConfig } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -560,7 +561,7 @@ describe('IMPL-020 (i) — teto menor que a estimativa para a run com parcial ho
     const fake = fakePipeline();
     usarGateway(fake.fetch);
     const rec = (await runWeb(COMPARE as never, KEY, {})) as RunRecord;
-    expect(rec.status, rec.error).toBe('finished');
+    expectPipelineDone(rec);
     expect(rec.stoppedReason).toBeUndefined();
     expect(rec.budgetUsd).toBeUndefined();
     expect(rec.stages.every((s) => !s.incomplete)).toBe(true);

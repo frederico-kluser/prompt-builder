@@ -32,6 +32,7 @@ import {
 import * as caseInputWeb from '../web/src/engine/caseInput.js';
 import type { CompetitorResponse, Contestant, RunConfig, StageSpec } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
+import { expectPipelineDone, type RunOutcomeView } from './runOutcome.js';
 
 vi.mock('../web/src/engine/storage', () => ({
   saveRun: async () => undefined,
@@ -224,8 +225,8 @@ describe('IMPL-009 (1) ponta a ponta — run variation nos DOIS motores', () => 
       },
     });
 
-  function conferirCompetidores(fake: FakeOpenRouter, status: string, erro?: string): void {
-    expect(status, erro).toBe('finished');
+  function conferirCompetidores(fake: FakeOpenRouter, rec: RunOutcomeView): void {
+    expectPipelineDone(rec);
     const competidores = fake.chatRequests().filter((r) => r.stream);
     expect(competidores).toHaveLength(CONTESTANTS.length * STAGES.length);
     for (const req of competidores) {
@@ -244,13 +245,13 @@ describe('IMPL-009 (1) ponta a ponta — run variation nos DOIS motores', () => 
     const rec = await comFake(fake, () =>
       runNode(CONFIG as unknown as RunConfig, KEY, { contestants: CONTESTANTS }),
     );
-    conferirCompetidores(fake, rec.status, rec.error);
+    conferirCompetidores(fake, rec);
   });
 
   it('SPA (web/src/engine/orchestrator) — mesmo payload', async () => {
     const fake = fakeRun();
     const rec = await comFake(fake, () => runWeb(CONFIG as never, KEY, { contestants: CONTESTANTS as never }));
-    conferirCompetidores(fake, rec.status, rec.error);
+    conferirCompetidores(fake, rec);
   });
 });
 

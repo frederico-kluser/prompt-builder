@@ -37,6 +37,7 @@ import type { RunEvent, RunRecord, SessionEvent, SessionRecord } from '../web/sr
 import type { RunConfig } from '../src/types.js';
 import { FakeIdb } from './fakeIndexedDb.js';
 import { catalogItem, fakeOpenRouter, noSleep } from './fakeOpenRouter.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -411,7 +412,7 @@ describe('IMPL-022 (d) run com o armazenamento cheio não se perde em silêncio'
 
     const rec = await runToCompletion(COMPARE as never, 'sk-or-v1-fake', { runId });
 
-    expect(rec.status, rec.error).toBe('finished'); // disco cheio NÃO derruba a run paga
+    expectPipelineDone(rec); // disco cheio NÃO derruba a run paga
     expect(rec.stages.filter((s) => s.judge || s.referenceJudge)).toHaveLength(2);
     const ev = storageEvents(eventos);
     expect(ev).toHaveLength(1);
@@ -433,7 +434,8 @@ describe('IMPL-022 (d) run com o armazenamento cheio não se perde em silêncio'
     expect(getStorageHealth().unsaved).toEqual({});
     const relida = await loadRun(runId);
     expect(relida).toEqual(normalizeRunRecord(structuredClone(rec)));
-    expect(await listRuns()).toEqual([expect.objectContaining({ id: runId, status: 'finished' })]);
+    // Status terminal da run (IMPL-004: 2 cenários => 'inconclusive' pelo piso de n efetivo).
+    expect(await listRuns()).toEqual([expect.objectContaining({ id: runId, status: rec.status })]);
     parar();
   });
 
@@ -445,13 +447,13 @@ describe('IMPL-022 (d) run com o armazenamento cheio não se perde em silêncio'
 
     const rec = await runToCompletion(COMPARE as never, 'sk-or-v1-fake', { runId });
 
-    expect(rec.status).toBe('finished');
+    expectPipelineDone(rec);
     expect(storageEvents(eventos)).toHaveLength(1);
     expect(getStorageHealth().unsaved).toEqual({});
     const salvo = fake.get('runs', runId) as RunRecord;
-    expect(salvo.status).toBe('finished');
+    expectPipelineDone(salvo);
     expect(salvo.stages).toHaveLength(2);
-    expect(fake.get('runSummaries', runId)).toMatchObject({ status: 'finished' });
+    expect(fake.get('runSummaries', runId)).toMatchObject({ status: salvo.status });
     parar();
   });
 
@@ -467,7 +469,7 @@ describe('IMPL-022 (d) run com o armazenamento cheio não se perde em silêncio'
     expect(daRun.some((t) => t.durability === 'relaxed')).toBe(true); // batida
     expect(daRun.every((t) => t.durability === 'strict' || t.durability === 'relaxed')).toBe(true);
     expect(daRun.every((t) => t.outcome === 'complete')).toBe(true);
-    expect(fake.get('runs', runId)).toMatchObject({ status: 'finished' });
+    expectPipelineDone(fake.get('runs', runId) as RunRecord);
   }, 15_000);
 });
 

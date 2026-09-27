@@ -130,6 +130,7 @@ import type { Output } from '../src/cli/output.js';
 import type { RunConfig, RunRecord, StageSpec, Verdict } from '../src/types.js';
 import type { AgentTaskSpec } from '../src/agent/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 const LIMITES = ['timeout', 'maxTurns', 'maxCost', 'maxOutput'] as const;
 const KEY = 'sk-or-v1-fake-key-para-teste-0000000000';
@@ -645,7 +646,7 @@ describe('IMPL-032 — pipeline Node: judge-score, resolveRate e significância 
     fake.roteiro = roteiroReps1;
     await comGateway(async () => {
       const rec: RunRecord = await runToCompletion(configAgente(6), KEY, {});
-      expect(rec.status, rec.error).toBe('finished');
+      expectPipelineDone(rec);
       expect(rec.agentVerdictTreeVersion).toBe(AGENT_VERDICT_TREE_VERSION);
       expect(rec.stages.some((s) => s.incomplete)).toBe(false);
 
@@ -701,7 +702,7 @@ describe('IMPL-032 — pipeline Node: judge-score, resolveRate e significância 
       const cfg = configAgente(3);
       cfg.agent = { ...cfg.agent!, repetitions: 2 };
       const rec = await runToCompletion(cfg, KEY, {});
-      expect(rec.status, rec.error).toBe('finished');
+      expectPipelineDone(rec);
       for (const s of rec.stages) {
         expect(s.referenceJudge!.verdictsByRep!['fake/b']).toEqual(['nao', 'resolve']);
         expect(s.referenceJudge!.verdictsByRep!['fake/a']).toEqual(['resolve', 'resolve']);
@@ -749,7 +750,7 @@ describe('IMPL-032 — pipeline Node: judge-score, resolveRate e significância 
     fake.roteiro = ({ question }) => ({ stopReason: LIMITES[ordem(question) % 4] });
     await comGateway(async () => {
       const rec = await runToCompletion(configAgente(4), KEY, {});
-      expect(rec.status, rec.error).toBe('finished');
+      expectPipelineDone(rec);
       expect(rec.stoppedReason).toBeUndefined();
       expect(rec.stages.some((s) => s.incomplete)).toBe(false);
       expect(rec.judgeScoreByContestant).toEqual({ 'fake/a': 0, 'fake/b': 0 });

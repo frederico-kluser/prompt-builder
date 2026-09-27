@@ -35,6 +35,7 @@ import { EXIT, exitCodeForGatewayError, Output } from '../src/cli/output.js';
 import { emitRunEvent } from '../src/cli/ndjson.js';
 import type { CompetitorResponse, RunConfig, RunRecord, StageSpec } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeChatReply } from './fakeOpenRouter.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 vi.mock('../web/src/engine/storage', () => ({
   saveRun: async () => undefined,
@@ -328,7 +329,12 @@ const CONFIG = {
 } as const;
 
 function conferirTaxonomia(rec: RunRecord): void {
-  expect(rec.status, rec.error).toBe('finished');
+  // IMPL-004: a run TERMINA, mas inconclusiva — as 2 respostas de `e` (infra)
+  // são vereditos perdidos do competidor (2 de 10 > 10%). Os 4 BLOQUEIOS não
+  // entram na conta de falha (defesa do gateway, não falha do pipeline).
+  expect(rec.status, rec.error).toBe('inconclusive');
+  expect(rec.failureCountByRole?.competitor).toBe(2);
+  expect(rec.verdictIntegrity?.reasons.some((r) => /^papel competitor: 2 de 10/.test(r))).toBe(true);
   // 2 cenários × (b bloqueado + d filtrado) · 2 × c · 2 × e
   expect(rec.competitorOutcomeCounts).toEqual({ blocked: 4, refused: 2, error: 2 });
   const porModelo = (m: string) => rec.stages.flatMap((s) => s.responses).filter((r) => r.modelId === m);
@@ -403,7 +409,7 @@ describe('IMPL-010 (3)+(4) — run inteira: contagens separadas e 0 bloqueio com
     });
     anterior = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));
     const rec = await runNode({ ...CONFIG, competitorModelIds: ['fake/a'], finalists: 0 } as unknown as RunConfig, KEY, {});
-    expect(rec.status, rec.error).toBe('finished');
+    expectPipelineDone(rec);
     expect(rec.competitorOutcomeCounts).toEqual({ blocked: 0, refused: 0, error: 0 });
   });
 });

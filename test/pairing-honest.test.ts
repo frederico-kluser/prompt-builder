@@ -40,6 +40,7 @@ import { runToCompletion as runNode } from '../src/orchestrator.js';
 import { runToCompletion as runWeb } from '../web/src/engine/orchestrator.js';
 import type { RunRecord, SessionRecord, Verdict } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep } from './fakeOpenRouter.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -481,7 +482,7 @@ describe('IMPL-005 — completude no RunRecord', () => {
     ] as const) {
       it(nome, async () => {
         const rec = (await runner(CONFIG as never, 'sk-or-v1-fake-key-para-teste-0000000000')) as unknown as RunRecord;
-        expect(rec.status, rec.error).toBe('finished');
+        expectPipelineDone(rec);
         expect(rec.completeness).toBeDefined();
         expect(rec.completeness).toEqual(runCompleteness(rec));
         expect(rec.completeness?.n).toBe(2);

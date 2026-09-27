@@ -40,6 +40,7 @@ import { importItems, listItems } from '../src/library.js';
 import { parseRunConfig, runConfigSchema } from '../src/runConfigSchema.js';
 import type { RunConfig, TrainingConfig } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter, type FakeRequest } from './fakeOpenRouter.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 vi.mock('../web/src/engine/storage', () => ({
   saveRun: async () => undefined,
@@ -581,6 +582,14 @@ function fakeComPii(): FakeOpenRouter {
       if (req.model === M.ref) return { text: `Gabarito: confirme o CPF ${CPF_2} e o prazo.`, usage };
       if (req.stream) return { text: `Localizei o cadastro do CPF ${CPF_2}; prazo confirmado.`, usage };
       if (req.system.includes('DUELO')) return { text: '{"winner":"A","explanation":"A melhor"}', usage };
+      // Juiz LISTWISE (compare sem gabarito): ranking + veredito por rótulo no
+      // schema estrito — desde o IMPL-004 saída fora do contrato é veredito PERDIDO.
+      const rotulos = /ordene TODOS estes rotulos da melhor para a pior: (\[[^\]]*\])/.exec(req.user)?.[1];
+      if (rotulos) {
+        const labels = JSON.parse(rotulos) as string[];
+        const verdicts = labels.map((label) => ({ label, justificativa: 'confere', veredito: 'resolve' }));
+        return { text: JSON.stringify({ ranking: labels, verdicts }), usage };
+      }
       return { text: '{"verdict":"resolve","explanation":"confere"}', usage };
     },
   });
@@ -700,7 +709,7 @@ describe('IMPL-042 (3) — prova DINÂMICA nos 6 papéis, Node e SPA (dado do us
   it('Node (trainer + orchestrator): modo redigir REVISADO roda inteiro e nenhum corpo leva o dado cru', async () => {
     const { fake, gw } = comFake();
     const rec = await trainNode(treino({ allowPii: true }) as unknown as TrainingConfig, KEY);
-    expect(rec.status, rec.error).toBe('finished');
+    expectPipelineDone(rec);
     conferirSemPii(fake, gw);
   });
 
@@ -708,7 +717,7 @@ describe('IMPL-042 (3) — prova DINÂMICA nos 6 papéis, Node e SPA (dado do us
     const { fake, gw } = comFake();
     const { sessionId, record } = await startWebTraining(treino({ allowPii: true }) as never, KEY);
     await esperarSessao(sessionId, record);
-    expect(record.status, record.error).toBe('finished');
+    expectPipelineDone(record);
     conferirSemPii(fake, gw);
   });
 
@@ -759,7 +768,7 @@ describe('IMPL-042 (3) — prova DINÂMICA nos 6 papéis, Node e SPA (dado do us
       scenarioSeed: [{ question: 'Qual o status do exame?', productContext: 'Resultados em 3 dias.', maxTokens: 300, rubric: 'Status.' }],
     });
     const rec = await trainNode(limpo as unknown as TrainingConfig, KEY);
-    expect(rec.status, rec.error).toBe('finished');
+    expectPipelineDone(rec);
     // O CPF que o datagen/competidor inventou foi pseudonimizado no envio.
     for (const req of fake.chatRequests()) {
       expect(JSON.stringify(req.body)).not.toContain(CPF_2);
@@ -1144,7 +1153,7 @@ describe('IMPL-042 (revisão) — run avulsa "redigir" revisada grava o relatór
         expect(fake.chatRequests()).toEqual([]);
 
         const rec = await run({ ...cfg, allowPii: true } as never, KEY, {});
-        expect(rec.status, rec.error).toBe('finished');
+        expectPipelineDone(rec);
         expect(fake.chatRequests().length).toBeGreaterThan(0);
         for (const req of fake.chatRequests()) {
           for (const cru of [CPF_2, CEL_1, '97351-2846']) expect(JSON.stringify(req.body)).not.toContain(cru);

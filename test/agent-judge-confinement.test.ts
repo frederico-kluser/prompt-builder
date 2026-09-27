@@ -140,6 +140,7 @@ import type { Output } from '../src/cli/output.js';
 import type { RunConfig, RunEvent, RunRecord, StageSpec, Verdict } from '../src/types.js';
 import type { AgentTaskSpec, OracleNotRun, OracleResult } from '../src/agent/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeChatReply, type FakeOpenRouter } from './fakeOpenRouter.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 const KEY = 'sk-or-v1-fake-key-para-teste-0000000000';
 const ORD: Record<Verdict, number> = { nao: 0, parcial: 1, resolve: 2 };
@@ -930,7 +931,7 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
   it('juiz sempre falha: notas = oráculo (judge-score 100, não 50), agentJudgeErrorCount = execuções', async () => {
     await comJuiz(() => HTTP_400, async (f) => {
       const rec = await runToCompletion(configAgente([{ verify: [PASSA] }, { verify: [PASSA] }, { verify: [PASSA] }]), KEY, {});
-      expect(rec.status, rec.error).toBe('finished');
+      expectPipelineDone(rec);
       expect(rec.agentVerdictTreeVersion).toBe(AGENT_VERDICT_TREE_VERSION);
       for (const s of rec.stages) {
         expect(s.referenceJudge!.verdictByContestant).toEqual({ 'fake/a': 'resolve', 'fake/b': 'resolve' });
@@ -960,7 +961,7 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
   it('juiz saudável: contagem presente e zerada (disponível em toda run com agente)', async () => {
     await comJuiz(() => JSON_OK('resolve'), async () => {
       const rec = await runToCompletion(configAgente([{ verify: [PASSA] }]), KEY, {});
-      expect(rec.status, rec.error).toBe('finished');
+      expectPipelineDone(rec);
       expect(rec.agentJudgeErrorCount).toBe(0);
       expect(rec.agentJudgeErrorsByContestant).toEqual({});
       expect(rec.stages[0].referenceJudge!.judgeErrorByContestant).toBeUndefined();
@@ -971,7 +972,7 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
   it("oráculo parcial + juiz 'resolve' em run inteira: nenhuma nota passa de 'parcial'", async () => {
     await comJuiz(() => JSON_OK('resolve'), async () => {
       const rec = await runToCompletion(configAgente([{ verify: [PASSA, FALHA] }, { verify: [PASSA, FALHA] }]), KEY, {});
-      expect(rec.status, rec.error).toBe('finished');
+      expectPipelineDone(rec);
       for (const s of rec.stages) {
         expect(s.referenceJudge!.verdictByContestant).toEqual({ 'fake/a': 'parcial', 'fake/b': 'parcial' });
       }
@@ -984,7 +985,10 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
     fake.escreve = () => ['feito.txt'];
     await comJuiz(() => HTTP_400, async () => {
       const rec = await runToCompletion(configAgente([{}, {}]), KEY, {});
-      expect(rec.status, rec.error).toBe('finished');
+      // IMPL-004: todo veredito perdido pelo juiz => a run TERMINA, mas
+      // inconclusiva, com a conta do papel `judge` como motivo.
+      expect(rec.status, rec.error).toBe('inconclusive');
+      expect(rec.verdictIntegrity?.reasons.some((r) => /^papel judge: 4 de 4/.test(r))).toBe(true);
       expect(rec.stages.some((s) => s.incomplete)).toBe(false);
       for (const s of rec.stages) {
         // Chave AUSENTE — nunca 'parcial'/'nao' imputado.
@@ -1013,7 +1017,7 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
     await comJuiz(() => JSON_OK('resolve'), async () => {
       const suite = { cmd: 'sh hang.sh', label: 'suite', timeoutMs: 300 };
       const rec = await runToCompletion(configAgente([{ verify: [PASSA, suite] }, { verify: [PASSA] }]), KEY, {});
-      expect(rec.status, rec.error).toBe('finished');
+      expectPipelineDone(rec);
       expect(rec.stages.every((s) => !s.error && !s.incomplete)).toBe(true);
       expect(rec.stages[0].referenceJudge!.verdictByContestant).toEqual({ 'fake/a': 'parcial', 'fake/b': 'parcial' });
       expect(rec.stages[1].referenceJudge!.verdictByContestant).toEqual({ 'fake/a': 'resolve', 'fake/b': 'resolve' });
@@ -1031,7 +1035,7 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
     await comJuiz(() => JSON_OK('resolve'), async () => {
       const fantasma = { cmd: 'comando-que-nao-existe-impl033', label: 'suite' };
       const rec = await runToCompletion(configAgente([{ verify: [PASSA, fantasma] }, { verify: [PASSA] }]), KEY, {});
-      expect(rec.status, rec.error).toBe('finished');
+      expectPipelineDone(rec);
       const inval = rec.stages[0];
       expect(inval.error).toMatch(/inválida para TODOS/);
       expect(inval.error).toContain('suite');
@@ -1061,7 +1065,7 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
         verify: [{ cmd: './run_tests.sh', label: 'suite' }],
       };
       const rec = await runToCompletion(configAgente([task]), KEY, {});
-      expect(rec.status, rec.error).toBe('finished');
+      expectPipelineDone(rec);
       const s = rec.stages[0];
       expect(s.error).toBeUndefined();
       expect(s.referenceJudge!.verdictByContestant).toEqual({ 'fake/a': 'nao', 'fake/b': 'resolve' });

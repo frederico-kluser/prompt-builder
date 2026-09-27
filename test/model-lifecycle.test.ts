@@ -35,6 +35,7 @@ import { runToCompletion as runWeb } from '../web/src/engine/orchestrator.js';
 import { prepareOptsFor } from '../src/prepareRun.js';
 import type { OpenRouterModel, RunConfig, RunRecord } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
+import { expectPipelineDone } from './runOutcome.js';
 
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
@@ -282,7 +283,7 @@ const VARIATION = {
 
 /** (i): TODO modelo da run tem os 3 campos preenchidos (null explícito quando o catálogo não informa). */
 function conferirCicloDeVida(rec: Pick<RunRecord, 'status' | 'error' | 'modelLifecycle'>, esperados: Record<string, string[]>): void {
-  expect(rec.status, rec.error).toBe('finished');
+  expectPipelineDone(rec);
   const snap = rec.modelLifecycle!;
   expect(snap, 'run sem modelLifecycle').toBeDefined();
   expect(snap.source).toBe('catalog');

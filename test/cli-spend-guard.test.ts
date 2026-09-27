@@ -616,9 +616,15 @@ describe('MUTEX entre processos — soma EXATA sob contenção (N processos × M
 
 // --- 3. CLI em processo -----------------------------------------------------------
 
+// 5 cenários: desde o IMPL-004 a run só é `finished` com >= 5 cenários julgados
+// por contestant — com menos, a compare sai inconclusiva (exit 6) e estes testes
+// são sobre o LEDGER, não sobre o piso de n efetivo.
 const CENARIOS = [
   { question: 'Qual o prazo de troca?', productContext: 'Trocas em 30 dias com nota.', maxTokens: 300, rubric: 'Citar 30 dias.' },
   { question: 'Como calcular juros compostos?', productContext: 'M = C (1 + i)^n.', maxTokens: 300, rubric: 'Fórmula certa.' },
+  { question: 'Posso cancelar a assinatura?', productContext: 'Cancelamento a qualquer momento, sem multa.', maxTokens: 300, rubric: 'Sem multa.' },
+  { question: 'Qual o horário de atendimento?', productContext: 'Atendimento das 8h às 18h, seg a sex.', maxTokens: 300, rubric: 'Citar 8h–18h.' },
+  { question: 'Tem frete grátis?', productContext: 'Frete grátis acima de R$ 200.', maxTokens: 300, rubric: 'Citar R$ 200.' },
 ];
 
 /** Catálogo BARATO (1e-6/token): reservas pequenas, a run cabe folgada em US$ 5. */
@@ -644,7 +650,7 @@ function rotaDoPipeline(req: FakeRequest, n: number): { text: string; usage: { p
 const PIPE_CONFIG = {
   mode: 'compare',
   theme: 'suporte ao cliente',
-  stages: 2,
+  stages: 5,
   datagenModelId: 'fake/gen',
   judgeModelIds: ['fake/judge'],
   referenceModelId: 'fake/ref',

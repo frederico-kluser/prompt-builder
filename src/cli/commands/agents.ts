@@ -536,6 +536,19 @@ async function cmdRun(argv: string[]): Promise<number> {
       },
     );
   }
+  // IMPL-004 × IMPL-028: inconclusiva (6) também sai pelo envelope — há
+  // resultado (em `details`), mas ele não sustenta conclusão.
+  if (code === EXIT.INCONCLUSIVE) {
+    throw new CliError(
+      `Run de agentes ${record.id} inconclusiva: ${(record.verdictIntegrity?.reasons ?? []).join('; ') || 'o resultado não sustenta conclusão'}.`,
+      code,
+      resumo,
+      {
+        code: 'run.inconclusive',
+        hint: `Não promova com base nela; veja \`prompt-builder agents show ${record.id} --json\` (verdictIntegrity, failureCountByRole).`,
+      },
+    );
+  }
   out.result(true, 'agents.run', resumo);
   return code;
 }
