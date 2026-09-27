@@ -20,13 +20,14 @@ O stream **sempre** abre em `start` e **sempre** termina em `result`.
 | `variants.generating` / `variants.generated` | geração de variantes | `contestants[]` |
 | `stage.generating` / `stage.generated` | cenários | `stageIndex`, `question`, `hasReference` |
 | `progress` | lotes agregados | `phase` (`gabarito` \| `duels`), `done`, `total` |
-| `competitor.finished` | uma resposta pronta | `contestantId`, `status` (`ok`\|`blocked`\|`refused`\|`error`), `tokensIn/Out`, `costUsd`, `chars` |
+| `competitor.finished` | uma resposta pronta | `contestantId`, `status` (`ok`\|`blocked`\|`refused`\|`error`), `tokensIn/Out`, `costUsd`, `chars`, `truncated`/`truncationRetried` (só quando `true`) |
+| `stage.incomplete` | etapa fora do placar e das médias | `stageIndex`, `reason` (`truncation`), `detail`, `contestantIds` (quem truncou) |
 | `stage.judging` / `stage.judged` | julgamento | `verdicts`, `ranked`, `scoreboard`, `totalCostUsd` |
 | `finals.started` | finais | `finalists[]` |
 | `stage.dueled` | duelos de um cenário | `pairs[]` |
 | `budget` | gasto acumulado | `spentUsd`, `budgetUsd`, `byRole` |
 | `budget.gate` | uma porta decidiu | `phase`, `projectedUsd`, `remainingUsd`, `decision` |
-| `run.finished` | run terminou | `status`, `totalCostUsd`, `standings`, `competitorOutcomeCounts` |
+| `run.finished` | run terminou | `status`, `totalCostUsd`, `standings`, `competitorOutcomeCounts`, `truncationRate`/`truncationCounts` (+ `truncationAlert` acima de 2%) |
 | `iteration.started` / `iteration.finished` / `iteration.promoted` | treino | `iteration`, `runId`, `gain` |
 | `session.holdout` / `session.converged` / `session.finished` | treino | ver `docs train` |
 | `result` | última linha | `ok`, `status`, `totalCostUsd`, `budgetExhausted`, … |

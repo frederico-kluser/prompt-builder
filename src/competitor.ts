@@ -1,5 +1,6 @@
 import { chatCompletionStream, isGatewayBlocked } from './openrouter.js';
 import { isControlSignal } from './budget.js';
+import { retryMaxTokens } from './engine/truncation.js';
 import type {
   CompetitorOutcomeCounts,
   CompetitorResponse,
@@ -58,6 +59,16 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
       ? Math.min(maxOutputTokens, stage.maxTokens)
       : stage.maxTokens;
 
+  // Truncamento (IMPL-014 / R-07b:DEC-2): UM retry com teto x2, fora da conta
+  // dos retries de erro (truncar nao e falha de infra). O teto dobrado passa
+  // do `maxOutputTokens` de proposito: o modelo nao ve `max_tokens` (nao e
+  // instrucao de concisao), entao cortar a resposta so mede o NOSSO teto; o
+  // dinheiro continua contido pelo ledger, que reserva com o teto novo.
+  let maxTokens = effectiveMaxTokens;
+  let truncationRetried = false;
+  /** Custo da 1a tentativa truncada — o dinheiro saiu, entra no costUsd final. */
+  let spentOnTruncated = 0;
+
   let attempt = 0;
   let lastError: unknown;
   while (attempt <= retries) {
@@ -74,7 +85,7 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
         // suporta — reasoning models ignoram sem quebrar.
         temperature,
         reasoningLevel,
-        maxTokens: effectiveMaxTokens,
+        maxTokens,
         timeoutMs,
         role: 'competitor',
         signal: ctx?.signal,
@@ -98,6 +109,19 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
       // da recusa vira o `text` quando nao ha conteudo). Recusa so em texto
       // corrido ("nao posso ajudar") segue 'ok': o juiz a le como resposta.
       const status: CompetitorStatus = res.blocked ? 'blocked' : res.refusal ? 'refused' : 'ok';
+      // Bloqueio tem desfecho proprio (IMPL-010): o texto parcial nao e
+      // "resposta truncada", e repetir nao desbloqueia.
+      const truncated = status !== 'blocked' && res.truncated === true;
+      if (truncated && !truncationRetried) {
+        truncationRetried = true;
+        spentOnTruncated += res.cost.usd;
+        maxTokens = retryMaxTokens(maxTokens);
+        console.error(
+          `[competitor ${modelId}] resposta truncada no teto (${(res.truncationSignals ?? []).join(', ')}); ` +
+            `repetindo 1x com max_tokens=${maxTokens}`,
+        );
+        continue;
+      }
       return {
         contestantId,
         modelId,
@@ -107,11 +131,19 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
         tokensOut: res.tokensOut,
         // Custo EXATO vindo de `usage.cost` (fallback: catalogo). Antes era
         // sempre derivado do catalogo, ignorando cache e faixas de preco.
-        costUsd: res.cost.usd,
+        // Com retry por truncamento, soma as duas tentativas.
+        costUsd: res.cost.usd + spentOnTruncated,
         status,
         ...(res.blocked ? { errorMsg: res.blocked.message } : {}),
         ...(res.finishReason ? { finishReason: res.finishReason } : {}),
         ...(res.nativeFinishReason ? { nativeFinishReason: res.nativeFinishReason } : {}),
+        // Os 4 sinais de fim (R-07b:REC-2): finish/native acima, raciocinio vs
+        // teto e o tamanho do conteudo (= `text`/`tokensOut`, ja persistidos).
+        truncated,
+        ...(typeof res.reasoningTokens === 'number' ? { reasoningTokens: res.reasoningTokens } : {}),
+        maxTokens,
+        ...(res.truncationSignals?.length ? { truncationSignals: res.truncationSignals } : {}),
+        ...(truncationRetried ? { truncationRetried: true } : {}),
       };
     } catch (err) {
       // Orcamento/cancelamento sao SINAIS DE CONTROLE: repetir a chamada so
@@ -130,9 +162,11 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
           latencyMs: Date.now() - start,
           tokensIn: 0,
           tokensOut: 0,
-          costUsd: 0,
+          // O 403 nao e cobrado; uma 1a tentativa truncada antes dele, sim.
+          costUsd: spentOnTruncated,
           status: 'blocked',
           errorMsg: err.message,
+          ...(truncationRetried ? { truncationRetried: true } : {}),
         };
       }
       lastError = err;
@@ -148,9 +182,11 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
     latencyMs: 0,
     tokensIn: 0,
     tokensOut: 0,
-    costUsd: 0,
+    // Erro de infra nao gera cobranca conhecida, mas a 1a tentativa truncada gerou.
+    costUsd: spentOnTruncated,
     status: 'error',
     errorMsg: lastError instanceof Error ? lastError.message : String(lastError),
+    ...(truncationRetried ? { truncationRetried: true } : {}),
   };
 }
 

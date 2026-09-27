@@ -17,7 +17,21 @@ import { saveRun } from './storage';
 import { contestantsFromConfig } from './normalize';
 import { listModels } from './openrouter';
 import { BudgetLedger, isControlSignal } from '../../../src/budget.js';
-import type { Contestant, RunConfig, RunCtx, RunRecord, StageRecord, StageSpec } from './types';
+import {
+  describeTruncatedStage,
+  truncatedResponses,
+  truncationAlert,
+  truncationStats,
+} from '../../../src/engine/truncation.js';
+import type {
+  CallFinishSignals,
+  Contestant,
+  RunConfig,
+  RunCtx,
+  RunRecord,
+  StageRecord,
+  StageSpec,
+} from './types';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -84,6 +98,13 @@ function syncLedger(record: RunRecord, ledger: BudgetLedger): void {
   if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
 }
 
+/** Taxa de truncamento do record inteiro (IMPL-014) — mesma funcao pura do Node. */
+function syncTruncation(record: RunRecord): void {
+  const t = truncationStats(record.stages);
+  record.truncationRate = t.rate;
+  record.truncationCounts = { calls: t.calls, truncated: t.truncated };
+}
+
 /**
  * Contestants do modo compare. compare-llms (competitorConfigs): as variantes
  * de config {modelo, temperatura, reasoning} viram os contestants (identidade =
@@ -122,6 +143,9 @@ function buildRecord(config: RunConfig, opts: StartRunOpts): RunRecord {
     totalCostUsd: 0,
     // IMPL-010: sempre presente numa run nova — "0 bloqueios" e informacao.
     competitorOutcomeCounts: { blocked: 0, refused: 0, error: 0 },
+    // IMPL-014: idem — "0% truncado" tambem e informacao.
+    truncationRate: 0,
+    truncationCounts: { calls: 0, truncated: 0 },
     startedAt: nowIso(),
     sessionId: opts.sessionId,
     iteration: opts.iteration,
@@ -336,6 +360,9 @@ async function runLoop(
   // cenario roda uma unica vez. Etapas que ja trazem reference (seed/pinadas)
   // passam intactas; falha num gabarito so deixa a etapa sem reference
   // (degrada na fase 3). ===
+  // Sinais de fim de cada gabarito (IMPL-014), por posicao em `specs` ANTES
+  // da expansao de repeats — vao para o StageRecord na materializacao.
+  const gabaritoCalls = new Map<number, CallFinishSignals>();
   if (referenceJudging) {
     specs = await generateReferences({
       stages: specs,
@@ -348,6 +375,7 @@ async function runLoop(
       // concluidos), nao de uma etapa especifica.
       onProgress: (done, total) =>
         emitEvent({ type: 'stage.gabarito', runId, stageIndex: -1, done, total }),
+      onCall: (idx, call) => gabaritoCalls.set(idx, call),
     });
   }
   syncLedger(record, ledger);
@@ -361,6 +389,10 @@ async function runLoop(
   // os slots do rabo viram stage.failed e a run segue com o que houver.
   specs.forEach((spec, i) => {
     record.stages[i].spec = spec;
+    // O gabarito e UMA chamada por cenario: com repeats, so o 1o clone guarda
+    // os sinais (senao a truncationRate contaria a mesma chamada N vezes).
+    const call = i % repeats === 0 ? gabaritoCalls.get(i / repeats) : undefined;
+    if (call) record.stages[i].gabaritoCall = call;
     emitEvent({ type: 'stage.generated', runId, stageIndex: i, spec });
   });
   for (let i = specs.length; i < record.stages.length; i++) {
@@ -369,6 +401,7 @@ async function runLoop(
     record.stages[i].finishedAt = nowIso();
     emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
   }
+  syncTruncation(record);
   scheduleSave();
 
   // Contestants ja sao finais aqui (opts.prepare rodou). Controle = ancora do
@@ -416,6 +449,7 @@ async function runLoop(
             // Bloqueio (defesa do gateway) ≠ recusa do modelo ≠ erro de infra —
             // tres contagens separadas no record (IMPL-010 / R-21:REC-6).
             record.competitorOutcomeCounts = countCompetitorOutcomes(record.stages);
+            syncTruncation(record);
             // Total verdadeiro vem do ledger (juiz/duelo/datagen nao sao
             // atribuiveis a um contestant); `costByContestant` segue sendo a
             // fatia dos competidores — agora com o custo MEDIDO (usage.cost).
@@ -429,6 +463,28 @@ async function runLoop(
             return response;
           }),
         );
+
+        // IMPL-014 (espelho do Node): resposta que CONTINUOU truncada depois
+        // do retry x2 torna a etapa `incomplete` — fora do placar e das medias,
+        // sem julgamento (comparar resposta cortada mede o nosso teto).
+        const truncadas = truncatedResponses(stageRecord.responses);
+        if (truncadas.length > 0) {
+          stageRecord.incomplete = true;
+          stageRecord.incompleteReason = 'truncation';
+          stageRecord.finishedAt = nowIso();
+          const detail = describeTruncatedStage(i, truncadas, labelOf);
+          log(runId, detail);
+          scheduleSave();
+          emitEvent({
+            type: 'stage.incomplete',
+            runId,
+            stageIndex: i,
+            reason: 'truncation',
+            detail,
+            contestantIds: truncadas.map((r) => r.contestantId),
+          });
+          return;
+        }
 
         // === FASE 3: julgamento. Com gabarito: pointwise vs referencia (os
         // duelos sairam daqui — agora sao a FASE 4, so entre os finalistas).
@@ -545,7 +601,8 @@ async function runLoop(
   );
 
   // === Agregados do julgamento por referencia (trainer/UI consomem). ===
-  const stagesComRef = record.stages.filter((s) => s.referenceJudge);
+  // Etapas `incomplete` (truncamento) ficam de fora — espelho do Node.
+  const stagesComRef = record.stages.filter((s) => s.referenceJudge && !s.incomplete);
   if (stagesComRef.length > 0) {
     // judge-score = (resolve + 0.5*parcial) / total * 100, por contestant,
     // sobre as etapas com juiz de referencia (ausente conta como 'nao').
@@ -563,7 +620,9 @@ async function runLoop(
   // bracket; agora a final e uma so, global, e roda depois de tudo. ===
   const finalsOn = record.config.duels !== false;
   const finalistCount = record.config.finalists ?? 3;
-  const stagesParaDuelo = record.stages.filter((s) => s.spec?.reference?.trim() && !s.error);
+  const stagesParaDuelo = record.stages.filter(
+    (s) => s.spec?.reference?.trim() && !s.error && !s.incomplete,
+  );
   if (
     finalsOn &&
     finalistCount !== 0 &&
@@ -708,6 +767,10 @@ async function runLoop(
       // Bloqueio NAO e erro de key nem falha do prompt: e a defesa do gateway.
       log(runId, 'desfechos dos competidores (bloqueio ≠ recusa ≠ erro)', { ...desfechos });
     }
+    // IMPL-014: acima de 2% de chamadas truncadas o teto esta baixo p/ estes modelos.
+    syncTruncation(record);
+    const alertaTrunc = truncationAlert({ ...record.truncationCounts!, rate: record.truncationRate! });
+    if (alertaTrunc) log(runId, `ALERTA de truncamento: ${alertaTrunc}`);
   } catch (err) {
     // Diagnostico e SUPORTE, nunca derruba a finalizacao.
     log(runId, `diagnostico do juiz falhou (ignorado): ${err instanceof Error ? err.message : String(err)}`);

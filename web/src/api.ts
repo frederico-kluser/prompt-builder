@@ -2,8 +2,16 @@ import { idbGet, idbGetAll, idbPut, idbPutMany } from './idb';
 import type { ExpectedSpec } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
-import type { CostEntry, CostRole, RunCtx } from '../../src/types.js';
+import type {
+  CallFinishSignals,
+  CostEntry,
+  CostRole,
+  RunCtx,
+  StageIncompleteReason,
+  TruncationSignal,
+} from '../../src/types.js';
 export type { CostEntry, CostRole } from '../../src/types.js';
+export type { CallFinishSignals, StageIncompleteReason, TruncationSignal } from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
 import type { LgpdData } from './lgpd';
@@ -186,6 +194,12 @@ export interface CompetitorResponse {
   errorMsg?: string;
   finishReason?: string;
   nativeFinishReason?: string;
+  /** Cortada no teto mesmo após o retry x2 (IMPL-014) — a etapa fica fora do placar. */
+  truncated?: boolean;
+  reasoningTokens?: number;
+  maxTokens?: number;
+  truncationSignals?: TruncationSignal[];
+  truncationRetried?: boolean;
 }
 
 export interface StageSpec {
@@ -301,6 +315,12 @@ export interface StageRecord {
   evaluation?: StageEvaluation;
   /** Preenchido quando a etapa falhou (datagen/imprevisto) e foi pulada. */
   error?: string;
+  /** Etapa fora do placar e das médias (orçamento/cancelamento/truncamento). */
+  incomplete?: boolean;
+  /** Motivo do `incomplete` (IMPL-014: `truncation` = resposta cortada no teto mesmo após o retry x2). */
+  incompleteReason?: StageIncompleteReason;
+  /** Sinais de fim da chamada do gabarito (IMPL-014). */
+  gabaritoCall?: CallFinishSignals;
   startedAt: string;
   finishedAt?: string;
 }
@@ -350,6 +370,9 @@ export interface RunRecord {
   upstreamCostUsd?: number;
   /** Desfechos não-ok dos competidores, separados (IMPL-010): bloqueio ≠ recusa ≠ erro. */
   competitorOutcomeCounts?: { blocked: number; refused: number; error: number };
+  /** Fração de chamadas (competidor + gabarito) truncadas no teto (IMPL-014); alerta acima de 2%. */
+  truncationRate?: number;
+  truncationCounts?: { calls: number; truncated: number };
   startedAt: string;
   finishedAt?: string;
   error?: string;

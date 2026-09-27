@@ -208,7 +208,7 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
   return (
     <div className="rounded-xl bg-card ring-1 ring-foreground/10">
       <div className="border-b border-border px-4 py-2 text-[12px] text-muted-foreground">
-        ✓ resolve · ◐ parcial · ✕ não resolve · ⏳ aguardando julgamento · ⊘ bloqueado · ! erro · · pendente
+        ✓ resolve · ◐ parcial · ✕ não resolve · ⏳ aguardando julgamento · ⊘ bloqueado · ✂ truncada · ! erro · · pendente
       </div>
       <div className="scroll-slim overflow-x-auto p-3">
         <div className="min-w-fit">
@@ -254,6 +254,11 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
                 // é inconclusivo para o prompt, nunca um 'não' (IMPL-010).
                 const estado = resp?.status === 'blocked'
                   ? { glyph: '⊘', cls: 'bg-muted text-muted-foreground', label: 'bloqueado pela moderação — sem veredito para o prompt' }
+                  : resp?.truncated
+                  ? // IMPL-014: cortada no teto mesmo após o retry x2 — a etapa inteira sai do placar.
+                    { glyph: '✂', cls: 'bg-muted text-muted-foreground', label: 'resposta truncada no teto de tokens — etapa fora do placar' }
+                  : s.incompleteReason === 'truncation' && !v
+                  ? { glyph: '–', cls: 'bg-muted/50 text-muted-foreground', label: 'etapa fora do placar (outra resposta foi truncada)' }
                   : v
                   ? { glyph: VERDICT_GLYPH[v], cls: VERDICT_META[v].cell, label: VERDICT_META[v].label }
                   : resp?.status === 'error'
@@ -488,6 +493,17 @@ export function applyEvent(prev: RunRecord, event: any): RunRecord {
     case 'stage.generated': {
       const s = next.stages[event.stageIndex];
       if (s) s.spec = event.spec;
+      return next;
+    }
+    case 'stage.incomplete': {
+      // IMPL-014: etapa fora do placar e das médias (hoje: truncamento). Por
+      // índice, como os demais — os eventos chegam fora de ordem.
+      const s = next.stages[event.stageIndex];
+      if (s) {
+        s.incomplete = true;
+        s.incompleteReason = event.reason;
+        s.finishedAt = new Date().toISOString();
+      }
       return next;
     }
     case 'stage.failed': {

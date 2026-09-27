@@ -32,6 +32,7 @@ import {
 } from '../components/primitives';
 import { VERDICT_META, verdictOf, trunc, denseStages, applyEvent, ScoreHeatmap, FinalsPanel } from './runShared';
 import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
+import { TruncationNotice } from '../components/TruncationNotice';
 import { cn } from '@/lib/utils';
 
 // Notacao decimal sempre: "$4.00e-4" e ilegivel para quem so quer saber quanto
@@ -356,6 +357,7 @@ export function RunView() {
           <DeltaBars record={record} onVariantClick={setDrawerVariant} />
           <FailureDigest record={record} />
           <JudgeDiagnostics record={record} />
+          <TruncationNotice record={record} />
         </>
       )}
       <VariantPromptDrawer
@@ -513,6 +515,15 @@ function StageRow({ stage, byId, contestants }: StageRowProps) {
                       <span className="text-muted-foreground"> · BLOQUEADO pela moderação: {r.errorMsg}</span>
                     )}
                     {r.status === 'refused' && <span className="text-muted-foreground"> · o modelo recusou</span>}
+                    {/* IMPL-014: cortada no teto (mesmo com o retry x2) — a etapa fica fora do placar. */}
+                    {r.truncated && (
+                      <span className="text-muted-foreground">
+                        {' '}· TRUNCADA no teto de {r.maxTokens ?? '?'} tokens ({r.finishReason ?? r.nativeFinishReason ?? 'sem finish_reason'}) — etapa fora do placar
+                      </span>
+                    )}
+                    {!r.truncated && r.truncationRetried && (
+                      <span className="text-muted-foreground"> · truncou na 1ª tentativa; refeita com teto {r.maxTokens}</span>
+                    )}
                   </div>
                   {explanation && (
                     <p className="mt-2 border-l-2 border-border pl-3 text-[13px] text-muted-foreground">

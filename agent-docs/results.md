@@ -30,7 +30,10 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 | `costAccuracy` | quantas chamadas tiveram preço exato / estimado / desconhecido |
 | `competitorOutcomeCounts` | `{ blocked, refused, error }` — bloqueio de moderação/guardrail (defesa do gateway, sem veredito) ≠ recusa declarada pelo modelo (julgável) ≠ erro de infra |
 | `stages[].responses[].status` | `ok` \| `blocked` \| `refused` \| `error`; `finishReason`/`nativeFinishReason` quando o provedor informa |
-| `stages[].incomplete` | etapa cortada no meio — **fora** do placar e do julgamento |
+| `stages[].responses[].truncated` | resposta cortada no teto de tokens **mesmo após 1 retry com teto x2** (`truncationRetried`, `maxTokens`, `reasoningTokens`, `truncationSignals` dizem como) |
+| `stages[].incomplete` / `incompleteReason` | etapa **fora** do placar e do julgamento — `budget`, `cancelled` ou `truncation` (uma resposta truncada) |
+| `stages[].gabaritoCall` | sinais de fim da chamada do gabarito; `truncated: true` = régua cortada, descartada |
+| `truncationRate` / `truncationCounts` | fração das chamadas (competidor + gabarito, cada tentativa conta) cortadas no teto; o CLI alerta acima de **2%** (`truncationAlert` no `--json`) |
 | `stages[].referenceJudge` | vereditos pointwise por contestant, com o motivo |
 | `finalists` | ids que disputaram a final |
 | `judgeDiagnostics` | pin do **contrato do juiz** (hash do prompt + modelos) + viés de verbosidade medido (correlação score×comprimento) |

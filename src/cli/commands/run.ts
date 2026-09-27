@@ -16,7 +16,7 @@ import { estimateInputFromConfig, estimateRunCost, toPerMTok } from '../../estim
 import { isKnownPrice } from '../../engine/pricing.js';
 import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
 import { buildNetworkContext, checkKey, isAgentContext, parse, type NetworkContext } from '../context.js';
-import { emitRunEvent, emitSessionEventNdjson } from '../ndjson.js';
+import { emitRunEvent, emitSessionEventNdjson, truncationFields } from '../ndjson.js';
 import type {
   RunConfig,
   RunMode,
@@ -446,6 +446,15 @@ function relatorioFinal(ctx: NetworkContext, record: RunRecord): void {
         `${desfechos.error} com erro`,
     );
   }
+  // IMPL-014: truncamento no teto de tokens — etapas cortadas saem do placar.
+  const trunc = truncationFields(record);
+  const etapasTruncadas = record.stages.filter((s) => s.incompleteReason === 'truncation').length;
+  if (trunc.truncationCounts && trunc.truncationCounts.truncated > 0) {
+    out.line(
+      `Truncadas  ${trunc.truncationCounts.truncated} de ${trunc.truncationCounts.calls} chamadas ` +
+        `(${((trunc.truncationRate ?? 0) * 100).toFixed(1)}%) · ${etapasTruncadas} etapa(s) fora do placar`,
+    );
+  }
 
   // Qual REGUA foi usada precisa ficar explicito: standings (finais) e
   // judge-score nao sao intercambiaveis.
@@ -548,6 +557,10 @@ async function runSingle(
   }
 
   relatorioFinal(ctx, record);
+  // IMPL-014: o alerta de truncamento (> 2% das chamadas) vai SEMPRE para o
+  // stderr (narração), em qualquer formato; no payload ele sai em `truncationAlert`.
+  const alertaTrunc = truncationFields(record).truncationAlert;
+  if (alertaTrunc) out.warn(alertaTrunc);
   out.result(record.status !== 'error', config.mode, {
     runId: record.id,
     status: record.status,
@@ -558,6 +571,8 @@ async function runSingle(
     judgeScoreByContestant: record.judgeScoreByContestant,
     // IMPL-010: blocked (defesa do gateway) / refused (modelo) / error (infra).
     competitorOutcomeCounts: record.competitorOutcomeCounts,
+    // IMPL-014: truncationRate (+ truncationAlert acima de 2%) — mesmo formato do NDJSON.
+    ...truncationFields(record),
   });
 
   if (record.status === 'error') throw new CliError(record.error ?? 'run falhou', EXIT.ERROR);

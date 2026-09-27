@@ -1,5 +1,6 @@
 import { applyReasoning } from './reasoning.js';
 import { classifyPrice, priceTokens, type PriceFieldKind } from './engine/pricing.js';
+import { isTruncated, truncationSignals } from './engine/truncation.js';
 import type {
   CallCost,
   CostRole,
@@ -8,6 +9,7 @@ import type {
   OpenRouterModel,
   PricingTier,
   ReasoningLevel,
+  TruncationSignal,
 } from './types.js';
 
 // Preco por faixa: a implementacao mora no modulo puro `engine/pricing.ts`
@@ -851,6 +853,18 @@ export interface ChatCompletionResult {
    * parcial). `text` pode ter o trecho gerado antes do corte — so para auditoria.
    */
   blocked?: GatewayBlock;
+  /**
+   * A saida foi CORTADA no teto de `max_tokens` (IMPL-014 / R-07b:DEC-2) —
+   * decidido aqui, no ponto unico, para TODO papel (competidor, gabarito,
+   * juiz, duelo, datagen, reescritor): `finish_reason`/`native_finish_reason`
+   * de teto, ou os sinais auxiliares (raciocinio ≈ teto, conteudo vazio com
+   * `completion_tokens > 0`) — ver `engine/truncation.ts`. Sempre presente
+   * numa chamada que completou. O gateway NAO repete: quem decide o retry x2 e
+   * o papel (o competidor e o gabarito repetem; o juiz e o IMPL-015).
+   */
+  truncated?: boolean;
+  /** Sinais de truncamento observados (inclusive os auxiliares que sozinhos nao decidem). */
+  truncationSignals?: TruncationSignal[];
 }
 
 export interface ChatCompletionParams {
@@ -1149,6 +1163,35 @@ export class OpenRouterGateway {
     return cost;
   }
 
+  /**
+   * Sinais de fim -> decisao de truncamento (IMPL-014), igual para JSON e SSE.
+   * `explainedEmpty`: conteudo vazio de bloqueio/recusa ja tem motivo proprio
+   * e nao conta como "vazio com tokens".
+   */
+  private truncationOf(
+    maxTokens: number | undefined,
+    usage: UsageInfo,
+    text: string,
+    finishReason: string | undefined,
+    nativeFinishReason: string | undefined,
+    explainedEmpty: boolean,
+  ): Pick<ChatCompletionResult, 'truncated' | 'truncationSignals'> {
+    const obs = {
+      finishReason,
+      nativeFinishReason,
+      reasoningTokens: usage.reasoningTokens,
+      tokensOut: usage.tokensOut,
+      contentChars: text.length,
+      maxTokens: typeof maxTokens === 'number' && maxTokens > 0 ? maxTokens : undefined,
+      explainedEmpty,
+    };
+    const sinais = truncationSignals(obs);
+    return {
+      truncated: isTruncated(obs, sinais),
+      ...(sinais.length > 0 ? { truncationSignals: sinais } : {}),
+    };
+  }
+
   async chatCompletion(params: ChatCompletionParams): Promise<ChatCompletionResult> {
     const { messages, maxTokens, timeoutMs = 60_000, signal: externalSignal, sink } = params;
     const role = params.role ?? 'competitor';
@@ -1204,6 +1247,14 @@ export class OpenRouterGateway {
       }
       const blocked = inBandBlock ?? blockFromFinishReason(finishReason, nativeFinishReason);
       const refusal = refusalText(choice?.message?.refusal);
+      const trunc = this.truncationOf(
+        maxTokens,
+        usage,
+        text,
+        finishReason,
+        nativeFinishReason,
+        Boolean(blocked || refusal),
+      );
 
       ok = true;
       return {
@@ -1219,6 +1270,7 @@ export class OpenRouterGateway {
         ...(nativeFinishReason ? { nativeFinishReason } : {}),
         ...(refusal ? { refusal } : {}),
         ...(blocked ? { blocked } : {}),
+        ...trunc,
       };
     } finally {
       if (!ok) reservation?.release();
@@ -1326,6 +1378,17 @@ export class OpenRouterGateway {
       }
       const blocked = inBandBlock ?? blockFromFinishReason(finishReason, nativeFinishReason);
       const refusalFinal = refusalText(refusal);
+      // No stream o finish_reason chega no penultimo chunk e o usage (com
+      // reasoning_tokens) no ultimo: so aqui, com o fluxo inteiro lido, da
+      // para decidir o truncamento.
+      const trunc = this.truncationOf(
+        maxTokens,
+        usage,
+        fullText,
+        finishReason,
+        nativeFinishReason,
+        Boolean(blocked || refusalFinal),
+      );
 
       const latencyMs = Date.now() - startedAt;
       ok = true;
@@ -1342,6 +1405,7 @@ export class OpenRouterGateway {
         ...(nativeFinishReason ? { nativeFinishReason } : {}),
         ...(refusalFinal ? { refusal: refusalFinal } : {}),
         ...(blocked ? { blocked } : {}),
+        ...trunc,
       };
     } finally {
       if (!ok) reservation?.release();

@@ -41,6 +41,19 @@ prompt-builder runs show <runId> --json | jq '.data.run.competitorOutcomeCounts'
 bloqueio nunca sai com `4`. Um 403 de *limite de gasto da key* é sem crédito
 (código `5`).
 
+## `truncationAlert` / `saíram truncadas no teto de tokens`
+
+Mais de 2% das chamadas bateram no `max_tokens` (`finish_reason: length`, ou o
+raciocínio comeu o teto e não sobrou resposta). Cada resposta truncada já foi
+refeita **uma vez** com o teto x2; a que continuou cortada deixa a etapa
+`incomplete` (`incompleteReason: "truncation"`), fora do placar e das médias —
+nunca vira veredito `nao`. Para corrigir: suba `--max-output-tokens` (ou
+`maxTokens` do cenário) ou baixe o esforço de raciocínio (`--effort-competitor`).
+
+```bash
+prompt-builder runs show <runId> --json | jq '.data.run | {truncationRate, truncationCounts}'
+```
+
 ## Todos os vereditos vieram `parcial`
 
 Significa que o juiz não teve gabarito para comparar. Causas, em ordem de

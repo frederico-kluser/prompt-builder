@@ -608,6 +608,11 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
   conteúdo viram `status: blocked` (defesa do gateway — **não** é problema de key nem falha do
   prompt); recusa declarada pelo modelo (`message.refusal`) vira `status: refused` (julgável); o
   resto é `status: error` (infra). O record traz as três contagens em `competitorOutcomeCounts`.
+- **Truncamento nunca é silencioso:** o gateway lê `finish_reason`/`native_finish_reason` (JSON e
+  stream) + raciocínio ≈ teto + conteúdo vazio com tokens; competidor e gabarito repetem 1x com
+  `max_tokens` x2. Resposta ainda truncada deixa a etapa `incomplete` (`incompleteReason:
+  truncation`), fora do placar e das médias; o record traz `truncationRate` e o CLI/UI alertam
+  acima de 2%.
 
 ---
 

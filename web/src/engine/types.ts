@@ -2,7 +2,15 @@
 import type { ExpectedSpec } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
-import type { CostEntry, CostRole, PricingTier, TokenPrice } from '../../../src/types.js';
+import type {
+  CallFinishSignals,
+  CostEntry,
+  CostRole,
+  PricingTier,
+  StageIncompleteReason,
+  TokenPrice,
+  TruncationSignal,
+} from '../../../src/types.js';
 
 // Contabilidade de custo: FONTE ÚNICA em src/types.ts (IMPL-021). Desde que os
 // módulos de papel e o gateway viraram shims, o web usa o MESMO ledger
@@ -19,6 +27,9 @@ export type {
   TokenPrice,
 } from '../../../src/types.js';
 export { COST_ROLES } from '../../../src/types.js';
+// Sinais de fim / truncamento (IMPL-014): fonte única em src/types.ts — o
+// gateway e o competidor já são shims, os dois motores gravam o MESMO formato.
+export type { CallFinishSignals, StageIncompleteReason, TruncationSignal } from '../../../src/types.js';
 
 export interface OpenRouterModelPricing {
   /** USD por token. `null` = desconhecido ("-1"/roteador, ausente, inválido) — ver src/types.ts. */
@@ -329,6 +340,16 @@ export interface CompetitorResponse {
   finishReason?: string;
   /** `native_finish_reason` cru do provedor (ex.: SAFETY, end_turn). */
   nativeFinishReason?: string;
+  /** Resposta final cortada no teto mesmo após o retry x2 (IMPL-014) — etapa fica `incomplete`. */
+  truncated?: boolean;
+  /** `reasoning_tokens` da tentativa final. */
+  reasoningTokens?: number;
+  /** `max_tokens` enviado na tentativa final (dobra no retry por truncamento). */
+  maxTokens?: number;
+  /** Sinais de truncamento observados na tentativa final. */
+  truncationSignals?: TruncationSignal[];
+  /** true = a 1a tentativa truncou; `costUsd` soma as duas tentativas. */
+  truncationRetried?: boolean;
 }
 
 /**
@@ -482,6 +503,12 @@ export interface StageRecord {
   evaluation?: StageEvaluation;
   /** Preenchido quando a etapa falhou (ex.: datagen) e foi pulada sem matar a run. */
   error?: string;
+  /** Etapa fora do placar e das medias (orcamento/cancelamento/truncamento) — espelho de src/types.ts. */
+  incomplete?: boolean;
+  /** Motivo do `incomplete` (IMPL-014). */
+  incompleteReason?: StageIncompleteReason;
+  /** Sinais de fim da chamada do gabarito (so no 1o clone com repeats) — IMPL-014. */
+  gabaritoCall?: CallFinishSignals;
   startedAt: string;
   finishedAt?: string;
 }
@@ -535,6 +562,10 @@ export interface RunRecord {
   upstreamCostUsd?: number;
   /** Desfechos nao-ok dos competidores, separados (blocked/refused/error) — IMPL-010. */
   competitorOutcomeCounts?: CompetitorOutcomeCounts;
+  /** Fracao de chamadas (competidor + gabarito) truncadas no teto — IMPL-014; alerta > 2%. */
+  truncationRate?: number;
+  /** Numerador/denominador de `truncationRate`. */
+  truncationCounts?: { calls: number; truncated: number };
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -649,6 +680,15 @@ export type RunEvent =
   | { type: 'stage.generating'; runId: string; stageIndex: number }
   | { type: 'stage.generated'; runId: string; stageIndex: number; spec: StageSpec }
   | { type: 'stage.failed'; runId: string; stageIndex: number; error: string }
+  /** Etapa fora do placar e das medias (IMPL-014: truncamento). Sem texto de resposta. */
+  | {
+      type: 'stage.incomplete';
+      runId: string;
+      stageIndex: number;
+      reason: StageIncompleteReason;
+      detail: string;
+      contestantIds?: string[];
+    }
   | { type: 'competitor.finished'; runId: string; stageIndex: number; response: CompetitorResponse }
   | { type: 'stage.judging'; runId: string; stageIndex: number }
   | {

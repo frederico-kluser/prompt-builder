@@ -504,6 +504,50 @@ export interface CompetitorOutcomeCounts {
   error: number;
 }
 
+/**
+ * Sinal de truncamento de UMA chamada (IMPL-014 / R-07b:DEC-2). Os provedores
+ * devolvem 200 OK tanto para a resposta completa quanto para a cortada no teto
+ * — sem ler estes sinais as duas sao indistinguiveis:
+ * - `finish_length`     — `finish_reason` normalizado = `length`;
+ * - `native_length`     — `native_finish_reason` cru de teto (`max_tokens`,
+ *                          `MAX_TOKENS`, `length`, …) mesmo que o normalizado diga outra coisa;
+ * - `reasoning_at_cap`  — `reasoning_tokens` ≈ `max_tokens` (o raciocinio comeu o teto);
+ * - `empty_with_tokens` — conteudo vazio com `completion_tokens > 0`.
+ */
+export type TruncationSignal =
+  | 'finish_length'
+  | 'native_length'
+  | 'reasoning_at_cap'
+  | 'empty_with_tokens';
+
+/**
+ * Os sinais de fim de UMA chamada, persistidos (IMPL-014): os 4 sinais do
+ * R-07b:REC-2 (finish_reason, native_finish_reason, reasoning_tokens vs teto e
+ * tamanho do conteudo) + a decisao. Hoje vai no gabarito
+ * (`StageRecord.gabaritoCall`); o competidor guarda os mesmos campos soltos na
+ * `CompetitorResponse` (nomes fixados no CONVENTIONS).
+ */
+export interface CallFinishSignals {
+  finishReason?: string;
+  nativeFinishReason?: string;
+  reasoningTokens?: number;
+  /** `completion_tokens` da chamada (inclui raciocinio). */
+  tokensOut: number;
+  /** Tamanho do conteudo VISIVEL devolvido (chars). */
+  contentChars: number;
+  /** `max_tokens` enviado nesta chamada (o teto contra o qual o truncamento e medido). */
+  maxTokens?: number;
+  /** Decisao: a saida desta chamada foi cortada no teto. */
+  truncated: boolean;
+  /** Sinais observados (inclusive os auxiliares que sozinhos nao decidem). */
+  truncationSignals?: TruncationSignal[];
+  /** true = a 1a tentativa truncou e estes sinais sao do retry com teto x2. */
+  truncationRetried?: boolean;
+}
+
+/** Por que uma etapa ficou `incomplete` (fora do placar e das medias). */
+export type StageIncompleteReason = 'budget' | 'cancelled' | 'truncation';
+
 export interface CompetitorResponse {
   /** Chave universal. compare: === modelId. */
   contestantId: string;
@@ -520,6 +564,25 @@ export interface CompetitorResponse {
   finishReason?: string;
   /** `native_finish_reason` cru do provedor (ex.: SAFETY, end_turn). */
   nativeFinishReason?: string;
+  /**
+   * A resposta FINAL saiu cortada no teto de tokens (IMPL-014), mesmo depois
+   * do retry com teto x2. Etapa com resposta truncada fica `incomplete`
+   * (`incompleteReason: 'truncation'`) — fora do placar e das medias. Ausente
+   * = chamada que nao completou (erro/403) ou record anterior ao IMPL-014.
+   */
+  truncated?: boolean;
+  /** `completion_tokens_details.reasoning_tokens` da tentativa final. */
+  reasoningTokens?: number;
+  /** `max_tokens` enviado na tentativa final (dobra quando houve retry por truncamento). */
+  maxTokens?: number;
+  /** Sinais de truncamento observados na tentativa final (ver `TruncationSignal`). */
+  truncationSignals?: TruncationSignal[];
+  /**
+   * true = a 1a tentativa truncou e esta resposta e a do retry com teto x2.
+   * `costUsd` soma as DUAS tentativas (o dinheiro saiu nas duas); tokens e
+   * latencia sao da tentativa final.
+   */
+  truncationRetried?: boolean;
   /**
    * Ponteiro para os artefatos da execução de agente em disco. NUNCA o
    * conteúdo: o RunRecord é resserializado inteiro a cada saveRun (throttled
@@ -698,6 +761,20 @@ export interface StageRecord {
    * mentindo": sem esta marca, uma etapa cortada viraria veredito 'parcial'.
    */
   incomplete?: boolean;
+  /**
+   * Motivo do `incomplete`: orcamento, cancelamento ou TRUNCAMENTO (IMPL-014:
+   * uma resposta de competidor saiu cortada no teto mesmo apos o retry x2 —
+   * a etapa nao e julgada, porque comparar resposta cortada com resposta
+   * inteira mede o nosso teto, nao o prompt). Ausente em records antigos.
+   */
+  incompleteReason?: StageIncompleteReason;
+  /**
+   * Sinais de fim da chamada que gerou o gabarito desta etapa (IMPL-014). Com
+   * `repeats > 1` fica so no 1o clone do cenario (o gabarito e 1 chamada).
+   * `truncated: true` = o gabarito saiu cortado mesmo apos o retry x2 e foi
+   * DESCARTADO (regua cortada nao julga ninguem) — a etapa segue sem `reference`.
+   */
+  gabaritoCall?: CallFinishSignals;
   startedAt: string;
   finishedAt?: string;
 }
@@ -766,6 +843,16 @@ export interface RunRecord {
    * infraestrutura. Ausente = record anterior a taxonomia.
    */
   competitorOutcomeCounts?: CompetitorOutcomeCounts;
+  /**
+   * Fracao (0..1, 4 casas) das chamadas de competidor + gabarito desta run que
+   * sairam TRUNCADAS no teto de tokens (IMPL-014 / R-07b:REC-2), contando cada
+   * tentativa (o retry x2 e uma chamada). Acima de `TRUNCATION_ALERT_RATE`
+   * (2%) o CLI/UI alertam: o teto de tokens esta baixo para estes modelos.
+   * Ausente = record anterior ao IMPL-014.
+   */
+  truncationRate?: number;
+  /** Numerador/denominador de `truncationRate` (chamadas com sinal de fim observado). */
+  truncationCounts?: { calls: number; truncated: number };
   /** Teto de gasto configurado (ausente = sem limite). */
   budgetUsd?: number;
   /** true = a run parou porque o orcamento acabou. */
@@ -900,6 +987,19 @@ export type RunEvent =
   | { type: 'stage.generating'; runId: string; stageIndex: number }
   | { type: 'stage.generated'; runId: string; stageIndex: number; spec: StageSpec }
   | { type: 'stage.failed'; runId: string; stageIndex: number; error: string }
+  /**
+   * Etapa marcada `incomplete` (IMPL-014): fica fora do placar e das medias.
+   * Hoje so o truncamento emite (o corte por orcamento sai em `run.budget`).
+   * `contestantIds` = quem truncou; NUNCA carrega o texto das respostas.
+   */
+  | {
+      type: 'stage.incomplete';
+      runId: string;
+      stageIndex: number;
+      reason: StageIncompleteReason;
+      detail: string;
+      contestantIds?: string[];
+    }
   | { type: 'competitor.finished'; runId: string; stageIndex: number; response: CompetitorResponse }
   | { type: 'stage.judging'; runId: string; stageIndex: number }
   | {
