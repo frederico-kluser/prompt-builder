@@ -573,7 +573,7 @@ export function verbosityDiag(
       Number.isFinite(s.score),
   );
   const niveis = new Set(reg.map((s) => ordinalOfScore(s.score)));
-  if (reg.length < MIN_DIAG_SAMPLES || niveis.size < 2) return vazio({});
+  if (reg.length < MIN_DIAG_SAMPLES || niveis.size < 2) return null;
 
   // ---- desenho: logLenRel + markdown_feats + FE(cenário) + FE(contestant)
   const cont: number[][] = reg.map((s) => [
@@ -597,7 +597,7 @@ export function verbosityDiag(
   // Descarta colunas degeneradas (sem variação não há coeficiente).
   const kept = cols.filter((c) => c.values.some((v) => v !== c.values[0]));
   const lenCol = kept.findIndex((c) => c.nome === 'logLenRel');
-  if (lenCol < 0) return vazio({}); // comprimento constante ⇒ sem efeito medível
+  if (lenCol < 0) return null; // comprimento constante ⇒ sem efeito medível
   const mean = kept.map((c) => c.values.reduce((a, b) => a + b, 0) / c.values.length);
   const sd = kept.map((c, j) => {
     const v = c.values.reduce((a, b) => a + (b - mean[j]) ** 2, 0) / c.values.length;
@@ -607,7 +607,7 @@ export function verbosityDiag(
   const y = reg.map((s) => ordinalOfScore(s.score));
 
   const fit = fitOrdinalLogit(X, y);
-  if (!fit) return vazio({});
+  if (!fit) return null;
   // beta em escala ORIGINAL: x_padronizado = (x − média)/sd ⇒ slope bruto = b/sd.
   const betaLenRel = fit.betaStd[lenCol] / sd[lenCol];
 

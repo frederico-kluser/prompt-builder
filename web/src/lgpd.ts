@@ -176,6 +176,29 @@ export async function estimateSiteStorage(manager?: StorageManagerLike): Promise
   }
 }
 
+/**
+ * `estimate()` com a contabilização ASSENTADA. O QuotaManager do Chromium
+ * atualiza o `usage` em lote: a leitura feita logo a seguir ao `deleteDatabase`
+ * ainda mostra o valor antigo (medido: ~17 KB "ainda em uso" com o banco já
+ * apagado). Aguarda amostras estáveis (máx. `maxSamples` × `intervalMs`) antes
+ * de reportar — sem isto a tela de apagar mostraria "≈ 0" errado.
+ */
+export async function settledSiteEstimate(
+  manager?: StorageManagerLike,
+  opts: { maxSamples?: number; intervalMs?: number } = {},
+): Promise<SiteEstimate> {
+  const maxSamples = opts.maxSamples ?? 8;
+  const intervalMs = opts.intervalMs ?? 100;
+  let anterior = await estimateSiteStorage(manager);
+  for (let i = 1; i < maxSamples; i++) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const atual = await estimateSiteStorage(manager);
+    if (atual.usage === anterior.usage && atual.quota === anterior.quota) return atual;
+    anterior = atual;
+  }
+  return anterior;
+}
+
 export interface SiteWipeResult {
   estimateBefore: SiteEstimate;
   estimateAfter: SiteEstimate;
@@ -208,7 +231,7 @@ export function wipeLocalData(opts: WipeLocalOptions = {}): Promise<SiteWipeResu
   const close = opts.closeConnections ?? resetIdbConnection;
   const blockedWaitMs = opts.blockedWaitMs ?? 3_000;
   return (async (): Promise<SiteWipeResult> => {
-    const estimateBefore = await estimateSiteStorage(opts.storage);
+    const estimateBefore = await settledSiteEstimate(opts.storage);
     close();
     if (!factory) {
       // Sem IndexedDB não há banco a derrubar: o "antes" já é o "depois".
@@ -235,7 +258,7 @@ export function wipeLocalData(opts: WipeLocalOptions = {}): Promise<SiteWipeResu
         finish(false);
       }
     });
-    const estimateAfter = await estimateSiteStorage(opts.storage);
+    const estimateAfter = await settledSiteEstimate(opts.storage);
     return { estimateBefore, estimateAfter, deleted, blocked };
   })();
 }

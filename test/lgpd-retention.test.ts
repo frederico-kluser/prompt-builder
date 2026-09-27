@@ -8,10 +8,9 @@
 //      cache de artefato do agente);
 //  (2) run com idade > TTL ausente após o prune, com ZERO exceções;
 //  (3) o wipe da SPA derruba o MESMO banco que `web/src/idb.ts` abre (contrato
-//      de nome) e o `navigator.storage.estimate()` volta a ≈ 0.
-//      ⚠️ O E2E Playwright (`launch_persistent_context`) do critério (3) ainda
-//      não existe no repo (sem dependência de browser) — aqui a semântica é
-//      coberta com o fake IndexedDB.
+//      de nome) e o `navigator.storage.estimate()` volta a ≈ 0 — aqui com o
+//      fake IndexedDB; o E2E num browser REAL (Playwright
+//      `launch_persistent_context`) é o `test/lgpd-wipe-e2e.test.ts`.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';

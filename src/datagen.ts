@@ -571,6 +571,13 @@ export async function generateStages(opts: GenerateStagesParams): Promise<StageS
     console.warn(
       `[datagen] dedup removeu ${(relatorio.rate * 100).toFixed(0)}% dos cenarios gerados (${relatorio.dropped}/${relatorio.total}) — acima de ${relatorio.alertRate * 100}%. Confira se o gerador nao esta repetindo o mesmo template (ecos: ${relatorio.templateEcho}).`,
     );
+  } else if (relatorio.dropped > 0) {
+    // IMPL-063: TODO run de datagen reporta quantas duplicatas removeu — antes
+    // o resultado (dropped/method) era descartado em silencio quando nao havia
+    // alerta. Com 0 descarte nao ha nada a relatar (sem poluir a narração).
+    console.warn(
+      `[datagen] dedup removeu ${(relatorio.rate * 100).toFixed(0)}% dos cenarios gerados (${relatorio.dropped}/${relatorio.total}) (ecos: ${relatorio.templateEcho}).`,
+    );
   }
   onDedupReport?.(relatorio);
 

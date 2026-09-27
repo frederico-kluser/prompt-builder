@@ -488,9 +488,10 @@ export async function judgeStage(params: JudgeStageParams): Promise<JudgeResult>
 // agrega por run) e o custo por veredito continua vindo MEDIDO do ledger
 // (usage.cost por papel) — nunca estimado aqui.
 //
-// ⚠️ logprobs NUNCA entram como dependencia: a cascata decide pelos vereditos
-// parseados e pelo comprimento das saidas, os dois disponiveis em qualquer
-// provedor (o contrato esta no teste judge-cascade.test.ts).
+// ⚠️ sinal estatístico por token (probabilidades do provedor) NUNCA entra como
+// dependencia: a cascata decide pelos vereditos parseados e pelo comprimento
+// das saidas, os dois disponiveis em qualquer provedor (o contrato esta no
+// teste judge-cascade.test.ts).
 // ---------------------------------------------------------------------------
 
 /** Gatilho de escalonamento da cascata. */
@@ -588,7 +589,7 @@ export function cascadeEscalatedFraction(reports: Pick<CascadeReport, 'escalated
  * Julga a etapa em modo economico (IMPL-115): 2 juizes baratos em paralelo e
  * escalonamento para o juiz forte so nos gatilhos de duvida. Sem gatilho, o
  * consenso barato decide (e a etapa pagou 2 chamadas baratas em vez do forte).
- * logprobs nao sao pedidos nem lidos em lugar nenhum da cascata.
+ * Nenhum sinal estatístico por token e pedido ou lido em lugar nenhum da cascata.
  */
 export async function judgeStageCascade(params: CascadeJudgeParams): Promise<CascadeJudgeResult> {
   const { cheapJudgeIds, strongJudgeId, ...rest } = params;

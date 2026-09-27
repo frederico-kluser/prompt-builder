@@ -194,7 +194,7 @@ Toda run tem **modelos de apoio** (gerador + juiz) além dos participantes:
 | **Participante** | compare: **≥2** (ou 2–12 configs); variation/training: **1** (+ variações) | Respondem ao cenário e disputam o ranking | `competitorModelIds[]` / `competitorConfigs[]` / `contestantModelId` |
 | **Gerador (datagen)** | exatamente **1** | Inventa os cenários (pergunta + contexto + maxTokens) | `datagenModelId` |
 | **Juiz** | **1 ou mais** | Vereditos vs gabarito + duelos (ou ranking listwise, no fallback) | `judgeModelIds[]` |
-| **Referência (gabarito)** | 1 (default = 1º juiz) | Gera a resposta de referência temp-0 por cenário | `referenceModelId` |
+| **Referência (gabarito)** | 1 (**obrigatório** em variation/training; em compare o default = 1º juiz) | Gera a resposta de referência temp-0 por cenário | `referenceModelId` |
 | **Optimizer** | 1 (variation/training) | Reescreve prompts aplicando técnicas | `optimizerModelId` (default = `datagenModelId`) |
 
 **Regras validadas no backend** (Zod) — config inválida é recusada com `400`:
@@ -202,6 +202,11 @@ Toda run tem **modelos de apoio** (gerador + juiz) além dos participantes:
 - compare: ≥ **2 competidores distintos**; gerador ≠ juiz; nem gerador nem juiz são competidores.
 - variation/training: ≥ 2 variações (técnicas ou manuais, contando o `basePrompt` como controle);
   **juiz ≠ modelo sob teste**.
+- **papéis separados (IMPL-048):** a referência **não pode ser juiz nem competidor** (erro de
+  config — o mesmo modelo escreveria o gabarito e o veredito sobre ele, com erros correlacionados);
+  o mesmo vendor/família só gera **aviso** de viés em `fairnessWarnings`. `referenceModelId` é
+  **obrigatório em variation/training**; em compare o default documentado (1º juiz) é denunciado
+  pelo mesmo aviso, nunca escondido.
 
 ---
 

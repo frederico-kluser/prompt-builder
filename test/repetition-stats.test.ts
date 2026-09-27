@@ -13,6 +13,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   aggregateByScenario,
+  contestantRepetitionReports,
   formatRepetitionReport,
   iccOneWay,
   mulberry32,
@@ -270,5 +271,89 @@ describe('IMPL-054 — repetitionDiagnostics com vetor plano (compare repeats)',
     const linhas = formatRepetitionReport(d).join('\n');
     expect(linhas).toMatch(/m=2 × 20 cenários \(40 observações\)/);
     expect(linhas).toMatch(/√DE=1\.41/);
+  });
+});
+
+describe('IMPL-054 — runs show: ICC/design effect/nEfetivo sempre que há repetição', () => {
+  // Geometria de agente: reps DENTRO da etapa (`verdictsByRep`), 4 cenários × 2
+  // reps perfeitamente correlatas (a rep nunca diverge da irmã). O cenário 2
+  // tem só 'parcial' — entra apenas na sensibilidade (sucesso = resolve OU parcial).
+  const stages = [
+    {
+      referenceJudge: {
+        verdictByContestant: { a: 'resolve' as Verdict, b: 'nao' as Verdict },
+        verdictsByRep: { a: ['resolve', 'resolve'] as Verdict[], b: ['nao', 'nao'] as Verdict[] },
+      },
+    },
+    {
+      referenceJudge: {
+        verdictByContestant: { a: 'nao' as Verdict, b: 'resolve' as Verdict },
+        verdictsByRep: { a: ['nao', 'nao'] as Verdict[], b: ['resolve', 'resolve'] as Verdict[] },
+      },
+    },
+    {
+      referenceJudge: {
+        verdictByContestant: { a: 'parcial' as Verdict, b: 'parcial' as Verdict },
+        verdictsByRep: { a: ['parcial', 'parcial'] as Verdict[], b: ['parcial', 'parcial'] as Verdict[] },
+      },
+    },
+    {
+      referenceJudge: {
+        verdictByContestant: { a: 'nao' as Verdict, b: 'nao' as Verdict },
+        verdictsByRep: { a: ['nao', 'nao'] as Verdict[], b: ['nao', 'nao'] as Verdict[] },
+      },
+    },
+  ];
+
+  const contestants = [
+    { id: 'a', label: 'A' },
+    { id: 'b', label: 'B' },
+  ];
+
+  it('por contestant: ICC, DE, nEfetivo E pass@k/pass^k — a fonte única do texto e do JSON', () => {
+    const reports = contestantRepetitionReports(stages, contestants);
+    expect(reports.map((r) => r.contestantId)).toEqual(['a', 'b']);
+    for (const r of reports) {
+      // Sempre que há repetição: os três diagnósticos existem e são coerentes.
+      expect(r.diagnostics.repsPerScenario).toBe(2);
+      expect(r.diagnostics.observations).toBe(8); // 4 cenários × 2 reps
+      expect(r.diagnostics.icc).not.toBeNull();
+      expect(r.diagnostics.designEffect).not.toBeNull();
+      expect(r.diagnostics.seInflation).not.toBeNull();
+    }
+    const a = reports[0];
+    // Reps perfeitamente correlatas: ICC=1, DE=2 e nEfetivo = 4 CENÁRIOS —
+    // as repetições NÃO dobram o n (8 observações, 4 pares analíticos).
+    expect(a.diagnostics.icc).toBe(1);
+    expect(a.diagnostics.designEffect).toBe(2);
+    expect(a.diagnostics.nEfetivo).toBe(4);
+    // Sucesso EXPLÍCITO nas duas saídas: principal = 'resolve'; o cenário 2
+    // (só 'parcial') entra SOMENTE na sensibilidade ('resolve' OU 'parcial').
+    expect(a.pass.rule).toBe('resolve');
+    expect(a.pass.ruleDefinition).toBe(SUCCESS_RULE_DEFINITION.resolve);
+    expect(a.pass.passK).toBeCloseTo(1 / 4, 4); // só o cenário 0 tem 2× 'resolve'
+    expect(a.sensitivity.rule).toBe('resolve-ou-parcial');
+    expect(a.sensitivity.ruleDefinition).toContain('parcial');
+    expect(a.sensitivity.passK).toBeCloseTo(2 / 4, 4); // cenários 0 e 2
+  });
+
+  it('geometria compare (clones consecutivos): mesmo contrato, nEfetivo = cenários', () => {
+    // Compare `repeats=2`: o orchestrator expande cada cenário em 2 clones
+    // consecutivos SEM `verdictsByRep` — o par analítico continua o cenário.
+    const flat = stages.map((s) => ({
+      referenceJudge: { verdictByContestant: s.referenceJudge.verdictByContestant },
+    }));
+    const clones = flat.flatMap((s) => [s, { ...s }]);
+    const reports = contestantRepetitionReports(clones, [contestants[0]], { repeatsPerScenario: 2 });
+    expect(reports).toHaveLength(1);
+    const d = reports[0].diagnostics;
+    expect(d.scenarios).toBe(4);
+    expect(d.repsPerScenario).toBe(2);
+    expect(d.observations).toBe(8);
+    expect(d.nEfetivo).toBe(4); // 8 observações/DE=2 — nunca 8
+    // O relatório textual sai da MESMA fonte (formatRepetitionReport(d, pass)).
+    const linhas = formatRepetitionReport(d, reports[0].pass).join('\n');
+    expect(linhas).toContain(`nEfetivo=${d.nEfetivo}`);
+    expect(linhas).toContain('sucesso =');
   });
 });

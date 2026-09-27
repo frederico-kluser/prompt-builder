@@ -61,11 +61,19 @@ referência rápida é esta (α=0,05 unilateral, poder 80%, σd=0,5):
   o `estimate` aceita o IC do piloto e usa o **limite superior** do IC.
 - `stages ≤ 5` = **modo econômico**: com 5 cenários só se decide Δ ≥ 45 p.p.
 - **Repetição ≠ observação independente** (ICC/design effect): com `repeats`/`repetitions`
-  ≥ 2, `runs show` reporta ICC, DE=1+(m−1)·ICC e nEfetivo = n·m/DE. ICC > 0,3
-  (faixa típica de tarefas agênticas: 0,30–0,77) → cada cenário novo vale mais que
-  uma rep nova: **mais cenários**, não mais repetições.
+  ≥ 2, `runs show` reporta ICC, DE=1+(m−1)·ICC e nEfetivo = n·m/DE (no texto **e**
+  no `--json`, campo `repetition`), com pass@k (estimador de Chen) e pass^k.
+  ICC > 0,3 (faixa típica de tarefas agênticas: 0,30–0,77) → cada cenário novo vale
+  mais que uma rep nova: **mais cenários**, não mais repetições.
 - Holdout: piso absoluto de 10 cenários (abaixo: "confirmação fraca", nunca
   "holdout"). Seleção com menos de 20 cenários não forma holdout.
+- **Evolução planeada (não implementada)**: controle de erro sequencial nas
+  iterações em cadeia — **alpha-spending** (α gasto por iteração, ex. O'Brien-
+  Fleming) ou **e-values** (testes sempre-válidos, sem correção de multiplicidade
+  entre olhadas). Hoje o controle é: gate max-T **por iteração** + UM teste final
+  em holdout (α=0,05 unilateral, o único p de confirmação da sessão) + paciência ≥
+  2 contra parada falsa — que juntos mantêm P(promoção falsa por sessão) ≤ 6% sob
+  H0 (ver `test/training-session-sim.test.ts`).
 
 ## Como ler o resultado
 

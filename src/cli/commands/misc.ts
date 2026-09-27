@@ -27,6 +27,7 @@ import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
 import { sampleSizeWarning } from '../../engine/judgeCalibration.js';
 import {
+  contestantRepetitionReports,
   formatIterationGate,
   formatPairCoverage,
   formatPowerPlan,
@@ -34,13 +35,10 @@ import {
   formatRunCompleteness,
   formatSignificance,
   formatSignificanceOrigin,
-  passAtKReport,
   planPower,
   recommendationFromStored,
-  repVerdictMatrix,
-  repetitionDiagnosticsFromRows,
   runCompleteness,
-  VERDICT_SCORE,
+  type ContestantRepetitionReport,
 } from '../../stats.js';
 import { holdoutConfirmationText, holdoutStrength } from '../../holdout.js';
 import { judgeScaleWarning } from '../../engine/verdictAggregate.js';
@@ -107,32 +105,36 @@ function sessionDecisionOf(record: SessionRecord): {
  * Relatório de REPETIÇÃO de `runs show` (IMPL-054, R-04:REC-7): por contestant
  * com reps, ICC + design effect + nEfetivo (repetição não é observação
  * independente) e pass@k (estimador não enviesado de Chen) + pass^k, ambos com
- * a regra de sucesso EXPLÍCITA. Sem repetição não há nada a reportar.
+ * a regra de sucesso EXPLÍCITA. Mesma fonte para o texto E o payload JSON — o
+ * `--json` nunca fica sem o diagnóstico que o texto mostra. Sem repetição não há
+ * nada a reportar (`null`).
  */
-function repetitionReportLines(record: RunRecord): string[] {
+function repetitionReportOf(record: RunRecord): {
+  repeats: number;
+  contestants: ContestantRepetitionReport[];
+  lines: string[];
+} | null {
   const mFlat =
     record.config.mode === 'compare' ? Math.max(1, Math.round(record.config.repeats ?? 1)) : 1;
   const mAgent = record.config.agent
     ? Math.max(1, Math.round(record.config.agent.repetitions ?? 1))
     : 1;
-  if (mFlat <= 1 && mAgent <= 1) return [];
+  if (mFlat <= 1 && mAgent <= 1) return null;
+  const contestants = contestantRepetitionReports(record.stages, record.contestants, {
+    repeatsPerScenario: mFlat,
+  });
   const lines: string[] = [
     `repetições (m=${Math.max(mFlat, mAgent)}): repetição ≠ observação independente — o par analítico é o cenário`,
   ];
-  for (const c of record.contestants) {
-    const rows = repVerdictMatrix(record.stages, c.id, { repeatsPerScenario: mFlat });
-    const scoreRows = rows.map((r) => r.map((v) => (v === undefined ? null : VERDICT_SCORE[v])));
-    const diag = repetitionDiagnosticsFromRows(scoreRows);
-    const k = Math.max(1, diag.repsPerScenario);
-    const pass = passAtKReport(rows, k);
-    const sens = passAtKReport(rows, k, 'resolve-ou-parcial');
-    lines.push(`  ${c.label}:`);
-    for (const l of formatRepetitionReport(diag, pass)) lines.push(`    ${l}`);
+  for (const rep of contestants) {
+    lines.push(`  ${rep.label}:`);
+    for (const l of formatRepetitionReport(rep.diagnostics, rep.pass)) lines.push(`    ${l}`);
+    const sens = rep.sensitivity;
     lines.push(
       `    sensibilidade (${sens.ruleDefinition}): pass@${sens.k}=${(sens.passAtK * 100).toFixed(1)}% · pass^${sens.k}=${(sens.passK * 100).toFixed(1)}%`,
     );
   }
-  return lines;
+  return { repeats: Math.max(mFlat, mAgent), contestants, lines };
 }
 
 // --- key ---------------------------------------------------------------------
@@ -401,15 +403,16 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   // show
   // IMPL-005: n nominal × efetivo SEMPRE visível (runs antigas: recalculado das etapas).
   const completeness = record.completeness ?? runCompleteness(record);
+  // IMPL-054: ICC, design effect, nEfetivo e pass@k/pass^k sempre que há
+  // repetição (compare `repeats` ou agente `repetitions`) — no texto E no JSON.
+  const repeticao = repetitionReportOf(record);
   if (out.isText) {
     out.line(`${record.id}  ${record.status}  ${record.mode}`);
     out.line(`tema: ${record.config.theme}`);
     out.line(`etapas: ${record.stages.length} · participantes: ${record.contestants.length}`);
     const labelOf = (cid: string): string => record.contestants.find((c) => c.id === cid)?.label ?? cid;
     for (const l of formatRunCompleteness(completeness, labelOf)) out.line(l);
-    // IMPL-054: ICC, design effect, nEfetivo e pass@k/pass^k sempre que há
-    // repetição (compare `repeats` ou agente `repetitions`).
-    for (const l of repetitionReportLines(record)) out.line(l);
+    for (const l of repeticao?.lines ?? []) out.line(l);
     out.line();
     for (const l of renderSpend(
       record.costByRole,
@@ -442,6 +445,9 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   out.result(true, 'runs.show', {
     run: record,
     completeness,
+    // IMPL-054: ICC/design effect/nEfetivo + pass@k/pass^k no payload — o
+    // `--json` vê exatamente o que o texto mostra (null sem repetição).
+    repetition: repeticao ? { repeats: repeticao.repeats, contestants: repeticao.contestants } : null,
     judgeDiagnostics: record.judgeDiagnostics ?? null,
     fairnessWarnings: record.fairnessWarnings ?? [],
     lifecycleAlerts: record.modelLifecycle?.alerts ?? [],

@@ -143,7 +143,11 @@ export async function enforceRunCompliance(
 //    do agente (`agent-runs/<id>/`, que inclui o `repo-cache`). Zero resíduo.
 //
 // O que fica POR FORA por enquanto: sessões de treino (o critério fala em
-// runs) e cifragem em repouso (keyring) — ambos pendentes.
+// runs) e cifragem em repouso (keyring) — ambos pendentes. O chamamento de
+// `eraseRuns` pelo `runs delete` do CLI e o botão "apagar banco" da tela de
+// Configurações vivem nos módulos de CLI/UI (fora deste ficheiro); o critério
+// (3) do IMPL-100 (Playwright `launch_persistent_context`, deleteDatabase +
+// estimate ≈ 0) é o `test/lgpd-wipe-e2e.test.ts`.
 //
 // A SPA tem o par em `web/src/lgpd.ts` (apagamento do IndexedDB inteiro +
 // `navigator.storage.estimate` + instrução de "limpar dados do site").

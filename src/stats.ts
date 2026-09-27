@@ -1960,3 +1960,42 @@ export function formatRepetitionReport(d: RepetitionDiagnostics, pass?: PassAtKR
   }
   return lines;
 }
+
+/** Relatório de repetição de UM contestant — dados puros (IMPL-054). */
+export interface ContestantRepetitionReport {
+  contestantId: string;
+  label: string;
+  diagnostics: RepetitionDiagnostics;
+  /** pass@k (Chen) / pass^k com SUCESSO EXPLÍCITO: 'resolve' (regra principal). */
+  pass: PassAtKReport;
+  /** Sensibilidade: sucesso = 'resolve' OU 'parcial'. */
+  sensitivity: PassAtKReport;
+}
+
+/**
+ * Relatórios de repetição por contestant (IMPL-054) — fonte ÚNICA do texto E do
+ * payload JSON de `runs show`: ICC, design effect e nEfetivo SEMPRE que há
+ * repetição, nas duas geometrias (`agent.repetitions` dentro da etapa via
+ * `verdictsByRep`; `repeats` do compare como clones consecutivos). O par
+ * analítico é o CENÁRIO: repetições não dobram o n do teste pareado.
+ */
+export function contestantRepetitionReports(
+  stages: readonly StageVerdictsLike[],
+  contestants: readonly { id: string; label: string }[],
+  opts: { repeatsPerScenario?: number } = {},
+): ContestantRepetitionReport[] {
+  const m = Math.max(1, Math.floor(opts.repeatsPerScenario ?? 1));
+  return contestants.map((c) => {
+    const rows = repVerdictMatrix(stages, c.id, { repeatsPerScenario: m });
+    const scoreRows = rows.map((r) => r.map((v) => (v === undefined ? null : VERDICT_SCORE[v])));
+    const diagnostics = repetitionDiagnosticsFromRows(scoreRows);
+    const k = Math.max(1, diagnostics.repsPerScenario);
+    return {
+      contestantId: c.id,
+      label: c.label,
+      diagnostics,
+      pass: passAtKReport(rows, k),
+      sensitivity: passAtKReport(rows, k, 'resolve-ou-parcial'),
+    };
+  });
+}

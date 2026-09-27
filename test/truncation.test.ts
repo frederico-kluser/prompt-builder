@@ -85,6 +85,7 @@ vi.mock('@/components/motion-ui/accordion', () => ({
   AccordionPanel: () => null,
 }));
 vi.mock('@/components/motion-ui/progress-bar', () => ({ ProgressBar: () => null }));
+vi.mock('@/components/motion-ui/sparkline', () => ({ Sparkline: () => null }));
 vi.mock('@/lib/utils', () => ({ cn: (...a: unknown[]) => a.filter(Boolean).join(' ') }));
 vi.mock('../web/src/components/primitives', () => ({ Tag: () => null }));
 vi.mock('../web/src/theme', () => ({ useTheme: () => ({ theme: 'light' }) }));

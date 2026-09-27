@@ -14,9 +14,25 @@
 //  — localStorage bloqueado/ausente degrada para memória, sem lançar.
 //
 // O que fica pendente (fora da fronteira do item — UI): checkbox "lembrar neste
-// dispositivo" e a declaração no KeySetup, a página "como sua key é tratada"
-// com frases amarradas a evidência e a decisão sobre OAuth PKCE com teste do
-// callback em *.vercel.app.
+// dispositivo" e a declaração no KeySetup e a página "como sua key é tratada"
+// com frases amarradas a evidência.
+//
+// DECISÃO sobre OAuth PKCE (IMPL-082 crit. iii) — registada com evidência de
+// documentação oficial (OpenRouter, consultada 2026-09-27):
+//  • o PKCE EXISTE e é compatível com o deploy em *.vercel.app: o fluxo
+//    `GET /auth?callback_url=…&code_challenge=…` devolve `code` no callback e a
+//    troca por API key é feita em seguida; `callback_url` aceita qualquer URL
+//    https (porta 443; localhost/127.0.0.1 em qualquer porta p/ CLI) e o
+//    *.vercel.app serve https na 443 — domínio aceite pelo contrato documentado.
+//    Fontes: https://openrouter.ai/docs/use-cases/oauth-pkce e
+//    https://openrouter.ai/docs/api/api-reference/oauth/create-authorization-code
+//  • o fluxo troca o code por uma API key da conta OpenRouter do usuário
+//    (mesma natureza da key colada à mão — não resolve o XSS por si só; o ganho
+//    é UX e key nunca digitada). Adoção fica para a UI.
+//  • FALTA fechar o critério (iii): rodar o callback de VERDADE em *.vercel.app
+//    (abrir /auth, autorizar, voltar com `code`, trocar por key) — exige
+//    deploy + navegador + login do usuário; nada fora da fronteira deste lote
+//    consegue registar essa evidência.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
