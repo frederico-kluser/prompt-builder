@@ -40,6 +40,7 @@ import {
   formatArenaWarning,
   jsonOnlyActiveValue,
   jsonOnlyRunPatch,
+  promptGroupProblem,
   type ArenaFieldWarning,
   type ArenaFormState,
   type ConfigRow,
@@ -730,6 +731,8 @@ export function NewRun() {
             : 'Escreva ao menos 2 variantes manuais (ou 1 + prompt base).',
         });
     }
+    const grupo = promptGroupProblem({ mode, promptGroup, promptId });
+    if (grupo) out.push({ tab: 'avancado', text: grupo });
     if (budget.trim() !== '' && !(parseFloat(budget) > 0))
       out.push({ tab: 'avancado', text: 'Orçamento máximo: informe um valor em US$ maior que zero (ou deixe vazio).' });
     return out;

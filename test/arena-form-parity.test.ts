@@ -118,20 +118,20 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
     prompt: {
       text: 'Você é o assistente da clínica.',
       generateFrom: 'assistente de preparo',
-      contracts: { neverBreak: ['nunca diagnostique'], placeholders: ['{{nome}}'], minLengthRatio: 0.6 },
       group: [
         { id: 'regras', label: 'Regras', text: 'Você é o assistente da clínica.' },
         { id: 'tom', text: 'Seja cordial.' },
       ],
       promptId: 'regras',
     },
+    // optimize: false → reescritor/contratos/técnicas NÃO entram na run (só
+    // valem com optimize ligado; ficam na fixture de treino).
     models: {
       datagen: 'gen/a',
       judges: ['judge/a'],
       contestant: 'cont/a',
-      rewriter: 'rew/a',
     },
-    effort: { competitor: 'xhigh', judge: 'high', rewriter: 'low', datagen: 'medium' },
+    effort: { competitor: 'xhigh', judge: 'high', datagen: 'medium' },
     variation: {
       optimize: false,
       manualVariants: [
@@ -146,7 +146,7 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
     prompt: {
       text: 'Você é o assistente da clínica.',
       generateFrom: 'assistente de preparo',
-      contracts: { neverBreak: ['nunca diagnostique'] },
+      contracts: { neverBreak: ['nunca diagnostique'], placeholders: ['{{nome}}'], minLengthRatio: 0.6 },
       group: [{ id: 'unico', text: 'Você é o assistente da clínica.' }],
       promptId: 'unico',
     },
@@ -259,7 +259,7 @@ describe('IMPL-045 (c) — round-trip export→import preserva todos os campos a
   it('os campos do gap sobrevivem e CHEGAM ao RunConfig (antes: validados e descartados)', () => {
     const t = importar(FIXTURES.training).state;
     expect(jsonOnlyRunPatch(t)).toEqual({
-      contracts: { neverBreak: ['nunca diagnostique'] },
+      contracts: { neverBreak: ['nunca diagnostique'], placeholders: ['{{nome}}'], minLengthRatio: 0.6 },
       promptGroup: { prompts: [{ id: 'unico', text: 'Você é o assistente da clínica.' }] },
       promptId: 'unico',
       reflection: 'llm',

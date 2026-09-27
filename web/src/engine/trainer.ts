@@ -1,7 +1,7 @@
 const randomUUID = (): string => crypto.randomUUID();
 import { runToCompletion } from './orchestrator';
 import { listModels } from './openrouter';
-import { generateContestants, llmReflectLessons } from './variator';
+import { generateContestants, lessonsEnabled, llmReflectLessons } from './variator';
 import { composePrompt } from '../../../src/engine/promptGroup.js';
 import { addToPool, pickParent, sliceScores, type ParetoEntry } from '../../../src/engine/pareto.js';
 import { planHalving, survivorsOf } from '../../../src/engine/halving.js';
@@ -399,9 +399,9 @@ async function trainingLoop(
       } else {
         // Reflection GEPA (deterministico — ver buildLessons): substitui a
         // antiga etapa LLM de analise; so a partir da iteracao 1 e se
-        // feedbackDriven nao foi desligado.
+        // as licoes nao foram desligadas (feedbackDriven false / reflection off).
         const hint0 =
-          cfg.feedbackDriven !== false && prevRun
+          lessonsEnabled(cfg) && prevRun
             ? buildLessons(prevRun, champion!.contestantId)
             : '';
         // Reflexao GEPA POR LLM (opt-in, §7.5): o meta-modelo reescreve as

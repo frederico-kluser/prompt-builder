@@ -38,6 +38,12 @@ const LOW_FACTOR = 0.45;
 export interface EstimateInput {
   mode: RunMode;
   plannedStages: number;
+  /**
+   * Repeticoes por cenario (so compare, 1..3 — `config.repeats`). Multiplica
+   * competidores, juiz e finais; gabarito e datagen continuam 1x por cenario
+   * (os clones compartilham a referencia, como no orchestrator).
+   */
+  repeats?: number;
   /** 1 fora de training. Em training e um TETO (o laco pode convergir antes). */
   iterations: number;
   /** Um id por contestant (variantes repetem o mesmo modelo). */
@@ -81,6 +87,8 @@ export interface CostEstimate {
     ctxInTokens: number;
     maxOutputTokens: number;
     stages: number;
+    /** Repeticoes por cenario (1 fora do compare): etapas executadas = stages x repeats. */
+    repeats: number;
     iterations: number;
     contestants: number;
     judges: number;
@@ -110,10 +118,21 @@ function pares(k: number): number {
   return k >= 2 ? (k * (k - 1)) / 2 : 0;
 }
 
+/** Mesmo clamp do orchestrator: `max(1, min(3, round(repeats ?? 1)))`. */
+export function clampRepeats(repeats: number | undefined): number {
+  const r = Math.round(repeats ?? 1);
+  return Number.isFinite(r) ? Math.max(1, Math.min(3, r)) : 1;
+}
+
 export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[]): CostEstimate {
   const idx = indexModels(models);
   const ctxIn = input.ctxInTokens ?? DEFAULT_CTX_IN;
   const stages = Math.max(0, input.plannedStages);
+  // REPEATS (F2 §7.9): o orchestrator roda alvo x repeats etapas (so compare,
+  // clamp 1..3). Sem isto a estimativa (e o portao de confirmacao de custo)
+  // subcontava competidores+juiz ate 3x (IMPL-045).
+  const repeats = input.mode === 'compare' ? clampRepeats(input.repeats) : 1;
+  const runStages = stages * repeats;
   const iterations = input.mode === 'training' ? Math.max(1, input.iterations) : 1;
   const nContestants = Math.max(1, input.contestantModelIds.length);
   const judges = input.judgeModelIds.length;
@@ -161,7 +180,7 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
 
   // --- competidores: cada contestant responde cada cenario ---
   for (const id of input.contestantModelIds) {
-    byRole.competitor += stages * priceCall(model(id), ctxIn, maxOut);
+    byRole.competitor += runStages * priceCall(model(id), ctxIn, maxOut);
   }
 
   // --- julgamento ---
@@ -170,13 +189,13 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
       byRole.judge +=
-        stages * nContestants * priceCall(m, ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE);
+        runStages * nContestants * priceCall(m, ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE);
     }
   } else {
     // listwise: uma chamada por (juiz x passe x cenario), com TODAS as respostas
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
-      byRole.judge += stages * input.judgePasses * priceCall(m, ctxIn + nContestants * maxOut, 800);
+      byRole.judge += runStages * input.judgePasses * priceCall(m, ctxIn + nContestants * maxOut, 800);
     }
   }
 
@@ -186,7 +205,7 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
   if (duelPairs > 0 && input.referenceJudging) {
     const m = model(input.judgeModelIds[0]);
     byRole.duel +=
-      stages *
+      runStages *
       duelPairs *
       2 *
       priceCall(m, ctxIn + 2 * maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_DUEL);
@@ -235,6 +254,7 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
       ctxInTokens: ctxIn,
       maxOutputTokens: maxOut,
       stages,
+      repeats,
       iterations,
       contestants: nContestants,
       judges,
@@ -292,6 +312,7 @@ export function estimateInputFromConfig(
   return {
     mode: config.mode,
     plannedStages,
+    ...(config.mode === 'compare' && config.repeats !== undefined ? { repeats: config.repeats } : {}),
     iterations: config.mode === 'training' ? config.iterations : 1,
     contestantModelIds,
     datagenModelId: precisaGerar ? config.datagenModelId : undefined,

@@ -30,7 +30,7 @@ import type {
   ScenarioPack,
   StageSpec,
 } from './api';
-import type { PromptGroup } from '../../src/engine/promptGroup.js';
+import { validatePromptGroup, type PromptGroup } from '../../src/engine/promptGroup.js';
 import type { ModelTuning } from './components/ModelSelector';
 
 // Defaults da Nova Run — fonte única (o NewRun inicializa o estado daqui).
@@ -172,6 +172,11 @@ export type ArenaFieldHandling =
       modes?: RunMode[];
       /** Sinônimo legado de outro campo (o export escreve o canônico). */
       aliasOf?: string;
+      /**
+       * Só entra na run com `variation.optimize` igual a este valor (o
+       * buildConfig manda técnicas/reescritor OU variantes manuais, nunca os dois).
+       */
+      whenOptimize?: boolean;
     }
   | {
       kind: 'json-only';
@@ -180,6 +185,8 @@ export type ArenaFieldHandling =
       note: string;
       modes?: RunMode[];
       aliasOf?: string;
+      /** Idem ao `whenOptimize` do ramo `ui`. */
+      whenOptimize?: boolean;
       /** Descontinuado: pode sumir do schema sem derrubar a guarda de itens órfãos. */
       discontinued?: boolean;
     };
@@ -203,9 +210,9 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
   'scenarios.ids': { kind: 'json-only', status: 'ignorado', note: LIBRARY_NOTE },
   'prompt.text': { kind: 'ui', control: 'Sujeitos › Prompt base', modes: SINGLE },
   'prompt.generateFrom': { kind: 'ui', control: 'Sujeitos › Gerar prompt base', modes: SINGLE },
-  'prompt.contracts.neverBreak': { kind: 'json-only', status: 'aplicado', note: 'contratos never-break do prompt base', modes: SINGLE },
-  'prompt.contracts.placeholders': { kind: 'json-only', status: 'aplicado', note: 'placeholders que o reescritor preserva', modes: SINGLE },
-  'prompt.contracts.minLengthRatio': { kind: 'json-only', status: 'aplicado', note: 'razão mínima de tamanho da reescrita', modes: SINGLE },
+  'prompt.contracts.neverBreak': { kind: 'json-only', status: 'aplicado', note: 'contratos never-break do prompt base', modes: SINGLE, whenOptimize: true },
+  'prompt.contracts.placeholders': { kind: 'json-only', status: 'aplicado', note: 'placeholders que o reescritor preserva', modes: SINGLE, whenOptimize: true },
+  'prompt.contracts.minLengthRatio': { kind: 'json-only', status: 'aplicado', note: 'razão mínima de tamanho da reescrita', modes: SINGLE, whenOptimize: true },
   'prompt.group[].id': { kind: 'json-only', status: 'aplicado', note: 'multi-prompt: grupo de fragmentos (irmãos congelados)', modes: SINGLE },
   'prompt.group[].label': { kind: 'json-only', status: 'aplicado', note: 'multi-prompt: rótulo do fragmento', modes: SINGLE },
   'prompt.group[].text': { kind: 'json-only', status: 'aplicado', note: 'multi-prompt: texto do fragmento', modes: SINGLE },
@@ -218,15 +225,15 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
   'models.competitorConfigs[].model': { kind: 'ui', control: 'Avançado › Configs', modes: COMPARE },
   'models.competitorConfigs[].temperature': { kind: 'ui', control: 'Avançado › Configs', modes: COMPARE },
   'models.competitorConfigs[].reasoning': { kind: 'ui', control: 'Avançado › Configs', modes: COMPARE },
-  'models.rewriter': { kind: 'ui', control: 'Avançado › Reescritor', modes: SINGLE },
+  'models.rewriter': { kind: 'ui', control: 'Avançado › Reescritor', modes: SINGLE, whenOptimize: true },
   'effort.competitor': { kind: 'ui', control: 'ajuste (chip) do modelo sob teste/competidores' },
   'effort.judge': { kind: 'ui', control: 'ajuste (chip) do juiz' },
-  'effort.rewriter': { kind: 'ui', control: 'ajuste (chip) do reescritor', modes: SINGLE },
+  'effort.rewriter': { kind: 'ui', control: 'ajuste (chip) do reescritor', modes: SINGLE, whenOptimize: true },
   'effort.datagen': { kind: 'ui', control: 'ajuste (chip) do gerador' },
   'variation.optimize': { kind: 'ui', control: 'Sujeitos › Otimizar com técnicas', modes: SINGLE },
-  'variation.techniques': { kind: 'ui', control: 'Sujeitos › Técnicas', modes: SINGLE },
-  'variation.manualVariants[].label': { kind: 'ui', control: 'Sujeitos › Variantes manuais', modes: SINGLE },
-  'variation.manualVariants[].systemPrompt': { kind: 'ui', control: 'Sujeitos › Variantes manuais', modes: SINGLE },
+  'variation.techniques': { kind: 'ui', control: 'Sujeitos › Técnicas', modes: SINGLE, whenOptimize: true },
+  'variation.manualVariants[].label': { kind: 'ui', control: 'Sujeitos › Variantes manuais', modes: SINGLE, whenOptimize: false },
+  'variation.manualVariants[].systemPrompt': { kind: 'ui', control: 'Sujeitos › Variantes manuais', modes: SINGLE, whenOptimize: false },
   'training.iterations': { kind: 'ui', control: 'Sujeitos › Iterações', modes: TRAINING },
   'training.minGain': { kind: 'ui', control: 'Avançado › Ganho mínimo', modes: TRAINING },
   'training.holdoutRatio': { kind: 'ui', control: 'Avançado › Holdout', modes: TRAINING },
@@ -419,6 +426,8 @@ export function applyArenaConfigToForm(
     const h = ARENA_FIELD_HANDLING[path];
     return !h?.modes || h.modes.includes(mode);
   };
+  // `variation.optimize` ausente no arquivo = o da tela (o import não o pisa).
+  const optimizeEfetivo = config.variation?.optimize ?? prev.optimize;
 
   // 1) Aviso por campo presente que NÃO entra nesta run (tabela de paridade).
   // Subcampos de lista (`x[].y`) viram UM aviso para a lista; ignorados com o
@@ -439,6 +448,20 @@ export function applyArenaConfigToForm(
           h.kind === 'ui'
             ? `não se aplica ao modo ${MODE_LABEL[mode]} — mantido no formulário, fora desta run`
             : `não se aplica ao modo ${MODE_LABEL[mode]} — ignorado`,
+      });
+      avisados.add(raiz);
+    } else if (
+      aplicavel(path) &&
+      mode !== 'compare' &&
+      h.whenOptimize !== undefined &&
+      h.whenOptimize !== optimizeEfetivo &&
+      !avisados.has(raiz)
+    ) {
+      // Técnicas/reescritor/contratos só valem com optimize ligado; variantes
+      // manuais só com ele desligado — o outro lado era aceito e sumia calado.
+      warnings.push({
+        path: raiz,
+        message: `só entra na run com variation.optimize ${h.whenOptimize ? 'ligado' : 'desligado'} — mantido no formulário, fora desta run`,
       });
       avisados.add(raiz);
     }
@@ -590,9 +613,36 @@ export function applyArenaConfigToForm(
   s.promptContracts = single ? config.prompt?.contracts : undefined;
   s.promptGroup = single && config.prompt?.group ? { prompts: config.prompt.group.map((p) => ({ ...p })) } : undefined;
   s.promptId = single ? config.prompt?.promptId : undefined;
+  // Grupo inválido (o schema já recusa; defesa p/ quem chama sem o parse) NÃO
+  // entra: `composePrompt` descartaria a variante e a run não mediria nada.
+  if (s.promptGroup) {
+    const grupo = validatePromptGroup(s.promptGroup, s.promptId);
+    if (!grupo.ok) {
+      warnings.push({ path: 'prompt.group', message: `ignorado — ${grupo.error}` });
+      s.promptGroup = undefined;
+      s.promptId = undefined;
+    }
+  } else if (s.promptId !== undefined) {
+    // promptId sozinho não escolhe fragmento nenhum (o motor só o lê com grupo).
+    warnings.push({ path: 'prompt.promptId', message: 'ignorado — sem prompt.group não há fragmento a escolher' });
+    s.promptId = undefined;
+  }
   const repeats = alias(config.repeats, (config.training as { repeats?: 1 | 2 | 3 } | undefined)?.repeats, 'repeats');
   s.repeats = mode === 'compare' ? repeats : undefined;
   s.reflection = mode === 'training' ? config.training?.reflection : undefined;
+  if (s.reflection === 'off') {
+    // 'off' = sem lições (== feedbackDriven false, ver types.ts). Vira o toggle
+    // da tela, que é quem o usuário vê — senão a tela mostraria "Lições das
+    // falhas" ligado numa run sem lições.
+    if (config.training?.feedbackDriven === true) {
+      warnings.push({
+        path: 'training.feedbackDriven',
+        message: "ignorado — training.reflection 'off' desliga as lições das falhas",
+      });
+    }
+    s.feedbackDriven = false;
+    s.reflection = undefined;
+  }
   s.paretoPool = mode === 'training' ? config.training?.paretoPool : undefined;
   // Tira chaves `undefined` (o estado fica igual ao de quem nunca importou).
   for (const k of ['promptContracts', 'promptGroup', 'promptId', 'repeats', 'reflection', 'paretoPool'] as const) {
@@ -640,10 +690,11 @@ export function exportArenaConfig(s: ArenaFormState): { config: ArenaConfigFile;
   const effort: NonNullable<ArenaConfigFile['effort']> = {};
   if (single) {
     if (s.contestantModel[0]) models.contestant = s.contestantModel[0];
-    if (s.rewriterModel[0]) models.rewriter = s.rewriterModel[0];
+    // Reescritor só existe com optimize ligado (mesma regra do buildConfig).
+    if (s.optimize && s.rewriterModel[0]) models.rewriter = s.rewriterModel[0];
     const ce = effortOf(s.tuning, s.contestantModel[0]);
     if (ce) effort.competitor = ce;
-    const re = effortOf(s.tuning, s.rewriterModel[0]);
+    const re = s.optimize ? effortOf(s.tuning, s.rewriterModel[0]) : undefined;
     if (re) effort.rewriter = re;
     if (s.contestantModel[0] && s.tuning[s.contestantModel[0]]?.temperature?.trim()) {
       omitted.push({
@@ -692,13 +743,18 @@ export function exportArenaConfig(s: ArenaFormState): { config: ArenaConfigFile;
   }
 
   const scenarios = s.pack?.scenarios ?? s.customStages ?? null;
+  // Etapas cruas SUBSTITUEM o gerador; no arquivo elas voltam como seed de
+  // pacote. Com `stages` = nº de etapas o seed cobre o alvo e o datagen não
+  // gera nada — sem isto o `stages` velho da tela (default 5) fazia a run
+  // reimportada gerar cenários a mais (e custar mais) sem aviso.
+  const stages = !s.pack && s.customStages?.length ? Math.min(50, s.customStages.length) : s.stages;
 
   const config: ArenaConfigFile = {
     format: ARENA_CONFIG_FORMAT,
     mode: s.mode,
     theme: s.theme,
     ...(s.scenarioBrief ? { scenarioBrief: s.scenarioBrief } : {}),
-    stages: s.stages,
+    stages,
     ...(scenarios?.length ? { scenarios: scenarios.map(toArenaScenario) } : {}),
     models,
     ...(Object.keys(effort).length ? { effort } : {}),
@@ -721,7 +777,7 @@ export function exportArenaConfig(s: ArenaFormState): { config: ArenaConfigFile;
       config.prompt = {
         text: s.basePrompt,
         ...(s.taskDescription ? { generateFrom: s.taskDescription } : {}),
-        ...(s.promptContracts ? { contracts: s.promptContracts } : {}),
+        ...(s.promptContracts && s.optimize ? { contracts: s.promptContracts } : {}),
         ...(s.promptGroup ? { group: s.promptGroup.prompts.map((p) => ({ ...p })) } : {}),
         ...(s.promptId !== undefined ? { promptId: s.promptId } : {}),
       };
@@ -791,11 +847,28 @@ export function jsonOnlyRunPatch(
     return out;
   }
   if (s.promptContracts) out.contracts = s.promptContracts;
-  if (s.promptGroup) out.promptGroup = s.promptGroup;
-  if (s.promptId !== undefined) out.promptId = s.promptId;
+  // Só grupo VÁLIDO vai para a run: o Node o recusaria (runConfigSchema) e a
+  // SPA, sem esta guarda, evoluía o fragmento errado (ou nenhum) calada.
+  if (s.promptGroup && validatePromptGroup(s.promptGroup, s.promptId).ok) {
+    out.promptGroup = s.promptGroup;
+    if (s.promptId !== undefined) out.promptId = s.promptId;
+  }
   if (s.mode === 'training') {
     if (s.reflection !== undefined) out.reflection = s.reflection;
     if (s.paretoPool !== undefined) out.paretoPool = s.paretoPool;
   }
   return out;
+}
+
+/**
+ * Pendência do grupo multi-prompt (a MESMA regra do runConfigSchema do Node),
+ * ou null. O import já recusa grupo inválido; o problems() do NewRun chama isto
+ * antes do submit como última guarda — run paga que não mede nada não sai.
+ */
+export function promptGroupProblem(
+  s: Pick<ArenaFormState, 'mode' | 'promptGroup' | 'promptId'>,
+): string | null {
+  if (s.mode === 'compare' || !s.promptGroup) return null;
+  const r = validatePromptGroup(s.promptGroup, s.promptId);
+  return r.ok ? null : `Grupo multi-prompt do arquivo inválido — ${r.error} Reimporte o JSON corrigido.`;
 }

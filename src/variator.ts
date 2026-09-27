@@ -380,6 +380,19 @@ export interface ReflectLessonsParams {
  * Reescreve as licoes deterministicas num bloco acionavel. Lanca erro (o
  * chamador degrada para as licoes deterministicas) — nunca derruba a iteracao.
  */
+/**
+ * Liga as lições das falhas (GEPA) na próxima iteração? `feedbackDriven: false`
+ * OU `reflection: 'off'` desligam (types.ts documenta 'off' == feedbackDriven
+ * false). Antes nenhum motor lia o 'off': as lições entravam mesmo assim, e o
+ * import da SPA o rotulava como "aplicado" (IMPL-045). Fonte única dos dois trainers.
+ */
+export function lessonsEnabled(cfg: {
+  feedbackDriven?: boolean;
+  reflection?: 'off' | 'deterministic' | 'llm';
+}): boolean {
+  return cfg.feedbackDriven !== false && cfg.reflection !== 'off';
+}
+
 export async function llmReflectLessons(p: ReflectLessonsParams): Promise<string> {
   const userPrompt = `${p.theme?.trim() ? `TEMA DA RUN: ${p.theme.trim()}\n\n` : ''}FRAQUEZAS OBSERVADAS:
 ${p.baseLessons}

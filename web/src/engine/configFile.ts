@@ -11,6 +11,7 @@
 
 import { z } from 'zod';
 import { getTechnique } from './techniques';
+import { validatePromptGroup } from '../../../src/engine/promptGroup.js';
 import type { ReasoningLevel } from './types';
 
 /** Valor do campo `format` — versão do contrato do arquivo de configuração. */
@@ -444,6 +445,16 @@ export const arenaConfigSchema = z
             message: `técnica desconhecida: '${id}'`,
           });
         }
+      }
+    }
+    // Multi-prompt (F2/P0.4): a MESMA regra do runConfigSchema — grupo com >1
+    // prompt exige promptId, e o id precisa existir no grupo. Sem ela a SPA
+    // aceitava o arquivo e `composePrompt` descartava a variante: todo
+    // contestant recebia o mesmo prompt e a run paga não media nada (IMPL-045).
+    if (cfg.prompt?.group) {
+      const grupo = validatePromptGroup({ prompts: cfg.prompt.group }, cfg.prompt.promptId);
+      if (!grupo.ok) {
+        ctx.addIssue({ code: 'custom', path: ['prompt', 'group'], message: grupo.error! });
       }
     }
   });
