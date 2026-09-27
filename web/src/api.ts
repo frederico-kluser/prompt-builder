@@ -264,6 +264,8 @@ export interface RunConfig {
   feedbackDriven?: boolean;
   /** Reflexao GEPA: 'deterministic' (default) | 'llm' (meta-modelo reescreve as licoes) | 'off'. */
   reflection?: 'off' | 'deterministic' | 'llm';
+  /** training: pool Pareto (F4.1) — >1 = populacao de prompts em vez do campeao unico. */
+  paretoPool?: number;
   // meta:
   datagenModelId: string;
   /** Um ou mais juizes — rodam em paralelo. */
@@ -1091,7 +1093,9 @@ export async function readArenaConfigFile(
 
 /** Resultado do import unificado de arquivo JSON do assistente. */
 export type ImportedFile =
-  | { kind: 'config'; config: ArenaConfigFile }
+  // `raw` = o JSON como veio: o import compara com o validado para AVISAR das
+  // chaves que o zod descartou (desconhecidas/typo) — IMPL-045.
+  | { kind: 'config'; config: ArenaConfigFile; raw: unknown }
   | { kind: 'pack'; pack: ScenarioPack }
   | { kind: 'stages'; stages: StageSpec[] };
 
@@ -1165,7 +1169,7 @@ export async function readImportFile(
     const r = parseArenaConfig(json, opts);
     // Chave descontinuada (ex.: training.halving, IMPL-012): lida e ignorada.
     if (r.ok) for (const w of r.warnings ?? []) console.warn(w);
-    return r.ok ? { ok: true, data: { kind: 'config', config: r.config } } : r;
+    return r.ok ? { ok: true, data: { kind: 'config', config: r.config, raw: json } } : r;
   }
   // Aceita tambem o nome legado: pacotes ja exportados pelo usuario nao podem
   // deixar de abrir por causa de uma troca de marca.

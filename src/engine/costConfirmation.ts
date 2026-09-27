@@ -111,13 +111,15 @@ export function plannedHoldoutStages(config: RunConfig): number {
 /** Chamadas por papel em UMA iteração (mesma contabilidade de `estimateRunCost`). */
 function callsPerIteration(input: EstimateInput, a: CostEstimate['assumptions']): Record<CostRole, number> {
   const judges = input.judgeModelIds.length;
+  // Etapas EXECUTADAS (repeats clona cenários no compare); gabarito segue 1×/cenário.
+  const exec = a.stages * a.repeats;
   return {
     datagen: a.datagenBatches,
     gabarito: input.referenceJudging ? a.stages : 0,
     rewriter: input.optimizerModelId ? (input.variantsPerIteration ?? 0) : 0,
-    competitor: a.stages * input.contestantModelIds.length,
-    judge: input.referenceJudging ? a.stages * a.contestants * judges : a.stages * input.judgePasses * judges,
-    duel: input.referenceJudging ? a.stages * a.duelPairs * 2 : 0,
+    competitor: exec * input.contestantModelIds.length,
+    judge: input.referenceJudging ? exec * a.contestants * judges : exec * input.judgePasses * judges,
+    duel: input.referenceJudging ? exec * a.duelPairs * 2 : 0,
     agent: input.agentRuns ?? 0,
   };
 }

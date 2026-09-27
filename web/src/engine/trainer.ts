@@ -2,7 +2,7 @@ const randomUUID = (): string => crypto.randomUUID();
 import { runToCompletion } from './orchestrator';
 import { listModels } from './openrouter';
 import { enforceRunCompliance } from '../lgpd';
-import { generateContestants, llmReflectLessons } from './variator';
+import { generateContestants, lessonsEnabled, llmReflectLessons } from './variator';
 import { composePrompt } from '../../../src/engine/promptGroup.js';
 import { addToPool, pickParent, sliceScores, type ParetoEntry } from '../../../src/engine/pareto.js';
 import {
@@ -492,9 +492,9 @@ async function trainingLoop(
       } else {
         // Reflection GEPA (deterministico — ver buildLessons): substitui a
         // antiga etapa LLM de analise; so a partir da iteracao 1 e se
-        // feedbackDriven nao foi desligado.
+        // as licoes nao foram desligadas (feedbackDriven false / reflection off).
         const hint0 =
-          cfg.feedbackDriven !== false && prevRun
+          lessonsEnabled(cfg) && prevRun
             ? // IMPL-013: com paciência a iteração anterior pode não ter
               // promovido — o campeão rodou nela como 'carry'; `v<k>` de lá é
               // OUTRA variante. O id da última run é o que vale.

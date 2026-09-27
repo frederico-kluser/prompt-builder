@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ArrowRight, LoaderCircle, Trash2, Upload } from 'lucide-react';
+import { ArrowRight, Download, LoaderCircle, Trash2, Upload } from 'lucide-react';
 import { ModelSelector, type ModelTuning } from '../components/ModelSelector';
 import { ManualVariantsEditor } from '../components/ManualVariantsEditor';
 import {
@@ -18,7 +18,6 @@ import {
   type ArenaConfigFile,
   type ManualVariant,
   type OpenRouterModel,
-  type PromptContracts,
   type ReasoningConfig,
   type ReasoningLevel,
   type RunConfig,
@@ -33,7 +32,23 @@ import {
   filterByMaxPrice,
   unestimableCostNotice,
   UNKNOWN_PRICE_LABEL,
+  parseArenaConfig,
 } from '../api';
+import {
+  ARENA_JSON_ONLY_FIELDS,
+  DEFAULT_DATAGEN,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  applyArenaConfigToForm,
+  defaultArenaFormState,
+  exportArenaConfig,
+  formatArenaWarning,
+  jsonOnlyActiveValue,
+  jsonOnlyRunPatch,
+  promptGroupProblem,
+  type ArenaFieldWarning,
+  type ArenaFormState,
+  type ConfigRow,
+} from '../arenaForm';
 import { CostConfirmDialog } from '../components/CostConfirmDialog';
 import {
   AREA_LIVRE,
@@ -74,20 +89,9 @@ import {
 } from '../components/primitives';
 import { cn } from '@/lib/utils';
 
-// Defaults da run (ajustáveis na própria tela antes de iniciar).
-const DEFAULT_COMPETITORS = ['openai/gpt-5-mini', 'openai/gpt-5-nano', 'openai/gpt-5.4-mini', 'openai/gpt-5.4-nano'];
-const DEFAULT_CONTESTANT = 'openai/gpt-5-mini';
-const DEFAULT_DATAGEN = 'deepseek/deepseek-v4-pro';
-const DEFAULT_JUDGE = 'moonshotai/kimi-k2.6';
-const DEFAULT_TECHNIQUES = ['persona', 'cot', 'constraints', 'format'];
-const DEFAULT_THEME =
-  'Assistente virtual de uma clínica de diagnósticos que orienta os pacientes no preparo para exames médicos e ' +
-  'laboratoriais: tempo de jejum, suspensão de medicamentos, ingestão de água, restrições alimentares, preparo ' +
-  'intestinal, documentos necessários, horários de coleta e reagendamento. As respostas devem ser claras, objetivas ' +
-  'e seguras, orientando a confirmar com a clínica ou com o médico quando a dúvida envolver decisão clínica.';
-const DEFAULT_MAX_OUTPUT_TOKENS = 500;
-/** Nº de finalistas que disputam os duelos no fim (0 = sem finais). */
-const DEFAULT_FINALISTS = 3;
+// Defaults da run (ajustáveis na própria tela antes de iniciar): fonte única em
+// `../arenaForm` — o mesmo estado-base que o import/export do arena-config usa.
+const INIT = defaultArenaFormState();
 
 // Ajustes oferecidos por papel. A capacidade REAL de cada modelo continua vindo
 // do `supported_parameters` (o seletor cruza as duas coisas).
@@ -119,14 +123,6 @@ type Tab = 'cenarios' | 'sujeitos' | 'juizes' | 'avancado';
 interface Problem {
   tab: Tab;
   text: string;
-}
-
-// Linha do editor de configs do compare-llms. A identidade do concorrente é a
-// TRIPLA modelo+temperatura+reasoning. temperature como texto: '' = padrão.
-interface ConfigRow {
-  modelId: string;
-  temperature: string;
-  reasoningLevel: '' | ReasoningLevel;
 }
 
 function fmtUsd(x: number): string {
@@ -319,84 +315,87 @@ function LinkButton(p: { onClick: () => void; children: ReactNode; disabled?: bo
 
 export function NewRun() {
   const navigate = useNavigate();
-  const [mode, setMode] = useState<RunMode>('compare');
+  const [mode, setMode] = useState<RunMode>(INIT.mode);
   const [tab, setTab] = useState<Tab>('cenarios');
-  const [theme, setTheme] = useState(DEFAULT_THEME);
-  const [scenarioBrief, setScenarioBrief] = useState('');
+  const [theme, setTheme] = useState(INIT.theme);
+  const [scenarioBrief, setScenarioBrief] = useState(INIT.scenarioBrief);
   const [briefOpen, setBriefOpen] = useState(false);
-  const [stages, setStages] = useState(5);
-  const [concurrency, setConcurrency] = useState(8);
-  const [timeoutMs, setTimeoutMs] = useState(60000);
+  const [stages, setStages] = useState(INIT.stages);
+  const [concurrency, setConcurrency] = useState(INIT.concurrency);
+  const [timeoutMs, setTimeoutMs] = useState(INIT.timeoutMs);
   // Máx. tokens por resposta: campo LIVRE (texto). ''/inválido cai no default
   // no envio (ver maxTokensNum) — o teto real é o do modelo.
-  const [maxOutputTokens, setMaxOutputTokens] = useState(String(DEFAULT_MAX_OUTPUT_TOKENS));
-  const [datagen, setDatagen] = useState<string[]>([DEFAULT_DATAGEN]);
-  const [judge, setJudge] = useState<string[]>([DEFAULT_JUDGE]);
+  const [maxOutputTokens, setMaxOutputTokens] = useState(INIT.maxOutputTokens);
+  const [datagen, setDatagen] = useState<string[]>(INIT.datagen);
+  const [judge, setJudge] = useState<string[]>(INIT.judge);
 
   // compare
-  const [competitors, setCompetitors] = useState<string[]>(DEFAULT_COMPETITORS);
-  const [compareAxis, setCompareAxis] = useState<'models' | 'configs'>('models');
-  const [competitorConfigs, setCompetitorConfigs] = useState<ConfigRow[]>([
-    { modelId: '', temperature: '', reasoningLevel: '' },
-    { modelId: '', temperature: '', reasoningLevel: '' },
-  ]);
+  const [competitors, setCompetitors] = useState<string[]>(INIT.competitors);
+  const [compareAxis, setCompareAxis] = useState<'models' | 'configs'>(INIT.compareAxis);
+  const [competitorConfigs, setCompetitorConfigs] = useState<ConfigRow[]>(INIT.competitorConfigs);
 
   // variation / training
-  const [contestantModel, setContestantModel] = useState<string[]>([DEFAULT_CONTESTANT]);
-  const [basePrompt, setBasePrompt] = useState('');
-  const [taskDescription, setTaskDescription] = useState('');
+  const [contestantModel, setContestantModel] = useState<string[]>(INIT.contestantModel);
+  const [basePrompt, setBasePrompt] = useState(INIT.basePrompt);
+  const [taskDescription, setTaskDescription] = useState(INIT.taskDescription);
   const [genOpen, setGenOpen] = useState(false);
   const [genBaseLoading, setGenBaseLoading] = useState(false);
   const [genBaseError, setGenBaseError] = useState<string | null>(null);
-  const [optimize, setOptimize] = useState(true);
-  const [techniques, setTechniques] = useState<string[]>(DEFAULT_TECHNIQUES);
+  const [optimize, setOptimize] = useState(INIT.optimize);
+  const [techniques, setTechniques] = useState<string[]>(INIT.techniques);
   const [techs, setTechs] = useState<Technique[]>([]);
-  const [manualVariants, setManualVariants] = useState<ManualVariant[]>([
-    { label: 'Variante 1', systemPrompt: '' },
-    { label: 'Variante 2', systemPrompt: '' },
-  ]);
-  const [iterations, setIterations] = useState(3);
-  const [twoPassJudge, setTwoPassJudge] = useState(false);
+  const [manualVariants, setManualVariants] = useState<ManualVariant[]>(INIT.manualVariants);
+  const [iterations, setIterations] = useState(INIT.iterations);
+  const [twoPassJudge, setTwoPassJudge] = useState(INIT.twoPassJudge);
 
   // Cenários prontos: pacote importado (seed do datagen) OU etapas cruas (array
   // JSON), que substituem o gerador por completo.
-  const [pack, setPack] = useState<ScenarioPack | null>(null);
-  // Contratos never-break (F2/P0.3): chegam pelo arena-config importado
-  // (`prompt.contracts`) — sem controle de UI, vão direto no RunConfig.
-  const [promptContracts, setPromptContracts] = useState<PromptContracts | undefined>(undefined);
-  const [customStages, setCustomStages] = useState<StageSpec[] | null>(null);
+  const [pack, setPack] = useState<ScenarioPack | null>(INIT.pack);
+  // Campos SÓ-JSON (IMPL-045): sem controle na tela, chegam pelo arena-config
+  // importado e vão para o RunConfig (`jsonOnlyRunPatch`). A lista visível com o
+  // valor ativo de cada um fica em Avançado › "Só pelo arquivo JSON".
+  const [promptContracts, setPromptContracts] = useState<ArenaFormState['promptContracts']>(INIT.promptContracts);
+  const [promptGroup, setPromptGroup] = useState<ArenaFormState['promptGroup']>(INIT.promptGroup);
+  const [promptId, setPromptId] = useState<ArenaFormState['promptId']>(INIT.promptId);
+  const [repeats, setRepeats] = useState<ArenaFormState['repeats']>(INIT.repeats);
+  const [reflection, setReflection] = useState<ArenaFormState['reflection']>(INIT.reflection);
+  const [paretoPool, setParetoPool] = useState<ArenaFormState['paretoPool']>(INIT.paretoPool);
+  // Aviso NOMEANDO o que o import descartou/ajustou (ou o que o export não
+  // representa) — nada some calado.
+  const [fieldNotice, setFieldNotice] = useState<{ title: string; items: ArenaFieldWarning[] } | null>(null);
+  const [customStages, setCustomStages] = useState<StageSpec[] | null>(INIT.customStages);
   // Import: resumo da arena-config aplicada + flag do prompt que já veio pronto.
   const [configSummary, setConfigSummary] = useState<string | null>(null);
-  const [promptImported, setPromptImported] = useState(false);
+  const [promptImported, setPromptImported] = useState(INIT.promptImported);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
 
   // Julgamento por referência (gabarito). null = default do modo/eixo; só um
   // arquivo importado (judging.reference) muda isso explicitamente.
-  const [refJudgingChoice, setRefJudgingChoice] = useState<boolean | null>(null);
-  const [finalists, setFinalists] = useState(DEFAULT_FINALISTS);
-  const [duelsOn, setDuelsOn] = useState(true);
+  const [refJudgingChoice, setRefJudgingChoice] = useState<boolean | null>(INIT.refJudgingChoice);
+  const [finalists, setFinalists] = useState(INIT.finalists);
+  const [duelsOn, setDuelsOn] = useState(INIT.duelsOn);
   // IMPL-002: '' = margem AUTOMÁTICA (max(1; 50/n), resolvida no gate); número = fixa.
-  const [minGain, setMinGain] = useState('');
-  const [holdoutRatio, setHoldoutRatio] = useState(0.2);
-  const [feedbackDriven, setFeedbackDriven] = useState(true);
+  const [minGain, setMinGain] = useState(INIT.minGain);
+  const [holdoutRatio, setHoldoutRatio] = useState(INIT.holdoutRatio);
+  const [feedbackDriven, setFeedbackDriven] = useState(INIT.feedbackDriven);
 
   // Ajuste fino POR MODELO (esforço/temperatura): o esforço mora no modelo, não
   // num campo global — cada modelo aceita o que o `supported_parameters` diz.
-  const [tuning, setTuning] = useState<Record<string, ModelTuning>>({});
+  const [tuning, setTuning] = useState<Record<string, ModelTuning>>(INIT.tuning);
   // `referenceModel` escreve os gabaritos (vazio = 1º juiz); `rewriterModel`
   // reescreve os prompts por técnica (vazio = mesmo do gerador) → optimizerModelId.
-  const [referenceModel, setReferenceModel] = useState<string[]>([]);
-  const [rewriterModel, setRewriterModel] = useState<string[]>([]);
+  const [referenceModel, setReferenceModel] = useState<string[]>(INIT.referenceModel);
+  const [rewriterModel, setRewriterModel] = useState<string[]>(INIT.rewriterModel);
 
   // Conformidade LGPD (consultivo): filtra o catálogo dos participantes.
-  const [complianceArea, setComplianceArea] = useState<string>(AREA_LIVRE);
-  const [includeRessalvas, setIncludeRessalvas] = useState(true);
+  const [complianceArea, setComplianceArea] = useState<string>(INIT.complianceArea);
+  const [includeRessalvas, setIncludeRessalvas] = useState(INIT.includeRessalvas);
   const [lgpd, setLgpd] = useState<LgpdData | null>(null);
   const [prunedNotice, setPrunedNotice] = useState<string | null>(null);
   // Dado pessoal (IMPL-042): 'synthetic' recusa dado de aparência real antes de
   // começar; nos dois modos o gateway pseudonimiza CPF/telefone/e-mail… no envio.
-  const [piiMode, setPiiMode] = useState<PiiMode>('redact');
+  const [piiMode, setPiiMode] = useState<PiiMode>(INIT.piiMode);
   // Importação bloqueada por dado pessoal: o arquivo fica pendente até o usuário
   // revisar (nunca corrigimos em silêncio) — ele pode confirmar e importar.
   // `keys` = o dado que o aviso mostrou (hash, nunca o valor): é o que "Revisei" confirma.
@@ -613,126 +612,109 @@ export function NewRun() {
     return Number.isFinite(t) ? Math.max(0, Math.min(2, t)) : undefined;
   }
 
-  // Aplica uma configuração importada (arena-config@1) no estado da tela.
-  // Campos AUSENTES no arquivo não pisam o estado atual.
-  function applyArenaConfig(config: ArenaConfigFile) {
-    setMode(config.mode);
-    setTheme(config.theme);
-    if (config.scenarioBrief !== undefined) setScenarioBrief(config.scenarioBrief);
-    if (config.stages !== undefined) setStages(Math.max(1, Math.min(50, Math.round(config.stages))));
-    // Cenários pinados: viram seed no MESMO estado do pacote de cenários.
-    // `scenarios.from: 'library'` NÃO é resolvível na SPA (sem filesystem) — a
-    // resolução vive no CLI (`pb library`); o resumo já anuncia a biblioteca.
-    if (Array.isArray(config.scenarios)) {
-      const tokensFallback = config.limits?.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
-      setCustomStages(null);
-      setPack({
-        format: 'prompt-builder-pack@1',
-        theme: config.theme,
-        exportedAt: new Date().toISOString(),
-        prompt: { text: config.prompt?.text ?? '', source: 'base' },
-        scenarios: config.scenarios.map((sc, i) => ({
-          id: sc.id ?? `import-${i + 1}`,
-          question: sc.question,
-          productContext: sc.productContext ?? '',
-          maxTokens: sc.maxTokens ?? tokensFallback,
-          rubric: sc.rubric ?? '',
-          reference: sc.reference,
-          expected: sc.expected,
-          // IMPL-003: sem o labelSet o verificador estrito perde a lista de rótulos.
-          labelSet: sc.labelSet,
-          origin: 'import' as const,
-        })),
-      });
-    }
-    if (config.prompt?.contracts !== undefined) setPromptContracts(config.prompt.contracts);
-    if (config.prompt?.text !== undefined) {
-      setBasePrompt(config.prompt.text);
-      setPromptImported(!!config.prompt.text.trim());
-    }
-    if (config.prompt?.generateFrom !== undefined) setTaskDescription(config.prompt.generateFrom);
-    setDatagen([config.models.datagen]);
-    setJudge(config.models.judges);
-    if (config.models.reference !== undefined) setReferenceModel(config.models.reference ? [config.models.reference] : []);
-    if (config.models.contestant !== undefined) setContestantModel(config.models.contestant ? [config.models.contestant] : []);
-    if (config.models.competitors) {
-      setCompetitors(config.models.competitors);
-      setCompareAxis('models');
-    }
-    if (config.models.competitorConfigs) {
-      // Eixo compare-llms: a identidade é a tripla modelo+temperatura+reasoning.
-      setCompetitorConfigs(
-        config.models.competitorConfigs.map((c) => ({
-          modelId: c.model,
-          temperature: c.temperature !== undefined ? String(c.temperature) : '',
-          reasoningLevel: c.reasoning ?? '',
-        })),
-      );
-      setCompareAxis('configs');
-    }
-    if (config.models.rewriter !== undefined) setRewriterModel(config.models.rewriter ? [config.models.rewriter] : []);
-    // O esforço do arquivo é por PAPEL; na tela ele mora no modelo daquele papel
-    // — traduz na entrada para o usuário VER no chip o que veio no JSON.
-    const tuned: Record<string, ModelTuning> = {};
-    const putEffort = (ids: string[], effort?: ReasoningLevel) => {
-      if (!effort) return;
-      for (const id of ids) if (id) tuned[id] = { ...tuned[id], effort };
+  /** Recorte do estado que o arena-config descreve (ver `../arenaForm`). */
+  function snapshot(): ArenaFormState {
+    return {
+      mode, theme, scenarioBrief, stages, pack, customStages, basePrompt, taskDescription, promptImported,
+      datagen, judge, referenceModel, contestantModel, competitors, compareAxis, competitorConfigs,
+      rewriterModel, tuning, optimize, techniques, manualVariants, iterations, minGain, holdoutRatio,
+      feedbackDriven, duelsOn, finalists, twoPassJudge, maxOutputTokens, timeoutMs, concurrency,
+      complianceArea, includeRessalvas, piiMode, refJudgingChoice, promptContracts, promptGroup, promptId,
+      repeats, reflection, paretoPool,
     };
-    const fileContestant = config.models.contestant !== undefined ? [config.models.contestant] : contestantModel;
-    putEffort(
-      config.mode === 'compare' ? config.models.competitors ?? competitors : fileContestant,
-      config.effort?.competitor,
-    );
-    putEffort([config.models.datagen], config.effort?.datagen);
-    putEffort(config.models.judges, config.effort?.judge);
-    putEffort(config.models.rewriter !== undefined ? [config.models.rewriter] : rewriterModel, config.effort?.rewriter);
-    // Configs do compare-llms: além das linhas do editor, o ajuste aparece no chip.
-    for (const c of config.models.competitorConfigs ?? []) {
-      tuned[c.model] = {
-        ...tuned[c.model],
-        ...(c.reasoning !== undefined ? { effort: c.reasoning } : {}),
-        ...(c.temperature !== undefined ? { temperature: String(c.temperature) } : {}),
-      };
-    }
-    if (Object.keys(tuned).length) setTuning((prev) => ({ ...prev, ...tuned }));
-    if (config.variation?.optimize !== undefined) setOptimize(config.variation.optimize);
-    if (config.variation?.techniques) setTechniques(config.variation.techniques);
-    if (config.variation?.manualVariants) setManualVariants(config.variation.manualVariants);
-    if (config.training?.iterations !== undefined)
-      setIterations(Math.max(2, Math.min(10, Math.round(config.training.iterations))));
-    if (config.training?.minGain !== undefined) setMinGain(String(config.training.minGain));
-    if (config.training?.holdoutRatio !== undefined)
-      setHoldoutRatio(Math.max(0, Math.min(0.5, config.training.holdoutRatio)));
-    if (config.training?.feedbackDriven !== undefined) setFeedbackDriven(config.training.feedbackDriven);
-    // duels/finalists: a raiz é o lugar canônico; o bloco training é compat.
-    const duelsFlag = config.duels ?? config.training?.duels;
-    if (duelsFlag !== undefined) setDuelsOn(duelsFlag);
-    const finalistsCfg = config.finalists ?? config.training?.finalists;
-    if (finalistsCfg !== undefined) setFinalists(Math.max(0, Math.min(12, Math.round(finalistsCfg))));
-    if (config.judging?.reference !== undefined) setRefJudgingChoice(config.judging.reference);
-    if (config.judging?.passes !== undefined) setTwoPassJudge(config.judging.passes === 2);
-    // Clamp na entrada: os inputs têm min/max nativos e um valor fora da faixa
-    // faz o browser abortar o submit SEM mensagem — o botão Iniciar morre calado.
-    if (config.limits?.maxOutputTokens !== undefined)
-      setMaxOutputTokens(String(Math.max(50, Math.round(config.limits.maxOutputTokens))));
-    if (config.limits?.timeoutMs !== undefined)
-      setTimeoutMs(Math.max(1000, Math.min(300000, Math.round(config.limits.timeoutMs))));
-    if (config.limits?.concurrency !== undefined)
-      setConcurrency(Math.max(1, Math.min(32, Math.round(config.limits.concurrency))));
-    if (config.compliance) {
-      setComplianceArea(config.compliance.area);
-      setIncludeRessalvas(config.compliance.includeRessalvas);
-    }
-    if (config.piiMode) setPiiMode(config.piiMode);
-    // Importado com "Revisei" (ou `allowPii` no arquivo): a revisão cobre o dado
+  }
+
+  /** Escreve um estado do assistente de volta na tela (um setter por campo). */
+  function applyFormState(f: ArenaFormState) {
+    setMode(f.mode);
+    setTheme(f.theme);
+    setScenarioBrief(f.scenarioBrief);
+    setStages(f.stages);
+    setPack(f.pack);
+    setCustomStages(f.customStages);
+    setBasePrompt(f.basePrompt);
+    setTaskDescription(f.taskDescription);
+    setPromptImported(f.promptImported);
+    setDatagen(f.datagen);
+    setJudge(f.judge);
+    setReferenceModel(f.referenceModel);
+    setContestantModel(f.contestantModel);
+    setCompetitors(f.competitors);
+    setCompareAxis(f.compareAxis);
+    setCompetitorConfigs(f.competitorConfigs);
+    setRewriterModel(f.rewriterModel);
+    setTuning(f.tuning);
+    setOptimize(f.optimize);
+    setTechniques(f.techniques);
+    setManualVariants(f.manualVariants);
+    setIterations(f.iterations);
+    setMinGain(f.minGain);
+    setHoldoutRatio(f.holdoutRatio);
+    setFeedbackDriven(f.feedbackDriven);
+    setDuelsOn(f.duelsOn);
+    setFinalists(f.finalists);
+    setTwoPassJudge(f.twoPassJudge);
+    setMaxOutputTokens(f.maxOutputTokens);
+    setTimeoutMs(f.timeoutMs);
+    setConcurrency(f.concurrency);
+    setComplianceArea(f.complianceArea);
+    setIncludeRessalvas(f.includeRessalvas);
+    setPiiMode(f.piiMode);
+    setRefJudgingChoice(f.refJudgingChoice);
+    setPromptContracts(f.promptContracts);
+    setPromptGroup(f.promptGroup);
+    setPromptId(f.promptId);
+    setRepeats(f.repeats);
+    setReflection(f.reflection);
+    setParetoPool(f.paretoPool);
+  }
+
+  // Aplica uma configuração importada (arena-config@1) no estado da tela. A
+  // tradução é pura (`applyArenaConfigToForm`) e devolve um aviso NOMEANDO cada
+  // campo que não entra na run — antes, 5 campos validados sumiam calados.
+  function applyArenaConfig(config: ArenaConfigFile, raw?: unknown) {
+    const { state, warnings } = applyArenaConfigToForm(snapshot(), config, { raw });
+    applyFormState(state);
+    // LGPD (IMPL-040): a revisão do arquivo vive fora do ArenaFormState — é
+    // one-shot, nunca exportada. Importado com "Revisei" (ou `allowPii` no arquivo): a revisão cobre o dado
     // DESTE arquivo — não o que for digitado depois.
     if (config.allowPii) ackPii(piiReviewKeys(checkImportPii(config).blocked));
+    setFieldNotice(
+      warnings.length ? { title: 'Campos do arquivo que NÃO entram nesta run', items: warnings } : null,
+    );
+  }
+
+  // Exporta o assistente como arena-config@1 — o mesmo arquivo que o import lê
+  // (round-trip coberto por test/arena-form-parity.test.ts).
+  function handleExport() {
+    setError(null);
+    const { config, omitted } = exportArenaConfig(snapshot());
+    const json = JSON.stringify(config, null, 2);
+    // Só baixa o que o import aceita de volta: arquivo exportado que não reabre
+    // seria pior que nenhum.
+    const check = parseArenaConfig(JSON.parse(json));
+    if (!check.ok) return setError(`Não dá para exportar ainda: ${check.error}`);
+    const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `arena-config-${mode}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    // O teto de gasto não faz parte do arena-config (é decisão de quem roda).
+    if (budget.trim())
+      omitted.push({ path: 'Orçamento máx.', message: 'o arena-config não tem teto de gasto — defina de novo após importar' });
+    setFieldNotice(
+      omitted.length ? { title: 'Ajustes da tela que o arquivo exportado não carrega', items: omitted } : null,
+    );
   }
 
   // Import unificado: UM arquivo, três formatos possíveis (arena-config@1,
   // prompt-builder-pack@1 (ou o legado ai-benchmark-pack@1) ou array cru — `readImportFile` detecta.
   async function handleImport(file: File, allowPii = false, reviewedKeys: readonly string[] = []) {
     setError(null);
+    setFieldNotice(null);
     const res = await readImportFile(file, { allowPii });
     if (!res.ok) {
       if (res.pii) return setPiiImport({ file, message: res.error, keys: piiReviewKeys(res.pii.blocked) });
@@ -741,7 +723,7 @@ export function NewRun() {
     setPiiImport(null);
     if (allowPii) ackPii(reviewedKeys);
     if (res.data.kind === 'config') {
-      applyArenaConfig(res.data.config);
+      applyArenaConfig(res.data.config, res.data.raw);
       setConfigSummary(arenaConfigSummary(res.data.config));
       return;
     }
@@ -807,6 +789,8 @@ export function NewRun() {
             : 'Escreva ao menos 2 variantes manuais (ou 1 + prompt base).',
         });
     }
+    const grupo = promptGroupProblem({ mode, promptGroup, promptId });
+    if (grupo) out.push({ tab: 'avancado', text: grupo });
     if (budget.trim() !== '' && !(parseFloat(budget) > 0))
       out.push({ tab: 'avancado', text: 'Orçamento máximo: informe um valor em US$ maior que zero (ou deixe vazio).' });
     return out;
@@ -876,8 +860,9 @@ export function NewRun() {
       ...(Object.keys(reasoning).length ? { reasoning } : {}),
       // Só nos modos de 1 modelo (no compare a temperatura é por concorrente).
       ...(contestantTemp !== undefined ? { temperature: contestantTemp } : {}),
-      // Contratos never-break do prompt base (F2/P0.3).
-      ...(promptContracts ? { contracts: promptContracts } : {}),
+      // Campos só-JSON aplicados (IMPL-045): contratos never-break, grupo
+      // multi-prompt, repeats (compare), reflexão/pool Pareto (training).
+      ...jsonOnlyRunPatch({ mode, promptContracts, promptGroup, promptId, repeats, reflection, paretoPool }),
       // Teto de gasto (IMPL-020): o ledger do motor para a run numa porta de
       // fase antes de passar dele. Em training o teto é da SESSÃO inteira.
       ...(budgetNum !== undefined ? { budgetUsd: budgetNum } : {}),
@@ -1048,6 +1033,8 @@ export function NewRun() {
   const launchCostNotice = launchEstimate
     ? unestimableCostNotice(launchEstimate.unknownPriceModelIds, launchEstimate.unpricedModelIds)
     : null;
+  // Valores ativos da lista "Só pelo arquivo JSON" (Avançado).
+  const formSnap = snapshot();
 
   return (
     <form onSubmit={submit}>
@@ -1060,6 +1047,10 @@ export function NewRun() {
               <Button type="button" variant="outline" size="sm" onClick={() => importRef.current?.click()}>
                 <Upload aria-hidden="true" />
                 Importar JSON
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={handleExport}>
+                <Download aria-hidden="true" />
+                Exportar JSON
               </Button>
               <input
                 ref={importRef}
@@ -1134,8 +1125,31 @@ export function NewRun() {
           </Banner>
         )}
 
-        {(configSummary || draftNotice) && (
+        {(configSummary || draftNotice || fieldNotice) && (
           <div className="mt-4 flex flex-col gap-2">
+            {fieldNotice && (
+              <Banner tone="warn">
+                <div className="flex items-start justify-between gap-3">
+                  <p className="font-medium">{fieldNotice.title}</p>
+                  <button
+                    type="button"
+                    className="shrink-0 text-[13px] text-primary underline-offset-4 hover:underline"
+                    onClick={() => setFieldNotice(null)}
+                  >
+                    dispensar
+                  </button>
+                </div>
+                <ul className="mt-1 flex list-disc flex-col gap-0.5 pl-5 text-[13px]">
+                  {fieldNotice.items.map((w) => (
+                    <li key={`${w.path}|${w.message}`}>
+                      <code className="font-mono text-[12px]">{w.path}</code>
+                      {': '}
+                      {w.message}
+                    </li>
+                  ))}
+                </ul>
+              </Banner>
+            )}
             {configSummary && (
               <ImportedLine
                 text={`Configuração importada — ${configSummary}`}
@@ -1728,6 +1742,41 @@ export function NewRun() {
                     onChange={setIncludeUnknownPrice}
                   />
                 )}
+              </SettingGroup>
+
+              {/* Paridade formulário × arena-config (IMPL-045): o que o schema
+                  aceita e a tela não tem controle. `aplicado` vai para a run
+                  (com o valor ativo à vista); `ignorado` é aceito e avisado. */}
+              <SettingGroup
+                title="Só pelo arquivo JSON"
+                footer="Estes campos não têm controle na tela: entram pelo Importar JSON e saem no Exportar JSON. Cada import substitui os valores ativos."
+              >
+                <ul className="flex flex-col divide-y divide-border">
+                  {ARENA_JSON_ONLY_FIELDS.map((f) => {
+                    const ativo = jsonOnlyActiveValue(formSnap, f.path);
+                    return (
+                      <li key={f.path} className="flex flex-col gap-0.5 px-4 py-2 text-[13px]">
+                        <span className="flex flex-wrap items-center gap-2">
+                          <code className="font-mono text-[12px] text-foreground">{f.path}</code>
+                          <span
+                            className={cn(
+                              'rounded px-1.5 text-[11px]',
+                              f.status === 'aplicado'
+                                ? 'bg-muted text-muted-foreground'
+                                : 'bg-parcial-soft text-foreground',
+                            )}
+                          >
+                            {f.status}
+                          </span>
+                          {ativo !== undefined && (
+                            <span className="text-[12px] text-primary">ativo: {JSON.stringify(ativo)}</span>
+                          )}
+                        </span>
+                        <span className="text-muted-foreground">{f.note}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
               </SettingGroup>
             </SmoothTabsPanel>
           </SmoothTabsPanels>

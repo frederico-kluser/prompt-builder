@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { checkImportPii, type PiiImportCheck } from '../../../src/engine/pii.js';
 import { getTechnique } from './techniques';
 import { stageLabelIssues } from '../../../src/engine/groundTruth.js';
+import { validatePromptGroup } from '../../../src/engine/promptGroup.js';
 import type { ReasoningLevel } from './types';
 // Schema/tipo de `contracts` são FONTE ÚNICA (src/engine/contracts.ts): o
 // mesmo nos dois configFile e na API — um campo novo não some em silêncio aqui.
@@ -224,7 +225,9 @@ const modelsSchema = z.object(
   'models deve ser um objeto com { datagen, judges }',
 );
 
-const arenaConfigSchema = z
+// Exportado para a guarda de paridade schema × formulário (web/src/arenaForm.ts,
+// IMPL-045): a lista de campos sai do PRÓPRIO schema, não de uma cópia à mão.
+export const arenaConfigSchema = z
   .object(
     {
       format: z.literal(ARENA_CONFIG_FORMAT),
@@ -469,6 +472,16 @@ const arenaConfigSchema = z
             message: `técnica desconhecida: '${id}'`,
           });
         }
+      }
+    }
+    // Multi-prompt (F2/P0.4): a MESMA regra do runConfigSchema — grupo com >1
+    // prompt exige promptId, e o id precisa existir no grupo. Sem ela a SPA
+    // aceitava o arquivo e `composePrompt` descartava a variante: todo
+    // contestant recebia o mesmo prompt e a run paga não media nada (IMPL-045).
+    if (cfg.prompt?.group) {
+      const grupo = validatePromptGroup({ prompts: cfg.prompt.group }, cfg.prompt.promptId);
+      if (!grupo.ok) {
+        ctx.addIssue({ code: 'custom', path: ['prompt', 'group'], message: grupo.error! });
       }
     }
   });

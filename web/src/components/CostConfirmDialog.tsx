@@ -63,7 +63,8 @@ export function CostConfirmDialog({
               {usd(estimate.low)} – {usd(estimate.high)}
             </div>
             <div className="mt-1 text-[12px] text-muted-foreground tabular">
-              {a.stages} cenário(s) × {a.contestants} participante(s) × {a.judges} juiz(es)
+              {a.stages} cenário(s)
+              {a.repeats > 1 ? ` × ${a.repeats} repetições` : ''} × {a.contestants} participante(s) × {a.judges} juiz(es)
               {a.iterations > 1 ? ` × até ${a.iterations} rodadas` : ''}
             </div>
           </div>
