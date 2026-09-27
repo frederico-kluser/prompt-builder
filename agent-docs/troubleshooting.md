@@ -1,5 +1,10 @@
 # Problemas comuns
 
+Com `--json` (ou `--output-format ndjson`), todo erro chega no stdout como
+`{ok:false, command, error:{code, kind, message, hint, details}}`. Procure
+aqui pelo `error.code`; o `error.hint` já traz o comando que resolve o caso
+comum, e `error.details` o dado exato (flag culpada, arquivo, saldo, estimativa).
+
 ## `Faltou definir orçamento` (código 2)
 
 Você está fora de um terminal interativo. Passe `--budget 5` ou `--budget none`.

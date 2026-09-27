@@ -13,8 +13,15 @@ import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
 import { hasGabarito, toStageSpec } from '../../engine/libraryCore.js';
 import { estimateInputFromConfig, estimateRunCost, toPerMTok } from '../../estimate.js';
-import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
-import { buildNetworkContext, checkKey, isAgentContext, parse, type NetworkContext } from '../context.js';
+import { CliError, EXIT, failAndExit, fmtUsd, renderSpend } from '../output.js';
+import {
+  buildNetworkContext,
+  checkKey,
+  isAgentContext,
+  parse,
+  readJsonFile,
+  type NetworkContext,
+} from '../context.js';
 import { emitRunEvent, emitSessionEventNdjson } from '../ndjson.js';
 import type {
   RunConfig,
@@ -67,7 +74,9 @@ const OPTIONS = {
 function n(v: unknown, campo: string): number | undefined {
   if (typeof v !== 'string' || !v.trim()) return undefined;
   const x = Number(v);
-  if (!Number.isFinite(x)) throw new CliError(`${campo} deve ser um número.`, EXIT.USAGE);
+  if (!Number.isFinite(x)) {
+    throw new CliError(`${campo} deve ser um número.`, EXIT.USAGE, { flag: campo, value: v }, { code: 'usage.invalid_number' });
+  }
   return x;
 }
 
@@ -94,7 +103,10 @@ function resolveBudget(values: Record<string, unknown>, warn: (m: string) => voi
     if (raw.trim().toLowerCase() === 'none') return undefined;
     const v = Number(raw);
     if (!Number.isFinite(v) || v <= 0) {
-      throw new CliError('--budget deve ser um valor em USD maior que zero, ou "none".', EXIT.USAGE);
+      throw new CliError('--budget deve ser um valor em USD maior que zero, ou "none".', EXIT.USAGE, { value: raw }, {
+        code: 'usage.invalid_budget',
+        hint: 'Use `--budget 5` (teto de US$ 5) ou `--budget none` (sem teto, assumindo o custo).',
+      });
     }
     return v;
   }
@@ -105,6 +117,11 @@ function resolveBudget(values: Record<string, unknown>, warn: (m: string) => voi
         '  --budget none   sem teto (assumindo o custo)\n' +
         '(a exigência vale fora de um terminal interativo — nada foi gasto)',
       EXIT.USAGE,
+      undefined,
+      {
+        code: 'usage.budget_required',
+        hint: 'Repita o comando com `--budget <usd>` (teto) ou `--budget none`; `--dry-run` estima o custo sem gastar.',
+      },
     );
   }
   warn('Sem --budget: rodando SEM teto de gasto.');
@@ -112,18 +129,7 @@ function resolveBudget(values: Record<string, unknown>, warn: (m: string) => voi
 }
 
 async function readConfigFile(file: string): Promise<RunConfig> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(file, 'utf-8');
-  } catch {
-    throw new CliError(`Não consegui ler o arquivo "${file}".`, EXIT.USAGE);
-  }
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch (err) {
-    throw new CliError(`"${file}" não é um JSON válido: ${(err as Error).message}`, EXIT.CONFIG);
-  }
+  const json = await readJsonFile(file);
 
   // Detecta o dialeto pela chave `format`: arena-config@1 (declarativo, o que a
   // ARENA-CONFIG.md documenta) vs RunConfig cru.
@@ -173,11 +179,19 @@ async function buildFromFlags(
   values: Record<string, unknown>,
 ): Promise<RunConfig> {
   const theme = typeof values.theme === 'string' ? values.theme.trim() : '';
-  if (!theme) throw new CliError('--theme é obrigatório (ou use --config <arquivo>).', EXIT.USAGE);
+  if (!theme) {
+    throw new CliError('--theme é obrigatório (ou use --config <arquivo>).', EXIT.USAGE, { flag: '--theme' }, {
+      code: 'usage.missing_flag',
+      hint: 'Passe `--theme "<tema>"` com os modelos, ou `--config <arquivo.json>` (`prompt-builder config example` gera um).',
+    });
+  }
 
   const judges = (values.judge as string[] | undefined) ?? [];
   if (judges.length === 0) {
-    throw new CliError('--judge é obrigatório (pode repetir para vários juízes).', EXIT.USAGE);
+    throw new CliError('--judge é obrigatório (pode repetir para vários juízes).', EXIT.USAGE, { flag: '--judge' }, {
+      code: 'usage.missing_flag',
+      hint: 'Passe `--judge <id>` (repita para vários); o juiz não pode ser um competidor.',
+    });
   }
 
   const reasoning: Record<string, ReasoningLevel> = {};
@@ -232,7 +246,10 @@ async function buildFromFlags(
   if (mode === 'compare') {
     const models = list(values.models);
     if (!models || models.length < 2) {
-      throw new CliError('--models precisa de ao menos 2 ids separados por vírgula.', EXIT.USAGE);
+      throw new CliError('--models precisa de ao menos 2 ids separados por vírgula.', EXIT.USAGE, { flag: '--models' }, {
+        code: 'usage.missing_flag',
+        hint: 'Ex.: `--models openai/gpt-5-mini,anthropic/claude-haiku-4.5` (ids de `prompt-builder models list --json`).',
+      });
     }
     candidate = { mode, ...common, competitorModelIds: models };
   } else {
@@ -240,7 +257,10 @@ async function buildFromFlags(
       (typeof values.contestant === 'string' && values.contestant.trim()) ||
       (typeof values.model === 'string' && values.model.trim());
     if (!contestant) {
-      throw new CliError('--model (o modelo sob teste) é obrigatório.', EXIT.USAGE);
+      throw new CliError('--model (o modelo sob teste) é obrigatório.', EXIT.USAGE, { flag: '--model' }, {
+        code: 'usage.missing_flag',
+        hint: 'Passe `--model <id>` (ids de `prompt-builder models list --json`).',
+      });
     }
     const techniques = list(values.techniques);
     candidate = {
@@ -293,6 +313,11 @@ async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: num
       throw new CliError(
         `Não dá para respeitar um orçamento com ${msg}. Verifique os ids com \`models list --search ...\`.`,
         EXIT.CONFIG,
+        { unpricedModelIds: est.unpricedModelIds },
+        {
+          code: 'config.unpriced_models',
+          hint: 'Corrija os ids (`prompt-builder models list --search <nome> --json`) ou rode com `--budget none`.',
+        },
       );
     }
     out.warn(msg);
@@ -325,6 +350,8 @@ async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: num
           `--max-price-in ${cap.prompt} está abaixo do preço de "${id}" ` +
             `(${toPerMTok(m.pricing.prompt).toFixed(2)} por 1M). Lembre: a flag é USD por MILHÃO de tokens.`,
           EXIT.CONFIG,
+          { modelId: id, capPerMTok: cap.prompt, pricePerMTok: toPerMTok(m.pricing.prompt) },
+          { code: 'config.price_cap_below_model', hint: 'Suba --max-price-in ou troque o modelo.' },
         );
       }
       if (cap.completion !== undefined && toPerMTok(m.pricing.completion) > cap.completion) {
@@ -332,6 +359,8 @@ async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: num
           `--max-price-out ${cap.completion} está abaixo do preço de "${id}" ` +
             `(${toPerMTok(m.pricing.completion).toFixed(2)} por 1M). A flag é USD por MILHÃO de tokens.`,
           EXIT.CONFIG,
+          { modelId: id, capPerMTok: cap.completion, pricePerMTok: toPerMTok(m.pricing.completion) },
+          { code: 'config.price_cap_below_model', hint: 'Suba --max-price-out ou troque o modelo.' },
         );
       }
     }
@@ -345,6 +374,8 @@ async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: num
         `A key tem ${fmtUsd(saldo)} disponíveis e a run custa pelo menos ${fmtUsd(est.low)}. ` +
           'Adicione créditos ou reduza --stages/--iterations.',
         EXIT.NO_CREDIT,
+        { remainingUsd: saldo, estimateLowUsd: est.low, estimateHighUsd: est.high },
+        { code: 'credit.insufficient' },
       );
     }
     if (saldo < est.high) out.warn(`saldo da key (${fmtUsd(saldo)}) pode não cobrir o teto estimado.`);
@@ -362,6 +393,11 @@ async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: num
         'Reduza --stages, desligue as finais (--no-duels), use menos juízes, ' +
         'ou passe --force para rodar mesmo assim (as portas de orçamento seguem armadas).',
       EXIT.USAGE,
+      { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high },
+      {
+        code: 'usage.budget_below_estimate',
+        hint: 'Suba --budget, reduza --stages/--no-duels/juízes, ou passe --force para rodar mesmo assim.',
+      },
     );
   }
   if (values.yes !== true && isAgentContext()) {
@@ -369,6 +405,8 @@ async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: num
       `Orçamento ${fmtUsd(budgetUsd)} está dentro da faixa estimada (${fmtUsd(est.low)} – ${fmtUsd(est.high)}), ` +
         'então a run pode parar no meio. Confirme com --yes.',
       EXIT.USAGE,
+      { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high },
+      { code: 'usage.confirmation_required', hint: 'Repita o mesmo comando com `--yes` (ou suba --budget acima do teto estimado).' },
     );
   }
   out.warn(
@@ -417,6 +455,13 @@ function relatorioFinal(ctx: NetworkContext, record: RunRecord): void {
   }
 }
 
+/** Nome do comando digitado (rotulo do envelope) por modo de run. */
+const COMMAND_BY_MODE: Record<RunMode, string> = {
+  compare: 'compare',
+  variation: 'vary',
+  training: 'train',
+};
+
 export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
   const parsed = parse(argv, OPTIONS);
   const ctx = await buildNetworkContext(parsed);
@@ -460,7 +505,14 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
       ac.abort('SIGINT');
       return;
     }
-    process.exit(EXIT.SIGINT);
+    // Saida imediata ainda termina no envelope: o NDJSON nao fica sem `result`.
+    failAndExit(
+      out,
+      COMMAND_BY_MODE[mode],
+      new CliError('Interrompido (2º Ctrl-C): saída imediata, sem esperar a run fechar.', EXIT.SIGINT, undefined, {
+        code: 'control.interrupted',
+      }),
+    );
   };
   process.on('SIGINT', onSigint);
 
@@ -499,17 +551,32 @@ async function runSingle(
   }
 
   relatorioFinal(ctx, record);
-  out.result(record.status !== 'error', config.mode, {
+  // Falha vira o envelope de erro (com o resumo em `details`), nunca um
+  // `result` ok:false seguido de um segundo objeto — dois JSONs no stdout.
+  if (record.status === 'error') {
+    throw new CliError(
+      record.error ?? 'run falhou',
+      EXIT.ERROR,
+      {
+        runId: record.id,
+        status: record.status,
+        totalCostUsd: record.totalCostUsd,
+        stoppedAtPhase: record.stoppedAtPhase ?? null,
+      },
+      { code: 'run.failed', hint: `Veja o record em \`prompt-builder runs show ${record.id} --json\`.` },
+    );
+  }
+  // ok:true com exit != 0 so para PARCIAL (7/130): `stoppedReason` diz qual.
+  out.result(true, config.mode, {
     runId: record.id,
     status: record.status,
     totalCostUsd: record.totalCostUsd,
     budgetExhausted: Boolean(record.budgetExhausted),
+    stoppedReason: record.stoppedReason ?? null,
     stoppedAtPhase: record.stoppedAtPhase,
     standings: record.standings,
     judgeScoreByContestant: record.judgeScoreByContestant,
   });
-
-  if (record.status === 'error') throw new CliError(record.error ?? 'run falhou', EXIT.ERROR);
   return exitFor(record.stoppedReason, record.budgetExhausted);
 }
 
@@ -592,18 +659,33 @@ async function runTraining(
     }
   }
 
-  out.result(record.status !== 'error', 'train', {
+  if (record.status === 'error') {
+    throw new CliError(
+      record.error ?? 'treino falhou',
+      EXIT.ERROR,
+      {
+        sessionId: sessionId || record.id,
+        status: record.status,
+        totalCostUsd: record.totalCostUsd,
+        iterationsDone: record.bestPromptByIteration.length,
+      },
+      {
+        code: 'session.failed',
+        hint: `Veja a sessão em \`prompt-builder sessions show ${sessionId || record.id} --json\`.`,
+      },
+    );
+  }
+  out.result(true, 'train', {
     sessionId: sessionId || record.id,
     status: record.status,
     totalCostUsd: record.totalCostUsd,
     iterationsDone: record.bestPromptByIteration.length,
     budgetExhausted: Boolean(record.budgetExhausted),
+    stoppedReason: record.stoppedReason ?? null,
     holdoutSkipped: Boolean(record.holdoutSkipped),
     championPrompt: campeao?.systemPrompt,
     holdout: record.holdout,
     significance: record.significance,
   });
-
-  if (record.status === 'error') throw new CliError(record.error ?? 'treino falhou', EXIT.ERROR);
   return exitFor(record.stoppedReason, record.budgetExhausted);
 }

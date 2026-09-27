@@ -91,8 +91,10 @@ npx prompt-builder-cli docs quickstart
 
 ## Códigos de saída
 
-`0` ok · `2` uso inválido · `3` config inválida · `4` auth · `5` sem crédito ·
-`7` parcial (orçamento esgotado) · `8` rede · `130` interrompido
+`0` ok · `1` inesperado · `2` uso inválido · `3` config inválida · `4` auth ·
+`5` sem crédito · `6` inconclusiva · `7` parcial (orçamento esgotado) · `8` rede ·
+`9` espera esgotada · `130` interrompido. Erro sob `--json`/ndjson:
+`{ok:false, command, error:{code, kind, message, hint, details}}` no stdout.
 
 ## Agentes desta máquina (configuração local do autor)
 

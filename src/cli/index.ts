@@ -7,8 +7,8 @@
 
 import { pkgVersion } from '../paths.js';
 import { configureGatewayFromEnv } from '../gatewayEnv.js';
-import { CliError, EXIT, Output } from './output.js';
-import { buildContext, parse } from './context.js';
+import { CliError, EXIT, Output, failAndExit } from './output.js';
+import { closestMatch, commandLabel, sniffOutputFormat } from './context.js';
 import { cmdModels } from './commands/models.js';
 import { cmdRun } from './commands/run.js';
 import { cmdDocs, cmdInit, cmdSkill } from './commands/knowledge.js';
@@ -99,13 +99,18 @@ OPÇÕES GLOBAIS
 
 PARA AGENTES
   Toda saída estruturada vai para o STDOUT; progresso e avisos vão para o STDERR.
+  Erro sob --json/ndjson: {ok:false, command, error:{code, kind, message, hint,
+  details}} no STDOUT (em ndjson, a última linha: type "result"). Decida pelo
+  error.kind; error.hint traz o próximo comando.
   Nunca chute um think level: \`models show <id> --json\` diz exatamente quais
   níveis o modelo aceita e o que vai no fio para cada um pedido.
   Comece por: prompt-builder docs quickstart
 
-CÓDIGOS DE SAÍDA
-  0 ok · 2 uso inválido · 3 config inválida · 4 auth · 5 sem crédito
-  7 parcial (orçamento esgotado) · 8 rede · 130 interrompido
+CÓDIGOS DE SAÍDA (error.kind entre parênteses)
+  0 ok · 1 falha inesperada (internal) · 2 uso inválido (usage)
+  3 config inválida (config) · 4 auth (auth) · 5 sem crédito (credit)
+  6 run inconclusiva (inconclusive) · 7 parcial, orçamento esgotado (control)
+  8 rede (network) · 9 espera esgotada (timeout) · 130 interrompido (control)
 `;
 
 /**
@@ -121,6 +126,29 @@ function emitClaudeHint(): void {
     );
   }
 }
+
+/** Comandos do `dispatch` — base do "você quis dizer" (mantenha em par com o switch). */
+const COMMANDS = [
+  'docs',
+  'skill',
+  'init',
+  'models',
+  'estimate',
+  'key',
+  'compare',
+  'vary',
+  'train',
+  'runs',
+  'sessions',
+  'library',
+  'techniques',
+  'lgpd',
+  'config',
+  'registry',
+  'doctor',
+  'mcp',
+  'agents',
+] as const;
 
 async function dispatch(cmd: string | undefined, argv: string[]): Promise<number> {
   switch (cmd) {
@@ -162,48 +190,62 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdMcp(argv);
     case 'agents':
       return cmdAgents(argv);
-    default:
+    default: {
+      const sugestao = cmd ? closestMatch(cmd, COMMANDS) : undefined;
       throw new CliError(
-        `Comando desconhecido: "${cmd}". Veja \`prompt-builder --help\`.`,
+        `Comando desconhecido: "${cmd}".`,
         EXIT.USAGE,
+        { command: cmd ?? null, suggestion: sugestao ?? null, commands: COMMANDS },
+        {
+          code: 'usage.unknown_command',
+          hint:
+            (sugestao ? `Você quis dizer \`prompt-builder ${sugestao}\`? ` : '') +
+            'A lista de comandos está em `prompt-builder --help` (e em details.commands).',
+        },
       );
+    }
   }
 }
 
 async function main(): Promise<void> {
-  // Gateway de LLM a partir do ambiente (OPENROUTER_*), antes de qualquer
-  // comando tocar a rede — o gateway em si nao le o processo (IMPL-021).
-  configureGatewayFromEnv();
   const argv = process.argv.slice(2);
   const cmd = argv[0] && !argv[0].startsWith('-') ? argv[0] : undefined;
   const rest = cmd ? argv.slice(1) : argv;
 
-  // `--version` ANTES do help: sem comando, `!cmd` e verdadeiro e um
-  // `prompt-builder --version` cairia no help.
-  if (argv.includes('--version')) {
-    process.stdout.write(`${VERSION}\n`);
-    process.exit(EXIT.OK);
-  }
-  if (!cmd || argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write(HELP);
-    emitClaudeHint();
-    process.exit(EXIT.OK);
-  }
+  // IMPL-028: o formato de saida e fixado AQUI, por varredura do argv, ANTES de
+  // qualquer outra coisa. Antes ele so era descoberto depois do parse — e um
+  // erro DE parse (flag desconhecida) caia no texto: sob --json o stdout saia
+  // com 0 bytes e o consumidor-maquina nao via nada (Furo 1, R-12).
+  const out = new Output({ format: sniffOutputFormat(argv) });
+  const label = commandLabel(argv);
+  // Excecao sem dono (callback, rejeicao solta) tambem termina no envelope —
+  // o NDJSON nunca fica sem a linha `result`.
+  process.on('uncaughtException', (err) => failAndExit(out, label, err));
+  process.on('unhandledRejection', (err) => failAndExit(out, label, err));
 
   try {
+    // Gateway de LLM a partir do ambiente (OPENROUTER_*), antes de qualquer
+    // comando tocar a rede — o gateway em si nao le o processo (IMPL-021).
+    // Dentro do try: nem a configuracao escapa do envelope.
+    configureGatewayFromEnv();
+
+    // `--version` ANTES do help: sem comando, `!cmd` e verdadeiro e um
+    // `prompt-builder --version` cairia no help.
+    if (argv.includes('--version')) {
+      process.stdout.write(`${VERSION}\n`);
+      process.exit(EXIT.OK);
+    }
+    if (!cmd || argv.includes('--help') || argv.includes('-h')) {
+      process.stdout.write(HELP);
+      emitClaudeHint();
+      process.exit(EXIT.OK);
+    }
+
     process.exitCode = await dispatch(cmd, rest);
   } catch (err) {
-    // O formato de saida so e conhecido depois do parse; num erro de parse
-    // caimos no texto simples, que e o que um humano e um agente conseguem ler.
-    let out: Output;
-    try {
-      out = buildContext(parse(rest, {})).out;
-    } catch {
-      out = new Output({ format: 'text' });
-    }
-    const cliErr =
-      err instanceof CliError ? err : new CliError((err as Error).message, EXIT.ERROR);
-    out.fail(cmd ?? '?', cliErr);
+    // O UNICO ponto de renderizacao de erro do CLI: qualquer coisa lancada vira
+    // o envelope {ok:false, command, error:{code,kind,message,hint,details}}.
+    const cliErr = out.fail(label, err);
     if (cliErr.code === EXIT.USAGE) emitClaudeHint();
     process.exitCode = cliErr.code;
   }

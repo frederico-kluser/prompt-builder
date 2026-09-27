@@ -14,7 +14,16 @@ import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
 import { sampleSizeWarning } from '../../engine/judgeCalibration.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
-import { buildContext, buildNetworkContext, checkKey, keyFilePath, parse, removeStoredKey, writeStoredKey } from '../context.js';
+import {
+  buildContext,
+  buildNetworkContext,
+  checkKey,
+  keyFilePath,
+  parse,
+  readJsonFile,
+  removeStoredKey,
+  writeStoredKey,
+} from '../context.js';
 import { CliError, EXIT, fmtUsd, renderSpend, type Output } from '../output.js';
 
 // --- key ---------------------------------------------------------------------
@@ -89,7 +98,7 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
     throw new CliError('Uso: prompt-builder estimate --config <arquivo.json>', EXIT.USAGE);
   }
 
-  const json = JSON.parse(await fs.readFile(file, 'utf-8')) as unknown;
+  const json = await readJsonFile(file);
   const formato = (json as Record<string, unknown>)?.format;
   let config;
   if (typeof formato === 'string') {
@@ -545,7 +554,7 @@ export async function cmdConfig(argv: string[]): Promise<number> {
 
   const file = parsed.positionals[0];
   if (!file) throw new CliError('Uso: prompt-builder config validate <arquivo.json>', EXIT.USAGE);
-  const json = JSON.parse(await fs.readFile(file, 'utf-8')) as unknown;
+  const json = await readJsonFile(file);
   const formato = (json as Record<string, unknown>)?.format;
 
   if (typeof formato === 'string') {
@@ -653,9 +662,22 @@ export async function cmdRegistry(argv: string[]): Promise<number> {
       for (const d of report.drifted) out.line(`  ${d.id} — ${d.reason}`);
     }
   }
-  out.result(report.drifted.length === 0, 'registry.validate', { file, report });
   // Drift = config: o registro não descreve mais o fonte de produção (exit 3).
-  return report.drifted.length === 0 ? EXIT.OK : EXIT.CONFIG;
+  // Sai pelo envelope de erro (o relatório vai em `details`), não por um
+  // `result` ok:false sem `error` (IMPL-028).
+  if (report.drifted.length > 0) {
+    throw new CliError(
+      `${report.drifted.length} de ${report.total} prompt(s) com drift em ${file}.`,
+      EXIT.CONFIG,
+      { file, report },
+      {
+        code: 'registry.drift',
+        hint: 'O fonte de produção mudou: reverta o prompt ou atualize o registro; o motivo de cada um está em details.report.drifted.',
+      },
+    );
+  }
+  out.result(true, 'registry.validate', { file, report });
+  return EXIT.OK;
 }
 
 export async function cmdDoctor(argv: string[]): Promise<number> {

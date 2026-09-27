@@ -1,15 +1,35 @@
 # Saída NDJSON
 
 `--output-format ndjson` emite **um objeto JSON por linha**, com flush a cada
-linha. Liga automaticamente quando não há TTY ou quando `CLAUDECODE`/`CI` estão
-definidos — um agente não precisa lembrar da flag.
+linha. Peça sempre explicitamente: sem a flag (ou `--json`) a saída é texto.
 
 Toda linha tem `{ type, ts, seq }`. `seq` é um contador monotônico: os
 barramentos internos não garantem ordem, e quem faz tail precisa de uma.
 Linhas de run trazem `scope: "run"` e `runId`; num treino trazem **também**
 `sessionId`, senão os dois níveis intercalados ficariam ambíguos.
 
-O stream **sempre** abre em `start` e **sempre** termina em `result`.
+As runs abrem em `start`; **todo** stream termina em `result` — inclusive
+quando o comando falha antes de começar (flag inválida, key ausente, pré-voo).
+
+## Erro
+
+Erro é a linha `result` com `ok: false` e o **mesmo** objeto `error` do
+`--json` (mesmos campos, mesma ordem):
+
+```json
+{"type":"result","ts":"…","seq":7,"ok":false,"command":"train",
+ "error":{"code":"control.budget_exceeded","kind":"control",
+          "message":"…","hint":"…","details":{"spentUsd":3,"budgetUsd":3}}}
+```
+
+- `kind` decide o próximo passo: `usage` (corrija a chamada) · `config`
+  (corrija o arquivo) · `auth` (key) · `credit` (saldo) · `network` (tente de
+  novo) · `control` (parou por orçamento/interrupção) · `inconclusive` ·
+  `timeout` · `internal`.
+- `code` é estável (`usage.unknown_flag`, `auth.key_missing`,
+  `config.invalid_json`, …); `hint` traz o comando que resolve.
+- `ok: true` com código de saída `7`/`130` é **resultado parcial**, não erro: o
+  `result` traz `stoppedReason` (`budget` | `cancelled`).
 
 ## Eventos
 
@@ -29,7 +49,7 @@ O stream **sempre** abre em `start` e **sempre** termina em `result`.
 | `run.finished` | run terminou | `status`, `totalCostUsd`, `standings` |
 | `iteration.started` / `iteration.finished` / `iteration.promoted` | treino | `iteration`, `runId`, `gain` |
 | `session.holdout` / `session.converged` / `session.finished` | treino | ver `docs train` |
-| `result` | última linha | `ok`, `status`, `totalCostUsd`, `budgetExhausted`, … |
+| `result` | última linha | `ok`, `status`, `totalCostUsd`, `budgetExhausted`, `stoppedReason`, … — ou `ok:false` + `error` |
 
 ## O que **não** vem no stream
 

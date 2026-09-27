@@ -34,7 +34,7 @@ import {
 import { generateStages } from '../../datagen.js';
 import { generateReferences } from '../../gabarito.js';
 import { BudgetLedger, isControlSignal } from '../../budget.js';
-import { buildContext, buildNetworkContext, isAgentContext, parse } from '../context.js';
+import { buildContext, buildNetworkContext, isAgentContext, parse, readJsonFile } from '../context.js';
 import { CliError, EXIT } from '../output.js';
 
 const HELP = `prompt-builder library — banco persistente de cenários+gabaritos.
@@ -71,18 +71,9 @@ function exigirProfile(values: Record<string, unknown>): string {
   return p.trim();
 }
 
+/** Mesmo leitor do resto do CLI: `usage.file_unreadable` (2) × `config.invalid_json` (3). */
 async function lerArquivoJson(file: string): Promise<unknown> {
-  let texto: string;
-  try {
-    texto = await fs.readFile(file, 'utf-8');
-  } catch {
-    throw new CliError(`Não consegui ler o arquivo: ${file}`, EXIT.USAGE);
-  }
-  try {
-    return JSON.parse(texto);
-  } catch (err) {
-    throw new CliError(`JSON inválido em ${file}: ${(err as Error).message}`, EXIT.CONFIG);
-  }
+  return readJsonFile(file);
 }
 
 export async function cmdLibrary(argv: string[]): Promise<number> {
@@ -192,8 +183,14 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
       const res = await importItems(profileId, cru, { origin });
       out.info(`+${res.added} itens · ${res.updated} atualizados · ${res.errors.length} recusados`);
       for (const e of res.errors) out.warn(e);
-      out.result(res.errors.length === 0, 'library.add', res);
-      return res.errors.length ? EXIT.CONFIG : EXIT.OK;
+      if (res.errors.length) {
+        throw new CliError(`${res.errors.length} item(ns) recusado(s); os válidos já foram gravados.`, EXIT.CONFIG, res, {
+          code: 'library.items_rejected',
+          hint: 'Corrija os itens de details.errors e rode `library add` de novo (o que passou não duplica).',
+        });
+      }
+      out.result(true, 'library.add', res);
+      return EXIT.OK;
     }
 
     case 'seed': {
@@ -220,12 +217,19 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
         for (const e of errors) out.warn(e);
         const res = await seedItems(profileId, itens);
         out.info(`seed: +${res.added} novos · ${res.skipped} já existentes (pulados) · ${errors.length} recusados`);
-        out.result(errors.length === 0, 'library.seed', {
-          added: res.added,
-          skipped: res.skipped,
-          errors,
-        });
-        return errors.length ? EXIT.CONFIG : EXIT.OK;
+        if (errors.length) {
+          throw new CliError(
+            `${errors.length} item(ns) recusado(s); os válidos já foram gravados.`,
+            EXIT.CONFIG,
+            { added: res.added, skipped: res.skipped, errors },
+            {
+              code: 'library.items_rejected',
+              hint: 'Corrija os itens de details.errors e rode `library seed` de novo (seed é idempotente).',
+            },
+          );
+        }
+        out.result(true, 'library.seed', { added: res.added, skipped: res.skipped, errors });
+        return EXIT.OK;
       }
       // Caminho 2: geração IA (datagen com regras do perfil + gabarito por item).
       const count = Number(parsed.values.generate ?? 0);
@@ -304,10 +308,10 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
         });
         return EXIT.OK;
       } catch (err) {
+        // Sinal de controle sobe CRU: o envelope (toCliError) o mapeia para
+        // kind 'control' com exit 7 (orçamento) ou 130 (cancelado).
         if (isControlSignal(err)) {
           out.warn('interrompido por orçamento/cancelamento — o que foi gerado já está salvo');
-          out.result(false, 'library.seed', { error: 'orcamento/cancelado' });
-          return err.benchControl === 'budget' ? EXIT.BUDGET : EXIT.SIGINT;
         }
         throw err;
       }
@@ -327,11 +331,19 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
           out.line(`ok: ${itens.length} itens, todos com gabarito (reference ou expected)`);
         }
       }
-      out.result(semGabarito.length === 0, 'library.verify', {
-        total: itens.length,
-        withoutGabarito: semGabarito.map((i) => i.id),
-      });
-      return semGabarito.length ? EXIT.CONFIG : EXIT.OK;
+      if (semGabarito.length) {
+        throw new CliError(
+          `${semGabarito.length} de ${itens.length} item(ns) sem gabarito (recusados no evolve).`,
+          EXIT.CONFIG,
+          { total: itens.length, withoutGabarito: semGabarito.map((i) => i.id) },
+          {
+            code: 'library.missing_gabarito',
+            hint: 'Adicione `reference` (texto) ou `expected` (rótulo) a cada item de details.withoutGabarito e rode `library verify` de novo.',
+          },
+        );
+      }
+      out.result(true, 'library.verify', { total: itens.length, withoutGabarito: [] });
+      return EXIT.OK;
     }
 
     case 'coverage': {

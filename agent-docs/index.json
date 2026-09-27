@@ -3,7 +3,7 @@
     "topic": "quickstart",
     "title": "Começo rápido",
     "summary": "o caminho de 6 passos e as 5 regras que evitam erro. COMECE AQUI.",
-    "approxTokens": 700
+    "approxTokens": 750
   },
   {
     "topic": "overview",
@@ -44,8 +44,8 @@
   {
     "topic": "ndjson",
     "title": "Saída NDJSON",
-    "summary": "tabela completa de eventos e o que deliberadamente não vem no stream",
-    "approxTokens": 700
+    "summary": "tabela completa de eventos, o envelope de erro (kind/code/hint) e o que não vem no stream",
+    "approxTokens": 950
   },
   {
     "topic": "results",
@@ -57,7 +57,7 @@
     "topic": "troubleshooting",
     "title": "Problemas comuns",
     "summary": "400 no esforço, 402 sem crédito, tudo 'parcial', run travada",
-    "approxTokens": 650
+    "approxTokens": 700
   },
   {
     "topic": "config",
