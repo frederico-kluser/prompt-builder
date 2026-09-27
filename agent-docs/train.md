@@ -106,9 +106,12 @@ numérico, como `"42"`, aceita `["42"]`); sem isso a config é recusada com exit
 3. O casamento é **estrito**: só resolve JSON inequívoco, a primeira linha
 (`"edit"`, `"Intent: edit"`, `"Edit. Porque…"`) ou a resposta exata. Rótulo no
 meio da prosa vale no máximo `parcial`; negação ("não é edit", "Edit: não"),
-hesitação ("talvez edit", "edit?", "edit\nmas pode ser help") ou vários rótulos
-("edit ou help", "edit; na verdade help") dão `nao`. Peça no prompt: "responda
-com o rótulo na primeira linha".
+hesitação ("talvez edit", "edit?", "edit. Talvez.", "edit\nmas pode ser help")
+ou vários rótulos ("edit ou help", "edit; na verdade help", "edit (50%) / help
+(50%)") dão `nao`. Explicação que cita outro rótulo sem negá-lo nem descartá-lo
+("o início parece help") cai para `parcial`; contraste firme ("pode parecer
+help, mas é edit") não rebaixa. Peça no prompt: "responda com o rótulo na
+primeira linha".
 
 ## Evolução segura (arena-config)
 

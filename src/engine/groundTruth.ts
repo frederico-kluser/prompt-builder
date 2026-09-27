@@ -22,18 +22,42 @@
 //   2. Primeira linha — a 1ª linha não-vazia (pulando UM cabeçalho sem
 //      rótulo: "## Resultado", "Sentimento:") É o rótulo (tolerando prefixo
 //      curto tipo "Sentimento:"), ou o rótulo abre a linha seguido de
-//      separador ("Negativo. O cliente…") — regra 'lead', com guardas: nega/
-//      duvida logo depois ("Urgente: não"), abre alternativa ("(ou neutro)"),
-//      se autocorrige ("na verdade neutro") ou soma outro rótulo ("mas também
-//      não") → desqualifica. As linhas seguintes não podem hesitar/somar/
-//      reafirmar outro rótulo ("mas pode ser neutro", "Também positivo.").
+//      separador ("Negativo. O cliente…") — regra 'lead'. Pergunta ("Urgente?",
+//      "Negativo?!", "¿…") nunca resolve.
 //   3. Igualdade normalizada da resposta inteira (e tag BCP-47). Numa resposta
 //      de UMA linha os passos 2 e 3 coincidem — o código testa a igualdade
-//      primeiro só porque ela dispensa as guardas das linhas seguintes.
+//      primeiro só porque ela dispensa as guardas do resto.
 //   4. Extração FLEXÍVEL (standalone/substring): teto 'parcial', NUNCA
 //      'resolve'. Negação ou hesitação sobre o rótulo → 'nao'; resposta que
 //      afirma vários rótulos do `labelSet` → 'nao'. Pergunta rejeitada
 //      ("Neutro? Não, há raiva.") conta como negação, não como afirmação.
+//
+// O RESTO da resposta depois do rótulo casado (o resto da 1ª linha na regra
+// 'lead' e as linhas seguintes) passa pela MESMA checagem (`restConflict`),
+// para a quebra de linha não mudar o veredito. Dois níveis:
+//   - DURO → 'nao': hesita/nega/se retrata ("Não.", "Talvez.", "Só que não.",
+//     "Errado, é neutro", "Wait, neutral"), abre alternativa ("ou neutro"),
+//     traz outro rótulo sozinho ("Opção B: positivo") ou o afirma/soma/
+//     distribui ("É positivo.", "Também positivo", "positivo (50%)").
+//   - BRANDO → 'parcial': QUALQUER outra menção de outro rótulo do labelSet
+//     que a resposta não negou nem descartou ("O início é positivo."). Não há
+//     heurística de "sujeito" para chegar a 'resolve' (revisão 2).
+// Descartar = negar ("não é neutro"), ou contraste/concessão explícitos com
+// oração firme ("parece neutro, mas há ironia"; "embora pareça urgente, é só
+// uma dúvida"; "poderia ser neutro se não houvesse…"). Menção só POSSÍVEL
+// ("pode ser neutro, mas…") exige que o contraste traga o rótulo aceito ou
+// uma negação seca ("…, mas não é"); menção seca ("Positivo, mas…") exige o
+// rótulo aceito. Hesitação na LINHA da resposta (fora dessas menções
+// descartadas) também tira o 'resolve' da regra 'lead' (conservador).
+//
+// No JSON, outro rótulo em QUALQUER campo/profundidade (inclusive listas),
+// confiança baixa ("confidence": 0.1) ou texto livre com conflito DURO
+// ("nota": "na verdade é positivo") → 'nao'; texto livre com menção branda é
+// explicação e não rebaixa (o campo de rótulo é a resposta estruturada).
+//
+// Sem `labelSet` (records/sessões/itens anteriores à regra, que não passam
+// pelo schema) a regra 'lead' não resolve e linha curta depois do rótulo
+// rebaixa para 'parcial' — não há como distinguir explicação de lista.
 //
 // Incerteza só conta quando é DO MODELO: trecho entre aspas (citação do
 // cliente) não desliga a primeira linha.
@@ -44,8 +68,9 @@
 // pelos schemas de config (erro de config / exit 3 no CLI). Sem ele o
 // verificador não enxerga "positivo | negativo | neutro" como lista.
 //
-// Risco aceito (R-03b): resposta correta escrita só em prosa cai para
-// 'parcial' — dito explicitamente na explicação, nunca silenciado.
+// Risco aceito (R-03b): resposta correta escrita só em prosa — ou cuja
+// explicação cita outro rótulo sem negá-lo/descartá-lo — cai para 'parcial',
+// dito explicitamente na explicação, nunca silenciado nem zerado.
 //
 // Import type de `../types.js` é seguro para o bundle do navegador: só tipos,
 // zero runtime.
@@ -574,69 +599,159 @@ const WINDOW_AFTER = 3;
 const NEGATION_WORDS = new Set([
   'nao', 'nunca', 'jamais', 'nem', 'sem', 'nenhum', 'nenhuma', 'nada',
   'not', 'never', 'nor', 'none', "isn't", 'isnt', "aren't", 'arent', "wasn't", "doesn't",
-  'doesnt', "don't", 'dont', 'cannot', "can't",
+  'doesnt', "don't", 'dont', 'cannot', "can't", "weren't", 'werent',
 ]);
 const NEGATION_PHRASES = ['longe de', 'em vez de', 'ao inves de', 'em lugar de', 'instead of', 'rather than', 'far from'];
-/** Intensificadores que CONTÊM uma negação mas afirmam ("sem dúvida é urgente"). */
+/**
+ * Intensificadores que CONTÊM uma negação mas afirmam ("sem dúvida é
+ * urgente", "não tenho dúvida"). São removidos antes de procurar negação,
+ * hesitação ou dúvida.
+ */
 const NEGATION_EXCEPTIONS = [
-  'sem sombra de duvida', 'nao ha duvida', 'nao resta duvida', 'sem duvida', 'nao so', 'nao apenas',
-  'nao somente', 'without a doubt', 'without doubt', 'no doubt', 'not only',
+  'sem sombra de duvidas', 'sem sombra de duvida', 'sem nenhuma duvida', 'sem qualquer duvida', 'nao ha duvidas',
+  'nao ha duvida', 'nao resta duvida', 'nao restam duvidas', 'nao tenho duvidas', 'nao tenho duvida',
+  'nenhuma duvida', 'sem duvidas', 'sem duvida', 'fora de duvida', 'nao so', 'nao apenas', 'nao somente',
+  'without a doubt', 'without any doubt', 'without doubt', 'no doubts', 'no doubt', 'not only',
 ];
+/**
+ * Depois destas palavras o rótulo-partícula ("não") continua sendo RÓTULO ("a
+ * resposta é não porque…"); fim de oração também. Qualquer outra palavra o
+ * torna operador da prosa ("não há", "não expirou").
+ */
+const PARTICLE_STILL_LABEL = new Set(['porque', 'pois', 'ou', 'or', 'because', 'since']);
 /** Negação logo DEPOIS do rótulo ("urgente não, só importante"). */
 const POST_NEGATION = new Set(['nao', 'not']);
 
-/** Hesitação (forma sem acento). "diria" fica de FORA: "eu diria negativo" é prosa firme (vale 'parcial'). */
+/**
+ * Hesitação (forma sem acento). "diria" fica de FORA: "eu diria negativo" é
+ * prosa firme (vale 'parcial'). "dúvida" também: em PT é "pergunta" ("é só
+ * uma dúvida de uso") — a dúvida DO MODELO vem por `UNCERTAINTY` ("estou em
+ * dúvida", "mas com dúvidas") e por `onlyDoubt` ("Com dúvidas.").
+ */
 const HEDGE_WORDS = new Set([
   'talvez', 'possivelmente', 'provavelmente', 'aparentemente', 'supostamente', 'acho', 'acredito',
   'creio', 'suponho', 'parece', 'pareca', 'parecer', 'incerto', 'incerta', 'depende', 'duvidoso',
   'possivel', 'provavel', 'palpite', 'chute', 'chuto', 'chutaria', 'chutando', 'palpitaria',
+  'imagino', 'presumo', 'presumivelmente', 'desconfio', 'arriscaria',
   'maybe', 'perhaps', 'probably', 'possibly', 'likely', 'unlikely', 'apparently', 'seemingly',
   'guess', 'guessing', 'unsure', 'uncertain', 'depends', 'might', 'either', 'possible', 'probable',
+  'suppose', 'presumably', 'reckon', 'doubt', 'doubtful',
 ]);
 const HEDGE_PHRASES = [
-  'pode ser', 'poderia ser', 'pode estar', 'poderia estar', 'tende a', 'nao tenho certeza',
-  'sem certeza', 'nao sei se', 'could be', 'may be', 'might be', 'i think', 'not sure',
+  'pode ser', 'poderia ser', 'pode estar', 'poderia estar', 'possa ser', 'possa estar', 'tende a',
+  'nao tenho certeza', 'sem certeza', 'nao sei se', 'em termos', 'de certa forma', 'de certo modo',
+  'mais ou menos', 'a principio', 'could be', 'may be', 'might be', 'i think', 'not sure', 'sort of',
+  'kind of', 'more or less', 'in a way',
 ];
 /** Hesitação FORTE (até 2 palavras antes): vale até em linhas depois de uma resposta firme. */
 const STRONG_HEDGE = new Set(['talvez', 'maybe', 'perhaps', 'possivelmente', 'possibly', 'provavelmente', 'probably']);
 /** Alternativa colada ao rótulo ("negativo ou neutro") = hesitação entre rótulos. "ou seja" é explicação. */
 const ALTERNATIVE_WORDS = new Set(['ou', 'or']);
-/** Incerteza declarada pelo modelo (fora de citação): nenhuma regra estrita resolve. */
-const GLOBAL_UNCERTAINTY = [
-  'nao tenho certeza', 'nao tenho como saber', 'sem certeza', 'dificil dizer', 'dificil saber',
-  'impossivel saber', 'impossivel determinar', 'nao da para saber', 'nao e possivel determinar',
-  'not sure', 'hard to say', "can't tell", 'cannot tell', 'cannot determine', "can't determine",
+/**
+ * Incerteza declarada pelo modelo (fora de citação): nenhuma regra estrita
+ * resolve. Casam sobre as palavras da resposta unidas por espaço (sem
+ * pontuação: "confiança: baixa" ≡ "confianca baixa"; "100%" vira "100").
+ */
+const UNCERTAINTY: readonly RegExp[] = [
+  /\bnao (?:tenho|temos|ha|estou com)(?: (?:muita|total|absoluta|plena|tanta|toda|a|100|cem|por|cento|de))* certeza\b/,
+  /\bsem(?: (?:muita|total|absoluta|plena|tanta|toda|a|100|cem|por|cento|de))* certeza\b/,
+  /\b(?:pouca|baixa) (?:certeza|confianca)\b/,
+  /\b(?:certeza|confianca) (?:e )?baixa\b/,
+  /\bnao (?:estou|to) (?:certo|certa|seguro|segura|convicto|convicta)\b/,
+  /\bnao sei (?:ao certo|dizer|bem)\b/,
+  /\bnao (?:faco|tenho) (?:a menor |nenhuma )?ideia\b/,
+  /\bnao tenho como (?:saber|afirmar|dizer|determinar)\b/,
+  /\b(?:dificil|impossivel) (?:de )?(?:dizer|saber|afirmar|determinar|precisar|cravar)\b/,
+  /\bnao (?:da|e possivel) (?:para |pra )?(?:saber|determinar|dizer|afirmar)\b/,
+  /\b(?:estou|esteja|fico|fiquei|estava|estando|to) em duvida\b/,
+  /(?<!\bnao )(?<!\bnenhuma )\btenho (?:minhas |algumas |certas |uma |alguma )?duvidas?\b/,
+  /\bna duvida\b/,
+  /\bmas com (?:alguma |algumas |certa |muitas? )?duvidas?\b/,
+  /\bse nao me engano\b/,
+  /\bsalvo engano\b/,
+  /\bposso estar (?:errado|errada|enganado|enganada)\b/,
+  /\bnot(?: (?:entirely|completely|totally|quite|really|fully|100|percent|so|very|that|too))* (?:sure|certain)\b/,
+  /\bhard to (?:say|tell)\b/,
+  /\b(?:can't|cannot|cant) (?:tell|determine|say for sure)\b/,
+  /\bi (?:could|might|may) be wrong\b/,
+  /\b(?:if|unless) i'?m not mistaken\b/,
+  /\bunless i'?m mistaken\b/,
+  /\bi (?:don'?t|do not) know\b/,
+  /\bno idea\b/,
+  /\blow confidence\b/,
+  // Dupla negação que hesita: "não descarto positivo", "can't rule out neutral".
+  /\bnao (?:descarto|descartaria|descartamos|excluo|excluiria|posso descartar|da para descartar)\b/,
+  /\b(?:can't|cannot|cant|not|wouldn't|won't) rule out\b/,
+  /\bconfidence (?:is )?low\b/,
 ];
 /** Autocorreção: o que vem depois substitui o que veio antes ("negativo; na verdade neutro"). */
 const CORRECTION_PHRASES = [
-  'na verdade', 'ou melhor', 'quer dizer', 'melhor dizendo', 'pensando bem', 'alias', 'digo', 'correcao',
+  'na verdade', 'ou melhor', 'quer dizer', 'melhor dizendo', 'pensando bem', 'pensando melhor', 'alias', 'digo',
+  'correcao', 'corrigindo', 'retificando', 'reformulando',
   'actually', 'or rather', 'i mean', 'on second thought', 'correction',
+];
+/**
+ * Retratação: a resposta desdiz o que veio antes ("Errado, é neutro",
+ * "mentira, normal", "Wait, neutral", "Só que não").
+ */
+const RETRACTION_WORDS = new Set([
+  'errado', 'errada', 'errei', 'incorreto', 'incorreta', 'mentira', 'brincadeira', 'brincadeirinha', 'corrigindo',
+  'corrijo', 'retifico', 'retificando', 'espera', 'pera', 'ops', 'wrong', 'incorrect', 'kidding', 'oops', 'wait',
+]);
+const RETRACTION_PHRASES = [
+  'so que nao', 'me enganei', 'erro meu', 'retiro o que disse', 'just kidding', 'scratch that', 'my bad',
+];
+/**
+ * Retratação que vale no COMEÇO de uma frase mesmo sem outro rótulo
+ * ("Negativo. Mentira, …"). "Errado"/"Wait"/"Espera" ficam de fora: começam
+ * frase comum ("Wait times were long.") — sem rótulo, só contam sozinhas.
+ */
+const SENTENCE_RETRACTION = new Set([
+  'errei', 'mentira', 'brincadeira', 'brincadeirinha', 'corrigindo', 'corrijo', 'retifico', 'retificando', 'ops',
+  'oops', 'kidding',
+]);
+/** Conectivos que podem abrir a frase antes da retratação ("Mas mentira…"). */
+const LEADING_CONNECTIVES = new Set(['mas', 'e', 'entao', 'ok', 'ah', 'oh', 'but', 'and', 'so']);
+/** Frases de dúvida (negação + "saber/certeza"): "Não sei.", "Not sure." — dúvida, não negação. */
+const DOUBT_PHRASES = [
+  'nao sei', 'nao sabemos', "don't know", 'dont know', 'do not know', 'no idea', 'not sure', 'nao faco ideia',
+  'sem certeza', 'nao tenho certeza',
 ];
 /** Adição de rótulo: "também positivo", "neutro também". */
 const ADDITION_WORDS = new Set(['tambem', 'also', 'too']);
 /** Condicional: "poderia ser neutro se…" é contrafactual (explicação), não hesitação sobre a resposta. */
 const CONDITIONAL_WORDS = new Set(['se', 'caso', 'if', 'unless']);
 /** Rejeição logo depois de uma pergunta ("Neutro? Não, há raiva."): o rótulo perguntado fica NEGADO. */
-const REJECTION_WORDS = new Set(['nao', 'not', 'nope', 'nunca', 'jamais', 'nem', 'never', 'no']);
+const REJECTION_WORDS = new Set(['nao', 'not', 'nope', 'nunca', 'jamais', 'nem', 'never', 'no', 'nah']);
 /** "Não sei", "not sure": depois de '?' isso é dúvida, não rejeição. */
 const DOUBT_AFTER_NEGATION = new Set(['sei', 'sabemos', 'tenho', 'da', 'sure', 'know', 'certain', 'idea', 'ideia']);
+/** "Dúvida" só marca dúvida DO MODELO com contexto ("com dúvidas", "em dúvida", "tenho dúvida"). */
+const DOUBT_NOUNS = new Set(['duvida', 'duvidas', 'doubts', 'incerteza', 'uncertainty']);
+const DOUBT_NOUN_CONTEXT = new Set(['com', 'em', 'tenho', 'alguma', 'algumas', 'certa', 'minhas', 'some', 'with', 'in']);
 /**
  * Palavras que acompanham uma negação/hesitação SEM trazer conteúdo: uma
  * oração feita só delas ("Não.", "Ou não.", "Não sei.", "Not really.",
- * "Nem um pouco.", "Não se aplica.") é só dúvida/negação.
+ * "Nem um pouco.", "Não se aplica.", "Só que não.", "Acho que sim.") é só
+ * dúvida/negação.
  */
 const DOUBT_FILLER = new Set([
   'sei', 'sabemos', 'tenho', 'certeza', 'ideia', 'sure', 'know', 'certain', 'idea', 'really', 'mesmo', 'de', 'jeito',
   'modo', 'way', 'at', 'all', 'um', 'pouco', 'bem', 'tanto', 'exatamente', 'necessariamente', 'ou', 'or', 'e', 'eh',
   'and', 'mas', 'but', 'i', 'eu', 'se', 'aplica', 'caso', 'isso', 'is', 'it', 'this', 'exactly', 'necessarily',
   'quite', 'so', 'applicable', 'nope', 'nah', 'no',
+  // revisão 2: "só que não", "talvez seja isso", "porém incerto", "pelo menos eu acho", "mas com dúvidas"
+  'que', 'seja', 'assim', 'porem', 'contudo', 'entretanto', 'todavia', 'embora', 'though', 'although', 'however',
+  'yet', 'pelo', 'menos', 'com', 'em', 'in', 'with', 'some', 'alguma', 'algumas', 'certa', 'minhas', 'estou',
+  'esteja', 'fico', 'that', "that's", 'thats', "i'm", 'im', 'am', 'think', 'sim', 'yes',
+  // revisão 3: artigos não trazem conteúdo ("É o que parece.", "Not the case.")
+  'o', 'a', 'the',
 ]);
 /**
  * Palavras que NÃO formam sujeito: conectivos, cópulas, artigos/pronomes,
  * intensificadores e os nomes da própria resposta ("a resposta é", "o
- * sentimento é"). Uma menção de OUTRO rótulo cuja oração só tem delas antes
- * ("mas pode ser neutro", "também positivo", "o sentimento é positivo") é
- * sobre A RESPOSTA; com sujeito ("o início é positivo") é explicação.
+ * sentimento é"). Decidem só entre 'nao' (menção sem sujeito que hesita/soma/
+ * se afirma: "mas pode ser neutro", "também positivo") e 'parcial' (menção com
+ * sujeito: "o início é positivo") — nunca levam a 'resolve'.
  */
 const NEUTRAL_WORDS = new Set([
   'e', 'mas', 'porem', 'contudo', 'entretanto', 'todavia', 'no', 'entanto', 'ou', 'so', 'que', 'entao', 'logo',
@@ -651,6 +766,25 @@ const NEUTRAL_WORDS = new Set([
   'clearly', 'definitely',
   ...HEDGE_WORDS,
   ...HEDGE_PHRASES.flatMap((p) => p.split(' ')),
+]);
+/** Contraste que descarta a menção anterior ("parece neutro, MAS há ironia"). */
+const CONTRAST_WORDS = new Set(['mas', 'porem', 'contudo', 'entretanto', 'todavia', 'entanto', 'but', 'however', 'yet']);
+/** Concessão que subordina a menção ("EMBORA pareça urgente, é só uma dúvida"). */
+const CONCESSIVE_WORDS = new Set(['embora', 'apesar', 'conquanto', 'although', 'though', 'despite']);
+const CONCESSIVE_PHRASES = ['ainda que', 'mesmo que', 'se bem que', 'even if', 'even though'];
+/** Aparência (não possibilidade): "parece neutro", "pode soar positivo", "looks neutral". */
+const APPEARANCE_WORDS = new Set([
+  'parece', 'pareca', 'parecer', 'parecem', 'pareceu', 'pareceria', 'soa', 'soar', 'soe', 'soou', 'aparenta',
+  'aparentar', 'aparente', 'aparentemente', 'seem', 'seems', 'seemed', 'look', 'looks', 'looked', 'sound', 'sounds',
+  'appear', 'appears',
+]);
+const APPEARANCE_PHRASES = ['a primeira vista', 'a primeira leitura', 'at first glance', 'at first sight'];
+/** Contrafactual: verbo no condicional + "se" + negação/subjuntivo passado ("poderia ser neutro se não houvesse…"). */
+const COUNTERFACTUAL_VERBS = new Set(['poderia', 'seria', 'estaria', 'ficaria', 'teria', 'would', 'could']);
+const COUNTERFACTUAL_MARKS = new Set(['fosse', 'houvesse', 'tivesse', 'estivesse', 'were', 'had']);
+/** Oração que só nega a cópula ("mas não é", "but it isn't", "mas não é o caso"). */
+const BARE_NEGATION = new Set([
+  'nao', 'e', 'eh', 'esta', 'o', 'caso', 'isso', 'is', "isn't", 'isnt', 'not', 'it', "it's", 'its', 'the', 'case',
 ]);
 
 /** Fronteira de oração dentro da linha (a janela de negação/hesitação não atravessa). */
@@ -711,21 +845,35 @@ function containsPhrase(words: readonly string[], phrases: readonly string[]): b
   return phrases.some((p) => joined.includes(` ${p} `));
 }
 
-function hasNegation(words: string[]): boolean {
+/** Remove os intensificadores que contêm negação ("sem dúvida", "não só") antes das checagens. */
+function stripExceptions(words: readonly string[]): string[] {
   let joined = ` ${words.join(' ')} `;
   for (const ex of NEGATION_EXCEPTIONS) joined = joined.split(` ${ex} `).join(' ');
-  const limpas = joined.trim().split(' ').filter((w) => w !== '');
+  return joined.trim().split(' ').filter((w) => w !== '');
+}
+
+function hasNegation(words: readonly string[]): boolean {
+  const limpas = stripExceptions(words);
   return limpas.some((w) => NEGATION_WORDS.has(w)) || containsPhrase(limpas, NEGATION_PHRASES);
 }
 
 function hasHedge(words: readonly string[]): boolean {
-  return words.some((w) => HEDGE_WORDS.has(w)) || containsPhrase(words, HEDGE_PHRASES);
+  const limpas = stripExceptions(words);
+  return limpas.some((w) => HEDGE_WORDS.has(w)) || containsPhrase(limpas, HEDGE_PHRASES);
+}
+
+function hasRetraction(words: readonly string[]): boolean {
+  return words.some((w) => RETRACTION_WORDS.has(w)) || containsPhrase(words, RETRACTION_PHRASES);
+}
+
+function hasUncertainty(words: readonly string[]): boolean {
+  const joined = words.join(' ');
+  return UNCERTAINTY.some((re) => re.test(joined));
 }
 
 /** Incerteza declarada PELO MODELO: frases entre aspas (citação) não contam. */
 function hasGlobalUncertainty(foldedText: string): boolean {
-  const semAspas = stripQuoted(foldedText);
-  return GLOBAL_UNCERTAINTY.some((p) => semAspas.includes(p));
+  return hasUncertainty(wordsOf(stripQuoted(foldedText)));
 }
 
 /** A oração começa com negação ("não…", "em vez de…"), fora os intensificadores ("sem dúvida", "não só"). */
@@ -736,15 +884,66 @@ function startsWithNegation(words: readonly string[]): boolean {
   return NEGATION_WORDS.has(words[0]) || NEGATION_PHRASES.some((p) => joined === p || joined.startsWith(`${p} `));
 }
 
-/** A oração é SÓ negação/hesitação ("Não.", "Ou não.", "Talvez.", "Não sei.", "Not really."). */
+/**
+ * A oração é SÓ negação/hesitação/retratação ("Não.", "Ou não.", "Talvez.",
+ * "Não sei.", "Not really.", "I think.", "Só que não.", "Mentira.", "Com
+ * dúvidas."). Frases de hesitação/dúvida contam inteiras como marcador.
+ */
 function onlyDoubt(words: readonly string[]): boolean {
-  if (words.length === 0) return false;
+  let joined = ` ${stripExceptions(words).join(' ')} `;
   let marcador = false;
-  for (const w of words) {
-    if (NEGATION_WORDS.has(w) || HEDGE_WORDS.has(w) || w === 'no' || w === 'nope' || w === 'nah') marcador = true;
-    else if (!DOUBT_FILLER.has(w)) return false;
+  for (const p of [...HEDGE_PHRASES, ...RETRACTION_PHRASES, ...DOUBT_PHRASES]) {
+    if (joined.includes(` ${p} `)) {
+      marcador = true;
+      joined = joined.split(` ${p} `).join(' ');
+    }
+  }
+  const resto = joined.trim().split(' ').filter((w) => w !== '');
+  if (resto.length === 0) return marcador;
+  const contexto = resto.some((w) => DOUBT_NOUN_CONTEXT.has(w));
+  for (const w of resto) {
+    if (
+      NEGATION_WORDS.has(w) ||
+      HEDGE_WORDS.has(w) ||
+      REJECTION_WORDS.has(w) ||
+      RETRACTION_WORDS.has(w) ||
+      (contexto && DOUBT_NOUNS.has(w))
+    ) {
+      marcador = true;
+    } else if (!DOUBT_FILLER.has(w)) {
+      return false;
+    }
   }
   return marcador;
+}
+
+/** Regra do veredito de uma oração de dúvida: negação seca ("Não.") → 'negated'; o resto → 'hedged'. */
+function doubtRule(words: readonly string[]): 'negated' | 'hedged' {
+  const seca =
+    startsWithNegation(words) &&
+    !hasHedge(words) &&
+    !hasRetraction(words) &&
+    !containsPhrase(words, DOUBT_PHRASES) &&
+    !words.some((w) => DOUBT_AFTER_NEGATION.has(w));
+  return seca ? 'negated' : 'hedged';
+}
+
+/** A frase abre com retratação ("Mentira, …", "Corrigindo: …", "Só que não", "Scratch that"). */
+function startsWithRetraction(words: readonly string[]): boolean {
+  let i = 0;
+  while (i < words.length - 1 && LEADING_CONNECTIVES.has(words[i])) i += 1;
+  const resto = words.slice(i);
+  if (resto.length === 0) return false;
+  if (SENTENCE_RETRACTION.has(resto[0])) return true;
+  const joined = `${resto.join(' ')} `;
+  return RETRACTION_PHRASES.some((p) => joined.startsWith(`${p} `));
+}
+
+/** Oração FIRME: não vazia, sem hesitação, incerteza, dúvida nem retratação. Negação seca é firme ("mas não é"). */
+function firmClause(words: readonly string[]): boolean {
+  if (words.length === 0) return false;
+  if (hasHedge(words) || hasRetraction(words) || containsPhrase(words, DOUBT_PHRASES)) return false;
+  return !hasUncertainty(words);
 }
 
 interface Mention {
@@ -757,6 +956,11 @@ interface Mention {
   hedged: boolean;
   /** Hesitação forte/alternativa/pergunta — vale até fora da primeira linha. */
   strongHedge: boolean;
+  /**
+   * A própria resposta DESCARTA a menção por contraste/concessão/contrafactual
+   * firme ("parece neutro, mas há ironia") — equivale a negá-la.
+   */
+  dismissed: boolean;
 }
 
 function clauseBounds(line: string, start: number, end: number): [number, number] {
@@ -810,17 +1014,77 @@ function doubtAcross(line: string, end: number, labels: readonly string[]): { ne
   const [, fim] = clauseBounds(line, inicio, inicio);
   const w = wordsOf(line.slice(inicio, fim));
   if (!onlyDoubt(w) || mentionsAnyLabel(w, labels)) return nada;
-  return startsWithNegation(w) ? { negated: true, hedged: false } : { negated: false, hedged: hasHedge(w) };
+  return doubtRule(w) === 'negated' ? { negated: true, hedged: false } : { negated: false, hedged: true };
 }
 
 /**
- * Menções standalone dos rótulos numa linha já `foldLine`-ada, com negação e
- * hesitação resolvidas na janela da oração. Menção contida numa menção maior
- * ("urgente" dentro de "nao urgente") é descartada: vale o rótulo mais longo.
- * Rótulo que também é partícula de negação ("não" em sim/não) seguido de outro
- * rótulo na mesma oração é OPERADOR ("não é sim"), não menção.
+ * A resposta DESCARTA a menção (equivale a negá-la)? Três formas, todas com
+ * uma oração FIRME que decide:
+ *   (a) contraste depois, na mesma frase: "parece neutro, MAS há ironia";
+ *       "o início é positivo, mas o fim reclama";
+ *   (b) concessão: "EMBORA pareça urgente, é só uma dúvida";
+ *   (c) contrafactual: "poderia ser neutro SE não houvesse a ameaça".
+ * Menção só POSSÍVEL ("pode ser neutro, mas…", sem verbo de aparência) exige
+ * que a oração decisiva traga o rótulo aceito ou só negue a cópula ("…, mas
+ * não é"); menção SECA, sem sujeito nem aparência ("Positivo, mas…"), exige o
+ * rótulo aceito. Assim "Pode ser positivo, mas a decisão é sua" não descarta.
  */
-function scanLine(line: string, labels: readonly string[]): Mention[] {
+function isDismissed(
+  line: string,
+  start: number,
+  end: number,
+  hedged: boolean,
+  acceptable: ReadonlySet<string>,
+): boolean {
+  const [fa, fb] = sentenceBounds(line, start, end);
+  const antesFrase = wordsOf(line.slice(fa, start));
+  const [a] = clauseBounds(line, start, end);
+  const antesOracao = wordsOf(line.slice(a, start));
+  const depoisTxt = line.slice(end, fb);
+  const depois = wordsOf(depoisTxt);
+  const aparencia = antesFrase.some((w) => APPEARANCE_WORDS.has(w)) || containsPhrase(antesFrase, APPEARANCE_PHRASES);
+  const possivel = hedged && !aparencia;
+  const sujeito = !antesOracao.every((w) => NEUTRAL_WORDS.has(w));
+  const trazAceito = (w: readonly string[]): boolean => [...acceptable].some((l) => hasStandalone(w.join(' '), l));
+  const soNega = (w: readonly string[]): boolean => hasNegation(w) && w.every((x) => BARE_NEGATION.has(x));
+
+  // (a) contraste depois, na mesma frase.
+  const i = depois.findIndex((w) => CONTRAST_WORDS.has(w));
+  if (i !== -1) {
+    const oracao = depois.slice(i + 1);
+    if (firmClause(oracao)) {
+      if (possivel) {
+        if (trazAceito(oracao) || soNega(oracao)) return true;
+      } else if (aparencia || sujeito || trazAceito(oracao)) {
+        return true;
+      }
+    }
+  }
+  // (b) concessão antes + oração principal firme depois (na mesma frase).
+  if (antesFrase.some((w) => CONCESSIVE_WORDS.has(w)) || containsPhrase(antesFrase, CONCESSIVE_PHRASES)) {
+    const corte = depoisTxt.search(CLAUSE_BOUNDARY);
+    const principal = corte === -1 ? [] : wordsOf(depoisTxt.slice(corte + 1));
+    if (firmClause(principal) && (!possivel || trazAceito(principal) || soNega(principal))) return true;
+  }
+  // (c) contrafactual.
+  const iSe = depois.findIndex((w) => CONDITIONAL_WORDS.has(w));
+  if (iSe !== -1 && antesFrase.some((w) => COUNTERFACTUAL_VERBS.has(w))) {
+    const resto = depois.slice(iSe + 1);
+    if (hasNegation(resto) || resto.some((w) => COUNTERFACTUAL_MARKS.has(w))) return true;
+  }
+  return false;
+}
+
+/**
+ * Menções standalone dos rótulos numa linha já `foldLine`-ada, com negação,
+ * hesitação e descarte resolvidos na janela da oração/frase. Menção contida
+ * numa menção maior ("urgente" dentro de "nao urgente") é descartada: vale o
+ * rótulo mais longo. Rótulo que também é partícula de negação ("não" em
+ * sim/não) seguido de outro rótulo na mesma oração é OPERADOR ("não é sim"),
+ * não menção.
+ */
+function scanLine(line: string, universe: LabelUniverse): Mention[] {
+  const labels = universe.all;
   const brutas: { label: string; start: number; end: number }[] = [];
   for (const label of labels) {
     for (const start of standaloneIndices(line, label)) brutas.push({ label, start, end: start + label.length });
@@ -841,6 +1105,17 @@ function scanLine(line: string, labels: readonly string[]): Mention[] {
     if (NEGATION_WORDS.has(m.label) && mantidas.some((o) => o !== m && o.start >= m.end && o.start < b)) {
       continue; // operador ("não é sim"), não resposta
     }
+    // OUTRO rótulo que é partícula de negação ("não"/"no" num labelSet sim/não)
+    // seguido de palavra na mesma oração é operador da prosa ("o prazo não
+    // expirou", "não há impedimento", "there is no exception"), não menção. O
+    // rótulo ACEITO fica como está (a flexível ainda o enxerga em "Não há direito").
+    if (
+      (rotuloNegacao || m.label === 'no') &&
+      !universe.acceptable.has(m.label) &&
+      !PARTICLE_STILL_LABEL.has(wordsOf(line.slice(m.end, b))[0] ?? 'porque')
+    ) {
+      continue;
+    }
     const before = wordsOf(line.slice(a, m.start)).slice(-WINDOW_BEFORE);
     const after = wordsOf(line.slice(m.end, b)).slice(0, WINDOW_AFTER);
     // "Talvez: negativo" / "Palpite: negativo" — a chave antes do ':' também hesita.
@@ -848,8 +1123,12 @@ function scanLine(line: string, labels: readonly string[]): Mention[] {
       before.length === 0 && a > 0 && line[a - 1] === ':'
         ? wordsOf(line.slice(clauseBounds(line, a - 1, a - 1)[0], a - 1))
         : [];
-    const proximo = line.slice(m.end).trimStart()[0];
-    const rejeitado = proximo === '?' && rejectsQuestion(line, line.indexOf('?', m.end));
+    // "Negativo (?)" e "¿Negativo…" também são pergunta sobre o rótulo.
+    const pergunta =
+      /^[\s([]*\?/.test(line.slice(m.end)) || line.slice(sentenceBounds(line, m.start, m.end)[0], m.start).includes('¿');
+    const proximo = pergunta ? '?' : line.slice(m.end).trimStart()[0];
+    const iPergunta = line.indexOf('?', m.end);
+    const rejeitado = proximo === '?' && iPergunta !== -1 && rejectsQuestion(line, iPergunta);
     const atravessa = rotuloNegacao ? { negated: false, hedged: false } : doubtAcross(line, m.end, labels);
     const negated =
       rejeitado ||
@@ -866,7 +1145,10 @@ function scanLine(line: string, labels: readonly string[]): Mention[] {
         before.slice(-2).some((w) => STRONG_HEDGE.has(w)) ||
         chave.some((w) => STRONG_HEDGE.has(w)));
     const hedged = strongHedge || (!rejeitado && (hasHedge(before) || hasHedge(after) || hasHedge(chave) || atravessa.hedged));
-    out.push({ ...m, negated, hedged, strongHedge });
+    // Alternativa ("ou neutro") e pergunta ("neutro?") nunca são descartadas por contraste.
+    const dismissed =
+      !negated && !alternativa && proximo !== '?' && isDismissed(line, m.start, m.end, hedged, universe.acceptable);
+    out.push({ ...m, negated, hedged, strongHedge, dismissed });
   }
   return out;
 }
@@ -882,6 +1164,12 @@ interface LabelUniverse {
   all: string[];
   /** Palavras que compõem algum rótulo (neutras na checagem de "afirmação solta"). */
   words: Set<string>;
+  /**
+   * Há rótulo CONHECIDO além dos aceitos? false = etapa sem labelSet (config
+   * anterior à regra): o verificador não enxerga lista, então a regra 'lead'
+   * não resolve e linha curta depois do rótulo rebaixa.
+   */
+  hasLabelSet: boolean;
 }
 
 function buildUniverse(alts: readonly string[], labelSet: readonly string[] | undefined): LabelUniverse {
@@ -892,7 +1180,7 @@ function buildUniverse(alts: readonly string[], labelSet: readonly string[] | un
     if (n !== '') all.add(n);
   }
   const words = new Set([...all].flatMap((l) => wordsOf(foldLine(l))));
-  return { acceptable, all: [...all], words };
+  return { acceptable, all: [...all], words, hasLabelSet: all.size > acceptable.size };
 }
 
 /** Marcador de lista no começo da linha ("- x", "* x", "1. x", "a) x"). */
@@ -933,66 +1221,143 @@ function isHeaderLine(raw: string, universe: LabelUniverse): boolean {
   return !universe.all.includes(norm);
 }
 
+// ----------------------------------------------------------------------------
+// Conflito no RESTO da resposta (depois do rótulo casado)
+// ----------------------------------------------------------------------------
+
 /**
- * Uma menção de OUTRO rótulo (não negada) contradiz a resposta firme? Motivo
- * em PT-BR ou null. Contradiz quando: hesita/alterna/pergunta ("ou talvez
- * positivo", "positivo?"); vem depois de autocorreção na mesma frase ("na
- * verdade é positivo"); está numa oração SEM sujeito próprio e hesita ou se
- * soma ("mas pode ser neutro", "também positivo", "neutro também é
- * possível"); ou forma uma frase solta com rótulos ("É positivo.", "Positivo,
- * neutro."). Explicação com sujeito ("o início é positivo", "alguns diriam
- * neutro") ou citação entre parênteses dentro de uma frase NÃO contradiz.
+ * Conflito entre o rótulo casado e o resto da resposta. DURO derruba para
+ * 'nao' (a resposta hesita, nega, se retrata ou afirma outro rótulo); BRANDO
+ * rebaixa para 'parcial' (menciona outro rótulo sem negá-lo/descartá-lo).
  */
-function otherLabelConflict(line: string, m: Mention, universe: LabelUniverse): string | null {
-  if (m.strongHedge) return `hesita entre rótulos ('${m.label}' com "ou"/"talvez"/"?")`;
+interface Conflict {
+  kind: 'hard' | 'soft';
+  rule: 'negated' | 'hedged' | 'multi-label';
+  motivo: string;
+}
+
+function hard(rule: Conflict['rule'], motivo: string): Conflict {
+  return { kind: 'hard', rule, motivo };
+}
+
+function soft(motivo: string): Conflict {
+  return { kind: 'soft', rule: 'multi-label', motivo };
+}
+
+/** Porcentagem na oração do rótulo ou na oração/parêntese logo depois ("positivo (50%)", "Positivo: 50%"). */
+function percentNear(line: string, a: number, b: number): boolean {
+  let c = b + 1;
+  while (c < line.length && !CLAUSE_BOUNDARY.test(line[c])) c += 1;
+  return line.slice(a, Math.min(c, line.length)).includes('%');
+}
+
+/**
+ * Uma menção de OUTRO rótulo contradiz a resposta firme? Negada ou
+ * descartada → null. DURO quando: hesita/alterna/pergunta ("ou talvez
+ * positivo", "positivo?"); vem depois de autocorreção/retratação na mesma
+ * frase ("na verdade é positivo", "Errado, é neutro", "Wait, neutral"); vem
+ * com porcentagem ("positivo (50%)"); ou, numa oração SEM sujeito próprio,
+ * hesita ("mas pode ser neutro"), se soma ("também positivo") ou forma frase
+ * solta com rótulos ("É positivo.", "Positivo, neutro."). Qualquer outra
+ * menção é BRANDA ("o início é positivo"): sem 'resolve', mas também sem zerar.
+ */
+function otherLabelConflict(line: string, m: Mention, universe: LabelUniverse): Conflict | null {
+  if (m.dismissed) return null;
+  if (m.negated) return m.hedged ? soft(`menciona outro rótulo ('${m.label}') sob dúvida ("não sei se…")`) : null;
+  if (m.strongHedge) return hard('hedged', `hesita entre rótulos ('${m.label}' com "ou"/"talvez"/"?")`);
   const [fa, fb] = sentenceBounds(line, m.start, m.end);
-  if (containsPhrase(wordsOf(line.slice(fa, m.start)), CORRECTION_PHRASES)) {
-    return `se corrige para outro rótulo ('${m.label}')`;
+  const antesFrase = wordsOf(line.slice(fa, m.start));
+  if (containsPhrase(antesFrase, CORRECTION_PHRASES) || hasRetraction(antesFrase)) {
+    return hard('multi-label', `se corrige para outro rótulo ('${m.label}')`);
   }
   const [a, b] = clauseBounds(line, m.start, m.end);
   const before = wordsOf(line.slice(a, m.start));
   const after = wordsOf(line.slice(m.end, b));
-  if (!before.every((w) => NEUTRAL_WORDS.has(w))) return null; // tem sujeito: explicação
-  // Contrafactual ("poderia ser neutro SE não houvesse a ameaça") explica, não hesita.
-  const condicional = CONDITIONAL_WORDS.has(after[0] ?? '') || wordsOf(line.slice(fa, m.start)).some((w) => CONDITIONAL_WORDS.has(w));
-  if (m.hedged && !condicional) return `hesita com outro rótulo ('${m.label}')`;
-  if ([...before, ...after].some((w) => ADDITION_WORDS.has(w))) return `acrescenta outro rótulo ('${m.label}')`;
-  const conteudo = (w: readonly string[]) => w.filter((x) => !NEUTRAL_WORDS.has(x) && !universe.words.has(x));
-  if (conteudo(wordsOf(line.slice(fa, m.start))).length === 0 && conteudo(wordsOf(line.slice(m.end, fb))).length === 0) {
-    return `afirma outro rótulo ('${m.label}')`;
+  if (before.every((w) => NEUTRAL_WORDS.has(w))) {
+    // Porcentagem colada a um rótulo SEM sujeito ("positivo (50%)") distribui a
+    // resposta; com sujeito ("o início é positivo (20% do texto)") é explicação.
+    if (percentNear(line, a, b)) return hard('multi-label', `distribui porcentagem entre rótulos ('${m.label}')`);
+    // Contrafactual sem descarte ("poderia ser neutro se…") fica brando, não duro.
+    const condicional = CONDITIONAL_WORDS.has(after[0] ?? '') || antesFrase.some((w) => CONDITIONAL_WORDS.has(w));
+    if (m.hedged && !condicional) return hard('hedged', `hesita com outro rótulo ('${m.label}')`);
+    if ([...before, ...after].some((w) => ADDITION_WORDS.has(w))) {
+      return hard('multi-label', `acrescenta outro rótulo ('${m.label}')`);
+    }
+    const conteudo = (w: readonly string[]) => w.filter((x) => !NEUTRAL_WORDS.has(x) && !universe.words.has(x));
+    if (conteudo(antesFrase).length === 0 && conteudo(wordsOf(line.slice(m.end, fb))).length === 0) {
+      return hard('multi-label', `afirma outro rótulo ('${m.label}')`);
+    }
   }
-  return null;
+  return soft(`menciona outro rótulo ('${m.label}') sem negá-lo`);
+}
+
+/** Sem labelSet: linha curta (≤2 palavras, sem "chave:") que pode ser outro rótulo de uma lista. */
+function looksLikeBareLabel(solto: string, universe: LabelUniverse): boolean {
+  if (solto === '' || universe.acceptable.has(solto) || solto.includes(':')) return false;
+  if (wordCount(solto) > 2 || !/^[\p{L}\p{N}' -]+$/u.test(solto)) return false;
+  return !onlyDoubt(wordsOf(solto));
+}
+
+interface RestOptions {
+  /** Texto livre de um campo JSON: dúvida só conta com hesitação ("não" é dado), sem retratação no começo. */
+  json?: boolean;
+  /** Linhas depois da 1ª linha no texto: sem labelSet, linha curta rebaixa (lista não verificável). */
+  legacyShortLine?: boolean;
 }
 
 /**
  * O resto da resposta (linhas seguintes, o resto da 1ª linha depois do
- * rótulo, ou a prosa em volta de um JSON) contradiz a resposta firme? Motivo
- * em PT-BR ou null.
+ * rótulo, a prosa em volta de um JSON ou o texto livre de um campo) contradiz
+ * a resposta firme? O primeiro conflito DURO vence; senão o primeiro BRANDO.
  */
-function tailConflict(foldedLines: readonly string[], universe: LabelUniverse): string | null {
+function restConflict(
+  foldedLines: readonly string[],
+  universe: LabelUniverse,
+  opts: RestOptions = {},
+): Conflict | null {
+  let brando: Conflict | null = null;
+  const outros = universe.all.filter((l) => !universe.acceptable.has(l));
   for (const line of foldedLines) {
+    // 1. Linha que é SÓ outro rótulo, com marcador de lista ou "chave:" ("Opção B: positivo").
     const solto = normalizeLabel(stripListMarker(line));
-    if (universe.all.includes(solto) && !universe.acceptable.has(solto)) return `traz outro rótulo sozinho ('${solto}')`;
-    // Frase que começa com alternativa ("ou talvez não") ou que é só dúvida ("Talvez.", "Não sei.").
-    for (const frase of line.split(SENTENCE_BOUNDARY)) {
+    for (const x of [solto, stripKeyPrefix(solto, universe)]) {
+      if (outros.includes(x)) return hard('multi-label', `traz outro rótulo sozinho ('${x}')`);
+    }
+    if (opts.legacyShortLine && !universe.hasLabelSet && brando === null && looksLikeBareLabel(solto, universe)) {
+      brando = soft(
+        `traz uma linha curta ('${solto}') que pode ser outro rótulo — sem labelSet (config anterior à regra) a lista não é verificável`,
+      );
+    }
+    // 2. Frases: alternativa ("ou talvez não"), só dúvida ("Talvez.", "Não sei."), retratação ("Mentira, …").
+    let perguntaAnterior: string | null = null;
+    for (const pedaco of stripQuoted(line).match(/[^.;!?…]+[.;!?…]*/g) ?? []) {
+      const frase = pedaco.replace(/[.;!?…]+$/, '');
+      const anterior = perguntaAnterior;
+      perguntaAnterior = pedaco.slice(frase.length).includes('?') ? frase : null;
       const w = wordsOf(frase);
       if (w.length === 0 || universe.acceptable.has(normalizeLabel(frase))) continue;
-      if (ALTERNATIVE_WORDS.has(w[0]) && w[1] !== 'seja') return 'abre alternativa ("ou…")';
-      if (onlyDoubt(w)) return `hesita ou nega ("${frase.trim()}")`;
+      if (ALTERNATIVE_WORDS.has(w[0]) && w[1] !== 'seja') return hard('hedged', 'abre alternativa ("ou…")');
+      if (onlyDoubt(w) && (!opts.json || hasHedge(w))) {
+        // "Neutro? Não." rejeita a pergunta sobre OUTRO rótulo: é firmeza, não dúvida.
+        const rejeita = anterior !== null && doubtRule(w) === 'negated' && mentionsAnyLabel(wordsOf(anterior), outros);
+        if (!rejeita) return hard(doubtRule(w), `hesita ou nega ("${frase.trim()}")`);
+      }
+      if (!opts.json && startsWithRetraction(w)) return hard('hedged', `se retrata ("${frase.trim()}")`);
     }
-    for (const m of scanLine(line, universe.all)) {
+    // 3. Menções de rótulo.
+    for (const m of scanLine(line, universe)) {
       if (universe.acceptable.has(m.label)) {
         // O próprio rótulo esperado sob dúvida/rejeição mais adiante ("Negativo? Não.").
-        if (m.strongHedge) return `volta a hesitar sobre '${m.label}'`;
-        if (m.negated && !NEGATION_WORDS.has(m.label)) return `nega '${m.label}' mais adiante`;
+        if (m.strongHedge) return hard('hedged', `volta a hesitar sobre '${m.label}'`);
+        if (m.negated && !NEGATION_WORDS.has(m.label)) return hard('negated', `nega '${m.label}' mais adiante`);
         continue;
       }
-      if (m.negated) continue; // "não é positivo porque…" = contraste
-      const motivo = otherLabelConflict(line, m, universe);
-      if (motivo) return motivo;
+      const c = otherLabelConflict(line, m, universe);
+      if (c?.kind === 'hard') return c;
+      if (c && brando === null) brando = c;
     }
   }
-  return null;
+  return brando;
 }
 
 /** Separador FORTE depois do rótulo que abre a linha. Vírgula conta; '?' não (pergunta é hesitação). */
@@ -1000,24 +1365,45 @@ const LEAD_SEPARATOR = /[.!;,(:…]| [—–-] /;
 /** Sequência de separadores logo depois do rótulo ("Negativo. ", "Negativo... ", "Urgente: "). */
 const LEAD_RUN = /^[\s.!;,(:…—–-]+/;
 
+interface LeadMatch {
+  head: string;
+  /** Conflito do resto da linha (duro → 'nao'; brando → 'parcial'). */
+  conflict: Conflict | null;
+  /** Hesitação na linha (fora de menção descartada): quem decide é a extração flexível. */
+  flex: boolean;
+}
+
+/** A linha hesita fora das orações de menções DESCARTADAS ("Parece neutro, mas…") e fora de citação? */
+function hedgeOnLine(resto: string, universe: LabelUniverse): boolean {
+  let limpo = resto;
+  for (const m of scanLine(resto, universe)) {
+    if (!m.dismissed) continue;
+    const [a] = sentenceBounds(resto, m.start, m.end);
+    limpo = limpo.slice(0, a) + ' '.repeat(m.end - a) + limpo.slice(m.end);
+  }
+  return hasHedge(wordsOf(stripQuoted(limpo)));
+}
+
 /**
  * O rótulo ABRE a linha seguido de separador ("Negativo. O cliente…",
- * "Não, o prazo expirou."). O resto da linha desqualifica quando: hesita; nega
- * ou duvida logo depois ("Urgente: não", "urgente, não", "Negativo. Não.");
- * abre alternativa ("Negativo (ou neutro)", "Negativo... ou não"); se
- * autocorrige ("Negativo; na verdade neutro"); emenda outro rótulo em lista
- * ("Negativo, positivo e neutro são as opções"); ou afirma/soma outro rótulo
- * ("Sim, mas também não", "Negativo. Positivo."). Desqualificado, quem decide
- * é a extração flexível (teto 'parcial').
+ * "Não, o prazo expirou."). O resto da linha passa pela mesma checagem das
+ * linhas seguintes (`restConflict`) e ainda: nega ou duvida logo depois
+ * ("Urgente: não", "Negativo. Não.", "Negativo, imagino.") → duro; abre
+ * alternativa ("(ou neutro)") → duro; se autocorrige ("; na verdade neutro")
+ * → duro; emenda outro rótulo em lista ("Negativo, positivo e neutro") →
+ * duro; hesita na frase do rótulo ("Urgente, provavelmente por…") → flexível;
+ * traz porcentagem ("Negativo (confiança: 30%)") → brando.
  */
-function leadLabel(answer: string, universe: LabelUniverse): string | null {
+function leadLabel(answer: string, universe: LabelUniverse, rawLine: string): LeadMatch | null {
   const sep = LEAD_SEPARATOR.exec(answer);
   if (!sep || sep.index === 0) return null;
   const head = normalizeLabel(answer.slice(0, sep.index));
   if (!universe.acceptable.has(head)) return null;
-  const resto = foldLine(answer.slice(sep.index));
-  const semAspas = stripQuoted(resto);
-  if (hasHedge(wordsOf(semAspas)) || hasGlobalUncertainty(semAspas)) return null;
+  // A normalização apagou a pontuação FINAL da linha ("…positivo (50%)" perde
+  // o "%)"); ela volta aqui para as checagens do resto (porcentagem, '?').
+  const fimCru = /[^\p{L}\p{N}]+$/u.exec(rawLine.trim())?.[0] ?? '';
+  const resto = foldLine(answer.slice(sep.index) + fimCru);
+  const r = (conflict: Conflict | null, flex = false): LeadMatch => ({ head, conflict, flex });
 
   const run = LEAD_RUN.exec(resto)?.[0] ?? '';
   const forte = /^[\s.!]+$/.test(run) && !/\.\./.test(run);
@@ -1030,16 +1416,19 @@ function leadLabel(answer: string, universe: LabelUniverse): string | null {
   const rotuloNegacao = NEGATION_WORDS.has(head) || POST_NEGATION.has(head);
 
   if (!rotuloNegacao) {
-    if (forte ? onlyDoubt(frase) : onlyDoubt(oracao)) return null;
-    // Separador fraco + negação: "urgente, não…" nega o rótulo; "normal, não urgente" é contraste.
-    if (!forte && startsWithNegation(oracao) && !mentionsAnyLabel(oracao.slice(1), outros)) return null;
+    const alvo = forte ? frase : oracao;
+    if (onlyDoubt(alvo)) return r(hard(doubtRule(alvo), `logo depois do rótulo, hesita ou nega ("${alvo.join(' ')}")`));
+    // Separador fraco + negação com conteúdo ("Negativo: não gostou…"): ambíguo — decide a flexível.
+    if (!forte && startsWithNegation(oracao) && !mentionsAnyLabel(oracao.slice(1), outros)) return r(null, true);
   }
   // Lista emendada: "Negativo, positivo e neutro são as opções".
-  if (!forte && oracao.length > 0 && mentionsAnyLabel(oracao.slice(0, 1), outros)) return null;
+  if (!forte && oracao.length > 0 && mentionsAnyLabel(oracao.slice(0, 1), outros)) {
+    return r(hard('multi-label', 'emenda outro rótulo em lista'));
+  }
   // Alternativa: algum trecho começa com "ou"/"or" ("Negativo (ou neutro)", "Negativo... ou não").
   for (const trecho of resto.split(CLAUSE_BOUNDARY)) {
     const w = wordsOf(trecho);
-    if (w.length > 0 && ALTERNATIVE_WORDS.has(w[0]) && w[1] !== 'seja') return null;
+    if (w.length > 0 && ALTERNATIVE_WORDS.has(w[0]) && w[1] !== 'seja') return r(hard('hedged', 'abre alternativa ("ou…")'));
   }
   // Autocorreção seguida de negação, hesitação ou outro rótulo ("Negativo; na verdade neutro").
   const palavras = wordsOf(resto);
@@ -1047,17 +1436,29 @@ function leadLabel(answer: string, universe: LabelUniverse): string | null {
     const idx = ` ${palavras.join(' ')} `.indexOf(` ${p} `);
     if (idx === -1) continue;
     const seguintes = wordsOf(` ${palavras.join(' ')} `.slice(idx + p.length + 1));
-    if (seguintes.some((w) => NEGATION_WORDS.has(w)) || hasHedge(seguintes) || mentionsAnyLabel(seguintes, outros)) {
-      return null;
-    }
+    if (mentionsAnyLabel(seguintes, outros)) return r(hard('multi-label', `se corrige ("${p}") para outro rótulo`));
+    if (seguintes.some((w) => NEGATION_WORDS.has(w))) return r(hard('negated', `se corrige ("${p}") e nega`));
+    if (hasHedge(seguintes)) return r(hard('hedged', `se corrige ("${p}") e hesita`));
   }
-  if (tailConflict([resto], universe)) return null;
-  return head;
+  const conflito = restConflict([resto], universe);
+  if (conflito?.kind === 'hard') return r(conflito);
+  // Só a FRASE do rótulo decide a hesitação: "Urgente, provavelmente por…" →
+  // flexível; "Urgente. Provavelmente é incidente…" vale o mesmo que com
+  // quebra de linha (as frases seguintes passam por `restConflict`, como as
+  // linhas seguintes) — revisão 3: a quebra de linha não muda o veredito.
+  const fraseDoRotulo = forte ? '' : fimFrase === -1 ? depois : depois.slice(0, fimFrase);
+  if (hedgeOnLine(fraseDoRotulo, universe)) return r(null, true);
+  if (conflito) return r(conflito);
+  if (resto.includes('%')) return r(soft('traz porcentagem na linha da resposta (confiança/distribuição não é resposta firme)'));
+  return r(null);
 }
 
-/** A primeira linha termina em pergunta ("Urgente?") — a normalização apagaria o '?'. */
-function endsWithQuestion(line: string): boolean {
-  return /\?[\s*_"'`»”)\]]*$/u.test(line.trim());
+/**
+ * A linha é PERGUNTA ("Urgente?", "Negativo?!", "Negativo (?)", "¿…") — a
+ * normalização apagaria o '?'.
+ */
+function isQuestionLine(line: string): boolean {
+  return /\?[\s*_"'`»”)\]!?.…]*$/u.test(line.trim()) || line.includes('¿');
 }
 
 // ----------------------------------------------------------------------------
@@ -1086,10 +1487,10 @@ function flexibleVerdict(
   universe: LabelUniverse,
   uncertain: boolean,
 ): GroundTruthResult {
-  const mencoes = foldedLines.flatMap((l) => scanLine(l, universe.all));
+  const mencoes = foldedLines.flatMap((l) => scanLine(l, universe));
   const esperadas = mencoes.filter((m) => universe.acceptable.has(m.label));
-  // Rejeitado ("Neutro? Não, há raiva.") conta como negado: não é afirmação.
-  const afirmados = new Set(mencoes.filter((m) => !m.negated).map((m) => m.label));
+  // Rejeitado ("Neutro? Não, há raiva.") ou descartado ("parece neutro, mas…") não é afirmação.
+  const afirmados = new Set(mencoes.filter((m) => !m.negated && !m.dismissed).map((m) => m.label));
   const outros = [...afirmados].filter((l) => !universe.acceptable.has(l));
   const multi = rawAlts.length > 1;
 
@@ -1123,9 +1524,9 @@ function flexibleVerdict(
   }
 
   const rotulo = alts.find((a) => a.norm === esperadas[0].label)?.raw ?? esperadas[0].label;
-  const afirmadas = esperadas.filter((m) => !m.negated);
+  const afirmadas = esperadas.filter((m) => !m.negated && !m.dismissed);
   if (afirmadas.length === 0) {
-    return gt('nao', 'negated', `rótulo esperado '${rotulo}' aparece NEGADO na resposta (ex.: "não é ${rotulo}")`);
+    return gt('nao', 'negated', `rótulo esperado '${rotulo}' aparece NEGADO/descartado na resposta (ex.: "não é ${rotulo}")`);
   }
   if (outros.length > 0) {
     return gt(
@@ -1148,7 +1549,8 @@ function flexibleVerdict(
  * Escada textual estrita: igualdade/idioma (resposta inteira) → primeira
  * linha (pulando UM cabeçalho sem rótulo, "## Resultado"/"Sentimento:") →
  * rótulo abrindo a primeira linha → flexível (teto 'parcial'). Pergunta
- * ("Urgente?") nunca resolve: a normalização apagaria o '?'.
+ * ("Urgente?") nunca resolve. Com o rótulo casado, o resto da resposta decide
+ * entre resolve / parcial (conflito brando) / nao (conflito duro).
  */
 function strictTextLadder(
   text: string,
@@ -1161,10 +1563,11 @@ function strictTextLadder(
   const normText = normalizeLabel(text);
   const uncertain = hasGlobalUncertainty(folded.join('\n'));
   const corpo = linhas.length > 1 && isHeaderLine(linhas[0], universe) ? linhas.slice(1) : linhas;
-  const pergunta = endsWithQuestion(corpo[0] ?? '');
+  const pergunta = isQuestionLine(corpo[0] ?? '');
   const sufixo = rawAlts.length > 1 ? ` (alternativas [${altsList(rawAlts)}])` : '';
+  const flex = () => flexibleVerdict(folded, normText, alts, rawAlts, universe, uncertain);
 
-  if (!pergunta && !endsWithQuestion(linhas[0] ?? '')) {
+  if (!pergunta && !isQuestionLine(linhas[0] ?? '')) {
     const exata = alts.find((a) => a.norm === normText);
     if (exata) return gt('resolve', 'exact', `resposta é exatamente o rótulo esperado '${exata.raw}'${sufixo}`);
   }
@@ -1174,33 +1577,38 @@ function strictTextLadder(
       return gt('resolve', 'language', `tag de idioma '${normText}' da resposta casa com o rótulo esperado '${idioma.raw}'${sufixo}`);
     }
   }
+  if (uncertain || pergunta || corpo.length === 0) return flex();
 
-  let conflito: { raw: string; motivo: string } | null = null;
-  if (!uncertain && corpo.length > 0) {
-    const resposta = stripKeyPrefix(normalizeLabel(stripListMarker(corpo[0])), universe);
-    const primeira = pergunta ? undefined : alts.find((a) => a.norm === resposta);
-    const head = primeira ? null : leadLabel(resposta, universe);
-    const casou = primeira ?? (head ? { raw: alts.find((a) => a.norm === head)?.raw ?? head, norm: head } : null);
-    if (casou) {
-      const motivo = tailConflict(corpo.slice(1).map(foldLine), universe);
-      if (!motivo) {
-        return primeira
-          ? gt('resolve', 'first-line', `primeira linha da resposta casa com o rótulo esperado '${casou.raw}'${sufixo}`)
-          : gt('resolve', 'lead', `primeira linha abre com o rótulo esperado '${casou.raw}' seguido de separador${sufixo}`);
-      }
-      conflito = { raw: casou.raw, motivo };
-    }
+  const resposta = stripKeyPrefix(normalizeLabel(stripListMarker(corpo[0])), universe);
+  const primeira = alts.find((a) => a.norm === resposta);
+  const lead = primeira ? null : leadLabel(resposta, universe, corpo[0]);
+  const casado = primeira?.norm ?? lead?.head;
+  if (casado === undefined) return flex();
+  const raw = alts.find((a) => a.norm === casado)?.raw ?? casado;
+
+  const cauda = restConflict(corpo.slice(1).map(foldLine), universe, { legacyShortLine: true });
+  const conflitos = [lead?.conflict ?? null, cauda].filter((c): c is Conflict => c !== null);
+  const duro = conflitos.find((c) => c.kind === 'hard');
+  if (duro) {
+    return gt('nao', duro.rule, `primeira linha casa com '${raw}', mas o resto da resposta ${duro.motivo} — resposta não é inequívoca`);
   }
-
-  const flex = flexibleVerdict(folded, normText, alts, rawAlts, universe, uncertain);
-  if (conflito && flex.rule === 'standalone') {
+  if (lead?.flex) return flex();
+  if (lead && !universe.hasLabelSet) {
+    const f = flex();
+    if (f.rule !== 'standalone') return f;
     return gt(
       'parcial',
       'standalone',
-      `primeira linha casa com '${conflito.raw}', mas o resto da resposta ${conflito.motivo} — no modo estrito isso não resolve`,
+      `primeira linha abre com '${raw}' seguido de prosa — sem labelSet (config anterior à regra) não dá para descartar lista de rótulos; no modo estrito isso não resolve`,
     );
   }
-  return flex;
+  const brando = conflitos[0];
+  if (brando) {
+    return gt('parcial', 'standalone', `primeira linha casa com '${raw}', mas o resto da resposta ${brando.motivo} — no modo estrito isso não resolve`);
+  }
+  return primeira
+    ? gt('resolve', 'first-line', `primeira linha da resposta casa com o rótulo esperado '${raw}'${sufixo}`)
+    : gt('resolve', 'lead', `primeira linha abre com o rótulo esperado '${raw}' seguido de separador${sufixo}`);
 }
 
 /** Prosa FORA dos documentos JSON (sem as linhas de fence): o que vem antes do 1º documento e todas as linhas. */
@@ -1219,27 +1627,62 @@ function proseAround(text: string, docs: readonly JsonDoc[]): { before: string; 
 
 /**
  * JSON EMBUTIDO em prosa: a prosa em volta pode desmentir o JSON ("Na verdade
- * é positivo.", "Ou talvez positivo.", "Acho que: {…}"). Motivo + regra, ou
- * null quando a prosa é neutra (ou o JSON é a resposta inteira).
+ * é positivo.", "Ou talvez positivo.", "Acho que: {…}") → duro; ou só
+ * mencionar outro rótulo sem negá-lo → brando. null quando a prosa é neutra
+ * (ou o JSON é a resposta inteira).
  */
-function proseContradiction(
-  text: string,
-  docs: readonly JsonDoc[],
-  universe: LabelUniverse,
-): { rule: GroundTruthRule; why: string } | null {
+function proseContradiction(text: string, docs: readonly JsonDoc[], universe: LabelUniverse): Conflict | null {
   const { before, lines } = proseAround(text, docs);
   if (lines.length === 0) return null;
-  if (hasHedge(wordsOf(stripQuoted(foldLine(before))))) return { rule: 'hedged', why: 'o texto antes do JSON hesita' };
-  if (hasGlobalUncertainty(lines.join('\n'))) return { rule: 'hedged', why: 'o texto em volta declara incerteza' };
-  const motivo = tailConflict(lines, universe);
-  return motivo ? { rule: 'multi-label', why: `o texto em volta ${motivo}` } : null;
+  if (hasHedge(wordsOf(stripQuoted(foldLine(before))))) return hard('hedged', 'o texto antes do JSON hesita');
+  if (hasGlobalUncertainty(lines.join('\n'))) return hard('hedged', 'o texto em volta declara incerteza');
+  const c = restConflict(lines, universe);
+  return c ? { ...c, motivo: `o texto em volta ${c.motivo}` } : null;
+}
+
+/** Chave de CONFIANÇA num JSON ("confidence", "confianca", "certeza", "probability", "confidence_score"). */
+const CONFIDENCE_KEY = /(?:^| )(?:confidence|confianca|certeza|certainty|probability|probabilidade|prob)(?: |$)/;
+const LOW_CONFIDENCE_WORDS = new Set([
+  'baixa', 'baixo', 'low', 'very low', 'muito baixa', 'pouca', 'minima', 'incerta', 'incerto', 'uncertain', 'unsure',
+]);
+
+/** Confiança declarada abaixo de 50% (0.1, "30%", 20 em escala 0–100) ou por palavra ("baixa", "low"). */
+function lowConfidence(v: unknown): boolean {
+  let n: number | undefined;
+  if (typeof v === 'number') n = v;
+  else if (typeof v === 'string') {
+    const t = v.trim().replace(',', '.');
+    const pct = /^(\d+(?:\.\d+)?)\s*%$/.exec(t);
+    if (pct) return Number(pct[1]) < 50;
+    if (/^\d+(?:\.\d+)?$/.test(t)) n = Number(t);
+    else return LOW_CONFIDENCE_WORDS.has(normalizeLabel(v));
+  }
+  if (n === undefined || !Number.isFinite(n) || n < 0) return false;
+  return n <= 1 ? n < 0.5 : n <= 100 ? n < 50 : false;
 }
 
 /**
- * Outro campo do JSON que desmente o rótulo: valor que é EXATAMENTE outro
- * rótulo do conjunto (no topo, ou em chave de rótulo de um objeto aninhado:
- * `{"a": {"label": "positivo"}, "label": "negativo"}`), ou valor que é só
- * hesitação (`"confianca": "talvez"`). Negação seca ("nenhum") não conta.
+ * Texto livre de um campo JSON desmente o rótulo? Incerteza declarada, valor
+ * só de hesitação ("talvez") ou conflito DURO do texto ("na verdade é
+ * positivo", "ou talvez neutro", "Errado, é positivo."). Menção BRANDA é
+ * explicação e não conta: o campo de rótulo é a resposta estruturada.
+ */
+function freeTextConflict(value: string, universe: LabelUniverse): Conflict | null {
+  const lines = value.split(/\r?\n/).filter((l) => l.trim() !== '').map(foldLine);
+  const w = wordsOf(lines.join(' '));
+  if (hasGlobalUncertainty(lines.join('\n')) || (onlyDoubt(w) && hasHedge(w))) {
+    return hard('hedged', `declara dúvida ('${value}')`);
+  }
+  const c = restConflict(lines, universe, { json: true });
+  return c?.kind === 'hard' ? c : null;
+}
+
+/**
+ * Outro campo do JSON — em QUALQUER profundidade — que desmente o rótulo:
+ * valor que é EXATAMENTE outro rótulo do conjunto (`{"a": {"b": {"label":
+ * "positivo"}}, "label": "negativo"}`), lista com outro rótulo (`"labels":
+ * ["negativo", "positivo"]`), confiança baixa (`"confidence": 0.1`) ou texto
+ * livre com conflito duro (`"nota": "na verdade é positivo"`).
  */
 function contradictingField(
   docs: readonly JsonDoc[],
@@ -1250,25 +1693,38 @@ function contradictingField(
     const n = normalizeLabel(x);
     return universe.all.includes(n) && !universe.acceptable.has(n);
   };
-  for (const d of docs) {
-    if (!isRecord(d.value)) continue;
-    for (const [key, x] of Object.entries(d.value)) {
-      if (outroRotulo(x)) return { rule: 'json-ambiguous', why: `traz também '${String(x)}' (campo '${key}')` };
-      if (typeof x === 'string') {
-        const folded = foldLine(x);
-        const w = wordsOf(folded);
-        if ((onlyDoubt(w) && hasHedge(w)) || hasGlobalUncertainty(folded)) {
-          return { rule: 'hedged', why: `declara dúvida no campo '${key}' ('${x}')` };
-        }
+  const visitar = (v: unknown, caminho: string, profundidade: number): { rule: GroundTruthRule; why: string } | null => {
+    if (profundidade > 8) return null;
+    if (Array.isArray(v)) {
+      const outros = v.filter(outroRotulo);
+      if (outros.length > 0) {
+        return { rule: 'json-ambiguous', why: `a lista '${caminho}' traz outro rótulo (${outros.map(String).join(', ')})` };
       }
-      if (!isRecord(x)) continue;
-      for (const [k2, y] of Object.entries(x)) {
-        const chave = normalizeLabel(k2);
-        if ((SPECIFIC_LABEL_KEYS.has(chave) || GENERIC_LABEL_KEYS.has(chave)) && outroRotulo(y)) {
-          return { rule: 'json-ambiguous', why: `traz também '${String(y)}' (campo '${key}.${k2}')` };
-        }
+      for (const [i, x] of v.entries()) {
+        const r = visitar(x, `${caminho}[${i}]`, profundidade + 1);
+        if (r) return r;
       }
+      return null;
     }
+    if (!isRecord(v)) return null;
+    for (const [k, x] of Object.entries(v)) {
+      const campo = caminho ? `${caminho}.${k}` : k;
+      if (outroRotulo(x)) return { rule: 'json-ambiguous', why: `traz também '${String(x)}' (campo '${campo}')` };
+      if (CONFIDENCE_KEY.test(normalizeLabel(k).replace(/[_-]+/g, ' ')) && lowConfidence(x)) {
+        return { rule: 'hedged', why: `declara confiança baixa (campo '${campo}' = ${JSON.stringify(x)})` };
+      }
+      if (typeof x === 'string') {
+        const c = freeTextConflict(x, universe);
+        if (c) return { rule: c.rule, why: `o campo '${campo}' ${c.motivo}` };
+      }
+      const r = visitar(x, campo, profundidade + 1);
+      if (r) return r;
+    }
+    return null;
+  };
+  for (const d of docs) {
+    const r = visitar(d.value, '', 0);
+    if (r) return r;
   }
   return null;
 }
@@ -1285,6 +1741,10 @@ function matchLabelStrict(text: string, rawAlts: string[], alts: Alt[], labelSet
     return gt('nao', 'json-ambiguous', `resposta JSON ambígua: ${json.why} — não há UM rótulo inequívoco`);
   }
   if (json.kind === 'value') {
+    // {"label": "negativo?"} — a normalização apagaria o '?'.
+    if (isQuestionLine(json.value)) {
+      return gt('nao', 'hedged', `o rótulo do JSON é uma pergunta ('${json.value}') — não é resposta firme`);
+    }
     const v = normalizeLabel(json.value);
     const hit = alts.find((a) => a.norm === v);
     if (hit) {
@@ -1294,8 +1754,11 @@ function matchLabelStrict(text: string, rawAlts: string[], alts: Alt[], labelSet
         return gt('nao', campo.rule, `resposta JSON traz o rótulo esperado '${hit.raw}', mas ${campo.why} — não há UM rótulo inequívoco`);
       }
       const contra = proseContradiction(text, docs, universe);
+      if (contra?.kind === 'hard') {
+        return gt('nao', contra.rule, `JSON traz o rótulo esperado '${hit.raw}', mas ${contra.motivo} — resposta não é inequívoca`);
+      }
       if (contra) {
-        return gt('nao', contra.rule, `JSON traz o rótulo esperado '${hit.raw}', mas ${contra.why} — resposta não é inequívoca`);
+        return gt('parcial', 'standalone', `JSON traz o rótulo esperado '${hit.raw}', mas ${contra.motivo} — no modo estrito isso não resolve`);
       }
       return gt('resolve', 'json', `JSON da resposta traz o rótulo esperado '${hit.raw}'`);
     }
@@ -1374,11 +1837,24 @@ function matchFieldStrict(
     }
     const extracted = valores[0];
     if (scalarMatches(extracted, value)) {
-      // JSON embutido: a prosa em volta não pode desmentir o campo.
+      // {"label": "negativo?"} — a normalização apagaria o '?'.
+      if (typeof extracted === 'string' && isQuestionLine(extracted)) {
+        return gt('nao', 'hedged', `campo '${field}' do JSON é uma pergunta ('${extracted}') — não é resposta firme`);
+      }
+      // Mesmas checagens do modo rótulo: outro campo (qualquer profundidade)
+      // e a prosa em volta não podem desmentir o campo.
       const normValue = normalizeLabel(toComparableString(value));
-      const contra = proseContradiction(text, docs, buildUniverse([normValue], labelSet));
+      const universe = buildUniverse([normValue], labelSet);
+      const campo = contradictingField(comCampo, universe);
+      if (campo) {
+        return gt('nao', campo.rule, `campo '${field}' do JSON confere ('${display(value)}'), mas ${campo.why} — resposta não é inequívoca`);
+      }
+      const contra = proseContradiction(text, docs, universe);
+      if (contra?.kind === 'hard') {
+        return gt('nao', contra.rule, `campo '${field}' do JSON confere ('${display(value)}'), mas ${contra.motivo} — resposta não é inequívoca`);
+      }
       if (contra) {
-        return gt('nao', contra.rule, `campo '${field}' do JSON confere ('${display(value)}'), mas ${contra.why} — resposta não é inequívoca`);
+        return gt('parcial', 'standalone', `campo '${field}' do JSON confere ('${display(value)}'), mas ${contra.motivo} — no modo estrito isso não resolve`);
       }
       return gt('resolve', 'json', `campo '${field}' do JSON confere com o esperado ('${display(value)}')`);
     }

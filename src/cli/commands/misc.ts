@@ -4,7 +4,7 @@
 import { promises as fs, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { listRuns, loadRun, listSessions, loadSession, getDataDir } from '../../storage.js';
+import { listRuns, loadRun, listSessions, loadSession, getDataDir, setDataDir } from '../../storage.js';
 import { listTechniques } from '../../techniques.js';
 import { getLgpdData } from '../../lgpd.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
@@ -14,8 +14,18 @@ import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
 import { sampleSizeWarning } from '../../engine/judgeCalibration.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
-import { buildContext, buildNetworkContext, checkKey, keyFilePath, parse, removeStoredKey, writeStoredKey } from '../context.js';
+import {
+  buildContext,
+  buildNetworkContext,
+  checkKey,
+  keyFilePath,
+  parse,
+  removeStoredKey,
+  resolveHome,
+  writeStoredKey,
+} from '../context.js';
 import { CliError, EXIT, fmtUsd, renderSpend, type Output } from '../output.js';
+import { readConfigFile, resolveArenaLibrary } from './run.js';
 
 // --- key ---------------------------------------------------------------------
 
@@ -82,27 +92,18 @@ export async function cmdKey(argv: string[]): Promise<number> {
 
 export async function cmdEstimate(argv: string[]): Promise<number> {
   const parsed = parse(argv, { config: { type: 'string', short: 'c' } });
-  const ctx = await buildNetworkContext(parsed);
-  const { out } = ctx;
   const file = parsed.values.config;
   if (typeof file !== 'string') {
     throw new CliError('Uso: prompt-builder estimate --config <arquivo.json>', EXIT.USAGE);
   }
-
-  const json = JSON.parse(await fs.readFile(file, 'utf-8')) as unknown;
-  const formato = (json as Record<string, unknown>)?.format;
-  let config;
-  if (typeof formato === 'string') {
-    const p = parseArenaConfig(json);
-    if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
-    const c = arenaConfigToRunConfig(p.config);
-    if (!c.ok) throw new CliError(c.error, EXIT.CONFIG);
-    config = c.config;
-  } else {
-    const p = parseRunConfig(json);
-    if (!p.ok) throw new CliError(p.error, EXIT.CONFIG, p.details);
-    config = p.config;
-  }
+  // Mesma leitura do `vary/evolve --config` (inclui `scenarios.from: 'library'`
+  // e a checagem de labelSet dos itens) — e ANTES da rede: config inválida
+  // sai com exit 3 sem baixar o catálogo. O data-dir (onde mora a biblioteca)
+  // é fixado antes, como o buildContext faria.
+  setDataDir(resolveHome(parsed.values));
+  const config = await readConfigFile(file);
+  const ctx = await buildNetworkContext(parsed);
+  const { out } = ctx;
 
   const est = estimateRunCost(estimateInputFromConfig(config), ctx.models);
   if (out.isText) {
@@ -553,8 +554,10 @@ export async function cmdConfig(argv: string[]): Promise<number> {
     if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
     const c = arenaConfigToRunConfig(p.config);
     if (!c.ok) throw new CliError(c.error, EXIT.CONFIG);
+    // `scenarios.from: 'library'`: mesma resolução/checagem do `vary --config`.
+    const config = await resolveArenaLibrary(p.config, c.config);
     out.info(`válido — ${arenaConfigSummary(p.config)}`);
-    out.result(true, 'config.validate', { format: formato, config: c.config });
+    out.result(true, 'config.validate', { format: formato, config });
     return EXIT.OK;
   }
   const p = parseRunConfig(json);

@@ -538,11 +538,14 @@ describe('IMPL-003 — corpus adversarial: 0 falso resolve', () => {
     }
   });
 
-  it('dúvida solta depois do rótulo fica no máximo em parcial, com explicação', () => {
+  // Revisão 2 (defeito 5): dúvida/negação solta depois do rótulo é hedge SOBRE
+  // o rótulo — a ação e agent-docs/train.md dizem 'nao', não 'parcial'.
+  it('dúvida solta depois do rótulo dá nao (hesitação/negação sobre a resposta), com explicação', () => {
     for (const c of ADVERSARIAL.duvidaSolta) {
       const r = matchExpected(c.texto, c.expected, { labelSet: c.labelSet });
-      expect(r.verdict, `${c.texto} → ${r.rule}`).toBe('parcial');
-      expect(r.explanation, c.texto).toContain('modo estrito');
+      expect(r.verdict, `${c.texto} → ${r.rule}`).toBe('nao');
+      expect(['hedged', 'negated'], c.texto).toContain(r.rule);
+      expect(r.explanation, c.texto).toContain('não é inequívoca');
     }
   });
 });
@@ -637,7 +640,21 @@ const LEGITIMOS: Caso[] = [
   { texto: 'Normal (não urgente)', expected: 'normal', labelSet: URG },
   { texto: 'Não, não tem direito.', expected: 'nao', labelSet: SIMNAO },
   { texto: 'Sim\n\nNão há impedimento.', expected: 'sim', labelSet: SIMNAO },
-  { texto: 'Não\n\nNão há direito, pois o prazo expirou; sim, o cliente pode recorrer.', expected: 'nao', labelSet: SIMNAO },
+  // Revisão 3: rótulo-partícula de OUTRO rótulo usado como operador da prosa
+  // ("o prazo não expirou", "there is no exception") não é menção.
+  { texto: 'Sim. O prazo não expirou.', expected: 'sim', labelSet: SIMNAO },
+  { texto: 'Sim, ele tem direito — não há exceção aplicável.', expected: 'sim', labelSet: SIMNAO },
+  { texto: 'Yes. There is no exception here.', expected: 'yes', labelSet: ['yes', 'no'] },
+  // ... e a hesitação numa frase SEGUINTE (sobre outra coisa) vale o mesmo que
+  // com quebra de linha: a quebra de linha não muda o veredito.
+  { texto: 'Negativo. O cliente não sabe se volta; talvez cancele.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo\nO cliente não sabe se volta; talvez cancele.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Urgente. Provavelmente é incidente de produção.', expected: 'urgente', labelSet: URG },
+  // ... contraste com aparência ("parece <outro>, mas…") descarta a menção.
+  { texto: 'Negativo\nParece neutro, mas não é.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo\n\nPode parecer neutro, mas há ironia.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo. Pode soar neutro, mas há ironia.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Normal\n\nEmbora pareça urgente, é só uma dúvida.', expected: 'normal', labelSet: URG },
   { texto: 'Aqui está: {"label":"negativo"}. Não é positivo.', expected: 'negativo', labelSet: SENT },
   { texto: 'Negative\n\nThe first sentence is positive, but the complaint dominates.', expected: 'negative', labelSet: EN },
 ];
@@ -662,7 +679,11 @@ describe('IMPL-003 — positivos legítimos: ≥95% resolve', () => {
       // revisão IMPL-003: rótulo + separador + prosa que começa com negação ou
       // hesita em outra coisa — a guarda da regra 'lead' rebaixa, não zera.
       { texto: 'Negativo: não gostou do atendimento.', expected: 'negativo', labelSet: SENT },
-      { texto: 'Negativo. O cliente não sabe se volta; talvez cancele.', expected: 'negativo', labelSet: SENT },
+      { texto: 'Urgente, provavelmente por causa do servidor.', expected: 'urgente', labelSet: URG },
+      // revisão 2 (sem heurística de sujeito): explicação que AFIRMA outro rótulo
+      // sem negá-lo/descartá-lo tira o 'resolve' — rebaixa, não zera (risco R-03b).
+      { texto: 'Não\n\nNão há direito, pois o prazo expirou; sim, o cliente pode recorrer.', expected: 'nao', labelSet: SIMNAO },
+      { texto: 'Negativo\nO tom do início é neutro.', expected: 'negativo', labelSet: SENT },
     ];
     for (const c of prosa) {
       const r = matchExpected(c.texto, c.expected, { labelSet: c.labelSet });

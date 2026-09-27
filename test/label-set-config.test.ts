@@ -26,6 +26,7 @@ import { saveItems, saveProfile } from '../src/library.js';
 import { getDataDir, setDataDir } from '../src/storage.js';
 import { CliError, EXIT } from '../src/cli/output.js';
 import { readConfigFile } from '../src/cli/commands/run.js';
+import { cmdConfig, cmdEstimate } from '../src/cli/commands/misc.js';
 import { judgeStageReference } from '../src/refJudge.js';
 import { variationConfigFrom } from '../src/trainer.js';
 import { normalizeRunRecord } from '../src/normalize.js';
@@ -335,6 +336,26 @@ describe('IMPL-003 — CLI: config sem labelSet sai com exit 3', () => {
     expect(erro?.code).toBe(3);
     expect(erro?.message).toContain('velho-001');
     expect(erro?.message).toContain('labelSet');
+  });
+
+  // Revisão IMPL-003 (defeito 7): `config validate` e `estimate` dizem o mesmo
+  // que o `vary --config` sobre a biblioteca — antes diziam "válido".
+  it('biblioteca: `config validate` e `estimate` também recusam o item antigo com exit 3', async () => {
+    const file = escrever('arena-lib2.json', { ...arenaBase, scenarios: { from: 'library', profile: 'sent' } });
+    const codigo = async (fn: () => Promise<number>): Promise<number | 'ok'> => {
+      try {
+        await fn();
+        return 'ok';
+      } catch (err) {
+        expect(err).toBeInstanceOf(CliError);
+        expect((err as CliError).message).toContain('velho-001');
+        return (err as CliError).code;
+      }
+    };
+    const dataDir = join(dir, 'data');
+    expect(await codigo(() => cmdConfig(['validate', file, '--json', '--data-dir', dataDir]))).toBe(3);
+    // estimate confere o config ANTES da rede: nenhum fetch do catálogo acontece.
+    expect(await codigo(() => cmdEstimate(['--config', file, '--json', '--data-dir', dataDir]))).toBe(3);
   });
 });
 
