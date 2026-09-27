@@ -450,7 +450,16 @@ async function comJuiz<T>(
   }
 }
 
-const JSON_OK = (v: Verdict) => ({ text: JSON.stringify({ verdict: v, explanation: `juiz: ${v}` }) });
+// IMPL-034: a saída do juiz é JSON ESTRITO com rubrica de processo coerente
+// com o veredito (antes bastava {verdict, explanation}).
+const RUBRICA: Record<Verdict, Record<string, string>> = {
+  resolve: { resultado: 'cumpre', escopo: 'no_escopo', burla: 'nao_detectada', manipulacao: 'nao_detectada' },
+  parcial: { resultado: 'parcial', escopo: 'no_escopo', burla: 'nao_detectada', manipulacao: 'nao_detectada' },
+  nao: { resultado: 'nao_cumpre', escopo: 'no_escopo', burla: 'nao_detectada', manipulacao: 'nao_detectada' },
+};
+const JSON_OK = (v: Verdict) => ({
+  text: JSON.stringify({ rubrica: RUBRICA[v], verdict: v, explanation: `juiz: ${v}` }),
+});
 const HTTP_400 = { status: 400, bodyText: '{"error":{"message":"bad request"}}' };
 
 describe('IMPL-033 — judgeDossier: retry 2× e falha estruturada (nunca parcial)', () => {
@@ -504,10 +513,18 @@ describe('IMPL-033 — judgeDossier: retry 2× e falha estruturada (nunca parcia
         expect(f.chatRequests(), texto).toHaveLength(1 + AGENT_JUDGE_RETRIES);
       });
     }
-    // JSON válido dentro de cerca/texto continua aceito (não é texto livre).
-    await comJuiz(() => ({ text: 'Segue:\n```json\n{"verdict": "não", "explanation": "x"}\n```' }), async () => {
+    // IMPL-034 (schema estrito): só JSON puro ou UMA cerca envolvendo a resposta
+    // INTEIRA. Antes, prosa + cerca ("Segue: ```json…```") era recortada e aceita
+    // — o mesmo recorte tolerante que deixava passar JSON "sugerido" por injeção.
+    const puro = JSON.stringify({ rubrica: RUBRICA.nao, verdict: 'nao', explanation: 'x' });
+    await comJuiz(() => ({ text: '```json\n' + puro + '\n```' }), async () => {
       const r = await judgeDossier({ stage: STAGE, dossierText: 'diff', contestantId: 'a', judgeModelIds: ['fake/judge'], apiKey: KEY });
       expect(r).toMatchObject({ verdict: 'nao', attempts: 1 });
+    });
+    await comJuiz(() => ({ text: 'Segue:\n```json\n' + puro + '\n```' }), async () => {
+      const r = await judgeDossier({ stage: STAGE, dossierText: 'diff', contestantId: 'a', judgeModelIds: ['fake/judge'], apiKey: KEY });
+      expect(r.verdict).toBeNull();
+      expect(r.judgeError?.kind).toBe('invalid_output');
     });
   });
 

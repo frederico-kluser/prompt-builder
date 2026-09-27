@@ -66,6 +66,12 @@ export interface EstimateInput {
   agentRuns?: number;
   /** Teto de gasto POR execucao de agente (USD). Vindo de `agent.limits.maxCostUsd`. */
   agentMaxCostUsd?: number;
+  /**
+   * Cenarios que usam gabarito textual (fase 1.5) e duelo LLM nas finais.
+   * Ausente = todos. Etapa de agente com `verify[]` fica de fora: o oraculo
+   * decide veredito e finais sem gabarito (IMPL-034).
+   */
+  referenceStages?: number;
 }
 
 export interface CostEstimate {
@@ -146,10 +152,11 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
     byRole.datagen += datagenBatches * priceCall(m, 400, MAX_TOKENS_DATAGEN_BATCH);
   }
 
-  // --- gabaritos: um por cenario ---
-  if (input.referenceJudging && stages > 0) {
+  // --- gabaritos: um por cenario que usa regua textual (IMPL-034) ---
+  const refStages = Math.min(stages, Math.max(0, input.referenceStages ?? stages));
+  if (input.referenceJudging && refStages > 0) {
     const m = model(input.referenceModelId ?? input.judgeModelIds[0]);
-    byRole.gabarito += stages * priceCall(m, ctxIn + 200, MAX_TOKENS_GABARITO);
+    byRole.gabarito += refStages * priceCall(m, ctxIn + 200, MAX_TOKENS_GABARITO);
   }
 
   // --- reescritor: uma chamada por variante por iteracao ---
@@ -186,7 +193,7 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
   if (duelPairs > 0 && input.referenceJudging) {
     const m = model(input.judgeModelIds[0]);
     byRole.duel +=
-      stages *
+      refStages *
       duelPairs *
       2 *
       priceCall(m, ctxIn + 2 * maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_DUEL);
@@ -288,6 +295,12 @@ export function estimateInputFromConfig(
   const repetitions = config.agent?.repetitions ?? 1;
   const agentRuns = config.agent ? contestantModelIds.length * plannedStages * repetitions : 0;
   const agentMaxCostUsd = config.agent?.limits?.maxCostUsd;
+  // IMPL-034: em modo agente (todo contestant e agente), etapa com verify[] nao
+  // gera gabarito nem duelo LLM — o oraculo decide.
+  const referenceStages =
+    config.agent && pinned > 0
+      ? config.customStages!.filter((s) => !(s.agentTask?.verify?.length ?? 0)).length
+      : undefined;
 
   return {
     mode: config.mode,
@@ -306,6 +319,7 @@ export function estimateInputFromConfig(
     variantsPerIteration,
     holdoutStages: opts.holdoutStages,
     ...(config.agent ? { agentRuns, agentMaxCostUsd } : {}),
+    ...(referenceStages !== undefined ? { referenceStages } : {}),
   };
 }
 

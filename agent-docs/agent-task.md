@@ -262,15 +262,17 @@ execução nenhuma (binário que falta na imagem/ambiente da tarefa).
 
 | Campo | Tipo | Obr. | Default | Descrição |
 |---|---|---|---|---|
-| `reference` | bool | não | true | Julgamento por referência (gabarito). |
+| `reference` | bool | não | true (**false automático** quando toda etapa tem `verify[]`) | Julgamento por referência (gabarito). Etapa com `verify[]` **nunca** gera gabarito, mesmo com `true` explícito: o oráculo decide. |
 | `passes` | int | não | 1 | Passadas do juiz. |
 | `dossierTokens` | int | não | 12000 | Teto de tokens do **dossiê** — o que o juiz realmente lê (não a trajetória crua, que tem megabytes). É **config**, não constante: é ele que liga o custo do juiz ao tamanho da evidência. |
 
 O gabarito de agente tem três encarnações, em ordem de preferência: **(a)** se a
-tarefa tem `verify[]`, ela já tem gabarito ("os testes passam") — não pague uma
-execução de referência; **(b)** gabarito importado via `reference` do scenario;
-**(c)** uma execução de referência (modelo forte, mesmos limites) cujo dossiê vira
-o gabarito.
+tarefa tem `verify[]`, ela já tem gabarito ("os testes passam") — o gabarito
+textual **não é gerado** (0 tokens; antes custava ~64% de uma run trivial sem
+ninguém lê-lo) e as **finais dessa etapa são decididas pelo oráculo** (maior score
+vence; score igual = empate, sem juiz LLM); **(b)** gabarito importado via
+`reference` do scenario; **(c)** uma execução de referência (modelo forte, mesmos
+limites) cujo dossiê vira o gabarito.
 
 ## `duels` / `finalists` — as finais
 

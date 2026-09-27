@@ -31,7 +31,7 @@ import { createWorkspaceManager, type CollectResult } from './workspace.js';
 import { execDir, redactEnv, sha256Of, writeExecution } from './store.js';
 import { buildDossier } from './dossier.js';
 import { runOracle } from './oracle.js';
-import { aggregateAgentVerdict, judgeDossier } from './agentJudge.js';
+import { aggregateAgentVerdict, judgeDossier, type AgentJudgeRubric } from './agentJudge.js';
 import {
   AGENT_VERDICT_TREE_VERSION,
   decideRepVerdict,
@@ -103,6 +103,8 @@ export interface AgentRepResult {
   judgeError?: VerdictError;
   /** Veredito CRU do juiz quando a faixa do oráculo o confinou (auditoria). */
   judgeVerdictBeforeClamp?: Verdict;
+  /** Rubrica de processo do juiz (IMPL-034): resultado/escopo/burla/manipulação. */
+  judgeRubric?: AgentJudgeRubric;
   /** Vezes que o oráculo rodou (> 1 = re-verificação cega de check que nem começou). */
   oracleAttempts?: number;
   costUsd: number;
@@ -540,6 +542,8 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
               complete: dossier.complete,
               redactions: dossier.redactions,
               mode: 'full',
+              marker: dossier.marker,
+              neutralized: dossier.neutralized,
             },
             digests: {},
           },
@@ -612,6 +616,7 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           ...(adjudication.judgeVerdictBeforeClamp
             ? { judgeVerdictBeforeClamp: adjudication.judgeVerdictBeforeClamp }
             : {}),
+          ...(adjudication.judgeRubric ? { judgeRubric: adjudication.judgeRubric } : {}),
           ...(oracleAttempts > 0 ? { oracleAttempts } : {}),
           costUsd: trajectory.usage.costUsd,
         };
@@ -784,7 +789,13 @@ async function callJudge(opts: {
         attempts: j.attempts,
       };
     }
-    return { status: 'ok', verdict: j.verdict, explanation: j.explanation, degraded: j.degraded };
+    return {
+      status: 'ok',
+      verdict: j.verdict,
+      explanation: j.explanation,
+      degraded: j.degraded,
+      ...(j.rubric ? { rubric: j.rubric } : {}),
+    };
   } catch (err) {
     if (isControlSignal(err)) throw err;
     if (ctx.signal?.aborted) throw new RunCancelled(ctx.signal.reason);
@@ -865,6 +876,7 @@ function writeVerdictArtifact(absDir: string, rep: AgentRepResult): void {
     judgeUsed: rep.judgeUsed,
     ...(rep.judgeError ? { judgeError: rep.judgeError } : {}),
     ...(rep.judgeVerdictBeforeClamp ? { judgeVerdictBeforeClamp: rep.judgeVerdictBeforeClamp } : {}),
+    ...(rep.judgeRubric ? { judgeRubric: rep.judgeRubric } : {}),
     ...(rep.oracle
       ? {
           oracle: {

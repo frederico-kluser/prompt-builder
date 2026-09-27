@@ -308,6 +308,10 @@ export interface ExecutionRecord {
     complete: boolean;
     redactions: number;
     mode: 'full' | 'compact' | 'summarized';
+    /** Marca dos blocos DADOS-DO-AGENTE (IMPL-034) — ausente em execuções antigas. */
+    marker?: string;
+    /** Tokens estruturais neutralizados no conteúdo do agente (tentativa de forjar bloco). */
+    neutralized?: number;
   };
 
   digests: Record<string, string>; // arquivo → sha256

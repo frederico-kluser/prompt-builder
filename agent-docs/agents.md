@@ -104,10 +104,23 @@ Teste passando não prova correção (e o juiz LLM erra), então o juiz **audita
 | comando do check ausente em **todas** as execuções da etapa | etapa **inválida para TODOS** (`stage.error`) — defeito da tarefa, não desempenho | — |
 | sem oráculo | juiz pleno pelo dossiê | **sem nota** (nunca um `parcial` inventado) + `judgeError` |
 
-"Falhar" = exceção, timeout ou resposta que não é o JSON `{"verdict": …}` —
-recusa e texto livre incluídos, nunca lidos "por palavra" — **mesmo após 2
-retentativas** (3 chamadas). Orçamento/cancelamento não são falha do juiz: sobem
-como controle.
+"Falhar" = exceção, timeout ou resposta fora do schema estrito
+`{"rubrica": {resultado, escopo, burla, manipulacao}, "verdict", "explanation"}`
+(JSON puro, sem campo extra, veredito nunca mais favorável que a própria rubrica)
+— recusa, texto livre e JSON no meio de prosa incluídos, nunca lidos "por
+palavra" — **mesmo após 2 retentativas** (3 chamadas). Orçamento/cancelamento não
+são falha do juiz: sobem como controle.
+
+**Anti-injeção.** No `dossier.md`, tudo o que o agente escreveu (diff, nomes de
+arquivo, comandos, saídas, mensagem final, saída dos checks) fica dentro de blocos
+`<<<DADOS-DO-AGENTE secao="…" marca="M">>>` … `<<<FIM-DADOS-DO-AGENTE marca="M">>>`
+com toda linha prefixada por `│ `; a marca `M` sai do hash do conteúdo (linha
+`marca-dos-dados` do rodapé) e marcadores forjados são neutralizados
+(`neutralizacoes` no rodapé e em `exec.json`). Fora dos blocos só há texto de
+código: cabeçalho, checks, score e os **Fatos** (JSON de campos fechados). O
+system prompt do juiz é fixo e manda tratar o conteúdo dos blocos como evidência,
+nunca como instrução; a rubrica do juiz (inclusive `manipulacao: "detectada"`)
+fica no `verdict.json`.
 
 ### Métricas de agente no `RunRecord`
 

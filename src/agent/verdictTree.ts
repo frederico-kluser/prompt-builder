@@ -62,8 +62,9 @@
 //
 // ⚠️ Módulo PURO de propósito: sem `node:*`, sem `process.env`.
 // ----------------------------------------------------------------------------
-import type { Verdict, VerdictError, VerdictSource } from '../types.js';
+import type { StageSpec, Verdict, VerdictError, VerdictSource } from '../types.js';
 import type { AgentStopReason, OracleNotRun, OracleResult } from './types.js';
+import type { AgentJudgeRubric } from './agentJudge.js';
 
 /**
  * Versão da semântica da árvore gravada em `RunRecord.agentVerdictTreeVersion`.
@@ -306,7 +307,7 @@ export function clampToOracleBand(verdict: Verdict, floor: Verdict, ceiling: Ver
 /** O que a chamada ao juiz devolveu, já depois das retentativas. */
 export type JudgeOutcome =
   /** O juiz (painel inteiro ou parte dele — `degraded`) deu um veredito válido. */
-  | { status: 'ok'; verdict: Verdict; explanation: string; degraded?: boolean }
+  | { status: 'ok'; verdict: Verdict; explanation: string; degraded?: boolean; rubric?: AgentJudgeRubric }
   /** Nenhum juiz produziu veredito válido mesmo após 1+2 tentativas. */
   | { status: 'failed'; error: VerdictError; attempts: number }
   /**
@@ -328,6 +329,8 @@ export interface SettledRepVerdict {
   judgeError?: VerdictError;
   /** O veredito CRU do juiz, quando a faixa do oráculo o confinou (auditoria). */
   judgeVerdictBeforeClamp?: Verdict;
+  /** Rubrica de processo do juiz (IMPL-034), quando ele respondeu — auditoria. */
+  judgeRubric?: AgentJudgeRubric;
 }
 
 /**
@@ -360,6 +363,7 @@ export function settleRepVerdict(decision: TreeDecision, judge?: JudgeOutcome): 
       source: outcome.degraded ? 'degraded' : 'judge',
       judgeUsed: true,
       ...(clamped ? { judgeVerdictBeforeClamp: outcome.verdict } : {}),
+      ...(outcome.rubric ? { judgeRubric: outcome.rubric } : {}),
     };
   }
   if (outcome.status === 'failed') {
@@ -647,4 +651,63 @@ export function agentVerdictTreeVersionOf(record: {
 }): number | undefined {
   if (record.agentVerdictTreeVersion !== undefined) return record.agentVerdictTreeVersion;
   return record.contestants.some((c) => c.runner === 'agent') ? 1 : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Etapa decidida pelo ORÁCULO (IMPL-034 / R-14a DEC-7)
+// ---------------------------------------------------------------------------
+
+/** true = a etapa tem verificação automática executável (`agentTask.verify[]` não vazio). */
+export function stageHasVerify(spec: Pick<StageSpec, 'agentTask'> | undefined): boolean {
+  return (spec?.agentTask?.verify?.length ?? 0) > 0;
+}
+
+/**
+ * A etapa precisa de GABARITO TEXTUAL (fase 1.5)? Com `verify[]` e só agentes
+ * na run, NÃO: o veredito vem da árvore (oráculo + juiz de dossiê, que não lê a
+ * referência) e as finais são decididas pelo oráculo — gerar o gabarito ali é
+ * custo sem leitor (medido: 64% de uma run trivial). Com contestant de CHAT na
+ * run, sim: o juiz de referência dele precisa da régua textual.
+ */
+export function needsTextReference(
+  spec: Pick<StageSpec, 'agentTask'>,
+  opts: { hasChatContestant: boolean },
+): boolean {
+  return opts.hasChatContestant || !stageHasVerify(spec);
+}
+
+/** O mínimo de uma rep que a nota de oráculo das finais lê. */
+export interface OracleDuelRep {
+  path: VerdictPath;
+  oracle?: { score: number; violations: string[] };
+}
+
+/**
+ * Nota DETERMINÍSTICA de uma rep para as finais decididas pelo oráculo, em
+ * [0,1]: o score do oráculo, exceto nos caminhos em que a árvore já fixou 'nao'
+ * sem olhar o score (processo morreu, corte por limite sem 100%, caminho
+ * proibido tocado) — ali é 0. `undefined` = sem observação (cancelada) ou rep
+ * sem oráculo. O juiz LLM não entra aqui: a final é do oráculo.
+ */
+export function repOracleDuelScore(rep: OracleDuelRep): number | undefined {
+  if (rep.path === 'cancelled') return undefined;
+  if (rep.path === 'error' || rep.path === 'limit-cut' || rep.path === 'oracle-violation') return 0;
+  if (!rep.oracle) return undefined;
+  if (rep.oracle.violations.length > 0) return 0;
+  return rep.oracle.score;
+}
+
+/**
+ * Nota de oráculo de cada contestant numa etapa (média das reps com nota, 4
+ * casas) — alimenta `runStageDuels.oracleScoresByContestant`. Contestant sem
+ * nenhuma rep com nota fica de fora (o par dele empata: sem gabarito, só o
+ * oráculo decide).
+ */
+export function agentOracleDuelScores(repsById: Record<string, OracleDuelRep[]>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const id of Object.keys(repsById).sort()) {
+    const notas = repsById[id].map(repOracleDuelScore).filter((n): n is number => n !== undefined);
+    if (notas.length > 0) out[id] = Number((notas.reduce((a, b) => a + b, 0) / notas.length).toFixed(4));
+  }
+  return out;
 }

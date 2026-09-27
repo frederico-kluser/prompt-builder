@@ -20,11 +20,15 @@ import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { listModels } from './openrouter.js';
 import { runAgentStage, aggregateAgentVerdict } from './agent/runAgentStage.js';
+import { AGENT_JUDGE_SYSTEM_PROMPT } from './agent/agentJudge.js';
 import {
   AGENT_VERDICT_TREE_VERSION,
+  agentOracleDuelScores,
   agentRateMetrics,
   agentStageProvenance,
+  needsTextReference,
   oracleCellDefect,
+  stageHasVerify,
   stageObservations,
   tallyReps,
   type RepCounts,
@@ -500,9 +504,17 @@ async function runLoop(
   // cenario roda uma unica vez. Etapas que ja trazem reference (seed/pinadas)
   // passam intactas; falha num gabarito so deixa a etapa sem reference
   // (degrada na fase 3). ===
-  if (referenceJudging) {
-    specs = await generateReferences({
-      stages: specs,
+  // IMPL-034 (R-14a DEC-7): etapa com `verify[]` numa run só de agentes NÃO
+  // gera gabarito — o veredito vem do oráculo (+ juiz de dossiê, que não lê a
+  // referência) e as finais são decididas pelo oráculo. Antes o gabarito saía
+  // igual e era 64% do custo de uma run trivial, sem leitor (0 tokens agora).
+  const hasChatContestant = record.contestants.some((c) => c.runner !== 'agent');
+  const precisamGabarito = specs
+    .map((spec, idx) => ({ spec, idx }))
+    .filter(({ spec }) => needsTextReference(spec, { hasChatContestant }));
+  if (referenceJudging && precisamGabarito.length > 0) {
+    const preenchidas = await generateReferences({
+      stages: precisamGabarito.map((p) => p.spec),
       apiKey,
       modelId: record.config.referenceModelId ?? record.config.judgeModelIds[0],
       reasoningLevel: record.config.reasoning?.judge,
@@ -513,6 +525,10 @@ async function runLoop(
       // concluidos), nao de uma etapa especifica.
       onProgress: (done, total) =>
         emitEvent({ type: 'stage.gabarito', runId, stageIndex: -1, done, total }),
+    });
+    specs = specs.slice();
+    precisamGabarito.forEach((p, k) => {
+      specs[p.idx] = preenchidas[k];
     });
   }
 
@@ -584,6 +600,9 @@ async function runLoop(
   // Governador de processos de agente COMPARTILHADO entre todas as etapas: se
   // cada etapa tivesse o próprio, N etapas em paralelo = N×maxParallel processos.
   const agentSemaphore = hasAgent ? new AgentSemaphore(agentMaxParallel) : undefined;
+  // IMPL-034: nota de ORÁCULO por contestant das etapas decididas pelo oráculo
+  // (verify[] + só agentes) — as finais dessas etapas saem daqui, sem LLM.
+  const oracleDuelScoresByStage = new Map<number, Record<string, number>>();
 
   const etapasSettled = await Promise.allSettled(
     record.stages.map(async (stageRecord) => {
@@ -757,12 +776,20 @@ async function runLoop(
           }
         }
 
+        // IMPL-034: etapa com verify[] numa run só de agentes é DECIDIDA PELO
+        // ORÁCULO — sem gabarito textual (fase 1.5 pulada): o veredito vem da
+        // árvore de cada execução e as finais, das notas do oráculo.
+        const decididaPeloOraculo =
+          agentContestants.length > 0 && chatContestants.length === 0 && stageHasVerify(stageSpec);
+        if (decididaPeloOraculo) oracleDuelScoresByStage.set(i, agentOracleDuelScores(agentRepsById));
+
         // === FASE 3: julgamento POINTWISE. Com gabarito: cada resposta contra
         // a referencia (os duelos sairam daqui — viraram a fase 4 de finais).
+        // Etapa decidida pelo oráculo: os vereditos da árvore de agente.
         // Sem gabarito: juiz LISTWISE classico (compare antigo / fallback). ===
         emitEvent({ type: 'stage.judging', runId, stageIndex: i });
         try {
-          if (stageSpec.reference?.trim()) {
+          if (stageSpec.reference?.trim() || decididaPeloOraculo) {
             // Pointwise: cada resposta classificada isoladamente contra o
             // gabarito (resolve/parcial/nao) — base do judge-score.
             //
@@ -889,7 +916,10 @@ async function runLoop(
               verdictByContestant: { ...refJudge.verdictByContestant },
               judges: [],
               blindMap: {},
-              rawJudgeText: 'Juiz de referência (gabarito)',
+              rawJudgeText:
+                chatContestants.length === 0
+                  ? 'Árvore de veredito do agente (oráculo + juiz de dossiê)'
+                  : 'Juiz de referência (gabarito)',
               inconclusive: refJudge.inconclusive,
             };
           } else {
@@ -1030,8 +1060,12 @@ async function runLoop(
   // conjunto de finalistas em todas as etapas). ===
   const finalsOn = record.config.duels !== false;
   const finalistCount = record.config.finalists ?? 3;
+  // Etapa decidida pelo oráculo (IMPL-034) entra nas finais SEM gabarito: o
+  // par é decidido pela nota do oráculo e empate de oráculo é empate — o juiz
+  // LLM não duela ali (não há régua textual, nem deve haver).
   const stagesParaDuelo = record.stages.filter(
-    (s) => s.spec?.reference?.trim() && !s.error && !s.incomplete,
+    (s) =>
+      (s.spec?.reference?.trim() || oracleDuelScoresByStage.has(s.index)) && !s.error && !s.incomplete,
   );
   const podeFinais = est.byRole.duel === 0 || gate('finals', est.byRole.duel);
   if (
@@ -1070,8 +1104,13 @@ async function runLoop(
       const dueloSettled = await Promise.allSettled(
         stagesParaDuelo.map(async (st) => {
           try {
+            const notasDoOraculo = oracleDuelScoresByStage.get(st.index);
+            // Sem `reference`, `runStageDuels` só decide pelo oráculo (par com
+            // notas iguais empata) — é o que torna a final "do oráculo" mesmo
+            // quando a etapa trazia um gabarito importado.
+            const { reference: _semGabarito, ...specSemGabarito } = st.spec!;
             st.duels = await runStageDuels({
-              stage: st.spec!,
+              stage: notasDoOraculo ? specSemGabarito : st.spec!,
               responses: st.responses,
               contestants: record.contestants,
               judgeModelId: record.config.judgeModelIds[0],
@@ -1080,10 +1119,12 @@ async function runLoop(
               verdictByContestant: st.referenceJudge?.verdictByContestant,
               // Etapa ground-truth (F1.4): vereditos determinísticos viram
               // scores de oráculo — os duelos decidem sem LLM (§19.1).
+              // Etapa com verify[] (IMPL-034): notas do oráculo por execução.
               oracleScoresByContestant:
-                st.spec?.expected !== undefined
+                notasDoOraculo ??
+                (st.spec?.expected !== undefined
                   ? oracleScoresFromVerdicts(st.referenceJudge?.verdictByContestant)
-                  : undefined,
+                  : undefined),
               apiKey,
               reasoningLevel: record.config.reasoning?.judge,
               timeoutMs: record.config.timeoutMs,
@@ -1194,7 +1235,16 @@ async function runLoop(
       }
     }
     record.judgeDiagnostics = {
-      contract: pinJudgeContract(record.config.judgeModelIds, JUDGE_CONTRACT_TEXT),
+      // IMPL-034: numa run com agente quem dá as notas é o juiz de DOSSIÊ — o
+      // pin precisa mudar quando o prompt DELE muda (senão o drift some).
+      contract: pinJudgeContract(
+        record.config.judgeModelIds,
+        !hasAgent
+          ? JUDGE_CONTRACT_TEXT
+          : record.contestants.every((c) => c.runner === 'agent')
+            ? AGENT_JUDGE_SYSTEM_PROMPT
+            : `${JUDGE_CONTRACT_TEXT}\n\n${AGENT_JUDGE_SYSTEM_PROMPT}`,
+      ),
       verbosity: verbosityReport(samples),
     };
     if (record.judgeDiagnostics.verbosity.warning) {
