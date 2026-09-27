@@ -38,9 +38,11 @@ import {
   detectSuspicious,
   diffProtected,
   diffViolations,
+  purgeToolCaches,
   restoreFiles,
   scoreChecks,
   snapshotProtected,
+  type NotRunReason,
   type ProtectedSnapshot,
   type ScoredCheck,
   type VerifyKind,
@@ -69,6 +71,8 @@ interface CheckOutcome {
   exitCode: number;
   ok: boolean;
   inconclusive: boolean;
+  /** Só quando `inconclusive`: timeout, morte por sinal, spawn error ou rebuild falho. */
+  reason?: NotRunReason;
   durationMs: number;
   tail: string;
 }
@@ -233,11 +237,18 @@ async function runCheck(opts: {
       }
       const durationMs = Date.now() - started;
       const inconclusive = timedOut || spawnFailed || code === null;
+      const reason: NotRunReason | undefined = timedOut
+        ? 'timeout'
+        : spawnFailed
+          ? 'spawn'
+          : code === null || signal !== null
+            ? 'signal'
+            : undefined;
       const exitCode = code ?? NO_EXIT;
       const ok = !inconclusive && exitCode === opts.expected;
       const text = tail.text();
       const tailText = lastLines(text, ok ? TAIL_LINES_PASS : TAIL_LINES_FAIL);
-      resolve({ exitCode, ok, inconclusive, durationMs, tail: tailText });
+      resolve({ exitCode, ok, inconclusive, ...(inconclusive && reason ? { reason } : {}), durationMs, tail: tailText });
     });
   });
 }
@@ -253,7 +264,16 @@ async function runCheck(opts: {
 const DEFAULT_REBUILD_LOCKFILES = ['package-lock.json'];
 /** O que o rebuild reconstrói (e por isso entra no hash de protegidos). */
 const DEFAULT_REBUILD_PROTECT = ['node_modules/'];
-const DEFAULT_REBUILD_CMD = 'npm ci';
+/**
+ * `--ignore-scripts`: o `npm ci` default roda `preinstall`/`postinstall`/
+ * `prepare` do pacote RAIZ — e o `package.json` é do agente. Um `postinstall`
+ * plantado rodaria DEPOIS do snapshot pós e adulteraria `node_modules` antes dos
+ * checks, sem violação nenhuma (confirmado com npm real). `--no-audit
+ * --no-fund`: o rebuild não precisa ir ao registry por nada além dos pacotes.
+ * Tarefa cujas deps exigem install script declara `rebuild.cmd` e protege o
+ * `package.json` em `forbiddenPaths`.
+ */
+export const DEFAULT_REBUILD_CMD = 'npm ci --ignore-scripts --no-audit --no-fund';
 const DEFAULT_REBUILD_TIMEOUT_MS = 600_000;
 
 type GuardTask = Pick<AgentTaskSpec, 'forbiddenPaths' | 'rebuild'>;
@@ -273,11 +293,11 @@ export function protectedPatternsFor(task: GuardTask): string[] {
  * agente acordar. `undefined` quando a tarefa não protege nada. Guarda os bytes
  * dos lockfiles para o rebuild restaurá-los ("npm ci do lockfile do seed").
  */
-export function captureSeedGuard(workspaceDir: string, task: GuardTask): ProtectedSnapshot | undefined {
+export async function captureSeedGuard(workspaceDir: string, task: GuardTask): Promise<ProtectedSnapshot | undefined> {
   const patterns = protectedPatternsFor(task);
   if (patterns.length === 0) return undefined;
   const keepContent = task.rebuild ? task.rebuild.lockfiles ?? DEFAULT_REBUILD_LOCKFILES : [];
-  return snapshotProtected(workspaceDir, patterns, { keepContent });
+  return await snapshotProtected(workspaceDir, patterns, { keepContent });
 }
 
 /**
@@ -299,9 +319,17 @@ export function captureSeedGuard(workspaceDir: string, task: GuardTask): Protect
  *    arquivos ignorados pelo git) + achados dos detectores em modo `fail`.
  *  - o snapshot pós é tirado ANTES do rebuild e dos checks (os checks podem
  *    escrever arquivos; o que conta é o estado que o AGENTE deixou).
- *  - `rebuild`: lockfiles voltam ao seed, `cmd` roda; falhou ⇒ checks NÃO
- *    rodam (nunca contra dependências sujas) e o oráculo é `inconclusive`.
- *  - `inconclusive` = algum check não rodou (timeout, spawn error, rebuild).
+ *  - snapshot truncado (teto de entradas) no seed OU no pós ⇒ o hash NÃO é
+ *    comparado (`guardTruncated`, oráculo `inconclusive`); o diff segue valendo.
+ *  - caches de ferramenta (`__pycache__`, `*.pyc`, `node_modules/.vite`…) são
+ *    APAGADOS antes do rebuild/checks: o hash os ignora, então não podem
+ *    sobreviver até o runner carregá-los.
+ *  - `rebuild`: lockfiles voltam ao seed, `cmd` roda; falhou (ou a restauração
+ *    falhou) ⇒ checks NÃO rodam (nunca contra dependências sujas) e o oráculo é
+ *    `inconclusive` — quem decide o veredito trata como infra (sem veredito).
+ *  - P2P que trava (timeout) ou morre por sinal = QUEBRADO (`scoreChecks`).
+ *  - `inconclusive` = algum check não rodou (timeout, spawn error, rebuild) ou
+ *    o hash dos protegidos foi truncado.
  *  - `onCheck` é chamado ao fim de cada check, na ordem, com o exit code real.
  */
 export async function runOracle(opts: {
@@ -332,36 +360,66 @@ export async function runOracle(opts: {
   // --- 1. Barreiras determinísticas, sobre o estado que o AGENTE deixou.
   const violations = new Set(diffViolations(diffFiles, opts.forbiddenPaths ?? []));
   let protectedChanges: OracleResult['protectedChanges'];
+  let guardTruncated = false;
   if (opts.seedSnapshot) {
-    const post = snapshotProtected(opts.workspaceDir, opts.seedSnapshot.patterns);
-    protectedChanges = diffProtected(opts.seedSnapshot, post, diffFiles);
-    for (const c of protectedChanges) violations.add(c.path);
+    const post = await snapshotProtected(opts.workspaceDir, opts.seedSnapshot.patterns);
+    if (opts.seedSnapshot.truncated || post.truncated) {
+      // Percurso cortado pelo teto: o ponto de corte se DESLOCA com qualquer
+      // arquivo que o agente cria/apaga — comparar daria `added`/`deleted`
+      // fantasma a um agente honesto (e cegaria o que ficou além do corte).
+      guardTruncated = true;
+    } else {
+      protectedChanges = diffProtected(opts.seedSnapshot, post, diffFiles);
+      for (const c of protectedChanges) violations.add(c.path);
+    }
   }
   const detectorMode = opts.detectors ?? 'warn';
   const findings = detectorMode === 'off' ? [] : detectSuspicious({ diff: opts.diff, nameStatus: diffFiles });
-  if (detectorMode === 'fail') for (const f of findings) violations.add(f.path);
+  const detectorViolations: string[] = [];
+  if (detectorMode === 'fail') {
+    for (const f of findings) {
+      if (!violations.has(f.path) && !detectorViolations.includes(f.path)) detectorViolations.push(f.path);
+    }
+    for (const p of detectorViolations) violations.add(p);
+  }
+
+  // --- 1b. Caches que o hash ignora não chegam aos checks (código sem hash).
+  const purged = await purgeToolCaches(opts.workspaceDir);
 
   // --- 2. Rebuild de dependências a partir do lockfile do seed.
   let rebuild: OracleResult['rebuild'];
   if (opts.rebuild) {
-    const restored = opts.seedSnapshot
-      ? restoreFiles(opts.workspaceDir, opts.seedSnapshot, opts.rebuild.lockfiles ?? DEFAULT_REBUILD_LOCKFILES)
-      : [];
     const cmd = opts.rebuild.cmd ?? DEFAULT_REBUILD_CMD;
-    const out = await runCheck({
-      cmd,
-      cwd: opts.workspaceDir,
-      expected: 0,
-      timeoutMs: opts.rebuild.timeoutMs ?? DEFAULT_REBUILD_TIMEOUT_MS,
-    });
-    rebuild = { cmd, exitCode: out.exitCode, ok: out.ok, durationMs: out.durationMs, tail: out.tail, restored };
+    let restored: string[] = [];
+    let restoreError: string | undefined;
+    try {
+      restored = opts.seedSnapshot
+        ? restoreFiles(opts.workspaceDir, opts.seedSnapshot, opts.rebuild.lockfiles ?? DEFAULT_REBUILD_LOCKFILES)
+        : [];
+    } catch (err) {
+      // Restauração falhou: rodar o rebuild sobre o lockfile do AGENTE seria
+      // instalar deps sujas. Vira rebuild falho — as violações já detectadas
+      // continuam valendo (a rep não cai no catch genérico e perde oracle.json).
+      restoreError = err instanceof Error ? err.message : String(err);
+    }
+    if (restoreError !== undefined) {
+      rebuild = { cmd, exitCode: NO_EXIT, ok: false, durationMs: 0, tail: `restauração do lockfile falhou: ${restoreError}`, restored };
+    } else {
+      const out = await runCheck({
+        cmd,
+        cwd: opts.workspaceDir,
+        expected: 0,
+        timeoutMs: opts.rebuild.timeoutMs ?? DEFAULT_REBUILD_TIMEOUT_MS,
+      });
+      rebuild = { cmd, exitCode: out.exitCode, ok: out.ok, durationMs: out.durationMs, tail: out.tail, restored };
+    }
   }
   const rebuildFailed = rebuild !== undefined && !rebuild.ok;
 
   // --- 3. Checks, na ordem da lista.
   const checks: OracleResult['checks'] = [];
   const scored: ScoredCheck[] = [];
-  let inconclusive = rebuildFailed;
+  let inconclusive = rebuildFailed || guardTruncated;
 
   for (let i = 0; i < opts.verify.length; i += 1) {
     const v = opts.verify[i];
@@ -372,11 +430,11 @@ export async function runOracle(opts: {
     const kind = v.kind;
 
     const out: CheckOutcome = rebuildFailed
-      ? { exitCode: NO_EXIT, ok: false, inconclusive: true, durationMs: 0, tail: '' }
+      ? { exitCode: NO_EXIT, ok: false, inconclusive: true, reason: 'rebuild', durationMs: 0, tail: '' }
       : await runCheck({ cmd: v.cmd, cwd: opts.workspaceDir, expected, timeoutMs });
 
     if (out.inconclusive) inconclusive = true;
-    scored.push({ ok: out.ok, weight, kind, inconclusive: out.inconclusive });
+    scored.push({ ok: out.ok, weight, kind, inconclusive: out.inconclusive, ...(out.reason ? { reason: out.reason } : {}) });
 
     checks.push({
       label,
@@ -389,6 +447,7 @@ export async function runOracle(opts: {
       tail: out.tail,
       ...(kind ? { kind } : {}),
       ...(rebuildFailed ? { skipped: true } : {}),
+      ...(out.reason ? { notRun: out.reason } : {}),
     });
 
     if (!rebuildFailed) opts.onCheck?.({ label, ok: out.ok, exitCode: out.exitCode });
@@ -408,6 +467,9 @@ export async function runOracle(opts: {
     f2p: s.f2p,
     p2p: s.p2p,
     ...(protectedChanges ? { protectedChanges } : {}),
+    ...(guardTruncated ? { guardTruncated: true } : {}),
+    ...(detectorViolations.length > 0 ? { detectorViolations } : {}),
+    ...(purged.length > 0 ? { purged } : {}),
     ...(findings.length > 0 ? { findings } : {}),
     ...(rebuild ? { rebuild } : {}),
   };

@@ -349,7 +349,7 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         cacheRepoDir = ws.cacheRepoDir;
         // SHA-256 dos protegidos NO SEED, antes do agente acordar (IMPL-039):
         // pelo filesystem, não pelo git — pega arquivo ignorado e rename.
-        const seedGuard = captureSeedGuard(workspaceDir, task);
+        const seedGuard = await captureSeedGuard(workspaceDir, task);
 
         // 2) task.txt + system-prompt.txt no repetitionDir (§12.5).
         writeFileSync(path.join(repAbs, 'task.txt'), stage.question, 'utf8');
@@ -729,6 +729,24 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
 // + §15.2 (stopReason !== 'completed'). O juiz LLM SÓ roda quando é de fato útil.
 // ---------------------------------------------------------------------------
 
+/**
+ * Explicação de `nao` por violação, separando CAMINHO PROTEGIDO de ACHADO DOS
+ * DETECTORES (modo `fail`): "arquivos proibidos modificados: src/x.ts" para um
+ * `|| true` num arquivo de código enganava quem lê o veredito.
+ */
+function violationExplanation(oracle: AgentOracleResult): string {
+  const byDetector = new Set(oracle.detectorViolations ?? []);
+  const protectedPaths = oracle.violations.filter((p) => !byDetector.has(p));
+  const parts: string[] = [];
+  if (protectedPaths.length > 0) parts.push(`arquivos proibidos modificados: ${protectedPaths.join(', ')}`);
+  if (byDetector.size > 0) {
+    const kinds = (p: string): string =>
+      [...new Set((oracle.findings ?? []).filter((f) => f.path === p).map((f) => f.kind))].join('/') || 'suspeito';
+    parts.push(`atalho suspeito (detectores em modo fail): ${[...byDetector].map((p) => `${p} [${kinds(p)}]`).join(', ')}`);
+  }
+  return parts.join('; ');
+}
+
 async function adjudicateRep(opts: {
   stopReason: AgentStopReason;
   oracle?: AgentOracleResult;
@@ -752,7 +770,7 @@ async function adjudicateRep(opts: {
   // que seja o motivo do fim (um agente cortado por timeout depois de editar o
   // teste não escapa como "incompleto, fora do placar").
   if (oracle && oracle.violations.length > 0) {
-    return { verdict: 'nao', explanation: `arquivos proibidos modificados: ${oracle.violations.join(', ')}`, judgeUsed: false };
+    return { verdict: 'nao', explanation: violationExplanation(oracle), judgeUsed: false };
   }
 
   // §18.3: processo morreu => é do contestant => 'nao' com status error.
@@ -760,9 +778,25 @@ async function adjudicateRep(opts: {
     return { verdict: 'nao', explanation: 'a execução do agente falhou (processo morreu)', judgeUsed: false };
   }
 
+  // IMPL-039: rebuild de dependências falhou (registry/rede fora, lockfile
+  // ausente…) ⇒ os checks não rodaram e o oráculo não disse NADA sobre o agente.
+  // Regra das CONVENTIONS §2: infra → sem veredito, fora do placar — nunca
+  // imputar `nao` (antes o score 0 dos checks pulados virava `nao` sem juiz).
+  if (oracle?.rebuild && !oracle.rebuild.ok) {
+    return {
+      verdict: null,
+      explanation:
+        `rebuild de dependências falhou (\`${oracle.rebuild.cmd}\`, exit ${oracle.rebuild.exitCode}) — ` +
+        'checks não rodaram, oráculo inconclusivo: sem veredito, fora do placar',
+      judgeUsed: false,
+    };
+  }
+
   // §15.2 exceção: stopReason !== 'completed' é incomplete, EXCETO se o oráculo
-  // passou inteiro (score===1) — aí o mundo mudou de forma verificável e segue.
-  const oraclePassing = oracle !== undefined && oracle.violations.length === 0 && oracle.score === 1;
+  // passou inteiro (score===1, sem P2P não aferido) — aí o mundo mudou de forma
+  // verificável e segue.
+  const p2pUnverified = (oracle?.p2p?.unverified ?? 0) > 0;
+  const oraclePassing = oracle !== undefined && oracle.violations.length === 0 && oracle.score === 1 && !p2pUnverified;
   if (stopReason !== 'completed' && !oraclePassing) {
     return { verdict: null, explanation: `execução cortada (${stopReason}) — fora do placar`, judgeUsed: false };
   }
@@ -770,8 +804,21 @@ async function adjudicateRep(opts: {
   // Daqui, o julgamento segue §17.1: o ORÁCULO MANDA; o juiz só gradua.
   if (oracle) {
     if (oracle.p2p?.broken) {
-      // IMPL-039: regressão (PASS_TO_PASS quebrado) = a execução FALHOU.
+      // IMPL-039: regressão (PASS_TO_PASS quebrado, travado ou morto por sinal) = a execução FALHOU.
       return { verdict: 'nao', explanation: 'regressão: teste(s) PASS_TO_PASS quebrado(s)', judgeUsed: false };
+    }
+    if (oracle.score === 1 && p2pUnverified) {
+      // IMPL-039: F2P verdes, mas a regressão NÃO foi aferida (P2P não rodou):
+      // o oráculo não sustenta `resolve`. Cai para o juiz com teto `parcial`.
+      return runJudgeForGraduation({
+        stage, dossierText, contestantId, judgeModelIds, apiKey, ctx,
+        canDowngradeTo: 'nao',
+        ceiling: 'parcial',
+        fallback: {
+          verdict: 'parcial' as Verdict,
+          explanation: 'F2P passaram, mas PASS_TO_PASS não pôde ser aferido — regressão não descartada',
+        },
+      });
     }
     if (oracle.score === 1) {
       // 'resolve' candidato; o juiz roda SÓ para graduar (pode rebaixar a
@@ -820,9 +867,11 @@ async function runJudgeForGraduation(opts: {
   apiKey: string;
   ctx: RunCtx;
   canDowngradeTo: 'parcial' | 'nao';
+  /** Teto do veredito: com `'parcial'`, um `resolve` do juiz é rebaixado a `parcial`. */
+  ceiling?: 'parcial';
   fallback: { verdict: Verdict; explanation: string };
 }): Promise<{ verdict: Verdict | null; explanation: string; judgeUsed: boolean }> {
-  const { stage, dossierText, contestantId, judgeModelIds, apiKey, ctx, canDowngradeTo, fallback } = opts;
+  const { stage, dossierText, contestantId, judgeModelIds, apiKey, ctx, canDowngradeTo, ceiling, fallback } = opts;
   // Sem juiz configurado não há rebaixamento: o veredito candidato (do oráculo)
   // permanece. Evita punir quem o oráculo aprovou por falta de modelo de juiz.
   if (judgeModelIds.length === 0) {
@@ -840,6 +889,7 @@ async function runJudgeForGraduation(opts: {
     // Clampeia o veredito do juiz ao piso permitido (§17.1: score 1 nunca vira
     // 'nao' — o juiz só pode rebaixar a 'parcial' com justificativa).
     let verdict = j.verdict;
+    if (ceiling === 'parcial' && verdict === 'resolve') verdict = 'parcial';
     if (canDowngradeTo === 'parcial' && verdict === 'nao') {
       verdict = 'parcial';
       return {

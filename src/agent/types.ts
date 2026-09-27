@@ -97,11 +97,16 @@ export interface AgentTaskSpec {
 
   /**
    * IMPL-039 — rebuild de dependências ANTES do `verify[]`: os `lockfiles` voltam
-   * aos bytes do seed e `cmd` reconstrói (default `npm ci`). Com rebuild ligado,
+   * aos bytes do seed e `cmd` reconstrói (default `npm ci --ignore-scripts
+   * --no-audit --no-fund`). Com rebuild ligado,
    * `lockfiles` e `protect` (default `node_modules/`) entram no hash de
    * protegidos: dependência adulterada pelo agente é VIOLAÇÃO — e o rebuild a
    * neutraliza para os checks rodarem contra dependências limpas. Falha do
-   * rebuild = oráculo inconclusivo, checks não rodam (nunca contra deps sujas).
+   * rebuild = oráculo inconclusivo, checks não rodam (nunca contra deps sujas)
+   * e a repetição fica SEM veredito (infra, nunca `nao`) — salvo violação.
+   * O default `npm ci --ignore-scripts` não roda `postinstall`/`prepare` do
+   * pacote raiz: um script de instalação plantado pelo agente adulteraria
+   * `node_modules` DEPOIS do snapshot pós.
    */
   rebuild?: {
     cmd?: string;
@@ -435,6 +440,8 @@ export interface OracleResult {
     kind?: 'fail_to_pass' | 'pass_to_pass';
     /** IMPL-039: não rodou por falha do rebuild de dependências. */
     skipped?: boolean;
+    /** IMPL-039: por que o check não teve exit normal (ausente = exit normal). */
+    notRun?: 'timeout' | 'signal' | 'spawn' | 'rebuild';
   }[];
   /** Soma ponderada dos ok / soma dos pesos, em [0,1]. */
   score: number;
@@ -446,10 +453,24 @@ export interface OracleResult {
   /** Nota antes das penalidades (violação / P2P quebrado). */
   rawScore?: number;
   f2p?: { passed: number; total: number };
-  /** `broken` ⇒ regressão: a execução falhou (score 0). */
-  p2p?: { passed: number; total: number; broken: boolean };
+  /**
+   * `broken` ⇒ regressão: a execução falhou (score 0) — inclui P2P que travou
+   * (timeout) ou morreu por sinal. `unverified` = P2P que não pôde ser aferido
+   * (spawn error/rebuild): com ele > 0 a nota cheia NÃO basta para `resolve`.
+   */
+  p2p?: { passed: number; total: number; broken: boolean; unverified?: number };
   /** Mudanças nos arquivos protegidos por SHA-256 vs o seed (filesystem). */
   protectedChanges?: { path: string; change: 'modified' | 'deleted' | 'added' | 'renamed'; to?: string }[];
+  /**
+   * true = o percurso dos protegidos bateu no teto de entradas (seed ou pós):
+   * o hash NÃO foi comparado (evita `added`/`deleted` fantasma pelo corte) e só
+   * o diff do git vigiou `forbiddenPaths`. O oráculo fica `inconclusive`.
+   */
+  guardTruncated?: boolean;
+  /** Violações que vieram SÓ dos detectores em modo `fail` (não de caminho protegido). */
+  detectorViolations?: string[];
+  /** Caches de ferramenta apagados antes do rebuild/checks (`__pycache__`, `node_modules/.vite`…). */
+  purged?: string[];
   /** Achados dos detectores estáticos (`detectors`). */
   findings?: { kind: 'skip' | 'xfail' | 'exit0' | 'test-deleted' | 'runner-config'; path: string; detail: string }[];
   /** Rebuild de dependências rodado antes dos checks. */
