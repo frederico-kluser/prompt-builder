@@ -193,6 +193,8 @@ export interface StageSpec {
   reference?: string;
   /** Rotulo esperado (ground-truth): veredito deterministico sem juiz LLM. */
   expected?: ExpectedSpec;
+  /** Todos os rotulos validos da etapa; obrigatorio com `expected` curto (IMPL-003). */
+  labelSet?: string[];
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
 }

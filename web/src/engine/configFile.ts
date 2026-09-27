@@ -11,6 +11,7 @@
 
 import { z } from 'zod';
 import { getTechnique } from './techniques';
+import { stageLabelIssues } from '../../../src/engine/groundTruth.js';
 import type { ReasoningLevel } from './types';
 
 /** Valor do campo `format` — versão do contrato do arquivo de configuração. */
@@ -31,6 +32,11 @@ export interface ArenaConfigScenario {
    * LLM. `string` | alternativas | par campo->valor (resposta JSON).
    */
   expected?: string | string[] | Record<string, string | number | boolean>;
+  /**
+   * TODOS os rótulos válidos do cenário (IMPL-003). Obrigatório quando
+   * `expected` é rótulo curto (≤5 palavras) — sem ele o arquivo é recusado.
+   */
+  labelSet?: string[];
 }
 
 /**
@@ -151,6 +157,13 @@ const scenarioSchema = z.object({
       z.array(z.string().min(1)).min(1),
       z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
     ])
+    .optional(),
+  // Todos os rotulos validos (IMPL-003): obrigatorio com `expected` curto —
+  // a regra (`labelSetIssue`) roda no superRefine da config.
+  labelSet: z
+    .array(z.string('labelSet deve ser lista de textos').min(1, 'rótulo vazio em labelSet'), 'labelSet deve ser uma lista de rótulos')
+    .min(1, 'labelSet não pode ser vazio')
+    .max(200, 'labelSet não pode passar de 200 rótulos')
     .optional(),
 });
 
@@ -375,6 +388,16 @@ const arenaConfigSchema = z
   )
   .superRefine((cfg, ctx) => {
     const { mode, models, variation } = cfg;
+
+    // Rótulo esperado curto sem `labelSet` = erro de config (IMPL-003,
+    // R-03b:DEC-4): sem o conjunto de rótulos o verificador estrito não
+    // reconhece a resposta que lista/hesita entre rótulos. Fica aqui (e não no
+    // item do array) para a mensagem sair nomeando o cenário, não o union.
+    if (Array.isArray(cfg.scenarios)) {
+      for (const { index, message } of stageLabelIssues(cfg.scenarios)) {
+        ctx.addIssue({ code: 'custom', path: ['scenarios', index, 'labelSet'], message });
+      }
+    }
 
     // compare: o eixo de competidores é XOR — modelos distintos OU configs.
     if (mode === 'compare') {

@@ -141,7 +141,9 @@ agente (Agent Arena), o executor do motor é o `pi`; os demais entram como
   `export`/`rm`/`drop`. Item enriquecido: `tier`, `dimensionTags`, `persona`, `rationale` e
   **gabarito obrigatório** (`reference` textual OU `expected` de rótulo — o evolve recusa sem).
 - **`expected`** (ground-truth): veredito determinístico sem juiz LLM — `"edit"`, `["edit","help"]`
-  ou `{"campo":"valor"}`.
+  ou `{"campo":"valor"}`. Rótulo curto (≤5 palavras) exige **`labelSet`** (todos os rótulos
+  válidos; sem ele = exit 3). Casamento estrito: prosa vale no máximo `parcial`; negação,
+  hesitação ou vários rótulos = `nao`.
 - **arena-config@1**: `scenarios: {"from":"library","profile","ids"}` · `prompt.contracts`
   (never-break) · `prompt.group`+`promptId` (multi-prompt coordinate ascent) · `training.reflection`
   (`deterministic|llm|off`) · `training.paretoPool` (população Pareto) · `repeats` (compare, 1–3).

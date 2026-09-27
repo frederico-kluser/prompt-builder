@@ -3,13 +3,23 @@
 // (padrão do prompt-arena `gabaritoSpec kind:'labels'`). Travam a normalização
 // de rótulo, o casamento BCP-47, a extração de campo em JSON e a escada
 // resolve/parcial/nao antes de qualquer refactor.
+//
+// IMPL-003 (R-03b:REC-5): o verificador é ESTRITO por padrão — standalone/
+// substring valem no máximo 'parcial'; negação, hesitação e multi-rótulo dão
+// 'nao'; JSON ambíguo (dois objetos, chave duplicada) dá 'nao'. O corpus N1 e
+// o adversarial abaixo travam 0 falso 'resolve'.
 
 import { describe, expect, it } from 'vitest';
 import {
   extractJsonField,
+  isShortLabelExpected,
+  labelSetIssue,
   languageMatches,
   matchExpected,
   normalizeLabel,
+  SHORT_LABEL_MAX_WORDS,
+  stageLabelIssues,
+  type ExpectedSpec,
 } from '../src/engine/groundTruth.js';
 
 describe('normalizeLabel', () => {
@@ -109,10 +119,15 @@ describe('matchExpected — rótulo simples', () => {
     expect(r.explanation).toContain('primeira linha');
   });
 
-  it('rótulo standalone no texto resolve', () => {
+  // IMPL-003: antes 'resolve' — é exatamente o casamento "aparece em algum
+  // ponto" que a medida N1 mostrou dar falso positivo 7/7. No estrito, prosa
+  // com o rótulo vale no máximo 'parcial' (o modo lenient guarda o legado).
+  it('rótulo standalone no meio da prosa vale no máximo parcial (strict)', () => {
     const r = matchExpected('edit o texto', 'edit');
-    expect(r.verdict).toBe('resolve');
+    expect(r.verdict).toBe('parcial');
+    expect(r.rule).toBe('standalone');
     expect(r.explanation).toContain('standalone');
+    expect(matchExpected('edit o texto', 'edit', { mode: 'lenient' }).verdict).toBe('resolve');
   });
 
   it('rótulo só dentro de outra palavra/frase é parcial', () => {
@@ -123,7 +138,11 @@ describe('matchExpected — rótulo simples', () => {
 
   it('standalone exige fronteira alfanumérica ("2" não casa em "2024")', () => {
     expect(matchExpected('2024', '2').verdict).toBe('parcial');
-    expect(matchExpected('foram 2 gatos', '2').verdict).toBe('resolve');
+    expect(matchExpected('2024', '2').rule).toBe('substring');
+    // IMPL-003: standalone na prosa era 'resolve'; no estrito é 'parcial'.
+    expect(matchExpected('foram 2 gatos', '2').verdict).toBe('parcial');
+    expect(matchExpected('foram 2 gatos', '2').rule).toBe('standalone');
+    expect(matchExpected('foram 2 gatos', '2', { mode: 'lenient' }).verdict).toBe('resolve');
   });
 
   it('rótulo de 6+ palavras não casa standalone (só substring → parcial)', () => {
@@ -259,5 +278,325 @@ describe('matchExpected — casos degenerados', () => {
       expect(typeof r.explanation).toBe('string');
       expect(r.explanation.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IMPL-003 — verificador ESTRITO (R-03b:REC-5 / DEC-4)
+// ---------------------------------------------------------------------------
+
+const SENT = ['positivo', 'negativo', 'neutro'];
+const SIMNAO = ['sim', 'nao'];
+const INTENT = ['edit', 'create', 'delete', 'help'];
+const URG = ['urgente', 'normal'];
+
+interface Caso {
+  texto: string;
+  expected: ExpectedSpec;
+  labelSet?: string[];
+}
+
+/**
+ * Medida N1 (R-03b, 2026-09-25, `matchExpected` @ ebad7a2): as 7 respostas
+ * adversariais em texto livre que davam 'resolve' + os 2 casos JSON do
+ * contexto (dois objetos com rótulos diferentes; chave duplicada).
+ */
+const N1: Caso[] = [
+  { texto: 'Não é sim, é não.', expected: 'sim', labelSet: SIMNAO },
+  { texto: 'positivo? negativo? neutro?', expected: 'negativo', labelSet: SENT },
+  { texto: 'As opções são edit, create ou delete. Escolho delete.', expected: 'edit', labelSet: INTENT },
+  { texto: 'Talvez sim, talvez não.', expected: 'sim', labelSet: SIMNAO },
+  { texto: 'Definitivamente não é negativo; é positivo.', expected: 'negativo', labelSet: SENT },
+  { texto: 'positivo | negativo | neutro', expected: ['negativo'], labelSet: SENT },
+  { texto: 'A resposta NÃO é urgente.', expected: 'urgente', labelSet: URG },
+];
+const N1_JSON: Caso[] = [
+  { texto: '{"label":"negativo"} ou {"label":"positivo"}', expected: { label: 'negativo' } },
+  { texto: '{"label":"positivo","label":"negativo"}', expected: { label: 'negativo' } },
+];
+
+describe('IMPL-003 — corpus N1 deixa de dar resolve', () => {
+  it('os 7 casos adversariais da N1 davam resolve no legado e dão nao no estrito', () => {
+    for (const c of N1) {
+      // o "antes": a regressão medida pela N1 (modo lenient = escada legada)
+      expect(matchExpected(c.texto, c.expected, { mode: 'lenient' }).verdict, c.texto).toBe('resolve');
+      const r = matchExpected(c.texto, c.expected, { labelSet: c.labelSet });
+      expect(r.verdict, `${c.texto} → ${r.rule}: ${r.explanation}`).toBe('nao');
+      expect(r.deterministic).toBe(true);
+    }
+  });
+
+  it('mesmo SEM labelSet (record antigo) nenhum dos 7 resolve', () => {
+    for (const c of N1) {
+      const r = matchExpected(c.texto, c.expected);
+      expect(r.verdict, `${c.texto} → ${r.rule}`).not.toBe('resolve');
+    }
+  });
+
+  it('os 2 casos JSON (dois objetos / chave duplicada) davam resolve e dão nao', () => {
+    for (const c of N1_JSON) {
+      expect(matchExpected(c.texto, c.expected, { mode: 'lenient' }).verdict, c.texto).toBe('resolve');
+      const r = matchExpected(c.texto, c.expected);
+      expect(r.verdict, c.texto).toBe('nao');
+      expect(r.rule).toBe('json-ambiguous');
+    }
+    // controle: ordem invertida continua 'nao'
+    expect(matchExpected('{"label":"positivo"} ou {"label":"negativo"}', { label: 'negativo' }).verdict).toBe('nao');
+  });
+
+  it('negação/hesitação/multi-rótulo são nomeados na regra (painel "onde falhou")', () => {
+    expect(matchExpected('A resposta NÃO é urgente.', 'urgente', { labelSet: URG }).rule).toBe('negated');
+    expect(matchExpected('Talvez urgente.', 'urgente', { labelSet: URG }).rule).toBe('hedged');
+    expect(matchExpected('positivo | negativo | neutro', 'negativo', { labelSet: SENT }).rule).toBe('multi-label');
+  });
+});
+
+/**
+ * Corpus adversarial (métrica R-03b §9: "corpus N1 + variações de negação,
+ * hedge, multi-rótulo, JSON duplo" — limiar: 0 falso 'resolve'). Toda linha
+ * é uma resposta ERRADA ou não-comprometida para o rótulo esperado.
+ */
+const ADVERSARIAL: Record<string, Caso[]> = {
+  negacao: [
+    { texto: 'Não é urgente.', expected: 'urgente', labelSet: URG },
+    { texto: 'Isso não é urgente', expected: 'urgente', labelSet: URG },
+    { texto: 'Nada urgente por aqui.', expected: 'urgente', labelSet: URG },
+    { texto: 'Não urgente', expected: 'urgente', labelSet: ['urgente', 'nao urgente'] },
+    { texto: 'Não urgente', expected: 'urgente', labelSet: URG },
+    { texto: 'Longe de ser urgente.', expected: 'urgente', labelSet: URG },
+    { texto: 'Nunca foi urgente.', expected: 'urgente', labelSet: URG },
+    { texto: 'Urgente não, apenas importante.', expected: 'urgente', labelSet: URG },
+    { texto: 'It is not urgent.', expected: 'urgent', labelSet: ['urgent', 'normal'] },
+    { texto: "This isn't urgent at all", expected: 'urgent', labelSet: ['urgent', 'normal'] },
+    { texto: 'Em vez de edit, use create.', expected: 'edit', labelSet: INTENT },
+    { texto: 'não-negativo', expected: 'negativo', labelSet: SENT },
+    { texto: 'O cliente não está negativo, está neutro.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Não é sim.', expected: 'sim', labelSet: SIMNAO },
+  ],
+  hedge: [
+    { texto: 'Talvez urgente.', expected: 'urgente', labelSet: URG },
+    { texto: 'Pode ser urgente.', expected: 'urgente', labelSet: URG },
+    { texto: 'Provavelmente urgente, mas não tenho certeza.', expected: 'urgente', labelSet: URG },
+    { texto: 'Acho que é urgente.', expected: 'urgente', labelSet: URG },
+    { texto: 'Urgente?', expected: 'urgente', labelSet: URG },
+    { texto: 'Urgente? Não sei.', expected: 'urgente', labelSet: URG },
+    { texto: 'Depende: pode ser urgente.', expected: 'urgente', labelSet: URG },
+    { texto: 'Possivelmente negativo.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Maybe urgent.', expected: 'urgent', labelSet: ['urgent', 'normal'] },
+    { texto: 'Negativo?', expected: 'negativo', labelSet: SENT },
+    { texto: 'Sim, mas não tenho certeza.', expected: 'sim', labelSet: SIMNAO },
+    { texto: 'negativo\nmas não tenho certeza', expected: 'negativo', labelSet: SENT },
+    { texto: 'Parece negativo.', expected: 'negativo', labelSet: SENT },
+  ],
+  multiRotulo: [
+    { texto: 'positivo, negativo, neutro', expected: 'negativo', labelSet: SENT },
+    { texto: 'positivo/negativo/neutro', expected: 'positivo', labelSet: SENT },
+    { texto: 'negativo ou neutro', expected: 'negativo', labelSet: SENT },
+    { texto: 'Pode ser positivo ou negativo.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo. Positivo. Neutro.', expected: 'negativo', labelSet: SENT },
+    { texto: 'positivo\nnegativo\nneutro', expected: 'positivo', labelSet: SENT },
+    { texto: 'positivo\nnegativo\nneutro', expected: 'negativo', labelSet: SENT },
+    { texto: '- positivo\n- negativo\n- neutro', expected: 'positivo', labelSet: SENT },
+    { texto: 'negativo\nou talvez positivo', expected: 'negativo', labelSet: SENT },
+    { texto: 'Rótulos possíveis: positivo | negativo | neutro. Escolho negativo.', expected: 'negativo', labelSet: SENT },
+    { texto: 'edit, create, delete, help', expected: 'help', labelSet: INTENT },
+    { texto: 'sim e não', expected: 'sim', labelSet: SIMNAO },
+    { texto: 'Negativo? Positivo? Difícil dizer.', expected: 'negativo', labelSet: SENT },
+  ],
+  jsonDuplo: [
+    { texto: '{"label":"negativo"} ou {"label":"positivo"}', expected: 'negativo', labelSet: SENT },
+    { texto: '{"label":"positivo"} ou {"label":"negativo"}', expected: 'negativo', labelSet: SENT },
+    { texto: '{"label":"positivo","label":"negativo"}', expected: 'negativo', labelSet: SENT },
+    { texto: '{"label":"negativo","label":"positivo"}', expected: { label: 'negativo' } },
+    { texto: '["positivo","negativo","neutro"]', expected: 'negativo', labelSet: SENT },
+    { texto: '{"label":"negativo","categoria":"positivo"}', expected: 'negativo', labelSet: SENT },
+    { texto: '```json\n{"label":"positivo"}\n```\n{"label":"negativo"}', expected: 'negativo', labelSet: SENT },
+    { texto: '```json\n{"label":"positivo"}\n```\n```json\n{"label":"negativo"}\n```', expected: { label: 'negativo' } },
+    { texto: '{"intent":"edit"}\n{"intent":"help"}', expected: { intent: 'edit' } },
+  ],
+  nulo: [
+    { texto: ':', expected: 'negativo', labelSet: SENT },
+    { texto: 'N/A', expected: 'negativo', labelSet: SENT },
+    { texto: '{}', expected: 'negativo', labelSet: SENT },
+    { texto: '{}', expected: { label: 'negativo' } },
+    { texto: 'Não sei.', expected: 'sim', labelSet: SIMNAO },
+  ],
+};
+
+describe('IMPL-003 — corpus adversarial: 0 falso resolve', () => {
+  for (const [familia, casos] of Object.entries(ADVERSARIAL)) {
+    it(`família ${familia} (${casos.length} casos) nunca resolve`, () => {
+      const falsos = casos
+        .map((c) => ({ c, r: matchExpected(c.texto, c.expected, { labelSet: c.labelSet }) }))
+        .filter(({ r }) => r.verdict === 'resolve')
+        .map(({ c, r }) => `${JSON.stringify(c.texto)} → ${r.rule}`);
+      expect(falsos).toEqual([]);
+    });
+  }
+
+  it('negação e hesitação sobre o rótulo dão nao (não só "não resolve")', () => {
+    for (const c of [...ADVERSARIAL.negacao, ...ADVERSARIAL.hedge]) {
+      const r = matchExpected(c.texto, c.expected, { labelSet: c.labelSet });
+      expect(r.verdict, `${c.texto} → ${r.rule}`).toBe('nao');
+    }
+  });
+
+  it('lista/multi-rótulo e JSON duplo dão nao', () => {
+    for (const c of [...ADVERSARIAL.multiRotulo, ...ADVERSARIAL.jsonDuplo]) {
+      const r = matchExpected(c.texto, c.expected, { labelSet: c.labelSet });
+      expect(r.verdict, `${c.texto} → ${r.rule}`).toBe('nao');
+    }
+  });
+});
+
+/**
+ * Positivos LEGÍTIMOS: respostas corretas num formato de resposta documentado
+ * (rótulo seco, rótulo na primeira linha com ou sem explicação, "chave:
+ * rótulo", JSON). Limiar R-03b §9: ≥95% de 'resolve'.
+ */
+const LEGITIMOS: Caso[] = [
+  { texto: 'negativo', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo', expected: 'negativo', labelSet: SENT },
+  { texto: 'NEGATIVO.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo!', expected: 'negativo', labelSet: SENT },
+  { texto: '**Negativo**', expected: 'negativo', labelSet: SENT },
+  { texto: '`negativo`', expected: 'negativo', labelSet: SENT },
+  { texto: '- negativo', expected: 'negativo', labelSet: SENT },
+  { texto: '"negativo"', expected: 'negativo', labelSet: SENT },
+  { texto: 'Resposta: negativo', expected: 'negativo', labelSet: SENT },
+  { texto: 'Classificação: Negativo', expected: 'negativo', labelSet: SENT },
+  { texto: 'Categoria: NEGATIVO', expected: 'negativo', labelSet: SENT },
+  { texto: 'Rótulo: negativo', expected: 'negativo', labelSet: SENT },
+  { texto: 'Label: negativo', expected: 'negativo', labelSet: SENT },
+  { texto: 'Sentimento: negativo', expected: 'negativo', labelSet: SENT },
+  { texto: 'negativo\n\nO cliente reclama do atraso na entrega.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo\nMotivo: o cliente não ficou satisfeito e não é neutro.', expected: 'negativo', labelSet: SENT },
+  { texto: 'negativo\nNão é positivo porque há reclamação explícita.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Resposta: Negativo.\nO cliente reclamou do prazo.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo. O cliente reclama do atraso.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo — o cliente pede reembolso.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo - o cliente pede reembolso.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo (reclamação de atraso)', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo: o cliente ameaça cancelar.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo. O início é positivo, mas o fim reclama.', expected: 'negativo', labelSet: SENT },
+  { texto: '{"label": "negativo"}', expected: 'negativo', labelSet: SENT },
+  { texto: '```json\n{"sentimento": "negativo"}\n```', expected: 'negativo', labelSet: SENT },
+  { texto: '{"label": "negativo", "justificativa": "cliente irritado"}', expected: 'negativo', labelSet: SENT },
+  { texto: '{"sentimento":"negativo","motivo":"atraso","resposta":"Entendo sua frustração"}', expected: 'negativo', labelSet: SENT },
+  { texto: 'Segue a classificação:\n```json\n{"label":"negativo"}\n```', expected: 'negativo', labelSet: SENT },
+  { texto: '["negativo"]', expected: 'negativo', labelSet: SENT },
+  { texto: 'Sim.', expected: 'sim', labelSet: SIMNAO },
+  { texto: 'Sim, o cliente tem direito ao reembolso.', expected: 'sim', labelSet: SIMNAO },
+  { texto: 'sim\nO prazo de 7 dias foi respeitado.', expected: 'sim', labelSet: SIMNAO },
+  { texto: 'Não.', expected: 'nao', labelSet: SIMNAO },
+  { texto: 'Não, o prazo de 7 dias expirou.', expected: 'nao', labelSet: SIMNAO },
+  { texto: 'Não\nO pedido foi feito há 10 dias.', expected: 'nao', labelSet: SIMNAO },
+  { texto: 'Não. Não há direito a reembolso.', expected: 'nao', labelSet: SIMNAO },
+  { texto: 'edit', expected: 'edit', labelSet: INTENT },
+  { texto: 'Intent: edit', expected: 'edit', labelSet: INTENT },
+  { texto: 'Ação: delete', expected: 'delete', labelSet: INTENT },
+  { texto: '{"intent":"edit"}', expected: 'edit', labelSet: INTENT },
+  { texto: 'help', expected: ['help', 'edit'], labelSet: INTENT },
+  { texto: 'edit\nO usuário pediu para alterar o texto, não criar um novo.', expected: ['help', 'edit'], labelSet: INTENT },
+  { texto: 'urgente', expected: 'urgente', labelSet: URG },
+  { texto: 'Prioridade: URGENTE', expected: 'urgente', labelSet: URG },
+  { texto: 'Urgente, com certeza.', expected: 'urgente', labelSet: URG },
+  { texto: 'pt-BR', expected: 'pt', labelSet: ['pt', 'en', 'es'] },
+  { texto: '42', expected: '42', labelSet: ['42'] },
+  { texto: 'Resposta: 42', expected: '42', labelSet: ['42'] },
+  { texto: '42\nPorque 6×7=42.', expected: '42', labelSet: ['42'] },
+  { texto: '{"intent": "edit"}', expected: { intent: 'edit' } },
+  { texto: 'Claro: {"intent": "edit"} — pronto!', expected: { intent: 'edit' } },
+  { texto: '```json\n{"intent": "edit", "confidence": 0.9}\n```', expected: { intent: 'edit' } },
+  { texto: '{"intent":"edit"}\n{"intent":"edit"}', expected: { intent: 'edit' } },
+];
+
+describe('IMPL-003 — positivos legítimos: ≥95% resolve', () => {
+  it(`acerto ≥95% em ${LEGITIMOS.length} respostas corretas bem-formadas`, () => {
+    const erros = LEGITIMOS.map((c) => ({ c, r: matchExpected(c.texto, c.expected, { labelSet: c.labelSet }) }))
+      .filter(({ r }) => r.verdict !== 'resolve')
+      .map(({ c, r }) => `${JSON.stringify(c.texto)} → ${r.verdict}/${r.rule}`);
+    const acerto = (LEGITIMOS.length - erros.length) / LEGITIMOS.length;
+    expect(acerto, erros.join('\n')).toBeGreaterThanOrEqual(0.95);
+    // Hoje o corpus inteiro passa — o piso acima é o contrato; isto trava regressão.
+    expect(erros).toEqual([]);
+  });
+
+  it('prosa correta cai para parcial (rebaixamento EXPLÍCITO, nunca nao)', () => {
+    const prosa: Caso[] = [
+      { texto: 'O sentimento do cliente é negativo.', expected: 'negativo', labelSet: SENT },
+      { texto: 'Classifico como negativo, pois o cliente reclama.', expected: 'negativo', labelSet: SENT },
+      { texto: 'Pelo tom da mensagem, eu diria negativo', expected: 'negativo', labelSet: SENT },
+      { texto: 'O usuário quer edit do parágrafo', expected: 'edit', labelSet: INTENT },
+    ];
+    for (const c of prosa) {
+      const r = matchExpected(c.texto, c.expected, { labelSet: c.labelSet });
+      expect(r.verdict, `${c.texto} → ${r.rule}`).toBe('parcial');
+      expect(r.explanation).toContain('modo estrito');
+    }
+  });
+
+  it('JSON com o valor errado dá nao (field-mismatch)', () => {
+    expect(matchExpected('{"label":"positivo"}', 'negativo', { labelSet: SENT }).rule).toBe('field-mismatch');
+    expect(matchExpected('{"label":"positivo"}', 'negativo', { labelSet: SENT }).verdict).toBe('nao');
+  });
+});
+
+describe('IMPL-003 — modo e labelSet', () => {
+  it('strict é o default (sem opções = { mode: "strict" })', () => {
+    const textos = ['edit o texto', 'A resposta NÃO é urgente.', 'Resposta: edit', '{"a":1}'];
+    for (const t of textos) {
+      expect(matchExpected(t, 'edit')).toEqual(matchExpected(t, 'edit', { mode: 'strict' }));
+    }
+  });
+
+  it('rótulo curto = ≤5 palavras; objeto campo→valor não conta', () => {
+    expect(SHORT_LABEL_MAX_WORDS).toBe(5);
+    expect(isShortLabelExpected('negativo')).toBe(true);
+    expect(isShortLabelExpected('um dois tres quatro cinco')).toBe(true);
+    expect(isShortLabelExpected('um dois tres quatro cinco seis')).toBe(false);
+    expect(isShortLabelExpected(['frase longa demais com seis palavras', 'curto'])).toBe(true);
+    expect(isShortLabelExpected({ intent: 'edit' })).toBe(false);
+    expect(isShortLabelExpected(undefined)).toBe(false);
+  });
+
+  it('labelSetIssue: rótulo curto SEM labelSet é erro; com labelSet que o contém, ok', () => {
+    expect(labelSetIssue({ expected: 'negativo' })).toMatch(/labelSet obrigatório/);
+    expect(labelSetIssue({ expected: ['edit', 'help'] })).toMatch(/labelSet obrigatório/);
+    expect(labelSetIssue({ expected: 'negativo', labelSet: SENT })).toBeNull();
+    // normalização: acento/caixa não importam
+    expect(labelSetIssue({ expected: 'Não', labelSet: ['sim', 'nao'] })).toBeNull();
+    // o esperado precisa estar no conjunto
+    expect(labelSetIssue({ expected: 'raiva', labelSet: SENT })).toMatch(/não está em labelSet/);
+    expect(labelSetIssue({ expected: ['help', 'outro'], labelSet: INTENT })).toMatch(/'outro'/);
+    // labelSet vazio/sem expected
+    expect(labelSetIssue({ expected: 'negativo', labelSet: ['  '] })).toMatch(/vazio/);
+    expect(labelSetIssue({ labelSet: SENT })).toMatch(/junto com expected/);
+    // rótulo longo e objeto não exigem
+    expect(labelSetIssue({ expected: 'um dois tres quatro cinco seis' })).toBeNull();
+    expect(labelSetIssue({ expected: { intent: 'edit' } })).toBeNull();
+    expect(labelSetIssue({})).toBeNull();
+  });
+
+  it('stageLabelIssues aponta o índice de cada etapa com problema', () => {
+    const issues = stageLabelIssues([
+      { expected: 'negativo', labelSet: SENT },
+      { expected: 'negativo' },
+      {},
+      { expected: 'x', labelSet: ['y'] },
+    ]);
+    expect(issues.map((i) => i.index)).toEqual([1, 3]);
+    expect(stageLabelIssues(undefined)).toEqual([]);
+  });
+
+  it('pergunta nunca resolve, nem pela regra de idioma BCP-47', () => {
+    expect(matchExpected('pt-BR?', 'pt', { labelSet: ['pt', 'en'] }).verdict).not.toBe('resolve');
+    expect(matchExpected('Edit?', 'edit', { labelSet: INTENT }).verdict).toBe('nao');
+  });
+
+  it('labelSet enxerga a lista; sem ele, a mesma resposta cai só para parcial', () => {
+    const lista = 'As opções são edit, create ou delete.';
+    expect(matchExpected(lista, 'edit', { labelSet: INTENT }).verdict).toBe('nao');
+    expect(matchExpected(lista, 'edit').verdict).toBe('parcial');
   });
 });

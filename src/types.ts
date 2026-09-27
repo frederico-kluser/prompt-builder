@@ -451,6 +451,13 @@ export interface StageSpec {
    * lista = alternativas aceitaveis, objeto = par campo->valor (resposta JSON).
    */
   expected?: ExpectedSpec;
+  /**
+   * TODOS os rotulos validos da etapa (IMPL-003 / R-03b:DEC-4). Obrigatorio
+   * quando `expected` e rotulo curto (<=5 palavras): sem ele a config e
+   * recusada (`labelSetIssue`, exit 3 no CLI). O verificador estrito usa o
+   * conjunto para reconhecer resposta que lista/hesita entre varios rotulos.
+   */
+  labelSet?: string[];
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
   /**

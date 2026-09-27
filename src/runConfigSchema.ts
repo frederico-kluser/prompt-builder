@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import { sanitizeLlmVariants, MIN_LLM_VARIANTS, MAX_LLM_VARIANTS } from './llmVariants.js';
 import { validatePromptGroup } from './engine/promptGroup.js';
+import { stageLabelIssues } from './engine/groundTruth.js';
 import type { RunConfig } from './types.js';
 
 // Nivel de esforco de raciocinio (ReasoningLevel de types.ts / REASONING_LEVELS
@@ -145,6 +146,9 @@ const stageSpecSchema = z.object({
       z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
     ])
     .optional(),
+  // TODOS os rotulos validos da etapa (IMPL-003). Obrigatorio com `expected`
+  // curto (<=5 palavras) — o superRefine abaixo aplica `labelSetIssue`.
+  labelSet: z.array(z.string().min(1)).min(1).max(200).optional(),
   // Proveniencia da etapa: gerada pela IA ou importada de pacote JSON.
   origin: z.enum(['ai', 'import']).optional(),
   // A etapa, quando executada por um agente. AUSENTE => a etapa so serve ao
@@ -333,6 +337,23 @@ export const runConfigSchema = z
     z.discriminatedUnion('mode', [compareObj, variationObj, trainingObj]),
   )
   .superRefine((cfg, ctx) => {
+    // ---------------------------------------------------------- rotulos (IMPL-003)
+    // Rotulo esperado CURTO sem `labelSet` e erro de config (R-03b:DEC-4): sem o
+    // conjunto de rotulos validos o verificador estrito nao reconhece a resposta
+    // que lista/hesita entre rotulos. O CLI traduz em exit 3 (EXIT.CONFIG).
+    for (const [campo, lista] of [
+      ['customStages', cfg.customStages],
+      ['scenarioSeed', cfg.scenarioSeed],
+    ] as const) {
+      for (const { index, message } of stageLabelIssues(lista)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [campo, index, 'labelSet'],
+          message: `etapa ${index + 1}: ${message}`,
+        });
+      }
+    }
+
     // ------------------------------------------------------------------ agente
     // Validacoes do modo agente, ativas quando `config.agent` existe (qualquer
     // `mode` — o eixo runner e ortogonal ao mode).

@@ -305,6 +305,11 @@ export interface StageSpec {
    * (`src/engine/groundTruth.ts`, fonte unica do shape).
    */
   expected?: ExpectedSpec;
+  /**
+   * Todos os rotulos validos da etapa (IMPL-003). Obrigatorio com `expected`
+   * curto (<=5 palavras) — regra unica em `labelSetIssue` (src/engine/groundTruth.ts).
+   */
+  labelSet?: string[];
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
   /**

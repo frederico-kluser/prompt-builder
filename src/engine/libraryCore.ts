@@ -14,7 +14,7 @@
 
 import { z } from 'zod';
 import type { StageSpec } from '../types.js';
-import type { ExpectedSpec } from './groundTruth.js';
+import { labelSetIssue, type ExpectedSpec } from './groundTruth.js';
 
 // ----------------------------------------------------------------------------
 // Tipos
@@ -64,6 +64,8 @@ export interface LibraryItem {
   reference?: string;
   /** Rótulo esperado (kind 'labels': veredito determinístico, sem juiz LLM). */
   expected?: ExpectedSpec;
+  /** Todos os rótulos válidos (IMPL-003): obrigatório com `expected` curto. */
+  labelSet?: string[];
   origin: LibraryOrigin;
   createdAt: string;
   updatedAt?: string;
@@ -145,6 +147,7 @@ const itemSchema = z.object({
   rubric: z.string().optional(),
   reference: z.string().optional(),
   expected: expectedSchema.optional(),
+  labelSet: z.array(z.string().min(1, 'rótulo vazio em labelSet')).min(1, 'labelSet não pode ser vazio').optional(),
   origin: z.enum(['official', 'ai', 'manual', 'import'], {
     error: "origin deve ser 'official', 'ai', 'manual' ou 'import'",
   }),
@@ -172,6 +175,11 @@ export function normalizeLibraryItem(
     return { ok: false, error: partes || 'Item inválido.' };
   }
   const item = result.data as LibraryItem;
+  // IMPL-003: rótulo curto sem labelSet é recusado já na entrada da biblioteca
+  // (itens antigos no disco não passam por aqui — `labelIssue` os aponta no
+  // verify e o evolve os recusa).
+  const rotulo = labelSetIssue(item);
+  if (rotulo) return { ok: false, error: `labelSet: ${rotulo}` };
   // Normalização leve: strings com bordas aparadas; listas sem vazios.
   item.question = item.question.trim();
   item.productContext = item.productContext.trim();
@@ -195,6 +203,15 @@ export function hasGabarito(item: Pick<LibraryItem, 'reference' | 'expected'>): 
   return Boolean(item.reference?.trim()) || item.expected !== undefined;
 }
 
+/**
+ * Problema de rótulo do item (IMPL-003) — rótulo curto sem `labelSet`, ou
+ * rótulo fora do `labelSet`. Itens gravados antes da regra não passaram pela
+ * validação de entrada: o `verify` e o evolve os recusam por aqui.
+ */
+export function labelIssue(item: Pick<LibraryItem, 'expected' | 'labelSet'>): string | null {
+  return labelSetIssue(item);
+}
+
 /** Converte o item enriquecido no `StageSpec` executável do pipeline. */
 export function toStageSpec(item: LibraryItem): StageSpec & { id: string } {
   return {
@@ -208,6 +225,7 @@ export function toStageSpec(item: LibraryItem): StageSpec & { id: string } {
     rubric: item.rubric ?? '',
     reference: item.reference,
     expected: item.expected,
+    ...(item.labelSet !== undefined ? { labelSet: item.labelSet } : {}),
     origin: item.origin === 'ai' ? 'ai' : 'import',
   };
 }

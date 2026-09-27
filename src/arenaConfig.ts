@@ -73,6 +73,9 @@ export function arenaConfigToRunConfig(
     ...(s.rubric ? { rubric: s.rubric } : {}),
     ...(s.reference ? { reference: s.reference } : {}),
     ...(s.expected !== undefined ? { expected: s.expected } : {}),
+    // Sem esta linha o labelSet sumiria na tradução e o parseRunConfig abaixo
+    // recusaria o cenário de rótulo curto (IMPL-003) — whitelist campo a campo.
+    ...(s.labelSet !== undefined ? { labelSet: s.labelSet } : {}),
     origin: 'import' as const,
   }));
 

@@ -242,7 +242,10 @@ export async function judgeStageReference(
   // 'ground-truth' para o registro mostrar que NENHUM juiz LLM opinou.
   if (stage.expected !== undefined) {
     for (const r of judgeable) {
-      const gt = matchExpected(r.text, stage.expected);
+      // Verificador ESTRITO (IMPL-003): o labelSet da etapa deixa a lista de
+      // rótulos/hesitação ("positivo | negativo") visível — sem ele só a
+      // negação/hesitação sobre o próprio rótulo é detectada.
+      const gt = matchExpected(r.text, stage.expected, { labelSet: stage.labelSet });
       verdictByContestant[r.contestantId] = gt.verdict;
       explanationByContestant[r.contestantId] = gt.explanation;
       verdictSourceByContestant[r.contestantId] = 'ground-truth';

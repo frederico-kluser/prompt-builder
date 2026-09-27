@@ -11,7 +11,7 @@ import { parseRunConfig } from '../../runConfigSchema.js';
 import { parseArenaConfig } from '../../configFile.js';
 import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
-import { hasGabarito, toStageSpec } from '../../engine/libraryCore.js';
+import { hasGabarito, labelIssue, toStageSpec } from '../../engine/libraryCore.js';
 import { estimateInputFromConfig, estimateRunCost, toPerMTok } from '../../estimate.js';
 import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
 import { buildNetworkContext, checkKey, isAgentContext, parse, type NetworkContext } from '../context.js';
@@ -111,7 +111,12 @@ function resolveBudget(values: Record<string, unknown>, warn: (m: string) => voi
   return undefined;
 }
 
-async function readConfigFile(file: string): Promise<RunConfig> {
+/**
+ * Lê e valida `--config` (arena-config@1 ou RunConfig cru). Todo problema de
+ * config sai como `CliError(EXIT.CONFIG)` = exit 3 — exportado para o teste
+ * de contrato do exit code (IMPL-003).
+ */
+export async function readConfigFile(file: string): Promise<RunConfig> {
   let raw: string;
   try {
     raw = await fs.readFile(file, 'utf-8');
@@ -155,6 +160,20 @@ async function readConfigFile(file: string): Promise<RunConfig> {
           `Evolve recusa itens SEM gabarito (reference ou expected) — paridade com o 409 do prompt-arena: ${semGabarito
             .map((i) => i.id)
             .join(', ')}. Corrija com \`prompt-builder library verify --profile ${lib.profile}\`.`,
+          EXIT.CONFIG,
+        );
+      }
+      // IMPL-003: os itens viram customStages DEPOIS do parseRunConfig da
+      // tradução — sem esta checagem um item antigo de rótulo curto sem
+      // labelSet escaparia da regra do schema.
+      const semLabelSet = selecionados
+        .map((i) => ({ id: i.id, erro: labelIssue(i) }))
+        .filter((x): x is { id: string; erro: string } => x.erro !== null);
+      if (semLabelSet.length) {
+        throw new CliError(
+          `Itens com rótulo esperado sem labelSet válido: ${semLabelSet
+            .map((x) => `${x.id} (${x.erro})`)
+            .join('; ')}. Corrija com \`prompt-builder library verify --profile ${lib.profile}\`.`,
           EXIT.CONFIG,
         );
       }

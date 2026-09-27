@@ -176,6 +176,7 @@ function stageSpecToScenario(spec: StageSpec): ArenaConfigScenario {
     ...(spec.rubric ? { rubric: spec.rubric } : {}),
     ...(spec.reference ? { reference: spec.reference } : {}),
     ...(spec.expected !== undefined ? { expected: spec.expected } : {}),
+    ...(spec.labelSet !== undefined ? { labelSet: spec.labelSet } : {}),
   };
 }
 

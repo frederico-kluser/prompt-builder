@@ -99,6 +99,14 @@ Cenário classificável (rotear intenção, moderar, escolher workflow) ganha
 `{"intent":"edit"}` (resposta JSON). O veredito vira **determinístico**, o juiz
 LLM é contornado (custo zero) e os duelos são decididos pelo oráculo.
 
+Rótulo curto (≤5 palavras) **exige `labelSet`** com TODOS os rótulos válidos
+da etapa — `"labelSet": ["edit","help","create","delete"]`; sem ele a config é
+recusada com exit 3. O casamento é **estrito**: só resolve JSON inequívoco, a
+primeira linha (`"edit"`, `"Intent: edit"`, `"Edit. Porque…"`) ou a resposta
+exata. Rótulo no meio da prosa vale no máximo `parcial`; negação ("não é
+edit"), hesitação ("talvez edit", "edit?") ou vários rótulos ("edit ou help")
+dão `nao`. Peça no prompt: "responda com o rótulo na primeira linha".
+
 ## Evolução segura (arena-config)
 
 - **`prompt.contracts`** — contratos never-break: `neverBreak[]` (invariantes que
