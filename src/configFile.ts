@@ -13,6 +13,8 @@ import { z } from 'zod';
 import { getTechnique } from './techniques.js';
 import type { ReasoningLevel } from './types.js';
 import type { AgentLimits } from './agent/types.js';
+import { promptContractsSchema } from './engine/contracts.js';
+import type { PromptContracts } from './engine/contracts.js';
 
 /** Valor do campo `format` — versão do contrato do arquivo de configuração. */
 export const ARENA_CONFIG_FORMAT = 'arena-config@1';
@@ -63,12 +65,8 @@ export interface ArenaConfigLibraryRef {
   ids?: string[];
 }
 
-/** Contratos never-break do prompt base (F2/P0.3) — vivem no perfil do prompt. */
-export interface ArenaConfigContracts {
-  neverBreak?: string[];
-  placeholders?: string[];
-  minLengthRatio?: number;
-}
+/** Contratos never-break do prompt base (F2/P0.3) — vivem no perfil do prompt. IMPL-011: + judgeDiff/canaries (3 camadas). */
+export type ArenaConfigContracts = PromptContracts;
 
 /** Contrato do arquivo de configuração importável do assistente Nova Run. */
 export interface ArenaConfigFile {
@@ -248,18 +246,8 @@ const libraryRefSchema = z.object(
   'library deve ser { from: "library", profile, ids? }',
 );
 
-const contractsSchema = z.object(
-  {
-    neverBreak: z.array(z.string()).optional(),
-    placeholders: z.array(z.string()).optional(),
-    minLengthRatio: z
-      .number('minLengthRatio deve ser número')
-      .min(0, 'mínimo 0')
-      .max(1, 'máximo 1')
-      .optional(),
-  },
-  'contracts deve ser um objeto { neverBreak?, placeholders?, minLengthRatio? }',
-);
+// Fonte única (IMPL-011): neverBreak/placeholders/minLengthRatio + judgeDiff/canaries.
+const contractsSchema = promptContractsSchema;
 
 const modelsSchema = z.object(
   {

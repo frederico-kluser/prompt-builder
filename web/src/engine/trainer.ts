@@ -319,6 +319,8 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           optimizerModelId,
           reasoningLevel: cfg.reasoning?.rewriter,
           contracts: cfg.contracts,
+          // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
+          contractJudgeModelId: cfg.judgeModelIds?.[0],
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
           promptId: cfg.promptId,
@@ -385,6 +387,8 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           analysisHint: hint,
           reasoningLevel: cfg.reasoning?.rewriter,
           contracts: cfg.contracts,
+          // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
+          contractJudgeModelId: cfg.judgeModelIds?.[0],
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
           promptId: cfg.promptId,

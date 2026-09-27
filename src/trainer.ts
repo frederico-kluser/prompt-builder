@@ -400,6 +400,8 @@ async function trainingLoop(
           maxPricePerMTok: cfg.maxPricePerMTok,
           // Contratos never-break (F2/P0.3): valem em toda iteracao.
           contracts: cfg.contracts,
+          // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
+          contractJudgeModelId: cfg.judgeModelIds?.[0],
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
           promptId: cfg.promptId,
@@ -469,6 +471,8 @@ async function trainingLoop(
           maxPricePerMTok: cfg.maxPricePerMTok,
           // Contratos never-break (F2/P0.3): valem em toda iteracao.
           contracts: cfg.contracts,
+          // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
+          contractJudgeModelId: cfg.judgeModelIds?.[0],
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
           promptId: cfg.promptId,

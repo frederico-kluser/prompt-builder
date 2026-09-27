@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import { sanitizeLlmVariants, MIN_LLM_VARIANTS, MAX_LLM_VARIANTS } from './llmVariants.js';
 import { validatePromptGroup } from './engine/promptGroup.js';
+import { promptContractsSchema } from './engine/contracts.js';
 import type { RunConfig } from './types.js';
 
 // Nivel de esforco de raciocinio (ReasoningLevel de types.ts / REASONING_LEVELS
@@ -212,13 +213,9 @@ const baseFields = {
     .optional(),
   // Contratos never-break do prompt base (F2/P0.3): o pos-rewriter valida toda
   // reescrita (invariantes, placeholders verbatim, piso de comprimento).
-  contracts: z
-    .object({
-      neverBreak: z.array(z.string()).optional(),
-      placeholders: z.array(z.string()).optional(),
-      minLengthRatio: z.number().min(0).max(1).optional(),
-    })
-    .optional(),
+  // IMPL-011: schema fonte única (inclui judgeDiff e canaries — sem ele o zod
+  // STRIPAVA os campos novos em silêncio e a camada 3 nunca rodava pela API).
+  contracts: promptContractsSchema.optional(),
 };
 
 const manualVariantSchema = z.object({

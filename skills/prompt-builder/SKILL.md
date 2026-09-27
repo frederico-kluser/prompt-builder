@@ -140,7 +140,7 @@ agente (Agent Arena), o executor do motor é o `pi`; os demais entram como
 - **`expected`** (ground-truth): veredito determinístico sem juiz LLM — `"edit"`, `["edit","help"]`
   ou `{"campo":"valor"}`.
 - **arena-config@1**: `scenarios: {"from":"library","profile","ids"}` · `prompt.contracts`
-  (never-break) · `prompt.group`+`promptId` (multi-prompt coordinate ascent) · `training.reflection`
+  (never-break em 3 camadas: local + juiz do diff + `canaries[]`; ver `agent-docs/train.md`) · `prompt.group`+`promptId` (multi-prompt coordinate ascent) · `training.reflection`
   (`deterministic|llm|off`) · `training.paretoPool` (população Pareto) · `repeats` (compare, 1–3).
 - **Reprodutibilidade**: `runs reproduce` · `runs export` · `sessions winner --apply [--commit]` ·
   `registry validate` (drift do prompt em código).

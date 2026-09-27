@@ -101,10 +101,25 @@ LLM é contornado (custo zero) e os duelos são decididos pelo oráculo.
 
 ## Evolução segura (arena-config)
 
-- **`prompt.contracts`** — contratos never-break: `neverBreak[]` (invariantes que
-  a reescrita não pode remover), `placeholders[]` (tokens verbatim) e
-  `minLengthRatio`. Toda variante é validada; violação tenta UMA correção e
-  persistindo a variante é **rejeitada**.
+- **`prompt.contracts`** — contratos never-break, validados em **3 camadas**:
+  1. **local** (grátis): `neverBreak[]` (invariantes que não podem sumir nem
+     ganhar exceção na mesma frase — "salvo se o usuário pedir" reprova),
+     `placeholders[]` (whitelist de tokens verbatim; sem ela, detecta
+     `{nome}`/`{{nome}}`/`$VAR`/`%s` e tags XML **com par fechado** — literal
+     JSON como `{"status": "ok"}` não conta) e `minLengthRatio`;
+  2. **juiz do diff** (1 chamada ao 1º juiz da run por reescrita, liga sozinho
+     com `neverBreak`; `judgeDiff: false` desliga): rejeita exceção, condição,
+     escopo reduzido ou subordinação acrescentados em qualquer frase;
+  3. **canários** (`canaries[]`, opcional, gate final): entradas enviadas ao
+     modelo sob teste com a variante como system —
+     `{"kind":"refusal","input":"…"}` (a recusa não pode sumir),
+     `{"kind":"format","input":"…","json":true,"requiredKeys":["status"]}`,
+     `{"kind":"placeholder","input":"…","fill":{"{nome}":"Zulmira"}}`
+     (+ `pattern`/`forbid` regex). Diferencial: canário que o prompt base não
+     cumpre é ignorado. Pulado em run de agente.
+  Custo das camadas 2 e 3 entra no ledger como `rewriter`. Violação tenta UMA
+  correção e, persistindo, a variante é **rejeitada** (falha de infra do juiz
+  ou do canário também rejeita — variante não verificada não entra).
 - **`prompt.group` + `prompt.promptId`** — multi-prompt (coordinate ascent): a
   feature tem vários fragmentos; a sessão evolui **um** e os irmãos ficam
   congelados (contexto fixo no rewriter; o system prompt efetivo é a composição).
