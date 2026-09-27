@@ -70,6 +70,20 @@ export function isBudgetSignal(e: unknown): e is BudgetExceeded {
   return isControlSignal(e) && (e as BudgetExceeded).benchControl === 'budget';
 }
 
+/**
+ * Converte o MOTIVO de um abort em sinal de controle (IMPL-020). O que o
+ * transporte devolve ao abortar varia (o `reason` do sinal, um `AbortError`
+ * genérico, conforme o navegador/runtime); um erro comum seria DEGRADADO pelos
+ * papéis (veredito 'parcial', competidor 'error') e viraria nota inventada.
+ * Motivo que já é sinal de controle passa intacto.
+ */
+export function toControlSignal(reason: unknown): BudgetExceeded | RunCancelled {
+  if (isControlSignal(reason)) return reason;
+  const texto =
+    typeof reason === 'string' ? reason : reason instanceof Error ? reason.message : undefined;
+  return new RunCancelled(texto);
+}
+
 // ---------------------------------------------------------------------------
 // Ledger
 // ---------------------------------------------------------------------------

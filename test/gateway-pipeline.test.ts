@@ -225,7 +225,10 @@ describe('IMPL-021 — soma(papéis) == total nos dois motores (transporte falso
     try {
       await comFake(async (fake) => {
         const { createRun } = await import('../web/src/api.js');
-        const runId = await createRun(VARIATION as never);
+        // O catálogo do fake é CARO de propósito (estimativa > US$ 1): desde o
+        // IMPL-020 o createRun exige a confirmação de custo que o diálogo da
+        // Nova run coleta — sem ela a run nem começa (ver web-budget-cancel).
+        const runId = await createRun(VARIATION as never, { costConfirmed: true });
         await new Promise<void>((resolve, reject) => {
           const t = setTimeout(() => reject(new Error('run não terminou')), 10_000);
           const fim = (): void => {

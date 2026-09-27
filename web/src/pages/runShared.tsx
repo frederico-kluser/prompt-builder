@@ -208,7 +208,7 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
   return (
     <div className="rounded-xl bg-card ring-1 ring-foreground/10">
       <div className="border-b border-border px-4 py-2 text-[12px] text-muted-foreground">
-        ✓ resolve · ◐ parcial · ✕ não resolve · ⏳ aguardando julgamento · ! erro · · pendente
+        ✓ resolve · ◐ parcial · ✕ não resolve · ⏳ aguardando julgamento · ! erro · ⊘ cortado · · pendente
       </div>
       <div className="scroll-slim overflow-x-auto p-3">
         <div className="min-w-fit">
@@ -252,7 +252,18 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
                 const resp = (s.responses ?? []).find((r) => r.contestantId === row.contestantId);
                 const estado = v
                   ? { glyph: VERDICT_GLYPH[v], cls: VERDICT_META[v].cell, label: VERDICT_META[v].label }
-                  : resp?.status === 'error'
+                  : s.incomplete
+                    ? {
+                        // Cortado por orçamento/cancelamento (IMPL-020): sem nota
+                        // e fora do score — nunca um ✕ que o competidor não mereceu.
+                        glyph: '⊘',
+                        cls: 'bg-muted/50 text-muted-foreground',
+                        label:
+                          s.incompleteReason === 'budget'
+                            ? 'cortado pelo orçamento — fora do placar'
+                            : 'interrompido — fora do placar',
+                      }
+                    : resp?.status === 'error'
                     ? { glyph: '!', cls: 'bg-nao/20 text-nao', label: 'resposta com erro' }
                     : resp
                       ? {
@@ -541,6 +552,14 @@ export function applyEvent(prev: RunRecord, event: any): RunRecord {
       next.totalCostUsd = event.totalCostUsd;
       return next;
     }
+    case 'run.spend':
+      // Gasto acumulado do LEDGER (todos os papéis) — é o número que o teto
+      // de orçamento compara; mais fiel que somar competidores.
+      return { ...next, totalCostUsd: event.spentUsd };
+    case 'run.budget':
+      // Decisão de uma porta de orçamento: o record final (run.finished) traz
+      // stoppedReason/stoppedAtPhase. Nada a dobrar aqui.
+      return prev;
     case 'run.finished':
       return event.record;
     case 'run.error':

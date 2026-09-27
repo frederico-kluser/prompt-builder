@@ -4,6 +4,8 @@ import { ArrowRight, Download } from 'lucide-react';
 import type { RunRecord, SessionRecord, StageSpec } from '../api';
 import {
   cacheSession,
+  canCancelSession,
+  cancelSession,
   fetchSession,
   openSessionStream,
   fetchRun,
@@ -40,6 +42,7 @@ import {
   Tag,
 } from '../components/primitives';
 import { useToasts } from '../components/AppShell';
+import { CancelHoldButton, StopBanner } from '../components/RunControls';
 import { cn } from '@/lib/utils';
 
 // ---------------------------------------------------------------------------
@@ -417,11 +420,14 @@ export function TrainingView() {
   const [drawerVariant, setDrawerVariant] = useState<string | null>(null);
   const [pastRuns, setPastRuns] = useState<Record<string, RunRecord>>({});
   const [duelProgress, setDuelProgress] = useState<{ done: number; total: number } | null>(null);
+  // Cancelar pedido: esconde o botão até o session.finished chegar.
+  const [cancelRequested, setCancelRequested] = useState(false);
 
   // Efeito A: eventos da SESSAO (iteracoes, snapshot, fim).
   useEffect(() => {
     if (!sessionId) return;
     let cancelled = false;
+    setCancelRequested(false);
     const refetch = () =>
       fetchSession(sessionId)
         .then((s) => {
@@ -576,6 +582,8 @@ export function TrainingView() {
   const done = session.bestPromptByIteration.length;
   const planned = session.config.iterations ?? 0;
   const isRunning = session.status === 'running';
+  // Só a aba que roda o treino consegue abortá-lo (o motor vive nela).
+  const cancellable = isRunning && !cancelRequested && canCancelSession(session.id);
   // A run de holdout e marcada com iteracao == planned ("rodada H"): em toda
   // lista de rodadas ela vira "Holdout", nunca "Rodada N+1".
   const holdoutAt = planned > 0 ? planned : undefined;
@@ -644,19 +652,36 @@ export function TrainingView() {
               </div>
             </div>
             <div className="min-w-[5rem]">
-              <div className="text-[11px] tracking-wide text-muted-foreground uppercase">custo</div>
+              <div className="text-[11px] tracking-wide text-muted-foreground uppercase">
+                {session.budgetUsd !== undefined ? 'custo / teto' : 'custo'}
+              </div>
               <div className="mt-0.5 font-heading text-lg font-medium tabular">
                 ${session.totalCostUsd.toFixed(4)}
+                {session.budgetUsd !== undefined && (
+                  <span className="text-sm text-muted-foreground"> / ${session.budgetUsd.toFixed(2)}</span>
+                )}
               </div>
             </div>
           </div>
         </div>
 
-        <div className="mt-4 border-t border-border pt-4">
+        <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-4">
           <Button variant="outline" size="sm" onClick={downloadPack} disabled={!packScenarios.length}>
             <Download aria-hidden="true" />
             Pacote
           </Button>
+          {cancellable && (
+            <div className="ml-auto">
+              <CancelHoldButton
+                onConfirm={() => {
+                  if (cancelSession(session.id)) setCancelRequested(true);
+                }}
+              />
+            </div>
+          )}
+          {isRunning && cancelRequested && (
+            <span className="ml-auto text-[13px] text-muted-foreground">Cancelando…</span>
+          )}
         </div>
       </header>
 
@@ -665,8 +690,17 @@ export function TrainingView() {
           <strong>Treino falhou:</strong> {session.error}
         </Banner>
       )}
-      {session.status === 'aborted' && (
-        <Banner className="mt-4">Treino interrompido — o servidor reiniciou enquanto ele rodava.</Banner>
+      <StopBanner
+        className="mt-4"
+        subject="treino"
+        info={session}
+        legacyText="Treino interrompido — o servidor reiniciou enquanto ele rodava."
+      />
+      {session.holdoutSkipped && (
+        <Banner tone="warn" className="mt-4">
+          <strong>Holdout pulado</strong> (orçamento/cancelamento): o campeão NÃO foi validado nos cenários
+          reservados — o ganho pode ser sobreajuste à seleção de treino.
+        </Banner>
       )}
       {gates.length > 0 && (
         <Banner tone={session.holdout?.regressed ? 'error' : 'neutral'} className="mt-4">

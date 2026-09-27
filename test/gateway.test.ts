@@ -23,7 +23,7 @@ import {
   setDefaultGateway,
 } from '../src/openrouter.js';
 import { gatewayConfigFromEnv } from '../src/gatewayEnv.js';
-import { BudgetLedger } from '../src/budget.js';
+import { BudgetLedger, isControlSignal } from '../src/budget.js';
 import { COST_ROLES, type CostRole } from '../src/types.js';
 import { generateStages } from '../src/datagen.js';
 import { catalogItem, fakeOpenRouter, noSleep } from './fakeOpenRouter.js';
@@ -331,10 +331,15 @@ describe('IMPL-021 (c) — limitador AIMD por instância', () => {
     const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
     const ac = new AbortController();
     ac.abort(new Error('cancelado'));
-    await expect(
-      gw.chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs, signal: ac.signal }),
-    ).rejects.toThrow(/cancelado/);
-    expect(fake.chatRequests()).toHaveLength(1);
+    const err = await gw
+      .chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs, signal: ac.signal })
+      .catch((e: unknown) => e);
+    expect(String((err as Error).message)).toMatch(/cancelado/);
+    // IMPL-020: sinal já abortado nem chega ao transporte (antes: 1 pedido
+    // saía mesmo assim) e sai como SINAL DE CONTROLE — um erro comum seria
+    // degradado pelos papéis em nota inventada.
+    expect(isControlSignal(err)).toBe(true);
+    expect(fake.chatRequests()).toHaveLength(0);
     expect(gw.currentConcurrency().active).toBe(0);
   });
 

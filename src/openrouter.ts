@@ -1,4 +1,5 @@
 import { applyReasoning } from './reasoning.js';
+import { isControlSignal, toControlSignal } from './budget.js';
 import type {
   CallCost,
   CostRole,
@@ -133,12 +134,30 @@ export class AimdLimiter {
     this.limit = Math.min(this.limit, max);
   }
 
-  acquire(): Promise<void> {
+  /**
+   * Vaga no limitador. Com `signal` (IMPL-020, Cancelar): sinal já abortado nem
+   * entra na fila, e quem estava ESPERANDO sai dela no abort — sem isso a
+   * chamada enfileirada ganharia a vaga depois do clique e iria ao transporte.
+   */
+  acquire(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(toControlSignal(signal.reason));
     if (this.active < this.limit) {
       this.active += 1;
       return Promise.resolve();
     }
-    return new Promise<void>((resolve) => this.waiters.push(resolve));
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => {
+        const i = this.waiters.indexOf(grant);
+        if (i >= 0) this.waiters.splice(i, 1);
+        reject(toControlSignal(signal?.reason));
+      };
+      const grant = (): void => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.waiters.push(grant);
+    });
   }
 
   release(): void {
@@ -398,6 +417,16 @@ function applyMaxPrice(
   body.provider = { ...provider, max_price: cap };
 }
 
+/**
+ * Erro de uma chamada cujo sinal EXTERNO abortou (Cancelar/Ctrl-C) sai como
+ * sinal de controle (IMPL-020). Cobre o abort no MEIO do corpo (JSON/stream
+ * chegando): o leitor rejeita com o que o runtime quiser, e um erro comum seria
+ * degradado pelos papeis em nota inventada ('parcial', competidor 'error').
+ */
+function controlIfAborted(err: unknown, signal?: AbortSignal): unknown {
+  return signal?.aborted && !isControlSignal(err) ? toControlSignal(signal.reason) : err;
+}
+
 function isRetryableStatus(status: number): boolean {
   return status === 429 || (status >= 500 && status < 600);
 }
@@ -652,7 +681,13 @@ export class OpenRouterGateway {
     const limiter = this.limiter;
     let attempt = 0;
     for (;;) {
-      await limiter.acquire();
+      await limiter.acquire(externalSignal);
+      // Abortou entre ganhar a vaga e enviar: devolve a vaga SEM tocar o
+      // transporte (zero chamadas novas depois do Cancelar — IMPL-020).
+      if (externalSignal?.aborted) {
+        limiter.release();
+        throw toControlSignal(externalSignal.reason);
+      }
       const controller = new AbortController();
       const timeoutHandle = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
       const onExternalAbort = () => controller.abort(externalSignal?.reason);
@@ -672,7 +707,11 @@ export class OpenRouterGateway {
       } catch (err) {
         cleanup();
         limiter.release();
-        // abort (timeout/externo) nao repete; erro de rede repete com backoff.
+        // Abort EXTERNO (Cancelar/Ctrl-C) sai como SINAL DE CONTROLE, aqui no
+        // ponto unico: o que o transporte rejeita varia por runtime, e um erro
+        // comum seria degradado pelos papeis em nota inventada (IMPL-020).
+        if (externalSignal?.aborted) throw toControlSignal(externalSignal.reason);
+        // abort (timeout) nao repete; erro de rede repete com backoff.
         if (controller.signal.aborted || attempt >= MAX_RETRIES) throw err;
         await this.sleep(backoffMs(attempt));
         attempt += 1;
@@ -693,6 +732,7 @@ export class OpenRouterGateway {
         const errText = await res.text().catch(() => '');
         cleanup();
         limiter.release();
+        if (externalSignal?.aborted) throw toControlSignal(externalSignal.reason);
         throw new Error(describeOpenRouterError(status, errText));
       }
 
@@ -807,6 +847,8 @@ export class OpenRouterGateway {
         cachedTokensIn: usage.cachedTokensIn,
         reasoningTokens: usage.reasoningTokens,
       };
+    } catch (err) {
+      throw controlIfAborted(err, externalSignal);
     } finally {
       if (!ok) reservation?.release();
       finish(ok);
@@ -904,6 +946,8 @@ export class OpenRouterGateway {
         cachedTokensIn: usage.cachedTokensIn,
         reasoningTokens: usage.reasoningTokens,
       };
+    } catch (err) {
+      throw controlIfAborted(err, externalSignal);
     } finally {
       if (!ok) reservation?.release();
       finish(ok);

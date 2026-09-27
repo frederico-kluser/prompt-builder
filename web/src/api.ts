@@ -2,14 +2,20 @@ import { idbGet, idbGetAll, idbPut, idbPutMany } from './idb';
 import type { ExpectedSpec } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
-import type { CostEntry, CostRole, RunCtx } from '../../src/types.js';
-export type { CostEntry, CostRole } from '../../src/types.js';
+import type { CostEntry, CostRole, RunCtx, RunPhase } from '../../src/types.js';
+export type { CostEntry, CostRole, RunPhase } from '../../src/types.js';
+import {
+  estimateLaunchCost,
+  type LaunchCostEstimate,
+} from '../../src/engine/costConfirmation.js';
+export type { CostDriver, LaunchCostEstimate } from '../../src/engine/costConfirmation.js';
+export { COST_CONFIRM_THRESHOLD_USD } from '../../src/engine/costConfirmation.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
 import type { LgpdData } from './lgpd';
 import lgpdData from './data/lgpd-compliance.json';
-import { startRun } from './engine/orchestrator';
-import { startTraining } from './engine/trainer';
+import { cancelRun as engineCancelRun, isRunCancellable, startRun } from './engine/orchestrator';
+import { cancelTraining, isTrainingCancellable, startTraining } from './engine/trainer';
 import { generateContestants, generateBasePrompt as engineGenerateBasePrompt } from './engine/variator';
 import { listModels, validateKey as engineValidateKey, currentConcurrency } from './engine/openrouter';
 import { listTechniques } from './engine/techniques';
@@ -152,6 +158,12 @@ export interface RunConfig {
   concurrency?: number;
   timeoutMs?: number;
   maxOutputTokens?: number;
+  /**
+   * Teto de gasto em USD da run (ou da SESSÃO inteira, em training). Ausente =
+   * sem limite. O ledger do motor para a run numa porta de fase (aborted +
+   * stoppedReason 'budget') em vez de estourar o teto.
+   */
+  budgetUsd?: number;
 }
 
 export interface CompetitorResponse {
@@ -279,6 +291,9 @@ export interface StageRecord {
   evaluation?: StageEvaluation;
   /** Preenchido quando a etapa falhou (datagen/imprevisto) e foi pulada. */
   error?: string;
+  /** Etapa cortada (orçamento/cancelamento): FORA do placar e das médias. */
+  incomplete?: boolean;
+  incompleteReason?: 'budget' | 'cancelled' | 'truncation';
   startedAt: string;
   finishedAt?: string;
 }
@@ -326,6 +341,14 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
+  /** Teto de gasto configurado (ausente = sem limite). */
+  budgetUsd?: number;
+  /** true = a run parou porque o orçamento acabou. */
+  budgetExhausted?: boolean;
+  /** Fase em que a run parou (só quando parou cedo). */
+  stoppedAtPhase?: RunPhase;
+  /** Por que parou cedo. Discrimina o status 'aborted'. */
+  stoppedReason?: 'budget' | 'cancelled';
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -414,7 +437,85 @@ export async function fetchModels(): Promise<OpenRouterModel[]> {
   return (await listModels(getStoredKey())) as unknown as OpenRouterModel[];
 }
 
-export async function createRun(config: RunConfig): Promise<string> {
+// -------------- Custo: estimativa e portão de confirmação (IMPL-020) --------------
+
+/**
+ * Faixa low–high + drivers da config, com o MESMO estimador que alimenta as
+ * portas de orçamento do motor. Síncrona: recebe o catálogo que a tela já tem.
+ */
+export function estimateConfigCost(config: RunConfig, models: OpenRouterModel[]): LaunchCostEstimate {
+  return estimateLaunchCost(config as never, models as never);
+}
+
+/** Recusa de iniciar: a estimativa pede um "sim" explícito (faixa alta > US$ 1). */
+export class CostConfirmationRequiredError extends Error {
+  readonly code = 'cost-confirmation-required' as const;
+  constructor(readonly estimate: LaunchCostEstimate) {
+    super(
+      `Custo estimado de US$ ${estimate.low.toFixed(2)} – ${estimate.high.toFixed(2)}: confirme antes de iniciar.`,
+    );
+    this.name = 'CostConfirmationRequiredError';
+  }
+}
+
+/**
+ * Reconhece a recusa por PROPRIEDADE (mesma regra de `isControlSignal`): sob
+ * ESM com instância dupla do módulo, `instanceof` daria false em silêncio.
+ */
+export function isCostConfirmationRequired(err: unknown): err is CostConfirmationRequiredError {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { code?: unknown }).code === 'cost-confirmation-required'
+  );
+}
+
+export interface LaunchOpts {
+  /**
+   * O usuário VIU a faixa e os drivers e confirmou. Sem isto, uma estimativa
+   * acima do limiar recusa iniciar — o portão mora aqui (e não só no botão)
+   * para nenhum caminho da SPA gastar acima de US$ 1 sem confirmação.
+   */
+  costConfirmed?: boolean;
+}
+
+async function assertCostConfirmed(config: RunConfig, opts: LaunchOpts): Promise<void> {
+  if (opts.costConfirmed) return;
+  // Catálogo em cache (o formulário já o carregou); indisponível => preço
+  // desconhecido, que também exige confirmação.
+  const models = await listModels(getStoredKey()).catch(() => []);
+  const est = estimateLaunchCost(config as never, models);
+  if (est.requiresConfirmation) throw new CostConfirmationRequiredError(est);
+}
+
+// -------------- Cancelamento (IMPL-020) --------------
+
+/**
+ * Cancela a run NESTA aba: aborta a raiz — o que está em voo morre, a fila do
+ * limitador esvazia e nenhuma chamada nova começa. A run fecha como
+ * `aborted` + `stoppedReason: 'cancelled'`, com o parcial honesto.
+ */
+export function cancelRun(id: string): boolean {
+  return engineCancelRun(id);
+}
+
+/** Cancela o treino NESTA aba (a run da iteração em voo cai junto). */
+export function cancelSession(id: string): boolean {
+  return cancelTraining(id);
+}
+
+/** true = a run roda nesta aba e ainda pode ser cancelada. */
+export function canCancelRun(id: string): boolean {
+  return isRunCancellable(id);
+}
+
+/** true = o treino roda nesta aba e ainda pode ser cancelado. */
+export function canCancelSession(id: string): boolean {
+  return isTrainingCancellable(id);
+}
+
+export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Promise<string> {
+  await assertCostConfirmed(config, launch);
   // Client-side: o run roda na própria aba (engine). Para variação, as variantes
   // são geradas via "optimizer" antes do loop (igual ao prepare do backend).
   const apiKey = getStoredKey();
@@ -521,6 +622,14 @@ export interface SessionRecord {
   costByRole?: Record<CostRole, CostEntry>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   upstreamCostUsd?: number;
+  budgetUsd?: number;
+  budgetExhausted?: boolean;
+  stoppedAtPhase?: RunPhase;
+  stoppedReason?: 'budget' | 'cancelled';
+  /** Iteração em que o orçamento/cancelamento interrompeu a sessão. */
+  stoppedAtIteration?: number;
+  /** true = o campeão NÃO passou pelo holdout (pulado): não validado contra sobreajuste. */
+  holdoutSkipped?: boolean;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -574,7 +683,8 @@ export interface ScenarioPack {
   scenarios: (StageSpec & { id: string })[];
 }
 
-export async function createSession(config: RunConfig): Promise<string> {
+export async function createSession(config: RunConfig, launch: LaunchOpts = {}): Promise<string> {
+  await assertCostConfirmed(config, launch);
   // Client-side: a sessão de treino roda na própria aba (engine trainer).
   const { sessionId, record } = await startTraining(config as never, getStoredKey());
   cacheSessionRecord(record);
