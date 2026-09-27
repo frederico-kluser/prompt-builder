@@ -133,22 +133,33 @@ repetição:
   artefatos criados no container são legíveis pelo host **sem sudo**. Rodar o
   prompt-builder como root com `kind: "container"` é recusado (use um usuário comum ou
   Docker rootless).
-- **Key do OpenRouter:** entra por um **`--env-file` tmp 0600 no HOST** (fora dos
-  volumes, via `os.tmpdir()`), que é **apagado ao fim** do run. Nunca em arquivo de
-  volume/container, nunca em `argv` (o `argv.json` de auditoria mascara o caminho como
-  `<env-file-tmp-0600>`); a key só existe no env do processo do container.
+- **Key do OpenRouter: NUNCA entra no sandbox.** Ela fica num **proxy de inferência
+  local** do host (um por run), que a injeta só na perna HTTPS até o provedor. O agente
+  recebe uma base URL local + um **token fictício por execução** (no `models.json` do
+  `pi`, não no env — `printenv OPENROUTER_API_KEY` dentro do container é vazio), revogado
+  quando a execução termina. O `--env-file` tmp 0600 do host leva só as `PI_*`; o
+  `argv.json` registra os NOMES das variáveis (`inference.envKeys`) e o sha256 do relay.
+  O log **redigido** do proxy fica em `<dataDir>/agent-runs/<runId>/inference-proxy.jsonl`
+  (método, rota, status, bytes, tempos, `upstreamAuth: "injected"` e o `keyFingerprint`
+  — nunca a key, o token, headers ou corpos). Rotas de gerência da conta (`/keys`,
+  `/credits`, `/key`) são recusadas pelo proxy.
 - **Timeout/cancelamento:** mata o container **por nome** → `docker kill <nome>` +
   `docker rm -f <nome>` (fire-and-forget, idempotente). Nenhum órfão no host.
-- **Rede:** `--network none` por default — o agente **não** tem rota para fora. Até o
-  proxy de inferência local existir, o `pi` não alcança o OpenRouter nesse modo, e o
-  `agents doctor --container` **falha (exit `3`)** dizendo isso — rode-o antes da run.
-  Se a run seguir mesmo assim, cada execução termina como **erro de infraestrutura**:
-  `stopReason: "error"` com `execution.infraError` (a mensagem do provedor) e a dica no
-  `stderr.log` — a repetição fica **sem veredito, fora do placar e das médias; nunca
-  `nao`** (a falha é da rede, não do agente). Válvula **do operador** (variável de
-  ambiente, nunca campo do arquivo): `PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK=bridge`
-  devolve a rede padrão — a key fica ao alcance do agente; o uso é avisado no stderr,
-  no `agents doctor` e registrado em `hardening.unsafe` do `argv.json`.
+- **Rede:** `--network none` por default — o agente **não** tem rota para fora (DNS, IP
+  direto e os serviços do host falham). A ÚNICA saída é o proxy de inferência: o socket
+  Unix dele é montado **read-only** em `/exec/proxy` e um relay (PID 1 do container)
+  o expõe como `http://127.0.0.1:47100/api/v1` no loopback do próprio container. O
+  `agents doctor --container` **mede** essa rota no sandbox da run (relay → proxy, key
+  ausente, egress bloqueado) e **falha (exit `3`)** se ela não fechar — ex.: Docker
+  Desktop (macOS/Windows) ou gVisor sem `--host-uds=open`, onde o socket do host não
+  atravessa. Se o modelo não responder numa execução (proxy/upstream fora), ela termina
+  como **erro de infraestrutura**: `stopReason: "error"` com `execution.infraError` e a
+  dica no `stderr.log` — **sem veredito, fora do placar e das médias; nunca `nao`**.
+  Válvula **do operador** (variável de ambiente, nunca campo do arquivo):
+  `PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK=bridge` devolve a rede padrão para tarefas
+  cujas tools precisam de rede — a key continua só no proxy, mas o agente ganha egress
+  (pode exfiltrar o workspace); o uso é avisado no stderr, no `agents doctor` e
+  registrado em `hardening.unsafe` do `argv.json`.
 - **`--cpus`** é encaixado nas CPUs do **daemon** (`docker info` → `NCPU`), não nas da
   máquina que roda o CLI — `DOCKER_HOST` remoto e a VM do Docker Desktop têm menos.
 - **Pré-requisito:** Docker **CLI** no PATH **e** daemon acessível (sem sudo). Confira

@@ -21,8 +21,9 @@ O isolamento de execução tem **três `isolation.kind`**: **`worktree`** (defau
 **`container`**. Em `container`, **cada execução do `pi` roda num container Docker
 efêmero e endurecido** (imagem `prompt-builder-pi:<ver>` pinada por digest sha256,
 `--cap-drop ALL`, `no-new-privileges`, rootfs read-only, `--network none`, roda como o
-usuário do host — nunca root), com a key do OpenRouter chegando por um **`--env-file` 0600 do host** (nunca
-em arquivo/volume) e a imagem criada/cacheada na **primeira preparação** de run em
+usuário do host — nunca root). A key do OpenRouter **nunca entra no sandbox**: fica num
+proxy de inferência local do host, e o agente fala com ele por um socket Unix montado
+read-only, com um token fictício por execução. A imagem é criada/cacheada na **primeira preparação** de run em
 container. Exige Docker **CLI/daemon** acessível (sem sudo); valide com
 `agents doctor --container`.
 
@@ -33,7 +34,7 @@ O contrato completo da configuração está na próxima doc: `docs agent-task`.
 ```bash
 # 1. PROVE a sala limpa antes de qualquer coisa (canários, versão pinada, git, disco).
 #    Em modo container, use `--container --config x.json` (Docker CLI, imagem/runtime da run e
-#    rota até o provedor — exit 3 se faltarem; com --network none sem proxy, falha).
+#    rota até o provedor pelo proxy de inferência, medida no sandbox — exit 3 se faltarem).
 prompt-builder agents doctor          # --deep roda o auto-teste de sala limpa
 
 # 2. Rode. --config declara a arena; --budget é o teto da run inteira.
@@ -67,7 +68,7 @@ cobrada. Configurar `maxCostUsd: 0.05` e ver `0.061` **é o teto funcionando**.
 
 **Erro de infraestrutura não é `error` do agente.** Quando a execução termina porque o
 **provedor/rede** falhou na última chamada ao modelo (retentativas esgotadas — ex.:
-container com `--network none` sem proxy, `Connection error.`), o `stopReason` é `error`,
+proxy de inferência sem alcançar o provedor, 502/`Connection error.`), o `stopReason` é `error`,
 mas a execução leva `infraError` e a repetição fica **sem veredito — fora do placar e das
 médias, nunca `nao`**. Exceção: oráculo conclusivo (passou 100% ou violou
 `forbiddenPaths`) decide como numa execução concluída. O `error` → `nao` da tabela é o

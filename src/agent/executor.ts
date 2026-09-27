@@ -39,6 +39,28 @@ export interface PrepareOpts {
   };
 }
 
+/**
+ * Por onde o agente fala com o modelo (IMPL-037 / R-15 DEC-2). O produto sobe um
+ * proxy de inferência LOCAL que detém a key real (`inferenceProxy.ts`) e entrega
+ * ao executor só isto: uma base URL local + um token FICTÍCIO desta execução. É
+ * a "base URL configurável" do executor — o upstream do agente deixa de ser o
+ * provedor e passa a ser o proxy. A key real NUNCA vem por aqui.
+ */
+export interface InferenceRoute {
+  /** Token fictício (vai no `Authorization: Bearer` do agente); revogado no fim da execução. */
+  token: string;
+  /** Base OpenAI-compatível no HOST (`http://127.0.0.1:<porta>/api/v1`) — modo host. */
+  baseUrl?: string;
+  /**
+   * Diretório do HOST com o socket Unix do proxy e o relay — modo container:
+   * montado read-only em `/exec/proxy`; o sandbox (`--network none`) o alcança
+   * pelo loopback do próprio container, via relay.
+   */
+  socketDir?: string;
+  /** Log redigido do proxy (dicas de erro; nunca montado no sandbox). */
+  logFile?: string;
+}
+
 /** A execução de UMA tarefa num workspace já preparado. */
 export interface AgentRunOpts {
   /** Id da execução (uuid) — também é o nome do diretório em disco. */
@@ -55,6 +77,14 @@ export interface AgentRunOpts {
   bin: string;
   /** env do executor (sala limpa) — já redigido/saneado por `prepare()`. */
   env: Record<string, string>;
+  /**
+   * Rota de inferência pelo proxy local (IMPL-037). Presente = o executor aponta o
+   * agente para ela. Em NENHUM caso o executor repassa `OPENROUTER_API_KEY` ao
+   * ambiente do agente: sem rota mas com a key no `env`, ele sobe um proxy
+   * PRÓPRIO desta execução (a key fica no processo do produto); sem rota e sem
+   * key, o modo container recusa e o modo host roda sem credencial (fakes).
+   */
+  inference?: InferenceRoute;
 }
 
 /**

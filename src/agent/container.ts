@@ -12,13 +12,19 @@
 //      image` sobrescreve a tag. Devolve a imagem PINADA por digest (`PinnedImage`):
 //      a tag só serve para achar/buildar — o `docker run` usa SEMPRE o sha256.
 //   2. `writeEnvFile(entries)` — o env-file do host (os.tmpdir(), chmod 0600)
-//      por onde a key do OpenRouter e as `PI_*` chegam ao container. Nunca em
-//      argv/artefato/volume.
+//      por onde as `PI_*` chegam ao container. A key do OpenRouter NÃO passa
+//      por ele (IMPL-037): ela fica no proxy de inferência do host e o sandbox
+//      só recebe um token fictício (no `models.json` do pi, não no env).
 //   3. `hardeningProfile()` + `buildSandboxRunArgv(...)` — o PERFIL FIXO de
 //      endurecimento (IMPL-036 / R-15 REC-1) e o argv genérico do `docker run`
 //      endurecido (o `buildDockerArgv` do pi é um caso dele; o verificador em
 //      sandbox reaproveita o mesmo builder).
 //   4. `killContainer(name)` — `docker kill` + `docker rm -f`, idempotente.
+//   5. A ponte até o proxy de inferência (IMPL-037): o diretório do socket Unix
+//      do proxy montado read-only em `/exec/proxy` e o comando embrulhado pelo
+//      relay (`inferenceRelayCommand`), que expõe o socket como
+//      `127.0.0.1:<porta>` no loopback do container. `--network none` fica: o
+//      loopback do container existe sem rede, e o socket atravessa pelo bind.
 //
 // Fonte da receita: SPIKE-CONTAINER.md (onda 1) — o `docker run` precisa de
 // `-i` (sem isso o stdin pipeado não chega ao container e o pi sai exit 0 sem
@@ -42,6 +48,15 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:
 import { availableParallelism, tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import {
+  INFERENCE_PROXY_VERSION,
+  PROXY_API_PREFIX,
+  PROXY_HEALTH_PATH,
+  PROXY_SOCKET_NAME,
+  RELAY_SCRIPT_NAME,
+  relaySha256,
+  startInferenceProxy,
+} from './inferenceProxy.js';
 
 // ----------------------------------------------------------------------------
 // Constantes documentadas (SPIKE-CONTAINER.md §"Para o produtor")
@@ -88,9 +103,11 @@ export const CONTAINER_DEFAULT_NETWORK = 'none';
 /**
  * Válvula de escape do OPERADOR (nunca do arquivo de config — um config de
  * terceiros não pode rebaixar o isolamento): `=bridge` devolve a rede padrão do
- * Docker ao container. Existe porque, sem o proxy de inferência local (IMPL-037),
- * o `pi` dentro de `--network none` não alcança o OpenRouter. Todo uso fica
- * registrado em `hardening.unsafe` do `argv.json` e é avisado no stderr.
+ * Docker ao container. Desde o proxy de inferência (IMPL-037) o modelo NÃO
+ * depende dela — a inferência vai pelo socket Unix com `--network none`; ela só
+ * serve a tarefas cujas tools precisam de rede (ex.: `npm install` pelo agente).
+ * A key continua fora do sandbox, mas o agente ganha egress (pode exfiltrar o
+ * workspace). Todo uso fica em `hardening.unsafe` do `argv.json` e no stderr.
  */
 export const UNSAFE_NETWORK_ENV = 'PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK';
 /**
@@ -132,6 +149,20 @@ export const CONTAINER_PI_HOME_DIR = `${CONTAINER_EXEC_DIR}/pi-home`;
 export const CONTAINER_SESSION_DIR = `${CONTAINER_EXEC_DIR}/session`;
 /** Caminho do workspace dentro do container (bind de `<workspaceDir>`, gravável). */
 export const CONTAINER_WS_DIR = '/ws';
+/**
+ * Onde o diretório do proxy de inferência do host (socket Unix + relay) aparece
+ * no container — bind READ-ONLY sob o tmpfs `/exec` (conectar num socket não
+ * exige mount gravável; o relay só é lido pelo `node`, então o `noexec` não pesa).
+ */
+export const CONTAINER_PROXY_DIR = `${CONTAINER_EXEC_DIR}/proxy`;
+/**
+ * Porta do relay no loopback do PRÓPRIO container (namespace de rede isolado —
+ * não colide com nada do host). Incomum de propósito: as tools do agente podem
+ * subir servidores em 3000/8080 sem trombar com a rota do modelo.
+ */
+export const CONTAINER_PROXY_PORT = 47100;
+/** Base URL que o agente enxerga dentro do sandbox (HTTP local; HTTPS só na perna externa). */
+export const CONTAINER_INFERENCE_BASE_URL = `http://127.0.0.1:${CONTAINER_PROXY_PORT}${PROXY_API_PREFIX}`;
 
 // ----------------------------------------------------------------------------
 // Spawn simples (nunca shell) — estilo `runSimple` de pi.ts
@@ -457,7 +488,7 @@ export function writeEnvFile(entries: Record<string, string>): string {
 
 /**
  * Lê o env-file de volta (para o `argv.json` de auditoria e para o smoke provar
- * a presença da key SEM imprimi-la). Nunca inclui a key em logs — o chamador
+ * a AUSÊNCIA da key — desde o IMPL-037 ela não entra no env-file). O chamador
  * decide como usar (redação).
  */
 export function readEnvFile(file: string): Record<string, string> {
@@ -547,8 +578,8 @@ export function resolveContainerNetwork(
     return {
       network: 'bridge',
       unsafe: [
-        `network=bridge via ${UNSAFE_NETWORK_ENV}: o container tem rede plena e a key do OpenRouter no env — ` +
-          'um agente hostil pode exfiltrá-la',
+        `network=bridge via ${UNSAFE_NETWORK_ENV}: o container tem rede plena — a key do OpenRouter segue só no ` +
+          'proxy de inferência, mas um agente hostil pode exfiltrar o workspace e o que mais ler',
       ],
     };
   }
@@ -722,11 +753,40 @@ export function buildSandboxRunArgv(spec: SandboxRunSpec): string[] {
   ];
 }
 
+/**
+ * O bind do diretório do proxy de inferência (socket Unix + relay) — READ-ONLY:
+ * o agente conecta no socket, mas não troca o relay nem planta arquivo ali.
+ */
+export function inferenceProxyMount(socketDir: string): SandboxMount {
+  return { host: socketDir, container: CONTAINER_PROXY_DIR, readOnly: true };
+}
+
+/**
+ * Embrulha o comando do agente no relay (PID 1 do container): `node relay.cjs
+ * <porta> <socket> -- <comando...>`. O relay abre `127.0.0.1:<porta>` →
+ * socket Unix do proxy e executa o comando com stdio herdado.
+ */
+export function inferenceRelayCommand(command: string[]): string[] {
+  return [
+    'node',
+    `${CONTAINER_PROXY_DIR}/${RELAY_SCRIPT_NAME}`,
+    String(CONTAINER_PROXY_PORT),
+    `${CONTAINER_PROXY_DIR}/${PROXY_SOCKET_NAME}`,
+    '--',
+    ...command,
+  ];
+}
+
 export interface DockerRunSpec {
   /** Digest da imagem do pi (`PinnedImage.digest`) — NUNCA a tag. */
   image: string;
   containerName: string;
   envFile: string;
+  /**
+   * Diretório do HOST do proxy de inferência (`InferenceRoute.socketDir`). Presente
+   * = bind read-only em `/exec/proxy` + comando embrulhado pelo relay (IMPL-037).
+   */
+  inferenceSocketDir?: string;
   workspaceDir: string;
   /** Dir de execução do HOST. Só `session/` e `pi-home/` dele entram no container. */
   workDir: string;
@@ -746,12 +806,16 @@ export interface DockerRunSpec {
  *   exit 0 sem fazer nada (SPIKE: correção crítica).
  * - `--rm` cobre o exit normal; o kill explícito (`killContainer`) cobre o resto.
  * - `--name` único por execução (matar por nome).
- * - `--env-file` = o tmp 0600 do host (a key NUNCA em argv/artefato/volume).
+ * - `--env-file` = o tmp 0600 do host, só com as `PI_*` (a key do OpenRouter NÃO:
+ *   fica no proxy de inferência — IMPL-037).
  * - binds: `<workspaceDir>` → `/ws` (cwd), `<sessionDir>` → `/exec/session`,
- *   `<workDir>/pi-home` → `/exec/pi-home`; o resto de `/exec` é tmpfs.
+ *   `<workDir>/pi-home` → `/exec/pi-home` e, com proxy, `<socketDir>` →
+ *   `/exec/proxy` (read-only); o resto de `/exec` é tmpfs.
+ * - com proxy, o PID 1 é o relay (`inferenceRelayCommand`) e o pi é filho dele.
  * - perfil endurecido completo (`hardeningFlags`) e imagem por digest.
  */
 export function buildDockerArgv(spec: DockerRunSpec): string[] {
+  const pi = ['pi', ...spec.piArgv];
   return buildSandboxRunArgv({
     image: spec.image,
     containerName: spec.containerName,
@@ -762,9 +826,10 @@ export function buildDockerArgv(spec: DockerRunSpec): string[] {
       { host: spec.workspaceDir, container: CONTAINER_WS_DIR },
       { host: spec.sessionDir ?? path.join(spec.workDir, 'session'), container: CONTAINER_SESSION_DIR },
       { host: path.join(spec.workDir, 'pi-home'), container: CONTAINER_PI_HOME_DIR },
+      ...(spec.inferenceSocketDir ? [inferenceProxyMount(spec.inferenceSocketDir)] : []),
     ],
     workdir: CONTAINER_WS_DIR,
-    command: ['pi', ...spec.piArgv],
+    command: spec.inferenceSocketDir ? inferenceRelayCommand(pi) : pi,
   });
 }
 
@@ -786,6 +851,19 @@ export interface ContainerAudit {
   imageRef: string;
   hardening: HardeningProfile;
   argv: string[];
+  /**
+   * Rota de inferência (IMPL-037): a key ficou no proxy do host; o sandbox viu só
+   * `containerBaseUrl` + token fictício. `relaySha256` prova QUAL relay foi o PID 1.
+   * `envKeys` = nomes (nunca valores) do env-file — a auditoria confere que
+   * `OPENROUTER_API_KEY` não está lá.
+   */
+  inference?: {
+    route: 'unix-socket-relay';
+    proxyVersion: number;
+    containerBaseUrl: string;
+    relaySha256: string;
+    envKeys: string[];
+  };
 }
 
 /** Monta o `ContainerAudit` (pura). Recusa imagem que não seja digest. */
@@ -796,6 +874,8 @@ export function containerAuditRecord(opts: {
   /** argv COMPLETO (`['docker', 'run', ...]`). */
   argv: string[];
   envFile?: string;
+  /** Nomes das variáveis do env-file (com proxy de inferência). */
+  inferenceEnvKeys?: string[];
 }): ContainerAudit {
   if (!isDigestRef(opts.imageDigest)) {
     throw new Error(`argv.json exige a imagem por digest sha256 (recebido "${opts.imageDigest}")`);
@@ -806,28 +886,173 @@ export function containerAuditRecord(opts: {
     imageRef: opts.imageRef ?? opts.imageDigest,
     hardening: opts.profile,
     argv: opts.envFile ? opts.argv.map((a) => (a === opts.envFile ? ENV_FILE_MASK : a)) : [...opts.argv],
+    ...(opts.inferenceEnvKeys
+      ? {
+          inference: {
+            route: 'unix-socket-relay' as const,
+            proxyVersion: INFERENCE_PROXY_VERSION,
+            containerBaseUrl: CONTAINER_INFERENCE_BASE_URL,
+            relaySha256: relaySha256(),
+            envKeys: [...opts.inferenceEnvKeys].sort(),
+          },
+        }
+      : {}),
   };
 }
 
 /**
- * Dica acionável quando o agente não alcança o provedor dentro do sandbox.
- * Com `--network none` (default) e SEM o proxy de inferência local, o pi não tem
- * rota até o OpenRouter: sai com exit 0 e "Connection error." — a execução vira
- * erro de INFRA (`infraError`: sem veredito, fora do placar — nunca `nao`; ver
- * `infraError.ts`). `undefined` quando a rede não é a causa provável.
- *
- * É também a ÚNICA fonte da pergunta "o agente alcança o provedor?": o pré-voo
- * (`agents doctor --container`, o passo antes de `agents run`) FALHA com esta
- * dica — avisa cedo, sem gastar, em vez de deixar a run descobrir execução a
- * execução. O proxy de inferência (IMPL-037) muda a resposta AQUI.
+ * Dica acionável quando o agente NÃO recebeu resposta do modelo dentro do
+ * sandbox. Desde o IMPL-037 a ÚNICA rota do agente até o provedor é o proxy de
+ * inferência do host (socket Unix montado em `/exec/proxy` + relay no loopback
+ * do container) — com `--network none` ou com a válvula `bridge`. Um erro do
+ * provedor aqui é, portanto, do proxy ou do upstream: o log redigido do proxy
+ * diz qual. Vira erro de INFRA (`infraError`: sem veredito, fora do placar —
+ * nunca `nao`; ver `infraError.ts`).
  */
-export function sandboxNetworkHint(profile: Pick<HardeningProfile, 'network'>): string | undefined {
-  if (profile.network !== 'none') return undefined;
+export function inferenceRouteHint(logFile?: string): string {
   return (
-    `o sandbox roda com --network none (perfil endurecido) e o agente não alcança o provedor sem o ` +
-    `proxy de inferência local. Para rodar SEM esse isolamento de rede (a key do OpenRouter fica exposta ` +
-    `ao agente), defina ${UNSAFE_NETWORK_ENV}=bridge no ambiente do operador.`
+    `o agente só alcança o provedor pelo proxy de inferência local (socket Unix montado em ${CONTAINER_PROXY_DIR}; ` +
+    `a rede do sandbox não leva a lugar nenhum) — veja o log redigido do proxy` +
+    (logFile ? ` (${logFile})` : ' (inference-proxy.jsonl da run)') +
+    `: status 401/403 = token/rota recusados pelo proxy; 502 = upstream inalcançável a partir do HOST. ` +
+    `Em Docker Desktop (macOS/Windows) e em gVisor sem --host-uds=open o socket Unix do host não atravessa ` +
+    `para o sandbox — rode \`agents doctor --container\`.`
   );
+}
+
+// ----------------------------------------------------------------------------
+// Sonda da rota de inferência (pré-voo do doctor, sem gastar)
+// ----------------------------------------------------------------------------
+
+/** Timeout da sonda (um `docker run` curto + 2 testes de rede). */
+export const ROUTE_PROBE_TIMEOUT_MS = 60_000;
+
+/**
+ * O que a sonda mediu DENTRO do sandbox — os critérios do IMPL-037 como checagem
+ * de runtime: o relay alcança o proxy (`relayStatus` 200 na saúde LOCAL, que
+ * nunca vai ao upstream), a key não está no ambiente, e sem rede nada sai
+ * (DNS e TCP direto por IP falham).
+ */
+export interface InferenceRouteProbe {
+  ok: boolean;
+  /** HTTP da saúde do proxy via relay, ou o código do erro (`ECONNREFUSED`…). */
+  relayStatus: number | string;
+  /** `OPENROUTER_API_KEY` presente no ambiente do sandbox? (tem de ser `false`). */
+  keyInSandbox: boolean;
+  /** Egress (DNS + TCP por IP) bloqueado? `null` = não medido (rede `bridge`). */
+  egressBlocked: boolean | null;
+  network: ContainerNetwork;
+  errors: string[];
+}
+
+/**
+ * Script da sonda (roda no `node` da imagem, filho do relay). Imprime UMA linha
+ * JSON no stdout. Recebe a porta e o token por argv — o token é de um proxy
+ * efêmero da própria sonda, sem key real e revogado ao fim.
+ */
+const ROUTE_PROBE_SCRIPT = `
+const [port, token, checkEgress] = process.argv.slice(1);
+const out = { keyInSandbox: typeof process.env.OPENROUTER_API_KEY === 'string' && process.env.OPENROUTER_API_KEY !== '' };
+(async () => {
+  try {
+    const r = await fetch('http://127.0.0.1:' + port + '${PROXY_HEALTH_PATH}', { headers: { authorization: 'Bearer ' + token } });
+    out.relayStatus = r.status;
+  } catch (e) { out.relayStatus = String((e.cause && e.cause.code) || e.message); }
+  if (checkEgress === '1') {
+    const dns = await require('node:dns').promises.lookup('openrouter.ai').then(() => 'resolveu', (e) => e.code || 'erro');
+    const tcp = await new Promise((resolve) => {
+      const s = require('node:net').connect(443, '1.1.1.1');
+      const t = setTimeout(() => { s.destroy(); resolve('timeout'); }, 3000);
+      s.on('connect', () => { clearTimeout(t); s.destroy(); resolve('conectou'); });
+      s.on('error', (e) => { clearTimeout(t); resolve(e.code || 'erro'); });
+    });
+    out.egress = { dns, tcp };
+  }
+  process.stdout.write(JSON.stringify(out));
+})();
+`;
+
+/** Interpreta a saída da sonda (pura — o ponto testável). */
+export function parseRouteProbe(stdout: string, network: ContainerNetwork): InferenceRouteProbe {
+  const errors: string[] = [];
+  let parsed: Record<string, unknown> | undefined;
+  try {
+    const line = stdout.trim().split('\n').pop() ?? '';
+    parsed = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    errors.push(`sonda da rota de inferência sem saída legível: ${JSON.stringify(stdout.slice(-300))}`);
+  }
+  const relayStatus = (parsed?.relayStatus as number | string | undefined) ?? 'sem-resposta';
+  const keyInSandbox = parsed?.keyInSandbox === true;
+  let egressBlocked: boolean | null = null;
+  if (network === 'none') {
+    const eg = (parsed?.egress ?? {}) as { dns?: string; tcp?: string };
+    egressBlocked = eg.dns !== undefined && eg.dns !== 'resolveu' && eg.tcp !== undefined && eg.tcp !== 'conectou';
+    if (!egressBlocked) errors.push(`sandbox com --network none alcançou a rede externa (dns=${eg.dns}, tcp=${eg.tcp})`);
+  }
+  if (parsed && relayStatus !== 200) {
+    errors.push(
+      `o sandbox não alcança o proxy de inferência pelo relay (saúde = ${relayStatus}) — ` +
+        'socket Unix do host não atravessou o bind (Docker Desktop/gVisor/SELinux?)',
+    );
+  }
+  if (keyInSandbox) errors.push('OPENROUTER_API_KEY apareceu no ambiente do sandbox');
+  return { ok: errors.length === 0, relayStatus, keyInSandbox, egressBlocked, network, errors };
+}
+
+/**
+ * Sobe um proxy EFÊMERO (sem key real — a saúde é local) e roda a sonda no
+ * sandbox endurecido da run, com o mesmo bind + relay de uma execução do pi.
+ * Nada é cobrado: nenhuma requisição vai ao upstream.
+ */
+export async function probeSandboxInferenceRoute(opts: {
+  imageDigest: string;
+  profile: HardeningProfile;
+}): Promise<InferenceRouteProbe> {
+  const proxy = await startInferenceProxy({
+    apiKey: '',
+    upstreamBaseUrl: 'http://127.0.0.1:9/api/v1', // nunca usado: a sonda só chama a saúde local
+    listen: { unix: true },
+  });
+  const cred = proxy.issueCredential({ role: 'doctor-probe' });
+  try {
+    const argv = buildSandboxRunArgv({
+      image: opts.imageDigest,
+      containerName: `${CONTAINER_NAME_PREFIX}probe-${randomUUID()}`,
+      profile: opts.profile,
+      mounts: [inferenceProxyMount(proxy.socketDir as string)],
+      command: inferenceRelayCommand([
+        'node',
+        '-e',
+        ROUTE_PROBE_SCRIPT,
+        String(CONTAINER_PROXY_PORT),
+        cred.token,
+        opts.profile.network === 'none' ? '1' : '0',
+      ]),
+    });
+    let res: SimpleResult;
+    try {
+      res = await runDocker(['docker', ...argv], { env: dockerCliEnv(), timeoutMs: ROUTE_PROBE_TIMEOUT_MS });
+    } catch (err) {
+      return {
+        ok: false,
+        relayStatus: 'docker-ausente',
+        keyInSandbox: false,
+        egressBlocked: null,
+        network: opts.profile.network,
+        errors: [`sonda da rota de inferência não rodou: ${(err as Error).message}`],
+      };
+    }
+    const probe = parseRouteProbe(res.stdout, opts.profile.network);
+    if (res.code !== 0) {
+      probe.ok = false;
+      probe.errors.push(`sonda saiu com ${res.code ?? res.signal}: ${res.stderr.slice(-500)}`);
+    }
+    return probe;
+  } finally {
+    cred.revoke();
+    await proxy.close();
+  }
 }
 
 // ----------------------------------------------------------------------------

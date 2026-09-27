@@ -33,10 +33,11 @@ import { buildDossier } from './dossier.js';
 import { runOracle } from './oracle.js';
 import { aggregateAgentVerdict, judgeDossier } from './agentJudge.js';
 import { decideInfraError } from './infraError.js';
+import { acquireRunInferenceProxy, type InferenceProxyLease } from './inferenceProxy.js';
 import { isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
 import { blindRankMap, seedFromId } from '../duels.js';
-import { tierFor } from '../openrouter.js';
+import { getGateway, tierFor } from '../openrouter.js';
 import type {
   AgentLimits,
   AgentRunnerConfig,
@@ -184,7 +185,7 @@ function summarizeResponse(rep: AgentRepResult): string {
  * julgamento de cada uma. Ver fluxo em §10 do plano.
  */
 export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgentStageResult> {
-  const { runId, stageIndex, contestant, stage, agentConfig, apiKey, ctx, dataDir, catalog, forcedPromptMode } = opts;
+  const { runId, contestant, stage, agentConfig, apiKey, dataDir, forcedPromptMode } = opts;
   const gateway = opts.gateway ?? DEFAULT_GATEWAY;
   const task = stage.agentTask;
   const judgeModelIds = opts.judgeModelIds ?? [];
@@ -241,6 +242,74 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
     };
   }
 
+  // Proxy de inferência da RUN (IMPL-037 / R-15 DEC-2): a key real (`apiKey`)
+  // fica NELE; o agente recebe só base URL local + token fictício por execução.
+  // Modo container: socket Unix (o sandbox roda com `--network none`); modo
+  // host: TCP no loopback. Upstream = gateway do processo (OPENROUTER_BASE_URL).
+  // UM por run: as etapas paralelas pegam empréstimos do mesmo proxy e o último
+  // a devolver o fecha. O log redigido fica em `<runDir>/inference-proxy.jsonl`,
+  // fora de qualquer mount do sandbox.
+  let proxyLease: InferenceProxyLease;
+  try {
+    const gw = getGateway().config;
+    const inContainer = agentConfig.isolation?.kind === 'container';
+    proxyLease = await acquireRunInferenceProxy(runId, {
+      apiKey,
+      upstreamBaseUrl: gw.baseUrl,
+      appUrl: gw.appUrl,
+      appTitle: gw.appTitle,
+      listen: inContainer ? { unix: true } : { tcp: true },
+      logFile: path.join(runDir, 'inference-proxy.jsonl'),
+    });
+  } catch (err) {
+    if (isControlSignal(err)) throw err;
+    const errorMsg = `Falha ao subir o proxy de inferência local: ${(err as Error).message}`;
+    return {
+      response: responseError(contestant, modelId, errorMsg, 0),
+      repResults: [],
+      incomplete: true,
+      errorMsg,
+    };
+  }
+  try {
+    return await runAgentReps(opts, {
+      gateway,
+      task,
+      judgeModelIds,
+      reps,
+      promptMode,
+      runConfig,
+      limits,
+      modelId,
+      systemPrompt,
+      prepared,
+      proxy: proxyLease.proxy,
+    });
+  } finally {
+    await proxyLease.release();
+  }
+}
+
+/** O que `runAgentReps` herda da preparação da etapa. */
+interface RepsContext {
+  gateway: AgentGateway;
+  task: NonNullable<StageSpec['agentTask']>;
+  judgeModelIds: string[];
+  reps: number;
+  promptMode: 'replace' | 'append' | 'none';
+  runConfig: AgentRunnerConfig;
+  limits: AgentLimits & { maxDiffBytes: number };
+  modelId: string;
+  systemPrompt: string;
+  prepared: { bin: string; env: Record<string, string> };
+  proxy: InferenceProxyLease['proxy'];
+}
+
+/** As N repetições da etapa (o laço do §10), com o proxy da run já no ar. */
+async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise<RunAgentStageResult> {
+  const { runId, stageIndex, contestant, stage, agentConfig, apiKey, ctx, dataDir, catalog } = opts;
+  const { gateway, task, judgeModelIds, reps, promptMode, runConfig, limits, modelId, systemPrompt, prepared, proxy } = rc;
+
   // Letra cega do candidato: MESMO mapa/shuffle que o orquestrador usa no ranking.
   const blindOrder = blindRankMap(opts.blindIds ?? [contestant.id], seedFromId(stage.question));
   const contestantLabel = String.fromCharCode(65 + (blindOrder.get(contestant.id) ?? 0));
@@ -265,6 +334,7 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
       let workspaceDir = '';
       let seedCommit = '';
       let cacheRepoDir = '';
+      let credential: ReturnType<typeof proxy.issueCredential> | undefined;
 
       try {
         // 1) workspace.prepare() — setup[] + files[] + seedCommit (§10.1).
@@ -285,15 +355,23 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
         // 3) executor.run() — cwd=workspace, workDir=repetitionDir, limites.
         const execId = randomUUID();
         emitEvent({ type: 'agent.started', runId, stageIndex, contestantId: contestant.id, execId, repetition: rep });
+        // A key NUNCA vai ao env do executor (IMPL-037) — nem se um `prepare`
+        // antigo/injetado a estampar: quem a detém é o proxy da run.
+        const { OPENROUTER_API_KEY: _keyFora, ...preparedEnv } = prepared.env;
+        void _keyFora;
         const env = {
-          ...prepared.env,
+          ...preparedEnv,
           PI_MODEL_ID: modelId,
           PI_TASK: stage.question,
           PI_SYSTEM_PROMPT: systemPrompt,
         };
+        // Token fictício DESTA execução (mapeamento execução → chamada conhecido
+        // só do produto); revogado assim que a execução termina.
+        credential = proxy.issueCredential({ runId, stageIndex, contestantId: contestant.id, repetition: rep, execId, role: 'agent' });
+        const inference = proxy.route(credential);
 
         const outcome = await gateway.run(
-          { execId, task, config: runConfig, workspaceDir, workDir: repAbs, bin: prepared.bin, env },
+          { execId, task, config: runConfig, workspaceDir, workDir: repAbs, bin: prepared.bin, env, inference },
           {
             signal: ctx.signal,
             priceTokensIn: price.priceTokensIn,
@@ -605,6 +683,7 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           response = responseError(contestant, modelId, msg, 0);
         }
       } finally {
+        credential?.revoke();
         // 9) dispose do workspace (preserva com isolation.keepWorkspace).
         const keep = agentConfig.isolation?.keepWorkspace === true;
         try {

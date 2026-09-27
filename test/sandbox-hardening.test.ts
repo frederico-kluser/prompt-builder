@@ -16,6 +16,7 @@
 //      `PB_SKIP_DOCKER_TESTS=1` desliga esta camada.
 
 import { execFile, spawnSync } from 'node:child_process';
+import net from 'node:net';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -44,10 +45,13 @@ import {
   parseImageInspect,
   resolveContainerNetwork,
   resolveImageDigest,
-  sandboxNetworkHint,
+  inferenceRouteHint,
   sandboxProfile,
   UNSAFE_NETWORK_ENV,
 } from '../src/agent/container.js';
+import { startInferenceProxy } from '../src/agent/inferenceProxy.js';
+import { createGateway, setDefaultGateway } from '../src/openrouter.js';
+import { startFakeUpstream } from './fakeInferenceUpstream.js';
 import { runCleanRoomCanary, runPreflight } from '../src/agent/doctor.js';
 import { runAgentStage, type RunAgentStageParams } from '../src/agent/runAgentStage.js';
 import { doctorIsolation } from '../src/cli/commands/agents.js';
@@ -283,9 +287,13 @@ describe('argv do `docker run` do pi', () => {
     );
   });
 
-  it('dica de rede só quando a rede é `none` (e aponta a válvula do operador)', () => {
-    expect(sandboxNetworkHint({ network: 'none' })).toContain(`${UNSAFE_NETWORK_ENV}=bridge`);
-    expect(sandboxNetworkHint({ network: 'bridge' })).toBeUndefined();
+  // IMPL-037 mudou a resposta: a rota até o provedor é SEMPRE o proxy de
+  // inferência (com `none` ou `bridge`) — a dica não manda mais abrir a rede.
+  it('dica de erro do provedor aponta o proxy de inferência e o log dele, nunca a válvula de rede', () => {
+    const hint = inferenceRouteHint('/dados/agent-runs/r/inference-proxy.jsonl');
+    expect(hint).toMatch(/proxy de inferência local/);
+    expect(hint).toContain('/dados/agent-runs/r/inference-proxy.jsonl');
+    expect(hint).not.toContain(`${UNSAFE_NETWORK_ENV}=bridge`);
   });
 });
 
@@ -662,7 +670,11 @@ describe('isolation.runtime chega a TODO `docker run` (validação da imagem e s
 // ----------------------------------------------------------------------------
 
 describe('agents doctor --container: falha CEDO quando o agente não alcança o provedor', () => {
-  it('rede `none` sem proxy de inferência: erro acionável, ok=false e o canário (que gastaria) nem roda', async () => {
+  // Antes do IMPL-037 este caso REPROVAVA ("não alcança o provedor" com rede
+  // none). Agora a rota é o proxy de inferência: o pré-voo não presume nada — a
+  // sonda mede relay → proxy no sandbox (Docker real, ver
+  // test/inference-proxy.test.ts). Sem imagem, nem sonda nem canário rodam.
+  it('rede `none`: a rota é o proxy local (sem o velho erro); sem imagem, nem sonda nem canário (que gastaria) rodam', async () => {
     const saved = process.env[UNSAFE_NETWORK_ENV];
     delete process.env[UNSAFE_NETWORK_ENV];
     try {
@@ -674,8 +686,10 @@ describe('agents doctor --container: falha CEDO quando o agente não alcança o 
         isolation: { kind: 'container', image: 'pb-inexistente-impl036:0' },
       });
       expect(r.ok).toBe(false);
-      expect(r.errors.join(' ')).toMatch(/não alcança o provedor.*--network none/);
-      expect(r.errors.join(' ')).toContain(`${UNSAFE_NETWORK_ENV}=bridge`);
+      expect(r.errors.join(' ')).toMatch(/não encontrada no daemon/);
+      expect(r.errors.join(' ')).not.toMatch(/não alcança o provedor/);
+      expect(r.errors.join(' ')).not.toContain(`${UNSAFE_NETWORK_ENV}=bridge`);
+      expect(r.inferenceRoute).toBeUndefined();
       expect(r.canary).toBeUndefined();
     } finally {
       if (saved !== undefined) process.env[UNSAFE_NETWORK_ENV] = saved;
@@ -812,11 +826,18 @@ describe.runIf(dockerReady && piImageId !== null)('Docker real: execução endur
   it(
     'docker inspect da execução REAL do pi: CapDrop ALL, ReadonlyRootfs, NoNewPrivileges, NetworkMode none, PidsLimit 512, User não-root, imagem sha256 — e o argv.json casa',
     async () => {
-      const saved = { key: process.env.OPENROUTER_API_KEY, model: process.env.PI_MODEL_ID, net: process.env[UNSAFE_NETWORK_ENV] };
-      // Key FALSA + rede none: nenhuma chamada sai da máquina (nada é cobrado).
-      process.env.OPENROUTER_API_KEY = 'sk-or-v1-FALSA-impl-036';
+      const saved = { model: process.env.PI_MODEL_ID, net: process.env[UNSAFE_NETWORK_ENV] };
+      // Key FALSA + rede none + upstream FALSO que segura a resposta (o container
+      // fica vivo para o inspect): nenhuma chamada sai da máquina, nada é cobrado.
       process.env.PI_MODEL_ID = 'openai/gpt-4o-mini';
       delete process.env[UNSAFE_NETWORK_ENV];
+      const up = await startFakeUpstream(() => ({ text: 'oi', delayMs: 30_000 }));
+      // IMPL-037: a key fica no proxy de inferência do host; o sandbox recebe a rota.
+      const proxy = await startInferenceProxy({
+        apiKey: 'sk-or-v1-FALSA-impl-036',
+        upstreamBaseUrl: up.baseUrl,
+        listen: { unix: true },
+      });
       const ac = new AbortController();
       try {
         const runDir = mkTmp('pb036-e2e-run-');
@@ -828,6 +849,7 @@ describe.runIf(dockerReady && piImageId !== null)('Docker real: execução endur
         });
         expect(prep.bin).toBe('docker');
         expect(prep.env.PI_CONTAINER_IMAGE).toBe(piImageId);
+        expect(prep.env.OPENROUTER_API_KEY).toBeUndefined(); // a preparação não carrega mais a key
 
         const opts = runOpts({
           bin: prep.bin,
@@ -838,24 +860,40 @@ describe.runIf(dockerReady && piImageId !== null)('Docker real: execução endur
             isolation: { kind: 'container' },
             limits: { timeoutMs: 120_000 },
           },
+          inference: proxy.route(proxy.issueCredential({ role: 'agent' })),
         });
         const name = `pb-agent-${opts.execId}`;
         const running = runPi(opts, { signal: ac.signal });
 
-        // Enquanto o pi roda: `docker inspect` + o status do PID 1 (o próprio pi).
+        // Enquanto o pi roda: `docker inspect` + o status do PID 1 (o relay do
+        // proxy de inferência) e do processo do PRÓPRIO pi (filho dele) + o env
+        // que o agente enxerga.
         let inspect: Record<string, any> | undefined;
         let pid1 = '';
+        let piStatus = '';
+        let keyEnv: { code: number; stdout: string } | undefined;
         const deadline = Date.now() + 60_000;
-        while (!inspect && Date.now() < deadline) {
+        while ((!inspect || !piStatus) && Date.now() < deadline) {
           try {
             const { stdout } = await execFileP('docker', ['inspect', name], { timeout: 10_000 });
             inspect = JSON.parse(stdout)[0];
             pid1 = (await execFileP('docker', ['exec', name, 'cat', '/proc/1/status'], { timeout: 10_000 })).stdout;
+            piStatus = (
+              await execFileP(
+                'docker',
+                ['exec', name, 'bash', '-c', `for p in /proc/[0-9]*; do if tr '\\0' ' ' < $p/cmdline 2>/dev/null | grep -q -- '--mode json'; then cat $p/status; break; fi; done`],
+                { timeout: 10_000 },
+              )
+            ).stdout;
+            keyEnv = await execFileP('docker', ['exec', name, 'printenv', 'OPENROUTER_API_KEY'], { timeout: 10_000 }).then(
+              (r) => ({ code: 0, stdout: r.stdout }),
+              (e: { code?: number; stdout?: string }) => ({ code: e.code ?? -1, stdout: e.stdout ?? '' }),
+            );
           } catch {
             await new Promise((r) => setTimeout(r, 100));
           }
         }
-        ac.abort(); // não precisa esperar as retentativas do pi sem rede
+        ac.abort(); // não precisa esperar a resposta segurada pelo upstream falso
         const out = await running;
 
         expect(inspect, 'o container da execução deveria ter sido inspecionado').toBeDefined();
@@ -873,11 +911,18 @@ describe.runIf(dockerReady && piImageId !== null)('Docker real: execução endur
         expect(inspect!.Config.User).toMatch(/^[1-9]\d*:\d+$/);
         expect(inspect!.Image).toBe(piImageId);
 
-        const st = procStatus(pid1);
-        expect(st.CapEff).toBe('0000000000000000');
-        expect(st.CapBnd).toBe('0000000000000000');
-        expect(st.Seccomp).toBe('2');
-        expect(st.NoNewPrivs).toBe('1');
+        for (const status of [pid1, piStatus]) {
+          const st = procStatus(status);
+          expect(st.CapEff).toBe('0000000000000000');
+          expect(st.CapBnd).toBe('0000000000000000');
+          expect(st.Seccomp).toBe('2');
+          expect(st.NoNewPrivs).toBe('1');
+        }
+        // IMPL-037: `printenv OPENROUTER_API_KEY` no sandbox do agente = vazio (exit 1).
+        expect(keyEnv).toEqual({ code: 1, stdout: '' });
+        // O proxy aparece montado read-only; o relay é o PID 1.
+        expect(inspect!.Mounts.find((m: { Destination: string }) => m.Destination === '/exec/proxy')?.RW).toBe(false);
+        expect(inspect!.Config.Cmd.slice(0, 2)).toEqual(['node', '/exec/proxy/relay.cjs']);
 
         const audit = JSON.parse(readFileSync(path.join(opts.workDir, 'argv.json'), 'utf8'));
         expect(audit.image).toBe(piImageId);
@@ -889,6 +934,7 @@ describe.runIf(dockerReady && piImageId !== null)('Docker real: execução endur
         expect(audit.hardening.cpus).toBe(Math.min(2, daemonNcpu()));
         expect(hc.NanoCpus).toBe(audit.hardening.cpus * 1e9);
         expect(JSON.stringify(audit)).not.toContain('FALSA');
+        expect(audit.inference.envKeys).not.toContain('OPENROUTER_API_KEY');
 
         expect(out.stopReason).toBe('cancelled');
         // Kill por nome: nenhum container órfão.
@@ -896,8 +942,8 @@ describe.runIf(dockerReady && piImageId !== null)('Docker real: execução endur
         expect(ps.stdout.trim()).toBe('');
       } finally {
         ac.abort();
-        if (saved.key === undefined) delete process.env.OPENROUTER_API_KEY;
-        else process.env.OPENROUTER_API_KEY = saved.key;
+        await proxy.close();
+        await up.close();
         if (saved.model === undefined) delete process.env.PI_MODEL_ID;
         else process.env.PI_MODEL_ID = saved.model;
         if (saved.net !== undefined) process.env[UNSAFE_NETWORK_ENV] = saved.net;
@@ -942,17 +988,25 @@ describe.runIf(dockerReady && piImageId !== null)('Docker real: execução endur
   }, 60_000);
 
   it(
-    'run REAL em container com --network none e SEM proxy: a repetição fica SEM veredito (fora do placar) — nunca nao',
+    'run REAL em container com --network none: o modelo inalcançável (upstream do proxy fora do ar) deixa a repetição SEM veredito — nunca nao',
     async () => {
-      // O caso da revisão: o default endurecido sem o proxy de inferência
-      // (IMPL-037). O pi esgota as retentativas (~15 s) com "Connection error." e
-      // sai 0. Key FALSA: nada sai da máquina.
-      const saved = { key: process.env.OPENROUTER_API_KEY, net: process.env[UNSAFE_NETWORK_ENV] };
-      process.env.OPENROUTER_API_KEY = 'sk-or-v1-FALSA-impl-036';
+      // O caso da revisão do IMPL-036, na rota do IMPL-037: o sandbox sem rede só
+      // fala com o proxy local; o proxy não alcança o "provedor" (porta sem
+      // ninguém) e responde 502; o pi esgota as retentativas e sai 0. Key FALSA e
+      // upstream no loopback: nada sai da máquina.
+      const saved = { net: process.env[UNSAFE_NETWORK_ENV] };
       delete process.env[UNSAFE_NETWORK_ENV];
       const dataDir = mkTmp('pb036-stage-docker-');
       const anterior = getDataDir();
       setDataDir(dataDir);
+      const porta = await new Promise<number>((resolve) => {
+        const srv = net.createServer();
+        srv.listen(0, '127.0.0.1', () => {
+          const p = (srv.address() as net.AddressInfo).port;
+          srv.close(() => resolve(p));
+        });
+      });
+      const prevGw = setDefaultGateway(createGateway({ baseUrl: `http://127.0.0.1:${porta}/api/v1` }));
       try {
         const res = await runAgentStage({
           runId: 'run-036-docker',
@@ -979,17 +1033,20 @@ describe.runIf(dockerReady && piImageId !== null)('Docker real: execução endur
         });
         const r0 = res.repResults[0];
         expect(r0.stopReason).toBe('error');
-        expect(r0.execution.infraError).toMatch(/Connection error/);
+        expect(r0.execution.infraError).toMatch(/502|upstream/i);
         expect(r0.oracle?.score).toBe(0);
         expect(r0.verdict).toBeNull();
         expect(res.incomplete).toBe(true);
-        // A causa e a dica acionável chegam a quem lê a resposta.
+        // A causa e a dica acionável (o log redigido do proxy) chegam a quem lê a resposta.
         expect(res.response.status).toBe('error');
-        expect(res.response.errorMsg).toContain(UNSAFE_NETWORK_ENV);
+        expect(res.response.errorMsg).toMatch(/proxy de inferência local/);
+        expect(res.response.errorMsg).toContain('inference-proxy.jsonl');
+        const log = readFileSync(path.join(dataDir, 'agent-runs', 'run-036-docker', 'inference-proxy.jsonl'), 'utf8');
+        expect(log).toMatch(/"status":502/);
+        expect(log).not.toContain('FALSA');
       } finally {
+        setDefaultGateway(prevGw);
         setDataDir(anterior);
-        if (saved.key === undefined) delete process.env.OPENROUTER_API_KEY;
-        else process.env.OPENROUTER_API_KEY = saved.key;
         if (saved.net !== undefined) process.env[UNSAFE_NETWORK_ENV] = saved.net;
       }
     },

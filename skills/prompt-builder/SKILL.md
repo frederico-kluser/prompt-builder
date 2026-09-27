@@ -127,8 +127,8 @@ agente (Agent Arena), o executor do motor é o `pi`; os demais entram como
   deepclaude × pi` como executores locais, é um passo futuro dos adaptadores
   (`AgentExecutor`) — hoje o executor é sempre `pi`.
 - **Segurança:** nunca imprima/commite chaves. O CLI lê a key de
-  `OPENROUTER_API_KEY`/`key set`; o modo container recebe por `--env-file` 0600
-  efêmero (fora dos volumes) e o `argv.json` mascara o caminho.
+  `OPENROUTER_API_KEY`/`key set`; no modo agente a key fica num proxy de inferência
+  local e o agente (container `--network none` ou host) só recebe um token fictício.
 
 
 ## Dataset estável e evolução segura (paridade prompt-arena)

@@ -319,6 +319,12 @@ async function cmdDoctor(argv: string[]): Promise<number> {
         out.warn(`· docker ${d.present ? '' : 'CLI AUSENTE — '}imagem '${d.image ?? '?'}' ausente`);
       }
     }
+    // Rota de inferência medida DENTRO do sandbox (IMPL-037): relay → proxy, key fora, egress.
+    const route = preflight.inferenceRoute;
+    if (route?.ok) {
+      const egress = route.egressBlocked === null ? 'egress ABERTO (válvula bridge)' : 'egress bloqueado';
+      out.line(`· rota de inferência ok (proxy local via socket; key fora do sandbox; ${egress})`);
+    }
     for (const e of preflight.errors) out.warn(e);
   }
   out.result(true, 'agents.doctor', { preflight });

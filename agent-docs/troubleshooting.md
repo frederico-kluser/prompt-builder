@@ -74,19 +74,23 @@ garanta acesso sem sudo. Confirme com `agents doctor --container`: o pré-voo ec
 do Docker (`· docker ok (prompt-builder-pi:<ver>)` ou `docker CLI AUSENTE` / `imagem ausente`)
 e **falha com exit `3`** quando o CLI/imagem faltam.
 
-## Modo container — execução em `error` com `Connection error.` / doctor: `o agente não alcança o provedor`
+## Modo container — execução em `error` com `502`/`Connection error.` / doctor: `rota de inferência do sandbox reprovada`
 
-O container roda com `--network none` (perfil endurecido): sem o proxy de inferência
-local, o `pi` não alcança o OpenRouter. O `agents doctor --container` já **falha com exit
-`3`** por isso (é o aviso cedo, sem gastar). Se a run seguir, o `pi` esgota as
-retentativas e sai 0 — o prompt-builder marca a execução como **erro de infraestrutura**
-(`stopReason: "error"` + `execution.infraError`) e põe no `stderr.log` a mensagem do
-provedor e a dica. A repetição fica **sem veredito — fora do placar e das médias, nunca
-`nao`** (exceto se o oráculo já for conclusivo: passou 100% ou violou `forbiddenPaths`).
-Um processo que **morre** sem erro do provedor continua `error` → `nao`. Se você aceita o
-risco (a key fica ao alcance do agente), rode com
-`PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK=bridge` no ambiente do operador; o doctor avisa e
-o `argv.json` registra o desvio em `hardening.unsafe`.
+O container roda com `--network none` (perfil endurecido) e alcança o modelo SÓ pelo
+**proxy de inferência local** (socket Unix do host montado em `/exec/proxy` + relay no
+loopback do container). O `agents doctor --container` mede essa rota no sandbox da run e
+**falha com exit `3`** se o relay não chega ao proxy — causa típica: Docker Desktop
+(macOS/Windows) ou gVisor sem `--host-uds=open`, onde o socket do host não atravessa (use
+Docker Engine no Linux). Se a rota existe mas o modelo não responde, veja o log redigido
+`<dataDir>/agent-runs/<runId>/inference-proxy.jsonl`: `401`/`403` = token/rota recusados
+pelo proxy; `502` = o HOST não alcança o provedor (rede/`OPENROUTER_BASE_URL`). O `pi`
+esgota as retentativas e sai 0 — o prompt-builder marca a execução como **erro de
+infraestrutura** (`stopReason: "error"` + `execution.infraError`) e põe a dica no
+`stderr.log`. A repetição fica **sem veredito — fora do placar e das médias, nunca `nao`**
+(exceto se o oráculo já for conclusivo: passou 100% ou violou `forbiddenPaths`). Um
+processo que **morre** sem erro do provedor continua `error` → `nao`.
+`PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK=bridge` **não** conserta a rota do modelo (ela é
+sempre o proxy) — só dá egress às tools do agente.
 
 ## Modo container — `range of CPUs is from 0.01 to N`
 

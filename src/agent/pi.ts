@@ -21,7 +21,11 @@
 // adaptador DERIVA esses valores dos CÓDIGOS que a interface oferece de fato:
 //
 //   - modelo ............ env `PI_MODEL_ID` (estampado por `prepare()`/runner).
-//   - key OpenRouter ..... env `OPENROUTER_API_KEY` (estampado por `prepare()`).
+//   - inferência ......... `opts.inference` (IMPL-037): base URL do proxy local +
+//                          token FICTÍCIO, gravados no `models.json` do pi. A key
+//                          real NUNCA chega ao agente (nem por env): sem rota, uma
+//                          `OPENROUTER_API_KEY` no env vira um proxy PRÓPRIO da
+//                          execução — a key fica neste processo.
 //   - thinking/tools ..... `opts.config.thinking` / `opts.config.tools`.
 //   - promptMode ......... `opts.config.promptMode` (replace/append/none).
 //   - system prompt ...... env `PI_SYSTEM_PROMPT` OU `<workDir>/system-prompt.txt`.
@@ -48,6 +52,7 @@ import {
   assertDockerRuntime,
   buildDockerArgv,
   buildSandboxRunArgv,
+  CONTAINER_INFERENCE_BASE_URL,
   CONTAINER_NAME_PREFIX,
   CONTAINER_PI_HOME_DIR,
   CONTAINER_SESSION_DIR,
@@ -55,12 +60,15 @@ import {
   dockerCliEnv,
   ensurePiImage,
   hardeningFlags,
+  inferenceRouteHint,
   isDigestRef,
   killContainer,
-  sandboxNetworkHint,
   sandboxProfile,
   writeEnvFile,
 } from './container.js';
+import type { InferenceRoute } from './executor.js';
+import { startInferenceProxy, type InferenceProxy } from './inferenceProxy.js';
+import { getGateway } from '../openrouter.js';
 
 // ----------------------------------------------------------------------------
 // Constantes da receita (SPIKE v0.84.2)
@@ -69,7 +77,7 @@ import {
 const NODE_BIN_DIR = '/home/ondokai/.nvm/versions/node/v24.19.0/bin';
 
 /** PATH da sala limpa — o node do `pi` primeiro, depois os `bin` usuais. */
-const CLEAN_PATH = `${NODE_BIN_DIR}:/usr/bin:/bin:/usr/local/bin`;
+export const CLEAN_PATH = `${NODE_BIN_DIR}:/usr/bin:/bin:/usr/local/bin`;
 
 /** Allowlist DEFAULT de ferramentas (receita do SPIKE). */
 const DEFAULT_TOOLS = ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls'];
@@ -328,6 +336,63 @@ function toContainerSessionPath(value: string, sessionDir: string): string {
 }
 
 // ----------------------------------------------------------------------------
+// Rota de inferência (IMPL-037)
+// ----------------------------------------------------------------------------
+
+/** Token aceito no `models.json`: sem `$` (interpolação) nem `!` (comando) do pi. */
+const ROUTE_TOKEN_RE = /^[A-Za-z0-9_-]{16,}$/;
+
+/**
+ * Aponta o provider do pi para o proxy local: `<agentDir>/models.json` com
+ * `providers.<provider>.baseUrl` = proxy e `apiKey` = token FICTÍCIO LITERAL
+ * ("Overriding Built-in Providers" do pi: os modelos embutidos continuam; só a
+ * base e a credencial mudam). O token vai no arquivo, NÃO no env — `printenv
+ * OPENROUTER_API_KEY` dentro do sandbox fica vazio. 0600: é credencial (fictícia,
+ * revogada ao fim da execução, mas credencial).
+ */
+export function writePiInferenceConfig(agentDir: string, provider: string, baseUrl: string, token: string): string {
+  if (!ROUTE_TOKEN_RE.test(token)) {
+    // `$VAR`/`!cmd` seriam INTERPRETADOS pelo pi (value resolution do models.json).
+    throw new Error('rota de inferência: token fictício com caractere inválido (só [A-Za-z0-9_-]).');
+  }
+  mkdirSync(agentDir, { recursive: true });
+  const file = path.join(agentDir, 'models.json');
+  const body = { providers: { [provider]: { baseUrl, apiKey: token } } };
+  writeFileSync(file, `${JSON.stringify(body, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  return file;
+}
+
+/**
+ * A rota da execução: a do chamador ou, sem ela e com a key no env, um proxy
+ * PRÓPRIO desta execução (upstream = gateway do processo). `close` derruba o
+ * proxy próprio (no-op para a rota do chamador, que tem dono).
+ */
+async function resolveInferenceRoute(
+  opts: AgentRunOpts,
+): Promise<{ route?: InferenceRoute; close: () => Promise<void> }> {
+  if (opts.inference) return { route: opts.inference, close: async () => undefined };
+  const hostKey = opts.env.OPENROUTER_API_KEY;
+  if (!hostKey) return { close: async () => undefined };
+  const gw = getGateway().config;
+  const own: InferenceProxy = await startInferenceProxy({
+    apiKey: hostKey,
+    upstreamBaseUrl: gw.baseUrl,
+    appUrl: gw.appUrl,
+    appTitle: gw.appTitle,
+    listen: opts.config.isolation?.kind === 'container' ? { unix: true } : { tcp: true },
+    logFile: existsSync(opts.workDir) ? path.join(opts.workDir, 'inference-proxy.jsonl') : undefined,
+  });
+  const cred = own.issueCredential({ execId: opts.execId, role: 'agent' });
+  return {
+    route: own.route(cred),
+    close: async () => {
+      cred.revoke();
+      await own.close();
+    },
+  };
+}
+
+// ----------------------------------------------------------------------------
 // Executor
 // ----------------------------------------------------------------------------
 
@@ -505,10 +570,8 @@ export const piExecutor: AgentExecutor = {
     const env = baseExecutorEnv(opts.runDir);
     mkdirSync(piHomeDir(opts.runDir), { recursive: true });
 
-    // A key NUNCA vai para log/arquivo/commit — só para o env (redigida na
-    // escrita na onda do store). Se ausente, seguimos vazia: o run real exige
-    // OPENROUTER_API_KEY, mas o canário/fake (sem custo) não.
-    if (process.env.OPENROUTER_API_KEY) env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+    // A key do OpenRouter NÃO entra no env preparado (IMPL-037): quem a detém é
+    // o proxy de inferência do produto (`runAgentStage` → `opts.inference`).
     // O runner pode fixar o modelo na preparação (via env) — senão o `run`
     // exige `PI_MODEL_ID` (documentado no JSDoc do módulo).
     if (process.env.PI_MODEL_ID) env.PI_MODEL_ID = process.env.PI_MODEL_ID;
@@ -581,15 +644,47 @@ export const piExecutor: AgentExecutor = {
    * mesma onda).
    */
   async run(opts: AgentRunOpts, base?: PiRunOptions): Promise<AgentRunOutcome> {
+    const { route, close } = await resolveInferenceRoute(opts);
+    try {
+      return await runPiExecution(opts, base ?? {}, route);
+    } finally {
+      await close();
+    }
+  },
+
+  /**
+   * v1 — pré-cheque de sala limpa via `pi --version` no binário preparado. O
+   * canário COMPLETO (tokens CANARY-* via execução real barata) vive no
+   * `doctor` (onda 3.3) — este método é o gate barato do pré-voo.
+   *
+   * Em MODO CONTAINER (`bin === 'docker'`), a verificação é a REAL: `pi
+   * --version` num container efêmero com o PERFIL ENDURECIDO e a imagem pelo
+   * DIGEST de `env.PI_CONTAINER_IMAGE` — prova que a imagem existe e que o pi
+   * sobe sem capabilities, com rootfs read-only e sem rede. `flagsUsed` devolve
+   * as flags de endurecimento efetivamente aplicadas.
+   */
+  async selfTest(opts: SelfTestOpts): Promise<CleanRoomReport> {
+    return piSelfTest(opts);
+  },
+};
+
+/**
+ * Executa UMA tarefa no pi com a rota de inferência já resolvida. Spawna via
+ * `spawnAgent` (kill-tree, tetos, shouldStop) com argv/env da receita, alimenta o
+ * parser JSONL a partir do stdout e devolve o `AgentRunOutcome`.
+ */
+async function runPiExecution(opts: AgentRunOpts, baseOpts: PiRunOptions, route: InferenceRoute | undefined): Promise<PiRunOutcome> {
     const startedAt = Date.now();
-    const baseOpts: PiRunOptions = base ?? {};
 
     // --- diretórios por execução -------------------------------------------
     const sessionDir = baseOpts.sessionDir ?? path.join(opts.workDir, 'session');
     mkdirSync(sessionDir, { recursive: true });
 
     // --- env da execução: base preparada + sessão ----------------------------
+    // A key REAL nunca segue para o agente, em modo nenhum (IMPL-037): se veio no
+    // env, `resolveInferenceRoute` já a pôs atrás de um proxy.
     const env: Record<string, string> = { ...opts.env, PI_CODING_AGENT_SESSION_DIR: sessionDir };
+    delete env.OPENROUTER_API_KEY;
 
     // --- modelo: env PI_MODEL_ID (em falta => erro claro de pré-voo) ---------
     const model = env.PI_MODEL_ID;
@@ -650,17 +745,26 @@ export const piExecutor: AgentExecutor = {
     let onKill: ((reason: AgentStopReason) => void) | undefined;
     let containerName: string | undefined;
     let envFile: string | undefined;
-    /** Dica para erro do provedor quando o sandbox está sem rede (container). */
+    /** Dica para erro do provedor: por onde o agente fala com o modelo. */
     let networkHint: string | undefined;
 
+    // A rota de inferência só atende o provedor OpenRouter (é a key que o proxy
+    // detém). Outro provider com a rota apontada para ele seria erro silencioso.
+    if (route && provider !== 'openrouter') {
+      throw new Error(
+        `piExecutor.run: o proxy de inferência só atende o provider "openrouter" (recebido "${provider}").`,
+      );
+    }
+
     if (isContainer) {
-      // A key do OpenRouter NUNCA vai a argv/artefato/volume — entra SÓ pelo
-      // env-file (tmp 0600 do host). Run REAL exige a key: sem ela o container
-      // não tem como cobrar o modelo.
-      if (!env.OPENROUTER_API_KEY) {
+      // A key do OpenRouter NÃO entra no sandbox em hipótese nenhuma (IMPL-037):
+      // nem env-file, nem argv, nem volume. O agente fala com o proxy local do
+      // host pelo socket Unix montado + relay, com um token fictício no
+      // `models.json`. Sem rota (e sem key para subir uma), não há execução.
+      if (!route?.socketDir) {
         throw new Error(
-          `piExecutor.run: modo container exige OPENROUTER_API_KEY no env preparado ` +
-            `(o canário/fake sem custo não roda em container).`,
+          `piExecutor.run: modo container exige a rota de inferência pelo proxy local (socket Unix) — ` +
+            `a key do OpenRouter não entra no sandbox; o runAgentStage a fornece (opts.inference).`,
         );
       }
       // Imagem por DIGEST, nunca por tag (IMPL-036): sem o sha256 do prepare()
@@ -672,7 +776,7 @@ export const piExecutor: AgentExecutor = {
         );
       }
       // Perfil fixo de endurecimento ANTES do env-file: se ele recusar (host
-      // root, válvula de rede inválida), a key nem chega a tocar o disco.
+      // root, válvula de rede inválida), nada toca o disco.
       const profile = await sandboxProfile({ runtime: opts.config.isolation?.runtime });
       if (profile.unsafe.length > 0) {
         // stderr (stdout do CLI é payload). Aviso POR EXECUÇÃO — é para incomodar.
@@ -681,12 +785,14 @@ export const piExecutor: AgentExecutor = {
       // Garante os pontos de mount existirem ANTES do `docker run` (o `--mount`
       // recusa origem ausente; o antigo `-v` a criava como root:root no host).
       // `pi-home`/`session` sob workDir são criados como o usuário do host.
-      mkdirSync(path.join(opts.workDir, 'pi-home'), { recursive: true });
+      const hostPiHome = path.join(opts.workDir, 'pi-home');
+      mkdirSync(hostPiHome, { recursive: true });
       mkdirSync(sessionDir, { recursive: true });
+      // O provider do pi aponta para o relay no loopback do container.
+      writePiInferenceConfig(hostPiHome, provider, CONTAINER_INFERENCE_BASE_URL, route.token);
 
       containerName = `${CONTAINER_NAME_PREFIX}${opts.execId}`;
-      envFile = writeEnvFile({
-        OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
+      const containerEnv: Record<string, string> = {
         PI_MODEL: model,
         PI_PROVIDER: provider,
         PI_CODING_AGENT_DIR: CONTAINER_PI_HOME_DIR,
@@ -702,36 +808,40 @@ export const piExecutor: AgentExecutor = {
         GIT_AUTHOR_EMAIL: 'agent@local',
         GIT_COMMITTER_NAME: 'agent',
         GIT_COMMITTER_EMAIL: 'agent@local',
-      });
-      // Daqui até o spawn, qualquer falha precisa apagar o env-file (ele carrega
-      // a key): o `finally` do spawn ainda não está armado.
+      };
+      envFile = writeEnvFile(containerEnv);
+      // Daqui até o spawn, qualquer falha precisa apagar o env-file: o
+      // `finally` do spawn ainda não está armado.
       try {
         agentArgv = buildDockerArgv({
           image: containerImage,
           containerName,
           envFile,
+          inferenceSocketDir: route.socketDir,
           workspaceDir: opts.workspaceDir,
           workDir: opts.workDir,
           sessionDir,
           profile,
           piArgv,
         });
-        // Env do CLI docker = APENAS o mínimo do host — NUNCA a OPENROUTER_API_KEY
-        // nem as PI_* (o env do agente entra SÓ pelo env-file).
+        // Env do CLI docker = APENAS o mínimo do host — nunca as PI_* (o env do
+        // agente entra SÓ pelo env-file).
         agentEnv = dockerCliEnv();
         agentBin = 'docker';
         agentCwd = opts.workspaceDir;
         // Auditoria crua: o comando EXATO (`docker run ...`) com o env-file
-        // MASCARADO, o digest sha256 que rodou e o perfil endurecido efetivo — é
-        // contra ele que se confere o `docker inspect` da execução.
+        // MASCARADO, o digest sha256 que rodou, o perfil endurecido efetivo e a
+        // rota de inferência (nomes do env-file: a key não está lá) — é contra
+        // ele que se confere o `docker inspect` da execução.
         const audit = containerAuditRecord({
           imageDigest: containerImage,
           imageRef: containerImageRef,
           profile,
           argv: ['docker', ...agentArgv],
           envFile,
+          inferenceEnvKeys: Object.keys(containerEnv),
         });
-        networkHint = sandboxNetworkHint(profile);
+        networkHint = inferenceRouteHint(route.logFile);
         writeFileSync(path.join(opts.workDir, 'argv.json'), JSON.stringify(audit, null, 2), 'utf8');
       } catch (err) {
         rmSync(envFile, { force: true });
@@ -743,6 +853,22 @@ export const piExecutor: AgentExecutor = {
         void killContainer(containerName as string);
       };
     } else {
+      if (route) {
+        // Modo host com rota: o provider do pi aponta para o proxy TCP do
+        // loopback do host. `PI_CODING_AGENT_DIR` passa a ser POR EXECUÇÃO (o
+        // token é por execução; um `models.json` por run seria sobrescrito por
+        // execuções paralelas). HOME segue o da preparação.
+        if (!route.baseUrl) {
+          throw new Error('piExecutor.run: modo host exige a base URL TCP do proxy de inferência (route.baseUrl).');
+        }
+        const agentDir = path.join(opts.workDir, 'pi-home');
+        writePiInferenceConfig(agentDir, provider, route.baseUrl, route.token);
+        env.PI_CODING_AGENT_DIR = agentDir;
+        networkHint =
+          `o agente fala com o provedor pelo proxy de inferência local (${route.baseUrl}) — veja o log redigido do proxy` +
+          (route.logFile ? ` (${route.logFile})` : '') +
+          ': 401/403 = token/rota recusados pelo proxy; 502 = upstream inalcançável.';
+      }
       agentBin = opts.bin;
       agentArgv = piArgv;
       agentEnv = env;
@@ -888,20 +1014,10 @@ export const piExecutor: AgentExecutor = {
     const sessionFile = findSessionFile(sessionDir);
 
     return makeOutcome(opts, parsed, { ...spawnResult, stopReason }, durationMs, stderrTail, sessionFile, infraError);
-  },
+}
 
-  /**
-   * v1 — pré-cheque de sala limpa via `pi --version` no binário preparado. O
-   * canário COMPLETO (tokens CANARY-* via execução real barata) vive no
-   * `doctor` (onda 3.3) — este método é o gate barato do pré-voo.
-   *
-   * Em MODO CONTAINER (`bin === 'docker'`), a verificação é a REAL: `pi
-   * --version` num container efêmero com o PERFIL ENDURECIDO e a imagem pelo
-   * DIGEST de `env.PI_CONTAINER_IMAGE` — prova que a imagem existe e que o pi
-   * sobe sem capabilities, com rootfs read-only e sem rede. `flagsUsed` devolve
-   * as flags de endurecimento efetivamente aplicadas.
-   */
-  async selfTest(opts: SelfTestOpts): Promise<CleanRoomReport> {
+/** Corpo do `piExecutor.selfTest` (ver o JSDoc lá). */
+async function piSelfTest(opts: SelfTestOpts): Promise<CleanRoomReport> {
     try {
       if (opts.bin === 'docker' && opts.env.PI_CONTAINER_IMAGE) {
         const image = opts.env.PI_CONTAINER_IMAGE;
@@ -941,8 +1057,7 @@ export const piExecutor: AgentExecutor = {
     } catch (err) {
       return { ok: false, leaks: [`pi --version no binário preparado falhou: ${(err as Error).message}`], flagsUsed: [] };
     }
-  },
-};
+}
 
 // ----------------------------------------------------------------------------
 // Montagem do outcome
