@@ -832,6 +832,8 @@ export async function readImportFile(
       : undefined;
   if (formato === ARENA_CONFIG_FORMAT) {
     const r = parseArenaConfig(json);
+    // Chave descontinuada (ex.: training.halving, IMPL-012): lida e ignorada.
+    if (r.ok) for (const w of r.warnings ?? []) console.warn(w);
     return r.ok ? { ok: true, data: { kind: 'config', config: r.config } } : r;
   }
   // Aceita tambem o nome legado: pacotes ja exportados pelo usuario nao podem

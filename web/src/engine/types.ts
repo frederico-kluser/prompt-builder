@@ -283,13 +283,9 @@ export interface TrainingConfig extends RunConfigBase, SingleModelFields {
    * 0/ausente = comportamento clássico (1).
    */
   paretoPool?: number;
-  /**
-   * Sequential halving (F4.3, §8.5): com muitas variantes, uma passada de
-   * TRIAGEM num subconjunto de cenários corta as piores antes da rodada
-   * completa (o controle nunca é eliminado). Reduz custo sem afetar o ranking
-   * final. Ausente/false = comportamento atual.
-   */
-  halving?: boolean;
+  // `halving` (F4.3) foi REMOVIDO no IMPL-012 (R-02b:REC-3, H4/H5/H6 — ver o
+  // comentário no laço de `trainer.ts`). Records antigos que ainda o tragam
+  // são lidos normalmente; o campo é ignorado.
 }
 export type RunConfig = CompareConfig | VariationConfig | TrainingConfig;
 

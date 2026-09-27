@@ -132,6 +132,8 @@ async function readConfigFile(file: string): Promise<RunConfig> {
   if (typeof formato === 'string') {
     const parsed = parseArenaConfig(json);
     if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG);
+    // Chave descontinuada (ex.: training.halving, IMPL-012): narração no stderr.
+    for (const w of parsed.warnings ?? []) process.stderr.write(`! ${w}\n`);
     const conv = arenaConfigToRunConfig(parsed.config);
     if (!conv.ok) throw new CliError(conv.error, EXIT.CONFIG);
     // F1/P0.1: `scenarios.from: 'library'` — o config aponta o banco curado

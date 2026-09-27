@@ -3,8 +3,6 @@ import { runToCompletion } from './orchestrator.js';
 import { generateContestants, llmReflectLessons } from './variator.js';
 import { composePrompt } from './engine/promptGroup.js';
 import { addToPool, pickParent, sliceScores, type ParetoEntry } from './engine/pareto.js';
-import { planHalving, survivorsOf } from './engine/halving.js';
-import { seedFromId } from './engine/duelCore.js';
 import { emitSessionEvent } from './events.js';
 import { saveSession } from './storage.js';
 import { computeMedals } from './medals.js';
@@ -460,49 +458,16 @@ async function trainingLoop(
       }
 
       // 2) Roda a iteracao (benchmark pinado a partir da iteracao 1).
-      // F4.3 — SEQUENTIAL HALVING (opt-in `training.halving`): antes da rodada
-      // completa, uma TRIAGEM barata num subconjunto de cenários corta as piores
-      // variantes (o controle nunca cai). O custo da triagem é real e entra no
-      // ledger; o ganho é rodar o benchmark completo só com os sobreviventes.
-      // Com dataset conhecido (customStages/scenarioSeed/pinos) e variantes > 3.
-      const estagiosConhecidos = pinnedStages ?? cfg.customStages ?? cfg.scenarioSeed ?? [];
-      if (cfg.halving && contestants.length > 3 && estagiosConhecidos.length >= 8) {
-        const seed = seedFromId(`halving:${sessionId}:${i}`);
-        const plano = planHalving(
-          contestants.map((c) => c.id),
-          estagiosConhecidos.map((s) => s.question),
-          seed,
-          { protectedIds: ['original', 'carry'] },
-        );
-        const rodada1 = plano.rounds[0];
-        const subset = estagiosConhecidos.filter((s) => rodada1.scenarioIds.includes(s.question));
-        log(sessionId, `halving: triagem de ${contestants.length} variantes em ${subset.length} cenarios`);
-        const rascunho = await runToCompletion(
-          { ...variationConfigFrom(cfg), stages: subset.length, customStages: subset, scenarioSeed: undefined },
-          apiKey,
-          {
-            runId: randomUUID(),
-            contestants,
-            sessionId,
-            iteration: i,
-            parentRunId: prevRun?.id,
-            parentLedger: ledger,
-            signal: opts.signal,
-          },
-        );
-        syncLedger();
-        const { survivors, eliminated } = survivorsOf(
-          rascunho.contestants.map((c) => ({ id: c.id, score: judgeScoreOf(rascunho, c.id) })),
-          rodada1.keepCount,
-          { seed, protectedIds: ['original', 'carry'] },
-        );
-        const antes = contestants.length;
-        contestants = contestants.filter((c) => survivors.includes(c.id));
-        log(
-          sessionId,
-          `halving: ${antes - contestants.length} variante(s) eliminada(s) na triagem (${eliminated.join(', ')})`,
-        );
-      }
+      // IMPL-012 (R-02b:REC-3): o sequential halving (F4.3, `training.halving`)
+      // foi REMOVIDO daqui. A triagem rodava uma run completa (competidores +
+      // juiz + finais), a rodada 1 mantinha keep = V (0 eliminadas sempre) e o
+      // rascunho era descartado: custo puro. As simulacoes da pesquisa vetam
+      // religar como estava: H4 — P(eliminar a verdadeira melhor) 21,7–24,3% com
+      // c <= 3 cenarios por rodada; H5 — nenhuma configuracao economiza >= 20%
+      // com P(melhor sobreviver) >= 0,9; H6 — reusar as avaliacoes da triagem
+      // infla o ganho reportado do vencedor em 4,9–8,7 p.p. So reimplementar do
+      // zero se K >= 8 e n >= 20 virarem rotina: corte real (keepCount < V desde
+      // a rodada 1), re-avaliacao limpa e as simulacoes como teste de regressao.
 
       const runId = randomUUID();
       record.runIds.push(runId);

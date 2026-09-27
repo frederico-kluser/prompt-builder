@@ -175,7 +175,6 @@ export function arenaConfigToRunConfig(
             holdoutRatio: clamp(file.training?.holdoutRatio ?? 0.2, 0, 0.5),
             feedbackDriven: file.training?.feedbackDriven !== false,
             ...(file.training?.reflection ? { reflection: file.training.reflection } : {}),
-            ...(file.training?.halving !== undefined ? { halving: file.training.halving } : {}),
             ...(file.training?.paretoPool !== undefined ? { paretoPool: file.training.paretoPool } : {}),
           }
         : {}),

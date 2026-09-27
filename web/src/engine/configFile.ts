@@ -103,8 +103,8 @@ export interface ArenaConfigFile {
     reflection?: 'off' | 'deterministic' | 'llm';
     /** Pool Pareto (F4.1): >1 = populacao de prompts em vez do campeao único. */
     paretoPool?: number;
-    /** Sequential halving (F4.3): triagem barata corta variantes perdedoras cedo. */
-    halving?: boolean;
+    // `halving` foi descontinuado (IMPL-012): arquivo antigo que o traga ainda
+    // é aceito — o zod descarta a chave e `parseArenaConfig` devolve um aviso.
     /** Aceito aqui por compat; o lugar canônico é a raiz do arquivo. */
     duels?: boolean;
     /** Aceito aqui por compat; o lugar canônico é a raiz do arquivo. */
@@ -305,7 +305,9 @@ const arenaConfigSchema = z
               .enum(['off', 'deterministic', 'llm'], "deve ser 'off', 'deterministic' ou 'llm'")
               .optional(),
             paretoPool: z.number().int().min(0).max(8).optional(),
-            halving: z.boolean('deve ser boolean').optional(),
+            // `halving`: descontinuado (IMPL-012) — fora do schema de propósito; o
+            // zod descarta a chave (qualquer valor) e o aviso sai de
+            // `deprecationWarnings`, então arquivo antigo nunca quebra.
             // Compat: `duels`/`finalists` valem para todos os modos e moram na
             // raiz; aceitos aqui para não invalidar arquivos antigos.
             duels: z.boolean('deve ser boolean').optional(),
@@ -469,7 +471,7 @@ function descreverIssues(error: z.ZodError): string {
  */
 export function parseArenaConfig(
   json: unknown,
-): { ok: true; config: ArenaConfigFile } | { ok: false; error: string } {
+): { ok: true; config: ArenaConfigFile; warnings?: string[] } | { ok: false; error: string } {
   // O discriminador `format` é checado à mão ANTES do zod, para garantir a
   // mensagem exata quando o arquivo não é uma configuração (ou é de outra versão).
   const formato =
@@ -483,7 +485,25 @@ export function parseArenaConfig(
   }
   const result = arenaConfigSchema.safeParse(json);
   if (!result.success) return { ok: false, error: descreverIssues(result.error) };
-  return { ok: true, config: result.data };
+  const warnings = deprecationWarnings(json);
+  return warnings.length ? { ok: true, config: result.data, warnings } : { ok: true, config: result.data };
+}
+
+/** Aviso de `training.halving`, descontinuado no IMPL-012 (lido e ignorado, nunca erro). */
+export const HALVING_DEPRECATED_WARNING =
+  'training.halving foi descontinuado e será ignorado: a triagem cobrava uma run completa, ' +
+  'não eliminava nenhuma variante e descartava as respostas (IMPL-012). Remova a chave do arquivo.';
+
+/**
+ * Chaves descontinuadas presentes no JSON CRU (o zod já as descartou do
+ * `config`). Vazio = nada a avisar; o chamador narra os avisos (stderr no CLI).
+ */
+function deprecationWarnings(json: unknown): string[] {
+  const training = (json as { training?: unknown }).training;
+  if (training && typeof training === 'object' && 'halving' in training) {
+    return [HALVING_DEPRECATED_WARNING];
+  }
+  return [];
 }
 
 /**

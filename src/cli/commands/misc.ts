@@ -102,6 +102,7 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   if (typeof formato === 'string') {
     const p = parseArenaConfig(json);
     if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
+    for (const w of p.warnings ?? []) out.warn(w); // chave descontinuada (IMPL-012)
     const c = arenaConfigToRunConfig(p.config);
     if (!c.ok) throw new CliError(c.error, EXIT.CONFIG);
     config = c.config;
@@ -573,6 +574,7 @@ export async function cmdConfig(argv: string[]): Promise<number> {
   if (typeof formato === 'string') {
     const p = parseArenaConfig(json);
     if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
+    for (const w of p.warnings ?? []) out.warn(w); // chave descontinuada (IMPL-012)
     const c = arenaConfigToRunConfig(p.config);
     if (!c.ok) throw new CliError(c.error, EXIT.CONFIG);
     out.info(`válido — ${arenaConfigSummary(p.config)}`);
