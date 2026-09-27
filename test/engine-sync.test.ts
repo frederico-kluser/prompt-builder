@@ -58,6 +58,8 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   caseInput: 'shim',
   // IMPL-016 (R-07b:REC-1): tetos de max_tokens por papel — o duelo (mirror) lê daqui.
   roleLimits: 'shim',
+  // Onda 2: identidade de conteúdo (contentHash/JCS) — fonte única em src/engine/hash.ts.
+  hash: 'shim',
   // Pares mantidos à mão (seams diferentes). Ao mudar UM lado, mude o outro.
   configFile: 'mirror',
   duels: 'mirror', // a MATEMÁTICA é compartilhada via src/engine/duelCore.ts (src lê dossiê de agente do disco)
@@ -81,6 +83,7 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
  */
 const CANONICO_EM: Record<string, string> = {
   caseInput: 'engine/caseInput',
+  hash: 'engine/hash',
 };
 
 /**
