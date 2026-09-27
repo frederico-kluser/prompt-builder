@@ -233,7 +233,10 @@ const CASOS: Caso[] = [
     code: 'config.unknown_model',
     exit: EXIT.CONFIG,
     mode: 'training',
-    argv: () => [...BASE, ...TECNICAS, '--model', 'ghost/nao-existe', '--iterations', '2', '--budget', '100', '--key', VALID_KEY],
+    // `--reference acme/beta` (IMPL-048: papéis separados, obrigatório em
+    // training/variation) é um modelo CONHECIDO: o alvo da recusa segue sendo
+    // o contestant inexistente.
+    argv: () => [...BASE, ...TECNICAS, '--model', 'ghost/nao-existe', '--reference', 'acme/beta', '--iterations', '2', '--budget', '100', '--key', VALID_KEY],
   },
   {
     nome: 'variante de roteamento (:nitro) sem preço exato, com teto',
@@ -246,7 +249,9 @@ const CASOS: Caso[] = [
     code: 'config.unpriced_models',
     exit: EXIT.CONFIG,
     mode: 'variation',
-    argv: () => [...BASE, ...TECNICAS, '--model', 'openrouter/auto', '--budget', '100', '--key', VALID_KEY],
+    // `--reference acme/beta` (IMPL-048): conhecido e precificado — o alvo da
+    // recusa segue sendo o contestant de preço variável.
+    argv: () => [...BASE, ...TECNICAS, '--model', 'openrouter/auto', '--reference', 'acme/beta', '--budget', '100', '--key', VALID_KEY],
   },
   {
     nome: 'teto por requisição abaixo do preço de um modelo',

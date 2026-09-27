@@ -18,6 +18,7 @@ import { hasGabarito, labelIssue, toStageSpec } from '../../engine/libraryCore.j
 import { formatGateSummary, formatSignificance } from '../../stats.js';
 import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, type Output } from '../output.js';
 import {
+  assertNoUnknownConfigKeys,
   buildContext,
   checkKey,
   isAgentContext,
@@ -257,6 +258,8 @@ export async function readConfigFile(
   if (typeof formato === 'string') {
     const parsed = parseArenaConfig(json, { allowPii: pii.allowPii });
     if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG);
+    // IMPL-093: chave que o parser descartaria em silêncio é ERRO (fail-closed).
+    assertNoUnknownConfigKeys(json, parsed.config);
     // Chave descontinuada (ex.: training.halving, IMPL-012): narração no stderr.
     for (const w of parsed.warnings ?? []) process.stderr.write(`! ${w}\n`);
     const conv = arenaConfigToRunConfig(parsed.config);
@@ -268,6 +271,8 @@ export async function readConfigFile(
   const cru = pii.allowPii && json && typeof json === 'object' ? { ...(json as object), allowPii: true } : json;
   const parsed = parseRunConfig(cru);
   if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG, parsed.details);
+  // IMPL-093: chave que o parser descartaria em silêncio é ERRO (fail-closed).
+  assertNoUnknownConfigKeys(cru, parsed.config);
   return parsed.config;
 }
 

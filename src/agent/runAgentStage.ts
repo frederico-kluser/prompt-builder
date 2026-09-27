@@ -11,10 +11,12 @@
 // ⚠️ ESPELHO CLIENT-SIDE: NÃO existe — o modo agente é impossível na SPA (§7.3).
 //
 // Notas de contrato (casar com os módulos merged, nunca adivinhar):
-// - O executor (`piExecutor.run`) recebe a tarefa pelo env `PI_TASK` OU
-//   `<workDir>/task.txt`; o system prompt pelo env `PI_SYSTEM_PROMPT` OU
-//   `<workDir>/system-prompt.txt`; o modelo pelo env `PI_MODEL_ID`. O 2º
-//   parâmetro (`PiRunOptions`) leva signal + priceTokensIn/Out do catálogo.
+// - O executor (`piExecutor.run`) recebe TUDO pelo `AgentRunOpts` (contrato v2,
+//   IMPL-095): `instruction` (tarefa), `systemPrompt` + `promptMode`, `modelId`,
+//   `thinking`, `contextFiles`, `signal`, `onEvent` (custo real por turno),
+//   preços do catálogo, `inference` (credentialRef/baseUrl), `sandbox` (alça do
+//   sandbox preparado) e `costBrake` (costSink). Sem canal `PI_*` de env e sem
+//   2º parâmetro fora do contrato.
 // - O executor NÃO expõe os events crus do stream `--mode json` (consome-os
 //   internamente) e devolve a `trajectory` já normalizada (`fromPi`) no `outcome`. Por isso
 //   este módulo usa `outcome.trajectory` direto (§10 passo 9). Um gateway
@@ -27,7 +29,7 @@ import { randomUUID } from 'node:crypto';
 import { ensurePrivateSubtree } from '../pathSafety.js';
 import type { AgentRunOpts, PrepareOpts } from './executor.js';
 import { piExecutor } from './pi.js';
-import type { PiRunOptions, PiRunOutcome } from './pi.js';
+import type { PiRunOutcome } from './pi.js';
 import { createWorkspaceManager, type CollectResult } from './workspace.js';
 import { execDir, redactEnv, sha256Of, writeExecution } from './store.js';
 import { buildDossier } from './dossier.js';
@@ -239,16 +241,18 @@ export interface RunAgentStageResult {
 export interface AgentGateway {
   id: string;
   prepare(opts: PrepareOpts): Promise<{ bin: string; env: Record<string, string> }>;
-  run(opts: AgentRunOpts, base?: PiRunOptions): Promise<PiRunOutcome>;
+  /**
+   * UM parâmetro só (IMPL-095): `AgentRunOpts` carrega TODO o contrato
+   * (modelId/instruction/systemPrompt/signal/onEvent/preços/sandbox) — sem canal
+   * `PI_*` de env e sem 2º parâmetro fora do contrato.
+   */
+  run(opts: AgentRunOpts): Promise<PiRunOutcome>;
 }
 
 const DEFAULT_GATEWAY: AgentGateway = {
   id: piExecutor.id,
   prepare: (o) => piExecutor.prepare(o),
-  // O `AgentExecutor.run` da interface declara só 1 parâmetro, mas a
-  // implementação do pi aceita o 2º (`PiRunOptions`). O cast modela o contrato
-  // REAL de `piExecutor.run` (2º param opcional) sem tocar em executor.ts.
-  run: piExecutor.run as (opts: AgentRunOpts, base?: PiRunOptions) => Promise<PiRunOutcome>,
+  run: (o) => piExecutor.run(o),
 };
 
 // ---------------------------------------------------------------------------
@@ -554,15 +558,12 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         const execId = randomUUID();
         emitEvent({ type: 'agent.started', runId, stageIndex, contestantId: contestant.id, execId, repetition: rep });
         // A key NUNCA vai ao env do executor (IMPL-037) — nem se um `prepare`
-        // antigo/injetado a estampar: quem a detém é o proxy da run.
+        // antigo/injetado a estampar: quem a detém é o proxy da run. E nada do
+        // contrato viaja por env (IMPL-095): modelo/tarefa/prompt vão em
+        // `AgentRunOpts`, nunca em `PI_*`.
         const { OPENROUTER_API_KEY: _keyFora, ...preparedEnv } = prepared.env;
         void _keyFora;
-        const env = {
-          ...preparedEnv,
-          PI_MODEL_ID: modelId,
-          PI_TASK: stage.question,
-          PI_SYSTEM_PROMPT: systemPrompt,
-        };
+        const env = preparedEnv;
         // Freio/medidor de custo DESTA execução (IMPL-035), registrado ANTES do
         // token: a 1ª chamada já é medida contra o teto `maxCostUsd`.
         execMeter = meter.openExecution({ execId, modelId, maxCostUsd: limits.maxCostUsd });
@@ -571,29 +572,54 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         credential = proxy.issueCredential({ runId, stageIndex, contestantId: contestant.id, repetition: rep, execId, role: 'agent' });
         const inference = proxy.route(credential);
 
-        const rawOutcome = await gateway.run(
-          { execId, task, config: runConfig, workspaceDir, workDir: repAbs, bin: prepared.bin, env, inference, costBrake: execMeter },
-          {
-            signal: ctx.signal,
-            priceTokensIn: price.priceTokensIn,
-            priceTokensOut: price.priceTokensOut,
-            // onEvent é a ponte p/ emissão mínima de progresso do agente rodando.
-            onEvent: (e) => {
-              if (e.type === 'turn' && execId) {
-                emitEvent({
-                  type: 'agent.turn',
-                  runId,
-                  stageIndex,
-                  contestantId: contestant.id,
-                  execId,
-                  turn: e.index,
-                  // Emissão mínima de progresso; o custo real sai no agent.finished.
-                  costUsd: 0,
-                });
+        // IMPL-095: TODO o contrato viaja em `AgentRunOpts` — UM argumento, sem
+        // canal `PI_*` de env e sem 2º parâmetro fora do contrato.
+        const rawOutcome = await gateway.run({
+          execId,
+          task,
+          config: runConfig,
+          workspaceDir,
+          workDir: repAbs,
+          bin: prepared.bin,
+          env,
+          modelId,
+          instruction: stage.question,
+          systemPrompt,
+          promptMode,
+          thinking: runConfig.thinking,
+          contextFiles: task.contextFiles ?? false,
+          signal: ctx.signal,
+          priceTokensIn: price.priceTokensIn,
+          priceTokensOut: price.priceTokensOut,
+          sessionDir: path.join(repAbs, 'session'),
+          inference,
+          costBrake: execMeter,
+          // Alça do sandbox preparado (IMPL-095): o digest pinado pelo `prepare`
+          // viaja no contrato, não por env.
+          sandbox: prepared.env.PI_CONTAINER_IMAGE
+            ? {
+                kind: 'container',
+                imageDigest: prepared.env.PI_CONTAINER_IMAGE,
+                imageRef: prepared.env.PI_CONTAINER_IMAGE_REF,
+                runtime: agentConfig.isolation?.runtime,
               }
-            },
+            : undefined,
+          // onEvent é a ponte de progresso do agente rodando — o `turn` leva o
+          // custo REAL do turno (medido), nunca o placeholder 0 de antes.
+          onEvent: (e) => {
+            if (e.type === 'turn' && execId) {
+              emitEvent({
+                type: 'agent.turn',
+                runId,
+                stageIndex,
+                contestantId: contestant.id,
+                execId,
+                turn: e.index,
+                costUsd: e.costUsd,
+              });
+            }
           },
-        );
+        });
 
         // As chamadas em voo desta execução terminam de ser anotadas (o agente
         // morto no meio de um stream fecha a troca logo em seguida).

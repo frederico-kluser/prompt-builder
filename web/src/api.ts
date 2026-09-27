@@ -264,14 +264,24 @@ export interface RunConfig {
    * tambem exige p ajustado (max-T sobre as K variantes) <= 0,05.
    */
   minGain?: number;
-  /** training: fracao de cenarios p/ holdout (clamp [0, 0.5]). Default 0.2. */
+  /** training: fracao de cenarios p/ holdout (clamp [0, 0.5]). Default 0.3 (IMPL-050). */
   holdoutRatio?: number;
+  /** training: paciencia do laco (IMPL-051) — iteracoes seguidas sem promocao antes de convergir. Default 2. */
+  patience?: number;
   /** training: variantes recebem licoes das falhas do campeao (GEPA). */
   feedbackDriven?: boolean;
   /** Reflexao GEPA: 'deterministic' (default) | 'llm' (meta-modelo reescreve as licoes) | 'off'. */
   reflection?: 'off' | 'deterministic' | 'llm';
   /** training: pool Pareto (F4.1) — >1 = populacao de prompts em vez do campeao unico. */
   paretoPool?: number;
+  /** IMPL-062: amostragem de pai ∝ cobertura (matriz candidato × cenário). Só com fatias múltiplas e n ≥ 20. */
+  paretoCoverageSampling?: boolean;
+  /** IMPL-060: teto do dossiê de lições (GEPA) em TOKENS (aprox. chars/4). Default 4000. */
+  maxLessonTokens?: number;
+  /** IMPL-060: inclui o gabarito no dossiê de lições. Default OFF (risco de exploração do juiz). */
+  lessonsIncludeReference?: boolean;
+  /** IMPL-065: piso de itens curados (âncora humana) p/ declarar campeão. Default 20. */
+  minCuratedItems?: number;
   // meta:
   datagenModelId: string;
   /** Um ou mais juizes — rodam em paralelo. */
@@ -327,10 +337,38 @@ export interface StageSpec {
   labelSet?: string[];
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
+  /**
+   * Metadados de curriculo (IMPL-064): tier curatorial e dimensoes medidas —
+   * alimentam a selecao Pareto por fatia. Espelho de src/types.ts.
+   */
+  tier?: string;
+  dimensionTags?: string[];
+  /** Idioma do cenario (IMPL-056): default 'pt-BR', variado so via opt-in. */
+  language?: string;
+  /** Quem pergunta (persona do usuario) — realismo/curadoria (IMPL-064). */
+  persona?: string;
+  /** Estimativa de dificuldade (1-5) — sinal de curadoria, NUNCA rotulo. */
+  difficultyEstimate?: number;
+  /** Grupo de invariancia (pares cuja saida esperada nao pode mudar). */
+  invarianceGroup?: string;
+  /**
+   * Metadados adversariais (IMPL-068): categoria, rotulo de turno
+   * ('single-turn' = ASR@1, limite inferior) e hash do prompt-base condicionador.
+   */
+  adversarialCategory?: string;
+  turnLabel?: string;
+  basePromptHash?: string;
 }
 
 /** Veredito ternario: resolve / parcial / nao. */
 export type Verdict = 'resolve' | 'parcial' | 'nao';
+
+/**
+ * Confiança do juiz no próprio veredito (IMPL-047) — campo `confianca` do JSON
+ * do juiz (pointwise e duelo), para triar revisão humana. Espelho de
+ * src/types.ts.
+ */
+export type JudgeConfidence = 'baixa' | 'media' | 'alta';
 
 export interface JudgeVerdict {
   contestantId: string;
@@ -382,6 +420,12 @@ export interface ReferenceJudgeResult {
   verdictByContestant: Record<string, Verdict>;
   /** Explicacao curta (1 frase) por contestant. */
   explanationByContestant: Record<string, string>;
+  /**
+   * Confiança do juiz no veredito (IMPL-047) — triagem de revisão humana.
+   * Com painel, vale o MENOR entre os votos legítimos. Ausente quando o juiz
+   * não devolveu o campo.
+   */
+  confidenceByContestant?: Record<string, JudgeConfidence>;
   /** Origem de cada veredito presente (IMPL-004). */
   verdictSourceByContestant?: Record<string, VerdictSource>;
   /** Motivo de cada veredito AUSENTE (IMPL-004) — sem chave em verdictByContestant. */
@@ -402,8 +446,8 @@ export interface ReferenceJudgeResult {
 export interface DuelOutcome {
   a: string;
   b: string;
-  order1: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string };
-  order2: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string };
+  order1: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence };
+  order2: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence };
   /** Resultado combinado das 2 ordens. */
   outcome: 'a' | 'b' | 'tie';
   /** Quem decidiu (IMPL-004): juiz LLM ou oráculo. */
@@ -598,17 +642,123 @@ export function normalizeContestants(record: RunRecord): Contestant[] {
   return ids.map((id) => ({ id, label: id, modelId: id }));
 }
 
-// -------------- API key (localStorage) --------------
-
+// -------------- API key (memória por default; localStorage só com "lembrar") --------------
+// IMPL-082 (R-10:REC-4): a key era gravada DIRETO no localStorage, sem
+// alternativa — persistência silenciosa por meses, exposta a qualquer XSS do
+// domínio (nenhum código defensivo sobrevive a script malicioso no mesmo
+// origin). O contrato novo é:
+//  • default = SÓ EM MEMÓRIA: sem "lembrar", a key não sobrevive ao reload;
+//  • opt-in explícito "lembrar neste dispositivo" persiste no localStorage — e
+//    quem expõe a UI tem de DECLARAR isso (`keyPersistence()`), porque aí a key
+//    vive no disco do navegador até ser removida;
+//  • cenário "key sumida" (Safari ITP apagando dados após 7 dias, limpeza
+//    manual, modo privado) = RE-PROMPT (`KeyMissingError`), nunca erro de fetch
+//    opaco de 401;
+//  • migração: key gravada por versões antigas (sem flag) é tratada como
+//    "lembrada" — o usuário a salvou explicitamente; apagá-la em silêncio no
+//    upgrade seria perda surpresa. A UI a declara como persistida.
 const KEY_STORAGE = 'openrouter_api_key';
+const KEY_REMEMBER = 'openrouter_api_key:remember';
 
-export function getStoredKey(): string {
-  return localStorage.getItem(KEY_STORAGE) ?? '';
+let memoryKey: string | null = null; // null = ainda não resolvido (reload)
+
+function lsGet(k: string): string | null {
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage.getItem(k);
+  } catch {
+    return null; // storage bloqueado (modo privado/iframe): key só em memória
+  }
 }
 
-export function setStoredKey(key: string): void {
-  if (key) localStorage.setItem(KEY_STORAGE, key);
-  else localStorage.removeItem(KEY_STORAGE);
+function lsSet(k: string, v: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(k, v);
+  } catch {
+    /* sem persistência: segue em memória */
+  }
+}
+
+function lsDel(k: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(k);
+  } catch {
+    /* sem persistência */
+  }
+}
+
+/** Resolve a key persistida quando o usuário optou por "lembrar" (ou migração). */
+function loadRemembered(): string {
+  const persisted = lsGet(KEY_STORAGE);
+  if (!persisted) return '';
+  if (lsGet(KEY_REMEMBER) === null) lsSet(KEY_REMEMBER, '1'); // migração: key antiga era persistida de fato
+  return persisted;
+}
+
+export function getStoredKey(): string {
+  if (memoryKey === null) memoryKey = loadRemembered();
+  return memoryKey;
+}
+
+export interface SetKeyOpts {
+  /** true = "lembrar neste dispositivo" (localStorage). Default: false (só memória). */
+  remember?: boolean;
+}
+
+/**
+ * Guarda a key. SEM `remember` ela vive só em memória e morre no reload; com
+ * `remember` persiste no localStorage (a UI declara via `keyPersistence()`).
+ * `key` vazio REMOVE a key dos dois lugares.
+ */
+export function setStoredKey(key: string, opts: SetKeyOpts = {}): void {
+  const k = key ?? '';
+  memoryKey = k;
+  if (!k) {
+    lsDel(KEY_STORAGE);
+    lsDel(KEY_REMEMBER);
+    return;
+  }
+  if (opts.remember) {
+    lsSet(KEY_STORAGE, k);
+    lsSet(KEY_REMEMBER, '1');
+  } else {
+    lsDel(KEY_STORAGE);
+    lsDel(KEY_REMEMBER);
+  }
+}
+
+export type KeyPersistence = 'memory' | 'remembered';
+
+/**
+ * Como a key está guardada AGORA. `remembered` = localStorage: a UI precisa
+ * dizer isso ao usuário (risco XSS/limpeza do navegador) em vez de fingir que a
+ * chave fica só nesta sessão.
+ */
+export function keyPersistence(): KeyPersistence {
+  return lsGet(KEY_REMEMBER) === '1' && lsGet(KEY_STORAGE) ? 'remembered' : 'memory';
+}
+
+/**
+ * "Key sumida" é re-prompt, não erro de fetch (IMPL-082): quem consome detecta
+ * por `isKeyMissing` (PROPRIEDADE, nunca `instanceof` — instância dupla do
+ * módulo em ESM daria false em silêncio) e mostra a tela de colar a key.
+ */
+export class KeyMissingError extends Error {
+  readonly code = 'key-missing' as const;
+  constructor(message = 'Conecte sua chave da OpenRouter para continuar.') {
+    super(message);
+    this.name = 'KeyMissingError';
+  }
+}
+
+export function isKeyMissing(err: unknown): err is KeyMissingError {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'key-missing';
+}
+
+/** Key para o que GASTA dinheiro; sem key => `KeyMissingError` (re-prompt). */
+export function requireKey(): string {
+  const key = getStoredKey();
+  if (!key) throw new KeyMissingError();
+  return key;
 }
 
 function authHeaders(): Record<string, string> {
@@ -732,10 +882,12 @@ export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Pro
   // da ativação do clique em Iniciar (o Firefox pergunta ao usuário). Memoizado
   // por página; o estado (negado inclusive) aparece na UI via storageHealth.
   void requestPersistentStorage();
+  // IMPL-082: "key sumida" (Safari ITP/limpeza) recusa ANTES de qualquer fetch:
+  // vira re-prompt (`isKeyMissing`), nunca erro de rede opaco.
+  const apiKey = requireKey();
   await assertCostConfirmed(config, launch);
   // Client-side: o run roda na própria aba (engine). Para variação, as variantes
   // são geradas via "optimizer" antes do loop (igual ao prepare do backend).
-  const apiKey = getStoredKey();
   const cfg = config as Record<string, any>;
   const opts: Record<string, unknown> = {};
   if (cfg.mode === 'variation') {
@@ -799,7 +951,8 @@ export async function generateBasePrompt(
     sink.setSensitiveRouting(routing);
     ctx = { sink };
   }
-  return engineGenerateBasePrompt({ apiKey: getStoredKey(), modelId, taskDescription, theme, ctx });
+  const apiKey = requireKey(); // IMPL-082: re-prompt em vez de fetch sem key
+  return engineGenerateBasePrompt({ apiKey, modelId, taskDescription, theme, ctx });
 }
 
 // -------------- Telemetria / subscricao ao vivo (cockpit de treino) --------------
@@ -896,6 +1049,44 @@ export interface SessionRecord {
   pairing?: SessionPairing;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
+  /** Motivo da convergencia (IMPL-051): 'patience' (streak sem promocao) | 'plateau' (IC do ganho abaixo de minGain). */
+  convergenceReason?: 'patience' | 'plateau';
+  /**
+   * IMPL-062 (R-02b:REC-4): diagnóstico Pareto da última iteração (métricas +
+   * alerta de ruído). Com fatia única o treino roda como elitismo explícito.
+   */
+  paretoMetrics?: {
+    mode: 'elitismo' | 'pareto';
+    n: number;
+    frontSize: number;
+    nonDominatedPairFraction: number;
+    noiseAlert?: boolean;
+  };
+  /**
+   * IMPL-065 (R-05:REC-4): declaração de campeão sob âncora HUMANA — abaixo do
+   * piso de itens curados o treino NÃO declara campeão (bootstrap, não evidência).
+   */
+  championDeclaration?: ChampionDeclaration;
+}
+
+/**
+ * IMPL-065 (R-05:REC-4): declaração de campeão sob âncora humana. Espelho de
+ * src/types.ts / web/src/engine/types.ts. Item curado = proveniência humana
+ * (`origin` !== 'ai') E gabarito acompanhando o item.
+ */
+export interface ChampionDeclaration {
+  /** false = recusa declarar campeão (piso de itens curados não atingido). */
+  declared: boolean;
+  /** Itens curados (âncora humana) presentes nos cenários da sessão. */
+  curatedItems: number;
+  /** Piso aplicado (`minCuratedItems`, default 20 — proposta sem fonte, calibrar). */
+  minCuratedItems: number;
+  /** Motivo da recusa, quando houver. */
+  reason?: 'sem-ancora-humana';
+  /** Mensagem em PT-BR citando o piso e o número de itens curados. */
+  message: string;
+  /** IC95 do score do campeão (p.p.) — bootstrap/inversão pareada. */
+  scoreCi95Pp?: [number, number] | null;
 }
 
 /** Prompt versionado da biblioteca local no IndexedDB (nova versao a cada promocao). */
@@ -931,9 +1122,10 @@ export interface ScenarioPack {
 
 export async function createSession(config: RunConfig, launch: LaunchOpts = {}): Promise<string> {
   void requestPersistentStorage(); // IMPL-022: ver createRun
+  const apiKey = requireKey(); // IMPL-082: "key sumida" => re-prompt, não fetch
   await assertCostConfirmed(config, launch);
   // Client-side: a sessão de treino roda na própria aba (engine trainer).
-  const { sessionId, record } = await startTraining(config as never, getStoredKey());
+  const { sessionId, record } = await startTraining(config as never, apiKey);
   cacheSessionRecord(record);
   return sessionId;
 }

@@ -293,7 +293,7 @@ describe('IMPL-042 (2) — importação: aparência de dado real bloqueia nomean
     mode: 'variation',
     theme: 'suporte',
     prompt: { text: 'Você atende a titular Fernanda Costa, celular (11) 97351-2846.' },
-    models: { datagen: 'x/gen', judges: ['x/judge'], contestant: 'x/a' },
+    models: { datagen: 'x/gen', judges: ['x/judge'], contestant: 'x/a', reference: 'x/ref' },
     variation: { optimize: true, techniques: ['persona', 'constraints'] },
     piiMode: 'synthetic',
   };

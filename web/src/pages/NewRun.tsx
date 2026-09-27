@@ -67,13 +67,6 @@ import {
 } from '../lgpd';
 import { defaultMinGain, GATE_ALPHA } from '../engine/rank';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
-import {
-  SmoothTabs,
-  SmoothTabsList,
-  SmoothTabsTab,
-  SmoothTabsPanels,
-  SmoothTabsPanel,
-} from '@/components/motion-ui/smooth-tabs';
 import { MultiStateButton } from '@/components/motion-ui/multi-state-button';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -81,8 +74,12 @@ import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Banner,
+  Chip,
+  Disclosure,
   ImportedLine,
   PageHeader,
+  RovingItem,
+  RovingToolbar,
   Screen,
   SettingGroup,
   SettingRow,

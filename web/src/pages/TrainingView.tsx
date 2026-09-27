@@ -16,8 +16,7 @@ import {
   buildScenarioPack,
   downloadScenarioPack,
 } from '../api';
-import { useTheme } from '../theme';
-import { applyEvent, denseStages, rankColor, ScoreHeatmap, FinalsPanel } from './runShared';
+import { applyEvent, denseStages, EvolutionHeatmap, ScoreHeatmap, FinalsPanel } from './runShared';
 import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
 import { diffLines } from '../diff';
 import { formatIterationGate, formatPValue, reportPValue } from '../engine/stats';
@@ -29,7 +28,6 @@ import {
   SmoothTabsPanel,
 } from '@/components/motion-ui/smooth-tabs';
 import { CopyButton } from '@/components/motion-ui/copy-button';
-import { Sparkline } from '@/components/motion-ui/sparkline';
 import { Skeleton } from '@/components/motion-ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -54,124 +52,6 @@ import { cn } from '@/lib/utils';
 // entre rodadas e a escolha do melhor prompt.
 // ---------------------------------------------------------------------------
 
-/** Heatmap de evolucao: variante x rodada; celula = judge-score arredondado. */
-function EvolutionHeatmap({
-  rounds,
-  dark,
-  holdoutAt,
-}: {
-  rounds: RunRecord[];
-  dark: boolean;
-  holdoutAt?: number;
-}) {
-  const cols = useMemo(
-    () =>
-      rounds.map((r) => {
-        const scores = r.judgeScoreByContestant ?? {};
-        const ordered = Object.entries(scores).sort((a, b) => b[1] - a[1]);
-        return {
-          iteration: r.iteration ?? 0,
-          isHoldout: r.iteration === holdoutAt,
-          scores,
-          total: ordered.length,
-          place: new Map(ordered.map(([id], i) => [id, i + 1])),
-        };
-      }),
-    [rounds, holdoutAt],
-  );
-  // Ordem estavel: primeira aparicao da variante ao longo das rodadas.
-  const vars = useMemo(() => {
-    const seen = new Set<string>();
-    const out: { id: string; label: string; isOriginal?: boolean }[] = [];
-    for (const r of rounds) {
-      for (const c of r.contestants ?? []) {
-        if (seen.has(c.id)) continue;
-        seen.add(c.id);
-        out.push({ id: c.id, label: c.label, isOriginal: c.isOriginal });
-      }
-    }
-    return out;
-  }, [rounds]);
-
-  if (!cols.length || !vars.length) return null;
-
-  const gridStyle = {
-    gridTemplateColumns: `minmax(8rem, 1fr) repeat(${cols.length}, 3rem) 5rem`,
-  };
-
-  return (
-    <div className="rounded-xl bg-card ring-1 ring-foreground/10">
-      <div className="scroll-slim overflow-x-auto p-3">
-        <div className="min-w-fit">
-          <div className="grid items-center gap-1 pb-1.5" style={gridStyle}>
-            <div />
-            {cols.map((col) => (
-              <div
-                key={col.iteration}
-                className="grid h-6 place-items-center text-[11px] text-muted-foreground tabular"
-              >
-                {col.isHoldout ? 'H' : `R${col.iteration + 1}`}
-              </div>
-            ))}
-            <div className="pr-1 text-right text-[11px] text-muted-foreground">curva</div>
-          </div>
-
-          {vars.map((v) => {
-            // A trilha da variante ao longo das rodadas alimenta a sparkline.
-            const history = cols.map((c) => c.scores[v.id]).filter((s): s is number => s !== undefined);
-            return (
-              <div key={v.id} className="grid items-center gap-1 py-0.5" style={gridStyle}>
-                <div className="flex min-w-0 items-center gap-1.5 pr-3">
-                  <span className="truncate text-[13px]">{v.label}</span>
-                  {v.isOriginal && <Tag>base</Tag>}
-                </div>
-                {cols.map((col) => {
-                  const rodada = col.isHoldout ? 'Holdout' : `Rodada ${col.iteration + 1}`;
-                  const score = col.scores[v.id];
-                  if (score === undefined) {
-                    return (
-                      <div
-                        key={col.iteration}
-                        className="grid h-7 place-items-center rounded-[5px] bg-muted/50 text-[13px] text-muted-foreground"
-                        title={`${rodada}: não participou`}
-                      >
-                        ·
-                      </div>
-                    );
-                  }
-                  const rc = rankColor(col.place.get(v.id) ?? 1, col.total, dark);
-                  return (
-                    <div
-                      key={col.iteration}
-                      className="grid h-7 place-items-center rounded-[5px] text-[13px] font-medium tabular"
-                      style={{ background: rc.soft, color: rc.text }}
-                      title={`${rodada}: judge-score ${score.toFixed(1)}`}
-                    >
-                      {Math.round(score)}
-                    </div>
-                  );
-                })}
-                <div className="flex justify-end pr-1">
-                  {history.length > 1 ? (
-                    <Sparkline
-                      history={history}
-                      width={64}
-                      height={22}
-                      tone="primary"
-                      label={`Evolução de ${v.label}`}
-                    />
-                  ) : (
-                    <span className="text-[12px] text-muted-foreground">—</span>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /** Estudio final: escolher qualquer variante de qualquer rodada, ver o diff vs.
  *  o prompt original, copiar e salvar na biblioteca local. */
@@ -418,8 +298,6 @@ function BestPromptStudio({
 export function TrainingView() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
-  const { resolved } = useTheme();
-  const dark = resolved === 'dark';
   const [session, setSession] = useState<SessionRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [liveRun, setLiveRun] = useState<RunRecord | null>(null);
@@ -814,7 +692,7 @@ export function TrainingView() {
       {rounds.length > 1 && (
         <>
           <SectionHead>Evolução</SectionHead>
-          <EvolutionHeatmap rounds={rounds} dark={dark} holdoutAt={holdoutAt} />
+          <EvolutionHeatmap rounds={rounds} holdoutAt={holdoutAt} />
         </>
       )}
 

@@ -14,11 +14,13 @@ import {
   newJudgeGuard,
   parseStrictJudgeJson,
   strictObjectSchema,
+  styleRuleFor,
   type JudgeGuard,
 } from './engine/judgeGuard.js';
 import type {
   CompetitorResponse,
   Contestant,
+  JudgeConfidence,
   ReasoningLevel,
   ReferenceJudgeResult,
   StageSpec,
@@ -46,7 +48,15 @@ import type {
 // + aviso dos blocos marcados e o campo `canario`; o schema exato da saida vai
 // no bloco INSTRUCOES de cada chamada (e em `response_format`, quando o
 // catalogo permite).
-const SYSTEM_PROMPT = `Você é um juiz técnico estrito. Um modelo mais forte já produziu a RESPOSTA DE REFERÊNCIA (correta). Compare o CANDIDATO com ela. Ignore redação/estilo — julgue se o candidato alcança o MESMO resultado e intenção. ${DATA_BLOCKS_NOTICE} Responda APENAS com um objeto JSON {"canario": "<o CANÁRIO das INSTRUÇÕES>", "explanation": "<uma frase curta em pt-BR>", "verdict": "resolve"|"parcial"|"nao"} onde resolve = corresponde plenamente à referência, parcial = parcialmente/impreciso/faltando parte, nao = errado ou fez outra coisa.`;
+//
+// IMPL-047 (R-03a:REC-7) — prompt HONESTO: a referência é CANDIDATA (pode estar
+// errada — nem toda referência está correta), a RUBRICA tem prioridade (se a
+// referência contrariar a rubrica, siga a rubrica) e o JSON traz `confianca`
+// para triar revisão humana. "Ignore redação/estilo" deixou de ser
+// incondicional: a instrução vive no bloco INSTRUÇÕES e só aparece quando a
+// rubrica NÃO tem critério de forma (`styleRuleFor`). ⚠️ Mudança de CONTRATO —
+// o hash do juiz muda (IMPL-049); executar ANTES de qualquer calibração.
+const SYSTEM_PROMPT = `Você é um juiz técnico estrito. A RESPOSTA DE REFERÊNCIA é CANDIDATA: foi gerada por outro modelo e PODE ESTAR ERRADA — use-a como apoio, nunca como gabarito inquestionável. A RUBRICA (critério de corretude) da etapa tem prioridade sobre a referência: se a referência contrariar a rubrica, SIGA A RUBRICA. Julgue se o CANDIDATO alcança o resultado e a intenção exigidos. ${DATA_BLOCKS_NOTICE} Responda APENAS com um objeto JSON {"canario": "<o CANÁRIO das INSTRUÇÕES>", "explanation": "<uma frase curta em pt-BR>", "verdict": "resolve"|"parcial"|"nao", "confianca": "baixa"|"media"|"alta"} onde resolve = corresponde plenamente ao exigido, parcial = parcialmente/impreciso/faltando parte, nao = errado ou fez outra coisa; "confianca" diz quão seguro está o veredito ("baixa" = merece revisão humana).`;
 
 /**
  * O CONTRATO do juiz pointwise (F4.2): o texto fixo que define a escala de
@@ -66,14 +76,22 @@ export const REFERENCE_JUDGE_SCHEMA: Record<string, unknown> = strictObjectSchem
   canario: { type: 'string' },
   explanation: { type: 'string' },
   verdict: { type: 'string', enum: ['resolve', 'parcial', 'nao'] },
+  confianca: { type: 'string', enum: ['baixa', 'media', 'alta'] },
 });
 
-/** O mesmo contrato em zod ESTRITO (campo a mais, valor fora do enum => invalido). */
+/**
+ * O mesmo contrato em zod ESTRITO (campo a mais, valor fora do enum => invalido).
+ * `confianca` entra OBRIGATÓRIO no contrato pedido (JSON Schema acima) mas
+ * ACEITO SEM PRESENÇA no parse (IMPL-047): um veredito válido não é rejeitado
+ * inteiro só porque o juiz omitiu o campo de auto-confiança — quem tria revisão
+ * humana usa o campo quando presente. Valor fora do enum continua invalidando.
+ */
 const referenceReplySchema = z
   .object({
     canario: z.string(),
     explanation: z.string(),
     verdict: z.enum(['resolve', 'parcial', 'nao']),
+    confianca: z.enum(['baixa', 'media', 'alta']).optional(),
   })
   .strict();
 
@@ -84,17 +102,19 @@ const referenceReplySchema = z
  * persistindo, registra o veredito como AUSENTE (`invalid_output`). Sem
  * recorte de `{...}` no meio do texto nem normalizacao ('Resolve', 'não'):
  * o recorte deixava um JSON forjado pelo candidato virar veredito.
+ * `confianca` (IMPL-047) volta junto quando o juiz a devolve.
  */
 export function parseJudgeReply(
   text: string,
   canary: string,
-): { verdict: Verdict; explanation: string; canary: string } | null {
+): { verdict: Verdict; explanation: string; canary: string; confianca?: JudgeConfidence } | null {
   const p = parseStrictJudgeJson(text, referenceReplySchema, canary);
   if (!p) return null;
   return {
     verdict: p.verdict,
     explanation: p.explanation.trim() || '(veredito do juiz de referência)',
     canary: p.canario,
+    ...(p.confianca ? { confianca: p.confianca } : {}),
   };
 }
 
@@ -120,7 +140,7 @@ export function buildReferenceJudgePrompt(
   const rubric = stage.rubric?.trim();
   const guard = newJudgeGuard([reference, stage.question, rubric ?? '', candidateText]);
   const partes = [
-    'REFERÊNCIA (resposta correta):',
+    'REFERÊNCIA (resposta CANDIDATA de outro modelo — pode estar errada):',
     markedBlock('REFERÊNCIA', guard.nonce, reference),
     'PERGUNTA:',
     markedBlock('PERGUNTA', guard.nonce, stage.question),
@@ -135,8 +155,11 @@ export function buildReferenceJudgePrompt(
       guard,
       candidateLabels: ['CANDIDATO'],
       rules: [
-        'Compare o CANDIDATO com a REFERÊNCIA; quando houver CRITÉRIO DE CORRETUDE, ele tem prioridade sobre a referência.',
-        '"verdict": resolve = corresponde plenamente; parcial = parcialmente/impreciso/faltando parte; nao = errado ou fez outra coisa. Escreva "explanation" (uma frase curta em pt-BR) ANTES de decidir o veredito.',
+        // IMPL-047: a referência é APOIO, não gabarito; a rubrica manda.
+        'A REFERÊNCIA é candidata e pode estar errada; quando houver CRITÉRIO DE CORRETUDE, ele tem prioridade — se a referência contrariar a rubrica, siga a rubrica.',
+        '"verdict": resolve = corresponde plenamente ao exigido; parcial = parcialmente/impreciso/faltando parte; nao = errado ou fez outra coisa. Escreva "explanation" (uma frase curta em pt-BR) ANTES de decidir o veredito, e devolva "confianca" ("baixa"|"media"|"alta") no mesmo JSON — "baixa" sinaliza que o veredito merece revisão humana.',
+        // IMPL-047: "ignore estilo" condicionado à rubrica (critério de forma conta quando existe).
+        styleRuleFor(rubric),
       ],
       outputSchema: REFERENCE_JUDGE_SCHEMA,
     }),
@@ -165,8 +188,23 @@ export interface JudgeStageReferenceParams {
 }
 
 type SingleVerdict =
-  | { ok: true; judgeModelId: string; contestantId: string; verdict: Verdict; explanation: string; canary: string }
+  | {
+      ok: true;
+      judgeModelId: string;
+      contestantId: string;
+      verdict: Verdict;
+      explanation: string;
+      canary: string;
+      confianca?: JudgeConfidence;
+    }
   | { ok: false; judgeModelId: string; contestantId: string; error: VerdictError };
+
+/** Ordem crescente de confiança — o MENOR valor entre votos manda na triagem (IMPL-047). */
+const CONFIDENCE_RANK: Record<JudgeConfidence, number> = { baixa: 0, media: 1, alta: 2 };
+
+function minConfidence(values: JudgeConfidence[]): JudgeConfidence {
+  return values.reduce((a, b) => (CONFIDENCE_RANK[b] < CONFIDENCE_RANK[a] ? b : a));
+}
 
 /**
  * UM juiz avaliando UMA resposta contra a referencia, com a re-tentativa
@@ -248,6 +286,8 @@ export async function judgeStageReference(
   const verdictTieByContestant: Record<string, Verdict[]> = {};
   // IMPL-006: o canario de CADA voto legitimo (1 por juiz), registrado.
   const canaryByContestant: Record<string, string[]> = {};
+  // IMPL-047: confianca do veredito agregado (menor entre os votos — triagem).
+  const confidenceByContestant: Record<string, JudgeConfidence> = {};
   const result = (inconclusive?: boolean): ReferenceJudgeResult => ({
     verdictByContestant,
     explanationByContestant,
@@ -255,6 +295,7 @@ export async function judgeStageReference(
     verdictErrorByContestant,
     ...(Object.keys(verdictTieByContestant).length > 0 ? { verdictTieByContestant } : {}),
     ...(Object.keys(canaryByContestant).length > 0 ? { canaryByContestant } : {}),
+    ...(Object.keys(confidenceByContestant).length > 0 ? { confidenceByContestant } : {}),
     judgeModelId,
     ...(inconclusive ? { inconclusive: true } : {}),
   });
@@ -363,6 +404,10 @@ export async function judgeStageReference(
       : autor.explanation;
     if (agg.tie) verdictTieByContestant[r.contestantId] = agg.votes;
     canaryByContestant[r.contestantId] = oks.map((v) => v.canary);
+    // IMPL-047: `confianca` persistida por veredito — o MENOR entre os votos
+    // legítimos (painel inseguro tria revisão humana; nunca o mais confiante).
+    const confs = oks.map((v) => v.confianca).filter((c): c is JudgeConfidence => c !== undefined);
+    if (confs.length > 0) confidenceByContestant[r.contestantId] = minConfidence(confs);
     // Painel reduzido: o veredito existe, mas vale menos — conta na regra de
     // run inconclusiva como 'degradado' (R-03b:REC-4).
     verdictSourceByContestant[r.contestantId] = oks.length < vs.length ? 'degraded' : 'judge';

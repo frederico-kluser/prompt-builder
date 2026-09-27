@@ -220,7 +220,15 @@ const baseFields = {
       datagen: reasoningLevelSchema.optional(),
     })
     .optional(),
-  // Modelo que gera os gabaritos (respostas de referencia). Default = 1o juiz.
+  // Modelo que gera os gabaritos (respostas de referencia).
+  // IMPL-048 (R-03a:REC-2) — papéis separados: OBRIGATÓRIO em training/
+  // variation (o gabarito não pode sair do 1º juiz: o mesmo modelo escrever a
+  // régua e julgar contra ela produz erros correlacionados que não se cancelam).
+  // Nos demais modos (compare) o default é explícito e documentado: o
+  // orquestrador resolve `referenceModelId ?? judgeModelIds[0]` — o risco de
+  // auto-preferência desse default aparece em `fairnessWarnings`, não escondido.
+  // Erro de config quando a referência é igual a um juiz ou a um competidor
+  // (superRefine abaixo); mesmo vendor/família é AVISO (não-bloqueante).
   referenceModelId: z.string().min(1).optional(),
   // Julgamento por referencia (pointwise vs gabarito + duelos).
   referenceJudging: z.boolean().optional(),
@@ -320,6 +328,9 @@ const trainingObj = z.object({
   minGain: z.number().min(0).max(100).optional(),
   // Fracao de cenarios reservada p/ holdout (re-score campeao vs controle).
   holdoutRatio: z.number().min(0).max(0.5).optional(),
+  // Paciencia do laco (IMPL-051): iteracoes seguidas sem promocao antes de
+  // convergir. Default 2 (trainingPolicy) — 1 com veredito ruidoso e anti-patrao.
+  patience: z.number().int().min(1).max(5).optional(),
   // Reflection estilo GEPA: variantes recebem licoes das falhas do campeao.
   feedbackDriven: z.boolean().optional(),
   // Reflexao GEPA por LLM (opt-in, §7.5): default deterministico (zero custo).
@@ -428,6 +439,53 @@ export const runConfigSchema = z
       // (maxOutputTokens/#maxTokens NAO se aplicam ao agente — ele controla os
       // proprios tokens — entao nao os exigimos aqui; §29.11 mantem o campo para
       // o caso de a etapa rodar em modo chat tambem.)
+    }
+
+    // ------------------------------------------- papéis separados (IMPL-048, R-03a:REC-2)
+    // A REFERÊNCIA (quem escreve o gabarito) não pode ser juiz nem competidor:
+    // o mesmo modelo escrever a régua e julgar contra ela produz erros
+    // CORRELACIONADOS que não se cancelam (DEC-2). Modelo igual => ERRO de
+    // config; mesmo vendor/família => AVISO em `fairnessWarnings` (a validação
+    // não bloqueia famílias — o mercado muda de vendor mais rápido que o schema).
+    if (cfg.referenceModelId) {
+      const ref = cfg.referenceModelId;
+      const juiz = cfg.judgeModelIds.find((id) => id === ref);
+      if (juiz) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['referenceModelId'],
+          message:
+            `A referência "${ref}" não pode ser também juiz: o mesmo modelo escreveria o gabarito e emitiria o veredito sobre ele (viés de auto-preferência). Escolha modelos distintos.`,
+        });
+      }
+      const competidores =
+        cfg.mode === 'compare'
+          ? [
+              ...(cfg.competitorModelIds ?? []),
+              ...(cfg.competitorConfigs ?? []).map((c) => c.modelId),
+            ]
+          : [cfg.contestantModelId];
+      const concorrente = competidores.find((id) => id === ref);
+      if (concorrente) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['referenceModelId'],
+          message:
+            `A referência "${ref}" não pode ser também competidor: quem escreve o gabarito não compete contra ele (viés de auto-preferência). Escolha modelos distintos.`,
+        });
+      }
+    }
+    // IMPL-048: `referenceModelId` é OBRIGATÓRIO em training/variation. Em
+    // compare o default (1º juiz) continua existindo, explícito e documentado
+    // no campo acima + `fairnessWarnings` — mas train/vary sem referência
+    // própria reprova AQUI: a régua do treino inteiro não sai do painel.
+    if (cfg.mode !== 'compare' && !cfg.referenceModelId?.trim()) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['referenceModelId'],
+        message:
+          'referenceModelId é obrigatório em training/variation: o gabarito não pode sair do 1º juiz (o mesmo modelo escreveria a régua e julgaria contra ela).',
+      });
     }
 
     // Gerador e juiz PODEM repetir o mesmo modelo (repeticao permitida).

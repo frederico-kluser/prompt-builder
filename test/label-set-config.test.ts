@@ -42,6 +42,8 @@ const variationBase = {
   stages: 1,
   datagenModelId: 'gerador/x',
   judgeModelIds: ['juiz/x'],
+  // IMPL-048: obrigatório em variation/training (papéis separados).
+  referenceModelId: 'referencia/x',
   contestantModelId: 'modelo/x',
   basePrompt: 'Classifique o sentimento do ticket.',
   techniqueIds: ['persona', 'constraints'],
@@ -59,7 +61,7 @@ const arenaBase = {
   mode: 'variation',
   theme: 'Classificação de sentimento de tickets',
   prompt: { text: 'Classifique o sentimento do ticket.' },
-  models: { datagen: 'gerador/x', judges: ['juiz/x'], contestant: 'modelo/x' },
+  models: { datagen: 'gerador/x', judges: ['juiz/x'], contestant: 'modelo/x', reference: 'referencia/x' },
   variation: { techniques: ['persona', 'constraints'] },
 };
 

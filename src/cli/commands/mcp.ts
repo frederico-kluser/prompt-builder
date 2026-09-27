@@ -26,11 +26,28 @@
 // longas de antes esperam até isso e devolvem o jobId); 1 run pesada por
 // processo, com fila; e `CreateTaskResult` (extensão io.modelcontextprotocol/
 // tasks) SÓ para o cliente que declarou a extensão — sem ela, -32021.
+//
+// Negociação dual-era (IMPL-084, R-13:REC-2): o mesmo processo atende as duas
+// revisões implementadas (2026-07-28 + 2025-11-25) e ACEITA as antigas
+// (2025-06-18/2025-03-26) pela regra legacy. `server/discover` responde sempre
+// (antes/depois de initialize) listando as suportadas; a versão pedida NUNCA é
+// ecoada sem checar — desconhecida numa requisição moderna vira -32022
+// (UnsupportedProtocolVersion) com data.supported/data.requested, e numa
+// requisição legacy vira a mais recente implementada + lista de suportadas
+// (regra antiga: "responder com uma versão suportada").
+//
+// Saídas (IMPL-086, R-13:REC-5): todo sucesso traz `structuredContent` + o
+// MESMO JSON espelhado em content de texto COMPACTO (0 espaços após ':' e ','
+// — indentação infla o contexto do agente sem dar nada). Teto de ~5 mil tokens
+// por resposta (get_result resume por padrão e pagina por cursor), dura 25 mil
+// no pico. Anotações (IMPL-085, R-13:REC-6) são honestas: um `readOnlyHint`
+// NUNCA autoriza nada sozinho do lado do cliente.
 
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { z } from 'zod';
 import { RunCancelled, isControlSignal } from '../../budget.js';
 import {
   BLOCKING_TOOL_LIMIT_MS,
@@ -47,7 +64,7 @@ import { JobManager, defaultJobManager, type JobView, type RunJobInput } from '.
 import { PKG_DOCS_DIR, PKG_ROOT, pkgVersion } from '../../paths.js';
 import { assertValidRecordId, isValidRecordId, publicErrorMessage } from '../../pathSafety.js';
 import { readDocTopic } from './knowledge.js';
-import { setDataDir, getDataDir, loadRun, loadSession } from '../../storage.js';
+import { setDataDir, getDataDir, loadRun, loadSession, runSummary, sessionSummary } from '../../storage.js';
 import { ensureCatalog } from '../../modelsCache.js';
 import { toExportRow } from '../../modelCaps.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
@@ -56,10 +73,60 @@ import { ARENA_AGENT_CONFIG_FORMAT, parseArenaConfig, parseArenaAgentConfig } fr
 import { arenaConfigToRunConfig, arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { readArtifact } from '../../agent/store.js';
 import { resolveHome, resolveKey, parse } from '../context.js';
+import { ensureExecConfigApproved } from './agents.js';
 import { EXIT } from '../output.js';
-import type { RunConfig } from '../../types.js';
+import type { RunConfig, RunRecord, SessionRecord, StageRecord } from '../../types.js';
 
-const PROTOCOL_VERSION = '2025-06-18';
+// ---------------------------------------------------------------------------
+// Negociação de versão do protocolo (IMPL-084, R-13:REC-2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Revisões IMPLEMENTADAS (dual-era no mesmo processo). O `server/discover`
+ * lista exatamente estas duas e o cliente escolhe; é o que entra em
+ * `data.supported` do -32022.
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS = ['2026-07-28', '2025-11-25'] as const;
+
+/**
+ * Revisões antigas ACEITAS pela regra legacy: a sessão funciona (dialecto de
+ * tools é compatível) e a resposta ecoa a pedida — isto NÃO é "eco cego":
+ * são versões reconhecidas, o eco proibido é o de versão desconhecida.
+ */
+export const LEGACY_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26'] as const;
+
+/** A mais recente implementada — resposta à versão desconhecida (regra legacy). */
+export const LATEST_PROTOCOL_VERSION: string = SUPPORTED_PROTOCOL_VERSIONS[0];
+
+/** UnsupportedProtocolVersion (renumerado de -32004 na spec 2026-07-28). */
+export const UNSUPPORTED_PROTOCOL_VERSION = -32022;
+
+const VERSOES_ACEITAS = new Set<string>([
+  ...SUPPORTED_PROTOCOL_VERSIONS,
+  ...LEGACY_PROTOCOL_VERSIONS,
+]);
+
+/** Versão declarada POR REQUISIÇÃO na era moderna (stateless): `_meta[...]`. */
+const MODERN_VERSION_META = 'io.modelcontextprotocol/protocolVersion';
+
+/** Requisição da era moderna? (`_meta` com chaves `io.modelcontextprotocol/*`). */
+function requestDeclaresModernEra(params: unknown): boolean {
+  const meta = (params as { _meta?: unknown } | null | undefined)?._meta;
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
+  return Object.keys(meta as Record<string, unknown>).some((k) => k.startsWith('io.modelcontextprotocol/'));
+}
+
+/** Versão pedida: `params.protocolVersion` (legacy) ou `_meta` (moderna). */
+function requestedVersion(params: Record<string, unknown>): string | undefined {
+  const direto = str(params.protocolVersion);
+  if (direto !== undefined) return direto;
+  const meta = params._meta;
+  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    return str((meta as Record<string, unknown>)[MODERN_VERSION_META]);
+  }
+  return undefined;
+}
+
 const SERVER_INFO = { name: 'prompt-builder', version: pkgVersion() };
 
 interface JsonRpcRequest {
@@ -92,10 +159,38 @@ export interface ToolCtx {
   blockingWaitMs: number;
 }
 
+/**
+ * Anotações de ferramenta (spec MCP). São DADO para o cliente decidir permissão
+ * — mas `readOnlyHint` NUNCA autoriza nada sozinho: quem implementa cliente não
+ * deve auto-aprovar por ele (a spec trata a anotação como dica, não mandato).
+ */
+export interface ToolAnnotations {
+  /** Nome legível para humano (spec: `annotations.title`). */
+  title: string;
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+}
+
 export interface McpTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /**
+   * Anotações honestas (IMPL-085). Ausente = tool de teste/plugin sem declaração
+   * (o cliente cai nos defaults conservadores da spec). As tools daqui declaram
+   * todas as 4 dicas + title.
+   */
+  annotations?: ToolAnnotations;
+  /**
+   * Schema Zod ESTRITO dos argumentos (IMPL-085): campo desconhecido é
+   * rejeitado com sugestão do mais parecido. `inputSchema` exposto é a
+   * conversão deste schema para JSON Schema.
+   */
+  argsSchema?: z.ZodType;
+  /** Shape da saída: sucesso devolve `structuredContent` + espelho compacto (IMPL-086). */
+  outputSchema?: Record<string, unknown>;
   /** Não precisa de key (lê disco/docs embarcadas): funciona sem OPENROUTER_API_KEY. */
   noKey?: boolean;
   /** Saída em JSON compacto (tools de poll: cada chamada custa tokens). */
@@ -181,7 +276,8 @@ export function taskGetResult(job: JobView): Record<string, unknown> {
     base.result =
       job.status === 'failed'
         ? { content: [{ type: 'text', text: job.error ?? 'o job falhou' }], isError: true }
-        : { content: [{ type: 'text', text: JSON.stringify(job.result ?? {}, null, 2) }], isError: false };
+        : // IMPL-086: espelho em JSON COMPACTO (o formato antigo indentava).
+          { content: [{ type: 'text', text: JSON.stringify(job.result ?? {}) }], isError: false };
   } else if (status === 'failed') {
     base.error = { code: -32603, message: job.error ?? 'o job falhou' };
   }
@@ -329,9 +425,189 @@ async function jobInputFromStartArgs(args: Record<string, unknown>): Promise<Run
   return { kind: cfg.mode === 'training' ? 'training' : 'benchmark', config: { ...cfg, budgetUsd }, budgetUsd };
 }
 
+// ---------------------------------------------------------------------------
+// Resumo de record (IMPL-086, R-13:REC-5)
+// ---------------------------------------------------------------------------
+
+/** Heurística do teste de contrato: ~3,5 caracteres por token. */
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 3.5);
+}
+
+/** Teto padrão de uma resposta — 1/5 do default de 25 mil tokens do Claude Code. */
+export const SOFT_RESULT_TOKENS = 5000;
+
+/** Teto duro: acima disto a resposta estouraria qualquer cliente conhecido. */
+export const HARD_RESULT_TOKENS = 25000;
+
+/** Etapa em uma linha: nada de texto de resposta nem de julgamento inteiro. */
+function etapaResumo(s: StageRecord): Record<string, unknown> {
+  return {
+    index: s.index,
+    question: (s.spec?.question ?? '').slice(0, 160),
+    done: Boolean(s.finishedAt),
+    incomplete: s.incomplete === true,
+    ...(s.incompleteReason ? { incompleteReason: s.incompleteReason } : {}),
+    ...(s.error ? { error: umaLinha(s.error, 160) } : {}),
+    judged: Boolean(s.judge ?? s.referenceJudge),
+  };
+}
+
+/**
+ * Referência ao record em disco (relativa ao data dir + `file://` para o
+ * cliente que entende resource link). O resumo NUNCA embute o record inteiro:
+ * quem quer tudo lê o arquivo ou pagina.
+ */
+function recordRef(kind: 'run' | 'session', id: string): Record<string, unknown> {
+  const rel = kind === 'run' ? `runs/${id}.json` : `sessions/${id}.json`;
+  return {
+    file: rel,
+    uri: `file://${path.join(getDataDir(), rel)}`,
+    note: 'record completo em disco; peça fatias com cursor/limit ou detail:"full"',
+  };
+}
+
+/**
+ * Resumo por padrão (≤ 5 mil tokens): campos do `runSummary`/`sessionSummary`
+ * (o MESMO cálculo do CLI) + uma fatia paginada de etapas por cursor.
+ */
+export function summarizeRecord(
+  kind: 'run' | 'session',
+  rec: RunRecord | SessionRecord,
+  opts: { cursor?: string; limit?: number },
+): Record<string, unknown> {
+  const base =
+    kind === 'run' ? runSummary(rec as RunRecord) : sessionSummary(rec as SessionRecord);
+  const saida: Record<string, unknown> = {
+    kind,
+    detail: 'summary',
+    ...base,
+    ref: recordRef(kind, rec.id),
+  };
+  if (kind === 'run') {
+    const run = rec as RunRecord;
+    const etapas = run.stages ?? [];
+    const limite = Math.min(Math.max(Math.trunc(opts.limit ?? 5), 1), 50);
+    const inicio = opts.cursor === undefined ? 0 : Number.parseInt(opts.cursor, 10);
+    if (!Number.isInteger(inicio) || inicio < 0) {
+      throw new Error('cursor inválido: use o nextCursor devolvido pela resposta anterior.');
+    }
+    const fatia = etapas.slice(inicio, inicio + limite);
+    const proximo = inicio + fatia.length;
+    saida.stages = fatia.map(etapaResumo);
+    saida.stageCount = etapas.length;
+    saida.cursor = String(inicio);
+    saida.nextCursor = proximo < etapas.length ? String(proximo) : null;
+    saida.hasMore = proximo < etapas.length;
+  }
+  return saida;
+}
+
+/** Serializa um record completo OU o resumo + referência quando ele estoura o teto. */
+function recordOuResumo(
+  kind: 'run' | 'session',
+  rec: RunRecord | SessionRecord,
+  opts: { cursor?: string; limit?: number },
+): Record<string, unknown> {
+  const texto = JSON.stringify(rec);
+  if (estimateTokens(texto) <= HARD_RESULT_TOKENS) return { kind, detail: 'full', ...rec };
+  return {
+    ...summarizeRecord(kind, rec, opts),
+    truncated: true,
+    note: `record com ~${estimateTokens(texto)} tokens — acima do teto de ${HARD_RESULT_TOKENS}; resumo + referência`,
+  };
+}
+
 // Schemas curtos de propósito: tools/list entra no contexto do agente a cada
-// turno. `ttlSeconds` só aparece no start_run (as tools longas o aceitam igual).
-const IDEMPOTENCY_KEY_SCHEMA = { type: 'string', description: 'retry com a mesma chave = mesmo job' };
+// turno. `ttlSeconds` está declarado em toda tool que o aceita (antes só o
+// start_run o expunha, mas as longas aceitavam igual — campo aceito sem estar
+// no schema é o mesmo que schema frouxo).
+
+// --- argumentos por tool (fonte: Zod; o inputSchema é a conversão) -----------
+
+/** `config` de run: objeto (arena-config@1/RunConfig) OU string JSON (robustez). */
+const zRunConfig = z.union([z.record(z.string(), z.unknown()), z.string()]);
+/** União de tipos no JSON Schema quebra clientes OpenAPI-subconjunto (Gemini). */
+const CONFIG_OBJECT_SCHEMA = {
+  type: 'object',
+  description: 'a configuração da run (aceita também string JSON)',
+};
+const CONFIG_STRING_SCHEMA = {
+  type: 'string',
+  description: 'JSON string de arena-agent-config@1 (aceita também objeto)',
+};
+
+const LIST_MODELS_ARGS = z.strictObject({
+  search: z.string().describe('filtra por parte do id ou do nome').optional(),
+  limit: z.number().describe('máximo de resultados (padrão 20)').optional(),
+});
+const ESTIMATE_COST_ARGS = z.strictObject({
+  config: zRunConfig.describe('a configuração da run'),
+});
+const START_RUN_ARGS = z.strictObject({
+  config: zRunConfig.describe('arena-config@1, RunConfig ou arena-agent-config@1'),
+  budgetUsd: z.number('budgetUsd é obrigatório e deve ser maior que zero.').describe('teto de gasto em USD'),
+  idempotencyKey: z
+    .string('idempotencyKey é obrigatória (texto de 1 a 256 caracteres): gere uma (ex.: UUID) e REUSE-a nos retries deste mesmo pedido.')
+    .describe('retry com a mesma chave = mesmo job'),
+  ttlSeconds: z.number().describe('prazo máximo; passado, cancela (padrão 7200)').optional(),
+  allowExecConfig: z
+    .boolean()
+    .describe('aceite do config EXECUTÁVEL de agente (grava o pin SHA-256; IMPL-099)')
+    .optional(),
+});
+const RUN_STATUS_ARGS = z.strictObject({
+  jobId: z.string('jobId obrigatório').describe('id devolvido por start_run'),
+  waitSeconds: z.number().describe('espera até 25 s pelo fim').optional(),
+});
+const CANCEL_RUN_ARGS = z.strictObject({
+  jobId: z.string('jobId obrigatório').describe('id devolvido por start_run'),
+  waitSeconds: z.number().describe('espera o parcial ser gravado (padrão 10 s)').optional(),
+});
+const RUN_BENCHMARK_ARGS = z.strictObject({
+  config: zRunConfig.describe('arena-config@1 ou RunConfig'),
+  budgetUsd: z.number('budgetUsd é obrigatório e deve ser maior que zero.').describe('teto de gasto em USD'),
+  idempotencyKey: z.string().describe('retry com a mesma chave = mesmo job').optional(),
+  ttlSeconds: z.number().describe('prazo máximo; passado, cancela (padrão 7200)').optional(),
+});
+const TRAIN_PROMPT_ARGS = z.strictObject({
+  config: zRunConfig.describe('configuração com mode "training"'),
+  budgetUsd: z.number('budgetUsd é obrigatório e deve ser maior que zero.').describe('teto de gasto em USD'),
+  idempotencyKey: z.string().describe('retry com a mesma chave = mesmo job').optional(),
+  ttlSeconds: z.number().describe('prazo máximo; passado, cancela (padrão 7200)').optional(),
+});
+const GET_RESULT_ARGS = z.strictObject({
+  id: z.string('id obrigatório').describe('id da run ou sessão'),
+  kind: z.enum(['run', 'session']).describe('"run" ou "session"').optional(),
+  detail: z.enum(['summary', 'full']).describe('padrão summary (≤ 5 mil tokens)').optional(),
+  cursor: z.string().describe('cursor da página de etapas').optional(),
+  limit: z.number().describe('etapas por página (padrão 5)').optional(),
+});
+const RUN_AGENT_ARGS = z.strictObject({
+  config: zRunConfig.describe('JSON string de arena-agent-config@1'),
+  budgetUsd: z.number('budgetUsd é obrigatório e deve ser maior que zero.').describe('teto de gasto em USD'),
+  idempotencyKey: z.string().describe('retry com a mesma chave = mesmo job').optional(),
+  allowExecConfig: z
+    .boolean()
+    .describe('aceite do config EXECUTÁVEL (grava o pin SHA-256; IMPL-099)')
+    .optional(),
+  ttlSeconds: z.number().describe('prazo máximo; passado, cancela (padrão 7200)').optional(),
+});
+const GET_DOSSIER_ARGS = z.strictObject({
+  runId: z.string('runId obrigatório').describe('id da run'),
+  stageIndex: z.number('stageIndex obrigatório').describe('índice da etapa'),
+  contestantId: z.string('contestantId obrigatório').describe('id do contestant'),
+  repetition: z.number().describe('0-based; default 0').optional(),
+});
+const READ_DOCS_ARGS = z.strictObject({
+  topic: z.string().describe('tópico da allowlist; vazio lista os tópicos').optional(),
+});
+
+const MODELOS_OUTPUT = {
+  type: 'object',
+  properties: { count: { type: 'number' }, models: { type: 'array' } },
+  additionalProperties: true,
+} as const;
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
 const numOf = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined);
@@ -367,19 +643,160 @@ function parseAgentConfigRaw(config: unknown): RunConfig {
   return c.config;
 }
 
+/** O `config` da tool como OBJETO (string JSON parseada); `null` se não der. */
+function rawConfigObject(config: unknown): Record<string, unknown> | null {
+  let raw: unknown = config;
+  if (typeof config === 'string') {
+    try {
+      raw = JSON.parse(config);
+    } catch {
+      return null;
+    }
+  }
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+}
+
+/**
+ * Portão de config EXECUTÁVEL das tools (IMPL-099, R-15:REC-6): as tools que
+ * rodam `arena-agent-config` (setup[]/verify[] na máquina de quem chama) passam
+ * pelo MESMO portão do `agents run` — aceite explícito (`allowExecConfig:
+ * true`) + pin SHA-256 do conteúdo, aprovação ÚNICA por conteúdo (mudou ⇒ a
+ * revisão revive). Devolve a recusa estruturada ou `null` quando aprovado.
+ */
+async function execConfigGateForTool(
+  toolName: string,
+  rawConfig: Record<string, unknown>,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown> | null> {
+  try {
+    await ensureExecConfigApproved({
+      dataDir: getDataDir(),
+      content: JSON.stringify(rawConfig),
+      identity: `mcp:${toolName}`,
+      label: `config de ${toolName}`,
+      command: `${toolName}({…, allowExecConfig: true})`,
+      allowExecConfig: args.allowExecConfig === true,
+    });
+    return null;
+  } catch (err) {
+    if (isControlSignal(err)) throw err;
+    const e = err as { message?: unknown; errorCode?: unknown; hint?: unknown };
+    return {
+      ok: false,
+      code: typeof e.errorCode === 'string' ? e.errorCode : 'config.exec_not_approved',
+      error: typeof e.message === 'string' ? e.message : String(err),
+      hint: typeof e.hint === 'string' ? e.hint : null,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Schemas de argumentos (IMPL-085): Zod ESTRITO → JSON Schema
+// ---------------------------------------------------------------------------
+
+/**
+ * Converte o schema Zod em JSON Schema enxuto para o `tools/list` (que entra no
+ * contexto do agente a cada turno). `overrides` corrige o que a conversão não
+ * pode expressar sem quebrar clientes com subconjunto de OpenAPI (Gemini):
+ * união de tipos vira o tipo único declarado (o runtime continua aceitando os
+ * dois — ex.: `config` como objeto OU string JSON).
+ */
+function inputSchemaFrom(
+  schema: z.ZodType,
+  overrides: Record<string, Record<string, unknown>> = {},
+): Record<string, unknown> {
+  const js = z.toJSONSchema(schema, { io: 'input', unrepresentable: 'any' }) as Record<string, unknown>;
+  delete js.$schema;
+  const props = js.properties as Record<string, unknown> | undefined;
+  if (props) for (const [k, v] of Object.entries(overrides)) props[k] = v;
+  return js;
+}
+
+/** Distância de edição simples (sugestão de campo parecido). */
+function editDistance(a: string, b: string): number {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+/** Campo aceito mais parecido com o digitado (para a sugestão do erro). */
+function sugestaoDeCampo(desconhecido: string, aceitos: string[]): string | undefined {
+  let melhor: string | undefined;
+  let melhorDist = Math.max(2, Math.floor(desconhecido.length / 3));
+  for (const aceito of aceitos) {
+    const d = editDistance(desconhecido.toLowerCase(), aceito.toLowerCase());
+    if (d < melhorDist || (melhor === undefined && aceito.toLowerCase().startsWith(desconhecido.toLowerCase()))) {
+      melhor = aceito;
+      melhorDist = d;
+    }
+  }
+  return melhor;
+}
+
+/**
+ * Valida os argumentos contra o schema ESTRITO: campo desconhecido é rejeitado
+ * com sugestão do mais parecido; os demais problemas saem em PT-BR citando o
+ * campo (sem caminho absoluto, sem eco de valor). Devolve os dados validados.
+ */
+function validateToolArgs(schema: z.ZodType, args: Record<string, unknown>): Record<string, unknown> {
+  const parsed = schema.safeParse(args);
+  if (parsed.success) return parsed.data as Record<string, unknown>;
+  const aceitos = Object.keys((schema as unknown as { def?: { shape?: Record<string, unknown> } }).def?.shape ?? {});
+  const partes: string[] = [];
+  for (const issue of parsed.error.issues.slice(0, 3)) {
+    const caminho = issue.path.map(String).join('.') || '(raiz)';
+    if (issue.code === 'unrecognized_keys') {
+      for (const k of (issue as unknown as { keys: string[] }).keys) {
+        const sugestao = sugestaoDeCampo(k, aceitos);
+        partes.push(
+          `campo desconhecido "${k}"` + (sugestao ? ` — quis dizer "${sugestao}"?` : '') +
+            (aceitos.length ? `. Campos aceitos: ${aceitos.join(', ')}.` : ''),
+        );
+      }
+      continue;
+    }
+    if (issue.code === 'invalid_type') {
+      partes.push(`campo "${caminho}" com tipo errado (esperado ${(issue as { expected?: string }).expected ?? 'outro'})`);
+      continue;
+    }
+    if (issue.code === 'invalid_union') {
+      partes.push(`campo "${caminho}" não é um valor aceito (veja o inputSchema da tool)`);
+      continue;
+    }
+    if (issue.code === 'invalid_value') {
+      partes.push(`campo "${caminho}" fora do conjunto aceito (veja o inputSchema da tool)`);
+      continue;
+    }
+    partes.push(`${caminho}: ${issue.message}`);
+  }
+  throw new Error(partes.join('; ') || 'Argumentos inválidos.');
+}
+
 const TOOLS: McpTool[] = [
   {
     name: 'list_models',
+    annotations: {
+      title: 'Listar modelos',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       'Lista modelos do OpenRouter com preço e, principalmente, quais níveis de raciocínio ' +
       '(think levels) cada um aceita. Use ANTES de escolher um modelo ou um nível de esforço.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        search: { type: 'string', description: 'filtra por parte do id ou do nome' },
-        limit: { type: 'number', description: 'máximo de resultados (padrão 20)' },
-      },
-    },
+    argsSchema: LIST_MODELS_ARGS,
+    inputSchema: inputSchemaFrom(LIST_MODELS_ARGS),
+    outputSchema: MODELOS_OUTPUT,
     run: async (args, apiKey) => {
       const cat = await ensureCatalog(apiKey);
       const busca = str(args.search)?.toLowerCase();
@@ -389,22 +806,30 @@ const TOOLS: McpTool[] = [
           (m) => m.id.toLowerCase().includes(busca) || m.name.toLowerCase().includes(busca),
         );
       }
+      // Teto do catálogo fatiado: sem ele, `limit: 100000` estouraria o teto de
+      // tokens da resposta de qualquer cliente.
+      const limite = Math.min(Math.max(Math.trunc(numOf(args.limit) ?? 20), 1), 200);
       return {
         count: rows.length,
-        models: rows.slice(0, numOf(args.limit) ?? 20).map(toExportRow),
+        models: rows.slice(0, limite).map(toExportRow),
       };
     },
   },
   {
     name: 'estimate_cost',
+    annotations: {
+      title: 'Estimar custo',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       'Estima quanto uma configuração vai custar, SEM chamar nenhum modelo. ' +
       'Aceita arena-config@1 ou RunConfig. Rode isto antes de qualquer run cara.',
-    inputSchema: {
-      type: 'object',
-      properties: { config: { type: 'object', description: 'a configuração da run' } },
-      required: ['config'],
-    },
+    argsSchema: ESTIMATE_COST_ARGS,
+    inputSchema: inputSchemaFrom(ESTIMATE_COST_ARGS, { config: CONFIG_OBJECT_SCHEMA }),
+    outputSchema: { type: 'object', additionalProperties: true },
     run: async (args, apiKey) => {
       const cfg = await toRunConfig(args.config);
       const cat = await ensureCatalog(apiKey);
@@ -413,22 +838,21 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'start_run',
+    annotations: {
+      title: 'Iniciar run',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description:
       'Inicia uma run (compare/vary/training/agentes) em segundo plano e devolve o jobId na hora. ' +
       'Depois: run_status (poll ≥ 5 s) e cancel_run. idempotencyKey obrigatória: reuse-a nos retries ' +
-      '(mesma chave = mesmo job, nunca uma 2ª run paga).',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        // `type` único de propósito: clientes com schema subconjunto de
-        // OpenAPI (Gemini) recusam união de tipos. String JSON é aceita também.
-        config: { type: 'object', description: 'arena-config@1, RunConfig ou arena-agent-config@1' },
-        budgetUsd: { type: 'number', description: 'teto de gasto em USD' },
-        idempotencyKey: IDEMPOTENCY_KEY_SCHEMA,
-        ttlSeconds: { type: 'number', description: 'prazo máximo; passado, cancela (padrão 7200)' },
-      },
-      required: ['config', 'budgetUsd', 'idempotencyKey'],
-    },
+      '(mesma chave = mesmo job, nunca uma 2ª run paga). arena-agent-config é EXECUTÁVEL e exige ' +
+      'allowExecConfig: true no primeiro aceite (pin SHA-256; ver run_agent_benchmark).',
+    argsSchema: START_RUN_ARGS,
+    inputSchema: inputSchemaFrom(START_RUN_ARGS, { config: CONFIG_OBJECT_SCHEMA }),
+    outputSchema: { type: 'object', additionalProperties: true },
     compact: true,
     run: async (args, apiKey, { jobs }) => {
       if (!isValidIdempotencyKey(args.idempotencyKey)) {
@@ -436,6 +860,12 @@ const TOOLS: McpTool[] = [
           'idempotencyKey é obrigatória (texto de 1 a 256 caracteres): gere uma (ex.: UUID) e REUSE-a ' +
             'nos retries deste mesmo pedido.',
         );
+      }
+      // IMPL-099: config de agente é EXECUTÁVEL — MESMO portão do `agents run`.
+      const cru = rawConfigObject(args.config);
+      if (cru && cru.format === ARENA_AGENT_CONFIG_FORMAT) {
+        const recusa = await execConfigGateForTool('start_run', cru, args);
+        if (recusa) return recusa;
       }
       const input = await jobInputFromStartArgs(args);
       // Só valida e grava: o catálogo e a run rodam no job (fora do caminho da
@@ -451,12 +881,17 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'run_status',
-    description: 'Estado de um job (fila, progresso, gasto) e, no fim, o resumo. waitSeconds ≤ 25 espera o fim.',
-    inputSchema: {
-      type: 'object',
-      properties: { jobId: { type: 'string' }, waitSeconds: { type: 'number' } },
-      required: ['jobId'],
+    annotations: {
+      title: 'Estado do job',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
     },
+    description: 'Estado de um job (fila, progresso, gasto) e, no fim, o resumo. waitSeconds ≤ 25 espera o fim.',
+    argsSchema: RUN_STATUS_ARGS,
+    inputSchema: inputSchemaFrom(RUN_STATUS_ARGS),
+    outputSchema: { type: 'object', additionalProperties: true },
     noKey: true,
     compact: true,
     run: async (args, _key, { jobs, signal }) => {
@@ -468,12 +903,19 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'cancel_run',
-    description: 'Cancela um job: nenhuma chamada paga nova; o parcial fica gravado (get_result).',
-    inputSchema: {
-      type: 'object',
-      properties: { jobId: { type: 'string' }, waitSeconds: { type: 'number' } },
-      required: ['jobId'],
+    annotations: {
+      title: 'Cancelar run',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
     },
+    description:
+      'Cancela um job: nenhuma chamada paga nova; o parcial fica gravado (get_result). ' +
+      'Destrutiva de propósito: interrompe o trabalho em voo (o parcial é preservado).',
+    argsSchema: CANCEL_RUN_ARGS,
+    inputSchema: inputSchemaFrom(CANCEL_RUN_ARGS),
+    outputSchema: { type: 'object', additionalProperties: true },
     noKey: true,
     compact: true,
     run: async (args, _key, { jobs, signal }) => {
@@ -486,18 +928,19 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'run_benchmark',
+    annotations: {
+      title: 'Rodar benchmark',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     description:
       'Benchmark (compare ou vary): espera até 25 s e devolve o resultado ou o jobId (siga com ' +
       'run_status). Prefira start_run. budgetUsd é OBRIGATÓRIO.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        config: { type: 'object' },
-        budgetUsd: { type: 'number', description: 'teto de gasto em USD' },
-        idempotencyKey: IDEMPOTENCY_KEY_SCHEMA,
-      },
-      required: ['config', 'budgetUsd'],
-    },
+    argsSchema: RUN_BENCHMARK_ARGS,
+    inputSchema: inputSchemaFrom(RUN_BENCHMARK_ARGS, { config: CONFIG_OBJECT_SCHEMA }),
+    outputSchema: { type: 'object', additionalProperties: true },
     run: async (args, apiKey, ctx) => {
       const base = await toRunConfig(args.config);
       const budgetUsd = budgetOf(args.budgetUsd);
@@ -510,18 +953,19 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'train_prompt',
+    annotations: {
+      title: 'Treinar prompt',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     description:
       'Treina um system prompt (campeão, holdout, significância): espera até 25 s e devolve o ' +
       'resultado ou o jobId. Prefira start_run. budgetUsd é OBRIGATÓRIO.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        config: { type: 'object', description: 'configuração com mode "training"' },
-        budgetUsd: { type: 'number' },
-        idempotencyKey: IDEMPOTENCY_KEY_SCHEMA,
-      },
-      required: ['config', 'budgetUsd'],
-    },
+    argsSchema: TRAIN_PROMPT_ARGS,
+    inputSchema: inputSchemaFrom(TRAIN_PROMPT_ARGS, { config: CONFIG_OBJECT_SCHEMA }),
+    outputSchema: { type: 'object', additionalProperties: true },
     run: async (args, apiKey, ctx) => {
       const base = await toRunConfig(args.config);
       const budgetUsd = budgetOf(args.budgetUsd);
@@ -532,14 +976,28 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'get_result',
-    description: 'Lê o resultado completo de uma run ou sessão já executada, pelo id.',
-    inputSchema: {
+    annotations: {
+      title: 'Resultado de run',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    description:
+      'Lê o resultado de uma run ou sessão pelo id. POR PADRÃO devolve um RESUMO (≤ 5 mil tokens) ' +
+      'com paginação de etapas (cursor/limit); detail:"full" devolve o record inteiro (máx. 25 mil ' +
+      'tokens — acima disso, resumo + referência ao arquivo em disco).',
+    argsSchema: GET_RESULT_ARGS,
+    inputSchema: inputSchemaFrom(GET_RESULT_ARGS),
+    outputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string' },
         kind: { type: 'string', enum: ['run', 'session'] },
+        detail: { type: 'string', enum: ['summary', 'full'] },
+        id: { type: 'string' },
+        status: { type: 'string' },
       },
-      required: ['id'],
+      additionalProperties: true,
     },
     noKey: true,
     run: async (args) => {
@@ -551,24 +1009,44 @@ const TOOLS: McpTool[] = [
       if (kind !== undefined && kind !== 'run' && kind !== 'session') {
         throw new Error('kind deve ser "run" ou "session".');
       }
-      if (kind === 'session') return (await loadSession(id)) ?? { error: 'sessão não encontrada' };
-      return (await loadRun(id)) ?? (await loadSession(id)) ?? { error: 'não encontrado' };
+      const paginacao = { cursor: str(args.cursor), limit: numOf(args.limit) };
+      let rec: RunRecord | SessionRecord | null;
+      let tipo: 'run' | 'session';
+      if (kind === 'session') {
+        rec = await loadSession(id);
+        tipo = 'session';
+        if (!rec) return { error: 'sessão não encontrada' };
+      } else {
+        const run = await loadRun(id);
+        if (run) {
+          rec = run;
+          tipo = 'run';
+        } else {
+          rec = await loadSession(id);
+          tipo = 'session';
+          if (!rec) return { error: 'não encontrado' };
+        }
+      }
+      if (args.detail === 'full') return recordOuResumo(tipo, rec, paginacao);
+      return summarizeRecord(tipo, rec, paginacao);
     },
   },
   {
     name: 'run_agent_benchmark',
+    annotations: {
+      title: 'Benchmark de agentes',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     description:
       'Benchmark de AGENTES (arena-agent-config@1): espera até 25 s e devolve o resumo ou o jobId. ' +
-      'Prefira start_run. config é um JSON string; budgetUsd é OBRIGATÓRIO.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        config: { type: 'string', description: 'JSON string de arena-agent-config@1' },
-        budgetUsd: { type: 'number', description: 'teto de gasto em USD' },
-        idempotencyKey: IDEMPOTENCY_KEY_SCHEMA,
-      },
-      required: ['config', 'budgetUsd'],
-    },
+      'Prefira start_run. config é um JSON string; budgetUsd é OBRIGATÓRIO. ⚠️ O config é EXECUTÁVEL ' +
+      '(setup[]/verify[] rodam comandos): sem allowExecConfig: true + pin SHA-256 aprovado, NÃO executa.',
+    argsSchema: RUN_AGENT_ARGS,
+    inputSchema: inputSchemaFrom(RUN_AGENT_ARGS, { config: CONFIG_STRING_SCHEMA }),
+    outputSchema: { type: 'object', additionalProperties: true },
     run: async (args, apiKey, ctx) => {
       // Validacao nunca derruba o servidor: erros viram {ok:false, error}.
       let cfg: RunConfig;
@@ -576,6 +1054,12 @@ const TOOLS: McpTool[] = [
         cfg = parseAgentConfigRaw(args.config);
       } catch (err) {
         return { ok: false, error: publicErrorMessage(err) };
+      }
+      // IMPL-099: portão de config executável — MESMO portão do `agents run`.
+      const cru = rawConfigObject(args.config);
+      if (cru) {
+        const recusa = await execConfigGateForTool('run_agent_benchmark', cru, args);
+        if (recusa) return recusa;
       }
       const budgetUsd = numOf(args.budgetUsd);
       if (budgetUsd === undefined || budgetUsd <= 0) {
@@ -593,19 +1077,19 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'get_agent_dossier',
+    annotations: {
+      title: 'Ler dossiê do agente',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description:
       'Lê o dossiê (dossier.md) de uma execução de agente — o MESMO texto que o juiz viu. ' +
       'Diagnóstico: para entender por que um contestant perdeu uma etapa.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        runId: { type: 'string' },
-        stageIndex: { type: 'number' },
-        contestantId: { type: 'string' },
-        repetition: { type: 'number', description: '0-based; default 0' },
-      },
-      required: ['runId', 'stageIndex', 'contestantId'],
-    },
+    argsSchema: GET_DOSSIER_ARGS,
+    inputSchema: inputSchemaFrom(GET_DOSSIER_ARGS),
+    outputSchema: { type: 'object', additionalProperties: true },
     noKey: true,
     run: async (args) => {
       assertValidRecordId(args.runId, 'runId');
@@ -623,13 +1107,20 @@ const TOOLS: McpTool[] = [
   },
   {
     name: 'read_docs',
+    annotations: {
+      title: 'Ler documentação',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     description:
       'Lê a documentação embarcada nesta versão do prompt-builder. ' +
       'Sem "topic", devolve a lista de tópicos. Comece por "quickstart".',
-    inputSchema: {
-      type: 'object',
-      properties: { topic: { type: 'string' } },
-    },
+    argsSchema: READ_DOCS_ARGS,
+    inputSchema: inputSchemaFrom(READ_DOCS_ARGS),
+    // Sem outputSchema de propósito: a saída é índice (array) OU tópico (objeto)
+    // — e o contrato do índice é ARRAY puro (security-baseline.test.ts).
     noKey: true,
     run: async (args) => {
       if (args.topic === undefined || args.topic === '') {
@@ -648,6 +1139,8 @@ const TOOLS: McpTool[] = [
 /** Resultado de `tools/call` (o `result` do JSON-RPC). */
 export interface ToolCallResult {
   content: { type: 'text'; text: string }[];
+  /** Espelho estruturado do JSON de texto (IMPL-086) — presente em tool com outputSchema. */
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }
 
@@ -708,10 +1201,41 @@ export async function callTool(
   };
   try {
     const key = tool.noKey ? '' : await getKey();
-    const out = await tool.run(args, key, ctx);
+    // IMPL-085: argumentos contra o schema ESTRITO — campo desconhecido é
+    // rejeitado (com sugestão) em vez de engolido sem erro.
+    const dados = tool.argsSchema ? validateToolArgs(tool.argsSchema, args) : args;
+    const out = await tool.run(dados, key, ctx);
     if (isRawResult(out)) return out[RAW_RESULT] as unknown as CreateTaskResult;
-    const text = tool.compact ? JSON.stringify(out) : JSON.stringify(out, null, 2);
-    return { content: [{ type: 'text', text }] };
+    // IMPL-086: JSON COMPACTO (0 espaços após ':' e ',') em toda saída — a
+    // indentação infla o contexto do agente sem dar nada (o texto é o que os
+    // clientes injetam de forma confiável).
+    const text = JSON.stringify(out);
+    if (estimateTokens(text) > HARD_RESULT_TOKENS) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              ok: false,
+              error:
+                `resposta grande demais (~${estimateTokens(text)} tokens; teto ${HARD_RESULT_TOKENS}). ` +
+                'Use paginação/verbosidade (ex.: get_result com cursor/limit) ou um filtro mais estreito.',
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+    // IMPL-086: structuredContent + o MESMO JSON espelhado em texto. O espelho
+    // é obrigatório: é ele que os clientes sem structuredContent injetam.
+    const estruturado =
+      tool.outputSchema && out !== null && typeof out === 'object' && !Array.isArray(out)
+        ? (out as Record<string, unknown>)
+        : undefined;
+    return {
+      content: [{ type: 'text', text }],
+      ...(estruturado ? { structuredContent: estruturado } : {}),
+    };
   } catch (err) {
     return { content: [{ type: 'text', text: publicErrorMessage(err) }], isError: true };
   }
@@ -860,18 +1384,59 @@ export class McpSession {
       switch (req.method) {
         case 'initialize': {
           const params = (req.params ?? {}) as Record<string, unknown>;
-          const pedido = str(params.protocolVersion);
-          this.tasksNaSessao = declaresTasks(params.capabilities);
+          const pedido = requestedVersion(params);
+          this.tasksNaSessao = declaresTasks(params.capabilities) || requestDeclaresTasks(params);
+          const capabilities = this.tasksNaSessao
+            ? { tools: {}, extensions: { [TASKS_EXTENSION]: {} } }
+            : { tools: {} };
+          if (pedido === undefined || VERSOES_ACEITAS.has(pedido)) {
+            // Suportada (ou aceita pela regra legacy): ecoar é o correto nas duas eras.
+            this.reply(req.id, {
+              protocolVersion: pedido ?? LATEST_PROTOCOL_VERSION,
+              // A extensão só é anunciada a quem a declarou: cliente legacy sem
+              // ela não vê campo desconhecido em `capabilities`.
+              capabilities,
+              serverInfo: SERVER_INFO,
+            });
+            return;
+          }
+          // Versão NUNCA é ecoada sem checar (IMPL-084). Era moderna → -32022
+          // (MUST da spec 2026-07-28) com os dois campos de data; era legacy →
+          // regra antiga: responder com uma versão suportada (a mais recente
+          // implementada) e NOMEAR as suportadas no diagnóstico.
+          if (requestDeclaresModernEra(params)) {
+            this.replyError(req.id, UNSUPPORTED_PROTOCOL_VERSION, 'UnsupportedProtocolVersion', {
+              supported: [...SUPPORTED_PROTOCOL_VERSIONS],
+              requested: pedido,
+            });
+            return;
+          }
           this.reply(req.id, {
-            // Ecoa a versao pedida quando conhecida; senao anuncia a nossa.
-            protocolVersion: pedido ?? PROTOCOL_VERSION,
-            // A extensão só é anunciada a quem a declarou: cliente legacy sem
-            // ela não vê campo desconhecido em `capabilities`.
-            capabilities: this.tasksNaSessao ? { tools: {}, extensions: { [TASKS_EXTENSION]: {} } } : { tools: {} },
+            protocolVersion: LATEST_PROTOCOL_VERSION,
+            capabilities,
             serverInfo: SERVER_INFO,
+            supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
+            _meta: {
+              'io.modelcontextprotocol/negotiation': {
+                requested: pedido,
+                supported: [...SUPPORTED_PROTOCOL_VERSIONS],
+              },
+            },
           });
           return;
         }
+        case 'server/discover':
+          // MUST da era moderna (IMPL-084): sempre disponível, antes/depois de
+          // qualquer initialize, listando as duas revisões implementadas.
+          if (!isNotification) {
+            this.reply(req.id, {
+              resultType: 'complete',
+              supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
+              capabilities: { tools: {}, extensions: { [TASKS_EXTENSION]: {} } },
+              _meta: { 'io.modelcontextprotocol/serverInfo': SERVER_INFO },
+            });
+          }
+          return;
         case 'notifications/initialized':
           return;
         case 'notifications/cancelled':
@@ -885,8 +1450,23 @@ export class McpSession {
             this.reply(req.id, {
               tools: (this.opts.tools ?? TOOLS).map((t) => ({
                 name: t.name,
+                title: t.annotations?.title,
                 description: t.description,
                 inputSchema: t.inputSchema,
+                // IMPL-085: as 4 dicas em toda tool declarada (sem elas a spec
+                // trata tudo como escrita destrutiva de mundo aberto).
+                ...(t.annotations
+                  ? {
+                      annotations: {
+                        title: t.annotations.title,
+                        readOnlyHint: t.annotations.readOnlyHint,
+                        destructiveHint: t.annotations.destructiveHint,
+                        idempotentHint: t.annotations.idempotentHint,
+                        openWorldHint: t.annotations.openWorldHint,
+                      },
+                    }
+                  : {}),
+                ...(t.outputSchema ? { outputSchema: t.outputSchema } : {}),
               })),
             });
           }

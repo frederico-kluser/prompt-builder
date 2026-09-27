@@ -72,6 +72,14 @@ ${DATA_BLOCKS_NOTICE}
 Saida ESTRITAMENTE em JSON valido, sem markdown e sem comentarios:
 {"canario":"<o CANARIO das INSTRUCOES>","ranking":["<melhor>","...","<pior>"],"verdicts":[{"label":"<letra>","justificativa":"<1-2 frases>","veredito":"resolve|parcial|nao"}, ... TODOS os rotulos]}`;
 
+/**
+ * O CONTRATO do juiz listwise (IMPL-049): o texto fixo que define a régua do
+ * fallback sem gabarito. Vai no hash do contrato do juiz junto do pointwise e
+ * do duelo — trocar este prompt muda a distribuição de veredito e precisa
+ * aparecer como drift (calibration drift), nunca passar despercebido.
+ */
+export const JUDGE_LISTWISE_CONTRACT_TEXT = SYSTEM_PROMPT;
+
 /** Schema da saida listwise para os rotulos DESTA passagem (JSON Schema `strict`). */
 export function listwiseSchema(labels: string[]): Record<string, unknown> {
   return strictObjectSchema({
@@ -464,5 +472,165 @@ export async function judgeStage(params: JudgeStageParams): Promise<JudgeResult>
     judges,
     blindMap: judges[0].blindMap,
     rawJudgeText,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// CASCATA juiz barato -> juiz forte (IMPL-115 / R-08:REC-2): o papel juiz
+// domina o custo do pipeline, e o modo economico paga o juiz forte so onde ele
+// e preciso. DOIS juizes baratos rodam em paralelo; o juiz forte e chamado
+// SOMENTE quando (a) os baratos discordam, (b) algum veredito saiu 'parcial'
+// (nivel intermediario = duvida) ou (c) ha ANOMALIA DE COMPRIMENTO de saida
+// (resposta muito fora da faixa das demais — e ali que mora o vies de
+// verbosidade que derruba juiz barato). Sem trigger, o consenso barato decide.
+//
+// A fração escalonada e reportada em `cascadeEscalatedFraction` (o chamador
+// agrega por run) e o custo por veredito continua vindo MEDIDO do ledger
+// (usage.cost por papel) — nunca estimado aqui.
+//
+// ⚠️ logprobs NUNCA entram como dependencia: a cascata decide pelos vereditos
+// parseados e pelo comprimento das saidas, os dois disponiveis em qualquer
+// provedor (o contrato esta no teste judge-cascade.test.ts).
+// ---------------------------------------------------------------------------
+
+/** Gatilho de escalonamento da cascata. */
+export type CascadeEscalationReason = 'disagreement' | 'parcial' | 'length-anomaly';
+
+/** Visao de UM juiz barato para a decisao da cascata (so o que decide). */
+export interface CheapJudgeView {
+  judgeModelId: string;
+  /** Vereditos legítimos deste juiz (chave = contestantId). */
+  verdictByContestant: Record<string, Verdict>;
+  /** true = o juiz barato nao devolveu saida valida (nao votou). */
+  failed?: boolean;
+}
+
+/**
+ * Razao max/min de comprimento que conta como ANOMALIA de saida (IMPL-115).
+ * 3x e o ponto onde a resposta deixa de ser variacao normal de verbosidade e
+ * vira confundidor de veredito (vies de tamanho — a regua do prompt do juiz
+ * manda "NAO premie respostas mais longas" justamente por isto).
+ */
+export const LENGTH_ANOMALY_RATIO = 3;
+
+/** Anomalia de comprimento: max/min acima da razao (comprimentos <= 0 ignorados). */
+export function hasLengthAnomaly(lengths: number[], ratio: number = LENGTH_ANOMALY_RATIO): boolean {
+  const positivos = lengths.filter((n) => Number.isFinite(n) && n > 0);
+  if (positivos.length < 2) return false;
+  return Math.max(...positivos) / Math.min(...positivos) > ratio;
+}
+
+/**
+ * Decisao PURA da cascata: quais gatilhos disparam o juiz forte. Ordem estavel
+ * (disagreement, parcial, length-anomaly) para o relatorio ser comparavel.
+ *
+ * - `disagreement`: os baratos discordam em ALGUM contestant, ou algum deles
+ *   nao votou (sem consenso possivel);
+ * - `parcial`: algum veredito barato saiu 'parcial' (nivel intermediario);
+ * - `length-anomaly`: comprimento das respostas julgadas fora da faixa.
+ */
+export function cascadeEscalationReasons(
+  cheap: CheapJudgeView[],
+  opts: { responseLengths?: number[]; ratio?: number } = {},
+): CascadeEscalationReason[] {
+  const reasons: CascadeEscalationReason[] = [];
+  let discordou = cheap.length < 2 || cheap.some((j) => j.failed);
+  let parcial = false;
+  const ids = new Set(cheap.flatMap((j) => Object.keys(j.verdictByContestant)));
+  for (const id of ids) {
+    const votos = new Set(cheap.map((j) => j.verdictByContestant[id]).filter((v): v is Verdict => Boolean(v)));
+    if (votos.size > 1) discordou = true;
+    if (votos.has('parcial')) parcial = true;
+  }
+  if (discordou) reasons.push('disagreement');
+  if (parcial) reasons.push('parcial');
+  if (hasLengthAnomaly(opts.responseLengths ?? [], opts.ratio)) reasons.push('length-anomaly');
+  return reasons;
+}
+
+/** Parametros da cascata: os 2 baratos + o forte de escalonamento. */
+export interface CascadeJudgeParams extends Omit<JudgeStageParams, 'judgeModelIds'> {
+  /** Juizes BARATOS (2, em paralelo) — a primeira camada. */
+  cheapJudgeIds: string[];
+  /** Juiz FORTE — so roda quando a cascata escala. */
+  strongJudgeId: string;
+}
+
+/** Relatorio da cascata nesta etapa (auditavel: os votos baratos ficam registados). */
+export interface CascadeReport {
+  /** true = a etapa foi escalonada para o juiz forte (independente do desfecho dele). */
+  escalated: boolean;
+  /** Gatilhos que escalonaram (vazio quando nao escalonou). */
+  reasons: CascadeEscalationReason[];
+  cheapJudgeIds: string[];
+  strongJudgeId: string;
+  /** Consenso barato por contestant (para auditar o que a 1a camada decidiu). */
+  cheapVerdictByContestant: Record<string, Verdict>;
+  /** true = o juiz forte decidiu; false = escalonou mas o forte falhou e valeu o barato. */
+  strongDecided: boolean;
+}
+
+/** Resultado da cascata = JudgeResult + o relatorio da cascata. */
+export interface CascadeJudgeResult extends JudgeResult {
+  cascade: CascadeReport;
+}
+
+/**
+ * Fracao escalonada (0..1) da run/mode economico: etapas escalonadas / etapas
+ * julgadas pela cascata. Vazia = 0 (sem etapa nao e "100% escalonado").
+ */
+export function cascadeEscalatedFraction(reports: Pick<CascadeReport, 'escalated'>[]): number {
+  if (reports.length === 0) return 0;
+  return reports.filter((r) => r.escalated).length / reports.length;
+}
+
+/**
+ * Julga a etapa em modo economico (IMPL-115): 2 juizes baratos em paralelo e
+ * escalonamento para o juiz forte so nos gatilhos de duvida. Sem gatilho, o
+ * consenso barato decide (e a etapa pagou 2 chamadas baratas em vez do forte).
+ * logprobs nao sao pedidos nem lidos em lugar nenhum da cascata.
+ */
+export async function judgeStageCascade(params: CascadeJudgeParams): Promise<CascadeJudgeResult> {
+  const { cheapJudgeIds, strongJudgeId, ...rest } = params;
+  const cheap = [...new Set(cheapJudgeIds)];
+  const barato = await judgeStage({ ...rest, judgeModelIds: cheap });
+
+  const views: CheapJudgeView[] = cheap.map((judgeModelId) => {
+    const j = barato.judges.find((x) => x.judgeModelId === judgeModelId);
+    if (!j) return { judgeModelId, verdictByContestant: {}, failed: true };
+    const verdictByContestant: Record<string, Verdict> = {};
+    for (const v of j.verdicts) verdictByContestant[v.contestantId] = v.verdict;
+    return { judgeModelId, verdictByContestant };
+  });
+  const reasons = cascadeEscalationReasons(views, {
+    responseLengths: (params.responses ?? []).map((r) => r.text.length),
+  });
+  const base: Omit<CascadeReport, 'escalated' | 'strongDecided'> = {
+    reasons,
+    cheapJudgeIds: cheap,
+    strongJudgeId,
+    cheapVerdictByContestant: barato.verdictByContestant ?? {},
+  };
+
+  if (reasons.length === 0) {
+    return {
+      ...barato,
+      rawJudgeText: `${barato.rawJudgeText}\n[cascata] sem gatilho — consenso dos juizes baratos.`,
+      cascade: { ...base, escalated: false, strongDecided: false },
+    };
+  }
+
+  // Escalonamento: o juiz FORTE decide (1 chamada). Se ele falhar, vale o
+  // consenso barato (degradado) — a etapa nunca fica sem veredito so porque o
+  // escalonamento falhou.
+  const forte = await judgeStage({ ...rest, judgeModelIds: [strongJudgeId] });
+  const strongDecided = forte.judges.length > 0;
+  const final = strongDecided ? forte : barato;
+  return {
+    ...final,
+    rawJudgeText:
+      `${final.rawJudgeText}\n[cascata] escalonada (${reasons.join(', ')}) — ` +
+      (strongDecided ? `decidida pelo juiz forte ${strongJudgeId}.` : `juiz forte ${strongJudgeId} falhou; valeu o consenso barato.`),
+    cascade: { ...base, escalated: true, strongDecided },
   };
 }

@@ -13,28 +13,35 @@
 // não tem sandbox próprio (docs/security.md). Contenção de recursos (kill-tree,
 // tetos de bytes, parede de tempo, shouldStop) é do `spawnAgent` (spawn.ts).
 //
-// ⚠️ CONTRATO DE FUNDO (diferença entre o SPIKE e a interface mergeada):
-// o `AgentRunOpts` de executor.ts ainda é MINIMAL (execId/task/config/
-// workspaceDir/workDir/bin/env). Campos que o SPIKE usou de um `run` rico
-// (apiKey/modelId/thinking/systemPrompt/sessionDir/piHomeDir/signal/onEvent/
-// priceTokens) NÃO existem no contrato atual. Para não romper o contrato, este
-// adaptador DERIVA esses valores dos CÓDIGOS que a interface oferece de fato:
+// ⚠️ CONTRATO v2 (IMPL-095): o `AgentRunOpts` de executor.ts carrega AGORA os
+// campos ricos que o SPIKE usava num `run` próprio — `modelId`, `instruction`
+// (tarefa), `systemPrompt` + `promptMode`, `thinking`, `contextFiles`, `signal`
+// (→ `stopReason: 'cancelled'`), `onEvent` (com o custo REAL por turno),
+// `sessionDir`, `sandbox` (alça do sandbox preparado), `inference`
+// (credentialRef/baseUrl) e `costBrake` (costSink). O canal `PI_*` de env e o
+// 2º parâmetro (`PiRunOptions`) foram FUNDIDOS no contrato:
 //
-//   - modelo ............ env `PI_MODEL_ID` (estampado por `prepare()`/runner).
+//   - modelo ............ `opts.modelId` (legado: env `PI_MODEL_ID`).
 //   - inferência ......... `opts.inference` (IMPL-037): base URL do proxy local +
 //                          token FICTÍCIO, gravados no `models.json` do pi. A key
 //                          real NUNCA chega ao agente (nem por env): sem rota, uma
 //                          `OPENROUTER_API_KEY` no env vira um proxy PRÓPRIO da
 //                          execução — a key fica neste processo.
-//   - thinking/tools ..... `opts.config.thinking` / `opts.config.tools`.
-//   - promptMode ......... `opts.config.promptMode` (replace/append/none).
-//   - system prompt ...... env `PI_SYSTEM_PROMPT` OU `<workDir>/system-prompt.txt`.
-//   - tarefa (stdin) ..... env `PI_TASK` OU `<workDir>/task.txt` (plano §12.5).
-//   - sessionDir ......... `path.join(opts.workDir, 'session')`.
+//   - thinking/tools ..... `opts.thinking` (ou `opts.config.thinking`) / `opts.config.tools`.
+//   - promptMode ......... `opts.promptMode` (ou `opts.config.promptMode`).
+//   - system prompt ...... `opts.systemPrompt` (legado: env `PI_SYSTEM_PROMPT`
+//                          OU `<workDir>/system-prompt.txt`).
+//   - tarefa (stdin) ..... `opts.instruction` (legado: env `PI_TASK` OU
+//                          `<workDir>/task.txt`, plano §12.5).
+//   - sessionDir ......... `opts.sessionDir` (default `<workDir>/session`).
 //   - piHomeDir .......... `path.join(<runDir>, 'pi-home')` em `prepare()`.
-//   - signal/onEvent ..... NÃO expostos ainda; turn/cost/tool/settled são
-//                          expostos internamente via `PiStreamEvent` (a onda que
-//                          for ligar `signal` no contrato repara só aqui).
+//   - signal/onEvent ..... `opts.signal` / `opts.onEvent` — o aborto devolve
+//                          `stopReason: 'cancelled'` e o `turn` leva o custo real.
+//   - sandbox ............ `opts.sandbox` (legado: env `PI_CONTAINER_IMAGE`).
+//
+// Os canais "legado" acima são TOLERÂNCIA para callers/fixtures antigos (o
+// `prepare()` ainda estampa o digest no env porque o `selfTest` recebe só env);
+// o caminho de PRODUÇÃO (`runAgentStage`) não os usa — tudo entra pelo contrato.
 //
 // O canário COMPLETO de sala limpa (tokens CANARY-*) vive no `doctor` — este
 // `selfTest` v1 é só o pré-cheque de `pi --version` que o pré-voo precisa.
@@ -44,7 +51,7 @@ import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, re
 import type { WriteStream } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
-import type { AgentExecutor, AgentRunOutcome, AgentRunOpts, CleanRoomReport, PrepareOpts, SelfTestOpts } from './executor.js';
+import type { AgentExecutor, AgentRunOutcome, AgentRunOpts, AgentStreamEvent, CleanRoomReport, PrepareOpts, SelfTestOpts } from './executor.js';
 import { createJsonlSplitter } from './jsonl.js';
 import { fromPi } from './trajectory.js';
 import { copyTreeBytes } from './sandboxExec.js';
@@ -114,25 +121,22 @@ const NPM_INSTALL_TIMEOUT_MS = 600_000;
 // Tipos locais
 // ----------------------------------------------------------------------------
 
-/** Evento enxuto do stream pi — o que o adaptador emite ao chamador. */
-export type PiStreamEvent =
-  | { type: 'turn'; index: number; total: number }
-  | { type: 'cost'; costUsd: number; tokensIn: number; tokensOut: number; responseId?: string }
-  | { type: 'tool'; name: string; ok: boolean; total: number }
-  | { type: 'settled'; sessionFile?: string };
+/**
+ * Evento enxuto do stream pi — o que o adaptador emite ao chamador.
+ * @deprecated desde o contrato v2 (IMPL-095): use `AgentStreamEvent`
+ * (`executor.ts`). Mantido como alias para não quebrar imports antigos.
+ */
+export type PiStreamEvent = AgentStreamEvent;
 
-/** Opções internas do run — canal de extensão FUTURO (ainda não no contrato). */
-export interface PiRunOptions {
-  /** Sobrepõe `workDir/session`. */
-  sessionDir?: string;
-  /** Cancelamento — quando a interface expuser `signal`. */
-  signal?: AbortSignal;
-  /** Observador do stream enxuto. */
-  onEvent?: (e: PiStreamEvent) => void;
-  /** Fallback de preço por token quando o `pi` reporta cost 0 (catálogo). */
-  priceTokensIn?: (t: number) => number;
-  priceTokensOut?: (t: number) => number;
-}
+/**
+ * Opções internas do run — CANAL LEGADO (IMPL-095): tudo isto vive AGORA em
+ * `AgentRunOpts` (`sessionDir`/`signal`/`onEvent`/`priceTokensIn`/`priceTokensOut`).
+ * O 2º parâmetro de `piExecutor.run` ainda aceita este objeto como tolerância a
+ * callers antigos, mas o contrato (`AgentExecutor.run`) tem UM parâmetro só e o
+ * `runAgentStage` não usa este canal.
+ * @deprecated use os campos de `AgentRunOpts`.
+ */
+export type PiRunOptions = Pick<AgentRunOpts, 'sessionDir' | 'signal' | 'onEvent' | 'priceTokensIn' | 'priceTokensOut'>;
 
 /** Resultado intermediário do parser — o que `run()` consome para montar o outcome. */
 interface ParsedRun {
@@ -459,15 +463,24 @@ function resolveLimits(opts: AgentRunOpts): AgentLimits {
   return { ...def, ...(opts.config.limits ?? {}), ...(opts.task.limits ?? {}) };
 }
 
-/** Lê o texto da tarefa que vai por stdin: env `PI_TASK` OU `<workDir>/task.txt`. */
+/**
+ * Lê o texto da tarefa que vai por stdin. Contrato v2 (IMPL-095): `opts.instruction`
+ * é a fonte. LEGADO (tolerância a callers antigos): env `PI_TASK` OU
+ * `<workDir>/task.txt` (plano §12.5).
+ */
 function readTaskInput(opts: AgentRunOpts, env: Record<string, string>): string {
+  if (typeof opts.instruction === 'string') return opts.instruction;
   if (env.PI_TASK) return env.PI_TASK;
   const f = path.join(opts.workDir, 'task.txt');
   return existsSync(f) ? readFileSync(f, 'utf8') : '';
 }
 
-/** Lê o system prompt sob teste: env `PI_SYSTEM_PROMPT` OU `<workDir>/system-prompt.txt`. */
+/**
+ * Lê o system prompt sob teste. Contrato v2 (IMPL-095): `opts.systemPrompt` é a
+ * fonte. LEGADO (tolerância): env `PI_SYSTEM_PROMPT` OU `<workDir>/system-prompt.txt`.
+ */
 function readSystemPrompt(opts: AgentRunOpts, env: Record<string, string>): string {
+  if (typeof opts.systemPrompt === 'string') return opts.systemPrompt;
   if (env.PI_SYSTEM_PROMPT) return env.PI_SYSTEM_PROMPT;
   const f = path.join(opts.workDir, 'system-prompt.txt');
   return existsSync(f) ? readFileSync(f, 'utf8') : '';
@@ -475,12 +488,14 @@ function readSystemPrompt(opts: AgentRunOpts, env: Record<string, string>): stri
 
 /**
  * O parser incremental do stream pi. Alimentado por `createJsonlSplitter`; grava
- * no `ParsedRun` o que `run()` precisa e emite `PiStreamEvent`.
+ * no `ParsedRun` o que `run()` precisa e emite `AgentStreamEvent` (contrato v2).
  */
 function createPiParser(parsed: ParsedRun, baseOpts: PiRunOptions): (rec: unknown) => void {
   const { onEvent, priceTokensIn, priceTokensOut } = baseOpts;
   let lastResponseId: string | undefined;
   let lastPushedResponseId: string | undefined;
+  /** Custo acumulado quando o turno começou — p/ o custo REAL do turno (IMPL-095). */
+  let costAtTurnStart = 0;
 
   return (rec: unknown): void => {
     const r = (rec ?? {}) as Record<string, unknown>;
@@ -494,7 +509,7 @@ function createPiParser(parsed: ParsedRun, baseOpts: PiRunOptions): (rec: unknow
       // Next Turn — novas iterações do mesmo "turno" original (turn_start).
       case 'turn_start': {
         parsed.turns++;
-        onEvent?.({ type: 'turn', index: parsed.turns, total: parsed.turns });
+        costAtTurnStart = parsed.costUsd;
         break;
       }
       case 'message_end':
@@ -567,6 +582,14 @@ function createPiParser(parsed: ParsedRun, baseOpts: PiRunOptions): (rec: unknow
             steps: [],
             usage: { tokensIn: inp, tokensOut: out, costUsd: cost },
             stopReason: toStr(dig(msg, 'rawStopReason') || dig(msg, 'stopReason')) || undefined,
+          });
+          // Evento de turno no FIM dele, com o custo REAL do turno (IMPL-095):
+          // o delta medido desde o `turn_start` — nunca o placeholder 0.
+          onEvent?.({
+            type: 'turn',
+            index: parsed.turns,
+            total: parsed.turns,
+            costUsd: Math.max(0, parsed.costUsd - costAtTurnStart),
           });
         }
         break;
@@ -694,12 +717,17 @@ export const piExecutor: AgentExecutor = {
    * shouldStop) com argv/env da receita, alimenta o parser JSONL a partir do
    * stdout e devolve o `AgentRunOutcome` com a trajetória já normalizada por
    * `fromPi` (`trajectory.ts`: passos, texto, pensamento, truncamento).
+   *
+   * UM parâmetro no contrato (IMPL-095). O 2º (`PiRunOptions`) é CANAL LEGADO:
+   * fundido em `AgentRunOpts` aqui mesmo, para callers antigos — o contrato
+   * (`AgentExecutor.run`) e o `runAgentStage` não o usam.
    */
-  async run(opts: AgentRunOpts, base?: PiRunOptions): Promise<AgentRunOutcome> {
-    const inference = await resolveInferenceRoute(opts);
+  async run(opts: AgentRunOpts, legacy?: PiRunOptions): Promise<AgentRunOutcome> {
+    const merged = mergeLegacyRunOpts(opts, legacy);
+    const inference = await resolveInferenceRoute(merged);
     let outcome: PiRunOutcome;
     try {
-      outcome = await runPiExecution(opts, base ?? {}, inference.route, inference.brake);
+      outcome = await runPiExecution(merged, inference.route, inference.brake);
     } finally {
       await inference.close();
     }
@@ -733,19 +761,35 @@ export const piExecutor: AgentExecutor = {
 };
 
 /**
+ * Funde o canal LEGADO (`PiRunOptions`, IMPL-095) no contrato (`AgentRunOpts`).
+ * Só preenche o que o contrato não trouxe — o contrato vence sempre. Existe só
+ * para não quebrar callers antigos num merge; remover quando eles migrarem.
+ */
+function mergeLegacyRunOpts(opts: AgentRunOpts, legacy?: PiRunOptions): AgentRunOpts {
+  if (!legacy) return opts;
+  return {
+    ...opts,
+    sessionDir: opts.sessionDir ?? legacy.sessionDir,
+    signal: opts.signal ?? legacy.signal,
+    onEvent: opts.onEvent ?? legacy.onEvent,
+    priceTokensIn: opts.priceTokensIn ?? legacy.priceTokensIn,
+    priceTokensOut: opts.priceTokensOut ?? legacy.priceTokensOut,
+  };
+}
+
+/**
  * Executa UMA tarefa no pi com a rota de inferência já resolvida. Spawna via
  * `spawnAgent` (kill-tree, tetos, shouldStop) com argv/env da receita, alimenta o
  * parser JSONL a partir do stdout e devolve o `AgentRunOutcome`.
  */
 async function runPiExecution(
   opts: AgentRunOpts,
-  baseOpts: PiRunOptions,
   route: InferenceRoute | undefined,
   brake?: CostBrake,
 ): Promise<PiRunOutcome> {
-  const auditSessionDir = baseOpts.sessionDir ?? path.join(opts.workDir, 'session');
+  const auditSessionDir = opts.sessionDir ?? path.join(opts.workDir, 'session');
   if (opts.config.isolation?.kind !== 'container') {
-    return runPiExecutionIn(opts, baseOpts, route, { sessionDir: auditSessionDir }, brake);
+    return runPiExecutionIn(opts, route, { sessionDir: auditSessionDir }, brake);
   }
   // IMPL-038 (R-15 REC-4) — COPY-IN / COPY-OUT. O que o sandbox monta com
   // escrita (`session/`, `pi-home/`) mora num staging FORA do dir de execução:
@@ -758,7 +802,6 @@ async function runPiExecution(
   try {
     return await runPiExecutionIn(
       opts,
-      baseOpts,
       route,
       {
         sessionDir: path.join(staging, 'session'),
@@ -786,7 +829,6 @@ const SESSION_COPY_OUT_MAX_BYTES = 64 * 1024 * 1024;
 /** Corpo do `runPiExecution` com os diretórios (host: os de auditoria; container: o staging). */
 async function runPiExecutionIn(
   opts: AgentRunOpts,
-  baseOpts: PiRunOptions,
   route: InferenceRoute | undefined,
   dirs: { sessionDir: string; piHomeDir?: string },
   brake?: CostBrake,
@@ -803,27 +845,32 @@ async function runPiExecutionIn(
     const env: Record<string, string> = { ...opts.env, PI_CODING_AGENT_SESSION_DIR: sessionDir };
     delete env.OPENROUTER_API_KEY;
 
-    // --- modelo: env PI_MODEL_ID (em falta => erro claro de pré-voo) ---------
-    const model = env.PI_MODEL_ID;
+    // --- modelo: `opts.modelId` (contrato v2, IMPL-095). ---------------------
+    // LEGADO: env `PI_MODEL_ID` — tolerância a callers antigos; em falta => erro
+    // claro de pré-voo.
+    const model = opts.modelId ?? env.PI_MODEL_ID;
     if (!model) {
       throw new Error(
-        `piExecutor.run: modelo ausente. O runner deve definir PI_MODEL_ID no env ` +
-          `preparado (a interface AgentRunOpts ainda não carrega modelId).`,
+        'piExecutor.run: modelo ausente. O contrato v2 carrega modelId em AgentRunOpts ' +
+          '(canal legado env PI_MODEL_ID ainda aceito para callers antigos).',
       );
     }
     const provider = opts.config.provider ?? 'openrouter';
-    const thinking = opts.config.thinking;
+    const thinking = opts.thinking ?? opts.config.thinking;
     const tools = opts.config.tools ?? DEFAULT_TOOLS;
-    const promptMode = opts.config.promptMode ?? 'append';
+    const promptMode = opts.promptMode ?? opts.config.promptMode ?? 'append';
+    const contextFiles = opts.contextFiles ?? opts.task.contextFiles ?? false;
     const limits = resolveLimits(opts);
 
     const systemPrompt = readSystemPrompt(opts, env);
     const taskInput = readTaskInput(opts, env);
 
     const isContainer = opts.config.isolation?.kind === 'container';
-    // Em modo container, `prepare()` estampa o DIGEST (sha256) e a tag pedida.
-    const containerImage = env.PI_CONTAINER_IMAGE;
-    const containerImageRef = env.PI_CONTAINER_IMAGE_REF ?? containerImage;
+    // Em modo container, o contrato v2 carrega a alça do sandbox (`opts.sandbox`,
+    // IMPL-095). LEGADO: env `PI_CONTAINER_IMAGE`/`PI_CONTAINER_IMAGE_REF` — o
+    // `prepare()` ainda estampa para o `selfTest` (que recebe só env).
+    const containerImage = opts.sandbox?.imageDigest ?? env.PI_CONTAINER_IMAGE;
+    const containerImageRef = opts.sandbox?.imageRef ?? env.PI_CONTAINER_IMAGE_REF ?? containerImage;
 
     // --- argv do pi (args posicionais após o binário `pi`) --------------------
     // Compartilhado host/container; diverge só em `--session-dir` e no caminho
@@ -835,7 +882,10 @@ async function runPiExecutionIn(
       '--model', model,
       ...thinkingArg(thinking),
       '--session-dir', isContainer ? CONTAINER_SESSION_DIR : sessionDir,
-      '--no-context-files',
+      // contextFiles (contrato v2, IMPL-095): default é o `--no-context-files`
+      // de sempre (o experimento controla o que o agente lê); `true` libera os
+      // arquivos de contexto do repo (AGENTS.md/CLAUDE.md).
+      ...(contextFiles ? ['--context-files'] : ['--no-context-files']),
       '--no-extensions',
       '--no-skills',
       '--no-prompt-templates',
@@ -1032,7 +1082,7 @@ async function runPiExecutionIn(
     };
     const stderrRing = new RingBuffer(STDERR_RING_BYTES);
 
-    const onRecord = createPiParser(parsed, baseOpts);
+    const onRecord = createPiParser(parsed, opts);
     const splitter = createJsonlSplitter(onRecord, () => {
       parsed.parseErrors++;
     });
@@ -1072,7 +1122,7 @@ async function runPiExecutionIn(
           // Auditoria (§14): persiste TODO o stderr, não só o tail.
           rawErr?.write(chunk);
         },
-        signal: baseOpts.signal,
+        signal: opts.signal,
         shouldStop,
         // Em container: gancho de kill do container por nome (o CLI docker ser
         // morto NÃO mata o container). Fire-and-forget — spawn.ts nunca awaita.

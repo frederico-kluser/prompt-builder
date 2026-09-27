@@ -503,16 +503,31 @@ const clampPp = (x: number): number => Math.min(100, Math.max(-100, x));
 export function pairedSignificance(
   controlScores: readonly PairScore[],
   championScores: readonly PairScore[],
-  opts?: { iterations?: number; seed?: number; pairKeys?: string[] },
-): PairedSignificance | null {
-  const { diffs, nominal, excluded } = pairDiffs(controlScores, championScores, opts?.pairKeys);
+  opts?: {
+    iterations?: number;
+    seed?: number;
+    pairKeys?: string[];
+    /** IMPL-054: reps por cenário — o par analítico é o CENÁRIO (reps agregadas). */
+    repeatsPerScenario?: number;
+    /** IMPL-050: origem do p (holdout | seleção) — gravada e sempre exibida. */
+    pOrigin?: SignificanceOrigin;
+  },
+): PairedSignificanceResult | null {
+  const m = Math.max(1, Math.floor(opts?.repeatsPerScenario ?? 1));
+  // IMPL-054: repetição NÃO é observação independente. Com reps > 1 as reps de
+  // um cenário são agregadas (média das observadas) e o teste pareado fica com
+  // n = CENÁRIOS — antes o vetor plano dobrava o n e subestimava o erro-padrão
+  // pelo design effect DE = 1+(m−1)·ICC.
+  const control0 = m > 1 ? aggregateByScenario(controlScores, m) : controlScores;
+  const champion0 = m > 1 ? aggregateByScenario(championScores, m) : championScores;
+  const { diffs, nominal, excluded } = pairDiffs(control0, champion0, opts?.pairKeys);
   const nEfetivo = diffs.length;
   if (nEfetivo < MIN_PAIRS) return null;
 
   const mc = { iterations: opts?.iterations, seed: opts?.seed };
   const sensitivity = sensitivityAnalysis(
-    controlScores,
-    championScores,
+    control0,
+    champion0,
     (d) => significanceCase(d, mc),
     { pairKeys: opts?.pairKeys },
   );
@@ -542,9 +557,13 @@ export function pairedSignificance(
     method: test.method,
     ciMethod: ci.method,
     signTest: exactSignTest(positive, negative),
+    ...(opts?.pOrigin ? { pOrigin: opts.pOrigin } : {}),
     ...(sensitivity ? { sensitivity } : {}),
   };
 }
+
+/** `PairedSignificance` + a origem do p (IMPL-050). */
+export type PairedSignificanceResult = PairedSignificance & { pOrigin?: SignificanceOrigin };
 
 // ---------------------------------------------------------------------------
 // IMPL-005 (R-04:REC-2) — pareamento honesto, n efetivo e sensibilidade
@@ -716,6 +735,11 @@ interface StageVerdictMapLike {
    * `VerdictError` sem acoplar este módulo ao union de motivos.
    */
   verdictErrorByContestant?: Readonly<Record<string, { kind: string }>>;
+  /**
+   * Veredito de CADA repetição (IMPL-054, §18.4): contestantId → vetor de reps.
+   * Presente quando a etapa rodou com `agent.repetitions > 1`.
+   */
+  verdictsByRep?: Readonly<Record<string, readonly (Verdict | undefined)[]>>;
 }
 
 /**
@@ -875,13 +899,15 @@ export function formatPValue(p: number): string {
 
 /**
  * Linha de relatório da significância: p bilateral, o p unilateral do gate, o
- * IC95 por inversão e o n que DE FATO entrou no teste (com os excluídos).
- * Ex.: `p=0.063 bilateral (gate unilateral p=0.031) · IC95 [-100.0, 100.0]pp · n=5 · exato`.
+ * IC95 por inversão, o n que DE FATO entrou no teste (com os excluídos) e a
+ * ORIGEM do p (IMPL-050 — holdout | seleção | sem p, sempre rotulada).
+ * Ex.: `p=0.063 bilateral (gate unilateral p=0.031) · IC95 [-100.0, 100.0]pp · n=5 · exato · origem do p: seleção (anti-conservador)`.
  */
-export function formatSignificance(sig: StoredSignificance): string {
+export function formatSignificance(sig: SignificanceWithOrigin): string {
   const { p, kind } = reportPValue(sig);
   const ci = `IC95 [${sig.ci95Pp[0].toFixed(1)}, ${sig.ci95Pp[1].toFixed(1)}]pp`;
-  if (kind === 'legacy') return `${formatPValue(p)} (bootstrap, legado) · ${ci} · n=${sig.n}`;
+  const origem = ` · origem do p: ${ORIGIN_LABEL[significanceOrigin(sig)]}`;
+  if (kind === 'legacy') return `${formatPValue(p)} (bootstrap, legado) · ${ci} · n=${sig.n}${origem}`;
   const nEf = sig.nEfetivo ?? sig.n;
   const nTxt =
     sig.excludedPairs && sig.excludedPairs > 0
@@ -890,12 +916,13 @@ export function formatSignificance(sig: StoredSignificance): string {
   const method = sig.method === 'monte-carlo' ? 'Monte Carlo' : 'exato';
   const base = `${formatPValue(p)} bilateral (gate unilateral ${formatPValue(sig.pValue)}) · ${ci} · ${nTxt} · ${method}`;
   const s = sig.sensitivity;
-  if (!s) return base;
+  if (!s) return base + origem;
   // IMPL-005: exclusões > 10% — a conclusão só vale se sobreviver aos extremos.
   return (
     `${base} · sensibilidade (${fmtPct(s.excludedFraction)} excluídos): ` +
     `pior Δ ${fmtSignedPp(s.worst.meanDiffPp)}, melhor Δ ${fmtSignedPp(s.best.meanDiffPp)} → ` +
-    (s.inconclusive ? 'INCONCLUSIVO' : 'conclusão robusta')
+    (s.inconclusive ? 'INCONCLUSIVO' : 'conclusão robusta') +
+    origem
   );
 }
 
@@ -1022,6 +1049,914 @@ export function formatRunCompleteness(
   if (c.controlId && c.vsControl) {
     lines.push(`pares com a régua (${labelOf(c.controlId)}):`);
     for (const [id, p] of Object.entries(c.vsControl)) lines.push(`  ${labelOf(id)}: ${formatPairCoverage(p)}`);
+  }
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
+// IMPL-050 (R-04:REC-5) — poder estatístico: Δ detectável, n para um Δ alvo
+// ---------------------------------------------------------------------------
+
+/**
+ * Poder planejado padrão (1−β = 0,8) e α unilateral do teste final/planejamento.
+ * O gate de recomendação é direcional ("o candidato é melhor?"), então o
+ * planejamento usa α UNILATERAL — ~16% menos n que o bilateral (R-04 DEC-3).
+ */
+export const POWER_TARGET = 0.8;
+export const POWER_ALPHA = 0.05;
+/**
+ * σd default das DIFERENÇAS pareadas (escala 0–1) quando não há run-piloto.
+ * 0,5 = desvio-padrão de um veredito ~Bernoulli(0,5) — pior caso plausível de
+ * uma diferença de scores ternários centrada em 0. ⚠️ É fallback, nunca régua:
+ * o planejamento real deve calibrar σd numa run-piloto
+ * ({@link sigmaFromPilot}) — ver {@link POWER_UNCALIBRATED}.
+ */
+export const DEFAULT_SIGMA_D = 0.5;
+/** Marca honesta do planejamento sem σd calibrado (R-04:REC-5). */
+export const POWER_UNCALIBRATED = 'estimativa não calibrada';
+
+const zOf = (p: number): number => invNormalCdf(p);
+
+/**
+ * σd estimado de uma run-piloto pelo LIMITE SUPERIOR do IC (R-04:REC-5:
+ * "planejando pelo limite superior do IC; nunca tabela fixa σ=0,5").
+ *
+ * O IC95% do Δ dá o erro-padrão (meia-amplitude / z_{0,975}); o desvio-padrão
+ * das diferenças sai por s = SE·√n e o limite SUPERIOR de confiança (95%) de s
+ * é s·√((n−1)/χ²_{0,05;n−1}). Planejar por ele é o conservador honesto com n
+ * pequeno. Com n < 2 (sem dispersão conhecível) devolve o fallback.
+ */
+export function sigmaFromPilot(
+  ci95Pp: readonly [number, number],
+  n: number,
+  fallback = DEFAULT_SIGMA_D,
+): number {
+  const nn = Math.max(0, Math.floor(n));
+  if (nn < 2 || !Number.isFinite(ci95Pp[0]) || !Number.isFinite(ci95Pp[1])) return fallback;
+  // O IC vem em p.p. (×100); σd vive na escala 0–1.
+  const half = Math.abs(ci95Pp[1] - ci95Pp[0]) / 2 / 100;
+  if (!(half > 0)) return fallback;
+  const se = half / zOf(0.975); // escala 0–1
+  const s = se * Math.sqrt(nn);
+  const chi2Low = chi2Quantile(0.05, nn - 1);
+  if (!(chi2Low > 0)) return fallback;
+  return Math.min(1, s * Math.sqrt((nn - 1) / chi2Low));
+}
+
+/**
+ * Menor Δ (p.p.) detectável com `n` cenários pareados, poder `power` e α
+ * `alpha` unilateral: (z_{1−α} + z_{power})·σd/√n. Ex.: n = 5 e σd = 0,5 →
+ * 55,6 p.p. — com 5 cenários só se detectam efeitos ENORMES (R-04:REC-5).
+ */
+export function deltaDetectavelPp(
+  n: number,
+  sigmaD: number = DEFAULT_SIGMA_D,
+  opts?: { alpha?: number; power?: number },
+): number {
+  const nn = Math.max(1, Math.floor(n));
+  const alpha = opts?.alpha ?? POWER_ALPHA;
+  const power = opts?.power ?? POWER_TARGET;
+  return ((zOf(1 - alpha) + zOf(power)) * sigmaD) / Math.sqrt(nn) * 100;
+}
+
+/**
+ * n de cenários para detectar `deltaPp` com `power` a α `alpha` unilateral:
+ * ⌈((z_{1−α} + z_{power})·σd/Δ)²⌉. Ex.: Δ = 20 p.p., σd = 0,5 → 39 cenários.
+ */
+export function nParaDeltaPp(
+  deltaPp: number,
+  sigmaD: number = DEFAULT_SIGMA_D,
+  opts?: { alpha?: number; power?: number },
+): number {
+  const d = Math.abs(deltaPp) / 100;
+  if (!(d > 0)) return Infinity;
+  const alpha = opts?.alpha ?? POWER_ALPHA;
+  const power = opts?.power ?? POWER_TARGET;
+  return Math.ceil(((zOf(1 - alpha) + zOf(power)) * sigmaD / d) ** 2);
+}
+
+/** Plano de amostra (o que `prompt-builder estimate` publica). */
+export interface PowerPlan {
+  /** Cenários configurados (o n do plano). */
+  n: number;
+  /** α unilateral do planejamento. */
+  alpha: number;
+  power: number;
+  /** σd usado (escala 0–1). */
+  sigmaD: number;
+  /** `pilot` = calibrado de run-piloto (limite superior do IC); `fallback` = tabela. */
+  sigmaSource: 'pilot' | 'fallback';
+  /** Menor Δ (p.p.) detectável com o n configurado. */
+  deltaDetectavelPp: number;
+  /** Δ alvo (p.p.) do planejamento de n; default 20. */
+  targetDeltaPp: number;
+  /** n para detectar `targetDeltaPp`. */
+  nParaDelta: number;
+  /** true quando σd veio de fallback — o relatório MARCA como não calibrado. */
+  uncalibrated: boolean;
+}
+
+/**
+ * Plano de poder para o n configurado. Com `pilotCi95Pp` + `pilotN` o σd vem da
+ * run-piloto (limite superior do IC); sem ele usa {@link DEFAULT_SIGMA_D} e o
+ * resultado sai marcado {@link POWER_UNCALIBRATED}.
+ */
+export function planPower(input: {
+  n: number;
+  sigmaD?: number;
+  pilotCi95Pp?: readonly [number, number];
+  pilotN?: number;
+  alpha?: number;
+  power?: number;
+  targetDeltaPp?: number;
+}): PowerPlan {
+  const alpha = input.alpha ?? POWER_ALPHA;
+  const power = input.power ?? POWER_TARGET;
+  const fallback = input.sigmaD ?? DEFAULT_SIGMA_D;
+  const fromPilot = input.pilotCi95Pp && input.pilotN ? sigmaFromPilot(input.pilotCi95Pp, input.pilotN, fallback) : undefined;
+  const sigmaD = fromPilot ?? fallback;
+  return {
+    n: Math.max(0, Math.floor(input.n)),
+    alpha,
+    power,
+    sigmaD,
+    sigmaSource: fromPilot !== undefined ? 'pilot' : 'fallback',
+    deltaDetectavelPp: round2(deltaDetectavelPp(Math.max(1, Math.floor(input.n)), sigmaD, { alpha, power })),
+    targetDeltaPp: input.targetDeltaPp ?? 20,
+    nParaDelta: nParaDeltaPp(input.targetDeltaPp ?? 20, sigmaD, { alpha, power }),
+    uncalibrated: fromPilot === undefined,
+  };
+}
+
+/**
+ * Linhas de relatório do plano de poder — com dígitos em toda probabilidade
+ * (nada de "provável"/"significativo" solto: R-11a:REC-4).
+ */
+export function formatPowerPlan(p: PowerPlan): string[] {
+  const pct = (x: number): string => `${Math.round(x * 100)}%`;
+  const lines = [
+    `poder: Δ detectável ≥ ${fmtPpText(p.deltaDetectavelPp)} p.p. com n=${p.n} (α=${p.alpha}, poder ${pct(p.power)}, unilateral)`,
+    `n para Δ=${fmtPpText(p.targetDeltaPp)} p.p.: ${p.nParaDelta} cenários (σd=${p.sigmaD.toFixed(2)})`,
+  ];
+  if (p.uncalibrated) {
+    lines.push(
+      `σd ${POWER_UNCALIBRATED} (${DEFAULT_SIGMA_D.toFixed(2)} por tabela; calibre com run-piloto — o IC do piloto traz o limite superior)`,
+    );
+  } else {
+    lines.push(`σd=${p.sigmaD.toFixed(2)} calibrado de run-piloto (limite superior do IC)`);
+  }
+  return lines;
+}
+
+/** `2` / `2,5` — p.p. em texto PT-BR (sem decimal desnecessário). */
+function fmtPpText(x: number): string {
+  const r = Math.round(x * 10) / 10;
+  return Number.isInteger(r) ? String(r) : r.toFixed(1).replace('.', ',');
+}
+
+// ---------------------------------------------------------------------------
+// Núcleo numérico auxiliar: normal padrão e qui-quadrado (poder e limites)
+// ---------------------------------------------------------------------------
+
+/**
+ * Φ(z) — CDF da normal padrão via erf (Abramowitz & Stegun 7.1.26, |erro| < 1,5e-7).
+ */
+export function normalCdf(z: number): number {
+  if (!Number.isFinite(z)) return z > 0 ? 1 : 0;
+  const x = Math.abs(z) / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * x);
+  const erf =
+    1 -
+    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) *
+      t *
+      Math.exp(-x * x);
+  return clamp01(0.5 * (1 + Math.sign(z) * erf));
+}
+
+/**
+ * Φ⁻¹(p) — inversa da CDF normal (Acklam) + 1 passo de Halley. Usada pelo
+ * planejamento de poder e pelo intervalo paramétrico do Δ.
+ */
+export function invNormalCdf(p: number): number {
+  if (!(p > 0 && p < 1)) return p >= 1 ? Infinity : -Infinity;
+  const a = [-39.696830286653757, 220.9460984245205, -275.92851044696869, 138.357751867269, -30.66479806614716, 2.5066282774592392];
+  const b = [-54.476098798224058, 161.58583685804089, -155.69897985988661, 66.80131188771972, -13.280681552885721];
+  const c = [-0.0077848940024302926, -0.32239645804113648, -2.4007582771618381, -2.5497325393437338, 4.3746641414649678, 2.9381639826987831];
+  const d = [0.0077846957090414622, 0.32246712907003983, 2.4451341137772671, 3.7544086619074162];
+  const pl = 0.02425;
+  let q: number;
+  let r: number;
+  let x: number;
+  if (p < pl) {
+    q = Math.sqrt(-2 * Math.log(p));
+    x = (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  } else if (p <= 1 - pl) {
+    q = p - 0.5;
+    r = q * q;
+    x = (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
+      (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+  } else {
+    q = Math.sqrt(-2 * Math.log(1 - p));
+    x = -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  }
+  // Um passo de Halley: erro residual < 1e-9 (suficiente para teste de unidade).
+  const e = normalCdf(x) - p;
+  const u = e * Math.sqrt(2 * Math.PI) * Math.exp((x * x) / 2);
+  return x - u / (1 + (x * u) / 2);
+}
+
+/** P(a, x) regularizada inferior — série + fração contínuda (Numerical Recipes). */
+function regularizedGammaP(a: number, x: number): number {
+  if (!(x > 0) || !(a > 0)) return 0;
+  if (x < a + 1) {
+    let ap = a;
+    let sum = 1 / a;
+    let del = sum;
+    for (let n = 1; n <= 200; n += 1) {
+      ap += 1;
+      del *= x / ap;
+      sum += del;
+      if (Math.abs(del) < Math.abs(sum) * 1e-12) break;
+    }
+    return clamp01(sum * Math.exp(-x + a * Math.log(x) - logGamma(a)));
+  }
+  // Fração contínua para o complemento (x ≥ a+1).
+  let b = x + 1 - a;
+  let c = 1e300;
+  let d = 1 / b;
+  let h = d;
+  for (let i = 1; i <= 200; i += 1) {
+    const an = -i * (i - a);
+    b += 2;
+    d = an * d + b;
+    if (Math.abs(d) < 1e-300) d = 1e-300;
+    c = b + an / c;
+    if (Math.abs(c) < 1e-300) c = 1e-300;
+    d = 1 / d;
+    const del = d * c;
+    h *= del;
+    if (Math.abs(del - 1) < 1e-12) break;
+  }
+  return clamp01(1 - Math.exp(-x + a * Math.log(x) - logGamma(a)) * h);
+}
+
+/** log Γ(x) — aproximação de Lanczos (g = 7). */
+function logGamma(x: number): number {
+  const g = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313,
+    -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6,
+    1.5056327351493116e-7,
+  ];
+  if (x < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * x)) - logGamma(1 - x);
+  x -= 1;
+  let a = g[0];
+  const t = x + 7.5;
+  for (let i = 1; i < g.length; i += 1) a += g[i] / (x + i);
+  return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
+}
+
+/** Quantil da qui-quadrado por bisseção sobre P regularizada (df > 0). */
+export function chi2Quantile(p: number, df: number): number {
+  if (!(df > 0)) return Number.NaN;
+  if (p <= 0) return 0;
+  if (p >= 1) return Infinity;
+  let lo = 0;
+  let hi = Math.max(2 * df, 16);
+  while (regularizedGammaP(df / 2, hi / 2) < p && hi < 1e12) hi *= 2;
+  for (let i = 0; i < 200; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (regularizedGammaP(df / 2, mid / 2) < p) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/** P(a, b, x) regularizada (fração contínua de Lentz + logGamma). */
+function regularizedBetaP(a: number, b: number, x: number): number {
+  if (!(x > 0)) return 0;
+  if (x >= 1) return 1;
+  const lnBeta = logGamma(a) + logGamma(b) - logGamma(a + b);
+  const front = Math.exp(Math.log(x) * a + Math.log(1 - x) * b - lnBeta);
+  const useCF = x < (a + 1) / (a + b + 2);
+  const aa = useCF ? a : b;
+  const bb = useCF ? b : a;
+  const xx = useCF ? x : 1 - x;
+  // Fração contínua (betacf, Numerical Recipes).
+  let c = 1;
+  let d = 1 - ((aa + bb) * xx) / (aa + 1);
+  if (Math.abs(d) < 1e-300) d = 1e-300;
+  d = 1 / d;
+  let h = d;
+  for (let m = 1; m <= 300; m += 1) {
+    const m2 = 2 * m;
+    const num1 = (m * (bb - m) * xx) / ((aa + m2 - 1) * (aa + m2));
+    d = 1 + num1 * d;
+    if (Math.abs(d) < 1e-300) d = 1e-300;
+    c = 1 + num1 / c;
+    if (Math.abs(c) < 1e-300) c = 1e-300;
+    d = 1 / d;
+    h *= d * c;
+    const num2 = (-((aa + m) * (aa + bb + m) * xx)) / ((aa + m2) * (aa + m2 + 1));
+    d = 1 + num2 * d;
+    if (Math.abs(d) < 1e-300) d = 1e-300;
+    c = 1 + num2 / c;
+    if (Math.abs(c) < 1e-300) c = 1e-300;
+    d = 1 / d;
+    const del = d * c;
+    h *= del;
+    if (Math.abs(del - 1) < 1e-12) break;
+  }
+  const value = (front * h) / aa;
+  return clamp01(useCF ? value : 1 - value);
+}
+
+/**
+ * Quantil bilateral da t de Student: `tOf(conf, df)` tal que P(|T| ≤ t) = conf.
+ * Bissecção sobre a CDF (incomplete beta). Usado pelo IC do Δ — com n pequeno a
+ * normal subestima as caudas ("don't use the CLT with fewer than a few hundred
+ * datapoints") e a recomendação falsa passaria do α nominal.
+ */
+export function studentTCritical(conf: number, df: number): number {
+  if (!(df > 0)) return Infinity;
+  if (df > 1e6) return invNormalCdf((1 + conf) / 2);
+  const target = 1 - (1 - conf) / 2; // CDF no quantil superior
+  let lo = 0;
+  let hi = 1;
+  const cdf = (t: number): number =>
+    1 - 0.5 * regularizedBetaP(df / 2, 0.5, df / (df + t * t));
+  while (cdf(hi) < target && hi < 1e6) hi *= 2;
+  for (let i = 0; i < 200; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (cdf(mid) < target) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+// ---------------------------------------------------------------------------
+// IMPL-046 (R-11a:REC-4) — regra de RECUSA de recomendação (veredito estável)
+// ---------------------------------------------------------------------------
+
+/** Condição que segurou a recomendação (auditoria + texto honesto). */
+export type RecommendationHoldReason =
+  | 'no-pairs'
+  | 'ci-covers-zero'
+  | 'low-superiority'
+  | 'below-granularity';
+
+/**
+ * Veredito de recomendação — MESMO shape para CLI e UI (o web o recebe pelo
+ * shim de `stats`). `winner` só existe quando `verdict === 'conclusivo'`.
+ */
+export interface RecommendationDecision {
+  /** Recomendado (rótulo); `undefined` = RECUSA (empate técnico/inconclusivo). */
+  winner: string | undefined;
+  /** Régua da decisão: judge-score com IC — nunca "sensação". */
+  ruler: 'judge-score+ci';
+  /** IC95% do Δ (candidato − controle) em p.p. */
+  ci95: [number, number];
+  /** P(Δ > 0) — probabilidade de superioridade do candidato. */
+  p_superiority: number;
+  verdict: 'conclusivo' | 'inconclusivo';
+  /** Δ observado (candidato − controle) em p.p. */
+  deltaPp: number;
+  /** Pares com veredito nos DOIS lados (a unidade é o cenário). */
+  nEfetivo: number;
+  /** Granularidade mínima de Δ: 100/nEfetivo p.p. */
+  granularityPp: number;
+  /** Limiar de P(superioridade) aplicado. */
+  minPSuperiority: number;
+  /** O que segurou (vazio = conclusivo). */
+  holds: RecommendationHoldReason[];
+  /** n sugerido para detectar `targetDeltaPp` com 80% de poder (sempre presente). */
+  suggestedN: number;
+  /** Δ alvo (p.p.) da sugestão de n. */
+  targetDeltaPp: number;
+  /** Texto honesto — toda probabilidade vem com dígito adjacente. */
+  text: string;
+}
+
+export interface RecommendationOpts {
+  labels?: { candidate: string; control: string };
+  /** K candidatos comparados ("melhor de K"): o IC sai com α/k (Bonferroni). */
+  k?: number;
+  /** Limiar de P(superioridade). Default 0,8 (R-11a:REC-4). */
+  minPSuperiority?: number;
+  alpha?: number;
+  /** Δ alvo (p.p.) para a sugestão de n. Default 20. */
+  targetDeltaPp?: number;
+  power?: number;
+  sigmaD?: number;
+}
+
+/**
+ * Resumo paramétrico do Δ pareado (IC t com correção da melhor de K). O
+ * `pSuperiority` é Φ(Δ/SE) — a probabilidade de o candidato ser melhor; com
+ * SE = 0 o Δ é exato (0/0,5/1 sem dispersão) e a probabilidade é 1/0/0,5.
+ * O IC usa a t de Student (n−1 gl) — com n pequeno a normal subestima as caudas
+ * e a recomendação falsa passaria do α nominal (verificado no harness H0).
+ */
+export function meanCiSummary(
+  diffs: readonly number[],
+  opts?: { alpha?: number; k?: number },
+): MeanCiSummary {
+  const n = diffs.length;
+  if (n === 0) {
+    return { n: 0, meanPp: 0, sdPp: 0, sePp: 0, ci95Pp: [-100, 100], pSuperiority: 0.5 };
+  }
+  let sum = 0;
+  for (const d of diffs) sum += d;
+  const mean = sum / n;
+  let ss = 0;
+  for (const d of diffs) ss += (d - mean) ** 2;
+  const sd = n > 1 ? Math.sqrt(ss / (n - 1)) : 0;
+  const se = sd / Math.sqrt(n);
+  const k = Math.max(1, Math.floor(opts?.k ?? 1));
+  const alpha = opts?.alpha ?? 0.05;
+  // Bonferroni sobre as K comparações (a "melhor de K"): o IC do candidato
+  // escolhido entre K precisa do α/k para a recomendação não vencer por azar.
+  const tCrit = n > 1 ? studentTCritical(1 - alpha / k, n - 1) : Infinity;
+  const pSuperiority = se > 0 ? normalCdf(mean / se) : mean > 0 ? 1 : mean < 0 ? 0 : 0.5;
+  return {
+    n,
+    meanPp: round2(mean * 100),
+    sdPp: round2(sd * 100),
+    sePp: round2(se * 100),
+    ci95Pp: se > 0 ? [round2((mean - tCrit * se) * 100), round2((mean + tCrit * se) * 100)] : [round2(mean * 100), round2(mean * 100)],
+    pSuperiority: Number(pSuperiority.toFixed(4)),
+  };
+}
+
+/** Resumo paramétrico do Δ pareado em p.p. */
+export interface MeanCiSummary {
+  n: number;
+  meanPp: number;
+  sdPp: number;
+  sePp: number;
+  ci95Pp: [number, number];
+  pSuperiority: number;
+}
+
+/**
+ * Veredito de recomendação (R-11a:REC-4): RECUSA quando (i) nEfetivo < 5 pares
+ * com veredito, (ii) o IC95% do Δ cobre zero, (iii) P(superioridade) < 80%
+ * (limiar configurável) ou (iv) Δ < granularidade 100/n. O objeto devolvido é
+ * estável e o texto é honesto: empate técnico traz Δ, IC e P(A>B) COM dígitos e
+ * a sugestão de n para o próximo passo ("rode N=… cenários para detectar Δ=…
+ * p.p. com 80% de poder"). Nenhum rótulo verbal de probabilidade sem dígito.
+ *
+ * Com `k > 1` (candidato escolhido entre K — a "melhor de K") o IC sai com α/k
+ * (Bonferroni): sob H0 a recomendação falsa fica ≤ α (verificado no harness
+ * Monte Carlo de `test/recommendation-decision.test.ts`).
+ */
+export function recommendationDecision(
+  controlScores: readonly PairScore[],
+  candidateScores: readonly PairScore[],
+  opts?: RecommendationOpts,
+): RecommendationDecision {
+  const { diffs } = pairDiffs(controlScores, candidateScores);
+  const alpha = opts?.alpha ?? 0.05;
+  const k = Math.max(1, Math.floor(opts?.k ?? 1));
+  return recommendationFromSummary(meanCiSummary(diffs, { alpha, k }), opts);
+}
+
+/**
+ * O MESMO veredito a partir de um resumo já calculado — o caminho do CLI/UI
+ * quando só o record gravado existe (`sessions show`: o significativo guardado
+ * na sessão). A regra de recusa é idêntica.
+ */
+export function recommendationFromSummary(
+  s: MeanCiSummary,
+  opts?: RecommendationOpts,
+): RecommendationDecision {
+  const labels = opts?.labels ?? { candidate: 'Candidato', control: 'Controle' };
+  const alpha = opts?.alpha ?? 0.05;
+  const k = Math.max(1, Math.floor(opts?.k ?? 1));
+  const minPSuperiority = opts?.minPSuperiority ?? 0.8;
+  const targetDeltaPp = opts?.targetDeltaPp ?? 20;
+  const power = opts?.power ?? POWER_TARGET;
+  const nEfetivo = s.n;
+  const granularityPp = nEfetivo > 0 ? round2(100 / nEfetivo) : 100;
+  const holds: RecommendationHoldReason[] = [];
+  if (nEfetivo < MIN_PAIRS) holds.push('no-pairs');
+  if (s.ci95Pp[0] <= 0 && s.ci95Pp[1] >= 0) holds.push('ci-covers-zero');
+  if (!(s.pSuperiority >= minPSuperiority) && !(s.pSuperiority <= 1 - minPSuperiority)) {
+    holds.push('low-superiority');
+  }
+  if (Math.abs(s.meanPp) < granularityPp - 1e-9) holds.push('below-granularity');
+  // A recusa cobre a recomendação do CANDIDATO; o controle só é recomendado
+  // com a mesma evidência na direção oposta (simetria da regra).
+  const candidateBetter = holds.length === 0 && s.meanPp > 0;
+  const controlBetter = holds.length === 0 && s.meanPp < 0;
+  const verdict: 'conclusivo' | 'inconclusivo' = candidateBetter || controlBetter ? 'conclusivo' : 'inconclusivo';
+  const winner = candidateBetter ? labels.candidate : controlBetter ? labels.control : undefined;
+  const sigmaD = opts?.sigmaD ?? (s.sdPp > 0 ? s.sdPp / 100 : DEFAULT_SIGMA_D);
+  const suggestedN = nParaDeltaPp(targetDeltaPp, sigmaD, { alpha, power });
+  const decision: RecommendationDecision = {
+    winner,
+    ruler: 'judge-score+ci',
+    ci95: s.ci95Pp,
+    p_superiority: s.pSuperiority,
+    verdict,
+    deltaPp: s.meanPp,
+    nEfetivo,
+    granularityPp,
+    minPSuperiority,
+    holds,
+    suggestedN,
+    targetDeltaPp,
+    text: '',
+  };
+  decision.text = recommendationText(decision, labels, power);
+  return decision;
+}
+
+/**
+ * Veredito a partir da significância GRAVADA numa sessão (`sessions show`/UI):
+ * o IC e o Δ já estão no record; o erro-padrão sai da meia-amplitude do IC e a
+ * probabilidade de superioridade de Φ(Δ/SE) — a mesma régua do caminho com
+ * scores brutos.
+ */
+export function recommendationFromStored(
+  sig: SignificanceWithOrigin | null | undefined,
+  opts?: RecommendationOpts,
+): RecommendationDecision | null {
+  if (!sig) return null;
+  const n = sig.nEfetivo ?? sig.n;
+  const half = Math.abs(sig.ci95Pp[1] - sig.ci95Pp[0]) / 2;
+  const sePp = Number.isFinite(half) ? half / zOf(0.975) : 0;
+  const pSuperiority =
+    sePp > 0 ? normalCdf(sig.meanDiffPp / sePp) : sig.meanDiffPp > 0 ? 1 : sig.meanDiffPp < 0 ? 0 : 0.5;
+  return recommendationFromSummary(
+    {
+      n,
+      meanPp: sig.meanDiffPp,
+      sdPp: sePp > 0 ? round2(sePp * Math.sqrt(Math.max(1, n))) : 0,
+      sePp: round2(sePp),
+      ci95Pp: [sig.ci95Pp[0], sig.ci95Pp[1]],
+      pSuperiority: Number(pSuperiority.toFixed(4)),
+    },
+    opts,
+  );
+}
+
+/** Texto honesto do veredito (toda probabilidade com dígito adjacente). */
+function recommendationText(
+  d: RecommendationDecision,
+  labels: { candidate: string; control: string },
+  power: number,
+): string {
+  const pct = (x: number): string => `${Math.round(x * 100)}%`;
+  const ic = `IC95% [${fmtPpText(d.ci95[0])}; ${fmtPpText(d.ci95[1])}]`;
+  const pAB = `P(${labels.candidate}>${labels.control})=${pct(d.p_superiority)}`;
+  const rodada = `Rode N=${d.suggestedN} cenários para detectar Δ=${fmtPpText(d.targetDeltaPp)} p.p. com ${pct(power)} de poder.`;
+  if (d.verdict === 'conclusivo' && d.winner === labels.candidate) {
+    return (
+      `${labels.candidate} supera ${labels.control} (Δ=${fmtPpText(d.deltaPp)} p.p.; ${ic}; ${pAB}; n=${d.nEfetivo} pares): ` +
+      `recomendação conclusiva (limiar ${pct(d.minPSuperiority)} de P, granularidade ${fmtPpText(d.granularityPp)} p.p.). ${rodada}`
+    );
+  }
+  if (d.verdict === 'conclusivo' && d.winner === labels.control) {
+    return (
+      `${labels.control} supera ${labels.candidate} (Δ=${fmtPpText(d.deltaPp)} p.p.; ${ic}; ${pAB}; n=${d.nEfetivo} pares): ` +
+      `recomendo manter ${labels.control}. ${rodada}`
+    );
+  }
+  const motivo =
+    d.holds.includes('no-pairs')
+      ? `pares com veredito nos dois lados: ${d.nEfetivo} (mínimo ${MIN_PAIRS})`
+      : d.holds.includes('ci-covers-zero')
+        ? `o ${ic} cobre zero`
+        : d.holds.includes('low-superiority')
+          ? `${pAB} abaixo de ${pct(d.minPSuperiority)}`
+          : `Δ abaixo da granularidade ${fmtPpText(d.granularityPp)} p.p.`;
+  return (
+    `Empate técnico entre ${labels.control} e ${labels.candidate} ` +
+    `(Δ=${fmtPpText(d.deltaPp)} p.p.; ${ic}; ${pAB}): ${motivo} — evidência insuficiente para recomendar. ${rodada}`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// IMPL-050 (R-04:REC-5) — origem do p em TODO relatório de significância
+// ---------------------------------------------------------------------------
+
+/**
+ * De onde veio o p exibido (R-04 DEC-7): `holdout` = UM teste final em holdout
+ * intocado (α=0,05 unilateral, confirmatório); `selecao` = a PRÓPRIA run de
+ * seleção (anti-conservador: o p mede o mesmo dado que escolheu o melhor);
+ * `sem p` = não há p válido (n efetivo < 5, ou bootstrap legado — que nem
+ * p-valor é).
+ */
+export type SignificanceOrigin = 'holdout' | 'selecao' | 'sem p';
+
+/** `StoredSignificance` com a origem do p (registrada pelo trainer no gate final). */
+export type SignificanceWithOrigin = StoredSignificance & { pOrigin?: SignificanceOrigin };
+
+const ORIGIN_LABEL: Record<SignificanceOrigin, string> = {
+  holdout: 'holdout (α=0,05 unilateral, confirmatório)',
+  selecao: 'seleção (anti-conservador)',
+  'sem p': 'sem p',
+};
+
+/** Origem do p de uma significância gravada — SEMPRE rotulada. */
+export function significanceOrigin(sig: SignificanceWithOrigin): SignificanceOrigin {
+  if (sig.pOrigin) return sig.pOrigin;
+  // Legado sem rótulo: o bootstrap antigo não é p-valor; o resto é tratado como
+  // seleção (o pior caso — anti-conservador) até a origem ser registrada.
+  return reportPValue(sig).kind === 'legacy' ? 'sem p' : 'selecao';
+}
+
+/** Linha de origem do p — o mesmo texto no CLI e na UI. */
+export function formatSignificanceOrigin(sig: SignificanceWithOrigin | null | undefined): string {
+  if (!sig) return `origem do p: ${ORIGIN_LABEL['sem p']}`;
+  return `origem do p: ${ORIGIN_LABEL[significanceOrigin(sig)]}`;
+}
+
+// ---------------------------------------------------------------------------
+// IMPL-054 (R-04:REC-7 / R-14a:REC-5) — repetição ≠ observação independente
+// ---------------------------------------------------------------------------
+
+/**
+ * Agrega repetições DENTRO de cada cenário (o par analítico é o CENÁRIO).
+ * O vetor plano do orchestrator é cenário-major ([c0r0, c0r1, c1r0, …]): cada
+ * bloco de `repeatsPerScenario` posições vira a MÉDIA das reps observadas
+ * (cenário sem nenhuma observação → `null` — sem observação, nunca 'nao').
+ */
+export function aggregateByScenario(
+  values: readonly PairScore[],
+  repeatsPerScenario: number,
+): PairScore[] {
+  const m = Math.max(1, Math.floor(repeatsPerScenario));
+  if (m <= 1) return [...values];
+  const out: PairScore[] = [];
+  for (let i = 0; i < values.length; i += m) {
+    let sum = 0;
+    let n = 0;
+    for (let r = 0; r < m && i + r < values.length; r += 1) {
+      const v = values[i + r];
+      if (isObs(v)) {
+        sum += v;
+        n += 1;
+      }
+    }
+    out.push(n > 0 ? sum / n : null);
+  }
+  return out;
+}
+
+/**
+ * Diagnóstico de repetição de UM contestant: ICC (efeitos aleatórios de via
+ * única, design balanceado), design effect DE = 1+(m−1)·ICC, inflação do
+ * erro-padrão √DE e o n EFETIVO = n·m/DE (o n honesto do teste pareado —
+ * repetição não dobra o n).
+ */
+export interface RepetitionDiagnostics {
+  /** Cenários distintos. */
+  scenarios: number;
+  /** Repeticoes por cenário (m). */
+  repsPerScenario: number;
+  /** Observações planas (cenario × rep) com veredito. */
+  observations: number;
+  /** ICC em [0,1]; null quando m = 1 ou não há dispersão estimável. */
+  icc: number | null;
+  /** DE = 1+(m−1)·ICC; null quando ICC é null. */
+  designEffect: number | null;
+  /** √DE — quanto o erro-padrão infla ao tratar reps como independentes. */
+  seInflation: number | null;
+  /** n efetivo = n·m/DE (com m = 1 é o próprio n). */
+  nEfetivo: number;
+  /** ICC < 0,5 (faixa de tarefas agênticas) → mais cenários, não mais reps. */
+  advice: 'more-scenarios' | 'balanced' | 'single-shot';
+}
+
+/**
+ * ICC de uma matriz [cenário][rep] de scores 0–1 (ANOVA de via única,
+ * balanceado: só cenários com TODAS as m reps observadas informam). Negativos
+ * (ruído maior que o sinal) são truncados em 0 — o design effect não pode ser
+ * < 1. ICC > 0,3 ⇒ mais cenários valem mais que mais repetições (R-14a:REC-10).
+ */
+export function iccOneWay(rows: readonly (readonly PairScore[])[]): number | null {
+  const complete = rows.filter((r) => r.length >= 2 && r.every(isObs)) as number[][];
+  const m = complete.length > 0 ? complete[0].length : 0;
+  if (m < 2 || complete.length < 2) return null;
+  const bal = complete.filter((r) => r.length === m);
+  if (bal.length < 2) return null;
+  const n = bal.length;
+  let grand = 0;
+  for (const row of bal) for (const v of row) grand += v;
+  grand /= n * m;
+  let ssBetween = 0;
+  let ssWithin = 0;
+  for (const row of bal) {
+    const mean = row.reduce((a, b) => a + b, 0) / m;
+    ssBetween += m * (mean - grand) ** 2;
+    for (const v of row) ssWithin += (v - mean) ** 2;
+  }
+  const msBetween = ssBetween / (n - 1);
+  const msWithin = ssWithin > 0 ? ssWithin / (n * (m - 1)) : 0;
+  if (msWithin === 0) return msBetween > 0 ? 1 : 0;
+  const icc = (msBetween - msWithin) / (msBetween + (m - 1) * msWithin);
+  return Math.min(1, Math.max(0, icc));
+}
+
+/**
+ * Diagnóstico de repetição a partir do vetor PLANO (cenário-major) de scores.
+ * Com m = 1 não há o que estimar: ICC null, DE 1, nEfetivo = n observado.
+ */
+export function repetitionDiagnostics(
+  flatScores: readonly PairScore[],
+  repeatsPerScenario: number,
+): RepetitionDiagnostics {
+  const m = Math.max(1, Math.floor(repeatsPerScenario));
+  const rows: PairScore[][] = [];
+  if (m > 1) {
+    for (let i = 0; i < flatScores.length; i += m) {
+      rows.push(Array.from({ length: Math.min(m, flatScores.length - i) }, (_, r) => flatScores[i + r]));
+    }
+  } else {
+    for (const v of flatScores) rows.push([v]);
+  }
+  return repetitionDiagnosticsFromRows(rows);
+}
+
+/**
+ * O mesmo diagnóstico a partir da matriz [cenário][rep] (geometria do agente:
+ * reps DENTRO da etapa via `verdictsByRep`). nEfetivo = observações/DE — o n
+ * honesto do teste pareado, com repetição agregada dentro do cenário.
+ */
+export function repetitionDiagnosticsFromRows(
+  rows: readonly (readonly PairScore[])[],
+): RepetitionDiagnostics {
+  const scenarios = rows.length;
+  const m = rows.reduce((mx, r) => Math.max(mx, r.length), 0);
+  let observations = 0;
+  for (const r of rows) for (const v of r) if (isObs(v)) observations += 1;
+  if (m <= 1) {
+    return {
+      scenarios,
+      repsPerScenario: 1,
+      observations,
+      icc: null,
+      designEffect: null,
+      seInflation: null,
+      nEfetivo: observations,
+      advice: observations >= 20 ? 'balanced' : 'more-scenarios',
+    };
+  }
+  const icc = iccOneWay(rows);
+  const designEffect = icc === null ? null : 1 + (m - 1) * icc;
+  const seInflation = designEffect === null ? null : Math.sqrt(designEffect);
+  const nEfetivo =
+    designEffect === null || designEffect <= 0
+      ? scenarios
+      : Math.max(1, Math.round((observations / designEffect) * 100) / 100);
+  return {
+    scenarios,
+    repsPerScenario: m,
+    observations,
+    icc,
+    designEffect: designEffect === null ? null : round2(designEffect),
+    seInflation: seInflation === null ? null : round2(seInflation),
+    nEfetivo,
+    advice: icc !== null && icc > 0.3 ? 'more-scenarios' : 'balanced',
+  };
+}
+
+/** Regra de sucesso do pass@k/pass^k — SUCESSO EXPLÍCITO, nunca implícito. */
+export type SuccessRule = 'resolve' | 'resolve-ou-parcial';
+
+export const SUCCESS_RULE_DEFINITION: Record<SuccessRule, string> = {
+  resolve: 'sucesso = veredito "resolve" (regra principal)',
+  'resolve-ou-parcial': 'sensibilidade: sucesso = "resolve" OU "parcial"',
+};
+
+const isSuccess = (v: Verdict | undefined, rule: SuccessRule): boolean =>
+  v === 'resolve' || (rule === 'resolve-ou-parcial' && v === 'parcial');
+
+/**
+ * pass@k pelo estimador NÃO ENVIESADO de Chen et al. (2021):
+ * 1 − C(n−c, k)/C(n, k), computado como 1 − Π_{i=n−c+1}^{n} (1 − k/i).
+ * `n` = tentativas, `c` = sucessos, `k` = escolhidas. Sem enviesar para cima
+ * com o plug-in c/n (com k = n o plug-in subestima o "pelo menos k de n").
+ */
+export function passAtK(n: number, c: number, k: number): number {
+  const nn = Math.max(0, Math.floor(n));
+  const cc = Math.min(Math.max(0, Math.floor(c)), nn);
+  const kk = Math.floor(k);
+  if (nn === 0 || kk <= 0) return 0;
+  if (kk > nn) return Number.NaN;
+  if (nn - cc < kk) return 1;
+  let prod = 1;
+  for (let i = nn - cc + 1; i <= nn; i += 1) prod *= 1 - kk / i;
+  return clamp01(1 - prod);
+}
+
+/** Relatório pass@k / pass^k de UM contestant (matriz [cenário][rep]). */
+export interface PassAtKReport {
+  k: number;
+  scenarios: number;
+  rule: SuccessRule;
+  /** Definição explícita da regra de sucesso (vai no relatório). */
+  ruleDefinition: string;
+  /** pass@k (Chen) — média sobre os cenários. */
+  passAtK: number;
+  /**
+   * pass^k (τ-bench): fração de cenários em que TODAS as k tentativas
+   * tiveram sucesso — a confiabilidade de "acerta sempre", não "acerta uma vez".
+   */
+  passK: number;
+  /** Sucessos por cenário (contagem sobre as reps observadas). */
+  successesByScenario: number[];
+}
+
+/**
+ * pass@k (Chen) e pass^k sobre a matriz [cenário][rep] de vereditos.
+ * `k` padrão = número de reps observadas por cenário.
+ */
+export function passAtKReport(
+  rows: readonly (readonly (Verdict | undefined)[])[],
+  k: number,
+  rule: SuccessRule = 'resolve',
+): PassAtKReport {
+  const successesByScenario = rows.map((r) => r.filter((v) => isSuccess(v, rule)).length);
+  const sizes = rows.map((r) => r.length);
+  const kk = Math.max(1, Math.floor(k));
+  let atK = 0;
+  let allK = 0;
+  let counted = 0;
+  rows.forEach((r, i) => {
+    const n = sizes[i];
+    if (n === 0) return;
+    counted += 1;
+    atK += passAtK(n, successesByScenario[i], Math.min(kk, n));
+    // pass^k: só cenários com k tentativas declaráveis entram; sucesso = todas.
+    if (n >= kk) allK += successesByScenario[i] >= kk ? 1 : 0;
+  });
+  return {
+    k: kk,
+    scenarios: rows.length,
+    rule,
+    ruleDefinition: SUCCESS_RULE_DEFINITION[rule],
+    passAtK: counted > 0 ? round4(atK / counted) : 0,
+    passK: counted > 0 ? round4(allK / counted) : 0,
+    successesByScenario,
+  };
+}
+
+/**
+ * Matriz [cenário][rep] de vereditos de um contestant (IMPL-054). Duas
+ * geometrias de repetição:
+ * - `agent.repetitions` > 1: `referenceJudge.verdictsByRep` (reps DENTRO da etapa);
+ * - `repeats` > 1 (compare): vetor PLANO cenário-major (clones consecutivos).
+ * Etapa `incomplete`/`error` entra como linha vazia (sem observação).
+ */
+export function repVerdictMatrix(
+  stages: readonly StageVerdictsLike[],
+  contestantId: string,
+  opts: { repeatsPerScenario?: number; ruler?: 'reference' | 'listwise' } = {},
+): (Verdict | undefined)[][] {
+  const ruler = opts.ruler ?? primaryRuler(stages);
+  const m = Math.max(1, Math.floor(opts.repeatsPerScenario ?? 1));
+  const rows: (Verdict | undefined)[][] = [];
+  for (let i = 0; i < stages.length; i += m) {
+    const row: (Verdict | undefined)[] = [];
+    for (let r = 0; r < m && i + r < stages.length; r += 1) {
+      const stage = stages[i + r];
+      const bearer = ruler === 'reference' ? stage.referenceJudge : stage.judge;
+      const porRep = bearer?.verdictsByRep?.[contestantId];
+      if (porRep && porRep.length > 0) {
+        for (const v of porRep) row.push(isVerdict(v) ? v : undefined);
+      } else {
+        const obs = stageObservation(stage, contestantId, ruler);
+        row.push('verdict' in obs ? obs.verdict : undefined);
+      }
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** Linhas de relatório de repetição (`runs show`), sempre com dígitos. */
+export function formatRepetitionReport(d: RepetitionDiagnostics, pass?: PassAtKReport): string[] {
+  const lines = [
+    `repetições: m=${d.repsPerScenario} × ${d.scenarios} cenários (${d.observations} observações)`,
+  ];
+  if (d.icc !== null && d.designEffect !== null && d.seInflation !== null) {
+    lines.push(
+      `ICC=${d.icc.toFixed(3)} · design effect DE=${d.designEffect.toFixed(3)} (√DE=${d.seInflation.toFixed(3)} inflação do erro-padrão) · nEfetivo=${d.nEfetivo} (de ${d.observations} observações)`,
+    );
+  } else {
+    lines.push(`nEfetivo=${d.nEfetivo} (sem ICC estimável: m=1 ou reps incompletas)`);
+  }
+  if (d.advice === 'more-scenarios') {
+    lines.push(
+      `ICC=${(d.icc ?? 0).toFixed(3)} > 0,3: repetições agregam pouco — prefira MAIS CENÁRIOS (cada cenário novo vale mais que uma rep nova)`,
+    );
+  }
+  if (pass) {
+    lines.push(
+      `pass@${pass.k}=${(pass.passAtK * 100).toFixed(1)}% · pass^${pass.k}=${(pass.passK * 100).toFixed(1)}% (${pass.ruleDefinition}; ${pass.scenarios} cenários)`,
+    );
   }
   return lines;
 }

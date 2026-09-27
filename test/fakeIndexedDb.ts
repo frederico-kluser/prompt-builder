@@ -53,6 +53,8 @@ class FakeRequest {
   error: DOMException | null = null;
   onsuccess: Handler = null;
   onerror: Handler = null;
+  /** Só o `deleteDatabase` dispara (outra aba segura conexão aberta). */
+  onblocked: Handler = null;
   readyState: 'pending' | 'done' = 'pending';
 }
 
@@ -236,6 +238,10 @@ export class FakeIdb {
   /** Nome do DOMException ao abrir (ex.: 'InvalidStateError' do modo privado). */
   openFailure: string | undefined;
   opens = 0;
+  /** Nomes pedidos em `open` (IMPL-100: contrato — o wipe apaga o MESMO banco que se abre). */
+  readonly openNames: string[] = [];
+  /** Nomes pedidos em `deleteDatabase`. */
+  readonly deletedNames: string[] = [];
   private version = 0;
   private readonly connections: FakeDatabase[] = [];
   private putFailures: { store: string; name: string; times: number }[] = [];
@@ -288,8 +294,9 @@ export class FakeIdb {
 
   /** A fábrica para `setIdbFactory`. */
   readonly factory = {
-    open: (_name: string, version?: number): FakeOpenRequest => {
+    open: (name: string, version?: number): FakeOpenRequest => {
       this.opens += 1;
+      this.openNames.push(name);
       const req = new FakeOpenRequest();
       tarefa(() => {
         if (this.openFailure) {
@@ -307,6 +314,32 @@ export class FakeIdb {
         req.readyState = 'done';
         req.onsuccess?.(evento('success', req));
       });
+      return req;
+    },
+    /** `deleteDatabase`: espera o fecho das conexões (dispara `onblocked`), depois apaga TUDO. */
+    deleteDatabase: (name: string): FakeRequest => {
+      this.deletedNames.push(name);
+      const req = new FakeRequest();
+      let tentativas = 0;
+      const tenta = (): void => {
+        const abertas = this.connections.some((c) => !c.closed);
+        if (abertas && tentativas++ < 500) {
+          if (tentativas === 1) req.onblocked?.(evento('blocked', req));
+          tarefa(tenta);
+          return;
+        }
+        if (abertas) {
+          req.error = new DOMException('bloqueado', 'InvalidStateError');
+          req.readyState = 'done';
+          req.onerror?.(evento('error', req));
+          return;
+        }
+        this.data.clear();
+        this.version = 0;
+        req.readyState = 'done';
+        req.onsuccess?.(evento('success', req));
+      };
+      tarefa(tenta);
       return req;
     },
   } as unknown as IDBFactory;

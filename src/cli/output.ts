@@ -387,6 +387,12 @@ export interface OutputOptions {
   format: OutputFormat;
   quiet?: boolean;
   color?: boolean;
+  /**
+   * `--pretty` (IMPL-092): o JSON sai COMPACTO por padrão — o catálogo inteiro
+   * indentado custava ~2× tokens sem dar nada a um consumidor-maquina — e este
+   * flag formata com 2 espaços.
+   */
+  pretty?: boolean;
 }
 
 export class Output {
@@ -394,6 +400,16 @@ export class Output {
 
   get format(): OutputFormat {
     return this.opts.format;
+  }
+
+  /** `--pretty` ligado? */
+  get pretty(): boolean {
+    return this.opts.pretty === true;
+  }
+
+  /** Serialização de payload JSON: compacta por padrão, indentada com `--pretty`. */
+  json(value: unknown): string {
+    return this.pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value);
   }
 
   get isNdjson(): boolean {
@@ -448,7 +464,7 @@ export class Output {
       return;
     }
     if (this.opts.format === 'json') {
-      process.stdout.write(`${JSON.stringify({ ok, command, data }, null, 2)}\n`);
+      process.stdout.write(`${this.json({ ok, command, data })}\n`);
     } else {
       this.ndjsonLine('result', { ok, command, ...data });
     }
@@ -468,7 +484,7 @@ export class Output {
       return cliErr;
     }
     if (this.opts.format === 'json') {
-      process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
+      process.stdout.write(`${this.json(envelope)}\n`);
     } else {
       this.ndjsonLine('result', { ...envelope });
     }

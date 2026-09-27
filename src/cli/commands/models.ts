@@ -26,7 +26,14 @@ import {
   type MaxPriceFilterResult,
 } from '../../engine/pricing.js';
 import { CliError, EXIT } from '../output.js';
-import { buildCatalogContext, buildContext, parse, type ParsedArgs } from '../context.js';
+import {
+  buildCatalogContext,
+  buildContext,
+  limitList,
+  parse,
+  parseListLimit,
+  type ParsedArgs,
+} from '../context.js';
 import { daysUntil, describeSuccessor, lifecycleAlertFor } from '../../engine/modelLifecycle.js';
 import type { OpenRouterModel, ReasoningLevel } from '../../types.js';
 
@@ -44,7 +51,9 @@ const OPTIONS = {
   free: { type: 'boolean' },
   'lgpd-area': { type: 'string' },
   'include-ressalvas': { type: 'boolean' },
+  // IMPL-092: teto de lista — default 50, --all devolve a lista inteira.
   limit: { type: 'string' },
+  all: { type: 'boolean' },
   expiring: { type: 'string' },
   format: { type: 'string' },
   out: { type: 'string', short: 'o' },
@@ -396,8 +405,11 @@ export async function cmdModels(argv: string[]): Promise<number> {
     const h = allowlistHealth(getLgpdData().allowlist);
     if (h.state !== 'ok') out.warn(h.message);
   }
-  const limit = num(values.limit, '--limit');
-  const rows = (limit !== undefined ? filtrados.slice(0, limit) : filtrados).map(toExportRow);
+  // IMPL-092: teto default de 50 itens — `models list --json` sem flags já
+  // devolveu o catálogo inteiro (~594 KB ≈ 150 mil tokens, satura o contexto
+  // do agente). --all é a decisão explícita de querer tudo; truncar avisa.
+  const cap = parseListLimit(values);
+  const rows = limitList(filtrados, cap, out, 'modelos').map(toExportRow);
 
   const format =
     typeof values.format === 'string'
@@ -410,21 +422,22 @@ export async function cmdModels(argv: string[]): Promise<number> {
             ? 'json'
             : 'table';
 
+  // JSON compacto por padrão (--pretty formata) — IMPL-092.
+  const json = (v: unknown): string => (values.pretty === true ? JSON.stringify(v, null, 2) : JSON.stringify(v));
+
   let payload: string;
   switch (format) {
     case 'json':
-      payload = JSON.stringify(
-        {
-          format: MODELS_EXPORT_FORMAT,
-          fetchedAt: new Date().toISOString(),
-          source: ctx.catalogSource,
-          scope: ctx.catalogScope,
-          count: rows.length,
-          data: rows,
-        },
-        null,
-        2,
-      );
+      payload = json({
+        format: MODELS_EXPORT_FORMAT,
+        fetchedAt: new Date().toISOString(),
+        source: ctx.catalogSource,
+        scope: ctx.catalogScope,
+        count: rows.length,
+        total: filtrados.length,
+        truncated: rows.length < filtrados.length,
+        data: rows,
+      });
       break;
     case 'ndjson':
       payload = rows.map((r) => JSON.stringify(r)).join('\n');

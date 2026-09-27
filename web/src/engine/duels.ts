@@ -19,6 +19,7 @@ import type {
   Contestant,
   DuelFailure,
   DuelOutcome,
+  JudgeConfidence,
   ReasoningLevel,
   RunCtx,
   StageDuels,
@@ -176,7 +177,9 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
   const judgeOnce = (
     firstId: string,
     secondId: string,
-  ): Promise<JudgeAttempt<{ winner: 'A' | 'B' | 'tie'; explanation: string; canary: string }>> => {
+  ): Promise<
+    JudgeAttempt<{ winner: 'A' | 'B' | 'tie'; explanation: string; canary: string; confianca?: JudgeConfidence }>
+  > => {
     // Marcador + canário sorteados AQUI: cada ORDEM é um veredito próprio.
     const prompt = buildDuelPrompt(
       stage,
@@ -279,8 +282,26 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
           failure: {
             a,
             b,
-            ...(v1.ok && o1 ? { order1: { winner: o1, explanation: v1.value.explanation, canary: v1.value.canary } } : {}),
-            ...(v2.ok && o2 ? { order2: { winner: o2, explanation: v2.value.explanation, canary: v2.value.canary } } : {}),
+            ...(v1.ok && o1
+              ? {
+                  order1: {
+                    winner: o1,
+                    explanation: v1.value.explanation,
+                    canary: v1.value.canary,
+                    ...(v1.value.confianca ? { confidence: v1.value.confianca } : {}),
+                  },
+                }
+              : {}),
+            ...(v2.ok && o2
+              ? {
+                  order2: {
+                    winner: o2,
+                    explanation: v2.value.explanation,
+                    canary: v2.value.canary,
+                    ...(v2.value.confianca ? { confidence: v2.value.confianca } : {}),
+                  },
+                }
+              : {}),
             error: falha ?? { kind: 'judge_failed', message: 'Ordem do duelo sem resultado.' },
           },
         };
@@ -288,8 +309,18 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
       const duel: DuelOutcome = {
         a,
         b,
-        order1: { winner: o1, explanation: v1.value.explanation, canary: v1.value.canary },
-        order2: { winner: o2, explanation: v2.value.explanation, canary: v2.value.canary },
+        order1: {
+          winner: o1,
+          explanation: v1.value.explanation,
+          canary: v1.value.canary,
+          ...(v1.value.confianca ? { confidence: v1.value.confianca } : {}),
+        },
+        order2: {
+          winner: o2,
+          explanation: v2.value.explanation,
+          canary: v2.value.canary,
+          ...(v2.value.confianca ? { confidence: v2.value.confianca } : {}),
+        },
         outcome: combineDuelOrders(o1, o2),
         source: 'judge',
       };

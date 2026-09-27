@@ -807,7 +807,14 @@ describe('IMPL-034 — pipeline Node: verify[] ⇒ 0 gabarito e finais decididas
         }
         expect(rec.judgeScoreByContestant).toEqual({ 'fake/a': 100, 'fake/b': 100 });
         // O pin de calibração é o do juiz de DOSSIÊ (muda quando o prompt dele muda).
-        expect(rec.judgeDiagnostics?.contract.hash).toBe(judgeContractHash(['fake/judge'], AGENT_JUDGE_SYSTEM_PROMPT));
+        // IMPL-049: o hash cobre também os componentes do contrato (prompt do
+        // duelo/listwise, referência, think level, provedor) — recompute com os
+        // MESMOS componentes pinados e confirme o setup (juiz + prompt de dossiê).
+        const pin = rec.judgeDiagnostics!.contract;
+        expect(pin.modelIds).toEqual(['fake/judge']);
+        expect(pin.hash).toBe(
+          judgeContractHash(['fake/judge'], AGENT_JUDGE_SYSTEM_PROMPT, pin.components),
+        );
         // (b) Finais PELO ORÁCULO: houve final, sem nenhuma chamada de duelo LLM;
         //     oráculo empatado (1 vs 1) ⇒ empate honesto.
         expect(rec.finalists).toHaveLength(2);

@@ -60,6 +60,11 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   roleLimits: 'shim',
   // Onda 2: identidade de conteúdo (contentHash/JCS) — fonte única em src/engine/hash.ts.
   hash: 'shim',
+  // IMPL-087/IMPL-089 (R-22): curadoria por item (states/contentHash/provenance)
+  // e o formato de troca prompt-builder-exchange@1 são fonte única em
+  // src/engine/ — o web re-exporta por shim (nunca uma terceira cópia).
+  libraryCore: 'shim',
+  exchange: 'shim',
   // Pares mantidos à mão (seams diferentes). Ao mudar UM lado, mude o outro.
   configFile: 'mirror',
   duels: 'mirror', // a MATEMÁTICA é compartilhada via src/engine/duelCore.ts (src lê dossiê de agente do disco)
@@ -84,6 +89,8 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
 const CANONICO_EM: Record<string, string> = {
   caseInput: 'engine/caseInput',
   hash: 'engine/hash',
+  libraryCore: 'engine/libraryCore',
+  exchange: 'engine/exchange',
 };
 
 /**

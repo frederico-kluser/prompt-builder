@@ -24,9 +24,66 @@
 import type { ReasoningLevel } from '../types.js';
 
 /**
+ * Um check do oráculo/regressão da tarefa (IMPL-039 + IMPL-098).
+ * `fail_to_pass` (default) = o que a tarefa pede (falha no seed, tem de passar);
+ * `pass_to_pass` = REGRESSÃO (passava no seed e tem de continuar passando).
+ */
+export interface AgentTaskCheck {
+  cmd: string;
+  expectExit?: number;
+  timeoutMs?: number;
+  weight?: number;
+  /** Rótulo curto p/ o dossiê e o CSV ("testes unitários", "typecheck", "lint"). */
+  label?: string;
+  kind?: 'fail_to_pass' | 'pass_to_pass';
+  /**
+   * IMPL-098 — check CRÍTICO: o veredito dele decide sozinho (falhou ⇒ score 0
+   * mesmo com os pesos; passou no seed ⇒ barreira de `fail-before`). Os pesos
+   * não o substituem: `weight` é para os checks comuns.
+   */
+  critical?: boolean;
+}
+
+/**
+ * IMPL-098 (agentTask@2) — SOLUÇÃO DE REFERÊNCIA ("golden"). Obrigatória em
+ * modo validate: sem ela não há `pass-after` validável nem `flakiness` medível.
+ * `script` = comando shell que implementa a solução; `diff` = patch unificado
+ * aplicado com `git apply` sobre o seed.
+ */
+export type AgentTaskSolution = { kind: 'script'; script: string } | { kind: 'diff'; diff: string };
+
+/**
+ * IMPL-098 — ambiente FIXADO por digest (imagem OCI ou lockfile). `path`, quando
+ * existe, tem de ser ABSOLUTO (path relativo é rejeitado pelo schema: um
+ * caminho relativo muda de significado com o cwd e quebra a reprodutibilidade).
+ */
+export interface AgentTaskEnv {
+  /** `sha256:<hex>` ou `<ref>@sha256:<hex>`. */
+  digest: string;
+  /** Caminho absoluto do lockfile/imagem local, quando houver. */
+  path?: string;
+}
+
+/** IMPL-098 — metadados da tarefa (proveniência e curadoria). */
+export interface AgentTaskMetadata {
+  /** De onde veio (dataset, repo, mineração --from-commit…). */
+  origin?: string;
+  /** Commit de origem, quando minerada de um repo. */
+  commit?: string;
+  difficulty?: 'easy' | 'medium' | 'hard';
+  tags?: string[];
+  /** Canário de sala limpa/sanidade: roda sempre, não entra no placar. */
+  canary?: boolean;
+}
+
+/**
  * O que transforma uma etapa em tarefa executável. Tudo aqui descreve o MUNDO
  * em que o agente acorda — nunca o agente em si (isso é `AgentRunnerConfig`).
  * Separar os dois é o que permite rodar a MESMA tarefa com agentes diferentes.
+ *
+ * Formato `arena-agent-config@2` (IMPL-098): os campos novos (`solution`,
+ * `regression[]`, `testsDir`, `env`, `metadata`) são ADITIVOS — o @1 continua
+ * legível (schema em `taskSchema.ts`).
  */
 export interface AgentTaskSpec {
   /**
@@ -68,20 +125,37 @@ export interface AgentTaskSpec {
    * Quando existe oráculo, ele MANDA. É a única parte do julgamento que não
    * depende de um LLM ter um bom dia.
    */
-  verify?: {
-    cmd: string;
-    expectExit?: number;
-    timeoutMs?: number;
-    weight?: number;
-    /** Rótulo curto p/ o dossiê e o CSV ("testes unitários", "typecheck", "lint"). */
-    label?: string;
-    /**
-     * IMPL-039 — papel do check. `fail_to_pass` (default) = o que a tarefa pede
-     * (falha no seed, tem de passar); `pass_to_pass` = REGRESSÃO (passava no seed
-     * e tem de continuar passando). Quebrar um P2P zera a nota: a execução FALHOU.
-     */
-    kind?: 'fail_to_pass' | 'pass_to_pass';
-  }[];
+  verify?: AgentTaskCheck[];
+
+  /**
+   * IMPL-098 (agentTask@2) — REGRESSÃO (PASS_TO_PASS): checks que já passavam
+   * no seed e têm de continuar passando depois da solução. Na prática entram no
+   * oráculo como `kind: 'pass_to_pass'` (quebrar um zera a nota).
+   */
+  regression?: AgentTaskCheck[];
+
+  /**
+   * IMPL-098 (agentTask@2) — SOLUÇÃO DE REFERÊNCIA. Obrigatória em modo
+   * validate (`taskSchema.ts`): é o que valida `pass-after`, `flakiness`,
+   * `trivialidade` e `oráculo fraco` (IMPL-097).
+   */
+  solution?: AgentTaskSolution;
+
+  /**
+   * IMPL-098 (agentTask@2) — `tests/` copiado para o verificador DEPOIS do
+   * agente, NUNCA no workspace durante a execução (o agente não entrega o
+   * próprio teste adulterado — padrão Harbor/SWE-bench). Caminho relativo ao
+   * diretório da configuração; o conteúdo é colhido na compilação/execução.
+   */
+  testsDir?: string;
+
+  /**
+   * IMPL-098 (agentTask@2) — ambiente fixado por digest (imagem/lockfile).
+   */
+  env?: AgentTaskEnv;
+
+  /** IMPL-098 (agentTask@2) — metadados (proveniência, dificuldade, canário). */
+  metadata?: AgentTaskMetadata;
 
   /**
    * Caminhos que o agente NÃO pode tocar. Violação => veredito 'nao' automático,
@@ -427,9 +501,16 @@ export interface ExecutionRecord {
  * nunca o formato do executor), senão trocar de executor vira reescrita. É uma
  * função pura que roda uma vez e grava `trajectory.json`; o bruto continua em
  * disco — normalizar não é descartar.
+ *
+ * Duas versões em circulação (IMPL-095):
+ * - `agent-trajectory@1` — o que `fromPi` produz hoje (turnos só do agente);
+ * - `agent-trajectory@2` — formato de INTERCÂMBIO (R-14b:REC-3 / R-14c:REC-8):
+ *   cada turno ganha `source` (system/user/agent) e `timestamp`, o que torna o
+ *   round-trip ATIF↔próprio sem perda possível. Os leitores aceitam as duas —
+ *   os campos novos são aditivos e opcionais.
  */
 export interface AgentTrajectory {
-  format: 'agent-trajectory@1';
+  format: 'agent-trajectory@1' | 'agent-trajectory@2';
   executor: { id: string; version: string };
   model: { provider: string; id: string; thinking?: ReasoningLevel };
   startedAt: string;
@@ -456,6 +537,15 @@ export interface AgentTrajectory {
 
 export interface AgentTurn {
   index: number;
+  /**
+   * Quem falou (IMPL-095, `agent-trajectory@2`): `agent` (default — o agente)
+   * ou as mensagens de CONTEXTO que rodeiam os turnos (`user` = enunciado,
+   * `system` = instrução de sistema) — sem elas o intercâmbio ATIF perderia
+   * mensagens no round-trip.
+   */
+  source?: 'system' | 'user' | 'agent';
+  /** ISO do instante do turno (IMPL-095, `agent-trajectory@2`). */
+  timestamp?: string;
   /** Texto visível do assistente neste turno. */
   text?: string;
   /** Raciocínio, quando o executor expõe. Vai para o disco; ao juiz só com flag. */

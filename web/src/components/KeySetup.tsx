@@ -26,6 +26,40 @@ function describeKey(res: ValidateKeyResponse): string {
   return parts.join(' ') + '.';
 }
 
+/** Aviso ACIONÁVEL quando GET /key não devolve limite (IMPL-111 critério b). */
+export function keyLimitWarning(
+  res: Pick<ValidateKeyResponse, 'ok' | 'limitUsd'>,
+): { text: string; href: string; action: string } | null {
+  if (!res.ok) return null;
+  if (res.limitUsd !== null && res.limitUsd !== undefined) return null;
+  return {
+    text: 'Sem limite de crédito — defina um limite na página de keys.',
+    href: 'https://openrouter.ai/keys',
+    action: 'definir limite ↗',
+  };
+}
+
+/** Banner do aviso acionável (extraído p/ o teste de DOM — IMPL-111 critério b). */
+export function KeyLimitAlert({
+  warning,
+}: {
+  warning: NonNullable<ReturnType<typeof keyLimitWarning>>;
+}) {
+  return (
+    <Banner tone="warn" alert className="mt-3">
+      {warning.text}{' '}
+      <a
+        className="font-medium text-primary underline-offset-4 hover:underline"
+        href={warning.href}
+        target="_blank"
+        rel="noreferrer"
+      >
+        {warning.action}
+      </a>
+    </Banner>
+  );
+}
+
 // Rótulo e glifo do botão por estado — o MultiStateButton morfa a largura entre eles.
 const BUTTON_LABEL: Record<Status, string> = {
   idle: 'Validar e salvar',
@@ -38,6 +72,7 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
   const [key, setKey] = useState(getStoredKey());
   const [status, setStatus] = useState<Status>(getStoredKey() ? 'valid' : 'idle');
   const [message, setMessage] = useState<string | null>(null);
+  const [keyInfo, setKeyInfo] = useState<ValidateKeyResponse | null>(null);
 
   useEffect(() => {
     setKey(getStoredKey());
@@ -58,15 +93,18 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
         setStoredKey(target);
         setStatus('valid');
         setMessage(describeKey(res));
+        setKeyInfo(res);
         onSaved?.();
       } else {
         setStoredKey('');
         setStatus('invalid');
         setMessage(res.error ?? 'Key inválida.');
+        setKeyInfo(null);
       }
     } catch (err) {
       setStatus('invalid');
       setMessage((err as Error).message);
+      setKeyInfo(null);
     }
   }
 
@@ -75,7 +113,10 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
     setKey('');
     setStatus('idle');
     setMessage(null);
+    setKeyInfo(null);
   }
+
+  const avisoLimite = status === 'valid' && keyInfo ? keyLimitWarning(keyInfo) : null;
 
   const icon =
     status === 'validating' ? (
@@ -90,17 +131,40 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
     <div className="rounded-xl bg-card p-5 ring-1 ring-foreground/10">
       <h2 className="font-heading text-base font-medium">OpenRouter API Key</h2>
       <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
-        Cole sua key do OpenRouter. Ela fica salva só no <code className="font-mono text-[12.5px]">localStorage</code>{' '}
-        deste navegador e vai direto do navegador para o OpenRouter — nenhum outro servidor a recebe.{' '}
-        <a
-          className="text-primary underline-offset-4 hover:underline"
-          href="https://openrouter.ai/keys"
-          target="_blank"
-          rel="noreferrer"
-        >
-          openrouter.ai/keys ↗
-        </a>
+        Cole sua key do OpenRouter. Ela vai direto do navegador para o OpenRouter — nenhum outro
+        servidor a recebe.
       </p>
+      {/* IMPL-111: os 4 pontos de risco concretos — localização da key, riscos
+          (XSS/extensões/máquina partilhada), limite de crédito e revogação. */}
+      <ul className="mt-2 space-y-1.5 text-sm leading-relaxed text-muted-foreground">
+        <li>
+          <strong className="font-medium text-foreground">Onde ela fica:</strong> salva só no{' '}
+          <code className="font-mono text-[12.5px]">localStorage</code> deste navegador — apagar os
+          dados do navegador apaga também a key.
+        </li>
+        <li>
+          <strong className="font-medium text-foreground">Riscos:</strong> qualquer script da página
+          (XSS), extensão do navegador com acesso à página ou outra pessoa neste computador consegue
+          ler a key. Em máquina partilhada, não a salve.
+        </li>
+        <li>
+          <strong className="font-medium text-foreground">Limite de crédito:</strong> crie a key COM
+          limite — um gasto acidental fica contido no teto que você definir.
+        </li>
+        <li>
+          <strong className="font-medium text-foreground">Como revogar:</strong> a key é exibida uma
+          única vez; se algo parecer errado, revogue-a e crie outra na{' '}
+          <a
+            className="text-primary underline-offset-4 hover:underline"
+            href="https://openrouter.ai/keys"
+            target="_blank"
+            rel="noreferrer"
+          >
+            página de keys do OpenRouter ↗
+          </a>
+          .
+        </li>
+      </ul>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <Input
@@ -146,6 +210,10 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
           {message}
         </Banner>
       )}
+
+      {/* IMPL-111: sem limite lido de GET /key o aviso é ACIONÁVEL (link para
+          definir o limite) — nunca texto decorativo. */}
+      {avisoLimite && <KeyLimitAlert warning={avisoLimite} />}
     </div>
   );
 }

@@ -8,7 +8,8 @@
 import { pkgVersion } from '../paths.js';
 import { configureGatewayFromEnv } from '../gatewayEnv.js';
 import { CliError, EXIT, Output, failAndExit } from './output.js';
-import { closestMatch, commandLabel, sniffOutputFormat } from './context.js';
+import { closestMatch, commandLabel, sniffOutputFormat, sniffPretty } from './context.js';
+import { COMMANDS, HELP_TAIL, renderCommandHelp } from './help.js';
 import { cmdModels } from './commands/models.js';
 import { cmdRun } from './commands/run.js';
 import { cmdDocs, cmdInit, cmdSkill } from './commands/knowledge.js';
@@ -120,30 +121,16 @@ AGENTES (modo agente — mesmo motor, executor pi)
 
 OPÇÕES GLOBAIS
   --budget <usd|none>      teto de gasto (OBRIGATÓRIO fora de um terminal)
-  --json                   um objeto JSON no stdout
+  --json                   um objeto JSON no stdout (compacto; --pretty formata)
   --output-format ndjson   um evento JSON por linha (progresso ao vivo)
   --key <k>                key do OpenRouter (ou \$OPENROUTER_API_KEY)
   --data-dir <caminho>     onde gravar runs (padrão ~/.prompt-builder)
   --refresh-models         ignora o cache de catálogo (24h)
-  --quiet · --verbose · --no-color · --help · --version
+  --quiet · --verbose · --no-color · --pretty · --help · --version
 
-PARA AGENTES
-  Toda saída estruturada vai para o STDOUT; progresso e avisos vão para o STDERR.
-  Erro sob --json/ndjson: {ok:false, command, error:{code, kind, message, hint,
-  details}} no STDOUT (em ndjson, a última linha: type "result"). Decida pelo
-  error.kind; error.hint traz o próximo comando.
-  Nunca chute um think level: \`models show <id> --json\` diz exatamente quais
-  níveis o modelo aceita e o que vai no fio para cada um pedido.
-  Comece por: prompt-builder docs quickstart
-
-CÓDIGOS DE SAÍDA (error.kind entre parênteses)
-  0 ok · 1 falha inesperada (internal) · 2 uso inválido (usage)
-  3 config inválida (config) · 4 auth (auth) · 5 sem crédito (credit)
-  6 run inconclusiva (inconclusive: vereditos perdidos > 10% ou < 5 cenários julgados)
-  7 parcial, orçamento esgotado (control) · 8 rede (network)
-  9 espera esgotada — \`runs wait --timeout\` (timeout) · 10 portão recusou (gate)
-  130 interrompido — Ctrl-C, SIGTERM, \`runs cancel\` (control)
-`;
+  \`<comando> --help\` mostra o help daquele comando — todos terminam com a
+  tabela de códigos de saída (IMPL-092).
+${HELP_TAIL}`;
 
 /**
  * Dica de plugin para o Claude Code. Hoje ela e DESCARTADA em silencio (so vale
@@ -159,30 +146,7 @@ function emitClaudeHint(): void {
   }
 }
 
-/** Comandos do `dispatch` — base do "você quis dizer" (mantenha em par com o switch). */
-const COMMANDS = [
-  'docs',
-  'skill',
-  'init',
-  'models',
-  'estimate',
-  'key',
-  'compare',
-  'vary',
-  'train',
-  'runs',
-  'sessions',
-  'library',
-  'techniques',
-  'lgpd',
-  'config',
-  'registry',
-  'baseline',
-  'doctor',
-  'limits',
-  'mcp',
-  'agents',
-] as const;
+/** Comandos do `dispatch` — a lista canônica é `COMMANDS` (src/cli/help.ts). */
 
 async function dispatch(cmd: string | undefined, argv: string[]): Promise<number> {
   switch (cmd) {
@@ -254,7 +218,7 @@ async function main(): Promise<void> {
   // qualquer outra coisa. Antes ele so era descoberto depois do parse — e um
   // erro DE parse (flag desconhecida) caia no texto: sob --json o stdout saia
   // com 0 bytes e o consumidor-maquina nao via nada (Furo 1, R-12).
-  const out = new Output({ format: sniffOutputFormat(argv) });
+  const out = new Output({ format: sniffOutputFormat(argv), pretty: sniffPretty(argv) });
   const label = commandLabel(argv);
   // Excecao sem dono (callback, rejeicao solta) tambem termina no envelope —
   // o NDJSON nunca fica sem a linha `result`.
@@ -274,7 +238,12 @@ async function main(): Promise<void> {
       process.exit(EXIT.OK);
     }
     if (!cmd || argv.includes('--help') || argv.includes('-h')) {
-      process.stdout.write(HELP);
+      // IMPL-092: `--help` COM comando = help DO comando (todo help termina com
+      // a tabela de códigos de saída); sem comando (ou comando desconhecido) =
+      // visão geral, como sempre.
+      const texto =
+        cmd && (COMMANDS as readonly string[]).includes(cmd) ? renderCommandHelp(cmd) : HELP;
+      process.stdout.write(texto);
       emitClaudeHint();
       process.exit(EXIT.OK);
     }

@@ -15,6 +15,7 @@
 import { z } from 'zod';
 import type { StageSpec } from '../types.js';
 import { labelSetIssue, type ExpectedSpec } from './groundTruth.js';
+import { contentHash as jcsSha256 } from './hash.js';
 
 // ----------------------------------------------------------------------------
 // Tipos
@@ -33,6 +34,75 @@ export const LIBRARY_TIERS: readonly LibraryTier[] = ['mft', 'invariance', 'adve
 
 /** Proveniência do item — curadoria humana, geração IA ou importação. */
 export type LibraryOrigin = 'official' | 'ai' | 'manual' | 'import';
+
+// ----------------------------------------------------------------------------
+// Curadoria por item (IMPL-087, R-22:REC-2/DEC-3)
+// ----------------------------------------------------------------------------
+
+/**
+ * Estado de curadoria do item — a aprovação é amarrada ao `contentHash`:
+ * editar um item `aprovado` o leva de volta a `gerado` (invalidação por hash,
+ * não por intenção).
+ */
+export type LibraryItemState = 'gerado' | 'em_revisao' | 'aprovado' | 'rejeitado' | 'ajustar';
+
+export const LIBRARY_ITEM_STATES: readonly LibraryItemState[] = [
+  'gerado',
+  'em_revisao',
+  'aprovado',
+  'rejeitado',
+  'ajustar',
+];
+
+/**
+ * Transições legais do ciclo: `gerado` é o estado inicial/de repente; `ajustar`
+ * marca item que precisa de ajuste (inclusive conflito de mescla); `rejeitado`
+ * exige `rejectReason`.
+ */
+export const LIBRARY_STATE_TRANSITIONS: Readonly<Record<LibraryItemState, readonly LibraryItemState[]>> = {
+  gerado: ['em_revisao', 'aprovado', 'rejeitado', 'ajustar'],
+  em_revisao: ['aprovado', 'rejeitado', 'ajustar', 'gerado'],
+  aprovado: ['gerado', 'ajustar', 'rejeitado'],
+  rejeitado: ['gerado', 'em_revisao', 'ajustar'],
+  ajustar: ['gerado', 'em_revisao', 'aprovado', 'rejeitado'],
+};
+
+/** Proveniência POR CAMPO (o `origin` por item mente após a edição). */
+export type FieldOrigin = 'ai' | 'humano' | 'editado';
+
+export const FIELD_ORIGINS: readonly FieldOrigin[] = ['ai', 'humano', 'editado'];
+
+export interface FieldProvenance {
+  origem: FieldOrigin;
+  /** Modelo que gerou o campo (quando `origem: 'ai'`). */
+  model?: string;
+  /** Prompt/regra que gerou o campo (quando `origem: 'ai'`). */
+  prompt?: string;
+}
+
+/** Motivo de rejeição — enum + nota livre (a recusa tem que ser legível). */
+export type RejectKind = 'fora_de_escopo' | 'duplicado' | 'gabarito_errado' | 'ambiguo' | 'outro';
+
+export const REJECT_KINDS: readonly RejectKind[] = [
+  'fora_de_escopo',
+  'duplicado',
+  'gabarito_errado',
+  'ambiguo',
+  'outro',
+];
+
+export interface RejectReason {
+  kind: RejectKind;
+  note?: string;
+}
+
+/** Quem gerou o item (trocar o modelo = conteúdo novo = re-aprovação). */
+export interface ItemGenerator {
+  modelId: string;
+  temperature?: number;
+  seed?: number;
+  generatedAt: string;
+}
 
 /**
  * Item da biblioteca: um cenário executável ENRIQUECIDO com metadados de
@@ -74,6 +144,23 @@ export interface LibraryItem {
    * que já existe (mesmo id) NÃO é regravado — rodar `seed` 2× não duplica.
    */
   seed?: string;
+  // --- curadoria (IMPL-087, R-22:REC-2) — opcional p/ records antigos ---
+  /** Estado de curadoria (ausente = nunca passou pelo fluxo novo = não aprovado). */
+  state?: LibraryItemState;
+  /** Quem revisou (última revisão válida para o `contentHash` atual). */
+  reviewer?: string;
+  /** Quando foi revisado (ISO-8601). */
+  reviewedAt?: string;
+  /** Motivo quando `state: 'rejeitado'` (enum + nota). */
+  rejectReason?: RejectReason;
+  /** Proveniência POR CAMPO: campo → {origem: ai|humano|editado, model?, prompt?}. */
+  provenance?: Record<string, FieldProvenance>;
+  /** Identidade do conteúdo: `sha256:<hex>` do JCS (RFC 8785) — a aprovação amarra-se a ele. */
+  contentHash?: string;
+  /** `contentHash` da versão anterior (nova versão = nó novo com parentHash). */
+  parentHash?: string;
+  /** Quem gerou o item (modelo/temperatura/seed/data). */
+  generator?: ItemGenerator;
 }
 
 /** Perfil = um banco de cenários (um alvo/prompt por treino). */
@@ -154,6 +241,40 @@ const itemSchema = z.object({
   createdAt: z.string('createdAt obrigatório').min(1, 'createdAt obrigatório'),
   updatedAt: z.string().optional(),
   seed: z.string().optional(),
+  // --- curadoria (IMPL-087): aceita e PRESERVA os campos novos ---
+  state: z.enum(LIBRARY_ITEM_STATES as unknown as [LibraryItemState, ...LibraryItemState[]]).optional(),
+  reviewer: z.string().optional(),
+  reviewedAt: z.string().optional(),
+  rejectReason: z
+    .object({
+      kind: z.enum(REJECT_KINDS as unknown as [RejectKind, ...RejectKind[]], {
+        error: `rejectReason.kind deve ser um de: ${REJECT_KINDS.join(', ')}`,
+      }),
+      note: z.string().optional(),
+    })
+    .optional(),
+  provenance: z
+    .record(
+      z.string(),
+      z.object({
+        origem: z.enum(FIELD_ORIGINS as unknown as [FieldOrigin, ...FieldOrigin[]], {
+          error: `provenance.origem deve ser um de: ${FIELD_ORIGINS.join(', ')}`,
+        }),
+        model: z.string().optional(),
+        prompt: z.string().optional(),
+      }),
+    )
+    .optional(),
+  contentHash: z.string().optional(),
+  parentHash: z.string().optional(),
+  generator: z
+    .object({
+      modelId: z.string('generator.modelId obrigatório'),
+      temperature: z.number().optional(),
+      seed: z.number().optional(),
+      generatedAt: z.string('generator.generatedAt obrigatório'),
+    })
+    .optional(),
 });
 
 /**
@@ -277,6 +398,341 @@ export function coverageReport(
   }
 
   return { total: items.length, byTier, byDimension, gaps, withoutGabarito };
+}
+
+// ----------------------------------------------------------------------------
+// Curadoria: hash de conteúdo, edição e revisão (IMPL-087, R-22:REC-2)
+// ----------------------------------------------------------------------------
+
+/**
+ * Campos de CONTEÚDO do item — os únicos que entram no `contentHash`. Os
+ * metadados de curadoria (state/reviewer/provenance/hash/generator) ficam DE
+ * FORA por definição: senão revisar o item mudaria o hash que a revisão amarra.
+ */
+export const ITEM_CONTENT_FIELDS = [
+  'title',
+  'tier',
+  'persona',
+  'context',
+  'successCriteria',
+  'rationale',
+  'dimensionTags',
+  'question',
+  'productContext',
+  'maxTokens',
+  'rubric',
+  'reference',
+  'expected',
+  'labelSet',
+] as const;
+
+/** O subconjunto de CONTEÚDO do item (o que o hash identifica). */
+export function itemContent(item: LibraryItem): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const campo of ITEM_CONTENT_FIELDS) {
+    const v = (item as unknown as Record<string, unknown>)[campo];
+    if (v !== undefined) out[campo] = v;
+  }
+  return out;
+}
+
+/**
+ * Identidade do conteúdo: `sha256:<hex>` do JSON canônico (JCS, RFC 8785) —
+ * mesma fórmula Node × navegador (a implementação é fonte única em `hash.ts`).
+ */
+export function computeContentHash(item: LibraryItem): string {
+  return jcsSha256(itemContent(item));
+}
+
+/** Campos de conteúdo cujo valor mudou entre `before` e `after`. */
+export function changedContentFields(
+  before: Partial<LibraryItem>,
+  after: Partial<LibraryItem>,
+): string[] {
+  const antes = before as unknown as Record<string, unknown>;
+  const depois = after as unknown as Record<string, unknown>;
+  return ITEM_CONTENT_FIELDS.filter(
+    (c) => depois[c] !== undefined && depois[c] !== antes[c],
+  ) as string[];
+}
+
+export interface ItemEditOptions {
+  /** Origem dos campos alterados (padrão `editado` — alguém mexeu na mão). */
+  origem?: FieldOrigin;
+  model?: string;
+  prompt?: string;
+  /** Data da edição (ISO-8601) — injetável nos testes. */
+  now?: string;
+}
+
+/**
+ * Edição de item (IMPL-087): transiciona `aprovado` → `gerado` por INVALIDAÇÃO
+ * DE `contentHash` (editou o conteúdo, a aprovação antiga não cobre mais) e
+ * registra a nova versão como nó com `parentHash` + proveniência por campo.
+ */
+export function applyItemEdit(
+  item: LibraryItem,
+  patch: Partial<LibraryItem>,
+  opts: ItemEditOptions = {},
+): LibraryItem {
+  const antes = computeContentHash(item);
+  const proximo: LibraryItem = { ...item, ...patch };
+  const agora = computeContentHash(proximo);
+  proximo.updatedAt = opts.now ?? new Date().toISOString();
+
+  const alterados = changedContentFields(item, patch);
+  if (alterados.length > 0) {
+    const prov: Record<string, FieldProvenance> = { ...(proximo.provenance ?? {}) };
+    for (const campo of alterados) {
+      prov[campo] = {
+        origem: opts.origem ?? 'editado',
+        ...(opts.model !== undefined ? { model: opts.model } : {}),
+        ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
+      };
+    }
+    proximo.provenance = prov;
+  }
+
+  if (agora !== antes) {
+    // Conteúdo mudou: nova versão = nó novo com parentHash; a revisão do
+    // conteúdo antigo (aprovação OU rejeição) fica sem efeito.
+    proximo.parentHash = antes;
+    proximo.contentHash = agora;
+    if (item.state === 'aprovado' || item.state === 'rejeitado' || item.state === 'em_revisao') {
+      proximo.state = 'gerado';
+      delete proximo.reviewer;
+      delete proximo.reviewedAt;
+      delete proximo.rejectReason;
+    }
+  } else {
+    proximo.contentHash = item.contentHash ?? antes;
+  }
+  return proximo;
+}
+
+/** Marca a proveniência dos campos de conteúdo indicados (e não mexe no resto). */
+export function stampProvenance(
+  item: LibraryItem,
+  fields: readonly string[],
+  p: FieldProvenance,
+): LibraryItem {
+  const prov: Record<string, FieldProvenance> = { ...(item.provenance ?? {}) };
+  for (const campo of fields) {
+    if ((item as unknown as Record<string, unknown>)[campo] === undefined) continue;
+    prov[campo] = { ...p };
+  }
+  return { ...item, provenance: prov };
+}
+
+/**
+ * Item acabou de ser GERADO por um modelo: proveniência `ai` em todo campo de
+ * conteúdo sem proveniência explícita + registro de `generator` (trocar o
+ * modelo depois = conteúdo novo = re-aprovação).
+ */
+export function stampGeneration(
+  item: LibraryItem,
+  generator: ItemGenerator,
+  opts: { now?: string } = {},
+): LibraryItem {
+  const prov: Record<string, FieldProvenance> = { ...(item.provenance ?? {}) };
+  for (const campo of ITEM_CONTENT_FIELDS) {
+    if ((item as unknown as Record<string, unknown>)[campo] === undefined) continue;
+    if (prov[campo]) continue; // proveniência explícita vence
+    prov[campo] = { origem: 'ai', model: generator.modelId };
+  }
+  return {
+    ...item,
+    generator,
+    provenance: prov,
+    state: item.state ?? 'gerado',
+    contentHash: item.contentHash ?? computeContentHash(item),
+  };
+}
+
+/** Transição de estado legal? (null = ok; senão, o problema em PT-BR). */
+export function transitionIssue(
+  from: LibraryItemState | undefined,
+  to: LibraryItemState,
+): string | null {
+  if (!LIBRARY_ITEM_STATES.includes(to)) return `estado desconhecido: ${to}`;
+  if (from === undefined || from === to) return null;
+  const legais = LIBRARY_STATE_TRANSITIONS[from] ?? [];
+  if (!legais.includes(to)) return `transição inválida: ${from} → ${to}`;
+  return null;
+}
+
+export interface ItemReviewInput {
+  /** Estado resultante da revisão (ex.: 'aprovado' | 'rejeitado' | 'ajustar'). */
+  state: LibraryItemState;
+  reviewer: string;
+  /** Obrigatório para 'rejeitado' — a recusa tem que ser legível. */
+  rejectReason?: RejectReason;
+  /** Data da revisão (ISO-8601) — injetável nos testes. */
+  now?: string;
+}
+
+/**
+ * Registra uma revisão. Aprovação/rejeição amarram-se ao CONTEÚDO atual
+ * (`contentHash` gravado = hash do conteúdo na hora da revisão). Lança em uso
+ * inválido (transição ilegal, `rejeitado` sem `rejectReason`) — o chamador
+ * (CLI/MCP) traduz em recusa, nunca em registro mudo.
+ */
+export function markItemReviewed(item: LibraryItem, review: ItemReviewInput): LibraryItem {
+  const problema = transitionIssue(item.state, review.state);
+  if (problema) throw new Error(problema);
+  if (review.state === 'rejeitado' && !review.rejectReason) {
+    throw new Error('rejectReason é obrigatório para rejeitar um item (kind enum + note).');
+  }
+  return {
+    ...item,
+    state: review.state,
+    reviewer: review.reviewer,
+    reviewedAt: review.now ?? new Date().toISOString(),
+    contentHash: computeContentHash(item),
+    ...(review.rejectReason ? { rejectReason: review.rejectReason } : {}),
+  };
+}
+
+/**
+ * O `contentHash` gravado ainda é o do conteúdo? Fora do fluxo (edição direta
+ * no JSON) o hash não mente: a aprovação fica velha na hora.
+ */
+export function contentHashIssue(item: LibraryItem): string | null {
+  if (item.contentHash === undefined) return 'sem contentHash (item anterior ao fluxo de curadoria)';
+  if (item.contentHash !== computeContentHash(item)) {
+    return 'contentHash não bate com o conteúdo atual (editado depois do registro)';
+  }
+  return null;
+}
+
+/** Aprovado de verdade = estado `aprovado` E hash do conteúdo ainda é o aprovado. */
+export function isApproved(item: LibraryItem): boolean {
+  return item.state === 'aprovado' && contentHashIssue(item) === null;
+}
+
+export type ItemMerge =
+  | { kind: 'novo' | 'fast-forward'; item: LibraryItem }
+  | { kind: 'identico'; item: LibraryItem }
+  | { kind: 'conflito'; local: LibraryItem; incoming: LibraryItem; item: LibraryItem };
+
+/**
+ * Mescla por IDENTIDADE de conteúdo (R-22:DEC-2): `incoming.parentHash` igual ao
+ * `contentHash` local é fast-forward; dois ramos a partir do mesmo pai são
+ * CONFLITO explícito — mantém as duas versões e marca `ajustar`. Nunca
+ * "último a escrever vence" (isso apagaria aprovação humana em silêncio).
+ */
+export function mergeItemVersion(
+  local: LibraryItem | undefined,
+  incoming: LibraryItem,
+): ItemMerge {
+  if (!local) return { kind: 'novo', item: incoming };
+  const localHash = local.contentHash ?? computeContentHash(local);
+  const incomingHash = incoming.contentHash ?? computeContentHash(incoming);
+  if (incomingHash === localHash) return { kind: 'identico', item: local };
+  if (incoming.parentHash === localHash) return { kind: 'fast-forward', item: incoming };
+  if (local.parentHash === incomingHash) return { kind: 'fast-forward', item: local };
+  return {
+    kind: 'conflito',
+    local,
+    incoming,
+    item: { ...incoming, state: 'ajustar', contentHash: incomingHash, parentHash: localHash },
+  };
+}
+
+/**
+ * Normalização que PRESERVA campo desconhecido (IMPL-089): o zod do item
+ * remove chaves fora do schema em silêncio — aqui elas voltam para o item (ida
+ * e volta = identidade) e o que efetivamente se perdeu é declarado em
+ * `lostFields` (régua: 100% preservado OU declarado perdido).
+ */
+export function normalizeLibraryItemPreserving(
+  raw: unknown,
+):
+  | { ok: true; item: LibraryItem & Record<string, unknown>; lostFields: string[] }
+  | { ok: false; error: string } {
+  const r = normalizeLibraryItem(raw);
+  if (!r.ok) return r;
+  const item: LibraryItem & Record<string, unknown> = { ...r.item };
+  const lostFields: string[] = [];
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [chave, valor] of Object.entries(raw as Record<string, unknown>)) {
+      if (chave in item) continue;
+      if (valor === undefined) {
+        lostFields.push(chave);
+        continue;
+      }
+      item[chave] = valor;
+    }
+  }
+  return { ok: true, item, lostFields };
+}
+
+// ----------------------------------------------------------------------------
+// Política de itens não aprovados (IMPL-090, R-22:REC-7)
+// ----------------------------------------------------------------------------
+
+export interface CurationStatus {
+  total: number;
+  /** Itens aprovados com `contentHash` válido — o "k" de "k de n curados". */
+  curated: number;
+  unapproved: { id: string; state: LibraryItemState | 'sem_estado' }[];
+}
+
+/** k de n curados: o dado que a run tem que reportar (nunca fingir curadoria). */
+export function curationStatus(items: LibraryItem[]): CurationStatus {
+  const unapproved: CurationStatus['unapproved'] = [];
+  let curated = 0;
+  for (const item of items) {
+    if (isApproved(item)) curated += 1;
+    else unapproved.push({ id: item.id, state: item.state ?? 'sem_estado' });
+  }
+  return { total: items.length, curated, unapproved };
+}
+
+/** Texto `"k de n itens curados"` para o resultado da run. */
+export function curatedKofN(items: LibraryItem[]): string {
+  const s = curationStatus(items);
+  return `${s.curated} de ${s.total} itens curados`;
+}
+
+/**
+ * `run.warning` AGREGADO (uma entrada para todos os itens, não uma por item —
+ * o evento é agregado e não entra no reducer de etapas).
+ */
+export function curationWarnings(items: LibraryItem[]): string[] {
+  const s = curationStatus(items);
+  if (s.unapproved.length === 0) return [];
+  const porEstado = new Map<string, string[]>();
+  for (const u of s.unapproved) {
+    const lista = porEstado.get(u.state) ?? [];
+    lista.push(u.id);
+    porEstado.set(u.state, lista);
+  }
+  const detalhe = [...porEstado.entries()]
+    .map(([estado, ids]) => {
+      const amostra = ids.slice(0, 5).join(', ');
+      return `${estado}: ${amostra}${ids.length > 5 ? ` (+${ids.length - 5})` : ''}`;
+    })
+    .join('; ');
+  return [`itens não aprovados em uso (${curatedKofN(items)}) — ${detalhe}`];
+}
+
+/**
+ * Bloqueio de `--require-approved`, holdout e finais (100% aprovados): mensagem
+ * legível ou `null`. Sem isto NADA bloqueia por default — e bloqueio total
+ * significaria curadoria nunca acontecer com mantenedor solo (R-22 §8).
+ */
+export function requireApprovedIssue(items: LibraryItem[]): string | null {
+  const s = curationStatus(items);
+  if (s.unapproved.length === 0) return null;
+  const amostra = s.unapproved
+    .slice(0, 10)
+    .map((u) => `${u.id}=${u.state}`)
+    .join(', ');
+  return (
+    `há ${s.unapproved.length} item(ns) não aprovado(s) de ${s.total} ` +
+    `(${s.curated} curado(s)): ${amostra}${s.unapproved.length > 10 ? ', …' : ''}`
+  );
 }
 
 // ----------------------------------------------------------------------------

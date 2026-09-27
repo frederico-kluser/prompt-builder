@@ -2,7 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { runToCompletion } from './orchestrator.js';
 import { generateContestants, lessonsEnabled, llmReflectLessons } from './variator.js';
 import { composePrompt } from './engine/promptGroup.js';
-import { addToPool, pickParent, sliceScores, type ParetoEntry } from './engine/pareto.js';
+import {
+  addToPool,
+  coverageWins,
+  paretoDiagnostics,
+  pickParent,
+  pickParentByCoverage,
+  sliceScores,
+  PARETO_MIN_N,
+  type ParetoEntry,
+} from './engine/pareto.js';
 import {
   judgeIdentity,
   judgeIdentityChanged,
@@ -21,8 +30,13 @@ import { emitSessionEvent } from './events.js';
 import { saveSession } from './storage.js';
 import { computeMedals } from './medals.js';
 import { judgeScoreFromVerdicts, pickWinner, promotionEventFields, type RankEntry } from './rank.js';
-import { MIN_HOLDOUT_SCENARIOS, splitHoldout } from './holdout.js';
-import { pairCoverage, pairedStageScores, stageScoresByContestant } from './stats.js';
+import {
+  holdoutConfirmationText,
+  HOLDOUT_RATIO_DEFAULT,
+  MIN_HOLDOUT_SCENARIOS,
+  splitHoldout,
+} from './holdout.js';
+import { meanCiSummary, pairCoverage, pairDiffs, pairedStageScores, stageScoresByContestant, type PairScore } from './stats.js';
 import { formatIterationGate, pairedSignificance, VERDICT_SCORE } from './stats.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { mergeFailureCounts } from './engine/verdictIntegrity.js';
@@ -30,15 +44,18 @@ import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './e
 import { listModels } from './openrouter.js';
 import { enforceRunCompliance } from './lgpd.js';
 import type {
+  ChampionDeclaration,
   Contestant,
   IterationGate,
   PromotionReeval,
   RunCtx,
   RunRecord,
   SessionRecord,
+  StageRecord,
   StageSpec,
   TrainingConfig,
   VariationConfig,
+  Verdict,
 } from './types.js';
 
 function nowIso(): string {
@@ -89,8 +106,17 @@ function meanPlacementOf(run: RunRecord, contestantId: string): number | undefin
  * `controlId` e a REGUA desta iteracao ('original' na 0, 'carry' nas demais):
  * ela nao disputa o titulo, entao seu promptLen e zerado — o desempate por
  * tamanho so vale entre candidatas.
+ * IMPL-071 (R-20:REC-6): e, dentre as candidatas, so vale entre as com o
+ * contrato never-break v2 VERDE (variante gerada pelo reescritor que passou
+ * pelo gate de 3 camadas com `contracts` ativo). Sem isso o desempate
+ * "o mais curto vence" premiava quem APAGA texto — inclusive cláusulas
+ * defensivas que o gate substring nao protege.
  */
-function buildRankEntries(run: RunRecord, controlId: string): RankEntry[] {
+function buildRankEntries(
+  run: RunRecord,
+  controlId: string,
+  opts: { contractsActive?: boolean } = {},
+): RankEntry[] {
   return run.contestants.map((c) => {
     const isControl = c.id === controlId;
     let errored = 0;
@@ -99,6 +125,7 @@ function buildRankEntries(run: RunRecord, controlId: string): RankEntry[] {
         if (r.contestantId === c.id && r.status === 'error') errored++;
       }
     }
+    const contratoVerde = !isControl && Boolean(opts.contractsActive) && Boolean(c.techniqueId);
     return {
       id: c.id,
       label: c.label,
@@ -106,50 +133,386 @@ function buildRankEntries(run: RunRecord, controlId: string): RankEntry[] {
       judgeScore: judgeScoreOf(run, c.id),
       meanPlacement: meanPlacementOf(run, c.id),
       errored,
-      promptLen: isControl ? 0 : (c.systemPrompt ?? '').length,
+      promptLen: contratoVerde ? (c.systemPrompt ?? '').length : 0,
     };
   });
 }
 
+/** IMPL-065 (R-05:REC-4): piso DEFAULT de itens curados (ancora humana). Proposta sem fonte — calibrar. */
+export const DEFAULT_MIN_CURATED_ITEMS = 20;
+
+/**
+ * IMPL-065 (R-05:REC-4) — item CURADO (ancora humana): proveniencia humana
+ * (`origin` !== 'ai' — o datagen marca os sintéticos como 'ai') E gabarito
+ * acompanhando o item (`reference`/`expected`). Gabarito gerado por IA junto do
+ * item sintético NAO serve de ancora: benchmarks bem-sucedidos mantêm
+ * verificação humana mesmo com dados sintéticos (IFEval/IFBench).
+ */
+export function isCuratedItem(spec: StageSpec): boolean {
+  return spec.origin !== 'ai' && Boolean(spec.reference ?? spec.expected);
+}
+
+/**
+ * IMPL-065 (R-05:REC-4) — declaração de campeão sob ancora HUMANA. Com
+ * `curatedItems < minCuratedItems` (default {@link DEFAULT_MIN_CURATED_ITEMS})
+ * o treino NAO declara campeão: o zero-dataset e BOOTSTRAP, nao evidência
+ * (84–89% em sintético vs 25–34% em real). Itens sintéticos entram como
+ * treino/apoio; a recusa cita o numero de itens curados e o piso.
+ */
+export function championDeclarationFor(
+  specs: readonly StageSpec[],
+  opts: { minCuratedItems?: number; scoreCi95Pp?: [number, number] | null } = {},
+): ChampionDeclaration {
+  const raw = opts.minCuratedItems;
+  const minCuratedItems =
+    typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_MIN_CURATED_ITEMS;
+  const curatedItems = specs.filter(isCuratedItem).length;
+  const scoreCi95Pp = opts.scoreCi95Pp ?? null;
+  if (curatedItems >= minCuratedItems) {
+    return {
+      declared: true,
+      curatedItems,
+      minCuratedItems,
+      message: `campeao declarado com ${curatedItems} itens curados (ancora humana; piso ${minCuratedItems})`,
+      scoreCi95Pp,
+    };
+  }
+  return {
+    declared: false,
+    curatedItems,
+    minCuratedItems,
+    reason: 'sem-ancora-humana',
+    message:
+      `campeao NAO declarado: ${curatedItems} itens curados (ancora humana) < piso ${minCuratedItems} — ` +
+      'o dataset e sintetico demais para ancorar um campeao (84-89% em sintetico vs 25-34% em tarefas reais); ' +
+      'a sessao vale como bootstrap/treino (itens sinteticos entram como apoio). ' +
+      'Gabaritos exigem verificacao humana para servir de ancora; o piso N e uma PROPOSTA sem fonte (calibrar).',
+    scoreCi95Pp,
+  };
+}
+
+/** Fatias (tier/dimensionTags) dos cenarios — 'geral' quando o cenario nao traz curriculo. */
+function sliceKeysOf(specs: readonly (StageSpec | undefined)[]): string[] {
+  const fatias = new Set<string>();
+  for (const s of specs) {
+    if (!s) continue;
+    if (s.dimensionTags?.length) for (const t of s.dimensionTags) fatias.add(t);
+    else fatias.add(s.tier ?? 'geral');
+  }
+  return [...fatias];
+}
+
+/**
+ * IMPL-062 — matriz candidato × cenário: score (VERDICT_SCORE) do contestant em
+ * cada etapa da SUA run. Ausente = sem observação (nunca pontua).
+ */
+function scenarioScoresOf(run: RunRecord | undefined, contestantId: string): (number | null | undefined)[] {
+  return (run?.stages ?? []).map((s) => {
+    const v =
+      s.referenceJudge?.verdictByContestant?.[contestantId] ??
+      s.judge?.verdictByContestant?.[contestantId];
+    return v === undefined ? undefined : VERDICT_SCORE[v];
+  });
+}
+
+/**
+ * Paciência do laço (IMPL-051): `config.patience` (1–5, schema) ou o default
+ * {@link TRAINING_PATIENCE} = 2. Paciência 1 com veredito ruidoso é anti-padrão
+ * (sob H0 25,8–35,8% das sessões param cedo por azar — R-04:REC-4).
+ */
+function resolvePatience(cfg: TrainingConfig): number {
+  const raw = cfg.patience;
+  const n = typeof raw === 'number' && Number.isFinite(raw) ? Math.floor(raw) : TRAINING_PATIENCE;
+  return Math.max(1, n);
+}
+
+/**
+ * IC95% do ganho pareado (candidato − régua) em p.p. — o que a parada por
+ * platão lê (IMPL-051): se o limite SUPERIOR do IC fica abaixo de minGain,
+ * nenhum ganho plausível alcança a margem. `undefined` sem par completo.
+ */
+function pairedGainCi(
+  scoresById: Readonly<Record<string, readonly (number | null | undefined)[]>>,
+  controlId: string,
+  bestId: string | undefined,
+): [number, number] | undefined {
+  if (!bestId) return undefined;
+  const control = scoresById[controlId];
+  const best = scoresById[bestId];
+  if (!control || !best) return undefined;
+  const { diffs } = pairDiffs(control, best);
+  if (diffs.length === 0) return undefined;
+  return meanCiSummary(diffs).ci95Pp;
+}
+
+/**
+ * IMPL-065 (R-05:REC-4): IC95 do SCORE do campeão (p.p.) sobre os pares
+ * COMPLETOS (pareado — mesmos pares do ganho; ausente nunca vira nota). É o
+ * intervalo que o resultado reporta ao lado do score. `null` sem par completo.
+ */
+function scoreCiOf(controlScores: readonly PairScore[], championScores: readonly PairScore[]): [number, number] | null {
+  const valores: number[] = [];
+  for (let i = 0; i < championScores.length; i++) {
+    const c = controlScores[i];
+    const v = championScores[i];
+    if (typeof c === 'number' && typeof v === 'number') valores.push(v);
+  }
+  if (!valores.length) return null;
+  return meanCiSummary(valores).ci95Pp ?? null;
+}
+
 const LESSONS_PREFIX =
   'Fraquezas observadas ao benchmarkar o prompt base ATUAL. Enderece-as SEM quebrar o contrato de saida:\n';
+const LESSONS_SUCCESSES_HEADER =
+  '\nAcertos representativos (preserve este comportamento — nao o reescreva para pior):\n';
+
+/** IMPL-060: teto DEFAULT do dossiê de lições em TOKENS (configurável, ≤ 4000). */
+export const DEFAULT_LESSON_TOKENS = 4000;
+/** Conversão aproximada tokens → chars usada no teto do dossiê. */
+const CHARS_PER_TOKEN = 4;
+/** Piso de um campo do dossiê antes de qualquer truncagem (chars). */
+const MIN_LESSON_FIELD_CHARS = 80;
+/** Acertos representativos no dossiê (2–3, GEPA). */
+const MAX_LESSON_SUCCESSES = 3;
+
+/** Entrada do dossiê de lições (payload versionado — R-02a:REC-2). */
+export interface LessonEntry {
+  /** Pergunta COMPLETA do cenário (IMPL-060: sem recorte de 60 chars). */
+  pergunta: string;
+  /** Resposta do candidato sob avaliação — a trajetória completa (GEPA/ProTeGi). */
+  resposta: string;
+  /** Gabarito do cenário — só com `includeReference` (default OFF, R-03b). */
+  gabarito?: string;
+  veredito: Verdict;
+  /** Explicação INTEGRAL do juiz (IMPL-060: sem recorte de 200 chars). */
+  explicacao: string;
+}
+
+/** Relato de truncagem do dossiê (teto `maxLessonTokens`). */
+export interface LessonTruncation {
+  limitTokens: number;
+  /** Campos encurtados — nenhuma falha é descartada (cobertura é 100%). */
+  truncatedFields: number;
+  /** Quais entradas encurtaram ("falha 2", "acerto 1", …). */
+  entries: string[];
+}
+
+/**
+ * IMPL-060 (R-02b:REC-1) — dossiê POR VARIANTE da reflexão GEPA: pergunta
+ * completa, resposta do candidato, explicação integral do juiz, veredito e
+ * acertos representativos. O dono é SEMPRE o contestant da SUA run (nunca as
+ * falhas do campeão injetadas em todas as variantes). Campos versionados:
+ * `pergunta`/`resposta`/`gabarito`/`veredito`/`explicacao`.
+ */
+export interface LessonDossier {
+  version: 2;
+  kind: 'licoes-gepa';
+  /** Dono do dossiê — cada variante lê as falhas da SUA run. */
+  contestantId: string;
+  runId: string;
+  /** 100% das falhas com resposta + explicação integral. */
+  falhas: LessonEntry[];
+  /** Acertos representativos (até 3) — mostram o que a reescrita deve preservar. */
+  acertos: LessonEntry[];
+  /** Presente só se algo encurtou para caber no teto (reportado em log). */
+  truncation?: LessonTruncation;
+}
+
+export interface LessonDossierOpts {
+  /** Teto em TOKENS (default {@link DEFAULT_LESSON_TOKENS}). */
+  maxLessonTokens?: number;
+  /** Inclui o gabarito do cenário. Default OFF (risco de exploração do juiz — R-03b). */
+  includeReference?: boolean;
+}
+
+function resolveLessonTokens(raw: number | undefined): number {
+  const t = typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_LESSON_TOKENS;
+  return t;
+}
+
+/** Resposta do candidato na etapa (trajetória completa — sem recorte). */
+function lessonResponseOf(s: StageRecord, contestantId: string): string {
+  return (s.responses ?? []).find((r) => r.contestantId === contestantId)?.text ?? '';
+}
+
+/** Explicação integral do juiz (referência primeiro; listwise cai no `motivo`). */
+function lessonExplanationOf(s: StageRecord, contestantId: string): string {
+  return (
+    s.referenceJudge?.explanationByContestant?.[contestantId] ??
+    (s.judge?.judges ?? [])
+      .map((j) => j.verdicts.find((v) => v.contestantId === contestantId)?.motivo)
+      .find((m) => m && m.trim()) ??
+    ''
+  )
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function lessonEntryOf(
+  s: StageRecord,
+  contestantId: string,
+  veredito: Verdict,
+  includeReference: boolean,
+): LessonEntry {
+  const ref = s.spec?.reference;
+  return {
+    pergunta: (s.spec?.question ?? '?').replace(/\s+/g, ' ').trim(),
+    resposta: lessonResponseOf(s, contestantId),
+    ...(includeReference && ref ? { gabarito: ref } : {}),
+    veredito,
+    explicacao: lessonExplanationOf(s, contestantId),
+  };
+}
+
+function lessonRenderEntry(e: LessonEntry): string {
+  const linhas = [`- [${e.pergunta}] veredito=${e.veredito}`, `  resposta: ${e.resposta}`];
+  if (e.gabarito) linhas.push(`  gabarito: ${e.gabarito}`);
+  linhas.push(`  explicacao: ${e.explicacao}`);
+  return linhas.join('\n');
+}
+
+function lessonRenderLength(falhas: LessonEntry[], acertos: LessonEntry[]): number {
+  let n = LESSONS_PREFIX.length + falhas.map(lessonRenderEntry).join('\n').length;
+  if (acertos.length) n += LESSONS_SUCCESSES_HEADER.length + acertos.map(lessonRenderEntry).join('\n').length;
+  return n;
+}
+
+/**
+ * Truncagem EXPLÍCITA (IMPL-060): encurta os campos mais longos até o payload
+ * caber em `maxLessonTokens` — nenhuma falha é descartada (a cobertura do
+ * dossiê é 100% das falhas), só os campos encolhem, nunca abaixo do piso.
+ */
+function truncateToFit(
+  falhas: LessonEntry[],
+  acertos: LessonEntry[],
+  limitChars: number,
+): LessonTruncation | undefined {
+  let over = lessonRenderLength(falhas, acertos) - limitChars;
+  if (over <= 0) return undefined;
+  const alvos: { rotulo: string; entry: LessonEntry; campo: 'pergunta' | 'resposta' | 'explicacao' | 'gabarito' }[] =
+    [];
+  falhas.forEach((entry, i) => {
+    for (const campo of ['pergunta', 'resposta', 'explicacao', 'gabarito'] as const) {
+      const v = entry[campo];
+      if (typeof v === 'string' && v.length > MIN_LESSON_FIELD_CHARS) {
+        alvos.push({ rotulo: `falha ${i + 1}`, entry, campo });
+      }
+    }
+  });
+  acertos.forEach((entry, i) => {
+    for (const campo of ['pergunta', 'resposta', 'explicacao', 'gabarito'] as const) {
+      const v = entry[campo];
+      if (typeof v === 'string' && v.length > MIN_LESSON_FIELD_CHARS) {
+        alvos.push({ rotulo: `acerto ${i + 1}`, entry, campo });
+      }
+    }
+  });
+  let truncatedFields = 0;
+  const tocadas = new Set<string>();
+  while (over > 0 && alvos.length) {
+    let maior = alvos[0];
+    for (const a of alvos) {
+      if ((a.entry[a.campo] ?? '').length > (maior.entry[maior.campo] ?? '').length) maior = a;
+    }
+    const atual = (maior.entry[maior.campo] ?? '') as string;
+    const corte = Math.min(over + 1, atual.length - MIN_LESSON_FIELD_CHARS);
+    if (corte <= 0) {
+      alvos.splice(alvos.indexOf(maior), 1);
+      continue;
+    }
+    maior.entry[maior.campo] = `${atual.slice(0, atual.length - corte).trimEnd()}…`;
+    over -= corte - 1;
+    truncatedFields += 1;
+    tocadas.add(maior.rotulo);
+    if ((maior.entry[maior.campo] ?? '').length <= MIN_LESSON_FIELD_CHARS) {
+      alvos.splice(alvos.indexOf(maior), 1);
+    }
+  }
+  if (!truncatedFields) return undefined;
+  return { limitTokens: Math.ceil(limitChars / CHARS_PER_TOKEN), truncatedFields, entries: [...tocadas] };
+}
+
+/**
+ * Monta o dossiê de lições (GEPA) do contestant `contestantId` na SUA run.
+ * Determinístico: zero custo LLM. Ver {@link LessonDossier}.
+ */
+export function buildLessonDossier(
+  run: RunRecord,
+  contestantId: string,
+  opts: LessonDossierOpts = {},
+): LessonDossier {
+  // Gabarito atrás de flag com default OFF (IMPL-060): risco de exploração do
+  // juiz pelo reescritor — aguarda R-03b.
+  const includeReference = opts.includeReference === true;
+  const falhas: LessonEntry[] = [];
+  const acertos: LessonEntry[] = [];
+  for (const s of run.stages ?? []) {
+    const veredito =
+      s.referenceJudge?.verdictByContestant?.[contestantId] ??
+      s.judge?.verdictByContestant?.[contestantId];
+    // Veredito AUSENTE (juiz que falhou, competidor com erro de infra/bloqueado
+    // — IMPL-004) NUNCA vira lição: o motivo dele descreve o PIPELINE, nao uma
+    // fraqueza do candidato, e a lição falsa empurraria o reescritor para
+    // "consertar" o que nao estava quebrado (R-03b:REC-4).
+    if (veredito === undefined) continue;
+    const entrada = lessonEntryOf(s, contestantId, veredito, includeReference);
+    if (veredito === 'resolve') {
+      if (acertos.length < MAX_LESSON_SUCCESSES) acertos.push(entrada);
+    } else {
+      falhas.push(entrada);
+    }
+  }
+  const base: LessonDossier = {
+    version: 2,
+    kind: 'licoes-gepa',
+    contestantId,
+    runId: run.id ?? '',
+    falhas,
+    acertos,
+  };
+  if (!falhas.length) return base;
+  const limitChars = resolveLessonTokens(opts.maxLessonTokens) * CHARS_PER_TOKEN;
+  const truncation = truncateToFit(falhas, acertos, limitChars);
+  return truncation ? { ...base, truncation } : base;
+}
+
+/** Renderiza o dossiê no texto que o reescritor recebe. Sem falhas = '' (como antes). */
+export function renderLessonDossier(d: LessonDossier): string {
+  if (!d.falhas.length) return '';
+  let out = LESSONS_PREFIX + d.falhas.map(lessonRenderEntry).join('\n');
+  if (d.acertos.length) out += LESSONS_SUCCESSES_HEADER + d.acertos.map(lessonRenderEntry).join('\n');
+  return out;
+}
+
+/**
+ * Aviso de truncagem para o LOG (IMPL-060, critério 3): a truncagem nunca é
+ * silenciosa — o chamador regista este texto em stderr. `undefined` = cabe tudo.
+ */
+export function lessonTruncationNotice(d: LessonDossier): string | undefined {
+  if (!d.truncation) return undefined;
+  const t = d.truncation;
+  return (
+    `dossie de licoes truncado para ${t.limitTokens} tokens: ${t.truncatedFields} campos encurtados ` +
+    `(${t.entries.join(', ')}) — nenhuma falha foi descartada`
+  );
+}
 
 /**
  * Reflection estilo GEPA (port do evolve.mjs): SUBSTITUI a antiga analise por
  * LLM (`analyzeIteration`, removida — a analise deixou de ser uma etapa do
  * pipeline, e o evento `iteration.analyzing` nao e mais emitido; o tipo
- * permanece em types.ts apenas para sessoes antigas). As licoes sao montadas
- * DETERMINISTICAMENTE das falhas do campeao na ultima run: ate 8 estagios em
- * que o veredito nao foi 'resolve', com cap de 4000 chars no total. O variator
- * injeta o resultado em `<licoes_da_iteracao_anterior>`.
+ * permanece em types.ts apenas para sessoes antigas). IMPL-060: o material é o
+ * DOSSIÊ POR VARIANTE (pergunta/resposta/gabarito/explicacao integrais, com
+ * acertos representativos) da run do PRÓPRIO candidato — não mais um resumo
+ * truncado em 60+200 chars das falhas do campeão. O variator injeta o resultado
+ * em `<licoes_da_iteracao_anterior>`.
  */
-export function buildLessons(run: RunRecord, championId: string): string {
-  const items: string[] = [];
-  for (const s of run.stages) {
-    if (items.length >= 8) break;
-    const verdict =
-      s.referenceJudge?.verdictByContestant?.[championId] ??
-      s.judge?.verdictByContestant?.[championId];
-    if (verdict === 'resolve') continue;
-    const motivo = (
-      s.referenceJudge?.explanationByContestant?.[championId] ??
-      (s.judge?.judges ?? [])
-        .map((j) => j.verdicts.find((v) => v.contestantId === championId)?.motivo)
-        .find((m) => m && m.trim()) ??
-      ''
-    )
-      .replace(/\s+/g, ' ')
-      .trim();
-    // Veredito AUSENTE (juiz que falhou, competidor com erro de infra/bloqueado
-    // — IMPL-004) NUNCA vira licao: o motivo dele descreve o PIPELINE, nao uma
-    // fraqueza do campeao, e a licao falsa empurraria o reescritor para
-    // "consertar" o que nao estava quebrado (R-03b:REC-4).
-    if (verdict === undefined) continue;
-    const question = (s.spec?.question ?? '?').replace(/\s+/g, ' ').trim().slice(0, 60);
-    items.push(`- [${question}] veredito=${verdict} — ${motivo.slice(0, 200)}`);
-  }
-  if (!items.length) return '';
-  return (LESSONS_PREFIX + items.join('\n')).slice(0, 4000);
+export function buildLessons(
+  run: RunRecord,
+  contestantId: string,
+  opts: LessonDossierOpts = {},
+): string {
+  return renderLessonDossier(buildLessonDossier(run, contestantId, opts));
 }
 
 
@@ -176,6 +539,10 @@ function sliceScoresOf(run: RunRecord, contestantId: string): Record<string, num
 
 interface PoolMember extends ParetoEntry {
   text: string;
+  /** IMPL-060/IMPL-062: run em que este membro foi avaliado — o dossiê de lições vem DELA. */
+  runId: string;
+  /** Id que o membro tinha na run dele (cada variante lê as falhas da SUA run). */
+  contestantId: string;
 }
 
 export interface StartTrainingResult {
@@ -387,6 +754,9 @@ async function trainingLoop(
   // IMPL-002: ausente = margem pratica default max(1; 50/n), resolvida NO GATE
   // (depende do n de pares da iteracao). O gate tambem exige p ajustado <= 0,05.
   const minGain = cfg.minGain;
+  // IMPL-051: paciencia configuravel (default 2, IMPL-013) — iteracoes seguidas
+  // sem promocao antes de convergir.
+  const patience = resolvePatience(cfg);
 
   // Catalogo quente antes do primeiro gasto (senao o custo sai 0 e a porta de
   // orcamento acha que tudo e de graca).
@@ -420,7 +790,7 @@ async function trainingLoop(
 
   await saveSession(record);
   emitSessionEvent({ type: 'session.started', sessionId, record });
-  log(sessionId, `started: ${cfg.iterations} iteracoes (minGain=${minGain ?? 'auto max(1; 50/n)'}, gate max-T a 5%)`);
+  log(sessionId, `started: ${cfg.iterations} iteracoes (minGain=${minGain ?? 'auto max(1; 50/n)'}, gate max-T a 5%, paciencia ${patience})`);
 
   let pinnedStages: StageSpec[] | undefined;
   // Fatia de holdout (split anti-overfit na iteracao 0): fica so EM MEMORIA —
@@ -431,6 +801,16 @@ async function trainingLoop(
   const poolSize = Math.max(1, Math.round(cfg.paretoPool ?? 1));
   let pool: PoolMember[] = [];
   const usoPai: Record<string, number> = {};
+  // IMPL-060: runs por id — o dossiê de lições de cada membro do pool vem da
+  // run DELE (não da última run, nem do campeão).
+  const runsById = new Map<string, RunRecord>();
+  // IMPL-062 (R-02b:REC-4): com FATIA ÚNICA a dominância de Pareto vira
+  // comparação de média — o treino roda como elitismo EXPLÍCITO (sem estado de
+  // pool/paretoFront). O pool só se forma com poolSize > 1 E fatias múltiplas
+  // (só conhecidas depois da iteração 0, quando os cenários congelam).
+  let fatiasMultiplas = false;
+  let todasSpecs: StageSpec[] = [];
+  let nInstancias = 0;
   // F4.2: 1o hash do contrato do juiz visto na sessao (detecta drift).
   let primeiroIdJuiz: JudgeIdentity | undefined;
   let champion: Champion | undefined;
@@ -445,6 +825,41 @@ async function trainingLoop(
   let promovidas = 0;
   // IMPL-013: K ≤ 6 técnicas por iteração; acima disso elas rodam na sessão.
   const techSeed = seedFromId(`techniques:${sessionId}`);
+
+  // IMPL-062: escolha do PAI da próxima derivação. Elitismo explícito (fatia
+  // única) não tem pai — o campeão é a base. Com pool, o pai sai do pool:
+  // amostragem ∝ COBERTURA (quantas instâncias o candidato vence) quando a
+  // feature-flag está ligada E n ≥ 20; senão, o rodízio pelo menos usado.
+  const selecionarPai = (): PoolMember | undefined => {
+    if (!(poolSize > 1 && fatiasMultiplas && pool.length)) return undefined;
+    const coberturaAtiva = cfg.paretoCoverageSampling === true && nInstancias >= PARETO_MIN_N;
+    const pai = coberturaAtiva
+      ? pickParentByCoverage(
+          pool,
+          coverageWins(Object.fromEntries(pool.map((m) => [m.id, scenarioScoresOf(runsById.get(m.runId), m.contestantId)]))),
+        )
+      : pickParent(pool, usoPai);
+    if (pai) usoPai[pai.id] = (usoPai[pai.id] ?? 0) + 1;
+    return pai;
+  };
+
+  // IMPL-062: métricas do pool reportadas (fração de pares não dominados +
+  // tamanho do front) com alerta de RUÍDO (fração > 0,6 com n < 20).
+  const registrarDiagnostico = (): void => {
+    const ativo = poolSize > 1 && fatiasMultiplas;
+    const diag = paretoDiagnostics(pool, nInstancias);
+    record.paretoMetrics = ativo
+      ? { mode: 'pareto', ...diag }
+      : { mode: 'elitismo', n: nInstancias, frontSize: champion ? 1 : 0, nonDominatedPairFraction: 0 };
+    if (!ativo) return;
+    log(
+      sessionId,
+      `pool Pareto: front ${diag.frontSize}/${pool.length}, pares nao dominados ${(diag.nonDominatedPairFraction * 100).toFixed(0)}%` +
+        (diag.noiseAlert
+          ? ` — ALERTA: front = RUIDO (fração de pares não dominados > 60% com n=${diag.n} < ${PARETO_MIN_N})`
+          : ''),
+    );
+  };
 
   try {
     // LGPD (IMPL-041): recusa a sessão sensível fora da allowlist ANTES do
@@ -499,16 +914,27 @@ async function trainingLoop(
           runner: cfg.agent ? 'agent' : undefined,
         });
       } else {
-        // Reflection GEPA (deterministico — ver buildLessons): substitui a
-        // antiga etapa LLM de analise; so a partir da iteracao 1 e se
-        // as licoes nao foram desligadas (feedbackDriven false / reflection off).
-        const hint0 =
-          lessonsEnabled(cfg) && prevRun
-            ? // IMPL-013: com paciência a iteração anterior pode não ter
-              // promovido — o campeão rodou nela como 'carry'; `v<k>` de lá é
-              // OUTRA variante. O id da última run é o que vale.
-              buildLessons(prevRun, championIdInLastRun)
-            : '';
+        // IMPL-060/IMPL-062: a base de derivação é o PAI (pool Pareto com
+        // fatias múltiplas) ou o campeão (elitismo explícito). O dossiê de
+        // lições vem da run do PRÓPRIO pai — antes eram sempre as falhas do
+        // campeão, o mesmo bloco injetado em todas as K variantes.
+        const pai = selecionarPai();
+        const dossieRun = pai ? runsById.get(pai.runId) : prevRun;
+        const dossieDono = pai ? pai.contestantId : championIdInLastRun;
+        // IMPL-013: com paciência a iteração anterior pode não ter promovido —
+        // o campeão rodou nela como 'carry'; `v<k>` de lá é OUTRA variante. O
+        // dono do dossiê é o que vale (o id da SUA run).
+        const dossie =
+          lessonsEnabled(cfg) && dossieRun && dossieDono
+            ? buildLessonDossier(dossieRun, dossieDono, {
+                maxLessonTokens: cfg.maxLessonTokens,
+                includeReference: cfg.lessonsIncludeReference,
+              })
+            : undefined;
+        // IMPL-060, critério 3: truncagem NUNCA é silensiosa — vai para o log.
+        const avisoTruncagem = dossie ? lessonTruncationNotice(dossie) : undefined;
+        if (avisoTruncagem) log(sessionId, avisoTruncagem);
+        const hint0 = dossie ? renderLessonDossier(dossie) : '';
         // Reflexao GEPA POR LLM (opt-in, §7.5): o meta-modelo reescreve as
         // licoes deterministicas num bloco acionavel. Custo extra contado no
         // ledger; falha DEGRADA para o deterministico — nunca derruba a iteracao.
@@ -539,15 +965,11 @@ async function trainingLoop(
           apiKey,
           modelId: cfg.contestantModelId,
           theme: cfg.theme,
-          // F4.1: com pool >1 a base de DERIVACAO rotaciona entre os membros
-          // nao-dominados (pais diversos — o GEPA mostra que colapsar num unico
-          // campeao e preso a otimo local). A REGUA ('carry') continua sendo o
-          // campeao: o gate por margem nao muda de significado.
-          basePrompt: (() => {
-            const pai = poolSize > 1 && pool.length ? pickParent(pool, usoPai) : undefined;
-            if (pai) usoPai[pai.id] = (usoPai[pai.id] ?? 0) + 1;
-            return pai?.text ?? champion!.systemPrompt;
-          })(),
+          // F4.1: com pool >1 a base de DERIVACAO vem do pai amostrado (pais
+          // diversos — o GEPA mostra que colapsar num unico campeao e preso a
+          // otimo local). A REGUA ('carry') continua sendo o campeao: o gate por
+          // margem nao muda de significado.
+          basePrompt: pai?.text ?? champion!.systemPrompt,
           originalPrompt: cfg.basePrompt,
           carryPrompt: champion!.systemPrompt,
           carryLabel: `Melhor it.${i}`,
@@ -626,10 +1048,10 @@ async function trainingLoop(
       }
       // O ledger e a fonte de verdade do gasto (soma todos os papeis de todas
       // as runs); somar `runRec.totalCostUsd` aqui contaria duas vezes.
-      // F4.1: o front final (sem o texto — grande demais p/ o record) mostra a
-    // POPULACAO que sobreviveu, nao so o campeao.
-    record.pool = pool.map(({ text: _text, ...e }) => ({ ...e, label: e.label ?? e.id }));
-    syncLedger();
+      // IMPL-060: guarda a run por id — o dossiê de lições de cada membro do
+      // pool vem da run DELE (lições da própria run da variante).
+      runsById.set(runRec.id, runRec);
+      syncLedger();
 
       // A run filha parou por orcamento/cancelamento => a sessao para tambem.
       if (runRec.status === 'aborted' && runRec.stoppedReason) {
@@ -648,10 +1070,24 @@ async function trainingLoop(
         const specs = runRec.stages
           .map((s) => s.spec)
           .filter((s): s is StageSpec => Boolean(s));
+        // IMPL-062/IMPL-065: os cenários da sessão congelam aqui — é deles que
+        // vêm as fatias do pool (elitismo vs Pareto) e a contagem de itens
+        // curados (âncora humana) da declaração de campeão.
+        todasSpecs = specs;
+        nInstancias = specs.length;
+        fatiasMultiplas = sliceKeysOf(specs).length > 1;
         if (cfg.holdoutRatio !== 0) {
-          const split = splitHoldout(specs, cfg.holdoutRatio ?? 0.2);
+          // IMPL-050: piso ABSOLUTO de 10 cenários + ratio default 0,3. Fatia
+          // curta não é holdout: é "confirmação fraca" (`strength`), o campeão
+          // sai com `holdoutSkipped` e a palavra "validado" fica bloqueada
+          // (ver `holdoutConfirmationText`).
+          const split = splitHoldout(specs, cfg.holdoutRatio ?? HOLDOUT_RATIO_DEFAULT);
           pinnedStages = split.train;
           holdoutStages = split.holdout;
+          if (split.strength === 'confirmacao-fraca') {
+            record.holdoutSkipped = true;
+            log(sessionId, holdoutConfirmationText(split.reserved.length, { strength: split.strength }));
+          }
         } else {
           pinnedStages = specs;
         }
@@ -668,13 +1104,19 @@ async function trainingLoop(
       // IMPL-005: o ganho e o Δ PAREADO (so etapas com veredito nos DOIS
       // lados; ausente nunca vira 'nao') e, com >10% de pares excluidos, a
       // promocao so vale se sobreviver ao pior/melhor caso (ver pickWinner).
-      const pick = pickWinner(buildRankEntries(runRec, controlId), {
-        minGain,
-        scoresById: stageScoresByContestant(
-          runRec.stages,
-          runRec.contestants.map((c) => c.id),
-        ),
-      });
+      const scoresById = stageScoresByContestant(
+        runRec.stages,
+        runRec.contestants.map((c) => c.id),
+      );
+      // IMPL-071: o desempate por tamanho só vale entre variantes com o
+      // contrato never-break v2 verde (ver buildRankEntries).
+      const pick = pickWinner(
+        buildRankEntries(runRec, controlId, { contractsActive: Boolean(cfg.contracts) }),
+        {
+          minGain,
+          scoresById,
+        },
+      );
       // IMPL-013: passou no gate da melhor de K → re-avaliação LIMPA num
       // minibatch antes de confirmar (as avaliações da seleção não confirmam a
       // própria seleção). Sem régua (treino sem prompt base, iteração 0) não há
@@ -757,18 +1199,33 @@ async function trainingLoop(
 
       // F4.1: promocao entra no POOL (nunca derruba o campeao unico — o pool
       // e aditivo e o champion segue sendo o melhor absoluto p/ holdout).
+      // IMPL-062 (R-02b:REC-4): o pool SÓ existe com fatias múltiplas — com
+      // fatia única a dominância de Pareto vira comparação de média e o treino
+      // roda como elitismo EXPLÍCITO (sem estado de pool/paretoFront; o record
+      // não traz `pool` e nenhum teste/consumidor deve esperar paretoFront).
+      const paretoAtivo = poolSize > 1 && fatiasMultiplas;
       if (promoted) {
-        pool = addToPool(
-          pool,
-          {
-            id: `it-${i}`,
-            label: champion.label,
-            bySlice: sliceScoresOf(runRec, championIdInLastRun),
-            text: champion.systemPrompt,
-          },
-          { maxSize: poolSize },
-        );
+        if (paretoAtivo) {
+          pool = addToPool(
+            pool,
+            {
+              id: `it-${i}`,
+              label: champion.label,
+              bySlice: sliceScoresOf(runRec, championIdInLastRun),
+              text: champion.systemPrompt,
+              // Proveniência: o dossiê de lições do membro vem DESTE run/id.
+              runId: runRec.id,
+              contestantId: championIdInLastRun,
+            },
+            { maxSize: poolSize },
+          );
+          // F4.1: o front (sem o texto — grande demais p/ o record) mostra a
+          // POPULACAO que sobreviveu, nao so o campeao.
+          record.pool = pool.map((e) => ({ id: e.id, label: e.label ?? e.id, bySlice: e.bySlice }));
+        }
+        // ...com elitismo explícito o campeão É o estado: `record.pool` não existe.
       }
+      registrarDiagnostico();
 
       prevRun = runRec;
       emitSessionEvent({
@@ -808,20 +1265,39 @@ async function trainingLoop(
         break;
       }
 
-      // IMPL-013 — paciência 2: uma iteração sem promoção NÃO encerra a sessão
-      // (antes encerrava: paciência implícita 1). A próxima deriva de novo do
-      // campeão atual, com lições novas; só 2 SEGUIDAS sem promoção = convergiu.
+      // IMPL-013/IMPL-051 — paciência configurável (default 2): uma iteração
+      // sem promoção NÃO encerra a sessão (antes encerrava: paciência implícita
+      // 1). A próxima deriva de novo do campeão atual, com lições novas; só
+      // `patience` SEGUIDAS sem promoção = convergiu.
       semPromocao = promoted ? 0 : semPromocao + 1;
-      if (!promoted && shouldStopForPatience(semPromocao)) {
+      // IMPL-051 — parada por PLATÃO: o IC95 do ganho termina ABAIXO de minGain
+      // (nenhum valor plausível do ganho alcança a margem: a curva platôou).
+      // Só depois de 2 seguidas sem promoção — a 1ª nunca mata a busca
+      // (IMPL-013: sob H0 25,8–35,8% das sessões param cedo por azar) — e
+      // antecipa a paciência quando ela é configurada acima de 2.
+      const ciGanho = pairedGainCi(scoresById, controlId, pick.best?.id);
+      const minGainPp = gate?.minGain ?? minGain ?? 1;
+      const plateau =
+        !promoted &&
+        semPromocao >= Math.min(2, patience) &&
+        ciGanho !== undefined &&
+        ciGanho[1] < minGainPp;
+      if (!promoted && (plateau || shouldStopForPatience(semPromocao, patience))) {
+        // IMPL-051: a convergência reporta iteração E motivo (platão vs paciência).
+        const reason: 'patience' | 'plateau' = plateau ? 'plateau' : 'patience';
         record.convergedAtIteration = i;
-        emitSessionEvent({ type: 'session.converged', sessionId, iteration: i });
+        record.convergenceReason = reason;
+        emitSessionEvent({ type: 'session.converged', sessionId, iteration: i, reason });
+        const detalheIc = ciGanho
+          ? `; IC95 do ganho [${ciGanho[0].toFixed(1)}; ${ciGanho[1].toFixed(1)}]pp vs minGain ${minGainPp.toFixed(1)}pp`
+          : '';
         log(
           sessionId,
           gate?.decision === 'inconclusive'
-            ? `parou sem promocao na iteracao ${i + 1} (${semPromocao} seguidas): gate INCONCLUSIVO (${gate.pairing.excludedPairs} de ${gate.pairing.n} pares sem veredito; a decisao muda no pior/melhor caso)`
-            : gate
-              ? `convergiu na iteracao ${i + 1} (${semPromocao} seguidas sem promocao; ${formatIterationGate(gate)})`
-              : `convergiu na iteracao ${i + 1} (${semPromocao} seguidas sem promocao; ganho ${pick.gain.toFixed(1)}pp < minGain ${minGain ?? 1})`,
+            ? `parou sem promocao na iteracao ${i + 1} (${semPromocao} seguidas, motivo ${reason}): gate INCONCLUSIVO (${gate.pairing.excludedPairs} de ${gate.pairing.n} pares sem veredito; a decisao muda no pior/melhor caso)`
+            : `convergiu na iteracao ${i + 1} por ${reason === 'plateau' ? 'platao' : 'paciencia'} (${semPromocao} seguidas sem promocao${detalheIc}; ${
+                gate ? formatIterationGate(gate) : `ganho ${pick.gain.toFixed(1)}pp < minGain ${minGainPp}`
+              })`,
         );
         await saveSession(record);
         break;
@@ -829,30 +1305,30 @@ async function trainingLoop(
       if (!promoted) {
         log(
           sessionId,
-          `iteracao ${i + 1} sem promocao (${semPromocao}/${TRAINING_PATIENCE} da paciencia): segue com o campeao atual`,
+          `iteracao ${i + 1} sem promocao (${semPromocao}/${patience} da paciencia): segue com o campeao atual`,
         );
       }
     }
 
     // 6) Gate final: holdout + significancia. NUNCA derruba a sessao — falha
     //    aqui vira warn e o treino termina com o que se tem.
+    let scoreCi95Pp: [number, number] | null = null;
     try {
-      // O holdout e uma run extra. Sem orcamento para ela o campeao fica NAO
-      // VALIDADO contra sobreajuste — e isso precisa aparecer no resultado, nao
-      // sumir. Ver `holdoutSkipped`.
+      // O holdout e uma run extra. Sem orcamento para ela o campeao fica sem
+      // CONFIRMACAO contra sobreajuste — e isso precisa aparecer no resultado,
+      // nao sumir. Ver `holdoutSkipped` (IMPL-050: a palavra "validado" so
+      // aparece com holdout forte e rodado — ver `holdoutConfirmationText`).
       const estHoldout =
         holdoutStages.length > 0 ? estIter * (holdoutStages.length / Math.max(1, cfg.stages)) : 0;
       if (record.stoppedReason || (estHoldout > 0 && !ledger.canAfford(estHoldout))) {
         record.holdoutSkipped = true;
-        log(
-          sessionId,
-          'holdout pulado (orcamento/cancelamento): campeao NAO validado contra sobreajuste',
-        );
+        log(sessionId, holdoutConfirmationText(0, { skipped: true }));
       } else {
-        await finalizeHoldout(record, apiKey, champion, championIdInLastRun, holdoutStages, prevRun, {
+        const gateFinal = await finalizeHoldout(record, apiKey, champion, championIdInLastRun, holdoutStages, prevRun, {
           ledger,
           signal: opts.signal,
         });
+        scoreCi95Pp = gateFinal.scoreCi95Pp ?? null;
       }
     } catch (err) {
       if (isControlSignal(err)) {
@@ -868,6 +1344,19 @@ async function trainingLoop(
         );
       }
     }
+
+    // IMPL-065 (R-05:REC-4): declaração de campeão sob âncora HUMANA. Com
+    // curatedItems < minCuratedItems o treino NÃO declara campeão — o dataset
+    // sintético é bootstrap/treino, não evidência — e a recusa entra no
+    // resultado citando o número de itens curados e o piso.
+    const specsDeclaracao = todasSpecs.length
+      ? todasSpecs
+      : (record.pinnedStages ?? cfg.customStages ?? cfg.scenarioSeed ?? []);
+    record.championDeclaration = championDeclarationFor(specsDeclaracao, {
+      minCuratedItems: cfg.minCuratedItems,
+      scoreCi95Pp,
+    });
+    log(sessionId, record.championDeclaration.message);
 
     syncLedger();
     record.status = record.stoppedReason ? 'aborted' : 'finished';
@@ -913,19 +1402,21 @@ async function finalizeHoldout(
   holdoutStages: StageSpec[],
   lastRun: RunRecord | undefined,
   ctxOpts: { ledger?: BudgetLedger; signal?: AbortSignal } = {},
-): Promise<void> {
+): Promise<{ scoreCi95Pp?: [number, number] | null }> {
   const cfg = record.config;
   const sessionId = record.id;
   const basePrompt = cfg.basePrompt ?? '';
+  // IMPL-065: IC95 do score do campeão (pareado) — reportado na declaração.
+  let scoreCi95Pp: [number, number] | null = null;
 
   let holdoutRun: RunRecord | undefined;
-  // Fase 4, treino com agente e reps>1: o pareamento do holdout (e da
-  // significancia) usa o veredito AGREGADO por cenário, nao o vetor plano por
-  // (cenário × rep) — mantém o comportamento atual ate a sub-tarefa de reps
-  // expor `referenceJudge.verdictsByRep`.
+  // Fase 4, treino com agente e reps>1 (IMPL-054): repetição NÃO é observação
+  // independente — o pareamento do holdout (e da significancia) usa o veredito
+  // AGREGADO por cenário (a maioria das reps, `verdictByContestant`), nunca o
+  // vetor plano (cenário × rep): reps não dobram o n do teste pareado.
   if (cfg.agent && (cfg.agent.repetitions ?? 1) > 1) {
     console.warn(
-      `[train ${sessionId}] holdout pareado por cenário (reps não pareadas) — agent.repetitions=${cfg.agent.repetitions}`,
+      `[train ${sessionId}] holdout pareado por cenário (reps agregadas dentro do cenário) — agent.repetitions=${cfg.agent.repetitions}`,
     );
   }
   // So ha o que re-testar se a fatia de holdout e confiavel, existe um prompt
@@ -1007,6 +1498,7 @@ async function finalizeHoldout(
       'holdout-control',
       'holdout-champion',
     );
+    scoreCi95Pp = scoreCiOf(controlScores, championScores);
     const coverage = pairCoverage(controlScores, championScores);
     const controlScore = coverage.controlMeanPp ?? 0;
     const championScore = coverage.championMeanPp ?? 0;
@@ -1027,7 +1519,11 @@ async function finalizeHoldout(
       ...coverage,
     };
     emitSessionEvent({ type: 'session.holdout', sessionId, holdout: record.holdout });
-    record.significance = pairedSignificance(controlScores, championScores);
+    // IMPL-051/IMPL-050: UM teste final em holdout intocado (α=0,05 unilateral)
+    // é o ÚNICO p de confirmação da sessão — e ele vem ROTULADO com a origem
+    // ('holdout'); a UI e o CLI exibem o rótulo em todo relatório.
+    record.significance = pairedSignificance(controlScores, championScores, { pOrigin: 'holdout' });
+    log(sessionId, holdoutConfirmationText(holdoutStages.length));
   } else if (lastRun && champion) {
     // Sem run de holdout (split invalido, campeao == base ou run falhou): a
     // significancia vem da ultima run de treino, pareando a BASE ('original',
@@ -1048,13 +1544,18 @@ async function finalizeHoldout(
         pairingControl,
         championIdInLastRun,
       );
+      scoreCi95Pp = scoreCiOf(controlScores, championScores);
       record.pairing = {
         source: 'training',
         controlId: pairingControl,
         championId: championIdInLastRun,
         ...pairCoverage(controlScores, championScores),
       };
-      record.significance = pairedSignificance(controlScores, championScores);
+      // IMPL-050 (R-04 DEC-7): este p veio da PRÓPRIA run de seleção —
+      // anti-conservador (mede o mesmo dado que escolheu o melhor) e vem
+      // rotulado como tal em todo relatório. O p de confirmação da sessão é o
+      // do holdout; sem holdout não há confirmação.
+      record.significance = pairedSignificance(controlScores, championScores, { pOrigin: 'selecao' });
     } else {
       // Campeao == controle (convergiu sem ganho) ou ids ausentes na run:
       // nao ha comparacao a testar.
@@ -1062,4 +1563,5 @@ async function finalizeHoldout(
     }
   }
   await saveSession(record);
+  return { scoreCi95Pp };
 }

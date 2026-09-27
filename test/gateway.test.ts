@@ -6,13 +6,15 @@
 //  (b) com transporte FALSO, `usage.cost` medido prevalece sobre o catálogo
 //      (catálogo = fallback 'catalog'; sem os dois = 'unknown', nunca "grátis")
 //      e soma(papéis) == total no ledger (ponto único: role + sink);
-//  (c) limitador AIMD POR INSTÂNCIA: 429 → recuo pela metade, retry ≤ 6.
+//  (c) limitador AIMD POR INSTÂNCIA (IMPL-076: por (key, modelo), recuo de
+//      429 limitado a 1 por janela >= 1 s), retry <= 6.
 // O pipeline inteiro (Node e web) é exercitado em gateway-pipeline.test.ts.
 
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
+  AIMD_DECREASE_WINDOW_MS,
   createGateway,
   DEFAULT_OPENROUTER_BASE_URL,
   extractUsage,
@@ -274,41 +276,65 @@ describe('IMPL-021 (b) — soma(papéis) == total: contabilidade num ponto só',
 describe('IMPL-021 (c) — limitador AIMD por instância', () => {
   const msgs = [{ role: 'user' as const, content: 'x' }];
 
-  it('429 → recua pela metade a cada vez (8→4→2→1) e depois conclui; outra instância intacta', async () => {
-    let gw!: OpenRouterGateway;
-    const limites: number[] = [];
-    const esperas: number[] = [];
-    const fake = fakeOpenRouter({
-      chat: (_req, n) => {
-        limites.push(gw.currentConcurrency().limit);
-        return n < 3 ? { status: 429, bodyText: 'rate limited' } : { text: 'ok' };
-      },
-    });
-    gw = createGateway({ fetch: fake.fetch, sleep: async (ms) => void esperas.push(ms) });
-    const outra = createGateway({ fetch: fake.fetch, sleep: noSleep });
+  // IMPL-076 (R-07a:REC-5): o recuo e LIMITADO — no maximo 1 decremento por
+  // janela (>= 1 s). Antes cada 429 da rajada recuava o limite (3 erros
+  // seguidos levavam 8→4→2→1): o provedor castiga em rajada e o castigo
+  // contava N vezes pelo MESMO tiro. Relógio congelado (fake timers, só Date).
+  it('rajada de 429 recua 1x por janela (8→4 e fica) e depois conclui; outra instância intacta', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      let gw!: OpenRouterGateway;
+      const limites: number[] = [];
+      const esperas: number[] = [];
+      const fake = fakeOpenRouter({
+        chat: (_req, n) => {
+          limites.push(gw.currentConcurrency().limit);
+          return n < 3 ? { status: 429, bodyText: 'rate limited' } : { text: 'ok' };
+        },
+      });
+      gw = createGateway({ fetch: fake.fetch, sleep: async (ms) => void esperas.push(ms) });
+      const outra = createGateway({ fetch: fake.fetch, sleep: noSleep });
 
-    const r = await gw.chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs });
-    expect(r.text).toBe('ok');
-    expect(limites).toEqual([8, 4, 2, 1]);
-    expect(fake.chatRequests()).toHaveLength(4);
-    // Backoff exponencial com jitter < 250 ms: 250·2^tentativa.
-    esperas.forEach((ms, i) => {
-      expect(ms).toBeGreaterThanOrEqual(250 * 2 ** i);
-      expect(ms).toBeLessThan(250 * 2 ** i + 250);
-    });
-    expect(outra.currentConcurrency().limit).toBe(8); // estado é da instância, não do módulo
-    expect(getGateway().currentConcurrency().limit).toBe(8);
+      const r = await gw.chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs });
+      expect(r.text).toBe('ok');
+      // Uma rajada = UM recuo: 8→4 e os demais 429 dentro da janela não contam.
+      expect(limites).toEqual([8, 4, 4, 4]);
+      expect(fake.chatRequests()).toHaveLength(4);
+      // Backoff exponencial com jitter < 250 ms: 250·2^tentativa.
+      esperas.forEach((ms, i) => {
+        expect(ms).toBeGreaterThanOrEqual(250 * 2 ** i);
+        expect(ms).toBeLessThan(250 * 2 ** i + 250);
+      });
+      expect(outra.currentConcurrency().limit).toBe(8); // estado é da instância, não do módulo
+      expect(getGateway().currentConcurrency().limit).toBe(8);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it('429 persistente: no máximo 6 re-tentativas (7 envios) e erro PT-BR claro; piso 1', async () => {
-    const fake = fakeOpenRouter({ chat: () => ({ status: 429, bodyText: 'slow down' }) });
-    const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
-    await expect(gw.chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs })).rejects.toThrow(
-      /rate limit \(HTTP 429\)/,
-    );
-    expect(MAX_RETRIES).toBe(6);
-    expect(fake.chatRequests()).toHaveLength(1 + MAX_RETRIES);
-    expect(gw.currentConcurrency()).toEqual({ limit: 1, active: 0, queued: 0 });
+  it('429 persistente com a janela avançando: metade por janela (8→4→2→1), piso 1, 7 envios no máximo', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      // Cada resposta do provedor chega numa janela NOVA (+1,1 s): 6 recuos
+      // cabem em 6 janelas distintas — e o piso do limite continua 1.
+      const fake = fakeOpenRouter({
+        chat: () => {
+          vi.setSystemTime(new Date(Date.now() + AIMD_DECREASE_WINDOW_MS + 100));
+          return { status: 429, bodyText: 'slow down' };
+        },
+      });
+      const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
+      await expect(gw.chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs })).rejects.toThrow(
+        /rate limit \(HTTP 429\)/,
+      );
+      expect(MAX_RETRIES).toBe(6);
+      expect(fake.chatRequests()).toHaveLength(1 + MAX_RETRIES);
+      expect(gw.currentConcurrency()).toEqual({ limit: 1, active: 0, queued: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('5xx repete SEM recuar o limite; 4xx não repete', async () => {

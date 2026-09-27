@@ -2,10 +2,8 @@
 // TrainingView (cockpit de treino). A UNICA visualizacao de progresso/resultado
 // e o heatmap (cenario x variante); o bloco de finais so aparece no fim.
 import { useMemo } from 'react';
-import type { KeyboardEvent } from 'react';
 import type { RunRecord, StageRecord, Verdict } from '../api';
 import { normalizeContestants } from '../api';
-import { useTheme } from '../theme';
 import {
   Accordion,
   AccordionItem,
@@ -13,6 +11,7 @@ import {
   AccordionPanel,
 } from '@/components/motion-ui/accordion';
 import { ProgressBar } from '@/components/motion-ui/progress-bar';
+import { Sparkline } from '@/components/motion-ui/sparkline';
 import { Tag } from '../components/primitives';
 import { cn } from '@/lib/utils';
 
@@ -61,24 +60,70 @@ export function denseStages(stages: StageRecord[]): StageRecord[] {
   return stages.filter((s): s is StageRecord => Boolean(s)).slice().sort((a, b) => a.index - b.index);
 }
 
-export interface RankColor {
-  solid: string;
-  soft: string;
-  text: string;
+// ---------------------------------------------------------------------------
+// Empate e tendência (IMPL-109): a informação de posição/score é TEXTO. A cor
+// só carrega o veredito (tokens semânticos + glifo), nunca a posição — a rampa
+// contínua verde→vermelho colapsava sob deuteranopia e reprovava em contraste.
+// ---------------------------------------------------------------------------
+
+/** Sufixo não cromático de empate — idêntico em todas as linhas empatadas. */
+export const TIE_MARKER = 'E';
+
+export interface TieMark {
+  /** Sufixo do valor (`''` quando a linha não está empatada). */
+  marker: string;
+  /** Resumo textual: `empatado com X` / `empatado com X e Y`. */
+  summary: string;
 }
 
-// Verde (melhor) -> vermelho (pior), em HSL. `pos` é 1-based. Escala de DADO
-// (posição no ranking), por isso é uma rampa contínua e não um token do tema.
-export function rankColor(pos: number, total: number, dark: boolean): RankColor {
-  const tl = dark ? 72 : 34;
-  const sa = dark ? 0.22 : 0.15;
-  if (total <= 1 || pos < 1) {
-    return { solid: 'hsl(145 60% 42%)', soft: `hsl(145 70% 50% / ${sa})`, text: `hsl(145 55% ${tl}%)` };
+/**
+ * Empates por valor (score, win-rate…): linhas com o MESMO valor recebem o
+ * mesmo marcador textual, e o resumo nomeia as demais — nada de "mesma cor"
+ * como único sinal (e nem cor: o marcador é igual nas duas linhas).
+ */
+export function tieMarks(
+  ids: string[],
+  valueOf: (id: string) => number | undefined,
+  labelOf: (id: string) => string,
+): Map<string, TieMark> {
+  const out = new Map<string, TieMark>();
+  const porValor = new Map<string, string[]>();
+  for (const id of ids) {
+    const v = valueOf(id);
+    if (v === undefined || !Number.isFinite(v)) continue;
+    const chave = String(v);
+    const lista = porValor.get(chave) ?? [];
+    lista.push(id);
+    porValor.set(chave, lista);
   }
-  const frac = (pos - 1) / (total - 1);
-  const hue = Math.round(145 - (145 - 6) * frac);
-  return { solid: `hsl(${hue} 62% 44%)`, soft: `hsl(${hue} 75% 50% / ${sa})`, text: `hsl(${hue} 58% ${tl}%)` };
+  for (const grupo of porValor.values()) {
+    if (grupo.length < 2) continue;
+    for (const id of grupo) {
+      const outros = grupo.filter((o) => o !== id).map(labelOf);
+      out.set(id, { marker: TIE_MARKER, summary: `empatado com ${outros.join(' e ')}` });
+    }
+  }
+  return out;
 }
+
+/**
+ * Texto alternativo da sparkline de evolução: `'Evolução de X: subiu de 40
+ * para 72 em 5 rodadas'`. Sem isto o gráfico é um traço mudo para leitor de
+ * tela (IMPL-108).
+ */
+export function sparklineTrend(label: string, history: number[]): string {
+  const n = history.length;
+  if (!n) return `Evolução de ${label}: sem rodadas julgadas`;
+  const first = Math.round(history[0]);
+  const last = Math.round(history[n - 1]);
+  const rodadas = `${n} ${n === 1 ? 'rodada' : 'rodadas'}`;
+  if (last === first) return `Evolução de ${label}: estável em ${last} ao longo de ${rodadas}`;
+  const verbo = last > first ? 'subiu' : 'caiu';
+  return `Evolução de ${label}: ${verbo} de ${first} para ${last} em ${rodadas}`;
+}
+
+/** Medalha textual do pódio — o número é texto, a medalha também (IMPL-109). */
+export const MEDAL_TEXT = ['ouro', 'prata', 'bronze'] as const;
 
 // ---------------------------------------------------------------------------
 // Heatmap de vereditos: cenario x variante. E a unica visualizacao durante a
@@ -160,11 +205,93 @@ export function heatRows(record: RunRecord): { rows: HeatRow[]; stages: StageRec
   return { rows, stages };
 }
 
+/** Estado de UMA célula do heatmap: glifo decorativo + rótulo textual. */
+export interface HeatCellState {
+  /** Glifo visível. Decoração: vai sempre `aria-hidden` (IMPL-108). */
+  glyph: string;
+  /** Classes do token semântico da célula (veredito) ou do neutro. */
+  cls: string;
+  /** Rótulo TEXTUAL do estado — é o que a célula anuncia (IMPL-108). */
+  label: string;
+}
+
+/**
+ * Fan-out ao vivo (F3/§7.2): a célula mostra a FASE do par (variante × cenário)
+ * — pendente → resposta recebida → julgada, com erro à parte. É o que faz a run
+ * longa não parecer travada. O rótulo é TEXTO: o glifo nunca é o nome acessível.
+ */
+export function heatmapCellState(stage: StageRecord, row: HeatRow, cenario: number): HeatCellState {
+  const v = row.verdicts[cenario];
+  const resp = (stage.responses ?? []).find((r) => r.contestantId === row.contestantId);
+  // IMPL-004: juiz que falhou NÃO vira nota — a célula diz "sem veredito" e o
+  // motivo, e o score da linha ignora a etapa.
+  const semVeredito = v ? undefined : verdictErrorInStage(stage, row.contestantId);
+  // Bloqueio (moderação/guardrail) vem ANTES do veredito: o cenário é
+  // inconclusivo para o prompt, nunca um 'não' (IMPL-010).
+  if (resp?.status === 'blocked') {
+    return {
+      glyph: '⊘',
+      cls: 'bg-muted text-muted-foreground',
+      label: 'bloqueado pela moderação — sem veredito para o prompt',
+    };
+  }
+  if (resp?.truncated) {
+    // IMPL-014: cortada no teto mesmo após o retry x2 — a etapa inteira sai do placar.
+    return {
+      glyph: '✂',
+      cls: 'bg-muted text-muted-foreground',
+      label: 'resposta truncada no teto de tokens — etapa fora do placar',
+    };
+  }
+  if (stage.incompleteReason === 'truncation' && !v) {
+    return {
+      glyph: '–',
+      cls: 'bg-muted/50 text-muted-foreground',
+      label: 'etapa fora do placar (outra resposta foi truncada)',
+    };
+  }
+  if (v) {
+    return { glyph: VERDICT_GLYPH[v], cls: VERDICT_META[v].cell, label: VERDICT_META[v].label };
+  }
+  if (stage.incomplete) {
+    // Cortado por orçamento/cancelamento (IMPL-020): sem nota e fora do score —
+    // nunca um ✕ que o competidor não mereceu. ⏹ (não ⊘): ⊘ é o bloqueio da
+    // moderação (IMPL-010).
+    return {
+      glyph: '⏹',
+      cls: 'bg-muted/50 text-muted-foreground',
+      label:
+        stage.incompleteReason === 'budget'
+          ? 'cortado pelo orçamento — fora do placar'
+          : 'interrompido — fora do placar',
+    };
+  }
+  if (semVeredito && resp?.status !== 'error') {
+    return { glyph: '?', cls: 'bg-muted text-muted-foreground', label: `sem veredito — ${semVeredito}` };
+  }
+  if (resp?.status === 'error') {
+    // bg-nao/15 (não /20): medido em WCAG — /20 reprovava em dark (4,43:1).
+    return { glyph: '!', cls: 'bg-nao/15 text-nao', label: 'resposta com erro' };
+  }
+  if (resp) {
+    return {
+      glyph: '⏳',
+      cls: 'bg-muted text-muted-foreground',
+      label: 'resposta recebida — aguardando julgamento',
+    };
+  }
+  return { glyph: '·', cls: 'bg-muted/50 text-muted-foreground', label: 'pendente' };
+}
+
 interface ScoreHeatmapProps {
   record: RunRecord;
   /** Ordena por score desc (só use quando a run terminou). Default false. */
   ranked?: boolean;
-  /** Clique numa célula/coluna abre o cenário correspondente (recebe o index da etapa). */
+  /**
+   * Clique no CABEÇALHO de uma coluna abre o cenário correspondente (recebe o
+   * index da etapa). Só o cabeçalho é interativo — as células nunca são
+   * (IMPL-108: M+N·M paradas de Tab viram M+1).
+   */
   onStageClick?: (index: number) => void;
 }
 
@@ -173,27 +300,12 @@ interface ScoreHeatmapProps {
  * estável), colunas = cenários, célula = ✓ (resolve) / ◐ (parcial) / ✕ (não) /
  * · (pendente). Coluna final = score 0–100 + contagem `n✓ n◐ n✕`.
  *
- * Não sai do catálogo: o Motion UI tem `sparkline` como único gráfico, e uma
- * matriz cenário × variante não é nenhuma das 35 peças. Daí a grade explícita.
+ * É uma `<table>` NATIVA (IMPL-108): `<caption>` com a legenda, `<th
+ * scope="col">` por cenário (o clique mora aqui), `<th scope="row">` por
+ * variante e `<td>` não focáveis com veredito em TEXTO — o glifo é `aria-hidden`.
  */
 export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeatmapProps) {
   const { rows, stages } = useMemo(() => heatRows(record), [record]);
-  // Interatividade opcional: célula/coluna só vira "botão" (foco, teclado)
-  // quando há onStageClick — sem handler, continua um div inerte.
-  const clickProps = (index: number) =>
-    onStageClick
-      ? {
-          role: 'button' as const,
-          tabIndex: 0,
-          onClick: () => onStageClick(index),
-          onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onStageClick(index);
-            }
-          },
-        }
-      : {};
   // Ordenacao so quando pedida (fim da run): sort e estavel, entao empate
   // preserva a ordem de `contestants`.
   const linhas = useMemo(
@@ -204,133 +316,300 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
   if (!linhas.length || !stages.length) {
     return (
       <div className="rounded-xl bg-card px-4 py-10 text-center text-sm text-muted-foreground ring-1 ring-foreground/10">
-        Aguardando os primeiros resultados…
+        <p>Aguardando os primeiros resultados…</p>
+        <p className="mt-1.5 text-[12px]">
+          Cada linha é uma variante e cada coluna, um cenário. A célula mostra o veredito do juiz
+          (resolve, parcial ou não resolve) assim que ele terminar.
+        </p>
       </div>
     );
   }
 
-  // Grade derivada do NÚMERO de cenários — é dado, não decoração de layout.
-  const gridStyle = {
-    gridTemplateColumns: `minmax(8rem, 1fr) repeat(${stages.length}, 1.75rem) 5rem`,
-  };
-  const cellBase =
-    'grid h-7 place-items-center rounded-[5px] text-[13px] leading-none select-none';
+  return (
+    <div className="rounded-xl bg-card ring-1 ring-foreground/10">
+      <div className="scroll-slim overflow-x-auto p-3">
+        <table className="w-full min-w-fit border-separate border-spacing-x-1 border-spacing-y-0.5">
+          <caption className="caption-top border-b border-border px-1 pb-2 text-left text-[12px] text-muted-foreground">
+            Heatmap de vereditos — linhas: variantes; colunas: cenários.{' '}
+            <span aria-hidden="true">✓</span> resolve · <span aria-hidden="true">◐</span> parcial ·{' '}
+            <span aria-hidden="true">✕</span> não resolve · <span aria-hidden="true">?</span> sem
+            veredito · <span aria-hidden="true">⏳</span> aguardando julgamento ·{' '}
+            <span aria-hidden="true">⊘</span> bloqueado · <span aria-hidden="true">✂</span>{' '}
+            truncada · <span aria-hidden="true">⏹</span> cortado ·{' '}
+            <span aria-hidden="true">!</span> erro · <span aria-hidden="true">·</span> pendente
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col" className="min-w-[8rem] px-1 pb-1 text-left text-[11px] font-normal text-muted-foreground">
+                variante
+              </th>
+              {stages.map((s, i) => {
+                // IMPL-014: gabarito truncado mesmo após o retry x2 foi descartado —
+                // o cenário é julgado SEM régua (listwise). Marca visível no cabeçalho.
+                const semRegua = s.gabaritoCall?.truncated === true;
+                const titulo = `Cenário ${i + 1}${semRegua ? ' — gabarito truncado no teto e descartado: julgado sem gabarito' : ''}`;
+                return (
+                  <th key={s.index} scope="col" className="px-0.5 pb-1 align-bottom font-normal">
+                    {onStageClick ? (
+                      <button
+                        type="button"
+                        title={`${titulo} — clique para abrir`}
+                        aria-label={`${titulo}. Abrir o cenário`}
+                        onClick={() => onStageClick(s.index)}
+                        className={cn(
+                          'grid h-6 w-7 place-items-center rounded-[5px] text-[11px] font-normal text-muted-foreground tabular cursor-pointer hover:bg-muted focus-visible:bg-muted focus-visible:outline-none',
+                          semRegua && 'underline decoration-dotted underline-offset-2',
+                        )}
+                      >
+                        {semRegua ? (
+                          <>
+                            {i + 1}
+                            <span aria-hidden="true">✂</span>
+                          </>
+                        ) : (
+                          i + 1
+                        )}
+                      </button>
+                    ) : (
+                      <span
+                        title={titulo}
+                        className={cn(
+                          'grid h-6 w-7 place-items-center text-[11px] text-muted-foreground tabular',
+                          semRegua && 'underline decoration-dotted underline-offset-2',
+                        )}
+                      >
+                        {semRegua ? (
+                          <>
+                            {i + 1}
+                            <span aria-hidden="true">✂</span>
+                          </>
+                        ) : (
+                          i + 1
+                        )}
+                      </span>
+                    )}
+                  </th>
+                );
+              })}
+              <th
+                scope="col"
+                className="w-20 px-1 pb-1 text-right text-[11px] font-normal text-muted-foreground"
+                title="(resolve + ½·parcial) ÷ julgados × 100"
+              >
+                score
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {linhas.map((row) => (
+              <tr key={row.contestantId}>
+                <th scope="row" className="min-w-0 py-0.5 pr-3 text-left font-normal">
+                  <span className="flex items-center gap-1.5">
+                    <span className="truncate text-[13px]" title={row.label}>
+                      {row.label}
+                    </span>
+                    {row.isControl && <Tag>base</Tag>}
+                    {row.isFinalist && <Tag className="border-primary/30 bg-primary/10 text-primary">final</Tag>}
+                  </span>
+                </th>
+                {stages.map((s, i) => {
+                  const estado = heatmapCellState(s, row, i);
+                  return (
+                    <td
+                      key={s.index}
+                      title={`Cenário ${i + 1}: ${estado.label}`}
+                      className={cn(
+                        'h-7 rounded-[5px] px-0.5 text-center text-[13px] leading-none select-none',
+                        estado.cls,
+                      )}
+                    >
+                      <span aria-hidden="true">{estado.glyph}</span>
+                      <span className="sr-only">{estado.label}</span>
+                    </td>
+                  );
+                })}
+                <td className="px-1 py-0.5 text-right leading-tight">
+                  <span className="text-[13px] font-medium tabular">
+                    {row.score === null ? '—' : row.score.toFixed(0)}
+                  </span>
+                  <span className="block text-[10px] text-muted-foreground tabular">
+                    <span aria-hidden="true">
+                      {row.resolve}✓ {row.parcial}◐ {row.nao}✕
+                    </span>
+                    <span className="sr-only">
+                      {row.resolve} resolve, {row.parcial} parcial, {row.nao} não resolve
+                    </span>
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/** Heatmap de evolucao: variante x rodada; celula = judge-score arredondado. */
+export function EvolutionHeatmap({
+  rounds,
+  holdoutAt,
+}: {
+  rounds: RunRecord[];
+  holdoutAt?: number;
+}) {
+  const cols = useMemo(
+    () =>
+      rounds.map((r) => {
+        const scores = r.judgeScoreByContestant ?? {};
+        return {
+          iteration: r.iteration ?? 0,
+          isHoldout: r.iteration === holdoutAt,
+          scores,
+        };
+      }),
+    [rounds, holdoutAt],
+  );
+  // Ordem estavel: primeira aparicao da variante ao longo das rodadas.
+  const vars = useMemo(() => {
+    const seen = new Set<string>();
+    const out: { id: string; label: string; isOriginal?: boolean }[] = [];
+    for (const r of rounds) {
+      for (const c of r.contestants ?? []) {
+        if (seen.has(c.id)) continue;
+        seen.add(c.id);
+        out.push({ id: c.id, label: c.label, isOriginal: c.isOriginal });
+      }
+    }
+    return out;
+  }, [rounds]);
+
+  // IMPL-109: empate por rodada é TEXTO — marcador 'E' idêntico em todas as
+  // linhas empatadas + resumo que nomeia as demais. Sem cor por posição.
+  const ties = useMemo(() => {
+    const out = new Map<string, TieMark>();
+    for (const col of cols) {
+      const ids = vars.map((v) => v.id).filter((id) => col.scores[id] !== undefined);
+      const marks = tieMarks(
+        ids,
+        (id) => col.scores[id],
+        (id) => vars.find((v) => v.id === id)?.label ?? id,
+      );
+      for (const [id, m] of marks) out.set(`${col.iteration}:${id}`, m);
+    }
+    return out;
+  }, [cols, vars]);
+
+  if (!cols.length || !vars.length) return null;
 
   return (
     <div className="rounded-xl bg-card ring-1 ring-foreground/10">
-      <div className="border-b border-border px-4 py-2 text-[12px] text-muted-foreground">
-        ✓ resolve · ◐ parcial · ✕ não resolve · ? sem veredito · ⏳ aguardando julgamento · ⊘ bloqueado · ✂ truncada · ⏹ cortado · ! erro · · pendente
-      </div>
       <div className="scroll-slim overflow-x-auto p-3">
-        <div className="min-w-fit">
-          <div className="grid items-center gap-1 pb-1.5" style={gridStyle}>
-            <div />
-            {stages.map((s, i) => {
-              // IMPL-014: gabarito truncado mesmo após o retry x2 foi descartado —
-              // o cenário é julgado SEM régua (listwise). Marca visível no cabeçalho.
-              const semRegua = s.gabaritoCall?.truncated === true;
-              const base = `Cenário ${i + 1}${semRegua ? ' — gabarito truncado no teto e descartado: julgado sem gabarito' : ''}`;
-              return (
-                <div
-                  key={s.index}
-                  title={onStageClick ? `${base} — clique para abrir` : base}
-                  className={cn(
-                    'grid h-6 place-items-center rounded-[5px] text-[11px] text-muted-foreground tabular',
-                    semRegua && 'underline decoration-dotted underline-offset-2',
-                    onStageClick && 'cursor-pointer hover:bg-muted focus-visible:bg-muted focus-visible:outline-none',
-                  )}
-                  {...clickProps(s.index)}
+        {/* Tabela NATIVA (IMPL-108): caption, th scope="col"/"row" e td com o
+            valor em texto — a associação cabeçalho/célula existe na árvore de
+            acessibilidade e o Tab só passa pelos cabeçalhos. */}
+        <table className="w-full min-w-fit border-separate border-spacing-x-1 border-spacing-y-0.5">
+          <caption className="caption-top px-1 pb-2 text-left text-[12px] text-muted-foreground">
+            Evolução do treino — linhas: variantes; colunas: rodadas; célula: judge-score.{' '}
+            <span aria-hidden="true">–</span> não participou ·{' '}
+            <span aria-hidden="true">E</span> empatado com a mesma nota.
+          </caption>
+          <thead>
+            <tr>
+              <th
+                scope="col"
+                className="min-w-[8rem] px-1 pb-1 text-left text-[11px] font-normal text-muted-foreground"
+              >
+                variante
+              </th>
+              {cols.map((col) => (
+                <th
+                  key={col.iteration}
+                  scope="col"
+                  className="px-1 pb-1 text-[11px] font-normal text-muted-foreground tabular"
+                  title={col.isHoldout ? 'Holdout (fora do treino)' : `Rodada ${col.iteration + 1}`}
                 >
-                  {semRegua ? `${i + 1}✂` : i + 1}
-                </div>
+                  {col.isHoldout ? 'H' : `R${col.iteration + 1}`}
+                </th>
+              ))}
+              <th
+                scope="col"
+                className="w-20 px-1 pb-1 text-right text-[11px] font-normal text-muted-foreground"
+              >
+                curva
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {vars.map((v) => {
+              // A trilha da variante ao longo das rodadas alimenta a sparkline.
+              const history = cols.map((c) => c.scores[v.id]).filter((s): s is number => s !== undefined);
+              return (
+                <tr key={v.id}>
+                  <th scope="row" className="min-w-0 py-0.5 pr-3 text-left font-normal">
+                    <span className="flex items-center gap-1.5">
+                      <span className="truncate text-[13px]" title={v.label}>
+                        {v.label}
+                      </span>
+                      {v.isOriginal && <Tag>base</Tag>}
+                    </span>
+                  </th>
+                  {cols.map((col) => {
+                    const rodada = col.isHoldout ? 'Holdout' : `Rodada ${col.iteration + 1}`;
+                    const score = col.scores[v.id];
+                    if (score === undefined) {
+                      // IMPL-109: "não participou" tem TEXTO — não um '·' mudo.
+                      return (
+                        <td
+                          key={col.iteration}
+                          title={`${rodada}: não participou`}
+                          className="h-7 rounded-[5px] bg-muted/50 px-1 text-center text-[13px] text-muted-foreground tabular"
+                        >
+                          <span aria-hidden="true">–</span>
+                          <span className="sr-only">não participou</span>
+                        </td>
+                      );
+                    }
+                    const tie = ties.get(`${col.iteration}:${v.id}`);
+                    // Score em texto NEUTRO (IMPL-109): a cor não carrega
+                    // posição — empate é o marcador textual idêntico.
+                    return (
+                      <td
+                        key={col.iteration}
+                        title={`${rodada}: judge-score ${score.toFixed(1)}${tie ? ` — ${tie.summary}` : ''}`}
+                        className="h-7 rounded-[5px] bg-muted/50 px-1 text-center text-[13px] font-medium text-foreground tabular"
+                      >
+                        {Math.round(score)}
+                        {tie?.marker}
+                        {tie && <span className="sr-only"> — {tie.summary}</span>}
+                      </td>
+                    );
+                  })}
+                  <td className="px-1 py-0.5 text-right">
+                    {history.length > 1 ? (
+                      <span className="flex justify-end">
+                        <Sparkline
+                          history={history}
+                          width={64}
+                          height={22}
+                          tone="primary"
+                          label={sparklineTrend(v.label, history)}
+                        />
+                      </span>
+                    ) : (
+                      <span
+                        className="text-[12px] text-muted-foreground"
+                        title="Curva disponível a partir da 2ª rodada julgada"
+                      >
+                        —
+                      </span>
+                    )}
+                  </td>
+                </tr>
               );
             })}
-            <div
-              className="pr-1 text-right text-[11px] text-muted-foreground"
-              title="(resolve + ½·parcial) ÷ julgados × 100"
-            >
-              score
-            </div>
-          </div>
-
-          {linhas.map((row) => (
-            <div key={row.contestantId} className="grid items-center gap-1 py-0.5" style={gridStyle}>
-              <div className="flex min-w-0 items-center gap-1.5 pr-3" title={row.label}>
-                <span className="truncate text-[13px]">{row.label}</span>
-                {row.isControl && <Tag>base</Tag>}
-                {row.isFinalist && (
-                  <Tag className="border-primary/30 bg-primary/10 text-primary">final</Tag>
-                )}
-              </div>
-              {stages.map((s, i) => {
-                // Fan-out ao vivo (F3/§7.2): a célula mostra a FASE do par
-                // (variante × cenário) — pendente → resposta recebida → julgada,
-                // com erro à parte. É o que faz a run longa não parecer travada.
-                const v = row.verdicts[i];
-                const resp = (s.responses ?? []).find((r) => r.contestantId === row.contestantId);
-                // IMPL-004: juiz que falhou NÃO vira nota — a célula diz "sem
-                // veredito" e o motivo, e o score da linha ignora a etapa.
-                const semVeredito = v ? undefined : verdictErrorInStage(s, row.contestantId);
-                // Bloqueio (moderação/guardrail) vem ANTES do veredito: o cenário
-                // é inconclusivo para o prompt, nunca um 'não' (IMPL-010).
-                const estado = resp?.status === 'blocked'
-                  ? { glyph: '⊘', cls: 'bg-muted text-muted-foreground', label: 'bloqueado pela moderação — sem veredito para o prompt' }
-                  : resp?.truncated
-                  ? // IMPL-014: cortada no teto mesmo após o retry x2 — a etapa inteira sai do placar.
-                    { glyph: '✂', cls: 'bg-muted text-muted-foreground', label: 'resposta truncada no teto de tokens — etapa fora do placar' }
-                  : s.incompleteReason === 'truncation' && !v
-                  ? { glyph: '–', cls: 'bg-muted/50 text-muted-foreground', label: 'etapa fora do placar (outra resposta foi truncada)' }
-                  : v
-                  ? { glyph: VERDICT_GLYPH[v], cls: VERDICT_META[v].cell, label: VERDICT_META[v].label }
-                  : s.incomplete
-                    ? {
-                        // Cortado por orçamento/cancelamento (IMPL-020): sem nota
-                        // e fora do score — nunca um ✕ que o competidor não mereceu.
-                        // ⏹ (não ⊘): ⊘ é o bloqueio da moderação (IMPL-010).
-                        glyph: '⏹',
-                        cls: 'bg-muted/50 text-muted-foreground',
-                        label:
-                          s.incompleteReason === 'budget'
-                            ? 'cortado pelo orçamento — fora do placar'
-                            : 'interrompido — fora do placar',
-                      }
-                  : semVeredito && resp?.status !== 'error'
-                    ? { glyph: '?', cls: 'bg-muted text-muted-foreground', label: `sem veredito — ${semVeredito}` }
-                    : resp?.status === 'error'
-                    ? { glyph: '!', cls: 'bg-nao/20 text-nao', label: 'resposta com erro' }
-                    : resp
-                      ? {
-                          glyph: '⏳',
-                          cls: 'bg-muted text-muted-foreground',
-                          label: 'resposta recebida — aguardando julgamento',
-                        }
-                      : { glyph: '·', cls: 'bg-muted/50 text-muted-foreground', label: 'pendente' };
-                return (
-                  <div
-                    key={s.index}
-                    title={`Cenário ${i + 1}: ${estado.label}${onStageClick ? ' — clique para abrir' : ''}`}
-                    className={cn(
-                      cellBase,
-                      estado.cls,
-                      onStageClick && 'cursor-pointer focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
-                    )}
-                    {...clickProps(s.index)}
-                  >
-                    {estado.glyph}
-                  </div>
-                );
-              })}
-              <div className="pr-1 text-right leading-tight">
-                <span className="text-[13px] font-medium tabular">
-                  {row.score === null ? '—' : row.score.toFixed(0)}
-                </span>
-                <span className="block text-[10px] text-muted-foreground tabular">
-                  {row.resolve}✓ {row.parcial}◐ {row.nao}✕
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -380,8 +659,6 @@ interface FinalsPanelProps {
  * confrontos.
  */
 export function FinalsPanel({ record, progress }: FinalsPanelProps) {
-  const { resolved } = useTheme();
-  const dark = resolved === 'dark';
   const stagesComDuelos = useMemo(
     () => denseStages(record.stages).filter((s) => s.duels),
     [record],
@@ -409,6 +686,21 @@ export function FinalsPanel({ record, progress }: FinalsPanelProps) {
       score: record.judgeScoreByContestant?.[id] ?? 0,
     }));
   }, [record, finalistIds]);
+
+  // IMPL-109: empate é TEXTO (sufixo idêntico nas linhas empatadas + resumo que
+  // nomeia as demais) — nunca uma cor parecida ou um lugar inventado.
+  const ties = useMemo(
+    () =>
+      tieMarks(
+        rows.map((r) => r.id),
+        (id) => {
+          const r = rows.find((x) => x.id === id);
+          return r?.winRate ?? r?.score;
+        },
+        (id) => rows.find((x) => x.id === id)?.label ?? id,
+      ),
+    [rows],
+  );
 
   const pares = useMemo<PairSummary[]>(() => {
     const labelOf = (id: string) => record.contestants?.find((c) => c.id === id)?.label ?? id;
@@ -459,36 +751,45 @@ export function FinalsPanel({ record, progress }: FinalsPanelProps) {
         </div>
       )}
       <ol className="p-2">
-        {rows.map((r, i) => (
-          <li key={r.id} className="flex items-center gap-3 rounded-lg px-2 py-2">
-            <span
-              className="grid size-6 shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white"
-              style={{ background: rankColor(i + 1, rows.length, dark).solid }}
-            >
-              {i + 1}
-            </span>
-            <span className="min-w-0 flex-1 truncate text-sm" title={r.label}>
-              {r.label}
-            </span>
-            {typeof r.winRate === 'number' ? (
-              <>
-                <span
-                  className="shrink-0 text-[13px] font-medium tabular"
-                  title="Taxa de vitória: (vitórias + ½ empate) / duelos disputados"
-                >
-                  {formatWinRate(r.winRate)}
-                </span>
+        {rows.map((r, i) => {
+          const tie = ties.get(r.id);
+          const temWinRate = typeof r.winRate === 'number';
+          const valor = temWinRate ? formatWinRate(r.winRate!) : (r.score ?? 0).toFixed(0);
+          const valorTitle = tie
+            ? `${temWinRate ? 'Taxa de vitória' : 'judge-score'} — ${tie.summary}`
+            : temWinRate
+              ? 'Taxa de vitória: (vitórias + ½ empate) / duelos disputados'
+              : 'judge-score';
+          return (
+            <li key={r.id} className="flex items-center gap-3 rounded-lg px-2 py-2">
+              {/* Pódio: número em TEXTO sobre fundo neutro + medalha textual
+                  (IMPL-109) — nada de cor por posição, nada de texto branco
+                  sobre rampa hue (reprovava AA em 2,36–3,16:1). */}
+              <span
+                className="grid size-6 shrink-0 place-items-center rounded-full bg-muted text-[11px] font-semibold text-foreground tabular"
+                title={`${i + 1}º lugar${tie ? ` — ${tie.summary}` : ''}`}
+              >
+                {i + 1}
+              </span>
+              {i < MEDAL_TEXT.length && (
+                <span className="shrink-0 text-[11px] text-muted-foreground">{MEDAL_TEXT[i]}</span>
+              )}
+              <span className="min-w-0 flex-1 truncate text-sm" title={r.label}>
+                {r.label}
+              </span>
+              <span className="shrink-0 text-[13px] font-medium tabular" title={valorTitle}>
+                {valor}
+                {tie?.marker}
+                {tie && <span className="sr-only"> — {tie.summary}</span>}
+              </span>
+              {temWinRate && (
                 <span className="w-16 shrink-0 text-right text-[12px] text-muted-foreground tabular">
                   {r.wins}–{r.ties}–{r.losses}
                 </span>
-              </>
-            ) : (
-              <span className="shrink-0 text-[13px] tabular" title="judge-score">
-                {(r.score ?? 0).toFixed(0)}
-              </span>
-            )}
-          </li>
-        ))}
+              )}
+            </li>
+          );
+        })}
       </ol>
 
       {pares.length > 0 && (

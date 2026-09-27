@@ -438,8 +438,10 @@ describe('IMPL-001 — relatório e compatibilidade', () => {
   it('relatório usa o p BILATERAL; o unilateral fica rotulado como o do gate', () => {
     const r = sig([0.5, 0.5, 0.5, 0.5, 0.5]);
     expect(reportPValue(r)).toEqual({ p: 0.0625, kind: 'two-sided' });
+    // IMPL-050: toda saída de significância traz a ORIGEM do p — sem rótulo
+    // gravado, a origem desconhecida é tratada como SELEÇÃO (o caso anti-conservador).
     expect(formatSignificance(r)).toBe(
-      'p=0.063 bilateral (gate unilateral p=0.031) · IC95 [-100.0, 100.0]pp · n=5 · exato',
+      'p=0.063 bilateral (gate unilateral p=0.031) · IC95 [-100.0, 100.0]pp · n=5 · exato · origem do p: seleção (anti-conservador)',
     );
     expect(formatPValue(0.0004)).toBe('p<0.001');
   });
@@ -452,7 +454,10 @@ describe('IMPL-001 — relatório e compatibilidade', () => {
   it('sessão gravada antes do IMPL-001 (só os 4 campos do bootstrap) continua legível', () => {
     const legado: StoredSignificance = { n: 5, meanDiffPp: 50, ci95Pp: [50, 50], pValue: 0 };
     expect(reportPValue(legado)).toEqual({ p: 0, kind: 'legacy' });
-    expect(formatSignificance(legado)).toBe('p<0.001 (bootstrap, legado) · IC95 [50.0, 50.0]pp · n=5');
+    // IMPL-050: o bootstrap legado NÃO é p-valor → a origem sai como "sem p".
+    expect(formatSignificance(legado)).toBe(
+      'p<0.001 (bootstrap, legado) · IC95 [50.0, 50.0]pp · n=5 · origem do p: sem p',
+    );
   });
 
   it('assinatura mantida: n, meanDiffPp, ci95Pp, pValue + campos novos', () => {

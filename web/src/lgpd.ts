@@ -27,6 +27,9 @@ import {
   type PiiRunReport,
 } from '../../src/engine/pii.js';
 import { sensitiveRoutingFor, type SensitiveRouting } from '../../src/engine/sensitiveRouting.js';
+import retentionBase from '../../src/data/lgpd-retention.json';
+import { resetIdbConnection } from './idb.js';
+import type { StorageManagerLike } from './storageHealth.js';
 
 export * from '../../src/engine/lgpdCore.js';
 // Cascata de dado pessoal PT-BR (IMPL-042) — shim do núcleo puro, igual ao Node.
@@ -108,4 +111,147 @@ export function allowlistNotice(
   const h: AllowlistHealth = allowlistHealth(data.allowlist, now);
   if (h.state === 'ok') return null;
   return { tone: h.usable ? 'warn' : 'error', text: h.message };
+}
+
+// ---------------------------------------------------------------------------
+// Retenção/apagamento (IMPL-100, R-16:REC-6) — lado NAVEGADOR
+// ---------------------------------------------------------------------------
+// O apagamento lógico (`idbDelete`) NÃO serve para LGPD: os tombstones do
+// LevelDB continuam recuperáveis (crbug 40418460). O "apagar tudo" da SPA
+// derruba o banco INTEIRO (`indexedDB.deleteDatabase`) e reporta antes/depois
+// via `navigator.storage.estimate()`. O que o navegador guarda fora do
+// IndexedDB (localStorage, Cache Storage) só some em "limpar dados do site" —
+// por isso `siteWipeInstructions()` entrega o passo a passo.
+//
+// O TTL/prune do lado servidor é `src/lgpd.ts` (`pruneExpiredRuns`); aqui fica
+// a MESMA semântica de corte para o histórico local (`isOlderThan`), casada
+// por `test/lgpd-retention.test.ts` (os dois lados calculam igual).
+
+/** Nome do banco: espelha `DB_NAME` de `web/src/idb.ts` (o contrato é testado: apagar tem de apagar o MESMO banco que o idb abre). */
+const DB_NAME = 'prompt-builder';
+
+/** Override do TTL no navegador (dias); fora do padrão ⇒ o default do JSON. */
+export const RETENTION_DAYS_KEY = 'pb.retentionDays';
+
+const DEFAULT_RETENTION_DAYS: number = retentionBase.retentionDays ?? 90;
+
+const DAY_MS = 86_400_000;
+
+/** TTL efetivo: default do pacote (`src/data/lgpd-retention.json`) + override em localStorage. */
+export function retentionDaysFor(storage?: Pick<Storage, 'getItem'>): number {
+  const raw = storage ? storage.getItem(RETENTION_DAYS_KEY) : (globalThis.localStorage?.getItem(RETENTION_DAYS_KEY) ?? null);
+  if (raw !== null && /^\d+$/u.test(raw.trim())) return Number(raw.trim());
+  return DEFAULT_RETENTION_DAYS;
+}
+
+/** Instante (ms) a partir do qual o registo já está vencido; `retentionDays: 0` ⇒ nunca (espelho de `src/lgpd.ts`). */
+export function retentionCutoffMs(now: number, retentionDays: number): number | null {
+  if (!Number.isInteger(retentionDays) || retentionDays <= 0) return null;
+  return now - retentionDays * DAY_MS;
+}
+
+/** Espelho da semântica do Node (`src/lgpd.ts`): `test/lgpd-retention.test.ts` casa os dois. */
+export function isOlderThan(ref: Date | number | string, now: number, retentionDays: number): boolean {
+  const cutoff = retentionCutoffMs(now, retentionDays);
+  if (cutoff === null) return false;
+  const t = ref instanceof Date ? ref.getTime() : typeof ref === 'number' ? ref : Date.parse(ref);
+  if (!Number.isFinite(t)) return true; // data ilegível ⇒ vencido (não reter por engano)
+  return t < cutoff;
+}
+
+export interface SiteEstimate {
+  usage: number;
+  quota: number | null;
+}
+
+/** `navigator.storage.estimate()` (injetável em teste). Falha ⇒ `{ usage: 0, quota: null }`. */
+export async function estimateSiteStorage(manager?: StorageManagerLike): Promise<SiteEstimate> {
+  const m = manager ?? globalThis.navigator?.storage;
+  if (!m?.estimate) return { usage: 0, quota: null };
+  try {
+    const e = await m.estimate();
+    return { usage: e.usage ?? 0, quota: e.quota ?? null };
+  } catch {
+    return { usage: 0, quota: null };
+  }
+}
+
+export interface SiteWipeResult {
+  estimateBefore: SiteEstimate;
+  estimateAfter: SiteEstimate;
+  /** `deleteDatabase` concluiu (banco inteiro apagado). */
+  deleted: boolean;
+  /** Ficou bloqueado: outra aba segura conexão aberta no banco. */
+  blocked: boolean;
+}
+
+export interface WipeLocalOptions {
+  /** Fábrica do IndexedDB (testes); default `globalThis.indexedDB`. */
+  indexedDB?: IDBFactory | null;
+  /** `navigator.storage` (testes). */
+  storage?: StorageManagerLike;
+  /** Fecha as conexões em cache do `idb.ts` (default: `resetIdbConnection`). */
+  closeConnections?: () => void;
+  /** Quanto espera pelo fecho de outras abas antes de reportar `blocked` (default 3000 ms). */
+  blockedWaitMs?: number;
+}
+
+/**
+ * "Apagar banco": fecha as conexões desta aba, derruba o IndexedDB INTEIRO
+ * (`deleteDatabase` — remove até os tombstones que o `delete` lógico deixa) e
+ * devolve `navigator.storage.estimate()` antes/depois (o critério é ≈ 0).
+ * `blocked: true` = outra aba ainda segura conexão; o navegador completa o
+ * apagamento quando ela fechar.
+ */
+export function wipeLocalData(opts: WipeLocalOptions = {}): Promise<SiteWipeResult> {
+  const factory = opts.indexedDB === undefined ? globalThis.indexedDB : opts.indexedDB;
+  const close = opts.closeConnections ?? resetIdbConnection;
+  const blockedWaitMs = opts.blockedWaitMs ?? 3_000;
+  return (async (): Promise<SiteWipeResult> => {
+    const estimateBefore = await estimateSiteStorage(opts.storage);
+    close();
+    if (!factory) {
+      // Sem IndexedDB não há banco a derrubar: o "antes" já é o "depois".
+      return { estimateBefore, estimateAfter: estimateBefore, deleted: true, blocked: false };
+    }
+    const { deleted, blocked } = await new Promise<{ deleted: boolean; blocked: boolean }>((resolve) => {
+      let done = false;
+      let sawBlocked = false;
+      const finish = (deletedFlag: boolean): void => {
+        if (done) return;
+        done = true;
+        resolve({ deleted: deletedFlag, blocked: sawBlocked });
+      };
+      try {
+        const req = factory.deleteDatabase(DB_NAME);
+        req.onsuccess = () => finish(true);
+        req.onerror = () => finish(false);
+        req.onblocked = () => {
+          sawBlocked = true;
+          // Outra aba segura a conexão: espera o fecho; sem fecho, reporta.
+          setTimeout(() => finish(false), blockedWaitMs);
+        };
+      } catch {
+        finish(false);
+      }
+    });
+    const estimateAfter = await estimateSiteStorage(opts.storage);
+    return { estimateBefore, estimateAfter, deleted, blocked };
+  })();
+}
+
+/**
+ * Instrução de "limpar dados do site" (o que o navegador guarda FORA do
+ * IndexedDB — localStorage com a key, Cache Storage, service workers). Texto
+ * puro: a tela de Configurações só o apresenta.
+ */
+export function siteWipeInstructions(): string[] {
+  return [
+    'O apagamento acima remove o banco local do app (runs, sessões e biblioteca).',
+    'Para apagar TUDO que este site guardou no navegador (inclusive a chave da OpenRouter e caches) use "limpar dados do site":',
+    '• Chrome/Edge: Configurações → Privacidade e segurança → Dados de sites → ver todos os sites e dados → procure por este site → Excluir.',
+    '• Firefox: Configurações → Privacidade e segurança → Cookies e dados de sites → Dados guardados → Gerir dados → procure por este site → Remover.',
+    '• Safari: Safari → Definições → Privacidade → Gerir dados de sites → procure por este site → Remover.',
+    'Depois, recarregue a página.',
+  ];
 }

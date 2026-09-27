@@ -13,6 +13,7 @@
 // SPA só pode LER runs de agente (campos aditivos); criar é impossível. Não
 // "consertar" essa assimetria.
 // ----------------------------------------------------------------------------
+import type { ReasoningLevel } from '../types.js';
 import type { AgentTaskSpec, AgentRunnerConfig, AgentStopReason, AgentTrajectory } from './types.js';
 
 /** De onde vem o binário e a versão que o pré-voo precisa casar. */
@@ -105,6 +106,9 @@ export interface MeasuredCost {
  * O executor só precisa TRADUZIR essa recusa (sinal de CONTROLE, não erro do
  * provedor) em `stopReason: 'maxCost'` e encerrar o agente — o kill por custo
  * DERIVADO do executor continua como segunda barreira.
+ *
+ * Este é o `costSink` do contrato v2 (IMPL-095): o dreno de custo da execução,
+ * dono do produto. Não criar um segundo campo com o mesmo papel.
  */
 export interface CostBrake {
   /** A recusa por orçamento, se já houve (a 1ª; é pegajosa). */
@@ -115,7 +119,51 @@ export interface CostBrake {
   measured(): MeasuredCost;
 }
 
-/** A execução de UMA tarefa num workspace já preparado. */
+/**
+ * Alça do sandbox já preparado (IMPL-095, `sandboxHandle`). Antes este dado
+ * viajava por env (`PI_CONTAINER_IMAGE`) estampado no `prepare()` e lido por
+ * fora do contrato — o contrato v2 o carrega explicitamente.
+ */
+export interface SandboxHandle {
+  kind: 'worktree' | 'clone' | 'container';
+  /** Digest sha256 da imagem (container) — o `docker run` usa SEMPRE o digest. */
+  imageDigest?: string;
+  /** Referência pedida (tag/`repo@sha256:…`) — só auditoria. */
+  imageRef?: string;
+  /** Runtime OCI opt-in (`runsc`/gVisor). Ausente = runc do daemon. */
+  runtime?: string;
+}
+
+/**
+ * Evento enxuto do stream da execução, exposto no contrato v2 (IMPL-095).
+ * O `turn` leva o custo REAL do turno (medido — `usage.cost` quando existe,
+ * catálogo como fallback), nunca o placeholder 0 de antes.
+ */
+export type AgentStreamEvent =
+  | { type: 'turn'; index: number; total: number; costUsd: number }
+  | { type: 'cost'; costUsd: number; tokensIn: number; tokensOut: number; responseId?: string }
+  | { type: 'tool'; name: string; ok: boolean; total: number }
+  | { type: 'settled'; sessionFile?: string };
+
+/**
+ * Ordem de adaptadores prevista (IMPL-095): cada entrada é um `AgentExecutor`
+ * futuro, testado contra o MESMO canário de sala limpa (`selfTest`) antes de
+ * entrar na corrida. O `pi` é o único implementado; a lista existe para que a
+ * troca seja um arquivo novo, nunca uma refatoração — e para que ninguém
+ * invente uma 7ª ordem sem passar pelo canário.
+ */
+export const AGENT_ADAPTER_ORDER = ['pi', 'claude-code', 'codex', 'gemini-cli', 'openhands', 'aider'] as const;
+export type AgentAdapterId = (typeof AGENT_ADAPTER_ORDER)[number];
+
+/**
+ * A execução de UMA tarefa num workspace já preparado — CONTRATO v2 (IMPL-095).
+ *
+ * Tudo o que a execução precisa entra AQUI: modelo, tarefa, system prompt,
+ * esforço, cancelamento, observador de eventos, credenciais de inferência,
+ * sandbox e o dreno de custo. Nada viaja por variáveis `PI_*` do env e nada
+ * viaja num 2º parâmetro fora do contrato (o `PiRunOptions` antigo foi fundido
+ * aqui; o que sobra no adaptador do pi é só tolerância LEGADA, marcada).
+ */
 export interface AgentRunOpts {
   /** Id da execução (uuid) — também é o nome do diretório em disco. */
   execId: string;
@@ -132,19 +180,61 @@ export interface AgentRunOpts {
   /** env do executor (sala limpa) — já redigido/saneado por `prepare()`. */
   env: Record<string, string>;
   /**
-   * Rota de inferência pelo proxy local (IMPL-037). Presente = o executor aponta o
-   * agente para ela. Em NENHUM caso o executor repassa `OPENROUTER_API_KEY` ao
-   * ambiente do agente: sem rota mas com a key no `env`, ele sobe um proxy
-   * PRÓPRIO desta execução (a key fica no processo do produto); sem rota e sem
-   * key, o modo container recusa e o modo host roda sem credencial (fakes).
+   * Modelo do contestant (IMPL-095). Antes: env `PI_MODEL_ID` — canal de env
+   * eliminado; o adaptador lê daqui.
+   */
+  modelId?: string;
+  /**
+   * Enunciado da tarefa — o que o agente recebe (stdin/prompt). Antes: env
+   * `PI_TASK` OU `<workDir>/task.txt`.
+   */
+  instruction?: string;
+  /** System prompt sob teste. Antes: env `PI_SYSTEM_PROMPT` OU `<workDir>/system-prompt.txt`. */
+  systemPrompt?: string;
+  /**
+   * Como o prompt sob teste chega ao agente ('replace' | 'append' | 'none').
+   * Valor RESOLVIDO (task/run/orquestrador) — o adaptador não adivinha default.
+   * Ausente = `config.promptMode` (e o default 'append' do adaptador).
+   */
+  promptMode?: 'replace' | 'append' | 'none';
+  /** Nível de esforço por contestant (MESMA escada de 7 degraus). Ausente = `config.thinking`. */
+  thinking?: ReasoningLevel;
+  /** contextFiles: o que o agente pode ler do repo (tarefa/contexto do experimento). */
+  contextFiles?: boolean;
+  /**
+   * Cancelamento (IMPL-095): o aborto interrompe `run()` e devolve
+   * `stopReason: 'cancelled'` — sinal de CONTROLE, nunca erro.
+   */
+  signal?: AbortSignal;
+  /** Observador do stream enxuto — o `turn` leva o custo REAL do turno. */
+  onEvent?: (e: AgentStreamEvent) => void;
+  /** Fallback de preço por token (catálogo) quando a chamada não reporta custo. */
+  priceTokensIn?: (tokens: number) => number;
+  priceTokensOut?: (tokens: number) => number;
+  /** Diretório da sessão/transcript. Default `<workDir>/session`. */
+  sessionDir?: string;
+  /**
+   * Rota de inferência pelo proxy local (IMPL-037) — o `credentialRef`/`baseUrl`
+   * do contrato v2. Presente = o executor aponta o agente para ela. Em NENHUM
+   * caso o executor repassa `OPENROUTER_API_KEY` ao ambiente do agente: sem rota
+   * mas com a key no `env`, ele sobe um proxy PRÓPRIO desta execução (a key fica
+   * no processo do produto); sem rota e sem key, o modo container recusa e o
+   * modo host roda sem credencial (fakes).
    */
   inference?: InferenceRoute;
   /**
-   * Freio de custo desta execução (IMPL-035), dono = o produto (proxy da run).
-   * Presente = o executor traduz a recusa do proxy em `stopReason: 'maxCost'` e
-   * mata o agente. Ausente (rota própria do executor) = o executor monta o dele.
+   * Freio/dreno de custo desta execução (IMPL-035), dono = o produto (proxy da
+   * run). É o `costSink` do contrato v2. Presente = o executor traduz a recusa
+   * do proxy em `stopReason: 'maxCost'` e mata o agente. Ausente (rota própria
+   * do executor) = o executor monta o dele.
    */
   costBrake?: CostBrake;
+  /**
+   * Alça do sandbox preparado (IMPL-095, `sandboxHandle`): imagem pinada por
+   * digest + runtime. Antes viajava por env (`PI_CONTAINER_IMAGE`). Ausente em
+   * modo host.
+   */
+  sandbox?: SandboxHandle;
 }
 
 /**
@@ -225,6 +315,9 @@ export interface AgentExecutor {
    * Executa UMA tarefa num workspace já preparado. Não faz git, não faz oráculo,
    * não julga: só roda o agente, respeita os limites e devolve a trajetória crua
    * + a normalizada. Tudo o mais é do orquestrador.
+   *
+   * UM parâmetro só (IMPL-095): `AgentRunOpts` carrega TODO o contrato — não há
+   * 2º parâmetro fora dele nem canal por variáveis `PI_*` do env.
    */
   run(opts: AgentRunOpts): Promise<AgentRunOutcome>;
 

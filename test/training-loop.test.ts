@@ -450,15 +450,16 @@ describe('IMPL-013 — re-avaliação LIMPA antes de confirmar a promoção', ()
       expect(eventos.filter((e) => e.type === 'iteration.promoted')).toHaveLength(1);
     });
 
-    it(`${nome}: minibatch sai SÓ da fatia de treino (holdout fora) — n = 15 → 5`, async () => {
+    it(`${nome}: minibatch sai SÓ da fatia de treino (holdout fora) — n = 10 → 5`, async () => {
       dubles.estado.politica = (c, id) => (id === 'v0' || id === 'holdout-champion' ? 'resolve' : 'parcial');
       const { rec } = await treinar(config({ iterations: 1, holdoutRatio: 0.25 }));
       expect(rec.status, rec.error).toBe('finished');
       const g = rec.bestPromptByIteration[0].gate!;
-      // 20 cenários, 1 em cada 4 no holdout → 15 de treino → max(5, ceil(4,5)) = 5.
-      expect(g.reeval).toMatchObject({ size: 5, poolSize: 15, confirmed: true });
+      // IMPL-050: 20 cenários, ratio 0,25 sobe para o piso ABSOLUTO de 10 no
+      // holdout → 10 de treino → max(5, ceil(3)) = 5 no minibatch.
+      expect(g.reeval).toMatchObject({ size: 5, poolSize: 10, confirmed: true });
       const treino = new Set((rec.pinnedStages ?? []).map((s) => s.question));
-      expect(treino.size).toBe(15);
+      expect(treino.size).toBe(10);
       const holdout = dubles.estado.runs.find((r) => r.kind === 'holdout')!;
       expect(reevals()[0].questions.every((q) => treino.has(q) && !holdout.questions.includes(q))).toBe(true);
     });

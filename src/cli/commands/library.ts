@@ -36,7 +36,7 @@ import {
 import { generateStages } from '../../datagen.js';
 import { generateReferences } from '../../gabarito.js';
 import { BudgetLedger, isControlSignal } from '../../budget.js';
-import { buildContext, buildNetworkContext, isAgentContext, parse, readJsonFile } from '../context.js';
+import { buildContext, buildNetworkContext, isAgentContext, limitList, parse, parseListLimit, readJsonFile } from '../context.js';
 import { CliError, EXIT } from '../output.js';
 import { isUnsafePathError } from '../../pathSafety.js';
 
@@ -117,6 +117,9 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
     out: { type: 'string', short: 'o' },
     rules: { type: 'string' },
     targets: { type: 'string' },
+    // IMPL-092: teto default de 50 em `library list` (--limit N / --all).
+    limit: { type: 'string' },
+    all: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
   });
   if (parsed.values.help) {
@@ -129,23 +132,28 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
   switch (sub) {
     case 'list': {
       const profileId = typeof parsed.values.profile === 'string' ? parsed.values.profile : undefined;
+      // IMPL-092: teto default de 50 (--limit N / --all; truncar avisa no stderr).
+      const cap = parseListLimit(parsed.values);
       if (!profileId) {
         const perfis = await listProfiles();
         const contagens = await Promise.all(perfis.map((p) => listItems(p.id)));
+        const visiveis = limitList(perfis, cap, out, 'perfis');
         if (out.isText) {
           if (!perfis.length) out.line('(biblioteca vazia — crie um perfil com `library init`)');
-          perfis.forEach((p, i) =>
+          visiveis.forEach((p) =>
             out.line(
-              `${p.id.padEnd(24)} ${String(contagens[i].length).padStart(4)} itens  ${p.name}`,
+              `${p.id.padEnd(24)} ${String(contagens[perfis.indexOf(p)].length).padStart(4)} itens  ${p.name}`,
             ),
           );
         }
         out.result(true, 'library.list', {
-          profiles: perfis.map((p, i) => ({ ...p, itemCount: contagens[i].length })),
+          profiles: visiveis.map((p) => ({ ...p, itemCount: contagens[perfis.indexOf(p)].length })),
+          total: perfis.length,
         });
         return EXIT.OK;
       }
-      const itens = await listItems(profileId);
+      const todos = await listItems(profileId);
+      const itens = limitList(todos, cap, out, 'itens');
       if (out.isText) {
         if (!itens.length) out.line(`(perfil "${profileId}" sem itens)`);
         for (const it of itens) {
@@ -155,7 +163,7 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
           );
         }
       }
-      out.result(true, 'library.items', { profile: profileId, items: itens });
+      out.result(true, 'library.items', { profile: profileId, items: itens, total: todos.length });
       return EXIT.OK;
     }
 

@@ -22,7 +22,7 @@
 //   reconciliação com o cobrado é papel futuro do runAgentStage.
 // - Cap de saída por step (~8k chars) e de argumento — nunca um step infinito.
 // ----------------------------------------------------------------------------
-import type { AgentStep, AgentStopReason, AgentTrajectory, AgentTurn } from './types.js';
+import type { AgentCostSource, AgentStep, AgentStopReason, AgentTrajectory, AgentTurn } from './types.js';
 import type { ReasoningLevel } from '../types.js';
 
 export interface FromPiOpts {
@@ -584,4 +584,420 @@ export function fromPi(opts: FromPiOpts): AgentTrajectory {
     parseErrors: opts.parseErrors ?? 0,
     compactions,
   };
+}
+
+
+// ---------------------------------------------------------------------------
+// IMPL-095 — `agent-trajectory@2` + conversores ATIF (RFC 0001 do Harbor).
+//
+// ATIF ("Agent Trajectory Interchange Format", RFC 0001 do Harbor, v1.7) é o
+// ÚNICO formato de intercâmbio de trajetória cross-ferramenta estável: cobre
+// mensagens, reasoning, tool calls, observações, usage e custo. Ele é o formato
+// de TROCA, nunca o contrato interno — o contrato interno continua sendo
+// `AgentTrajectory` (e o dossiê/juiz leem só ele).
+//
+// Regras de mapeamento (as duas direções):
+//   turn                ↔ step (1:1, na ordem)
+//   turn.text           ↔ step.message
+//   turn.thinking       ↔ step.reasoning_content
+//   turn.source         ↔ step.source ('agent' default em @1)
+//   turn.timestamp      ↔ step.timestamp
+//   AgentStep           ↔ tool_call (id↔tool_call_id, tool↔function_name,
+//                          args↔arguments) + observation result
+//                          (source_call_id↔id, content↔output)
+//   turn.usage          ↔ step.metrics (tokensIn↔prompt_tokens,
+//                          tokensOut↔completion_tokens, costUsd↔cost_usd)
+//   turn.stopReason     ↔ step.extra.stop_reason
+//   trajectory.usage    ↔ final_metrics (+ cache/tokensReasoning/costSource em
+//                          extra.pb — o ATIF só tem total_cached_tokens)
+//   trajectory.stopReason ↔ extra.stop_reason
+//
+// Campos fora do núcleo canônico (ok/exitCode/durationMs/outputTruncated,
+// compactions, startedAt/finishedAt exatos…) viajam em `extra.pb` — mecanismo
+// SANÇÃONADO pelo próprio RFC para metadados próprios. Por isso o round-trip
+// ATIF→próprio→ATIF é sem perda nos campos canônicos (mensagens, tool calls,
+// usage, stopReason, timestamps) e a única perda DECLARADA é `parseErrors`
+// (linhas/entradas ilegíveis, que não existiam como dado aproveitável).
+// ---------------------------------------------------------------------------
+
+/** Versão do ATIF emitida/aceite (RFC 0001 v1.7 — a que o Harbor valida). */
+export const ATIF_SCHEMA_VERSION = 'ATIF-v1.7';
+
+/** Quem falhou/falou num step (RFC 0001). */
+export type AtifSource = 'system' | 'user' | 'agent';
+
+export interface AtifToolCall {
+  tool_call_id: string;
+  function_name: string;
+  arguments: Record<string, unknown>;
+  extra?: Record<string, unknown>;
+}
+
+export interface AtifObservationResult {
+  source_call_id: string;
+  content: string;
+}
+
+export interface AtifObservation {
+  results: AtifObservationResult[];
+}
+
+export interface AtifStepMetrics {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_tokens?: number;
+  cost_usd?: number;
+  reasoning_tokens?: number;
+}
+
+export interface AtifStep {
+  step_id: number;
+  source: AtifSource;
+  /** String OU array de content parts (RFC 0001). */
+  message: string | unknown[];
+  timestamp?: string;
+  model_name?: string;
+  reasoning_effort?: unknown;
+  reasoning_content?: string;
+  tool_calls?: AtifToolCall[];
+  observation?: AtifObservation;
+  metrics?: AtifStepMetrics;
+  is_copied_context?: boolean;
+  extra?: Record<string, unknown>;
+}
+
+export interface AtifAgent {
+  name: string;
+  version?: string;
+  model_name?: string;
+  extra?: Record<string, unknown>;
+}
+
+export interface AtifFinalMetrics {
+  model_name?: string;
+  total_prompt_tokens?: number;
+  total_completion_tokens?: number;
+  total_cached_tokens?: number;
+  total_cost_usd?: number;
+  total_steps?: number;
+  llm_call_count?: number;
+  notes?: string;
+  extra?: Record<string, unknown>;
+}
+
+export interface AtifTrajectory {
+  schema_version: string;
+  session_id?: string;
+  trajectory_id?: string;
+  agent: AtifAgent;
+  steps: AtifStep[];
+  final_metrics?: AtifFinalMetrics;
+  extra?: Record<string, unknown>;
+}
+
+/**
+ * Relatório de perda da conversão ATIF↔próprio (IMPL-095). A única perda
+ * TOLERADA é `parseErrors` (entrada ilegível — não havia dado aproveitável);
+ * `droppedCanonical` tem de ficar VAZIO: perda de campo canônico é defeito.
+ */
+export interface AtifLossReport {
+  /** Entradas ilegíveis/não-mapeáveis (declarado). */
+  parseErrors: number;
+  /** Campos canônicos perdidos. Esperado: sempre vazio. */
+  droppedCanonical: string[];
+  /** Normalizações/descartes não-canônicos, documentados. */
+  notes: string[];
+}
+
+type AnyObj = Record<string, unknown>;
+
+function objOr(x: unknown): AnyObj {
+  return x !== null && typeof x === 'object' && !Array.isArray(x) ? (x as AnyObj) : {};
+}
+
+/** `message` do ATIF (string OU content parts) → texto único. O bruto fica em extra. */
+function atifMessageText(msg: unknown): string {
+  if (typeof msg === 'string') return msg;
+  if (Array.isArray(msg)) {
+    return msg
+      .map((part) => {
+        const p = objOr(part);
+        return typeof p.text === 'string' ? p.text : '';
+      })
+      .filter((t) => t !== '')
+      .join('');
+  }
+  return '';
+}
+
+/**
+ * Converte a trajetória própria (`AgentTrajectory` @1 ou @2) para ATIF.
+ * Pura. Campos fora do canônico viajam em `extra.pb` (sanção do RFC).
+ */
+export function toAtif(t: AgentTrajectory): AtifTrajectory {
+  const steps: AtifStep[] = t.turns.map((turn, i) => {
+    const toolCalls: AtifToolCall[] = turn.steps.map((st) => ({
+      tool_call_id: st.id,
+      function_name: st.tool,
+      arguments: st.args ?? {},
+      extra: {
+        pb: {
+          ok: st.ok,
+          ...(st.exitCode !== undefined ? { exitCode: st.exitCode } : {}),
+          ...(st.durationMs !== undefined ? { durationMs: st.durationMs } : {}),
+          ...(st.outputTruncated !== undefined ? { outputTruncated: st.outputTruncated } : {}),
+        },
+      },
+    }));
+    const results: AtifObservationResult[] = turn.steps
+      .filter((st) => st.output !== undefined)
+      .map((st) => ({ source_call_id: st.id, content: st.output as string }));
+    return {
+      step_id: i + 1,
+      source: turn.source ?? 'agent',
+      message: turn.text ?? '',
+      ...(turn.timestamp !== undefined ? { timestamp: turn.timestamp } : {}),
+      ...(turn.thinking !== undefined ? { reasoning_content: turn.thinking } : {}),
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+      ...(results.length > 0 ? { observation: { results } } : {}),
+      ...(turn.usage
+        ? {
+            metrics: {
+              prompt_tokens: turn.usage.tokensIn,
+              completion_tokens: turn.usage.tokensOut,
+              cost_usd: turn.usage.costUsd,
+            },
+          }
+        : {}),
+      extra: {
+        ...(turn.stopReason !== undefined ? { stop_reason: turn.stopReason } : {}),
+        pb: {
+          index: turn.index,
+          ...(turn.usage ? { usage: turn.usage } : {}),
+        },
+      },
+    };
+  });
+
+  return {
+    schema_version: ATIF_SCHEMA_VERSION,
+    agent: {
+      name: t.executor.id,
+      version: t.executor.version,
+      model_name: t.model.id,
+      extra: { pb: { model: t.model } },
+    },
+    steps,
+    final_metrics: {
+      model_name: t.model.id,
+      total_prompt_tokens: t.usage.tokensIn,
+      total_completion_tokens: t.usage.tokensOut,
+      total_cached_tokens: t.usage.cacheRead + t.usage.cacheWrite,
+      total_cost_usd: t.usage.costUsd,
+      total_steps: t.turns.length,
+      extra: {
+        pb: {
+          cacheRead: t.usage.cacheRead,
+          cacheWrite: t.usage.cacheWrite,
+          tokensReasoning: t.usage.tokensReasoning,
+          costSource: t.usage.costSource,
+          ...(t.usage.agentDerivedCostUsd !== undefined ? { agentDerivedCostUsd: t.usage.agentDerivedCostUsd } : {}),
+        },
+      },
+    },
+    extra: {
+      stop_reason: t.stopReason,
+      pb: {
+        format: t.format,
+        startedAt: t.startedAt,
+        finishedAt: t.finishedAt,
+        durationMs: t.durationMs,
+        parseErrors: t.parseErrors,
+        compactions: t.compactions,
+      },
+    },
+  };
+}
+
+/**
+ * Converte um documento ATIF (RFC 0001) para o formato próprio
+ * (`agent-trajectory@2`) e devolve o RELATÓRIO DE PERDA (IMPL-095).
+ * Pura e defensiva: entrada ilegível conta em `parseErrors` (a única perda
+ * declarada), nunca derruba a conversão.
+ */
+export function fromAtif(input: unknown): { trajectory: AgentTrajectory; loss: AtifLossReport } {
+  const loss: AtifLossReport = { parseErrors: 0, droppedCanonical: [], notes: [] };
+  const doc = objOr(input);
+  const rawSteps = Array.isArray(doc.steps) ? doc.steps : [];
+
+  const turns: AgentTurn[] = [];
+  let sawMessageRaw = false;
+  for (const raw of rawSteps) {
+    const st = objOr(raw);
+    const stepId = typeof st.step_id === 'number' && Number.isFinite(st.step_id) ? st.step_id : undefined;
+    const source = st.source === 'system' || st.source === 'user' || st.source === 'agent' ? st.source : undefined;
+    if (stepId === undefined || source === undefined) {
+      // Entrada ilegível: perda DECLARADA (parseErrors), não canônica.
+      loss.parseErrors += 1;
+      continue;
+    }
+    const extra = objOr(st.extra);
+    const pb = objOr(extra.pb);
+
+    // message: string OU content parts. O bruto não-string viaja em extra.
+    let text: string | undefined;
+    if (typeof st.message === 'string') {
+      text = st.message;
+    } else if (st.message !== undefined) {
+      text = atifMessageText(st.message);
+      sawMessageRaw = true;
+    }
+    if (text === '') text = undefined;
+
+    const steps: AgentStep[] = [];
+    const calls = Array.isArray(st.tool_calls) ? st.tool_calls : [];
+    const obsResults = Array.isArray(objOr(st.observation).results) ? (objOr(st.observation).results as unknown[]) : [];
+    const obsByCall = new Map<string, string>();
+    for (const r of obsResults) {
+      const ro = objOr(r);
+      if (typeof ro.source_call_id === 'string' && typeof ro.content === 'string') {
+        obsByCall.set(ro.source_call_id, ro.content);
+      }
+    }
+    for (const c of calls) {
+      const co = objOr(c);
+      const callId = typeof co.tool_call_id === 'string' ? co.tool_call_id : undefined;
+      const fn = typeof co.function_name === 'string' ? co.function_name : undefined;
+      if (callId === undefined || fn === undefined) {
+        loss.parseErrors += 1;
+        continue;
+      }
+      const cpb = objOr(objOr(co.extra).pb);
+      const output = obsByCall.get(callId);
+      steps.push({
+        id: callId,
+        tool: fn,
+        args: objOr(co.arguments),
+        ok: typeof cpb.ok === 'boolean' ? cpb.ok : true,
+        ...(output !== undefined ? { output } : {}),
+        ...(typeof cpb.outputTruncated === 'boolean' ? { outputTruncated: cpb.outputTruncated } : {}),
+        ...(typeof cpb.exitCode === 'number' ? { exitCode: cpb.exitCode } : {}),
+        ...(typeof cpb.durationMs === 'number' ? { durationMs: cpb.durationMs } : {}),
+      });
+    }
+    // Observações sem tool call correspondente: entrada útil ainda — vira step
+    // de observação pura (tool 'observation'), sem perder o conteúdo.
+    for (const [callId, content] of obsByCall) {
+      if (!steps.some((s) => s.id === callId)) {
+        steps.push({ id: callId, tool: 'observation', args: {}, ok: true, output: content });
+      }
+    }
+
+    const metrics = objOr(st.metrics);
+    const usageFromMetrics =
+      typeof metrics.prompt_tokens === 'number' || typeof metrics.completion_tokens === 'number' || typeof metrics.cost_usd === 'number'
+        ? {
+            tokensIn: typeof metrics.prompt_tokens === 'number' ? metrics.prompt_tokens : 0,
+            tokensOut: typeof metrics.completion_tokens === 'number' ? metrics.completion_tokens : 0,
+            costUsd: typeof metrics.cost_usd === 'number' ? metrics.cost_usd : 0,
+          }
+        : undefined;
+    const usagePb = objOr(pb.usage);
+    const usage =
+      typeof usagePb.tokensIn === 'number' && typeof usagePb.tokensOut === 'number' && typeof usagePb.costUsd === 'number'
+        ? { tokensIn: usagePb.tokensIn, tokensOut: usagePb.tokensOut, costUsd: usagePb.costUsd }
+        : usageFromMetrics;
+
+    const stopReason = typeof extra.stop_reason === 'string' ? extra.stop_reason : undefined;
+
+    turns.push({
+      index: typeof pb.index === 'number' ? pb.index : turns.length,
+      source,
+      ...(text !== undefined ? { text } : {}),
+      ...(typeof st.reasoning_content === 'string' ? { thinking: st.reasoning_content } : {}),
+      ...(typeof st.timestamp === 'string' ? { timestamp: st.timestamp } : {}),
+      steps,
+      ...(usage ? { usage } : {}),
+      ...(stopReason !== undefined ? { stopReason } : {}),
+    });
+  }
+  if (sawMessageRaw) loss.notes.push('message em content parts foi normalizado para string (o bruto foi restaurado no round-trip via extra)');
+
+  // --- nível trajetória -----------------------------------------------------
+  const agent = objOr(doc.agent);
+  const agentPb = objOr(objOr(agent.extra).pb);
+  const modelPb = objOr(agentPb.model);
+  const model: { provider: string; id: string; thinking?: ReasoningLevel } = {
+    provider: typeof modelPb.provider === 'string' ? modelPb.provider : 'unknown',
+    id: typeof agent.model_name === 'string' ? agent.model_name : typeof modelPb.id === 'string' ? modelPb.id : 'unknown',
+    ...(typeof modelPb.thinking === 'string' ? { thinking: modelPb.thinking as ReasoningLevel } : {}),
+  };
+
+  const fm = objOr(doc.final_metrics);
+  const fmPb = objOr(objOr(fm.extra).pb);
+  const usage = {
+    tokensIn: typeof fm.total_prompt_tokens === 'number' ? fm.total_prompt_tokens : 0,
+    tokensOut: typeof fm.total_completion_tokens === 'number' ? fm.total_completion_tokens : 0,
+    tokensReasoning: typeof fmPb.tokensReasoning === 'number' ? fmPb.tokensReasoning : 0,
+    // Entrada estrangeira (sem `extra.pb`): o ATIF só tem `total_cached_tokens`
+    // agregado — fica em `cacheRead` (o mais próximo) para o round-trip fechar.
+    cacheRead: typeof fmPb.cacheRead === 'number' ? fmPb.cacheRead : typeof fm.total_cached_tokens === 'number' ? fm.total_cached_tokens : 0,
+    cacheWrite: typeof fmPb.cacheWrite === 'number' ? fmPb.cacheWrite : 0,
+    costUsd: typeof fm.total_cost_usd === 'number' ? fm.total_cost_usd : 0,
+    costSource: (typeof fmPb.costSource === 'string' ? fmPb.costSource : 'agent-derived') as AgentCostSource,
+    ...(typeof fmPb.agentDerivedCostUsd === 'number' ? { agentDerivedCostUsd: fmPb.agentDerivedCostUsd } : {}),
+  };
+
+  const extra = objOr(doc.extra);
+  const ePb = objOr(extra.pb);
+  const stopReason: AgentStopReason =
+    typeof extra.stop_reason === 'string' && isStopReason(extra.stop_reason) ? extra.stop_reason : 'completed';
+  if (typeof extra.stop_reason === 'string' && !isStopReason(extra.stop_reason)) {
+    loss.notes.push(`stopReason desconhecido "${extra.stop_reason}" → 'completed'`);
+  }
+
+  const timestamps = turns.map((t) => t.timestamp).filter((t): t is string => typeof t === 'string');
+  const startedAt =
+    typeof ePb.startedAt === 'string' ? ePb.startedAt : (timestamps[0] ?? new Date(0).toISOString());
+  const finishedAt =
+    typeof ePb.finishedAt === 'string' ? ePb.finishedAt : (timestamps[timestamps.length - 1] ?? startedAt);
+  const durationMs =
+    typeof ePb.durationMs === 'number' ? ePb.durationMs : Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt) || 0);
+
+  // Campos ATIF sem casa no formato próprio (não-canônicos): DECLARADOS em notes.
+  if (typeof doc.session_id === 'string') loss.notes.push('session_id não tem casa no formato próprio (identificador do documento)');
+  if (typeof doc.trajectory_id === 'string') loss.notes.push('trajectory_id não tem casa no formato próprio (identificador do documento)');
+  if (typeof fm.llm_call_count === 'number') loss.notes.push('llm_call_count derivável dos steps não tem casa no formato próprio');
+
+  const trajectory: AgentTrajectory = {
+    format: 'agent-trajectory@2',
+    executor: {
+      id: typeof agent.name === 'string' && agent.name !== '' ? agent.name : 'unknown',
+      version: typeof agent.version === 'string' ? agent.version : 'unknown',
+    },
+    model,
+    startedAt,
+    finishedAt,
+    durationMs,
+    stopReason,
+    turns,
+    usage,
+    // `parseErrors` é o canal DECLARADO de perda (IMPL-095).
+    parseErrors: (typeof ePb.parseErrors === 'number' ? ePb.parseErrors : 0) + loss.parseErrors,
+    compactions: Array.isArray(ePb.compactions) ? (ePb.compactions as { at: string; tokensBefore: number }[]) : [],
+  };
+
+  return { trajectory, loss };
+}
+
+function isStopReason(v: string): v is AgentStopReason {
+  return (
+    v === 'completed' ||
+    v === 'maxTurns' ||
+    v === 'maxCost' ||
+    v === 'timeout' ||
+    v === 'maxOutput' ||
+    v === 'error' ||
+    v === 'cancelled'
+  );
 }

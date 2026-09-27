@@ -182,8 +182,18 @@ function vendorOf(modelId: string): string {
  * também compete tende a se auto-preferir, e um juiz do mesmo vendor de um
  * competidor tende a favorecer a própria família. Uma mensagem por juiz e
  * categoria; lista vazia = painel sem conflito aparente.
+ *
+ * IMPL-048 (R-03a:REC-2): a REFERÊNCIA (quem escreve o gabarito) entra na
+ * conta — auto-preferência quando ela também julga/compete (em compare o
+ * default é o próprio 1º juiz, e o aviso é o que denuncia esse default) e viés
+ * de família quando compartilha vendor. Modelo igual a juiz/competidor é ERRO
+ * de config no `runConfigSchema`; aqui o conflito restante é AVISO.
  */
-export function fairnessWarnings(variants: LlmVariant[], judgeModelIds: string[]): string[] {
+export function fairnessWarnings(
+  variants: LlmVariant[],
+  judgeModelIds: string[],
+  referenceModelId?: string,
+): string[] {
   const warnings: string[] = [];
   for (const judgeId of judgeModelIds) {
     const self = variants.filter((v) => v.modelId === judgeId);
@@ -206,6 +216,35 @@ export function fairnessWarnings(variants: LlmVariant[], judgeModelIds: string[]
       );
     }
   }
+  // ------------------------------------------------------- referência (IMPL-048)
+  if (referenceModelId) {
+    const ref = referenceModelId;
+    if (judgeModelIds.includes(ref)) {
+      warnings.push(
+        `A referência "${ref}" (quem escreve o gabarito) é também juiz desta run — mesmo modelo produz a régua e o veredito sobre ela (risco de auto-preferência).`,
+      );
+    }
+    const comoCompetidor = variants.filter((v) => v.modelId === ref);
+    if (comoCompetidor.length > 0) {
+      warnings.push(
+        `A referência "${ref}" (quem escreve o gabarito) também compete nesta run (${comoCompetidor
+          .map((v) => v.label)
+          .join(', ')}) — risco de viés de auto-preferência.`,
+      );
+    }
+    const familia = [
+      ...judgeModelIds.filter((id) => id !== ref && vendorOf(id) === vendorOf(ref)),
+      ...variants
+        .filter((v) => v.modelId !== ref && vendorOf(v.modelId) === vendorOf(ref))
+        .map((v) => v.modelId),
+    ];
+    const distintos = [...new Set(familia)];
+    if (distintos.length > 0) {
+      warnings.push(
+        `A referência "${ref}" é do mesmo vendor ("${vendorOf(ref)}") de ${distintos.length === 1 ? 'outro modelo do pipeline' : `${distintos.length} modelos do pipeline`} (${distintos.join(', ')}) — modelos tendem a preferir a própria família.`,
+      );
+    }
+  }
   return warnings;
 }
 
@@ -213,14 +252,17 @@ export function fairnessWarnings(variants: LlmVariant[], judgeModelIds: string[]
  * Avisos de imparcialidade para o caso GENÉRICO (variation/training: o eixo é
  * um modelo só; compare clássico usa `fairnessWarnings` com variantes). Mesma
  * regra: auto-preferência (juiz compete) e mesmo vendor (viés de família).
+ * `referenceModelId` (IMPL-048) cobre a referência na mesma régua.
  */
 export function fairnessWarningsForModels(
   modelIds: string[],
   judgeModelIds: string[],
+  referenceModelId?: string,
 ): string[] {
   return fairnessWarnings(
     modelIds.map((m) => ({ id: m, label: m, modelId: m, reasoningLevel: null, temperature: null })),
     judgeModelIds,
+    referenceModelId,
   );
 }
 

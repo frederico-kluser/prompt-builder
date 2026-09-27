@@ -28,10 +28,10 @@ prompt-builder train --config arena.json --budget 3 --output-format ndjson
 | `--judge <id>` | juiz; repita para um painel. **Não pode ser o `--model`.** |
 | `--techniques a,b,c` | técnicas de reescrita (`prompt-builder techniques`) |
 | `--base-prompt-file` | o prompt de partida; entra como controle |
-| `--iterations N` | teto de iterações (2–10; recomendado 3–5). O laço para antes se convergir (2 iterações seguidas sem promoção). |
+| `--iterations N` | teto de iterações (2–10; recomendado 3–5). O laço para antes se convergir: paciência = 2 iterações seguidas sem promoção (configurável via `patience` 1–5 no JSON do config — default 2) ou parada por platão (IC95 do ganho abaixo de `minGain`; `convergenceReason` diz qual foi) |
 | `--min-gain N` | margem PRÁTICA mínima em pontos de judge-score para promover. Padrão: `max(1; 50/n)` — meia granularidade (com 8 cenários, 6,25 pontos). Além dela, o gate exige p ajustado ≤ 0,05 (ver abaixo) |
-| `--holdout-ratio N` | fatia reservada para o gate final (padrão 0,2; 0 desliga) |
-| `--stages N` | quantos cenários (1–50). Recomendado 6–12. |
+| `--holdout-ratio N` | fatia reservada para o gate final (padrão 0,3; 0 desliga). **Piso absoluto de 10 cenários**: fatia menor não é holdout — é "confirmação fraca" (`holdoutSkipped`) e a palavra "validado" fica bloqueada no resultado |
+| `--stages N` | quantos cenários (1–50). Recomendado 6–12; veja a tabela de poder abaixo (`stages ≤ 5` = **modo econômico**, o `estimate` avisa) |
 | `--effort-judge high` | o juiz é a tarefa mais sensível — vale gastar aqui |
 | `--effort-datagen low` | gerar cenários é mecânico |
 | `--finalists N` / `--no-duels` | tamanho da final / desliga a final |
@@ -40,6 +40,32 @@ prompt-builder train --config arena.json --budget 3 --output-format ndjson
 
 **Precisa de pelo menos 2 contestants**: `técnicas + (1 se houver prompt base)`.
 Uma técnica sem prompt base não basta.
+
+## Poder — quantos cenários decidem o quê (Q5)
+
+Com n pequeno o benchmark só detecta efeitos ENORMES. O `prompt-builder estimate`
+imprime o plano do seu config (`deltaDetectavelPp`, `nParaDelta`, `poder`), mas a
+referência rápida é esta (α=0,05 unilateral, poder 80%, σd=0,5):
+
+| n (cenários) | Δ detectável (p.p.) | | Δ alvo (p.p.) | n necessário |
+|---:|---:|---|---:|---:|
+| 5 | 55,6 | | 45 | 8 |
+| 8 | 43,9 | | 30 | 18 |
+| 10 | 39,3 | | 20 | 39 |
+| 14 | 33,2 | | 10 | 155 |
+| 20 | 27,8 | | | |
+| 30 | 22,7 | | | |
+| 50 | 17,6 | | | |
+
+- ⚠️ σd=0,5 é **estimativa não calibrada** (tabela): calibre com uma run-piloto —
+  o `estimate` aceita o IC do piloto e usa o **limite superior** do IC.
+- `stages ≤ 5` = **modo econômico**: com 5 cenários só se decide Δ ≥ 45 p.p.
+- **Repetição ≠ observação independente** (ICC/design effect): com `repeats`/`repetitions`
+  ≥ 2, `runs show` reporta ICC, DE=1+(m−1)·ICC e nEfetivo = n·m/DE. ICC > 0,3
+  (faixa típica de tarefas agênticas: 0,30–0,77) → cada cenário novo vale mais que
+  uma rep nova: **mais cenários**, não mais repetições.
+- Holdout: piso absoluto de 10 cenários (abaixo: "confirmação fraca", nunca
+  "holdout"). Seleção com menos de 20 cenários não forma holdout.
 
 ## Como ler o resultado
 
@@ -74,8 +100,12 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
   dos vereditos ausentes (> 10% dos pares); o gate não promove (conta para a
   paciência: 2 iterações seguidas sem promoção encerram o treino).
   Investigue as falhas do juiz antes de rodar de novo.
-- `holdoutSkipped: true` — **o campeão não passou pelo gate**. Trate o ganho como
-  não verificado.
+- `holdoutSkipped: true` — **o campeão não passou pelo gate de holdout** (pulado,
+  ou fatia abaixo do piso de 10 cenários). O resultado vem como "confirmação
+  fraca" — sem confirmação contra sobreajuste; a palavra "validado" não aparece.
+  O `significance` nesse caso tem `pOrigin: "selecao"` (p medido na própria run de
+  seleção — anti-conservador); o p de confirmação só existe com holdout
+  (`pOrigin: "holdout"`, α=0,05 unilateral).
 - `holdout.regressed: true` — o campeão foi **pior** que a base nos cenários
   reservados. `sessions winner <id> --apply <arq>` **recusa** (exit `10`,
   destino intocado); só passa com `--override "<motivo>"`, que fica gravado
@@ -84,7 +114,10 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
   no gate, mas a re-avaliação limpa (`gate.reeval`: minibatch, Δ limpo) não
   confirmou a melhora. Promoção por acaso barrada — não é falha.
 - `convergedAtIteration` — o treino parou por falta de ganho, não por falta de
-  iterações. Isso é um bom sinal, não uma falha.
+  iterações. Isso é um bom sinal, não uma falha. `convergenceReason` diz o porquê:
+  `"patience"` (2 iterações seguidas sem promoção — configurável via `patience`)
+  ou `"plateau"` (o IC95 do ganho fica abaixo de `minGain`: nenhum ganho plausível
+  alcança a margem).
 
 ## Quando o resultado não presta
 

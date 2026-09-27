@@ -1218,7 +1218,8 @@ describe('contracts.canaries/judgeDiff atravessam schemas e whitelists', () => {
       mode: 'variation',
       theme: 'suporte',
       prompt: { text: BASE, contracts: contratos },
-      models: { datagen: 'fake/gen', judges: [JUIZ], contestant: ALVO },
+      // IMPL-048: `models.reference` é obrigatório em variation (papéis separados).
+      models: { datagen: 'fake/gen', judges: [JUIZ], contestant: ALVO, reference: 'fake/ref' },
     };
     for (const parse of [parseArenaConfig, parseArenaConfigWeb]) {
       const r = parse(arena);
@@ -1230,6 +1231,8 @@ describe('contracts.canaries/judgeDiff atravessam schemas e whitelists', () => {
       theme: 'suporte',
       datagenModelId: 'fake/gen',
       judgeModelIds: [JUIZ],
+      // IMPL-048: obrigatório em variation (papéis separados).
+      referenceModelId: 'fake/ref',
       contestantModelId: ALVO,
       basePrompt: BASE,
       techniqueIds: ['cot'],

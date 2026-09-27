@@ -19,6 +19,8 @@ import type { OpenRouterModel } from '../types.js';
 export const GLOBAL_OPTIONS = {
   json: { type: 'boolean' },
   'output-format': { type: 'string' },
+  // IMPL-092: o JSON sai compacto por padrão; --pretty formata (2 espaços).
+  pretty: { type: 'boolean' },
   'data-dir': { type: 'string' },
   key: { type: 'string' },
   'refresh-models': { type: 'boolean' },
@@ -205,6 +207,68 @@ export function sniffOutputFormat(argv: readonly string[]): OutputFormat {
   return json ? 'json' : 'text';
 }
 
+/**
+ * `--pretty` lido DIRETO do argv (mesma razão do `sniffOutputFormat`: o Output
+ * do `main` nasce antes de qualquer parse). Presente = ligado.
+ */
+export function sniffPretty(argv: readonly string[]): boolean {
+  for (const a of argv) {
+    if (a === '--') break;
+    if (a === '--pretty') return true;
+  }
+  return false;
+}
+
+// --- teto de listas ----------------------------------------------------------
+
+/**
+ * Teto DEFAULT de toda lista (IMPL-092, R-12:REC-2). Sem ele, `models list
+ * --json` devolvia o catálogo INTEIRO (~594 KB ≈ 150 mil tokens) e saturava o
+ * contexto do agente. `--limit <N>` muda o teto; `--all` devolve a lista
+ * inteira (decisão explícita); truncar avisa SEMPRE no stderr.
+ */
+export const DEFAULT_LIST_LIMIT = 50;
+
+export interface ListLimit {
+  /** `null` = `--all` (sem teto). */
+  limit: number | null;
+}
+
+/** Lê `--limit`/`--all` de um comando de lista. `--all` vence `--limit`. */
+export function parseListLimit(values: Record<string, unknown>): ListLimit {
+  if (values.all === true) return { limit: null };
+  const raw = values.limit;
+  if (raw === undefined || raw === null || raw === '') return { limit: DEFAULT_LIST_LIMIT };
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new CliError(
+      `--limit deve ser um inteiro maior que zero (recebi "${String(raw)}").`,
+      EXIT.USAGE,
+      { flag: '--limit', value: raw },
+      {
+        code: 'usage.invalid_flag_value',
+        hint: 'Use `--limit <N>` (teto de itens) ou `--all` (lista inteira).',
+      },
+    );
+  }
+  return { limit: n };
+}
+
+/**
+ * Aplica o teto e narra o truncamento (stderr — o stdout é payload). O rótulo
+ * entra na frase ("modelos", "runs"): "mostrando 50 de 243 runs — use --all…".
+ */
+export function limitList<T>(rows: T[], cap: ListLimit, out: Output, rotulo: string): T[] {
+  if (cap.limit === null || rows.length <= cap.limit) return rows;
+  out.warn(
+    `mostrando ${cap.limit} de ${rows.length} ${rotulo} — use --all para a lista inteira ` +
+      'ou --limit <N> para outro teto.',
+  );
+  return rows.slice(0, cap.limit);
+}
+
+// --- config fail-closed ------------------------------------------------------
+
 /** Comandos com subcomando: o rotulo do envelope vira `runs.show`, `key.check`… */
 const FAMILIAS_COM_SUB = new Set(['models', 'key', 'runs', 'sessions', 'library', 'config', 'registry', 'agents', 'limits']);
 
@@ -328,6 +392,142 @@ export async function readJsonFile(file: string): Promise<unknown> {
   }
 }
 
+// --- config fail-closed (IMPL-093, R-12:REC-2) --------------------------------
+//
+// Os schemas zod são `strip`: chave desconhecida é descartada EM SILÊNCIO e um
+// typo como "trainig" sumia do config sem ninguém saber (nota/custo mudavam).
+// O CLI fecha o circuito comparando a ÁRVORE LIDA com a árvore PARSEADA: toda
+// chave de entrada que não sobrevive ao parse foi descartada pelo schema —
+// recusa (exit 3) citando o caminho JSON e o "você quis dizer". Chaves
+// descontinuadas/alias legado continuam aceitas (com o aviso de sempre) e
+// moram na allowlist abaixo (IMPL-012: chave descontinuada é aviso, não erro).
+
+export interface UnknownKeyIssue {
+  /** Caminho JSON da chave (ex.: `training.trainig`). */
+  path: string;
+  key: string;
+  /** Chave irmã mais plausível (did-you-mean), quando existe. */
+  suggestion: string | null;
+}
+
+/**
+ * Chaves aceitas e IGNORADAS de propósito pelo parser (não são typo):
+ * descontinuada com aviso (IMPL-012) e alias legado renomeado pelo preprocess.
+ */
+export const CHAVES_LEGADO_ACEITAS: readonly string[] = ['training.halving', 'judgeModelId'];
+
+/**
+ * Chaves canônicas dos três dialetos (arena-config@1, arena-agent-config@1 e
+ * RunConfig cru). ALIMENTA SÓ o "você quis dizer" — a recusa vem da comparação
+ * entrada × saída do parse, então uma chave de menos aqui apenas deixa a
+ * sugestão mais pobre, nunca aprova nada errado. Mantenha em par com
+ * src/configFile.ts / src/runConfigSchema.ts.
+ */
+const CHAVES_CANONICAS: readonly string[] = [
+  // raiz (arena-config@1 / arena-agent-config@1 / RunConfig cru)
+  'format', 'mode', 'theme', 'scenarioBrief', 'stages', 'scenarios', 'prompt', 'models', 'effort',
+  'variation', 'training', 'judging', 'limits', 'compliance', 'piiMode', 'allowPii', 'agent',
+  'duels', 'repeats', 'finalists', 'budgetUsd',
+  // RunConfig cru
+  'datagenModelId', 'judgeModelIds', 'judgeModelId', 'contestantModelId', 'basePrompt',
+  'techniqueIds', 'manualVariants', 'temperature', 'promptGroup', 'promptId', 'competitorModelIds',
+  'competitorConfigs', 'customStages', 'scenarioSeed', 'reasoning', 'referenceModelId',
+  'referenceJudging', 'promptOptimization', 'optimizerModelId', 'judgePasses', 'maxPricePerMTok',
+  'maxOutputTokens', 'timeoutMs', 'concurrency',
+  // cenário / etapa
+  'id', 'question', 'productContext', 'maxTokens', 'rubric', 'reference', 'expected', 'labelSet',
+  'origin', 'agentTask',
+  // biblioteca / prompt
+  'from', 'profile', 'ids', 'text', 'generateFrom', 'contracts', 'group',
+  // models
+  'datagen', 'judges', 'contestant', 'competitors', 'rewriter', 'model', 'modelId', 'reasoningLevel',
+  // effort / variation / training / judging
+  'competitor', 'judge', 'rewriter', 'optimize', 'techniques', 'iterations', 'minGain',
+  'holdoutRatio', 'feedbackDriven', 'reflection', 'paretoPool', 'passes', 'dossierTokens',
+  // agente
+  'executor', 'executorVersion', 'install', 'provider', 'promptMode', 'thinking', 'tools',
+  'repetitions', 'maxParallel', 'isolation', 'kind', 'keepWorkspace', 'image', 'runtime',
+  'maxTurns', 'maxCostUsd', 'maxOutputBytes', 'maxDiffBytes',
+  'repo', 'setup', 'files', 'verify', 'forbiddenPaths', 'rebuild', 'detectors', 'contextFiles',
+  'url', 'path', 'ref', 'shallow', 'cmd', 'content', 'label', 'expectExit', 'weight',
+  'lockfiles', 'protect',
+  // contracts (IMPL-011) + preço
+  'neverBreak', 'placeholders', 'minLengthRatio', 'judgeDiff', 'canaries', 'input',
+  'prompt', 'completion',
+];
+
+/** "Você quis dizer" sobre as chaves irmãs REAIS + as canônicas do dialeto. */
+function sugestaoDeChave(key: string, irmaos: readonly string[]): string | null {
+  return closestMatch(key, [...irmaos, ...CHAVES_CANONICAS]) ?? null;
+}
+
+function walkUnknownKeys(
+  raw: unknown,
+  parsed: unknown,
+  base: string,
+  allow: ReadonlySet<string>,
+  out: UnknownKeyIssue[],
+): void {
+  if (Array.isArray(raw)) {
+    if (!Array.isArray(parsed)) return;
+    raw.forEach((item, i) => walkUnknownKeys(item, parsed[i], `${base}[${i}]`, allow, out));
+    return;
+  }
+  if (typeof raw !== 'object' || raw === null) return;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return;
+  const r = raw as Record<string, unknown>;
+  const p = parsed as Record<string, unknown>;
+  const irmaos = Object.keys(p);
+  for (const [k, v] of Object.entries(r)) {
+    const caminho = base ? `${base}.${k}` : k;
+    if (allow.has(caminho)) continue;
+    if (!(k in p)) {
+      out.push({ path: caminho, key: k, suggestion: sugestaoDeChave(k, irmaos) });
+      continue;
+    }
+    walkUnknownKeys(v, p[k], caminho, allow, out);
+  }
+}
+
+/**
+ * Chaves do JSON de entrada que o parser descartaria em silêncio (comparação
+ * entrada × saída do parse). Pura: testável sem disco nem CLI.
+ */
+export function unknownKeyIssues(
+  raw: unknown,
+  parsed: unknown,
+  allow: readonly string[] = CHAVES_LEGADO_ACEITAS,
+): UnknownKeyIssue[] {
+  const out: UnknownKeyIssue[] = [];
+  walkUnknownKeys(raw, parsed, '', new Set(allow), out);
+  return out;
+}
+
+/**
+ * Recusa (exit 3) se o config tem chave que o parser descartaria em silêncio —
+ * `config validate` e todo `--config` do CLI passam por aqui (fail-closed).
+ */
+export function assertNoUnknownConfigKeys(raw: unknown, parsed: unknown): void {
+  const issues = unknownKeyIssues(raw, parsed);
+  if (issues.length === 0) return;
+  const citadas = issues
+    .slice(0, 5)
+    .map((i) => `"${i.path}"${i.suggestion ? ` (você quis dizer "${i.suggestion}"?)` : ''}`)
+    .join('; ');
+  const mais = issues.length > 5 ? ` (+${issues.length - 5})` : '';
+  throw new CliError(
+    `Chave(s) desconhecida(s) no config: ${citadas}${mais}. Nada é descartado em silêncio.`,
+    EXIT.CONFIG,
+    { unknownKeys: issues },
+    {
+      code: 'config.unknown_key',
+      hint:
+        'Corrija ou remova as chaves acima — provavelmente um typo; `prompt-builder config example` ' +
+        'gera um config válido e `prompt-builder config validate <arq>` re-confere.',
+    },
+  );
+}
+
 export async function writeStoredKey(key: string): Promise<string> {
   const target = keyFilePath();
   // IMPL-024: raiz privada + tmp 0600 e rename — a key NOVA nunca passa por um
@@ -357,6 +557,7 @@ export function buildContext(parsed: ParsedArgs): CliContext {
     format: resolveFormat(parsed.values),
     quiet: parsed.values.quiet === true,
     color: parsed.values['no-color'] !== true && !process.env.NO_COLOR,
+    pretty: parsed.values.pretty === true,
   });
   return {
     out,

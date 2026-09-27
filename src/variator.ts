@@ -107,6 +107,35 @@ export interface GenerateContestantsParams {
 /** Texto-sentinela do base quando a variante nasce só do tema. */
 const NO_BASE_TEXT = 'Não há prompt base — escreva um prompt completo do zero sobre o tema.';
 
+/** Fração default do base que a reescrita precisa preservar (espelha engine/contracts.ts). */
+const DEFAULT_MIN_LENGTH_RATIO = 0.3;
+
+/**
+ * IMPL-071 (R-20:REC-6): o piso de tamanho é medido contra o prompt ORIGINAL
+ * da sessão, nunca contra o pai da iteração. O `verifyRewrite` calcula o piso
+ * como `base.length × minLengthRatio` sobre o base que o gate conhece — o PAI
+ * da reescrita —, e como cada pai é derivado do anterior o piso composto
+ * encolhia 0,3^k por rodada (3000→900→270→81): somado ao desempate "o mais
+ * curto vence", o mecanismo premiava quem APAGA texto (inclusive cláusulas
+ * defensivas que o gate substring não protege). Ajustar a razão faz o piso
+ * valer `original.length × ratio` em TODA iteração — o encolhimento acumulado
+ * da sessão fica limitado a `minLengthRatio` do original.
+ */
+export function contractsAgainstOriginal(
+  contracts: PromptContracts | undefined,
+  originalText: string | undefined,
+  parentText: string,
+): PromptContracts | undefined {
+  const bruto = contracts?.minLengthRatio;
+  const ratio =
+    typeof bruto === 'number' && Number.isFinite(bruto) && bruto >= 0 ? bruto : DEFAULT_MIN_LENGTH_RATIO;
+  const originalLen = (originalText ?? '').length;
+  const parentLen = parentText.length;
+  // Sem original ou sem pai o verifyRewrite já usa o piso absoluto (40 chars).
+  if (originalLen <= 0 || parentLen <= 0 || originalLen === parentLen) return contracts;
+  return { ...contracts, minLengthRatio: (ratio * originalLen) / parentLen };
+}
+
 /** Base de derivação: o base do usuário ou (multi-prompt) o texto atual do fragmento-alvo. */
 function derivationBase(p: GenerateContestantsParams): string {
   return (
@@ -336,7 +365,9 @@ export async function generateContestants(
   const baseRef = derivationBase(p);
   const gate = createContractGate({
     apiKey: p.apiKey,
-    contracts: p.contracts,
+    // IMPL-071: o piso de tamanho é contra o ORIGINAL da sessão (não contra o
+    // pai da iteração, cujo piso composto encolhe 0,3^k por rodada).
+    contracts: contractsAgainstOriginal(p.contracts, p.originalPrompt ?? p.basePrompt, baseRef),
     baseText: baseRef || NO_BASE_TEXT,
     hasBase: Boolean(baseRef),
     compose: p.promptGroup
@@ -456,7 +487,14 @@ export interface ReflectLessonsParams {
   timeoutMs?: number;
   /** Sinal de abort + ledger de custo. */
   ctx?: RunCtx;
-  maxPricePerMTok?: { prompt?: number; completion?: number };}
+  maxPricePerMTok?: { prompt?: number; completion?: number };
+  /**
+   * IMPL-060: teto do bloco REESCRITO em caracteres (default 4000). A entrada
+   * agora é o dossiê completo (pergunta/resposta/explicação integrais); a saída
+   * continua compacta de propósito — reflexão é síntese, não cópia.
+   */
+  maxChars?: number;
+}
 
 /**
  * Reescreve as licoes deterministicas num bloco acionavel. Lanca erro (o
@@ -500,5 +538,5 @@ Produza o bloco de licoes para a proxima rodada de reescrita.`;
 
   const texto = result.text.trim();
   if (!texto) throw new Error('Reflexao LLM devolveu bloco vazio.');
-  return texto.slice(0, 4000);
+  return texto.slice(0, Math.max(200, Math.floor(p.maxChars ?? 4000)));
 }

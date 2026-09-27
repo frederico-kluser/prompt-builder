@@ -26,6 +26,8 @@ import {
   type JudgeSetup,
 } from '../../engine/judgeBaseline.js';
 import { judgeContractHash } from '../../engine/judgeCalibration.js';
+import { DUEL_HEAD } from '../../engine/duelPrompt.js';
+import { JUDGE_LISTWISE_CONTRACT_TEXT } from '../../judge.js';
 import { JUDGE_CONTRACT_TEXT } from '../../refJudge.js';
 import { getGateway } from '../../openrouter.js';
 import { loadCatalogFile, loadPublicCatalog } from '../../publicCatalog.js';
@@ -51,11 +53,24 @@ const OPTIONS = {
 
 /**
  * Hash do contrato do juiz EM VIGOR neste binário para um setup. Mesmo cálculo
- * do orquestrador (`pinJudgeContract(judgeModelIds, JUDGE_CONTRACT_TEXT)`): se
- * uma versão nova do CLI mudar o prompt de julgamento, o gate acusa.
+ * do orquestrador (`pinJudgeContract`) no caminho DEFAULT (chat sem esforço de
+ * raciocínio explícito nem roteamento ZDR): juízes + prompt pointwise + prompt
+ * do duelo + prompt listwise + modelo de referência (IMPL-049 — trocar qualquer
+ * um destes muda o hash). Se uma versão nova do CLI mudar QUALQUER prompt de
+ * julgamento, o gate acusa.
+ *
+ * GRANULARIDADE (IMPL-049, decisão consciente): o gate compara no espaço de
+ * SETUP — think level e política de provedor entram no hash DA RUN (o pin do
+ * `judgeDiagnostics.contract`) e no drift `judge.contract.changed`/`runs show`.
+ * Uma run pinada com esforço/roteamento fora do default vai exigir re-baseline
+ * declarada: as notas dela não são comparáveis com as do default sem dizer.
  */
 function contractHashFor(setup: JudgeSetup): string {
-  return judgeContractHash(setup.judgeModelIds, JUDGE_CONTRACT_TEXT);
+  return judgeContractHash(setup.judgeModelIds, JUDGE_CONTRACT_TEXT, {
+    duelPromptText: DUEL_HEAD,
+    listwisePromptText: JUDGE_LISTWISE_CONTRACT_TEXT,
+    referenceModelId: setup.referenceModelId,
+  });
 }
 
 function defaultFile(): string {

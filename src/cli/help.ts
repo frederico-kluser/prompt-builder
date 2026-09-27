@@ -1,0 +1,178 @@
+// Help POR COMANDO + a tabela de códigos de saída compartilhada (IMPL-092,
+// R-12:REC-2). Antes a tabela só aparecia no help global: um agente que lia
+// `prompt-builder runs --help` nunca via o contrato de exit codes do comando
+// que ia chamar. Agora TODO `--help` de comando termina com o mesmo rodapé
+// (contrato de saída + tabela de códigos), e a lista `COMMANDS` é a fonte
+// única do dispatch e do "você quis dizer".
+//
+// ⚠️ Os testes de varredura de `src/cli` (test/cli-error-envelope.test.ts)
+// leem este arquivo sem cortar strings: nada de `process.exit(`, `.fail(`,
+// `.result(`, `console.*`, `return EXIT.` ou `stderr.write(…Erro…)` dentro dos
+// textos — nem como exemplo de uso.
+
+/** Comandos do dispatch — base do "você quis dizer" (mantenha em par com o switch do index). */
+export const COMMANDS = [
+  'docs',
+  'skill',
+  'init',
+  'models',
+  'estimate',
+  'key',
+  'compare',
+  'vary',
+  'train',
+  'runs',
+  'sessions',
+  'library',
+  'techniques',
+  'lgpd',
+  'config',
+  'registry',
+  'baseline',
+  'doctor',
+  'limits',
+  'mcp',
+  'agents',
+] as const;
+
+/** Rodapé comum de TODO help: contrato de saída + a tabela de códigos. */
+export const HELP_TAIL = `PARA AGENTES
+  Toda saída estruturada vai para o STDOUT; progresso e avisos vão para o STDERR.
+  Erro sob --json/ndjson: {ok:false, command, error:{code, kind, message, hint,
+  details}} no STDOUT (em ndjson, a última linha: type "result"). Decida pelo
+  error.kind; error.hint traz o próximo comando.
+  JSON sai COMPACTO por padrão; --pretty formata com 2 espaços.
+  Listas (\`models list\`, \`runs list\`, \`sessions list\`, \`agents list\`,
+  \`library list\`) têm teto default de 50 itens: --limit <N> muda o teto e
+  --all devolve a lista inteira — truncar avisa no stderr.
+  Nunca chute um think level: \`models show <id> --json\` diz exatamente quais
+  níveis o modelo aceita e o que vai no fio para cada um pedido.
+  Comece por: prompt-builder docs quickstart
+
+CÓDIGOS DE SAÍDA (error.kind entre parênteses)
+  0 ok · 1 falha inesperada (internal) · 2 uso inválido (usage)
+  3 config inválida (config) · 4 auth (auth) · 5 sem crédito (credit)
+  6 run inconclusiva (inconclusive: vereditos perdidos > 10% ou < 5 cenários julgados)
+  7 parcial, orçamento esgotado (control) · 8 rede (network)
+  9 espera esgotada — \`runs wait --timeout\` (timeout) · 10 portão recusou (gate)
+  130 interrompido — Ctrl-C, SIGTERM, \`runs cancel\` (control)
+`;
+
+/** Resumo de 1 linha por comando (usado no help global). */
+const RESUMO: Record<string, string> = {
+  docs: 'documentação embarcada nesta versão',
+  skill: 'SKILL.md deste pacote',
+  init: 'instala a skill no diretório de skills do seu agente',
+  models: 'catálogo do OpenRouter e capacidades de ajuste',
+  estimate: 'estima o custo de uma run antes de gastar',
+  key: 'key do OpenRouter (validar/gravar/remover)',
+  compare: 'compara modelos no mesmo desafio',
+  vary: 'testa variações de prompt num modelo',
+  train: 'treina um prompt ao longo de iterações',
+  runs: 'lista, mostra, exporta e cancela runs',
+  sessions: 'sessões de treino e handoff do campeão',
+  library: 'dataset estável de cenários + gabaritos',
+  techniques: 'técnicas de variação disponíveis',
+  lgpd: 'áreas de dado pessoal e regras de tratamento',
+  config: 'valida, exemplifica e explica configs de run',
+  registry: 'guarda de drift dos prompts de produção',
+  baseline: 'pina e confere juiz/gabarito/contrato de uma run',
+  doctor: 'diagnostica key, limites e o ambiente do modo agente',
+  limits: 'teto diário de gasto da máquina',
+  mcp: 'servidor MCP por stdio (mesmo binário)',
+  agents: 'modo agente: arena de agentes com executor pi',
+};
+
+/**
+ * Uso de cada comando. Listas com `--limit/--all` (IMPL-092): teto default de
+ * 50 itens, `--all` devolve a lista inteira e o truncamento avisa no stderr.
+ */
+const USO: Record<string, string> = {
+  docs: `  docs [tópico]            imprime um tópico da documentação
+  docs --list              todos os tópicos, com custo aproximado em tokens`,
+  skill: `  skill                    imprime o SKILL.md deste pacote`,
+  init: `  init --agent <nome>      instala a skill em .claude/skills, .agents/skills, …`,
+  models: `  models list [filtros]    lista o catálogo (teto 50; --all/--limit N)
+  models show <id>         o que aquele modelo aceita (think levels, temperatura)
+  models export -o <arq>   exporta o catálogo com capacidades de ajuste
+  models allowlist --check idade/contagem da allowlist LGPD por endpoint (sem key)
+
+  Filtros de list: --search --provider --effort --supports --reasoning
+  --no-reasoning --min-context --max-prompt-price --max-completion-price
+  --free --lgpd-area --expiring --format table|json|ndjson|csv|ids
+  Listas: --limit <N> (default 50) · --all (lista inteira)`,
+  estimate: `  estimate -c <arquivo>    estima o custo antes de gastar (sem key)
+  O arquivo pode ser arena-config@1 ou RunConfig cru.`,
+  key: `  key check                valida a key e mostra o saldo
+  key set --stdin          grava a key (leia da entrada padrão, nunca de argv)
+  key path | rm            onde está a key gravada | remove`,
+  compare: `  compare --models a,b     compara modelos no mesmo desafio
+  compare --config <arq>   usa um arena-config@1 (ver: docs config)
+  Comuns: --theme --stages --judge --budget <usd|none> --dry-run
+  --output-format ndjson --idempotency-key <k> --allow-concurrent --detach`,
+  vary: `  vary --model <id>        testa variações de prompt num modelo
+  vary --config <arq>      usa um arena-config@1 (ver: docs config)
+  Comuns: --theme --stages --judge --techniques --budget --dry-run --detach`,
+  train: `  train --model <id>       treina um prompt ao longo de iterações
+  train --config <arq>     usa um arena-config@1 (ver: docs config)
+  Comuns: --iterations --holdout-ratio --budget --dry-run --detach`,
+  runs: `  runs list [--status X]   lista runs (teto 50; --all/--limit N)
+  runs show <id>           record completo + diagnóstico do juiz
+  runs winner <id> [--prompt-only]
+  runs reproduce <id>      config reconstruído + comando p/ re-rodar
+  runs export <id> [-o <arq>]
+  runs status|wait|cancel <id>  job (--detach), run ou sessão`,
+  sessions: `  sessions list            lista sessões (teto 50; --all/--limit N)
+  sessions show <id>
+  sessions winner <id> [--prompt-only | --apply <arq> [--commit] [--override "<motivo>"]]
+           handoff com backup + diff; holdout regredido BLOQUEIA (exit 10)
+           salvo --override com motivo (gravado na auditoria + trailer)`,
+  library: `  library list [--profile <id>]
+          perfis (ou itens de um perfil; teto 50; --all/--limit N)
+  library init|show|add|seed|verify|coverage|export|rm|drop
+          veja \`prompt-builder library --help\` e \`docs quickstart\``,
+  techniques: `  techniques               lista as técnicas de variação (id — o que faz)`,
+  lgpd: `  lgpd                     áreas de dado pessoal, allowlist LGPD e cobertura
+           da pseudonimização (IMPL-042)`,
+  config: `  config validate <arq>    valida arena-config@1 ou RunConfig cru (exit 3 se inválido)
+  config example [--mode compare|variation|training] [-o <arq>]
+           gera um exemplo VÁLIDO para o modo pedido (aliases: train, vary)`,
+  registry: `  registry validate [--file <arq>]
+           guarda de drift dos prompts de produção (exit 3 com drift)
+  registry init [-o <arq>]  grava um registro-exemplo comentado`,
+  baseline: `  baseline pin <runId> [-o <arq>]
+           pina juiz/gabarito/contrato de uma run (judge-baseline@1)
+  baseline check [--file <arq>] [--config <arq>] [--catalog <models.json>]
+           gate de CI: sai 3 se juiz/gabarito mudou ou sumiu sem re-baseline
+  baseline declare --reason "…" [--judge a,b] [--reference x]`,
+  doctor: `  doctor [--deep] [--container] [--config <arq>]
+           key (exit 4 se ausente/recusada), teto diário, runs ativas e a
+           sala do modo agente (canário real com --deep)`,
+  limits: `  limits show              teto diário da máquina (UTC) e quem gastou hoje
+  limits set --daily <usd|none>   teto somando TODOS os processos (default US$ 20)`,
+  mcp: `  mcp [--data-dir <caminho>]
+           servidor MCP por stdio (mesmo binário). Tools longas viram jobs
+           (start_run → run_status → cancel_run); o modo agente passa pelo
+           MESMO portão de execução do \`agents run\` (allowExecConfig + pin
+           SHA-256 do config)`,
+  agents: `  agents doctor [--deep] [--container] [--config <arq>]
+           pré-voo do executor (canário real com --deep)
+  agents run --config <arq> --budget <usd|none> [--allow-exec-config]
+           roda a arena de agentes até o fim. ⚠️ arena-agent-config É
+           CONFIGURÁVEL/EXECUTÁVEL (setup[]/verify[] rodam comandos): sem um
+           hash SHA-256 aprovado o comando RECUSA (exit 3). A aprovação é
+           única por conteúdo: \`--allow-exec-config\` grava o pin; conteúdo
+           diferente revê a aprovação.
+  agents show <runId> | list (teto 50; --all/--limit N) | logs | replay | gc`,
+};
+
+export function renderCommandHelp(cmd: string): string {
+  const resumo = RESUMO[cmd] ?? '';
+  const uso = USO[cmd] ?? `  prompt-builder ${cmd}`;
+  return `prompt-builder ${cmd}${resumo ? ` — ${resumo}` : ''}
+
+USO
+${uso}
+
+${HELP_TAIL}`;
+}

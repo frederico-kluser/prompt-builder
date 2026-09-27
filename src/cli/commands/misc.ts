@@ -29,20 +29,33 @@ import { sampleSizeWarning } from '../../engine/judgeCalibration.js';
 import {
   formatIterationGate,
   formatPairCoverage,
+  formatPowerPlan,
+  formatRepetitionReport,
   formatRunCompleteness,
   formatSignificance,
+  formatSignificanceOrigin,
+  passAtKReport,
+  planPower,
+  recommendationFromStored,
+  repVerdictMatrix,
+  repetitionDiagnosticsFromRows,
   runCompleteness,
+  VERDICT_SCORE,
 } from '../../stats.js';
+import { holdoutConfirmationText, holdoutStrength } from '../../holdout.js';
 import { judgeScaleWarning } from '../../engine/verdictAggregate.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import {
+  assertNoUnknownConfigKeys,
   buildCatalogContext,
   buildContext,
   buildNetworkContext,
   checkKey,
   keyFilePath,
+  limitList,
   loadCatalog,
   parse,
+  parseListLimit,
   resolveHome,
   readJsonFile,
   removeStoredKey,
@@ -65,8 +78,62 @@ import {
   handoffAuditPath,
   overrideTrailers,
 } from '../handoff.js';
-import type { SessionRecord } from '../../types.js';
+import type { RunRecord, SessionRecord } from '../../types.js';
 import { readConfigFile, resolveArenaLibrary } from './run.js';
+
+/**
+ * Veredito + confirmação da sessão (IMPL-046/IMPL-050): o objeto ESTÁVEL de
+ * recomendação (com recusa honesta quando a evidência não decide) e o texto de
+ * confirmação do campeão contra sobreajuste — a MESMA saída no CLI e na UI.
+ */
+function sessionDecisionOf(record: SessionRecord): {
+  confirmation: string;
+  recommendation: ReturnType<typeof recommendationFromStored>;
+} {
+  const confirmation = holdoutConfirmationText(record.holdout?.n ?? 0, {
+    skipped: Boolean(record.holdoutSkipped) && !record.holdout,
+    strength: record.holdout ? holdoutStrength(record.holdout.n) : 'nenhum',
+  });
+  const recommendation = recommendationFromStored(record.significance, {
+    labels: {
+      candidate: record.pairing?.championId ?? 'campeão',
+      control: record.pairing?.controlId ?? 'controle',
+    },
+  });
+  return { confirmation, recommendation };
+}
+
+/**
+ * Relatório de REPETIÇÃO de `runs show` (IMPL-054, R-04:REC-7): por contestant
+ * com reps, ICC + design effect + nEfetivo (repetição não é observação
+ * independente) e pass@k (estimador não enviesado de Chen) + pass^k, ambos com
+ * a regra de sucesso EXPLÍCITA. Sem repetição não há nada a reportar.
+ */
+function repetitionReportLines(record: RunRecord): string[] {
+  const mFlat =
+    record.config.mode === 'compare' ? Math.max(1, Math.round(record.config.repeats ?? 1)) : 1;
+  const mAgent = record.config.agent
+    ? Math.max(1, Math.round(record.config.agent.repetitions ?? 1))
+    : 1;
+  if (mFlat <= 1 && mAgent <= 1) return [];
+  const lines: string[] = [
+    `repetições (m=${Math.max(mFlat, mAgent)}): repetição ≠ observação independente — o par analítico é o cenário`,
+  ];
+  for (const c of record.contestants) {
+    const rows = repVerdictMatrix(record.stages, c.id, { repeatsPerScenario: mFlat });
+    const scoreRows = rows.map((r) => r.map((v) => (v === undefined ? null : VERDICT_SCORE[v])));
+    const diag = repetitionDiagnosticsFromRows(scoreRows);
+    const k = Math.max(1, diag.repsPerScenario);
+    const pass = passAtKReport(rows, k);
+    const sens = passAtKReport(rows, k, 'resolve-ou-parcial');
+    lines.push(`  ${c.label}:`);
+    for (const l of formatRepetitionReport(diag, pass)) lines.push(`    ${l}`);
+    lines.push(
+      `    sensibilidade (${sens.ruleDefinition}): pass@${sens.k}=${(sens.passAtK * 100).toFixed(1)}% · pass^${sens.k}=${(sens.passK * 100).toFixed(1)}%`,
+    );
+  }
+  return lines;
+}
 
 // --- key ---------------------------------------------------------------------
 
@@ -151,6 +218,13 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   const { out } = ctx;
 
   const est = estimateRunCost(estimateInputFromConfig(config), ctx.models);
+  // IMPL-050/IMPL-054: poder e desenho de amostra junto do custo — estimar
+  // dinheiro sem estimar poder produz run cara que não decide nada.
+  const power = planPower({ n: config.stages });
+  const reps =
+    config.mode === 'compare'
+      ? Math.max(1, Math.round(config.repeats ?? 1))
+      : Math.max(1, Math.round(config.agent?.repetitions ?? 1));
   if (out.isText) {
     out.line(`Estimativa: ${fmtUsd(est.low)} – ${fmtUsd(est.high)}`);
     out.line();
@@ -158,6 +232,22 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
     for (const [role, usd] of Object.entries(est.byRole).sort((a, b) => b[1] - a[1])) {
       if (usd > 0) out.line(`  ${role.padEnd(12)} ${fmtUsd(usd)}`);
     }
+    out.line();
+    out.line('Poder (IMPL-050):');
+    for (const l of formatPowerPlan(power)) out.line(`  ${l}`);
+    if (config.stages <= 5) {
+      out.warn(
+        `modo econômico (stages=${config.stages}): com n=${power.n} só se detectam efeitos ≥ ${power.deltaDetectavelPp.toFixed(1)} p.p. (poder 80%, α=0,05 unilateral) — suba --stages para decidir Δ menores`,
+      );
+    }
+    out.line();
+    out.line('Amostra — cenários × repetições (IMPL-054):');
+    out.line(
+      `  ICC>0,3 (faixa típica de tarefas agênticas: 0,30–0,77) → repetições agregam pouco: prefira MAIS CENÁRIOS a mais reps`,
+    );
+    out.line(
+      `  design effect DE=1+(m−1)·ICC: com m=${reps} e ICC=0,5, o nEfetivo é ${(reps / (1 + (reps - 1) * 0.5)).toFixed(2)}× o n de cenários (reps não dobram o n)`,
+    );
     out.line();
     out.line('Premissas:');
     for (const [k, v] of Object.entries(est.assumptions)) out.line(`  ${k.padEnd(18)} ${v}`);
@@ -170,6 +260,8 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   }
   out.result(true, 'estimate', {
     estimate: est,
+    power,
+    sample: { stages: config.stages, repeats: reps, economicMode: config.stages <= 5 },
     catalog: { source: ctx.catalogSource, scope: ctx.catalogScope, models: ctx.models.length },
   });
   return EXIT.OK;
@@ -181,6 +273,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     limit: { type: 'string' },
+    // IMPL-092: --all devolve a lista inteira (o default tem teto de 50).
+    all: { type: 'boolean' },
     status: { type: 'string' },
     'prompt-only': { type: 'boolean' },
     out: { type: 'string', short: 'o' },
@@ -203,8 +297,9 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     if (typeof parsed.values.status === 'string') {
       rows = rows.filter((r) => r.status === parsed.values.status);
     }
-    const limit = Number(parsed.values.limit ?? 20);
-    rows = rows.slice(0, Number.isFinite(limit) ? limit : 20);
+    const total = rows.length;
+    // IMPL-092: teto default de 50 (--limit N / --all; truncar avisa no stderr).
+    rows = limitList(rows, parseListLimit(parsed.values), out, 'runs');
     if (out.isText) {
       for (const r of rows) {
         out.line(
@@ -213,7 +308,7 @@ export async function cmdRuns(argv: string[]): Promise<number> {
       }
       if (rows.length === 0) out.info('nenhuma run em ' + getDataDir());
     }
-    out.result(true, 'runs.list', { runs: rows });
+    out.result(true, 'runs.list', { runs: rows, total });
     return EXIT.OK;
   }
 
@@ -237,7 +332,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     // a fonte de verdade lossless — ver src/runArtifact.ts).
     const art = buildReproduceArtifact(record);
     if (out.isText) {
-      out.line(JSON.stringify(art.config, null, 2));
+      // IMPL-092: JSON compacto por padrão (--pretty formata).
+      out.line(out.json(art.config));
       out.line();
       out.line(`Comando sugerido (grave o JSON acima em ${configFileForRun(record.id)}):`);
       out.line(`  ${art.suggestedCommand}`);
@@ -255,7 +351,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     // Artefato auto-contido: record + etapas com gabaritos + system prompts +
     // vereditos do juiz — auditável/reproduzível sem o disco original.
     const artifact = buildRunArtifact(record);
-    const texto = `${JSON.stringify(artifact, null, 2)}\n`;
+    // IMPL-092: JSON compacto por padrão (--pretty formata).
+    const texto = `${out.json(artifact)}\n`;
     const alvo =
       typeof parsed.values.out === 'string' && parsed.values.out.trim()
         ? parsed.values.out.trim()
@@ -310,6 +407,9 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     out.line(`etapas: ${record.stages.length} · participantes: ${record.contestants.length}`);
     const labelOf = (cid: string): string => record.contestants.find((c) => c.id === cid)?.label ?? cid;
     for (const l of formatRunCompleteness(completeness, labelOf)) out.line(l);
+    // IMPL-054: ICC, design effect, nEfetivo e pass@k/pass^k sempre que há
+    // repetição (compare `repeats` ou agente `repetitions`).
+    for (const l of repetitionReportLines(record)) out.line(l);
     out.line();
     for (const l of renderSpend(
       record.costByRole,
@@ -511,6 +611,8 @@ export async function cmdSessions(argv: string[]): Promise<number> {
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     'prompt-only': { type: 'boolean' },
     limit: { type: 'string' },
+    // IMPL-092: --all devolve a lista inteira (o default tem teto de 50).
+    all: { type: 'boolean' },
     apply: { type: 'string' },
     commit: { type: 'boolean' },
     override: { type: 'string' },
@@ -520,7 +622,9 @@ export async function cmdSessions(argv: string[]): Promise<number> {
 
   if (sub === 'list') {
     await sweepOrphanRecords({ locklessAfterMs: LOCKLESS_ORPHAN_AFTER_MS }); // IMPL-030
-    const rows = (await listSessions()).slice(0, Number(parsed.values.limit ?? 20));
+    const todas = await listSessions();
+    // IMPL-092: teto default de 50 (--limit N / --all; truncar avisa no stderr).
+    const rows = limitList(todas, parseListLimit(parsed.values), out, 'sessões');
     if (out.isText) {
       for (const r of rows) {
         out.line(
@@ -528,7 +632,7 @@ export async function cmdSessions(argv: string[]): Promise<number> {
         );
       }
     }
-    out.result(true, 'sessions.list', { sessions: rows });
+    out.result(true, 'sessions.list', { sessions: rows, total: todas.length });
     return EXIT.OK;
   }
 
@@ -649,8 +753,14 @@ export async function cmdSessions(argv: string[]): Promise<number> {
       });
       return EXIT.OK;
     }
+    const decisaoWinner = sessionDecisionOf(record);
     if (out.isText && campeao) {
       out.line(`campeão da iteração ${campeao.iteration + 1}: ${campeao.winnerContestantId}`);
+      // IMPL-050/IMPL-046: confirmação + veredito de recomendação antes do prompt.
+      out.line(`confirmação: ${decisaoWinner.confirmation}`);
+      if (decisaoWinner.recommendation) {
+        out.line(`recomendação (${decisaoWinner.recommendation.ruler}): ${decisaoWinner.recommendation.text}`);
+      }
       for (const i of [...guards.blocks, ...guards.warnings]) out.warn(i.message);
       if (guards.blocked) out.warn('--apply será BLOQUEADO para esta sessão (só passa com --override "<motivo>").');
       out.line();
@@ -663,16 +773,30 @@ export async function cmdSessions(argv: string[]): Promise<number> {
       holdout: record.holdout,
       significance: record.significance,
       judgeDrift: Boolean(record.judgeDrift),
+      // IMPL-046/IMPL-050: veredito estável + texto de confirmação (CLI e UI).
+      confirmation: decisaoWinner.confirmation,
+      recommendation: decisaoWinner.recommendation,
       // Laudo do gate SEM aplicar: um agente decide antes de tentar o --apply.
       handoff: { wouldBlock: guards.blocked, blocks: guards.blocks, warnings: guards.warnings },
     });
     return EXIT.OK;
   }
 
+  const decisao = sessionDecisionOf(record);
   if (out.isText) {
     out.line(`${record.id}  ${record.status}`);
     out.line(`tema: ${record.config.theme}`);
     out.line(`iterações: ${record.bestPromptByIteration.length}/${record.config.iterations}`);
+    // IMPL-051: convergência com iteração E motivo (platão vs paciência).
+    if (record.convergedAtIteration !== undefined) {
+      out.line(
+        `convergência: iteração ${record.convergedAtIteration + 1} (${
+          record.convergenceReason === 'plateau'
+            ? 'platão — IC95 do ganho abaixo de minGain'
+            : 'paciência — iterações seguidas sem promoção'
+        })`,
+      );
+    }
     // IMPL-002: gate de cada iteração — bruto × corrigido × p ajustado (max-T).
     for (const it of record.bestPromptByIteration) {
       if (it.gate) out.line(`  iteração ${it.iteration + 1}: ${formatIterationGate(it.gate)}`);
@@ -682,10 +806,22 @@ export async function cmdSessions(argv: string[]): Promise<number> {
       out.line(`pareamento (${record.pairing.source}): ${formatPairCoverage(record.pairing)}`);
     }
     if (record.significance) out.line(`significância: ${formatSignificance(record.significance)}`);
+    else out.line(`significância: ${formatSignificanceOrigin(null)}`);
+    // IMPL-050: confirmação do campeão — a palavra "validado" só com holdout forte.
+    out.line(`confirmação: ${decisao.confirmation}`);
+    // IMPL-046: veredito de recomendação com recusa honesta (mesmo objeto na UI).
+    if (decisao.recommendation) {
+      out.line(`recomendação (${decisao.recommendation.ruler}): ${decisao.recommendation.text}`);
+    }
     out.line();
     for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) out.line(l);
   }
-  out.result(true, 'sessions.show', { session: record });
+  out.result(true, 'sessions.show', {
+    session: record,
+    // IMPL-046/IMPL-050: veredito estável + texto de confirmação (CLI e UI).
+    confirmation: decisao.confirmation,
+    recommendation: decisao.recommendation,
+  });
   return EXIT.OK;
 }
 
@@ -740,27 +876,77 @@ export async function cmdConfig(argv: string[]): Promise<number> {
   const { out } = ctx;
 
   if (sub === 'example') {
-    const mode = typeof parsed.values.mode === 'string' ? parsed.values.mode : 'train';
-    const exemplo = {
+    // IMPL-093 (R-12:REC-2): o exemplo tem de passar em `config validate` para
+    // os 3 modos (round-trip). Antes `--mode vary` emitia mode:'vary' (que o
+    // parser recusa) e o compare saía sem `models.competitors` (compare exige
+    // >= 2) — example→validate quebrava em 2 dos 3 modos.
+    const ALIAS_DE_MODO: Record<string, string> = {
+      compare: 'compare',
+      variation: 'variation',
+      vary: 'variation',
+      training: 'training',
+      train: 'training',
+    };
+    const pedido = typeof parsed.values.mode === 'string' ? parsed.values.mode.trim() : 'train';
+    const mode = ALIAS_DE_MODO[pedido];
+    if (!mode) {
+      throw new CliError(
+        `--mode deve ser compare, variation ou training (recebi "${pedido}"; aliases: train, vary).`,
+        EXIT.USAGE,
+        { flag: '--mode', value: pedido, accepted: ['compare', 'variation', 'training'], aliases: ['train', 'vary'] },
+        {
+          code: 'usage.invalid_flag_value',
+          hint: 'Use `--mode training` (alias `train`), `--mode variation` (alias `vary`) ou `--mode compare`.',
+        },
+      );
+    }
+    // Campo de tokens UNIFICADO: `limits.maxOutputTokens` é o canônico do
+    // arena-config@1 (src/arenaConfig.ts o traduz em RunConfig.maxOutputTokens;
+    // src/runArtifact.ts faz o caminho de volta). O `maxOutputTokens` no topo é
+    // do RunConfig CRU — em arena-config é chave desconhecida e hoje o
+    // `config validate` o recusa citando o caminho (fail-closed, IMPL-093).
+    const comum = {
       format: 'arena-config@1',
-      mode: mode === 'train' ? 'training' : mode,
+      mode,
       theme: 'Assistente de suporte técnico de um SaaS de faturamento',
       scenarioBrief: 'Cubra dúvidas de cobrança, recusa de pedidos fora da política e extração de dados de faturas.',
       stages: 8,
       prompt: { text: 'Você é um assistente de suporte. Responda com base na política do produto.' },
-      models: {
-        datagen: 'openai/gpt-5-mini',
-        judges: ['anthropic/claude-sonnet-5'],
-        contestant: 'openai/gpt-5-mini',
-      },
       effort: { judge: 'high', datagen: 'low' },
-      variation: { optimize: true, techniques: ['persona', 'constraints', 'format'] },
-      // minGain ausente = margem prática default max(1; 50/n) (IMPL-002).
-      training: { iterations: 3, holdoutRatio: 0.2 },
       finalists: 3,
       limits: { maxOutputTokens: 600 },
     };
-    const texto = JSON.stringify(exemplo, null, 2);
+    const exemplo =
+      mode === 'compare'
+        ? {
+            ...comum,
+            // compare: eixo de competidores (>= 2) — juiz, datagen e referência
+            // ficam FORA (IMPL-048: quem escreve o gabarito não compete nem julga).
+            models: {
+              datagen: 'openai/gpt-5-mini',
+              judges: ['anthropic/claude-sonnet-5'],
+              reference: 'google/gemini-2.5-pro',
+              competitors: ['google/gemini-2.5-flash', 'openai/gpt-4.1-mini'],
+            },
+          }
+        : {
+            ...comum,
+            // IMPL-048: `reference` OBRIGATÓRIO em variation/training e distinto
+            // de juiz e do modelo sob teste (papéis separados).
+            models: {
+              datagen: 'openai/gpt-5-mini',
+              judges: ['anthropic/claude-sonnet-5'],
+              reference: 'google/gemini-2.5-pro',
+              contestant: 'openai/gpt-5-mini',
+            },
+            variation: { optimize: true, techniques: ['persona', 'constraints', 'format'] },
+            // minGain ausente = margem prática default max(1; 50/n) (IMPL-002).
+            // holdoutRatio 0.3 (IMPL-050): com o piso absoluto de 10 cenários, só a
+            // partir de ~34 cenários o split alcança um holdout de verdade.
+            ...(mode === 'training' ? { training: { iterations: 3, holdoutRatio: 0.3 } } : {}),
+          };
+    // JSON compacto por padrão (--pretty formata) — IMPL-092.
+    const texto = out.json(exemplo);
     if (typeof parsed.values.out === 'string') {
       await fs.writeFile(parsed.values.out, `${texto}\n`, 'utf-8');
       out.info(`exemplo gravado em ${parsed.values.out}`);
@@ -778,6 +964,9 @@ export async function cmdConfig(argv: string[]): Promise<number> {
   if (typeof formato === 'string') {
     const p = parseArenaConfig(json);
     if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
+    // IMPL-093: chave que o parser descartaria em silêncio é ERRO (fail-closed),
+    // com caminho JSON e "você quis dizer" — nunca sumir em silêncio.
+    assertNoUnknownConfigKeys(json, p.config);
     for (const w of p.warnings ?? []) out.warn(w); // chave descontinuada (IMPL-012)
     const c = arenaConfigToRunConfig(p.config);
     if (!c.ok) throw new CliError(c.error, EXIT.CONFIG);
@@ -789,6 +978,7 @@ export async function cmdConfig(argv: string[]): Promise<number> {
   }
   const p = parseRunConfig(json);
   if (!p.ok) throw new CliError(p.error, EXIT.CONFIG, p.details);
+  assertNoUnknownConfigKeys(json, p.config); // IMPL-093: fail-closed
   out.info('válido (RunConfig)');
   out.result(true, 'config.validate', { format: 'run-config', config: p.config });
   return EXIT.OK;

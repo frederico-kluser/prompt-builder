@@ -541,7 +541,13 @@ describe('IMPL-002 — o default chega ao motor (arquivo de config sem minGain)'
     theme: 'suporte',
     stages: 8,
     prompt: { text: 'Você é um assistente de suporte.' },
-    models: { datagen: 'openai/gpt-5-mini', judges: ['anthropic/claude-sonnet-5'], contestant: 'openai/gpt-5-mini' },
+    models: {
+      datagen: 'openai/gpt-5-mini',
+      judges: ['anthropic/claude-sonnet-5'],
+      contestant: 'openai/gpt-5-mini',
+      // IMPL-048: obrigatório em training (papéis separados — distinto de juiz e competidor).
+      reference: 'openai/gpt-5-nano',
+    },
     variation: { optimize: true, techniques: ['persona', 'constraints'] },
     training,
   });

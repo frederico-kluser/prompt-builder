@@ -102,11 +102,14 @@ describe('rank.ts — judge-score e promoção com margem', () => {
 });
 
 describe('holdout.ts — split intercalado com piso', () => {
-  it('intercala deterministicamente (a cada k-ésimo → holdout)', () => {
+  it('intercala deterministicamente com a fatia do tamanho planejado', () => {
     const items = Array.from({ length: 25 }, (_, i) => i);
     const { train, holdout } = splitHoldout(items, 0.2);
-    expect(holdout).toEqual([4, 9, 14, 19, 24]);
-    expect(train).toHaveLength(20);
+    // IMPL-050: piso absoluto de 10 — 25 × 0,2 = 5 sobe para 10 cenários.
+    expect(holdout).toEqual([2, 4, 7, 9, 12, 14, 17, 19, 22, 24]);
+    expect(train).toHaveLength(15);
+    // Determinístico: redividir devolve as mesmas fatias.
+    expect(splitHoldout(items, 0.2).holdout).toEqual(holdout);
     // As duas fatias amostram a seleção inteira (não um bloco contíguo de
     // cabeça/cauda): há itens de TREINO depois do primeiro holdout, e a união
     // disjunta recompõe a seleção original.
@@ -115,16 +118,21 @@ describe('holdout.ts — split intercalado com piso', () => {
   });
 
   it('abaixo do piso o holdout é descartado por inteiro (tudo treina)', () => {
-    const items = Array.from({ length: 12 }, (_, i) => i); // k=5 → só 2 no holdout
-    const { train, holdout } = splitHoldout(items, 0.2);
-    expect(holdout).toHaveLength(0);
-    expect(train).toEqual(items);
+    const items = Array.from({ length: 12 }, (_, i) => i); // 6 reservados < 10
+    const split = splitHoldout(items, 0.2);
+    expect(split.holdout).toHaveLength(0);
+    expect(split.train).toEqual(items);
+    // IMPL-050: fatia curta é "confirmação fraca", nunca "holdout".
+    expect(split.strength).toBe('confirmacao-fraca');
   });
 
-  it('piso MIN_HOLDOUT_SCENARIOS=5 casa com o piso da significância', () => {
-    expect(MIN_HOLDOUT_SCENARIOS).toBe(5);
+  it('piso MIN_HOLDOUT_SCENARIOS=10 é ABSOLUTO (IMPL-050, R-04:REC-5)', () => {
+    expect(MIN_HOLDOUT_SCENARIOS).toBe(10);
     const items = Array.from({ length: 25 }, (_, i) => i);
-    expect(splitHoldout(items, 0.2).holdout.length).toBeGreaterThanOrEqual(5);
+    expect(splitHoldout(items, 0.2).holdout.length).toBeGreaterThanOrEqual(10);
+    // Seleção com menos de 20 cenários nunca forma holdout (teto de ratio 0,5).
+    const curta = splitHoldout(Array.from({ length: 19 }, (_, i) => i), 0.5);
+    expect(curta.strength).toBe('confirmacao-fraca');
   });
 
   it('ratio é clampado em [0, 0.5]; 0 desliga o holdout', () => {

@@ -1,0 +1,4 @@
+{
+  "retentionDays": 90,
+  "note": "Politica de retencao/apagamento LGPD (IMPL-100). 'retentionDays' e o TTL padrao das runs gravadas (dias apos o inicio da run); 0 desliga o TTL (so apagamento explicito). Sobrescrito por PB_RETENTION_DAYS (Node) e por localStorage['pb.retentionDays'] (SPA). O prune roda no boot do CLI/servidor e antes de cada run via autoPrune()."
+}

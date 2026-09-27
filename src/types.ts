@@ -19,7 +19,7 @@ import type {
   AgentTaskSpec,
   ExecutionRef,
 } from './agent/types.js';
-import type { ExpectedSpec } from './engine/groundTruth.js';
+import type { ExpectedSpec, ReferenceValidation } from './engine/groundTruth.js';
 import type { PromptContracts } from './engine/contracts.js';
 import type { PromptGroup } from './engine/promptGroup.js';
 import type { ModelLifecycleSnapshot } from './engine/modelLifecycle.js';
@@ -115,6 +115,42 @@ export interface CostEntry {
   usd: number;
   tokensIn: number;
   tokensOut: number;
+  /**
+   * IMPL-078 (R-08:REC-5) — telemetria de uso AGREGADA por papel, somada pelo
+   * ledger no ponto único da contabilidade. Ausente = nada medido ainda
+   * (record anterior ao IMPL-078 ou papel sem chamada registrada).
+   */
+  /** Soma dos tokens de entrada lidos DO CACHE (`prompt_tokens_details.cached_tokens`). */
+  cachedTokensIn?: number;
+  /**
+   * Soma dos tokens de raciocínio (`completion_tokens_details.reasoning_tokens`).
+   * ⚠️ São SUBCONJUNTO de `tokensOut` (o Codex dobra o raciocínio DENTRO de
+   * `completion_tokens`): sempre etiquetados, NUNCA somados a `tokensOut`.
+   */
+  reasoningTokens?: number;
+  /** Soma das latências das chamadas (média = latencyTotalMs / calls). */
+  latencyTotalMs?: number;
+  /**
+   * Soma do custo ESTIMADO (catálogo, usado na reserva) — o "estimado x real"
+   * por papel sai daqui contra `usd` (o valor efetivamente cobrado).
+   */
+  estimatedUsd?: number;
+}
+
+/**
+ * IMPL-075 (R-07b:REC-4) — provedor que EFETIVAMENTE serviu a chamada. Sem
+ * isto a variação entre provedores do mesmo id de pesos abertos (>20 pp de
+ * schema_accuracy; entrada 4,5x entre endpoints) é inseparável da variação de
+ * prompt. `name` vem do payload da resposta (`provider`); `upstreamId` e
+ * `serviceTier` do GET /api/v1/generation (conciliação IMPL-074).
+ */
+export interface CallProviderInfo {
+  /** `provider_name` do provedor (ex.: 'OpenAI', 'Azure'). */
+  name?: string;
+  /** `upstream_id` da geração no provedor (identifica a cobrança). */
+  upstreamId?: string;
+  /** `service_tier` efetivo (ex.: 'standard', 'flex', 'priority'). */
+  serviceTier?: string;
 }
 
 /**
@@ -229,6 +265,10 @@ export interface CostSink {
       generationId?: string;
       /** Sinais de fim, quando a resposta completou sem `usage` (IMPL-014). */
       finish?: CallFinishSignals;
+      /** IMPL-075: provedor que serviu a chamada (mesmo sem custo medido). */
+      provider?: CallProviderInfo;
+      /** IMPL-078: latência observada até o corte/abort, em ms. */
+      latencyMs?: number;
     },
   ): void;
   /** Chamado DEPOIS do fetch, sempre: troca a reserva pelo custo real. */
@@ -240,6 +280,21 @@ export interface CostSink {
       cost: CallCost;
       tokensIn: number;
       tokensOut: number;
+      /**
+       * IMPL-078 (R-08:REC-5) — telemetria de uso POR CHAMADA, entregue no
+       * MESMO ponto único do custo (role + sink): 100% das chamadas, todos os
+       * papéis. Campos opcionais só pela retrocompatibilidade do record.
+       */
+      /** Tokens de entrada lidos do cache (`prompt_tokens_details.cached_tokens`). */
+      cachedTokensIn?: number;
+      /** Tokens de raciocínio — SUBCONJUNTO de `tokensOut`, nunca somado. */
+      reasoningTokens?: number;
+      /** Latência da chamada (ms, despacho até a resposta lida). */
+      latencyMs?: number;
+      /** Custo ESTIMADO (catálogo) enviado na reserva — real = `cost.usd`. */
+      estimatedUsd?: number;
+      /** IMPL-075: provedor que efetivamente serviu a chamada. */
+      provider?: CallProviderInfo;
       /**
        * Sinais de fim da chamada (IMPL-014) — presentes quando a chamada
        * COMPLETOU (ausentes no 200 com corpo de erro, que lanca). E por aqui
@@ -579,8 +634,14 @@ export interface TrainingConfig extends RunConfigBase, SingleModelFields {
    * (max-T sobre as K variantes) <= 0,05.
    */
   minGain?: number;
-  /** Fracao de cenarios reservada p/ holdout (clamp [0, 0.5]). Default 0.2. */
+  /** Fracao de cenarios reservada p/ holdout (clamp [0, 0.5]). Default 0.3 (IMPL-050). */
   holdoutRatio?: number;
+  /**
+   * Paciencia do laco (IMPL-051): iteracoes SEGUIDAS sem promocao antes de
+   * convergir. Default 2 (IMPL-013) — paciencia 1 com veredito ruidoso e
+   * anti-patrao (sob H0 25,8-35,8% das sessoes param cedo por azar).
+   */
+  patience?: number;
   /** Reflection estilo GEPA: variantes recebem licoes das falhas do campeao. */
   feedbackDriven?: boolean;
   /**
@@ -596,8 +657,37 @@ export interface TrainingConfig extends RunConfigBase, SingleModelFields {
    * Tamanho do POOL Pareto (F4.1, GEPA): >1 mantém uma população de prompts
    * (pais diversos por dominância de fatia) em vez do campeão único elitista.
    * 0/ausente = comportamento clássico (1).
+   * IMPL-062: com FATIA ÚNICA o pool não se forma — o treino roda como
+   * elitismo EXPLÍCITO (sem estado de pool/paretoFront), porque com fatia única
+   * a dominância de Pareto vira comparação de média com overhead de estado.
    */
   paretoPool?: number;
+  /**
+   * IMPL-062 (R-02b:REC-4): amostragem de pai ∝ COBERTURA (matriz candidato ×
+   * cenário — quantas instâncias cada candidato vence) em vez do rodízio pelo
+   * menos usado. Só atua com fatias múltiplas e n ≥ 20 (abaixo disso o front é
+   * ruído — a ablação do GEPA foi com 111–300 instâncias).
+   */
+  paretoCoverageSampling?: boolean;
+  /**
+   * IMPL-060 (R-02b:REC-1): teto do DOSSIÊ de lições (GEPA) em TOKENS
+   * (aprox. chars/4). Default 4000. A truncagem é explícita: reportada em log
+   * e marcada no payload — nenhuma falha é descartada em silêncio.
+   */
+  maxLessonTokens?: number;
+  /**
+   * IMPL-060: inclui o GABARITO do cenário no dossiê de lições. Default OFF —
+   * mostrar o gabarito ao reescritor abre risco de exploração do juiz
+   * (aguarda R-03b).
+   */
+  lessonsIncludeReference?: boolean;
+  /**
+   * IMPL-065 (R-05:REC-4): piso de ITENS CURADOS (âncora humana) para declarar
+   * campeão. Default 20 (proposta sem fonte — calibrar). Abaixo do piso o
+   * treino roda como bootstrap e NÃO declara campeão (ver
+   * `SessionRecord.championDeclaration`).
+   */
+  minCuratedItems?: number;
   // `halving` (F4.3) foi REMOVIDO no IMPL-012 (R-02b:REC-3, H4/H5/H6 — ver o
   // comentário no laço de `trainer.ts`). Records antigos que ainda o tragam
   // são lidos normalmente; o campo é ignorado.
@@ -622,6 +712,16 @@ export interface StageSpec {
   /** Gabarito: resposta de referencia ideal (juiz pointwise + duelos). */
   reference?: string;
   /**
+   * Validacao do GABARITO (IMPL-055, R-03a:REC-1): verificacao dirigida pela
+   * rubrica rodada ANTES do julgamento + 2º gabarito de familia distinta
+   * (condicionado) + itens `needs-human-review`. Preenchida por
+   * `generateReferences`/`validateGeneratedReferences` (`gabarito.ts`) e
+   * persistida junto da spec — a fila agregada vive em
+   * `RunRecord.needsHumanReview`. Ausente = etapa sem gabarito gerado (seed/
+   * pinada) ou validacao nao rodou.
+   */
+  referenceValidation?: ReferenceValidation;
+  /**
    * Rótulo ESPERADO (ground-truth): quando presente, o veredito da etapa e
    * decidido deterministicamente (`engine/groundTruth.ts`), SEM juiz LLM — o
    * padrao `gabaritoSpec kind:'labels'` do prompt-arena. string = rotulo unico,
@@ -641,9 +741,34 @@ export interface StageSpec {
    * Metadados de CURRICULO (F1/F4.1): tier curatorial e dimensoes medidas.
    * Sobrevivem da biblioteca (`toStageSpec`) e alimentam a selecao Pareto por
    * fatia — sem eles a populacao nao sabe onde cada prompt e especialista.
+   * O datagen v2 (IMPL-064) tambem os emite — antes o zod os stripava em
+   * silencio e todo item gerado caia na fatia 'geral'.
    */
   tier?: string;
   dimensionTags?: string[];
+  /**
+   * Idioma do cenario (IMPL-056 / R-03a:REC-6). Default 'pt-BR': o produto e
+   * monolinguue e misturar idiomas e confundidor no veredito. Variado so via
+   * opt-in (`languages`); cenario fora da politica da run vira warning.
+   */
+  language?: string;
+  /** Quem pergunta (persona do usuario) — realismo/curadoria (IMPL-064). */
+  persona?: string;
+  /**
+   * Estimativa de dificuldade (1-5) emitida pelo gerador (IMPL-064).
+   * SINAL DE CURADORIA, NUNCA rotulo: a validacao humana decide.
+   */
+  difficultyEstimate?: number;
+  /** Grupo de invariancia (pares cuja saida esperada nao pode mudar) — IMPL-064. */
+  invarianceGroup?: string;
+  /**
+   * Metadados ADVERSARIAIS (IMPL-068): categoria (uma das 6 minimas), rotulo
+   * de turno ('single-turn' = ASR@1, limite inferior) e hash do system
+   * prompt-base que condicionou a geracao (amarracao item↔politica).
+   */
+  adversarialCategory?: string;
+  turnLabel?: string;
+  basePromptHash?: string;
   /**
    * A etapa, quando executada por um agente. AUSENTE => a etapa só serve ao
    * runner 'chat' (comportamento de hoje, intacto).
@@ -819,6 +944,83 @@ export interface CompetitorResponse {
  */
 export type Verdict = 'resolve' | 'parcial' | 'nao';
 
+/**
+ * Confiança do juiz no PRÓPRIO veredito (IMPL-047, R-03a:REC-7): campo `confianca`
+ * do JSON do juiz (pointwise e duelo), pedida para triar revisão humana —
+ * veredito 'baixa' é candidato natural a revisão. Mesmos valores (sem acento)
+ * da confiança de evidência de `Technique`. Ausente em records antigos e em
+ * vereditos de quem não devolveu o campo (o parse não derruba um veredito
+ * válido só por isso — a triagem usa o campo quando presente).
+ */
+export type JudgeConfidence = 'baixa' | 'media' | 'alta';
+
+/**
+ * Componentes do contrato do juiz QUE MAIS ENTRAM no hash (IMPL-049,
+ * R-03a:REC-9) além dos ids de juiz + prompt pointwise: o prompt do duelo, o
+ * prompt listwise, o modelo de referência (quem escreve o gabarito), o think
+ * level de julgamento e a política de provedor das chamadas de juiz. Trocar
+ * qualquer componente muda a distribuição de veredito ⇒ muda o hash e sugere
+ * recalibração. Campos ausentes entram vazios na serialização canônica.
+ */
+export interface JudgeContractComponents {
+  /** Prompt do duelo (head-to-head; com o bloco de hierarquia no modo agente). */
+  duelPromptText?: string;
+  /** Prompt do juiz listwise (fallback sem gabarito). */
+  listwisePromptText?: string;
+  /** Modelo que escreve o gabarito (referência). */
+  referenceModelId?: string;
+  /** Think level efetivo do juiz (`reasoning.judge`; 'default' quando ausente). */
+  judgeReasoningLevel?: string;
+  /** Política de provedor das chamadas de juiz (ex.: roteamento ZDR forçado). */
+  providerPolicy?: string;
+}
+
+/**
+ * Fonte (papel) de um veredito usado no diagnóstico de verbosidade (IMPL-052):
+ * pointwise (juiz contra gabarito), rótulo (ground-truth determinístico),
+ * listwise (juiz clássico sem gabarito) e imputado ('auto' — resposta vazia e
+ * afins, NUNCA entra na regressão). Papéis com calibrações distintas não
+ * partilham regressão.
+ */
+export type VerdictSampleSource = 'pointwise' | 'rotulo' | 'listwise' | 'imputado';
+
+/**
+ * Diagnóstico de verbosidade em CAMADAS (IMPL-053, R-03b:REC-1): regressão
+ * ORDINAL do veredito sobre `log(len_cand/len_ref)` + feitos de markdown, com
+ * efeito fixo do cenário e do contestant, inferência por PERMUTAÇÃO do veredito
+ * dentro do cenário e sondas contrafactuais (truncar/preencher 20% e re-julgar).
+ * O Pearson agregado virou legenda descritiva (`VerbosityReport`) — o
+ * diagnóstico é este: efeito + incerteza + n.
+ */
+export interface VerbosityDiag {
+  /**
+   * Efeito do comprimento relativo no veredito (coeficiente de
+   * `log(len_cand/len_ref)` na regressão ordinal, em unidades latentes do
+   * logit acumulado). `> 0` = respostas mais longas (vs a referência) pontuam
+   * mais, mesmo controlando cenário/contestant/markdown.
+   */
+  betaLenRel: number;
+  /** IC 95% de `betaLenRel` (bootstrap percentil estratificado por cenário). */
+  ic95: [number, number];
+  /** p do teste de PERMUTAÇÃO do veredito dentro do cenário (bicaudal). */
+  pPermutacao: number;
+  /** n de amostras válidas por fonte de veredito (papel). */
+  nPorFonte: Record<string, number>;
+  /**
+   * Taxa de INVERSÃO das sondas contrafactuais (0..1): fração de respostas em
+   * que truncar/preencher 20% mudou o veredito do juiz. Bom < 10%. `null` =
+   * sondas não rodaram (re-julgamento é assíncrono — quem chama passa os pares).
+   */
+  taxaInversaoSondas: number | null;
+  /**
+   * Nota LC AUXILIAR por contestant (0..100): judge-score do contestant com o
+   * comprimento fixado na mediana (predição do modelo ajustado). O judge-score
+   * BRUTO (`judgeScoreByContestant`) permanece o primário — este só mostra
+   * quanto da nota é comprimento.
+   */
+  judgeScoreLC: Record<string, number> | null;
+}
+
 // ----------------------------------------------------------------------------
 // Veredito AUSENTE (IMPL-004, R-03b:REC-4) — nomes FIXOS do CONVENTIONS.
 //
@@ -852,6 +1054,59 @@ export type VerdictErrorKind =
 export interface VerdictError {
   kind: VerdictErrorKind;
   message: string;
+}
+
+/**
+ * Voto de UM juiz para UMA resposta (IMPL-057, R-11a:REC-8): veredito +
+ * explicação + confiança + canário persistidos POR JUIZ — antes o resultado
+ * agregado descartava os singles e era impossível mostrar "2 de 3 juízes:
+ * resolve", destacar o divergente ou calcular κ painel×humano. Juiz que FALHOU
+ * entra com `error` e sem `verdict` (falha ≠ veredito).
+ */
+export interface JudgeVote {
+  judgeModelId: string;
+  /** Veredito deste juiz; ausente = este juiz falhou (motivo em `error`). */
+  verdict?: Verdict;
+  /** Explicação curta (1 frase) que este juiz deu para o seu veredito. */
+  explanation?: string;
+  /** Confiança que este juiz declarou no PRÓPRIO veredito (IMPL-047). */
+  confianca?: JudgeConfidence;
+  /** Canário devolvido por este juiz nesta chamada (IMPL-006). */
+  canary?: string;
+  /** Falha deste juiz (IMPL-057): só presente quando `verdict` está ausente. */
+  error?: VerdictError;
+}
+
+/**
+ * Por que um item entrou na fila `needs-human-review` (IMPL-055/IMPL-057).
+ * Valores estáveis (dados de record, não decoração).
+ */
+export type HumanReviewReason =
+  /** O gabarito gerado diverge da rubrica do cenário (verificação dirigida). */
+  | 'reference_rubric_divergence'
+  /** O 2º gabarito (família distinta) discordou do 1º — referência incerta. */
+  | 'reference_disagreement'
+  /** Amostra humana de auditoria (5–10%) acionada por discordância. */
+  | 'reference_audit_sample'
+  /** Veredito com confiança 'baixa' — triagem de revisão humana (IMPL-047). */
+  | 'low_confidence_verdict';
+
+/**
+ * Item da fila `needs-human-review` (IMPL-055, R-03a:REC-1): o que um humano
+ * precisa conferir antes de a run virar régua. A referência sintética é o elo
+ * mais fraco (qualidade da referência > força do juiz) e erro de gabarito vira
+ * veredito contra a resposta certa — a fila existe para NUNCA esconder isso.
+ */
+export interface HumanReviewItem {
+  /** Índice da etapa (0-based, posição em `RunRecord.stages`). */
+  stageIndex: number;
+  /** Contestant afetado, quando o item é por veredito/resposta. */
+  contestantId?: string;
+  reason: HumanReviewReason;
+  /** Detalhe curto em PT-BR (o que exatamente divergiu). */
+  detail?: string;
+  /** Custo humano estimado da revisão em USD (default da política: 0.025). */
+  estimatedCostUsd?: number;
 }
 
 /** Veredito COMPACTO de UM juiz para UMA resposta: justificativa + veredito ternario. */
@@ -937,6 +1192,13 @@ export interface ReferenceJudgeResult {
   verdictByContestant: Record<string, Verdict>;
   /** Explicacao curta (1 frase) por contestant — so para vereditos presentes. */
   explanationByContestant: Record<string, string>;
+  /**
+   * Confiança do juiz no veredito (IMPL-047): o campo `confianca` do JSON do
+   * juiz, persistido por veredito para triar revisão humana. Com painel, vale o
+   * MENOR `confianca` entre os votos legítimos (lado seguro da triagem). Só
+   * para vereditos presentes; ausente quando nenhum voto devolveu o campo.
+   */
+  confidenceByContestant?: Record<string, JudgeConfidence>;
   /** Origem de cada veredito presente (IMPL-004). */
   verdictSourceByContestant?: Record<string, VerdictSource>;
   /** Motivo de cada veredito AUSENTE (IMPL-004). */
@@ -952,6 +1214,15 @@ export interface ReferenceJudgeResult {
    * dos juízes. Só para vereditos presentes; ausente em records antigos.
    */
   canaryByContestant?: Record<string, string[]>;
+  /**
+   * Voto de CADA juiz por (etapa, contestant) (IMPL-057, R-11a:REC-8):
+   * veredito + explicação + confiança + canário de cada juiz, ou a falha
+   * (`error`) do juiz. Com isto a UI mostra a concordância do painel
+   * ("2 de 3: resolve") e destaca o divergente; antes o resultado agregado
+   * descartava os singles. Ausente em records antigos e em vereditos
+   * determinísticos (ground-truth/auto — não há painel).
+   */
+  judgeVotesByContestant?: Record<string, JudgeVote[]>;
   judgeModelId: string;
   inconclusive?: boolean;
   /**
@@ -1002,6 +1273,12 @@ export interface DuelOrderResult {
   explanation: string;
   /** Canário que o juiz devolveu nesta ordem (IMPL-006). Ausente no oráculo e em records antigos. */
   canary?: string;
+  /**
+   * Confiança do juiz nesta ordem (IMPL-047): o campo `confianca` do JSON do
+   * duelo, por ordem (cada ordem é um veredito). Ausente no oráculo, em
+   * records antigos e quando o juiz não devolveu o campo.
+   */
+  confidence?: JudgeConfidence;
 }
 
 /** Resultado de UM duelo pairwise (2 ordens; desacordo entre ordens = empate). */
@@ -1272,6 +1549,15 @@ export interface RunRecord {
   /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
   fairnessWarnings?: string[];
   /**
+   * Fila `needs-human-review` (IMPL-055, R-03a:REC-1): itens cujo gabarito
+   * divergiu da rubrica, cujo 2º gabarito (família distinta) discordou, ou a
+   * amostra humana de auditoria (5–10%, acionada por discordância). A
+   * referência sintética é o elo mais fraco da run — sem esta fila, erro de
+   * gabarito vira veredito contra a resposta certa e ninguém fica sabendo.
+   * `normalizeRunRecord` deriva a fila das etapas quando o record não a traz.
+   */
+  needsHumanReview?: HumanReviewItem[];
+  /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
    * `allowPii`. E o registro de que os identificadores foram pseudonimizados
@@ -1280,8 +1566,42 @@ export interface RunRecord {
   piiReport?: PiiRunReport;
   /** Diagnostico do juiz (F4.2): pin do contrato (hash) + vies de verbosidade medido. */
   judgeDiagnostics?: {
-    contract: { hash: string; modelIds: string[]; pinnedAt: string };
-    verbosity: { n: number; r: number; biased: boolean; warning: string };
+    /**
+     * Pin do contrato do juiz (IMPL-049 estendeu o hash): cobre juízes, os 3
+     * prompts (pointwise/duelo/listwise), o modelo de referência, o think level
+     * de julgamento e a política de provedor — trocar QUALQUER um muda o hash
+     * e sugere recalibração (`judge.contract.changed`). `components` guarda a
+     * entrada canônica usada (auditoria de granularidade).
+     */
+    contract: {
+      hash: string;
+      modelIds: string[];
+      pinnedAt: string;
+      components?: JudgeContractComponents;
+    };
+    /**
+     * Viés de verbosidade (IMPL-052): a regressão deixa de misturar papéis —
+     * só amostras VÁLIDAS da fonte-alvo entram; n por fonte e por célula
+     * (fonte × contestant) e a conta de excluídos (vazios/truncados/imputados)
+     * ficam no relatório.
+     */
+    verbosity: {
+      n: number;
+      r: number;
+      biased: boolean;
+      warning: string;
+      alvo?: VerdictSampleSource;
+      nPorFonte?: Record<string, number>;
+      nPorCelula?: Record<string, number>;
+      excluidos?: { vazios: number; truncados: number; imputados: number };
+      /**
+       * Diagnóstico de verbosidade em CAMADAS (IMPL-053): regressão ordinal +
+       * permutação dentro do cenário + sondas contrafactuais + nota LC
+       * auxiliar. Publicado POR `verbosityReport` (a chamada do orquestrador já
+       * o carrega); `null`/ausente = n insuficiente para ajustar o modelo.
+       */
+      verbosityDiag?: VerbosityDiag;
+    };
   };
   /**
    * Ciclo de vida de TODO modelo da run (IMPL-019): canonicalSlug/
@@ -1646,6 +1966,28 @@ export interface RunCompleteness {
 export type StoredSignificance = Pick<PairedSignificance, 'n' | 'meanDiffPp' | 'ci95Pp' | 'pValue'> &
   Partial<Omit<PairedSignificance, 'n' | 'meanDiffPp' | 'ci95Pp' | 'pValue'>>;
 
+/**
+ * IMPL-065 (R-05:REC-4): declaração de campeão sob âncora HUMANA. O zero-dataset
+ * (tudo sintético) é BOOTSTRAP, não evidência: modelos atingem 84–89% em
+ * benchmarks sintéticos e 25–34% em tarefas reais. Item curado = proveniência
+ * humana (`origin` !== 'ai') E gabarito acompanhando o item (gabarito gerado
+ * por IA não serve de âncora).
+ */
+export interface ChampionDeclaration {
+  /** false = recusa declarar campeão (piso de itens curados não atingido). */
+  declared: boolean;
+  /** Itens curados (âncora humana) presentes nos cenários da sessão. */
+  curatedItems: number;
+  /** Piso aplicado (`minCuratedItems`, default 20 — proposta sem fonte, calibrar). */
+  minCuratedItems: number;
+  /** Motivo da recusa, quando houver. */
+  reason?: 'sem-ancora-humana';
+  /** Mensagem em PT-BR citando o piso e o número de itens curados. */
+  message: string;
+  /** IC95 do score do campeão (p.p.) — bootstrap/inversão pareada. */
+  scoreCi95Pp?: [number, number] | null;
+}
+
 export interface SessionRecord {
   id: string;
   status: RunStatus;
@@ -1686,8 +2028,39 @@ export interface SessionRecord {
   pairing?: SessionPairing;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
+  /**
+   * Motivo da convergencia (IMPL-051): 'patience' = N iteracoes seguidas sem
+   * promocao (a paciencia configuravel, default 2); 'plateau' = o IC95 do
+   * ganho termina abaixo de minGain (nenhum ganho plausivel alcança a margem).
+   * Vai junto de `convergedAtIteration` e do evento `session.converged`.
+   */
+  convergenceReason?: 'patience' | 'plateau';
   /** Pool Pareto final (F4.1): prompts não-dominados por fatia que sobreviveram. */
   pool?: { id: string; label: string; bySlice: Record<string, number> }[];
+  /**
+   * IMPL-062 (R-02b:REC-4): diagnóstico Pareto da última iteração — fração de
+   * pares não dominados e tamanho do front (com alerta de RUÍDO quando a
+   * fração > 0,6 com n < 20). Com fatia única o treino roda como elitismo
+   * explícito e o diagnóstico vem com `mode: 'elitismo'`.
+   */
+  paretoMetrics?: {
+    mode: 'elitismo' | 'pareto';
+    /** Instâncias (cenários) por trás da matriz. */
+    n: number;
+    /** Tamanho do front de Pareto (entradas não dominadas). */
+    frontSize: number;
+    /** Fração de pares (a,b) em que nenhum domina o outro (0–1). */
+    nonDominatedPairFraction: number;
+    /** true = front provavelmente ruído (ver regra em engine/pareto.ts). */
+    noiseAlert?: boolean;
+  };
+  /**
+   * IMPL-065 (R-05:REC-4): declaração de campeão sob âncora HUMANA. Com menos
+   * itens curados que `minCuratedItems` (default 20) o treino NÃO declara
+   * campeão — os sintéticos servem de treino/apoio, nunca de âncora — e o
+   * resultado traz a recusa com o número de itens curados.
+   */
+  championDeclaration?: ChampionDeclaration;
   /**
    * true = as runs da sessao compararam CONTRATOS DE JUIZ diferentes (F4.2):
    * calibration drift — o delta entre iteracoes pode ser do juiz, nao do prompt.
@@ -1803,6 +2176,21 @@ export type RunEvent =
       kinds: JudgeCutKind[];
       detail: string;
     }
+  /**
+   * Contrato do juiz MUDOU em relação ao último pin visto neste processo
+   * (IMPL-049, R-03a:REC-9): o hash cobre juízes + prompts (pointwise, duelo,
+   * listwise) + modelo de referência + think level + provedor. O aviso sugere
+   * RECALIBRAÇÃO antes de comparar notas com runs antigas (calibrar um
+   * contrato que mudou é desperdício). Evento agregado, sem `stageIndex` —
+   * não entra no reducer de etapas (como `duel.progress`).
+   */
+  | {
+      type: 'judge.contract.changed';
+      runId: string;
+      previousHash: string;
+      currentHash: string;
+      detail: string;
+    }
   | { type: 'stage.judging'; runId: string; stageIndex: number }
   | {
       type: 'stage.judged';
@@ -1899,6 +2287,7 @@ export type SessionEvent =
       minGain?: number;
     }
   | { type: 'session.holdout'; sessionId: string; holdout: SessionRecord['holdout'] }
-  | { type: 'session.converged'; sessionId: string; iteration: number }
+  /** IMPL-051: `reason` = por que a sessão convergiu (platão vs paciência). */
+  | { type: 'session.converged'; sessionId: string; iteration: number; reason?: 'patience' | 'plateau' }
   | { type: 'session.finished'; sessionId: string; record: SessionRecord }
   | { type: 'session.error'; sessionId: string; error: string };

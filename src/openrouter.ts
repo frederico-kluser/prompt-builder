@@ -8,6 +8,7 @@ import { applySensitiveRouting } from './engine/sensitiveRouting.js';
 import type {
   CallCost,
   CallFinishSignals,
+  CallProviderInfo,
   CostRole,
   CostSink,
   ModelReasoningMeta,
@@ -58,6 +59,9 @@ export const MAX_RETRIES = 6;
  */
 export const DEFAULT_MAX_TOKENS = 4096;
 
+/** IMPL-077 — teto de `listModels`/`validateKey`/`/generation` (ms): servidor mudo não pendura o processo. */
+export const DEFAULT_META_TIMEOUT_MS = 20_000;
+
 /** O teto que vai no corpo E na reserva — um numero so. */
 export function effectiveMaxTokens(maxTokens: number | undefined): number {
   return typeof maxTokens === 'number' && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS;
@@ -68,6 +72,39 @@ function generationIdOf(payload: unknown): string | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
   const id = (payload as { id?: unknown }).id;
   return typeof id === 'string' && id.trim() ? id.trim() : undefined;
+}
+
+/**
+ * IMPL-075 (R-07b:REC-4) — provedor da chamada a partir do PAYLOAD (o campo
+ * `provider` que o OpenRouter devolve em JSON e em todo chunk SSE). Ausente =
+ * undefined (quem chama decide se busca no GET /generation).
+ */
+export function extractProviderInfo(payload: unknown): CallProviderInfo | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const p = payload as Record<string, unknown>;
+  const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const name = str(p.provider_name) ?? str(p.provider);
+  const upstreamId = str(p.upstream_id) ?? str(p.upstreamId);
+  const serviceTier = str(p.service_tier) ?? str(p.serviceTier);
+  if (!name && !upstreamId && !serviceTier) return undefined;
+  return {
+    ...(name ? { name } : {}),
+    ...(upstreamId ? { upstreamId } : {}),
+    ...(serviceTier ? { serviceTier } : {}),
+  };
+}
+
+/** Junta duas fontes de provedor (payload + /generation); a SEGUNDA vence campo a campo. */
+function mergeProviderInfo(base: CallProviderInfo | undefined, extra: CallProviderInfo | undefined): CallProviderInfo | undefined {
+  if (!base && !extra) return undefined;
+  const name = extra?.name ?? base?.name;
+  const upstreamId = extra?.upstreamId ?? base?.upstreamId;
+  const serviceTier = extra?.serviceTier ?? base?.serviceTier;
+  return {
+    ...(name ? { name } : {}),
+    ...(upstreamId ? { upstreamId } : {}),
+    ...(serviceTier ? { serviceTier } : {}),
+  };
 }
 const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -98,7 +135,56 @@ export interface GatewayConfig {
    * abort por fora, então uma espera que o ignore continua cancelável.
    */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /**
+   * IMPL-072 — transporte STREAMING (`stream: true` + SSE) também para
+   * `chatCompletion` (juiz, duelo, gabarito, datagen, reescritor): em abort/
+   * timeout o provedor PARA de gerar (e cobra só o gerado) — no não-streaming
+   * ele continua e cobra a resposta inteira. Default false = caminho JSON
+   * histórico; os papéis migram passando `streamTransport` ou ligando aqui.
+   */
+  streamTransport?: boolean;
+  /**
+   * IMPL-077 — timeouts por papel (inatividade/total). Parcial: o que faltar
+   * cai em `DEFAULT_ROLE_TIMEOUTS`; valores recortados para 1-600 s.
+   */
+  roleTimeouts?: Partial<Record<CostRole, Partial<RoleTimeouts>>>;
+  /** IMPL-077 — teto de `listModels`/`validateKey` (ms). Default 20 s. */
+  metaTimeoutMs?: number;
+  /**
+   * IMPL-073 — janela (ms) da guarda anti-reenvio: falha DEPOIS dos headers
+   * com desfecho desconhecido bloqueia reenvio do MESMO corpo até a
+   * conciliação (ou o fim da janela). 0 = desliga.
+   */
+  resendGuardTtlMs?: number;
+  /**
+   * IMPL-075 — preenchimento de `provider_name`/`upstream_id`/`service_tier`
+   * via GET /api/v1/generation. 'off' = só o payload; 'missing' = busca quando
+   * o payload nao trouxer o provedor; 'always' = sempre (modo auditável).
+   */
+  providerLookup?: 'off' | 'missing' | 'always';
+  /**
+   * IMPL-075 — modo auditável: papéis que recebem `provider { order,
+   * quantizations, allow_fallbacks:false, require_parameters:true }`. Preset do
+   * item: `AUDITABLE_ROLES` (juiz + gabarito). Vazio = desligado.
+   */
+  auditableRoles?: CostRole[];
+  /** Ordem fixa de provedores do modo auditável (`provider.order`). Vazio = omitido. */
+  auditableProviderOrder?: string[];
+  /** Quantizações aceitas no modo auditável (`provider.quantizations`). */
+  auditableQuantizations?: string[];
+  /**
+   * IMPL-076 — teto DIARIO de chamadas a modelos `:free` por key (o por minuto
+   * e fixo: 20). O provedor muda o teto diario com creditos (50/dia sem,
+   * 1.000/dia com) — default conservador `FREE_DAILY_LIMIT_DEFAULT` (50);
+   * conta com creditos levanta para 1.000.
+   */
+  freeDailyLimit?: number;
 }
+
+/** Preset do modo auditável (IMPL-075): juiz e gabarito — os papéis de REFERÊNCIA. */
+export const AUDITABLE_ROLES: readonly CostRole[] = ['judge', 'gabarito'];
+/** Quantizações de precisão cheia do modo auditável (auditável = sem quantização lossy). */
+export const DEFAULT_AUDITABLE_QUANTIZATIONS: readonly string[] = ['bf16', 'fp16', 'fp32'];
 
 const DEFAULT_CONFIG: GatewayConfig = {
   baseUrl: DEFAULT_OPENROUTER_BASE_URL,
@@ -106,6 +192,12 @@ const DEFAULT_CONFIG: GatewayConfig = {
   appTitle: DEFAULT_APP_TITLE,
   maxConcurrency: DEFAULT_MAX_CONCURRENCY,
   modelsCacheTtlMs: MODELS_CACHE_TTL_MS,
+  metaTimeoutMs: DEFAULT_META_TIMEOUT_MS,
+  resendGuardTtlMs: 120_000,
+  providerLookup: 'off',
+  auditableRoles: [],
+  auditableProviderOrder: [],
+  auditableQuantizations: [...DEFAULT_AUDITABLE_QUANTIZATIONS],
 };
 
 function normalizeBaseUrl(url: string): string {
@@ -132,6 +224,44 @@ function mergeConfig(base: GatewayConfig, patch: Partial<GatewayConfig>): Gatewa
   if (typeof patch.modelsCacheTtlMs === 'number' && Number.isFinite(patch.modelsCacheTtlMs)) {
     out.modelsCacheTtlMs = Math.max(0, patch.modelsCacheTtlMs);
   }
+  if (typeof patch.streamTransport === 'boolean') out.streamTransport = patch.streamTransport;
+  // Timeouts por papel: mescla por papel, recortando para 1-600 s (IMPL-077).
+  if (patch.roleTimeouts && typeof patch.roleTimeouts === 'object') {
+    const merged: Partial<Record<CostRole, Partial<RoleTimeouts>>> = { ...(base.roleTimeouts ?? {}) };
+    for (const [role, t] of Object.entries(patch.roleTimeouts) as [CostRole, Partial<RoleTimeouts>][]) {
+      if (!t || typeof t !== 'object') continue;
+      const prev = merged[role] ?? {};
+      merged[role] = {
+        ...(typeof prev.idleMs === 'number' ? { idleMs: prev.idleMs } : {}),
+        ...(typeof prev.totalMs === 'number' ? { totalMs: prev.totalMs } : {}),
+        ...(typeof t.idleMs === 'number' ? { idleMs: clampRoleTimeoutMs(t.idleMs) } : {}),
+        ...(typeof t.totalMs === 'number' ? { totalMs: clampRoleTimeoutMs(t.totalMs) } : {}),
+      };
+    }
+    out.roleTimeouts = merged;
+  }
+  if (typeof patch.metaTimeoutMs === 'number' && Number.isFinite(patch.metaTimeoutMs)) {
+    out.metaTimeoutMs = Math.max(1_000, Math.floor(patch.metaTimeoutMs));
+  }
+  if (typeof patch.resendGuardTtlMs === 'number' && Number.isFinite(patch.resendGuardTtlMs)) {
+    out.resendGuardTtlMs = Math.max(0, Math.floor(patch.resendGuardTtlMs));
+  }
+  if (patch.providerLookup === 'off' || patch.providerLookup === 'missing' || patch.providerLookup === 'always') {
+    out.providerLookup = patch.providerLookup;
+  }
+  if (Array.isArray(patch.auditableRoles)) {
+    out.auditableRoles = patch.auditableRoles.filter((r): r is CostRole => typeof r === 'string');
+  }
+  if (Array.isArray(patch.auditableProviderOrder)) {
+    out.auditableProviderOrder = patch.auditableProviderOrder.filter((p) => typeof p === 'string' && p.trim());
+  }
+  if (Array.isArray(patch.auditableQuantizations)) {
+    out.auditableQuantizations = patch.auditableQuantizations.filter((q) => typeof q === 'string' && q.trim());
+  }
+  // IMPL-076: teto diario :free (>= 1; nao-numerico e ignorado).
+  if (typeof patch.freeDailyLimit === 'number' && Number.isFinite(patch.freeDailyLimit) && patch.freeDailyLimit >= 1) {
+    out.freeDailyLimit = Math.floor(patch.freeDailyLimit);
+  }
   if ('fetch' in patch) out.fetch = patch.fetch;
   if ('sleep' in patch) out.sleep = patch.sleep;
   return out;
@@ -151,10 +281,14 @@ const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   });
 
 // ---------------------------------------------------------------------------
-// Limitador de concorrencia ADAPTATIVO (AIMD), por instancia de gateway.
+// Limitador de concorrencia ADAPTATIVO (AIMD), por ESCOPO (key, modelo) com
+// refinamento por provedor (IMPL-076, R-07a:REC-5).
 // O limite CRESCE no sucesso (so quando ha pressao: saturado ou com fila) e
 // RECUA pela metade quando o provedor devolve 429 — converge para o maximo que
 // o provedor aguenta, "brigando" para rodar no teto sem derrubar com 429.
+// O recuo e LIMITADO: no maximo 1 decremento por janela (>= 1 s) — o provedor
+// castiga em rajada e antes cada 429 da rajada contava um recuo (5 seguidos
+// derrubavam 32 -> 1, com ~31 sucessos sob pressao para voltar).
 // ---------------------------------------------------------------------------
 
 export interface LimiterSnapshot {
@@ -163,13 +297,33 @@ export interface LimiterSnapshot {
   queued: number;
 }
 
+/**
+ * IMPL-076 — janela de decremento do AIMD (ms): uma rajada de 429 corta o
+ * limite NO MAXIMO uma vez por janela. O piso e 1 s — o chamador pode pedir
+ * janela maior, nunca menor.
+ */
+export const AIMD_DECREASE_WINDOW_MS = 1000;
+
+export interface AimdLimiterOptions {
+  /** Janela de decremento em ms. Piso: `AIMD_DECREASE_WINDOW_MS` (1 s). */
+  decreaseWindowMs?: number;
+  /** Relogio injetavel (testes com fake timers). Default `Date.now`. */
+  now?: () => number;
+}
+
 export class AimdLimiter {
   private limit: number;
   private active = 0;
   private readonly waiters: Array<() => void> = [];
+  private readonly decreaseWindowMs: number;
+  private readonly now: () => number;
+  /** Instante do ultimo decremento — -infinito = ainda nao recuou nesta janela. */
+  private lastDecreaseAt = Number.NEGATIVE_INFINITY;
 
-  constructor(private max: number) {
+  constructor(private max: number, opts?: AimdLimiterOptions) {
     this.limit = Math.min(INITIAL_CONCURRENCY, max);
+    this.decreaseWindowMs = Math.max(AIMD_DECREASE_WINDOW_MS, opts?.decreaseWindowMs ?? AIMD_DECREASE_WINDOW_MS);
+    this.now = opts?.now ?? Date.now;
   }
 
   /** Novo teto. O limite corrente nunca passa dele (mesma regra do valor inicial). */
@@ -220,13 +374,309 @@ export class AimdLimiter {
     }
   }
 
-  /** Recuo multiplicativo: metade, com piso 1. */
+  /**
+   * Recuo multiplicativo: metade, com piso 1. IMPL-076: no maximo 1 recuo por
+   * janela (>= 1 s) — uma rajada de 429 do provedor e UM castigo, nao N.
+   */
   noteRateLimit(): void {
+    const agora = this.now();
+    if (agora - this.lastDecreaseAt < this.decreaseWindowMs) return;
+    this.lastDecreaseAt = agora;
     this.limit = Math.max(MIN_CONCURRENCY, Math.floor(this.limit / 2));
   }
 
   snapshot(): LimiterSnapshot {
     return { limit: this.limit, active: this.active, queued: this.waiters.length };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// IMPL-076 — ESCOPOS do limitador: um limitador por (key, modelo) com
+// refinamento por provedor, e um teto estatico por INSTANCIA por cima.
+//
+// ANTES havia UM estado AIMD para todas as keys: no servidor multiusuario um
+// 429 de um usuario derrubava o limite de TODOS (anti-padrao). Agora:
+//   • escopo base = (key, modelo) — 429 sem provedor identificado recua aqui;
+//   • refinamento = (key, modelo, provedor) — quando o 429 traz
+//     `error.metadata.provider_code` a pressao e DO PROVEDOR: em chamada
+//     fixada nele so o refino recua (os demais provedores seguem livres); em
+//     chamada livre recuam o base (a rota pode devolver o mesmo) e o refino;
+//   • o teto por instancia (`OPENROUTER_MAX_CONCURRENCY`, divisao estatica
+//     entre processos) continua valendo por cima de todos os escopos.
+// ---------------------------------------------------------------------------
+
+/** Escopo de um limitador: key (sufixo identificador) + modelo [+ provedor fixado]. */
+export interface LimiterScope {
+  keyId: string;
+  modelId: string;
+  /** Provedor fixado no corpo (order/only com 1 entrada) — refina o escopo. */
+  provider?: string;
+}
+
+function scopeKeyOf(keyId: string, modelId: string, provider?: string): string {
+  return provider ? `${keyId}\u0000${modelId}\u0000${provider}` : `${keyId}\u0000${modelId}`;
+}
+
+/**
+ * Teto estatico por instancia (a "divisao estatica" entre processos via
+ * OPENROUTER_MAX_CONCURRENCY): fila FIFO com abort (IMPL-020). Nao e adaptativo
+ * de proposito — o AIMD mora nos escopos; aqui e so o teto de processamento.
+ */
+class CapacityGate {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(private capacity: number) {}
+
+  setCapacity(capacity: number): void {
+    this.capacity = Math.max(MIN_CONCURRENCY, Math.floor(capacity));
+    while (this.waiters.length > 0 && this.active < this.capacity) {
+      const next = this.waiters.shift()!;
+      this.active += 1;
+      next();
+    }
+  }
+
+  acquire(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(toControlSignal(signal.reason));
+    if (this.active < this.capacity) {
+      this.active += 1;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => {
+        const i = this.waiters.indexOf(grant);
+        if (i >= 0) this.waiters.splice(i, 1);
+        reject(toControlSignal(signal?.reason));
+      };
+      const grant = (): void => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.waiters.push(grant);
+    });
+  }
+
+  release(): void {
+    this.active -= 1;
+    while (this.waiters.length > 0 && this.active < this.capacity) {
+      const next = this.waiters.shift()!;
+      this.active += 1;
+      next();
+    }
+  }
+
+  get queued(): number {
+    return this.waiters.length;
+  }
+}
+
+/**
+ * Vaga segurada numa chamada: o `release` devolve na ordem inversa da aquisicao
+ * (porta -> refino -> base) e o `note*` mexe SÓ nos limitadores adquiridos.
+ */
+export interface LimiterSlot {
+  noteSuccess(): void;
+  /** Recuo AIMD do 429. `providerCode` = upstream que devolveu o erro. */
+  noteRateLimit(providerCode?: string): void;
+  release(): void;
+}
+
+class ScopedAimdLimiters {
+  private readonly map = new Map<string, AimdLimiter>();
+  private readonly gate: CapacityGate;
+
+  constructor(private max: number) {
+    this.gate = new CapacityGate(max);
+  }
+
+  setMax(max: number): void {
+    this.max = Math.max(MIN_CONCURRENCY, Math.floor(max));
+    for (const l of this.map.values()) l.setMax(this.max);
+    this.gate.setCapacity(this.max);
+  }
+
+  private for(keyId: string, modelId: string, provider?: string): AimdLimiter {
+    const k = scopeKeyOf(keyId, modelId, provider);
+    let l = this.map.get(k);
+    if (!l) {
+      l = new AimdLimiter(this.max);
+      this.map.set(k, l);
+    }
+    return l;
+  }
+
+  /**
+   * Aquisicao em cadeia (base -> refino -> teto global): o espera mais comum e
+   * a do escopo proprio, que nao segura vaga dos outros usuarios.
+   */
+  async acquire(scope: LimiterScope, signal?: AbortSignal): Promise<LimiterSlot> {
+    const base = this.for(scope.keyId, scope.modelId);
+    await base.acquire(signal);
+    let refinement: AimdLimiter | undefined;
+    if (scope.provider) {
+      refinement = this.for(scope.keyId, scope.modelId, scope.provider);
+      try {
+        await refinement.acquire(signal);
+      } catch (err) {
+        base.release();
+        throw err;
+      }
+    }
+    try {
+      await this.gate.acquire(signal);
+    } catch (err) {
+      refinement?.release();
+      base.release();
+      throw err;
+    }
+    return {
+      noteSuccess: () => {
+        base.noteSuccess();
+        refinement?.noteSuccess();
+      },
+      noteRateLimit: (providerCode?: string) => {
+        if (refinement) {
+          // Chamada FIXADA num provedor: a pressao e dele — so o refino recua.
+          refinement.noteRateLimit();
+          return;
+        }
+        // Chamada livre: recua o base (a rota pode devolver o mesmo upstream)
+        // e o refino do provedor nomeado, para quem o fixar depois respeitar.
+        base.noteRateLimit();
+        if (providerCode) this.for(scope.keyId, scope.modelId, providerCode).noteRateLimit();
+      },
+      release: () => {
+        this.gate.release();
+        refinement?.release();
+        base.release();
+      },
+    };
+  }
+
+  /** Instantaneo de um escopo (ou AGREGADO sem escopo: teto mais apertado, somas). */
+  snapshot(scope?: LimiterScope): LimiterSnapshot {
+    if (scope) return this.for(scope.keyId, scope.modelId, scope.provider).snapshot();
+    if (this.map.size === 0) {
+      // Sem escopos ainda: o valor inicial que a telemetria sempre mostrou.
+      return { limit: Math.min(INITIAL_CONCURRENCY, this.max), active: 0, queued: 0 };
+    }
+    let limit = Infinity;
+    let active = 0;
+    let queued = this.gate.queued;
+    for (const l of this.map.values()) {
+      const s = l.snapshot();
+      limit = Math.min(limit, s.limit);
+      active += s.active;
+      queued += s.queued;
+    }
+    return { limit, active, queued };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// IMPL-076 — tetos de taxa dos modelos :free por key (token bucket). Os
+// tetos do provedor sao por MINUTO e por DIA e a conta muda com creditos
+// (50/dia sem, 1.000/dia com): o diario e configuravel (`freeDailyLimit`) e o
+// default conservador e o menor — nao chutar o teto alheio evita 429 bobo.
+// O minuto AGUENTA reabastecimento (a chamada espera a ficha); o dia ESTOURADO
+// e recusado com erro claro (esperar um dia nao e backoff, e prejuizo).
+// ---------------------------------------------------------------------------
+
+/** Tetos :free por key: 20 req/min (fixo do provedor) e o diario configuravel. */
+export const FREE_PER_MINUTE = 20;
+export const FREE_DAILY_LIMIT_DEFAULT = 50;
+
+class TokenBucket {
+  private tokens: number;
+  private lastRefill: number;
+
+  constructor(
+    private readonly capacity: number,
+    private readonly refillPerMs: number,
+    private readonly now: () => number = Date.now,
+  ) {
+    this.tokens = capacity;
+    this.lastRefill = now();
+  }
+
+  private refill(): void {
+    const t = this.now();
+    const gained = Math.floor((t - this.lastRefill) * this.refillPerMs);
+    if (gained > 0) {
+      this.tokens = Math.min(this.capacity, this.tokens + gained);
+      this.lastRefill += Math.floor(gained / this.refillPerMs);
+    }
+  }
+
+  /** true = ha ficha AGORA (consumida). false = vazio. */
+  tryTake(): boolean {
+    this.refill();
+    if (this.tokens < 1) return false;
+    this.tokens -= 1;
+    return true;
+  }
+
+  /** Milissegundos ate a proxima ficha (para a chamada esperar). */
+  msUntilNext(): number {
+    this.refill();
+    if (this.tokens >= 1) return 0;
+    return Math.max(1, Math.ceil((1 - this.tokens) / this.refillPerMs));
+  }
+
+  get remaining(): number {
+    this.refill();
+    return this.tokens;
+  }
+}
+
+/** Buckets :free por key: [por minuto, por dia]. */
+class FreeTierBuckets {
+  private readonly perKey = new Map<string, { min: TokenBucket; day: TokenBucket }>();
+
+  constructor(
+    private dailyLimit: number,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  setDailyLimit(n: number): void {
+    this.dailyLimit = Math.max(1, Math.floor(n));
+  }
+
+  private for(keyId: string): { min: TokenBucket; day: TokenBucket } {
+    let b = this.perKey.get(keyId);
+    if (!b) {
+      b = {
+        min: new TokenBucket(FREE_PER_MINUTE, FREE_PER_MINUTE / 60_000, this.now),
+        day: new TokenBucket(this.dailyLimit, this.dailyLimit / 86_400_000, this.now),
+      };
+      this.perKey.set(keyId, b);
+    }
+    return b;
+  }
+
+  /**
+   * Consome uma ficha de CADA janela. `wait(ms, signal)` (injetavel) cobre a
+   * espera do minuto; o dia estourado lanca `GatewayError` rate_limit.
+   */
+  async take(
+    keyId: string,
+    wait: (ms: number, signal?: AbortSignal) => Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const b = this.for(keyId);
+    if (!b.day.tryTake()) {
+      throw new GatewayError(
+        'rate_limit',
+        `Teto diario de chamadas a modelos :free atingido (${this.dailyLimit}/dia nesta key). Aguarde o reabastecimento ou use um modelo pago.`,
+        { httpStatus: 429 },
+      );
+    }
+    for (let i = 0; i < 120 && !b.min.tryTake(); i++) {
+      if (signal?.aborted) throw toControlSignal(signal.reason);
+      await wait(b.min.msUntilNext(), signal);
+    }
   }
 }
 
@@ -713,6 +1163,30 @@ function applyMaxPrice(
 }
 
 /**
+ * IMPL-075 (R-07b:REC-4) — modo AUDITÁVEL: restringe o roteamento para que a
+ * chamada seja reproduzível e atribuível a um provedor só. Envia
+ * `provider { order, quantizations, allow_fallbacks:false, require_parameters:true }`:
+ * sem fallback o provedor que respondeu é o que vai registrado; `require_parameters`
+ * impede de cair em endpoint que ignora parâmetros (temperature/seed/response_format).
+ * ⚠️ Mescla SEMPRE sobre o `provider` já montado (max_price, ZDR): nunca apaga.
+ */
+function applyAuditable(
+  body: Record<string, unknown>,
+  opts: { order?: string[]; quantizations?: string[] },
+): void {
+  const provider = (body.provider ?? {}) as Record<string, unknown>;
+  const order = opts.order ?? [];
+  const quantizations = opts.quantizations ?? [];
+  body.provider = {
+    ...provider,
+    ...(order.length > 0 ? { order: [...order] } : {}),
+    ...(quantizations.length > 0 ? { quantizations: [...quantizations] } : {}),
+    allow_fallbacks: false,
+    require_parameters: true,
+  };
+}
+
+/**
  * Erro de uma chamada cujo sinal EXTERNO abortou (Cancelar/Ctrl-C) sai como
  * sinal de controle (IMPL-020). Cobre o abort no MEIO do corpo (JSON/stream
  * chegando): o leitor rejeita com o que o runtime quiser, e um erro comum seria
@@ -722,13 +1196,169 @@ function controlIfAborted(err: unknown, signal?: AbortSignal): unknown {
   return signal?.aborted && !isControlSignal(err) ? toControlSignal(signal.reason) : err;
 }
 
+/**
+ * IMPL-076 — transientes que valem retry: 429/5xx. O 402 (sem credito) NUNCA
+ * entra aqui: backoff nao repoe credito, repetir e so queimar tentativas —
+ * sai logo classificado como `no_credit` (idem 400/401/403).
+ */
 function isRetryableStatus(status: number): boolean {
   return status === 429 || (status >= 500 && status < 600);
 }
 
-function backoffMs(attempt: number): number {
+/** Janela de backoff exponencial com jitter. `retryAfterMs` (do header) e PISO. */
+function backoffMs(attempt: number, retryAfterMs?: number): number {
   const base = Math.min(8000, 250 * 2 ** attempt);
-  return base + Math.floor(Math.random() * 250); // jitter
+  const wait = base + Math.floor(Math.random() * 250); // jitter
+  return retryAfterMs !== undefined && retryAfterMs > wait ? retryAfterMs : wait;
+}
+
+/**
+ * IMPL-073 (R-07a:REC-3) — `Retry-After`/`retry-after-ms` do provedor como
+ * PISO do backoff. `retry-after-ms` (milissegundos, aceita fracao) vence;
+ * `Retry-After` e delta-segundos OU data HTTP. Ausente/malformado => undefined
+ * (backoff comum). Cabe aqui (puro, sem cabecalhos reais) para os dois lados.
+ */
+export function parseRetryAfterMs(
+  headers: { get(name: string): string | null | undefined } | Record<string, string | undefined> | undefined,
+): number | undefined {
+  if (!headers) return undefined;
+  const get = (name: string): string | undefined =>
+    typeof (headers as { get?: unknown }).get === 'function'
+      ? (headers as { get(n: string): string | null | undefined }).get(name) ?? undefined
+      : Object.entries(headers as Record<string, string | undefined>).find(
+          ([k]) => k.toLowerCase() === name.toLowerCase(),
+        )?.[1];
+  const rawMs = get('retry-after-ms')?.trim();
+  if (rawMs) {
+    const n = Number(rawMs);
+    if (Number.isFinite(n) && n >= 0) return Math.ceil(n);
+  }
+  const raw = get('retry-after')?.trim();
+  if (!raw) return undefined;
+  const secs = Number(raw);
+  if (Number.isFinite(secs) && secs >= 0) return Math.ceil(secs * 1000);
+  const date = Date.parse(raw);
+  if (Number.isFinite(date)) {
+    const delta = date - Date.now();
+    return delta > 0 ? Math.ceil(delta) : 0;
+  }
+  return undefined;
+}
+
+/**
+ * IMPL-073 — erro de rede ANTES do envio (conexao recusada/DNS/inalcancavel):
+ * o pedido nunca chegou ao provedor, nada foi gerado nem cobrado — pode
+ * repetir. Tudo o mais depois do despacho tem desfecho DESCONHECIDO (o
+ * provedor pode ter processado e cobrado) e NAO repete sem verificacao.
+ */
+const PRE_SEND_CODES = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'EADDRNOTAVAIL',
+  'ECONNABORTED',
+  'UND_ERR_CONNECT_TIMEOUT',
+]);
+
+function preSendError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const e = err as { code?: unknown; cause?: unknown; name?: unknown };
+  const code = typeof e.code === 'string' ? e.code : undefined;
+  if (code && PRE_SEND_CODES.has(code)) return true;
+  const cause = e.cause as { code?: unknown } | undefined;
+  const causeCode = typeof cause?.code === 'string' ? cause.code : undefined;
+  return Boolean(causeCode && PRE_SEND_CODES.has(causeCode));
+}
+
+/** Marca INEQUIVOCA de "já despachada" (mesmo motivo de `isControlSignal`: nada de instanceof). */
+const UPSTREAM_SENT = 'upstreamSent';
+
+/**
+ * IMPL-073 / R-07a:REC-2 — falha DEPOIS de o pedido sair (corpo de erro lido,
+ * stream cortado, abort/timeout em voo): a geração pode ter concluído e sido
+ * COBRADA. O erro sai marcado para que nenhum laço de retry reenvie sem antes
+ * verificar pelo `generationId` (GET /generation). Nunca `instanceof`.
+ */
+export function isUpstreamSent(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && UPSTREAM_SENT in err && (err as Record<string, unknown>)[UPSTREAM_SENT] === true;
+}
+
+function markUpstreamSent<T>(err: T): T {
+  if (typeof err === 'object' && err !== null && !isUpstreamSent(err)) {
+    try {
+      Object.defineProperty(err, UPSTREAM_SENT, { value: true, enumerable: false, configurable: true });
+    } catch {
+      // erro congelado estranho: segue sem a marca, nunca derruba a chamada
+    }
+  }
+  return err;
+}
+
+/** Marca do timeout tipado (propriedade, nunca instanceof — ESM duplo). */
+const GATEWAY_TIMEOUT = 'gatewayTimeout';
+
+/**
+ * IMPL-077 (R-07a:REC-6) — timeout TIPADO do gateway, distinto de
+ * `BudgetExceeded`/`RunCancelled`: timeout é ERRO (a chamada falhou), controle
+ * é CONTROLE (`isControlSignal`). `name = 'TimeoutError'` casa com o runtime e
+ * com o classificador de timeout do agente; a mensagem leva "timeout" para os
+ * contratos que casam por texto.
+ */
+export class GatewayTimeoutError extends Error {
+  readonly gatewayTimeout = true;
+  /** 'idle' = sem bytes por X ms; 'total' = teto da tentativa inteira. */
+  readonly timeoutKind: 'idle' | 'total';
+  readonly role?: CostRole;
+  readonly timeoutMs: number;
+  constructor(kind: 'idle' | 'total', timeoutMs: number, role?: CostRole) {
+    const papel = role ? `, papel ${role}` : '';
+    super(
+      kind === 'idle'
+        ? `timeout de inatividade (${timeoutMs}ms${papel}): o provedor parou de emitir dados — a geração pode ter sido cobrada e a chamada fica pendente de conciliação.`
+        : `timeout total (${timeoutMs}ms${papel}): a chamada excedeu o teto — a geração pode ter sido cobrada e a chamada fica pendente de conciliação.`,
+    );
+    this.name = 'TimeoutError';
+    this.timeoutKind = kind;
+    this.role = role;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/** true = falha por timeout do gateway (ERRO, não controle). */
+export function isGatewayTimeout(err: unknown): err is GatewayTimeoutError {
+  return typeof err === 'object' && err !== null && GATEWAY_TIMEOUT in err && (err as Record<string, unknown>)[GATEWAY_TIMEOUT] === true;
+}
+
+/**
+ * IMPL-077 — timeouts POR PAPEL: inatividade (sem bytes no stream) + teto
+ * total da tentativa. Valores iniciais a calibrar (R-07a:REC-6): competidor
+ * 90s/600s, juiz 60s/120s, duelo 60s/90s, gabarito/datagen/reescritor
+ * 90s/300s. Configuráveis via `roleTimeouts` (1-600 s); `agent` segue juiz
+ * estendido. O `timeoutMs` do chamador continua valendo (pode só ENCURTAR).
+ */
+export interface RoleTimeouts {
+  /** Inatividade máxima entre bytes do stream (ms). */
+  idleMs: number;
+  /** Teto total da tentativa, do despacho à resposta lida (ms). */
+  totalMs: number;
+}
+
+export const DEFAULT_ROLE_TIMEOUTS: Record<CostRole, RoleTimeouts> = {
+  competitor: { idleMs: 90_000, totalMs: 600_000 },
+  judge: { idleMs: 60_000, totalMs: 120_000 },
+  duel: { idleMs: 60_000, totalMs: 90_000 },
+  gabarito: { idleMs: 90_000, totalMs: 300_000 },
+  datagen: { idleMs: 90_000, totalMs: 300_000 },
+  rewriter: { idleMs: 90_000, totalMs: 300_000 },
+  agent: { idleMs: 60_000, totalMs: 300_000 },
+};
+
+/** Configuração de papel é 1-600 s (critério IMPL-077 (iii)); fora disso recorta. */
+export function clampRoleTimeoutMs(ms: number): number {
+  if (!Number.isFinite(ms)) return 60_000;
+  return Math.min(600_000, Math.max(1_000, Math.round(ms)));
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +1608,13 @@ export interface ChatCompletionResult {
   truncated?: boolean;
   /** Sinais de truncamento observados (inclusive os auxiliares que sozinhos nao decidem). */
   truncationSignals?: TruncationSignal[];
+  /**
+   * IMPL-075 — provedor que efetivamente serviu esta chamada (payload +
+   * GET /generation quando habilitado). Ausente = nada recuperável.
+   */
+  provider?: CallProviderInfo;
+  /** true = corpo enviado no modo auditável (IMPL-075) — visível no artefato de replay. */
+  auditable?: boolean;
 }
 
 export interface ChatCompletionParams {
@@ -1013,6 +1650,19 @@ export interface ChatCompletionParams {
    * reserva volta inteira (HTTP de erro/nada despachado: nao houve custo).
    */
   onCost?: (cost: CallCost) => void;
+  /**
+   * IMPL-072 — força o transporte STREAMING (SSE) para ESTA chamada mesmo em
+   * `chatCompletion` (juiz/duelo/gabarito/datagen/reescritor passam a poder
+   * abortar sem levar a cobrança da resposta inteira). Ausente = decide o
+   * `streamTransport` do gateway (default: caminho JSON histórico).
+   */
+  streamTransport?: boolean;
+  /** IMPL-077 — inatividade desta chamada (ms). Ausente = default do papel. */
+  idleTimeoutMs?: number;
+  /** IMPL-075 — override do `providerLookup` do gateway para esta chamada. */
+  providerLookup?: 'off' | 'missing' | 'always';
+  /** IMPL-075 — modo auditável desta chamada (além do preset por papel). */
+  auditable?: boolean;
 }
 
 export interface ChatStreamParams extends ChatCompletionParams {
@@ -1058,6 +1708,8 @@ interface GuardedResponse {
   finish: (ok: boolean) => void;
   /** Se a leitura do corpo foi abortada: por timeout ou por abort externo (IMPL-017). */
   abortReason: () => PendingReason | undefined;
+  /** IMPL-077 — zera o watchdog de inatividade (chamado a cada chunk do stream). */
+  touch: () => void;
 }
 
 /**
@@ -1084,6 +1736,41 @@ function cacheKey(apiKey: string): string {
   return apiKey.slice(-12);
 }
 
+// --- IMPL-076: escopo do limitador por chamada --------------------------------
+
+/** Modeles :free do provedor — sufixo `:free` no id. Tetos de taxa por key. */
+function isFreeModel(modelId: string): boolean {
+  return modelId.trim().toLowerCase().endsWith(':free');
+}
+
+/**
+ * Provedor FIXADO no corpo da chamada (`provider.order`/`only` com exatamente
+ * uma entrada). Multi-entrada/ausente = livre: a rota escolhe, e o escopo e o
+ * base (key, modelo).
+ */
+function pinnedProviderOf(body: Record<string, unknown>): string | undefined {
+  const p = body.provider as { order?: unknown; only?: unknown } | undefined;
+  const list = Array.isArray(p?.order) ? p.order : Array.isArray(p?.only) ? p.only : undefined;
+  const first = list?.[0];
+  return list?.length === 1 && typeof first === 'string' && first.trim() ? first.trim() : undefined;
+}
+
+/**
+ * IMPL-076 — upstream que devolveu o erro, quando o corpo identifica
+ * (`error.metadata.provider_code`). Ausente = undefined (recuo no escopo base).
+ */
+function providerCodeFromError(bodyText: string): string | undefined {
+  const meta = parseErrorBody(bodyText)?.metadata;
+  const code = meta?.provider_code;
+  return typeof code === 'string' && code.trim() ? code.trim() : undefined;
+}
+
+/** Escopo do limitador da chamada (IMPL-076): (key, modelo) + provedor fixado. */
+function limiterScopeOf(apiKey: string, modelId: string, body: Record<string, unknown>): LimiterScope {
+  const provider = pinnedProviderOf(body);
+  return { keyId: cacheKey(apiKey), modelId, ...(provider ? { provider } : {}) };
+}
+
 /**
  * Uma instancia do gateway: config + limitador AIMD + cache de catalogo.
  * Toda chamada de geracao passa por `chatCompletion`/`chatCompletionStream`
@@ -1102,7 +1789,15 @@ function withEffort(fim: CallFinishSignals, body: Record<string, unknown>): Call
 
 export class OpenRouterGateway {
   private cfg: GatewayConfig;
-  readonly limiter: AimdLimiter;
+  /**
+   * IMPL-076 — limitadores AIMD por (key, modelo) + refino por provedor, com o
+   * teto estatico da instancia por cima. Antes era UM estado para todas as
+   * keys: no servidor multiusuario um 429 de um usuario derrubava o limite de
+   * todos. `currentConcurrency` continua o espelho de telemetria.
+   */
+  private readonly limiters: ScopedAimdLimiters;
+  /** IMPL-076 — tetos :free por key (20/min + diario configuravel). */
+  private readonly freeBuckets: FreeTierBuckets;
   private readonly modelsCache = new Map<string, { fetchedAt: number; data: OpenRouterModel[] }>();
   /** Alertas da ultima validacao de /models, por key (ver `validateModelsPayload`). */
   private readonly modelsIssues = new Map<string, CatalogIssue[]>();
@@ -1110,10 +1805,85 @@ export class OpenRouterGateway {
   // próprios; cofre de pseudônimos com chave HMAC própria POR RUN/SESSÃO),
   // aplicada em `buildBody`, o ponto único dos 6 papéis.
   private readonly piiGuard = createPiiGuard();
+  /**
+   * IMPL-073 / R-07a:REC-2 — guarda anti-reenvio: falha DEPOIS dos headers com
+   * desfecho desconhecido (stream cortado, abort/timeout em voo, corpo ilegível)
+   * pode ter sido COBRADA. O hash do corpo fica bloqueado para reenvio até a
+   * conciliação (ou a janela expirar): um laço de retry do chamador reencontrar
+   * o MESMO pedido é recusado sem tocar a rede, com o erro original.
+   */
+  private readonly resendGuard = new Map<string, { until: number; err: unknown }>();
 
   constructor(config: Partial<GatewayConfig> = {}) {
     this.cfg = mergeConfig(DEFAULT_CONFIG, config);
-    this.limiter = new AimdLimiter(this.cfg.maxConcurrency);
+    this.limiters = new ScopedAimdLimiters(this.cfg.maxConcurrency);
+    this.freeBuckets = new FreeTierBuckets(this.cfg.freeDailyLimit ?? FREE_DAILY_LIMIT_DEFAULT);
+  }
+
+  /**
+   * IMPL-077 — timeouts efetivos: default do papel, config do gateway e o
+   * `timeoutMs` do chamador (que só ENCURTA; o teto de 1-600 s é o do papel).
+   * `idleMs: 0` = sem watchdog de inatividade (caminho JSON, onde o provedor
+   * fica em silêncio enquanto gera e o teto total é que vale).
+   */
+  private timeoutsFor(params: ChatCompletionParams, streaming: boolean): { totalMs: number; idleMs: number } {
+    const role = params.role ?? 'competitor';
+    const dflt = DEFAULT_ROLE_TIMEOUTS[role] ?? DEFAULT_ROLE_TIMEOUTS.competitor;
+    const cfgT = this.cfg.roleTimeouts?.[role] ?? {};
+    const totalCap = clampRoleTimeoutMs(cfgT.totalMs ?? dflt.totalMs);
+    const idleDefault = clampRoleTimeoutMs(cfgT.idleMs ?? dflt.idleMs);
+    const totalMs =
+      typeof params.timeoutMs === 'number' && params.timeoutMs > 0
+        ? Math.min(params.timeoutMs, totalCap)
+        : totalCap;
+    const idleParam =
+      typeof params.idleTimeoutMs === 'number' && params.idleTimeoutMs > 0 ? params.idleTimeoutMs : undefined;
+    const idleMs = Math.min(idleParam ?? idleDefault, totalMs);
+    return { totalMs, idleMs: streaming ? idleMs : 0 };
+  }
+
+  /**
+   * Chave da guarda anti-reenvio: hash FNV-1a do corpo enviado (sem
+   * `node:crypto` — este módulo roda no navegador). O corpo já inclui modelo,
+   * mensagens, teto e amostragem: pedido idêntico = chave idêntica.
+   */
+  private guardKey(body: string): string {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < body.length; i++) {
+      h ^= body.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return `${body.length.toString(36)}-${h.toString(36)}`;
+  }
+
+  /** IMPL-073 — reenvio bloqueado? Devolve o erro original (sem nova chamada HTTP). */
+  private resendBlocked(key: string): unknown | undefined {
+    const ttl = this.cfg.resendGuardTtlMs ?? 0;
+    if (ttl <= 0) return undefined;
+    const hit = this.resendGuard.get(key);
+    if (!hit) return undefined;
+    if (hit.until <= Date.now()) {
+      this.resendGuard.delete(key);
+      return undefined;
+    }
+    return hit.err;
+  }
+
+  /** IMPL-073 — arma a guarda: este corpo pode ter sido cobrado; sem verificação, não reenvia. */
+  private armResendGuard(key: string, err: unknown): void {
+    const ttl = this.cfg.resendGuardTtlMs ?? 0;
+    if (ttl <= 0) return;
+    this.resendGuard.set(key, { until: Date.now() + ttl, err });
+    // Higiene: nunca crescer sem teto numa sessão longa (SPA aberta por horas).
+    if (this.resendGuard.size > 512) {
+      const now = Date.now();
+      for (const [k, v] of this.resendGuard) if (v.until <= now) this.resendGuard.delete(k);
+      while (this.resendGuard.size > 512) {
+        const first = this.resendGuard.keys().next();
+        if (first.done) break;
+        this.resendGuard.delete(first.value);
+      }
+    }
   }
 
   /** Config em vigor (copia; mude via `configure`). */
@@ -1127,7 +1897,8 @@ export class OpenRouterGateway {
    */
   configure(patch: Partial<GatewayConfig>): this {
     this.cfg = mergeConfig(this.cfg, patch);
-    this.limiter.setMax(this.cfg.maxConcurrency);
+    this.limiters.setMax(this.cfg.maxConcurrency);
+    this.freeBuckets.setDailyLimit(this.cfg.freeDailyLimit ?? FREE_DAILY_LIMIT_DEFAULT);
     return this;
   }
 
@@ -1146,6 +1917,29 @@ export class OpenRouterGateway {
     return f(url, init);
   }
 
+  /**
+   * IMPL-077 — transporte de METADADOS (/models, /key, /generation) com teto
+   * (default 20 s, dentro dos 15-30 s pedidos): um servidor mudo não pode mais
+   * pendurar o processo para sempre. Timeout sai como `GatewayTimeoutError`.
+   */
+  private async metaFetch(url: string, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const ms = this.cfg.metaTimeoutMs ?? DEFAULT_META_TIMEOUT_MS;
+    let timedOut = false;
+    const handle = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new GatewayTimeoutError('total', ms));
+    }, ms);
+    try {
+      return await this.transport(url, { ...init, signal: controller.signal });
+    } catch (err) {
+      if (timedOut) throw new GatewayTimeoutError('total', ms);
+      throw err;
+    } finally {
+      clearTimeout(handle);
+    }
+  }
+
   private sleep(ms: number, signal?: AbortSignal): Promise<void> {
     const s = this.cfg.sleep ?? defaultSleep;
     return s(ms, signal);
@@ -1157,8 +1951,8 @@ export class OpenRouterGateway {
    * nova, mas a run só fechava quando o sono acabava (a UI ficava presa em
    * "Cancelando…"). Abortou antes ou durante => sinal de controle na hora.
    */
-  private async backoff(attempt: number, signal?: AbortSignal): Promise<void> {
-    if (!signal) return this.sleep(backoffMs(attempt));
+  private async backoff(attempt: number, signal?: AbortSignal, retryAfterMs?: number): Promise<void> {
+    if (!signal) return this.sleep(backoffMs(attempt, retryAfterMs));
     if (signal.aborted) throw toControlSignal(signal.reason);
     let onAbort: () => void = () => undefined;
     const abortou = new Promise<never>((_, reject) => {
@@ -1166,7 +1960,7 @@ export class OpenRouterGateway {
       signal.addEventListener('abort', onAbort, { once: true });
     });
     try {
-      await Promise.race([this.sleep(backoffMs(attempt), signal), abortou]);
+      await Promise.race([this.sleep(backoffMs(attempt, retryAfterMs), signal), abortou]);
     } finally {
       signal.removeEventListener('abort', onAbort);
     }
@@ -1205,7 +1999,7 @@ export class OpenRouterGateway {
       return cached.data;
     }
 
-    const res = await this.transport(`${this.cfg.baseUrl}/models`, {
+    const res = await this.metaFetch(`${this.cfg.baseUrl}/models`, {
       method: 'GET',
       headers: this.headers(apiKey),
     });
@@ -1237,46 +2031,75 @@ export class OpenRouterGateway {
 
   // --- limitador ----------------------------------------------------------------
 
-  /** Limite atual de concorrencia (para logs/telemetria). */
-  currentConcurrency(): LimiterSnapshot {
-    return this.limiter.snapshot();
+  /**
+   * Limite atual de concorrencia (para logs/telemetria). Com `apiKey`+`modelId`
+   * (e provedor opcional) mostra o ESCOPO daquele par (IMPL-076); sem
+   * argumentos, o agregado de todos os escopos (teto mais apertado + somas).
+   */
+  currentConcurrency(apiKey?: string, modelId?: string, provider?: string): LimiterSnapshot {
+    if (apiKey !== undefined && modelId !== undefined) {
+      return this.limiters.snapshot({ keyId: cacheKey(apiKey), modelId, ...(provider ? { provider } : {}) });
+    }
+    return this.limiters.snapshot();
   }
 
   /**
    * fetch sob o limitador da instancia, com timeout/abort por tentativa e retry
-   * com backoff em 429/5xx/rede. Em 429 reduz o limite (AIMD). Retorna a
-   * Response OK SEGURANDO o slot — o chamador DEVE chamar finish() apos ler o corpo.
+   * com backoff em 429/5xx/rede. Em 429 reduz o limite (AIMD) — no maximo uma
+   * vez por janela, e no escopo certo ((key, modelo) ou o refino do provedor).
+   * Retorna a Response OK SEGURANDO o slot — o chamador DEVE chamar finish()
+   * apos ler o corpo.
    */
   private async guardedFetch(
     url: string,
     init: RequestInit,
-    timeoutMs: number,
+    timeouts: { totalMs: number; idleMs: number },
+    role: CostRole,
+    scope: LimiterScope,
     externalSignal?: AbortSignal,
     track?: DispatchTrack,
   ): Promise<GuardedResponse> {
-    const limiter = this.limiter;
     let attempt = 0;
     for (;;) {
-      await limiter.acquire(externalSignal);
+      // IMPL-076: tetos :free por key ANTES de segurar vaga — a espera do
+      // reabastecimento nao deve entupir o semaforo de quem nao e :free.
+      if (isFreeModel(scope.modelId)) {
+        await this.freeBuckets.take(scope.keyId, (ms, sig) => this.sleep(ms, sig), externalSignal);
+      }
+      const slot = await this.limiters.acquire(scope, externalSignal);
       // Abortou entre ganhar a vaga e enviar: devolve a vaga SEM tocar o
       // transporte (zero chamadas novas depois do Cancelar — IMPL-020).
       if (externalSignal?.aborted) {
-        limiter.release();
+        slot.release();
         throw toControlSignal(externalSignal.reason);
       }
       const controller = new AbortController();
-      let timedOut = false;
-      const timeoutHandle = setTimeout(() => {
-        timedOut = true;
-        controller.abort(new Error('timeout'));
-      }, timeoutMs);
+      // IMPL-077: watchdog TOTAL + de INATIVIDADE (o de inatividade só vale em
+      // stream — no JSON o provedor fica em silêncio enquanto gera). O erro de
+      // timeout é TIPADO (GatewayTimeoutError) e nunca vira sinal de controle.
+      let timedOut: 'idle' | 'total' | null = null;
+      const totalHandle = setTimeout(() => {
+        timedOut = 'total';
+        controller.abort(new GatewayTimeoutError('total', timeouts.totalMs, role));
+      }, timeouts.totalMs);
+      let idleHandle: ReturnType<typeof setTimeout> | undefined;
+      const resetIdle = (): void => {
+        if (timeouts.idleMs <= 0) return;
+        if (idleHandle !== undefined) clearTimeout(idleHandle);
+        idleHandle = setTimeout(() => {
+          timedOut = 'idle';
+          controller.abort(new GatewayTimeoutError('idle', timeouts.idleMs, role));
+        }, timeouts.idleMs);
+      };
+      resetIdle();
       const onExternalAbort = () => controller.abort(externalSignal?.reason);
       if (externalSignal) {
         if (externalSignal.aborted) controller.abort(externalSignal.reason);
         else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
       }
       const cleanup = () => {
-        clearTimeout(timeoutHandle);
+        clearTimeout(totalHandle);
+        if (idleHandle !== undefined) clearTimeout(idleHandle);
         if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
       };
 
@@ -1288,7 +2111,7 @@ export class OpenRouterGateway {
         res = await this.transport(url, { ...init, signal: controller.signal });
       } catch (err) {
         cleanup();
-        limiter.release();
+        slot.release();
         // Abortada DEPOIS de despachada: o provedor pode seguir gerando e
         // cobrando — quem chamou mantem a reserva (IMPL-017). Erro de rede sem
         // abort (conexao recusada/DNS) nao chegou a gerar: segue devolvendo.
@@ -1301,8 +2124,13 @@ export class OpenRouterGateway {
         // ponto unico: o que o transporte rejeita varia por runtime, e um erro
         // comum seria degradado pelos papeis em nota inventada (IMPL-020).
         if (externalSignal?.aborted) throw toControlSignal(externalSignal.reason);
-        // abort (timeout) nao repete; erro de rede repete com backoff.
-        if (controller.signal.aborted || attempt >= MAX_RETRIES) throw err;
+        // IMPL-077: timeout sai TIPADO (erro, distinto de controle), sem retry.
+        if (timedOut) throw new GatewayTimeoutError(timedOut, timedOut === 'idle' ? timeouts.idleMs : timeouts.totalMs, role);
+        if (controller.signal.aborted) throw err;
+        // IMPL-073: retry SO em erro ANTES do envio (conexao recusada/DNS) —
+        // depois do despacho o desfecho é desconhecido (pode ter gerado e sido
+        // cobrado): SEM reenvio; o erro sai marcado para o chamador não repetir.
+        if (!preSendError(err) || attempt >= MAX_RETRIES) throw markUpstreamSent(err);
         await this.backoff(attempt, externalSignal);
         attempt += 1;
         continue;
@@ -1310,18 +2138,27 @@ export class OpenRouterGateway {
 
       if (!res.ok) {
         const status = res.status;
+        // IMPL-073: Retry-After/retry-after-ms do provedor é PISO do backoff.
+        const retryAfterMs = parseRetryAfterMs(res.headers as { get(n: string): string | null | undefined });
         if (isRetryableStatus(status) && attempt < MAX_RETRIES && !externalSignal?.aborted) {
-          if (status === 429) limiter.noteRateLimit();
-          await res.body?.cancel().catch(() => undefined);
+          if (status === 429) {
+            // IMPL-076: o corpo do 429 pode identificar o upstream
+            // (`error.metadata.provider_code`) e a triagem do recuo depende
+            // dele — le o corpo (pequeno) antes de descartar.
+            const errText = await res.text().catch(() => '');
+            slot.noteRateLimit(providerCodeFromError(errText));
+          } else {
+            await res.body?.cancel().catch(() => undefined);
+          }
           cleanup();
-          limiter.release();
-          await this.backoff(attempt, externalSignal);
+          slot.release();
+          await this.backoff(attempt, externalSignal, retryAfterMs);
           attempt += 1;
           continue;
         }
         const errText = await res.text().catch(() => '');
         cleanup();
-        limiter.release();
+        slot.release();
         if (externalSignal?.aborted) throw toControlSignal(externalSignal.reason);
         // Classificado: 403 de moderacao sai como 'blocked' (nao "key invalida").
         throw classifyHttpError(status, errText);
@@ -1332,11 +2169,12 @@ export class OpenRouterGateway {
         res,
         startedAt,
         finish: (ok: boolean) => {
-          if (ok) limiter.noteSuccess();
+          if (ok) slot.noteSuccess();
           cleanup();
-          limiter.release();
+          slot.release();
         },
         abortReason: () => (controller.signal.aborted ? (timedOut ? 'timeout' : 'aborted') : undefined),
+        touch: resetIdle,
       };
     }
   }
@@ -1367,11 +2205,26 @@ export class OpenRouterGateway {
       applyReasoning(body, params.reasoningLevel, model?.reasoning);
     }
     applyMaxPrice(body, params.maxPricePerMTok);
+    // IMPL-075: modo auditável (preset por papel — juiz/gabarito — ou explícito
+    // por chamada). Mescla SEMPRE sobre o provider já montado (max_price/ZDR).
+    if (this.auditableFor(params)) {
+      applyAuditable(body, {
+        order: this.cfg.auditableProviderOrder,
+        quantizations: this.cfg.auditableQuantizations,
+      });
+    }
     // LGPD (IMPL-040): modo "dados sensiveis" FAIL-CLOSED — por ULTIMO, para
     // nada montado acima afrouxar os 4 campos de privacidade; faltou algum,
     // lanca aqui (antes da reserva e do fetch). Politica vem do ledger da run.
     applySensitiveRouting(body, params.sink?.sensitiveRouting?.(), modelId, params.role ?? 'competitor');
     return body;
+  }
+
+  /** IMPL-075 — esta chamada vai no modo auditável? (preset do papel ou flag da chamada). */
+  private auditableFor(params: ChatCompletionParams): boolean {
+    if (params.auditable === true) return true;
+    const role = params.role ?? 'competitor';
+    return (this.cfg.auditableRoles ?? []).includes(role);
   }
 
   /**
@@ -1417,12 +2270,15 @@ export class OpenRouterGateway {
    * `finish` (IMPL-014): os sinais de fim da chamada que COMPLETOU vao junto —
    * e assim que TODO papel (juiz e duelo inclusive) tem finish_reason/
    * native_finish_reason/truncamento no RunRecord (`finishSignalsByRole`).
+   * `extra` (IMPL-078/IMPL-075): telemetria de uso por chamada — cached/
+   * reasoning tokens, latência, estimado x real e o provedor que serviu.
    */
   private account(
     params: ChatCompletionParams,
     reservation: ReturnType<CostSink['reserve']> | undefined,
     usage: UsageInfo,
     finish?: CallFinishSignals,
+    extra?: { latencyMs?: number; provider?: CallProviderInfo },
   ): CallCost {
     const role = params.role ?? 'competitor';
     const cost = priceUsage(usage, this.cachedModel(params.apiKey, params.modelId));
@@ -1433,11 +2289,26 @@ export class OpenRouterGateway {
         cost,
         tokensIn: usage.tokensIn,
         tokensOut: usage.tokensOut,
+        ...(typeof usage.cachedTokensIn === 'number' ? { cachedTokensIn: usage.cachedTokensIn } : {}),
+        ...(typeof usage.reasoningTokens === 'number' ? { reasoningTokens: usage.reasoningTokens } : {}),
+        ...(typeof extra?.latencyMs === 'number' ? { latencyMs: extra.latencyMs } : {}),
+        ...(extra?.provider ? { provider: extra.provider } : {}),
+        // Estimado x real (IMPL-078): a MESMA conta da reserva (catálogo), contra `cost.usd`.
+        ...(this.estimatedUsdFor(params) !== null ? { estimatedUsd: this.estimatedUsdFor(params)! } : {}),
         ...(finish ? { finish } : {}),
       });
     }
     params.onCost?.(cost);
     return cost;
+  }
+
+  /** Estimativa de catálogo desta chamada (a mesma que vai na reserva). `null` = não precificável. */
+  private estimatedUsdFor(params: ChatCompletionParams): number | null {
+    return computeCost(
+      guessPromptTokens(params.messages),
+      effectiveMaxTokens(params.maxTokens),
+      this.cachedModel(params.apiKey, params.modelId),
+    );
   }
 
   /**
@@ -1478,6 +2349,7 @@ export class OpenRouterGateway {
     reason: PendingReason,
     generationId: string | undefined,
     finish?: CallFinishSignals,
+    extra?: { provider?: CallProviderInfo; latencyMs?: number },
   ): CallCost {
     if (reservation) {
       params.sink?.pending(reservation, {
@@ -1485,6 +2357,8 @@ export class OpenRouterGateway {
         modelId: params.modelId,
         reason,
         ...(generationId ? { generationId } : {}),
+        ...(extra?.provider ? { provider: extra.provider } : {}),
+        ...(typeof extra?.latencyMs === 'number' ? { latencyMs: extra.latencyMs } : {}),
         ...(finish ? { finish } : {}),
       });
     }
@@ -1525,20 +2399,36 @@ export class OpenRouterGateway {
   }
 
   async chatCompletion(params: ChatCompletionParams): Promise<ChatCompletionResult> {
-    const { timeoutMs = 60_000, signal: externalSignal, sink } = params;
+    // IMPL-072: transporte STREAMING quando o papel/chamada pedir — o parser SSE
+    // é ÚNICO (o de `chatCompletionStream`), e em abort/timeout o provedor PARA
+    // de gerar em vez de concluir e cobrar a resposta inteira.
+    if (params.streamTransport ?? this.cfg.streamTransport) return this.chatCompletionStream(params);
+    const { signal: externalSignal, sink } = params;
     const maxTokens = effectiveMaxTokens(params.maxTokens);
     const role = params.role ?? 'competitor';
+    const timeouts = this.timeoutsFor(params, false);
     const body = this.buildBody(params, false);
+    const bodyJson = JSON.stringify(body);
+    // IMPL-073: reenvio SEM verificação de uma chamada que pode ter sido cobrada
+    // (falha depois dos headers) é recusado aqui, antes de reservar/gerar.
+    const guardKey = this.guardKey(bodyJson);
+    const bloqueado = this.resendBlocked(guardKey);
+    if (bloqueado !== undefined) throw bloqueado;
 
     const reservation = await this.reserveFor(params, role);
 
     const track: DispatchTrack = {};
     let guarded: GuardedResponse;
+    // Nota: `JSON.stringify(body)` sai repetido de propósito — o contrato
+    // estático do ponto único (test/lgpd-pii.test.ts) exige o corpo SAIR de
+    // `buildBody` no próprio POST.
     try {
       guarded = await this.guardedFetch(
         `${this.cfg.baseUrl}/chat/completions`,
         { method: 'POST', headers: this.headers(params.apiKey), body: JSON.stringify(body) },
-        timeoutMs,
+        timeouts,
+        role,
+        limiterScopeOf(params.apiKey, params.modelId, body),
         externalSignal,
         track,
       );
@@ -1556,6 +2446,7 @@ export class OpenRouterGateway {
     // lancado e "despachada sem usage" — nunca devolucao da reserva.
     let accounted = false;
     let generationId: string | undefined;
+    let provider: CallProviderInfo | undefined;
     try {
       const latencyMs = Date.now() - startedAt;
       const json = (await res.json()) as {
@@ -1569,6 +2460,8 @@ export class OpenRouterGateway {
         error?: OpenRouterErrorBody;
       };
       generationId = generationIdOf(json);
+      // IMPL-075: provedor que serviu esta chamada (payload; /generation sob demanda).
+      provider = extractProviderInfo(json);
 
       const usage = extractUsage(json.usage);
       const choice = json.choices?.[0];
@@ -1590,6 +2483,10 @@ export class OpenRouterGateway {
         nativeFinishReason,
         Boolean(blocked || refusal),
       );
+      // IMPL-075: completa provider_name/upstream_id/service_tier via
+      // GET /generation quando o modo pedir (best-effort, nunca derruba a chamada).
+      provider = mergeProviderInfo(provider, await this.lookupProvider(params, generationId, provider));
+      const extra = { latencyMs, provider };
       // Contabiliza ANTES do throw in-band: uma resposta 200 com corpo de erro
       // (provider rejeitou um parametro) JA foi cobrada. Sem isto ela sai de
       // graca nos livros e cara na fatura. Os sinais de fim so vao junto
@@ -1605,8 +2502,8 @@ export class OpenRouterGateway {
           );
       // Sem bloco `usage` nao ha custo medido: pendente pelo id (IMPL-017).
       const cost = hasUsage(json.usage)
-        ? this.account(params, reservation, usage, fim)
-        : this.accountUnmeasured(params, reservation, 'no_usage', generationId, fim);
+        ? this.account(params, reservation, usage, fim, extra)
+        : this.accountUnmeasured(params, reservation, 'no_usage', generationId, fim, extra);
       accounted = true;
       if (inBandFailure && json.error) {
         if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
@@ -1627,35 +2524,55 @@ export class OpenRouterGateway {
         ...(nativeFinishReason ? { nativeFinishReason } : {}),
         ...(refusal ? { refusal } : {}),
         ...(blocked ? { blocked } : {}),
+        ...(provider ? { provider } : {}),
+        ...(this.auditableFor(params) ? { auditable: true } : {}),
         ...trunc,
       };
     } catch (err) {
+      // IMPL-073: falha DEPOIS do 200 (corpo ilegível/cortado) tem desfecho
+      // desconhecido e PODE ter sido cobrada: marca o erro e guarda o corpo
+      // contra reenvio sem verificação.
+      if (!accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
       throw controlIfAborted(err, externalSignal);
     } finally {
       // Corpo abortado/ilegivel depois do 200: o provedor gerou (e cobra) —
       // no nao-streaming ele segue gerando apos o abort (IMPL-017).
       if (!accounted) {
-        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', generationId);
+        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
+          provider,
+          latencyMs: Date.now() - startedAt,
+        });
       }
       finish(ok);
     }
   }
 
   async chatCompletionStream(params: ChatStreamParams): Promise<ChatCompletionResult> {
-    const { timeoutMs = 60_000, signal: externalSignal, sink, onDelta } = params;
+    const { signal: externalSignal, sink, onDelta } = params;
     const maxTokens = effectiveMaxTokens(params.maxTokens);
     const role = params.role ?? 'competitor';
+    // IMPL-077: inatividade + teto total por papel (o watchdog de inatividade é
+    // o que faz sentido em stream — cada chunk zera o relógio via `touch`).
+    const timeouts = this.timeoutsFor(params, true);
     const body = this.buildBody(params, true);
+    const bodyJson = JSON.stringify(body);
+    // IMPL-073: sem verificação (GET /generation), não reenvia o mesmo corpo.
+    const guardKey = this.guardKey(bodyJson);
+    const bloqueado = this.resendBlocked(guardKey);
+    if (bloqueado !== undefined) throw bloqueado;
 
     const reservation = await this.reserveFor(params, role);
 
     const track: DispatchTrack = {};
     let guarded: GuardedResponse;
+    // Mesma nota do chatCompletion: o POST precisa mostrar `JSON.stringify(body)`.
     try {
       guarded = await this.guardedFetch(
         `${this.cfg.baseUrl}/chat/completions`,
         { method: 'POST', headers: this.headers(params.apiKey), body: JSON.stringify(body) },
-        timeoutMs,
+        timeouts,
+        role,
+        limiterScopeOf(params.apiKey, params.modelId, body),
         externalSignal,
         track,
       );
@@ -1664,13 +2581,14 @@ export class OpenRouterGateway {
       else reservation?.release();
       throw err;
     }
-    const { res, startedAt, finish } = guarded;
+    const { res, startedAt, finish, touch } = guarded;
 
     let ok = false;
     let accounted = false;
     // Id da geracao: vem em TODO chunk — e o que permite conciliar um stream
     // cortado no meio pelo GET /generation (IMPL-017).
     let generationId: string | undefined;
+    let provider: CallProviderInfo | undefined;
     let fullText = '';
     let lastRaw: unknown = null;
     // Guardado SEPARADO de `lastRaw`: hoje o ultimo chunk *por acaso* e o de
@@ -1693,6 +2611,8 @@ export class OpenRouterGateway {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
+        // IMPL-077: qualquer byte recebido zera o watchdog de inatividade.
+        touch();
         buffer += decoder.decode(value, { stream: true });
 
         // SSE lines separadas por \n. OpenRouter usa data: <json>\n\n
@@ -1717,6 +2637,8 @@ export class OpenRouterGateway {
             };
             lastRaw = chunk;
             generationId ??= generationIdOf(chunk);
+            // IMPL-075: o provedor vem em todo chunk (campo `provider`).
+            provider ??= extractProviderInfo(chunk);
             if (chunk.error && !streamError) {
               streamError =
                 typeof chunk.error === 'object' ? chunk.error : { message: String(chunk.error) };
@@ -1776,10 +2698,14 @@ export class OpenRouterGateway {
             ),
             body,
           );
+      // IMPL-075: completa provider_name/upstream_id/service_tier via
+      // GET /generation quando o modo pedir (best-effort, nunca derruba o stream).
+      provider = mergeProviderInfo(provider, await this.lookupProvider(params, generationId, provider));
+      const extra = { latencyMs: Date.now() - startedAt, provider };
       // Stream sem frame de usage: pendente pelo id dos chunks (IMPL-017).
       const cost = hasUsage(usageRaw)
-        ? this.account(params, reservation, usage, fim)
-        : this.accountUnmeasured(params, reservation, 'no_usage', generationId, fim);
+        ? this.account(params, reservation, usage, fim, extra)
+        : this.accountUnmeasured(params, reservation, 'no_usage', generationId, fim, extra);
       accounted = true;
       // Resposta vazia + erro in-band (provider rejeitou parametro etc.): falha alto.
       if (inBandFailure && streamError) {
@@ -1803,15 +2729,24 @@ export class OpenRouterGateway {
         ...(nativeFinishReason ? { nativeFinishReason } : {}),
         ...(refusalFinal ? { refusal: refusalFinal } : {}),
         ...(blocked ? { blocked } : {}),
+        ...(provider ? { provider } : {}),
+        ...(this.auditableFor(params) ? { auditable: true } : {}),
         ...trunc,
       };
     } catch (err) {
+      // IMPL-073: stream cortado/abortado DEPOIS do 200 = desfecho desconhecido
+      // (o provedor pode ter concluído e cobrado): marca o erro e guarda o corpo
+      // contra reenvio sem verificação.
+      if (!accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
       throw controlIfAborted(err, externalSignal);
     } finally {
       // Stream cortado no meio (abort/timeout/rede): tokens ja gerados foram
       // cobrados — pendente pelo id dos chunks, conservador sem ele (IMPL-017).
       if (!accounted) {
-        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', generationId);
+        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
+          provider,
+          latencyMs: Date.now() - startedAt,
+        });
       }
       finish(ok);
     }
@@ -1835,7 +2770,7 @@ export class OpenRouterGateway {
 
     let res: Response;
     try {
-      res = await this.transport(`${this.cfg.baseUrl}/key`, {
+      res = await this.metaFetch(`${this.cfg.baseUrl}/key`, {
         method: 'GET',
         headers: this.headers(key),
       });
@@ -1870,6 +2805,72 @@ export class OpenRouterGateway {
       limitReset: typeof d.limit_reset === 'string' ? d.limit_reset : d.limit_reset === null ? null : undefined,
       usageDailyUsd: typeof d.usage_daily === 'number' ? d.usage_daily : undefined,
     };
+  }
+
+  // --- geracao (conciliacao/proveniencia) ---------------------------------------
+
+  /**
+   * IMPL-075 / IMPL-074 (R-07a:REC-4) — `GET /api/v1/generation?id=…`: o
+   * provedor que efetivamente serviu a chamada (`provider_name`, `upstream_id`,
+   * `service_tier`), o custo cobrado (`total_cost`) e se a geração foi
+   * cancelada. É o MESMO endpoint da conciliação de pendentes
+   * (`BudgetLedger.settlePending`); aqui fica acessível a qualquer papel.
+   * Best-effort: id vazio, 404 ou falha de rede => `undefined`.
+   */
+  async fetchGenerationInfo(
+    apiKey: string,
+    generationId: string,
+  ): Promise<
+    { generationId: string; provider?: CallProviderInfo; totalCostUsd?: number; cancelled?: boolean } | undefined
+  > {
+    const id = (generationId ?? '').trim();
+    if (!id) return undefined;
+    let res: Response;
+    try {
+      res = await this.metaFetch(`${this.cfg.baseUrl}/generation?id=${encodeURIComponent(id)}`, {
+        method: 'GET',
+        headers: this.headers(apiKey),
+      });
+    } catch {
+      return undefined;
+    }
+    if (!res.ok) return undefined;
+    const json = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown> };
+    const d = json.data;
+    if (!d || typeof d !== 'object') return undefined;
+    const provider = extractProviderInfo(d);
+    const totalCostUsd =
+      typeof d.total_cost === 'number' && Number.isFinite(d.total_cost)
+        ? d.total_cost
+        : typeof d.cost === 'number' && Number.isFinite(d.cost)
+          ? d.cost
+          : undefined;
+    const cancelled = typeof d.cancelled === 'boolean' ? d.cancelled : undefined;
+    return {
+      generationId: id,
+      ...(provider ? { provider } : {}),
+      ...(typeof totalCostUsd === 'number' ? { totalCostUsd } : {}),
+      ...(typeof cancelled === 'boolean' ? { cancelled } : {}),
+    };
+  }
+
+  /**
+   * IMPL-075 — completa a proveniência do provedor pelo GET /generation quando
+   * o modo `providerLookup` pedir ('missing' = só sem nome no payload;
+   * 'always' = sempre). Nunca derruba a chamada: sem recuperação, fica o que o
+   * payload trouxe.
+   */
+  private async lookupProvider(
+    params: ChatCompletionParams,
+    generationId: string | undefined,
+    fromPayload: CallProviderInfo | undefined,
+  ): Promise<CallProviderInfo | undefined> {
+    const mode = params.providerLookup ?? this.cfg.providerLookup ?? 'off';
+    if (mode === 'off') return undefined;
+    if (!generationId) return undefined;
+    if (mode === 'missing' && fromPayload?.name) return undefined;
+    const info = await this.fetchGenerationInfo(params.apiKey, generationId).catch(() => undefined);
+    return info?.provider;
   }
 }
 
@@ -1920,8 +2921,9 @@ export function peekModelsCache(
   return defaultGateway.peekModelsCache(apiKey);
 }
 
-export function currentConcurrency(): LimiterSnapshot {
-  return defaultGateway.currentConcurrency();
+/** Agregado dos escopos, ou o escopo de um par (key, modelo) [provedor]. */
+export function currentConcurrency(apiKey?: string, modelId?: string, provider?: string): LimiterSnapshot {
+  return defaultGateway.currentConcurrency(apiKey, modelId, provider);
 }
 
 export function listModels(apiKey: string, force = false): Promise<OpenRouterModel[]> {

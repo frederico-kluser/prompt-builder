@@ -17,7 +17,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { runToCompletion } from '../../orchestrator.js';
 import { prepareOptsFor } from '../../prepareRun.js';
 import { parseArenaAgentConfig } from '../../configFile.js';
@@ -39,14 +39,17 @@ import {
   readArtifact,
   readExecutionRef,
 } from '../../agent/store.js';
-import { ensurePrivateDataDir, loadRun, getDataDir } from '../../storage.js';
+import { ensurePrivateDataDir, loadRun, getDataDir, writePrivateDataFile } from '../../storage.js';
 import { isValidRecordId } from '../../pathSafety.js';
 import { subscribe } from '../../events.js';
 import {
+  assertNoUnknownConfigKeys,
   buildContext,
   isAgentContext,
+  limitList,
   loadCatalog,
   parse,
+  parseListLimit,
   readJsonFile,
   resolveHome,
   resolveKey,
@@ -102,15 +105,154 @@ function resolveBudget(value: unknown, warn: (m: string) => void): BudgetChoice 
   return { kind: 'unset' };
 }
 
-/** Lê e valida um `arena-agent-config@1` -> RunConfig (nunca lança por config). */
-async function readAgentConfigFile(file: string): Promise<RunConfig> {
+/**
+ * Lê e valida um `arena-agent-config@1` -> RunConfig (nunca lança por config).
+ * Além do schema: fail-closed de chaves desconhecidas (IMPL-093) e contenção
+ * de `files[]` ao workspace (IMPL-099/E6) — ANTES de qualquer execução.
+ */
+export async function readAgentConfigFile(file: string): Promise<RunConfig> {
   // Leitor comum do CLI: caminho errado = uso (2), JSON quebrado = config (3).
   const json = await readJsonFile(file);
   const parsed = parseArenaAgentConfig(json);
   if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG);
+  // IMPL-093: chave que o parser descartaria em silêncio é ERRO (fail-closed).
+  assertNoUnknownConfigKeys(json, parsed.config);
+  // IMPL-099 (E6): `files[].path` contido ao workspace, por validação (exit 3).
+  assertAgentFilesContained(parsed.config);
   const conv = arenaAgentConfigToRunConfig(parsed.config);
   if (!conv.ok) throw new CliError(conv.error, EXIT.CONFIG);
   return conv.config;
+}
+
+/**
+ * Contenção de `files[]` ao workspace (IMPL-099, E6): caminho absoluto ou
+ * `../` escrevia FORA do workspace (`writeFileNoFollow` do engine também
+ * barra na escrita — aqui a recusa é VALIDAÇÃO, exit 3, antes de rodar nada).
+ * A regra é a mesma do engine: `path.resolve(workspace, rel)` tem de voltar
+ * para dentro da raiz.
+ */
+export function assertAgentFilesContained(config: {
+  scenarios?: { agentTask?: { files?: { path?: unknown }[] } }[];
+}): void {
+  const ruins: { scenario: number; path: string }[] = [];
+  const cenarios = config.scenarios ?? [];
+  cenarios.forEach((c, i) => {
+    for (const f of c.agentTask?.files ?? []) {
+      const rel = typeof f.path === 'string' ? f.path : '';
+      if (!caminhoRelativoSeguro(rel)) ruins.push({ scenario: i + 1, path: rel });
+    }
+  });
+  if (ruins.length === 0) return;
+  const citados = ruins.slice(0, 5).map((r) => `cenário ${r.scenario}: "${r.path}"`).join('; ');
+  throw new CliError(
+    `files[].path fora do workspace: ${citados}. Use caminhos RELATIVOS à raiz do workspace ` +
+      '(sem "/" inicial, sem ".." e sem caminho absoluto).',
+    EXIT.CONFIG,
+    { filesOutsideWorkspace: ruins },
+    {
+      code: 'config.files_path_escapes_workspace',
+      hint:
+        'Cada files[].path é gravado dentro do workspace da execução — caminho absoluto ou "../" ' +
+        'escapa dele e é recusado. Corrija o arquivo e rode `prompt-builder config validate <arq>`.',
+    },
+  );
+}
+
+/** Relativo, não-vazio e sem fuga do workspace (mesma régua do `writeFileNoFollow`). */
+function caminhoRelativoSeguro(rel: string): boolean {
+  if (!rel.trim()) return false;
+  const base = '/workspace-raiz';
+  const alvo = path.resolve(base, rel);
+  const norm = path.relative(base, alvo);
+  return norm !== '' && !norm.startsWith('..') && !path.isAbsolute(norm);
+}
+
+// ---------------------------------------------------------------------------
+// Portão de config EXECUTÁVEL (IMPL-099, R-15:REC-6)
+// ---------------------------------------------------------------------------
+//
+// `arena-agent-config` executa `setup[]`/`verify[]` na máquina de quem roda —
+// config é conteúdo NÃO confiável quando o autor é um LLM. O portão tem duas
+// peças: flag explícita (`--allow-exec-config`; no MCP, `allowExecConfig`) e
+// pin SHA-256 do conteúdo gravado no PRIMEIRO aceite. Conteúdo muda ⇒ hash muda
+// ⇒ a revisão revive (aprovação é ÚNICA por conteúdo).
+
+const EXEC_APPROVALS_FILE = 'exec-config-approvals.json';
+
+interface ExecApprovalStore {
+  version: 1;
+  approvals: Record<string, { identity: string; approvedAt: string; command: string }>;
+}
+
+export function sha256Hex(text: string): string {
+  return createHash('sha256').update(text, 'utf-8').digest('hex');
+}
+
+function execApprovalsPath(dataDir: string): string {
+  return path.join(dataDir, EXEC_APPROVALS_FILE);
+}
+
+/**
+ * Confere (e grava) a aprovação de um config executável. `identity` é estável
+ * por config (caminho absoluto do arquivo ou `mcp:<tool>`); `content` é o que
+ * vai para o hash. Sem aceite pinado ⇒ recusa `config.exec_not_approved`;
+ * conteúdo mudou desde o aceite ⇒ recusa `config.exec_hash_changed`. Ambas
+ * exit 3 e com a instrução EXATA de como aprovar.
+ */
+export async function ensureExecConfigApproved(opts: {
+  dataDir: string;
+  content: string;
+  identity: string;
+  /** Rótulo do erro (o caminho como o usuário digitou; nunca o absoluto). */
+  label: string;
+  /** Comando exato a citar na dica (ex.: `agents run --config x.json`). */
+  command: string;
+  allowExecConfig: boolean;
+}): Promise<{ hash: string; firstApproval: boolean }> {
+  const hash = sha256Hex(opts.content);
+  const file = execApprovalsPath(opts.dataDir);
+  let store: ExecApprovalStore = { version: 1, approvals: {} };
+  try {
+    const lido = JSON.parse(await fs.readFile(file, 'utf-8')) as ExecApprovalStore;
+    if (lido && typeof lido === 'object' && typeof lido.approvals === 'object' && lido.approvals) {
+      store = lido;
+    }
+  } catch {
+    /* primeiro uso: sem store ainda */
+  }
+  const pinado = store.approvals[hash];
+  if (pinado) return { hash, firstApproval: false };
+
+  const anterior = Object.values(store.approvals).find((a) => a.identity === opts.identity);
+  if (!opts.allowExecConfig) {
+    if (anterior) {
+      throw new CliError(
+        `O conteúdo de "${opts.label}" mudou desde a aprovação de ${anterior.approvedAt.slice(0, 10)}: ` +
+          'a revisão revive (setup/verify/files executam comandos).',
+        EXIT.CONFIG,
+        { label: opts.label, previousApprovedAt: anterior.approvedAt, currentHash: hash },
+        {
+          code: 'config.exec_hash_changed',
+          hint: `Revise o que mudou e aprove de novo: \`${opts.command} --allow-exec-config\`.`,
+        },
+      );
+    }
+    throw new CliError(
+      `Config executável SEM aprovação: "${opts.label}" traz comandos (setup[]/verify[]) que rodam ` +
+        'nesta máquina e ninguém aprovou este conteúdo.',
+      EXIT.CONFIG,
+      { label: opts.label, hash },
+      {
+        code: 'config.exec_not_approved',
+        hint:
+          `Aprove UMA vez com \`${opts.command} --allow-exec-config\` — o SHA-256 fica pinado e o MESMO ` +
+          'conteúdo passa sem flag depois; qualquer mudança exige nova aprovação.',
+      },
+    );
+  }
+  store.approvals[hash] = { identity: opts.identity, approvedAt: new Date().toISOString(), command: opts.command };
+  await writePrivateDataFile(file, `${JSON.stringify(store, null, 2)}\n`);
+  return { hash, firstApproval: true };
 }
 
 /** Ajusta `config.agent` pelas flags `--repetitions/--max-parallel/--keep-workspace`. */
@@ -395,6 +537,8 @@ const AGENTS_RUN_OPTIONS = {
   'keep-workspace': { type: 'boolean' },
   // IMPL-031 (revisão): réplica intencional da mesma config, sem o lock.
   'allow-concurrent': { type: 'boolean' },
+  // IMPL-099: aceite do config EXECUTÁVEL (grava o pin SHA-256 do conteúdo).
+  'allow-exec-config': { type: 'boolean' },
 } as const;
 
 async function cmdRun(argv: string[]): Promise<number> {
@@ -496,6 +640,26 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
   }
 
   const runConfigComFlags = applyAgentOverrides(configComOrcamento, values);
+
+  // IMPL-099: portão de config EXECUTÁVEL — o arena-agent-config manda rodar
+  // setup[]/verify[] NESTA máquina e config de origem LLM não é confiável. Sem
+  // hash SHA-256 aprovado nada executa; o aceite é ÚNICO por conteúdo (mudou ⇒
+  // a revisão revive). Fica DEPOIS do --dry-run (que não executa nada) e da
+  // recusa por orçamento ausente (a ordem das recusas é a de sempre).
+  const pin = await ensureExecConfigApproved({
+    dataDir: ctx.dataDir,
+    content: await fs.readFile(file, 'utf-8'),
+    identity: path.resolve(file),
+    label: file,
+    command: `agents run --config ${file}`,
+    allowExecConfig: values['allow-exec-config'] === true,
+  });
+  if (pin.firstApproval) {
+    out.info(
+      `config aprovado (SHA-256 ${pin.hash.slice(0, 12)}…) — o pin fica em ${EXEC_APPROVALS_FILE} e o MESMO ` +
+        'conteúdo passa sem --allow-exec-config.',
+    );
+  }
 
   // IMPL-030: `--detach` — validado (config, orçamento, key); o FILHO
   // destacado abre as guardas (lock, teto diário) e roda a run.
@@ -773,10 +937,15 @@ async function countFiles(dir: string): Promise<number> {
 }
 
 async function cmdList(argv: string[]): Promise<number> {
-  const parsed = parse(argv, {});
+  const parsed = parse(argv, {
+    // IMPL-092: teto default de 50 (--limit N / --all; truncar avisa no stderr).
+    limit: { type: 'string' },
+    all: { type: 'boolean' },
+  });
   const ctx = buildContext(parsed);
   const { out } = ctx;
-  const rows = await scanAgentRunDirs();
+  const todas = await scanAgentRunDirs();
+  const rows = limitList(todas, parseListLimit(parsed.values), out, 'runs de agente');
   if (out.isText) {
     for (const r of rows) {
       out.line(
@@ -792,7 +961,7 @@ async function cmdList(argv: string[]): Promise<number> {
     sizeBytes: r.sizeBytes,
     mtime: new Date(r.mtimeMs).toISOString(),
   }));
-  out.result(true, 'agents.list', { runs: list });
+  out.result(true, 'agents.list', { runs: list, total: todas.length });
   return EXIT.OK;
 }
 

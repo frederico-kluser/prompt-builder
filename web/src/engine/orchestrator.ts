@@ -1,16 +1,23 @@
 const randomUUID = (): string => crypto.randomUUID();
 import { generateStages } from './datagen';
 import { countCompetitorOutcomes, runCompetitor } from './competitor';
-import { judgeStage } from './judge';
+import { judgeStage, JUDGE_LISTWISE_CONTRACT_TEXT } from './judge';
 import { generateReferences } from './gabarito';
 import { judgeStageReference } from './refJudge';
-import { blindRankMap, pickFinalists, runStageDuels, seedFromId, VERDICT_SCORE } from './duels';
+import { blindRankMap, DUEL_HEAD, pickFinalists, runStageDuels, seedFromId, VERDICT_SCORE } from './duels';
 import { oracleScoresFromVerdicts } from '../../../src/engine/duelCore.js';
 import { assessVerdictIntegrity } from '../../../src/engine/verdictIntegrity.js';
 import { VERDICT_AGGREGATION } from '../../../src/engine/verdictAggregate.js';
 import { fairnessWarningsForModels } from './llmVariants';
 import { JUDGE_CONTRACT_TEXT } from './refJudge';
-import { pinJudgeContract, verbosityReport } from '../../../src/engine/judgeCalibration.js';
+import {
+  noteJudgeContract,
+  pinJudgeContract,
+  verbosityReport,
+  verbositySamples,
+  type VerbositySampleRow,
+} from '../../../src/engine/judgeCalibration.js';
+import type { JudgeContractComponents } from './types';
 import { modelRolesForRun, snapshotModelLifecycle } from '../../../src/engine/modelLifecycle.js';
 import { mergeScenarios } from './scenarioPack';
 import { sanitizeLlmVariants, variantsToContestants } from './llmVariants';
@@ -632,6 +639,10 @@ async function runLoop(
     specs = await generateReferences({
       stages: specs,
       apiKey,
+      // IMPL-048: default EXPLÍCITO e documentado — só compare chega aqui sem
+      // `referenceModelId` (train/vary reprova na validação sem ele). Sem
+      // referência própria o gabarito sai do 1º juiz: o risco de auto-preferência
+      // aparece em `fairnessWarnings`, nunca escondido.
       modelId: record.config.referenceModelId ?? record.config.judgeModelIds[0],
       reasoningLevel: record.config.reasoning?.judge,
       timeoutMs: datagenTimeout,
@@ -1140,27 +1151,89 @@ async function runLoop(
   // contrato (hash do prompt do juiz + modelos) denuncia calibration drift ao
   // comparar sessoes; o relatorio de verbosidade expoe o vies score×comprimento.
   try {
+    // IMPL-048: a REFERÊNCIA entra na conta de imparcialidade (default do
+    // compare = 1º juiz — o aviso denuncia o default, ele não fica escondido).
+    const referenceModelId = record.config.referenceModelId ?? record.config.judgeModelIds[0];
     record.fairnessWarnings = fairnessWarningsForModels(
       record.contestants.map((c) => c.modelId),
       record.config.judgeModelIds,
+      referenceModelId,
     );
-    const samples: { score: number; length: number }[] = [];
+    // IMPL-052 (R-03b:REC-2, espelho de src/orchestrator.ts): higiene das
+    // amostras — fontes segregadas, vazios/imputados/truncados excluídos e
+    // contados, comprimento em tokens (razão candidato/referência) e n por
+    // célula (fonte × contestant) no relatório.
+    const rows: VerbositySampleRow[] = [];
     for (const st of record.stages) {
+      const refJudge = st.referenceJudge;
+      const listwise = st.judge;
       for (const r of st.responses) {
-        const v =
-          st.referenceJudge?.verdictByContestant?.[r.contestantId] ??
-          st.judge?.verdictByContestant?.[r.contestantId];
-        if (!v || r.status !== 'ok') continue;
-        samples.push({
+        if (r.status !== 'ok') continue;
+        const vRef = refJudge?.verdictByContestant?.[r.contestantId];
+        const vList = vRef === undefined ? listwise?.verdictByContestant?.[r.contestantId] : undefined;
+        const v = vRef ?? vList;
+        if (!v) continue;
+        const origem =
+          vRef !== undefined
+            ? refJudge?.verdictSourceByContestant?.[r.contestantId]
+            : listwise?.verdictSourceByContestant?.[r.contestantId];
+        const fonte: VerbositySampleRow['source'] =
+          origem === 'auto'
+            ? 'imputado'
+            : origem === 'ground-truth'
+              ? 'rotulo'
+              : vRef !== undefined
+                ? 'pointwise'
+                : 'listwise';
+        rows.push({
+          contestantId: r.contestantId,
+          source: fonte,
           score: v === 'resolve' ? 1 : v === 'parcial' ? 0.5 : 0,
-          length: r.text.length,
+          text: r.text,
+          candidateTokens: r.tokensOut > 0 ? r.tokensOut : undefined,
+          referenceText: st.spec?.reference,
+          referenceTokens: st.gabaritoCall?.tokensOut ? st.gabaritoCall.tokensOut : undefined,
+          maxTokens: r.maxTokens ?? st.spec?.maxTokens,
+          truncated: r.truncated === true || r.finishReason === 'length',
         });
       }
     }
-    record.judgeDiagnostics = {
-      contract: pinJudgeContract(record.config.judgeModelIds, JUDGE_CONTRACT_TEXT),
-      verbosity: verbosityReport(samples),
+    // IMPL-049 (R-03a:REC-9, espelho de src/orchestrator.ts): o contrato cobre
+    // juízes + prompts (pointwise/duelo/listwise) + modelo de referência +
+    // think level + provedor; drift dispara `judge.contract.changed`.
+    const components: JudgeContractComponents = {
+      duelPromptText: DUEL_HEAD,
+      listwisePromptText: JUDGE_LISTWISE_CONTRACT_TEXT,
+      referenceModelId,
+      // Ausente = default (canônico vazio) — mesmo hash que o `baseline check`
+      // recomputa; fora do default entra cheio e é drift visível.
+      judgeReasoningLevel: record.config.reasoning?.judge,
+      providerPolicy: ctx.sink?.sensitiveRouting?.()
+        ? JSON.stringify(ctx.sink.sensitiveRouting!())
+        : undefined,
     };
+    const contract = pinJudgeContract(
+      record.config.judgeModelIds,
+      JUDGE_CONTRACT_TEXT,
+      undefined,
+      components,
+    );
+    const drift = noteJudgeContract(contract.hash);
+    record.judgeDiagnostics = {
+      contract,
+      verbosity: verbosityReport(verbositySamples(rows)),
+    };
+    if (drift.changed) {
+      const detail = `judge.contract.changed: ${drift.message}`;
+      log(runId, detail);
+      emitEvent({
+        type: 'judge.contract.changed',
+        runId,
+        previousHash: drift.previousHash ?? '',
+        currentHash: contract.hash,
+        detail,
+      });
+    }
     if (record.judgeDiagnostics.verbosity.warning) {
       log(runId, `aviso de verbosidade do juiz: ${record.judgeDiagnostics.verbosity.warning}`);
     }
