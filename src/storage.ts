@@ -2,6 +2,16 @@ import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { normalizeRunRecord } from './normalize.js';
+import {
+  assertValidRecordId,
+  chmodPrivate,
+  ensurePrivateDir,
+  isValidRecordId,
+  PRIVATE_DIR_MODE,
+  PRIVATE_FILE_MODE,
+  readFileInside,
+  resolveInside,
+} from './pathSafety.js';
 import type { RunMode, RunRecord, SessionRecord } from './types.js';
 
 // Raiz de persistencia. MUTAVEL de proposito: o servidor mantem o default
@@ -31,12 +41,40 @@ function sessionsDir(): string {
   return path.join(baseDir, 'sessions');
 }
 
-async function ensureDir(): Promise<void> {
-  await fs.mkdir(runsDir(), { recursive: true });
+// ---------------------------------------------------------------------------
+// Permissões (IMPL-024): diretórios 0700, arquivos 0600
+// ---------------------------------------------------------------------------
+// Runs e sessões carregam prompts, respostas e custos; no CLI moram em
+// ~/.prompt-builder, ao lado da key. `mkdir({mode})` só vale na criação, então
+// o chmod é EXPLÍCITO (corrige instalações antigas, criadas 0755).
+//
+// A RAIZ só recebe chmod quando tem o nome dedicado do default do CLI
+// (`~/.prompt-builder` ou `$XDG_STATE_HOME/prompt-builder`) — um `--data-dir .`
+// não pode mudar a permissão do projeto do usuário. Raiz nova nasce 0700 de
+// qualquer forma (mkdir com mode); os subdiretórios nossos sempre são 0700.
+
+function isDedicatedRoot(dir: string): boolean {
+  const nome = path.basename(dir);
+  return nome === '.prompt-builder' || nome === 'prompt-builder';
 }
 
+async function ensurePrivateRoot(): Promise<void> {
+  await fs.mkdir(baseDir, { recursive: true, mode: PRIVATE_DIR_MODE });
+  if (isDedicatedRoot(baseDir)) await chmodPrivate(baseDir, PRIVATE_DIR_MODE);
+}
+
+async function ensureDir(): Promise<void> {
+  await ensurePrivateRoot();
+  await ensurePrivateDir(runsDir());
+}
+
+/**
+ * Arquivo de UMA run. Id validado (regex estrita) + contenção sob runs/:
+ * `saveRun` nunca grava fora, e o que `loadRun` recusa nunca foi gravado.
+ */
 function fileFor(runId: string): string {
-  return path.join(runsDir(), `${runId}.json`);
+  assertValidRecordId(runId, 'id de run');
+  return resolveInside(runsDir(), `${runId}.json`);
 }
 
 async function writeAtomic(target: string, data: string): Promise<void> {
@@ -45,7 +83,9 @@ async function writeAtomic(target: string, data: string): Promise<void> {
   // que derrubava a run inteira quando varios competidores terminavam juntos).
   const tmp = `${target}.${randomUUID()}.tmp`;
   try {
-    await fs.writeFile(tmp, data, 'utf-8');
+    // tmp é SEMPRE novo (UUID), então o mode vale; o rename leva o 0600 para o
+    // alvo — um record antigo 0644 é corrigido na próxima gravação.
+    await fs.writeFile(tmp, data, { encoding: 'utf-8', mode: PRIVATE_FILE_MODE });
     await fs.rename(tmp, target);
   } catch (err) {
     await fs.rm(tmp, { force: true }).catch(() => undefined);
@@ -58,8 +98,8 @@ async function writeAtomic(target: string, data: string): Promise<void> {
 const saveQueues = new Map<string, Promise<unknown>>();
 
 export async function saveRun(record: RunRecord): Promise<void> {
+  const target = fileFor(record.id); // valida o id ANTES de criar diretório
   await ensureDir();
-  const target = fileFor(record.id);
   // snapshot sincrono: a fila persiste o estado na ordem das chamadas,
   // sem JSON corrompido por mutacao concorrente do record.
   const data = JSON.stringify(record, null, 2);
@@ -79,8 +119,14 @@ export async function saveRun(record: RunRecord): Promise<void> {
 }
 
 export async function loadRun(runId: string): Promise<RunRecord | null> {
+  // Id fora do formato nunca foi gravado por `saveRun`: "não existe", sem
+  // tocar o disco. Quem expõe a leitura (rota/tool/comando) valida ANTES para
+  // responder 400/uso inválido em vez de 404.
+  if (!isValidRecordId(runId)) return null;
   try {
-    const data = await fs.readFile(fileFor(runId), 'utf-8');
+    // contenção léxica + realpath (symlink plantado em runs/ não escapa);
+    // EISDIR/EACCES propagam — a rota responde 500 sem derrubar o processo.
+    const data = await readFileInside(runsDir(), `${runId}.json`);
     return normalizeRunRecord(JSON.parse(data));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -168,18 +214,20 @@ export async function markOrphansAsAborted(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function ensureSessionsDir(): Promise<void> {
-  await fs.mkdir(sessionsDir(), { recursive: true });
+  await ensurePrivateRoot();
+  await ensurePrivateDir(sessionsDir());
 }
 
 function sessionFileFor(id: string): string {
-  return path.join(sessionsDir(), `${id}.json`);
+  assertValidRecordId(id, 'id de sessão');
+  return resolveInside(sessionsDir(), `${id}.json`);
 }
 
 const sessionSaveQueues = new Map<string, Promise<unknown>>();
 
 export async function saveSession(record: SessionRecord): Promise<void> {
-  await ensureSessionsDir();
   const target = sessionFileFor(record.id);
+  await ensureSessionsDir();
   const data = JSON.stringify(record, null, 2);
   const prev = sessionSaveQueues.get(record.id) ?? Promise.resolve();
   const job = prev.then(
@@ -195,8 +243,9 @@ export async function saveSession(record: SessionRecord): Promise<void> {
 }
 
 export async function loadSession(id: string): Promise<SessionRecord | null> {
+  if (!isValidRecordId(id)) return null; // ver loadRun
   try {
-    const data = await fs.readFile(sessionFileFor(id), 'utf-8');
+    const data = await readFileInside(sessionsDir(), `${id}.json`);
     return JSON.parse(data) as SessionRecord;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;

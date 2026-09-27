@@ -5,6 +5,7 @@ import { promises as fs, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { listRuns, loadRun, listSessions, loadSession, getDataDir } from '../../storage.js';
+import { isValidRecordId } from '../../pathSafety.js';
 import { listTechniques } from '../../techniques.js';
 import { getLgpdData } from '../../lgpd.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
@@ -157,6 +158,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
 
   const id = parsed.positionals[0];
   if (!id) throw new CliError(`Uso: prompt-builder runs ${sub} <id>`, EXIT.USAGE);
+  // IMPL-024: id fora do formato nem chega ao disco (e não é ecoado).
+  if (!isValidRecordId(id)) throw new CliError('Id de run inválido: use o id listado em `prompt-builder runs list`.', EXIT.USAGE);
   const record = await loadRun(id);
   if (!record) throw new CliError(`Run "${id}" não encontrada em ${getDataDir()}.`, EXIT.USAGE);
 
@@ -402,6 +405,7 @@ export async function cmdSessions(argv: string[]): Promise<number> {
 
   const id = parsed.positionals[0];
   if (!id) throw new CliError(`Uso: prompt-builder sessions ${sub} <id>`, EXIT.USAGE);
+  if (!isValidRecordId(id)) throw new CliError('Id de sessão inválido: use o id listado em `prompt-builder sessions list`.', EXIT.USAGE);
   const record = await loadSession(id);
   if (!record) throw new CliError(`Sessão "${id}" não encontrada.`, EXIT.USAGE);
   const campeao = record.bestPromptByIteration.at(-1);

@@ -14,7 +14,9 @@ import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { PKG_DOCS_DIR, PKG_ROOT, pkgVersion } from '../../paths.js';
+import { PKG_DOCS_DIR, pkgVersion } from '../../paths.js';
+import { assertValidRecordId, publicErrorMessage } from '../../pathSafety.js';
+import { readDocTopic } from './knowledge.js';
 import { setDataDir, loadRun, loadSession } from '../../storage.js';
 import { ensureCatalog } from '../../modelsCache.js';
 import { toExportRow } from '../../modelCaps.js';
@@ -232,8 +234,14 @@ const TOOLS: Tool[] = [
       required: ['id'],
     },
     run: async (args) => {
-      const id = str(args.id) ?? '';
-      const kind = str(args.kind);
+      // IMPL-024: id com '../' (ou fora do formato) é REJEITADO antes de tocar o
+      // disco — a mensagem não ecoa o valor recebido.
+      const id = args.id;
+      assertValidRecordId(id);
+      const kind = args.kind;
+      if (kind !== undefined && kind !== 'run' && kind !== 'session') {
+        throw new Error('kind deve ser "run" ou "session".');
+      }
       if (kind === 'session') return (await loadSession(id)) ?? { error: 'sessão não encontrada' };
       return (await loadRun(id)) ?? (await loadSession(id)) ?? { error: 'não encontrado' };
     },
@@ -257,7 +265,7 @@ const TOOLS: Tool[] = [
       try {
         cfg = parseAgentConfigRaw(args.config);
       } catch (err) {
-        return { ok: false, error: (err as Error).message };
+        return { ok: false, error: publicErrorMessage(err) };
       }
       const budgetUsd = numOf(args.budgetUsd);
       if (budgetUsd === undefined || budgetUsd <= 0) {
@@ -268,7 +276,8 @@ const TOOLS: Tool[] = [
         await ensureCatalog(apiKey);
         rec = await runToCompletion({ ...cfg, budgetUsd }, apiKey, prepareOptsFor(cfg, apiKey));
       } catch (err) {
-        return { ok: false, error: (err as Error).message };
+        // IMPL-024: erro de workspace/executor costuma citar caminho absoluto.
+        return { ok: false, error: publicErrorMessage(err) };
       }
       return { ok: true, runId: rec.id, totalCostUsd: rec.totalCostUsd, agentSummary: agentSummary(rec) };
     },
@@ -289,7 +298,8 @@ const TOOLS: Tool[] = [
       required: ['runId', 'stageIndex', 'contestantId'],
     },
     run: async (args) => {
-      const rec = await loadRun(str(args.runId) ?? '');
+      assertValidRecordId(args.runId, 'runId');
+      const rec = await loadRun(args.runId);
       const stage = rec?.stages[numOf(args.stageIndex) ?? 0];
       const ref = stage?.responses.find(
         (r) => r.contestantId === str(args.contestantId) && r.execution && r.execution.repetition === (numOf(args.repetition) ?? 0),
@@ -311,19 +321,49 @@ const TOOLS: Tool[] = [
       properties: { topic: { type: 'string' } },
     },
     run: async (args) => {
-      const topic = str(args.topic);
-      if (!topic) {
+      if (args.topic === undefined || args.topic === '') {
         const raw = await fs.readFile(path.join(PKG_DOCS_DIR, 'index.json'), 'utf-8');
         return JSON.parse(raw);
       }
-      const file =
-        topic === 'config'
-          ? path.join(PKG_ROOT, 'ARENA-CONFIG.md')
-          : path.join(PKG_DOCS_DIR, `${topic}.md`);
-      return { topic, content: await fs.readFile(file, 'utf-8') };
+      // IMPL-024: tópico por ALLOWLIST (mesma função do `docs` do CLI) — o input
+      // nunca entra num path.join; `{topic:'../README'}` é rejeitado.
+      const lido = await readDocTopic(args.topic);
+      if (!lido.ok) throw new Error(lido.message);
+      return { topic: lido.topic, content: lido.content };
     },
   },
 ];
+
+/** Resultado de `tools/call` (o `result` do JSON-RPC). */
+export interface ToolCallResult {
+  content: { type: 'text'; text: string }[];
+  isError?: boolean;
+}
+
+/**
+ * Executa UMA tool e devolve o `result` do `tools/call`. Exportado para os
+ * testes de contrato (test/security-baseline.test.ts). Erro de ferramenta vai
+ * como resultado com `isError`, não como erro de protocolo: o agente precisa
+ * LER a mensagem para se corrigir — e ela sai sem caminho absoluto (IMPL-024).
+ */
+export async function callTool(
+  name: unknown,
+  args: Record<string, unknown>,
+  getKey: () => Promise<string> = async () => '',
+): Promise<ToolCallResult | null> {
+  const tool = TOOLS.find((t) => t.name === name);
+  if (!tool) return null;
+  try {
+    const key =
+      tool.name === 'read_docs' || tool.name === 'get_result' || tool.name === 'get_agent_dossier'
+        ? ''
+        : await getKey();
+    const out = await tool.run(args, key);
+    return { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] };
+  } catch (err) {
+    return { content: [{ type: 'text', text: publicErrorMessage(err) }], isError: true };
+  }
+}
 
 function send(msg: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(msg)}\n`);
@@ -396,35 +436,19 @@ export async function cmdMcp(argv: string[]): Promise<number> {
           break;
         case 'tools/call': {
           const params = (req.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
-          const tool = TOOLS.find((t) => t.name === params.name);
-          if (!tool) {
-            replyError(req.id, -32602, `Ferramenta desconhecida: ${params.name}`);
+          const result = await callTool(params.name, params.arguments ?? {}, getKey);
+          if (!result) {
+            replyError(req.id, -32602, `Ferramenta desconhecida: ${String(params.name).slice(0, 80)}`);
             break;
           }
-          try {
-            const key =
-              tool.name === 'read_docs' || tool.name === 'get_result' || tool.name === 'get_agent_dossier'
-                ? ''
-                : await getKey();
-            const out = await tool.run(params.arguments ?? {}, key);
-            reply(req.id, {
-              content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],
-            });
-          } catch (err) {
-            // Erro de ferramenta vai como resultado com isError, nao como erro
-            // de protocolo: o agente precisa LER a mensagem para se corrigir.
-            reply(req.id, {
-              content: [{ type: 'text', text: (err as Error).message }],
-              isError: true,
-            });
-          }
+          reply(req.id, result);
           break;
         }
         default:
           if (!isNotification) replyError(req.id, -32601, `Método não suportado: ${req.method}`);
       }
     } catch (err) {
-      if (!isNotification) replyError(req.id, -32603, (err as Error).message);
+      if (!isNotification) replyError(req.id, -32603, publicErrorMessage(err));
     }
   }
 

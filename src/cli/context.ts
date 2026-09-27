@@ -125,6 +125,8 @@ export async function writeStoredKey(key: string): Promise<string> {
   const target = keyFilePath();
   await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
   await fs.writeFile(target, `${key}\n`, { encoding: 'utf-8', mode: 0o600 });
+  // writeFile({mode}) só vale na CRIAÇÃO: uma key antiga 0644 seguiria legível (IMPL-024).
+  await fs.chmod(target, 0o600);
   return target;
 }
 

@@ -28,6 +28,7 @@ import path from 'node:path';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDataDir, listRuns, loadRun } from './storage.js';
+import { isValidRecordId } from './pathSafety.js';
 import { normalizeRunRecord } from './normalize.js';
 import { subscribe } from './events.js';
 import { startRun } from './orchestrator.js';
@@ -157,6 +158,16 @@ function buildExecRef(
 // qualquer pessoa com acesso à rede executaria código na máquina — portão
 // aplicado ANTES de qualquer handler.
 router.use(requireAgentsToken);
+
+// IMPL-024: `:id` decodificado pelo Express (`..%2F`, `%2e%2e`, `..%5C`) nunca
+// chega ao disco — mesma guarda de /v1/benchmark, sem ecoar o valor.
+router.param('id', (_req, res, next, id: unknown) => {
+  if (!isValidRecordId(id)) {
+    res.status(400).json({ error: 'id inválido: use o runId (UUID) devolvido ao criar a run.' });
+    return;
+  }
+  next();
+});
 
 /**
  * GET /doctor — pré-voo do executor (§21.4). Executor presente? versão certa?
