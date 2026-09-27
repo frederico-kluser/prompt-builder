@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { chatCompletion } from './openrouter.js';
+import { chatCompletion, type ChatMessage } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { dedupeAdvanced } from './dedup.js';
 import { renderScenarioRules } from './engine/scenarioRules.js';
@@ -141,11 +141,8 @@ ${brief}
 (Este briefing tem PRIORIDADE na distribuicao dos cenarios.)`;
 }
 
-/** Um lote = uma chamada pedindo `count` cenarios. Falha → excecao (o chamador
- * converte em lote vazio); itens que nao passam no schema sao descartados. */
-async function runBatch(params: {
-  apiKey: string;
-  modelId: string;
+/** Entradas que decidem o TEXTO de um lote (sem transporte: key/modelo/ctx). */
+export interface BatchPromptParams {
   theme: string;
   count: number;
   batchIndex?: number;
@@ -155,13 +152,27 @@ async function runBatch(params: {
   rules?: ScenarioRules;
   coverageInstructionText?: string;
   extraInstruction?: string;
-  timeoutMs?: number;
-  reasoningLevel?: ReasoningLevel;
-  ctx?: RunCtx;
-}): Promise<StageSpec[]> {
+}
+
+/**
+ * Montagem UNICA das mensagens de um lote do gerador — o que esta funcao
+ * devolve e EXATAMENTE o que `runBatch` envia (IMPL-008, bug E5 da R-05).
+ *
+ * O E5 era um system "calculado e descartado": o grounding do perfil era
+ * renderizado numa variavel e a chamada mandava outra expressao. Devolver o
+ * array de mensagens pronto (em vez de pedacos soltos) tira do chamador a
+ * chance de montar o system de novo por fora. Pura e exportada: o Node e a SPA
+ * (shim) usam a mesma, e o teste de contrato compara o que foi ENVIADO com ela.
+ *
+ * Com regras do perfil (F1.3) o grounding real VEM PRIMEIRO (dominio) e o
+ * contrato de saida JSON fecha o system — a regra enriquece, nunca reescreve o
+ * parse. O briefing do usuario e a instrucao de cobertura entram nos DOIS
+ * caminhos: antes, com regras o briefing sumia do system, e sem regras a
+ * lacuna de cobertura sumia do user (perfil com `--targets` e sem `--rules`),
+ * as duas em silencio — a mesma classe de erro do E5.
+ */
+export function buildBatchMessages(params: BatchPromptParams): ChatMessage[] {
   const {
-    apiKey,
-    modelId,
     theme,
     count,
     batchIndex,
@@ -171,52 +182,68 @@ async function runBatch(params: {
     rules,
     coverageInstructionText,
     extraInstruction,
-    timeoutMs,
-    reasoningLevel,
-    ctx,
   } = params;
 
   const sliceLine =
     batchCount && batchCount > 1
       ? `\nEste é o lote ${(batchIndex ?? 0) + 1} de ${batchCount}. Gere itens DISTINTOS entre si e dos demais lotes; varie tipos de tarefa, dificuldade e idioma.`
       : '';
+
+  if (rules) {
+    const rendered = renderScenarioRules(rules, {
+      theme,
+      count,
+      excludePrompts,
+      coverageInstruction: coverageInstructionText,
+    });
+    return [
+      { role: 'system', content: `${rendered.system}\n\n---\n\n${batchSystemPrompt(scenarioBrief)}` },
+      {
+        role: 'user',
+        content: `${rendered.user}\n\nTEMA: ${theme}
+QUANTIDADE: ${count} cenarios${sliceLine}${extraInstruction ?? ''}
+
+Gere os ${count} cenarios em JSON conforme as regras.`,
+      },
+    ];
+  }
+
+  const coverageLine = coverageInstructionText?.trim() ? `\n${coverageInstructionText.trim()}` : '';
   const excludeLine = excludePrompts.length
     ? `\nEVITE perguntas equivalentes a estas já existentes:\n${excludePrompts.map((p) => `- ${p}`).join('\n')}`
     : '';
-
-  // Regras do perfil (F1.3): grounding real VEM PRIMEIRO (domínio), o contrato
-  // de saída JSON fecha o system — a regra enriquece, nunca reescreve o parse.
-  const rendered = rules
-    ? renderScenarioRules(rules, {
-        theme,
-        count,
-        excludePrompts,
-        coverageInstruction: coverageInstructionText,
-      })
-    : undefined;
-  const system = rendered ? `${rendered.system}\n\n---\n\n${BATCH_SYSTEM_PROMPT}` : batchSystemPrompt(scenarioBrief);
-  const userPrompt = rendered
-    ? `${rendered.user}\n\nTEMA: ${theme}
-QUANTIDADE: ${count} cenarios${sliceLine}${extraInstruction ?? ''}
-
-Gere os ${count} cenarios em JSON conforme as regras.`
-    : `TEMA: ${theme}
+  return [
+    { role: 'system', content: batchSystemPrompt(scenarioBrief) },
+    {
+      role: 'user',
+      content: `TEMA: ${theme}
 QUANTIDADE: ${count} cenarios
-${sliceLine}${excludeLine}${extraInstruction ?? ''}
+${sliceLine}${coverageLine}${excludeLine}${extraInstruction ?? ''}
 
-Gere os ${count} cenarios em JSON conforme as regras.`;
+Gere os ${count} cenarios em JSON conforme as regras.`,
+    },
+  ];
+}
+
+/** Um lote = uma chamada pedindo `count` cenarios. Falha → excecao (o chamador
+ * converte em lote vazio); itens que nao passam no schema sao descartados. */
+async function runBatch(
+  params: BatchPromptParams & {
+    apiKey: string;
+    modelId: string;
+    timeoutMs?: number;
+    reasoningLevel?: ReasoningLevel;
+    ctx?: RunCtx;
+  },
+): Promise<StageSpec[]> {
+  const { apiKey, modelId, timeoutMs, reasoningLevel, ctx } = params;
 
   const result = await chatCompletion({
     apiKey,
     modelId,
-    messages: [
-      // `system` (e nao `batchSystemPrompt` direto): com regras de perfil o
-      // grounding renderizado abre o system. O Node descartava as regras aqui
-      // em silencio (a variavel era calculada e ignorada); o motor do web ja
-      // usava `system` — unificado no shim (IMPL-021).
-      { role: 'system', content: system },
-      { role: 'user', content: userPrompt },
-    ],
+    // As mensagens saem prontas de `buildBatchMessages` e vao sem retoque:
+    // nenhum system alternativo e montado aqui (ver E5 acima).
+    messages: buildBatchMessages(params),
     temperature: 0.8,
     timeoutMs: timeoutMs ?? 120_000,
     responseFormatJson: true,
