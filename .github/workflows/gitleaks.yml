@@ -1,0 +1,49 @@
+# Varredura de segredos (IMPL-044 / R-19:REC-10): histórico inteiro + working tree.
+# NÃO reescrevemos histórico (a varredura mede 0 chaves reais e o registry npm é
+# imutável); este job impede que uma chave nova entre. Falsos positivos conhecidos
+# (placeholders `sk-or-v1-FALSA…`/`sk-or-v1-...`) ficam na allowlist de `.gitleaks.toml`.
+# O conteúdo do tarball (dado pessoal/de máquina) é coberto por test/tarball-content.test.ts.
+name: gitleaks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks (histórico + working tree)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # binário pinado + sha256 do release oficial (sem action de terceiros, sem licença)
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # histórico completo: o scan de git precisa de todos os commits
+
+      - name: Instala gitleaks
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tgz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+
+      - name: Histórico (todos os commits de todas as refs)
+        run: |
+          "$RUNNER_TEMP/gitleaks" git . --log-opts="--all" \
+            --config .gitleaks.toml --redact --no-banner -v
+
+      - name: Working tree (arquivos versionados)
+        run: |
+          # só o que o git rastreia; -P copia symlinks como symlinks (.claude/skills)
+          mkdir -p "$RUNNER_TEMP/tree"
+          git ls-files -z | xargs -0 cp -P --parents -t "$RUNNER_TEMP/tree"
+          "$RUNNER_TEMP/gitleaks" dir "$RUNNER_TEMP/tree" \
+            --config .gitleaks.toml --redact --no-banner -v
