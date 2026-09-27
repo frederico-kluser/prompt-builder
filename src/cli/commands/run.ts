@@ -58,6 +58,7 @@ import {
   type FileSpendLedger,
   type MachineBudgetLedger,
 } from '../spendLedger.js';
+import { pruneSpendState } from '../spendGuards.js';
 import { emitRunEvent, emitSessionEventNdjson } from '../ndjson.js';
 import type {
   RunConfig,
@@ -597,6 +598,10 @@ function orphanError(key: string, rec: IdempotencyRecord, status: string | null)
  * devolve quando terminar. NADA e gasto aqui: nem pre-voo, nem rede, nem key.
  * `'released'` = o dono desistiu antes de rodar (ex.: lock recusado) e apagou
  * o registro — o chamador segue como invocacao nova.
+ *
+ * `mode` e o mode EFETIVO da config (o do arquivo, nunca o verbo digitado).
+ * Como a key esta presa ao hash da config — que inclui o mode —, ele e o mesmo
+ * da execucao dona; o id gravado no registro, quando ja existe, desempata.
  */
 async function attachToExisting(
   out: Output,
@@ -605,7 +610,6 @@ async function attachToExisting(
   key: string,
   hash: string,
 ): Promise<number | 'released'> {
-  const ehSessao = mode === 'training';
   const ac = new AbortController();
   const onSigint = (): void => ac.abort('SIGINT');
   process.on('SIGINT', onSigint);
@@ -615,6 +619,7 @@ async function attachToExisting(
       const rec = readIdempotency(dataDir, key);
       if (!rec) return 'released';
       if (rec.configHash !== hash) throw idempotencyConflictError(key, rec, hash);
+      const ehSessao = rec.sessionId ? true : rec.runId ? false : mode === 'training';
       const id = ehSessao ? rec.sessionId : rec.runId;
 
       const terminal = async (): Promise<RunRecord | SessionRecord | null> => {
@@ -627,6 +632,10 @@ async function attachToExisting(
 
       let fim = await terminal();
       if (!fim && !idempotencyOwnerAlive(dataDir, rec)) {
+        // O registro pode ter sido desfeito/trocado entre a leitura e o stat
+        // (o dono desistiu antes de rodar): reavalia do zero, sem veredito.
+        const again = readIdempotency(dataDir, key);
+        if (!again || again.token !== rec.token) continue;
         // O dono pode ter gravado o fim logo antes de sair: uma ultima leitura.
         fim = await terminal();
         if (!fim) {
@@ -693,6 +702,8 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
   // publico antes e so exige a key no fim — e o dry-run roda sem ela.
   const base = buildContext(parsed);
   const { out, values, dataDir } = base;
+  // `command` = o VERBO digitado: so rotula os envelopes de antes da run
+  // (pre-voo, 2º Ctrl-C). O que roda — e o `result` — segue o mode do ARQUIVO.
   const command = COMMAND_BY_MODE[mode];
   const dryRun = values['dry-run'] === true;
   const allowConcurrent = values['allow-concurrent'] === true;
@@ -706,6 +717,13 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
   if (config.mode !== mode && typeof values.config === 'string') {
     out.warn(`o arquivo declara mode "${config.mode}"; usando o do arquivo.`);
   }
+  // Mode EFETIVO (IMPL-031, revisão): run × sessão, runId e o registro da
+  // --idempotency-key seguem o que vai RODAR, nunca o verbo. Com o verbo, um
+  // `train --config compare.json` assinava o bus com runId null (NDJSON sem
+  // nenhum evento) e gravava a key sem id — o reuso virava um run.orphaned
+  // falso e o agente pagava de novo com key nova.
+  const efetivo: RunMode = config.mode;
+  const commandEfetivo = COMMAND_BY_MODE[efetivo];
 
   const budget = resolveBudget(values, (m) => out.warn(m));
   const budgetUsd = budgetUsdOf(budget);
@@ -737,7 +755,7 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
         });
         return EXIT.OK;
       }
-      const r = await attachToExisting(out, dataDir, mode, idemKey, hash);
+      const r = await attachToExisting(out, dataDir, efetivo, idemKey, hash);
       if (r !== 'released') return r;
     }
   }
@@ -813,16 +831,16 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
   // IMPL-031 — registra a key (atomico: de dois processos com a mesma key,
   // exatamente um vence; o outro se ANEXA a ele) e so depois toma o lock da
   // config. Lock recusado desfaz o registro: a run nem comecou.
-  const runId = mode === 'training' ? null : randomUUID();
+  const runId: string | null = efetivo === 'training' ? null : randomUUID();
   let claim: IdempotencyRecord | null = null;
   if (idemKey) {
     for (let tentativa = 0; tentativa < 5 && !claim; tentativa++) {
-      claim = claimIdempotency(dataDir, { key: idemKey, configHash: hash, command, runId, sessionId: null });
+      claim = claimIdempotency(dataDir, { key: idemKey, configHash: hash, command: commandEfetivo, runId, sessionId: null });
       if (claim) break;
       const existente = readIdempotency(dataDir, idemKey);
       if (!existente) continue;
       if (existente.configHash !== hash) throw idempotencyConflictError(idemKey, existente, hash);
-      const r = await attachToExisting(out, dataDir, mode, idemKey, hash);
+      const r = await attachToExisting(out, dataDir, efetivo, idemKey, hash);
       if (r !== 'released') return r;
     }
     if (!claim) {
@@ -837,7 +855,7 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
   let lock: RunLock | null = null;
   try {
     if (!allowConcurrent) {
-      lock = acquireRunLock(dataDir, { command, configHash: hash, runId, idempotencyKey: idemKey });
+      lock = acquireRunLock(dataDir, { command: commandEfetivo, configHash: hash, runId, idempotencyKey: idemKey });
     }
   } catch (err) {
     if (claim) dropIdempotency(dataDir, claim);
@@ -870,10 +888,12 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
 
   // Raiz do ledger da run que TAMBEM reserva no ledger em arquivo da maquina
   // (teto diario somando processos). Vai como `parentLedger`: o teto da run
-  // continua na raiz, com a mesma semantica de antes.
+  // continua na raiz, com a mesma semantica de antes. Antes, o GC do estado
+  // no disco (dias velhos do ledger, keys vencidas) — revisao do IMPL-031.
+  pruneSpendState(dataDir);
   const { root, machine } = openMachineLedger({
     dataDir,
-    label: `${command}${runId ? ` run ${runId}` : ''}`,
+    label: `${commandEfetivo}${runId ? ` run ${runId}` : ''}`,
     budgetUsd: configComOrcamento.budgetUsd,
     signal: ac.signal,
     estimateCall: makeCallEstimator(rep.catalog!.models),
@@ -883,10 +903,9 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
   const guards: SpendGuards = { root, machine, lock, claim, dataDir };
 
   try {
-    if (configComOrcamento.mode === 'training') {
-      return await runTraining(ctx, configComOrcamento, ac.signal, guards);
-    }
-    return await runSingle(ctx, configComOrcamento, ac.signal, runId as string, guards);
+    // `runId` nulo <=> mode efetivo 'training' (sessao: o id nasce no onSession).
+    if (runId === null) return await runTraining(ctx, configComOrcamento, ac.signal, guards);
+    return await runSingle(ctx, configComOrcamento, ac.signal, runId, guards);
   } finally {
     process.off('SIGINT', onSigint);
     stopClaimHeartbeat();

@@ -92,8 +92,9 @@ OUTROS
 
 AGENTES (modo agente — mesmo motor, executor pi)
   agents doctor [--deep] [--container]   pré-voo do executor (canário real com --deep; valida Docker em --container)
-  agents run --config <arq> --budget <usd|none> [--dry-run]
-                           roda a arena de agentes até o fim
+  agents run --config <arq> --budget <usd|none> [--dry-run] [--allow-concurrent]
+                           roda a arena de agentes até o fim (mesmo teto
+                           diário e lock por config dos comandos de run)
   agents show <runId>      record + execuções de agente
   agents list              varre <data-dir>/agent-runs
   agents logs <runId> --stage N --contestant <id>

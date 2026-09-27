@@ -45,7 +45,8 @@ import {
 import { budgetRequiredError, budgetUsdOf, keyRequirement, toRefusal, type BudgetChoice } from '../preflight.js';
 import { CliError, EXIT, failAndExit, fmtUsd, isCliError, renderSpend } from '../output.js';
 import { emitRunEvent } from '../ndjson.js';
-import type { RunRecord, RunConfig } from '../../types.js';
+import { openSpendGuards, spendGuardRefusals, type SpendGuards } from '../spendGuards.js';
+import type { RunRecord, RunConfig, OpenRouterModel } from '../../types.js';
 import type { AgentRunnerConfig, ExecutionRef } from '../../agent/types.js';
 
 /** Versão pinada do executor `pi` (plano §22/§26). Divergência => doctor falha. */
@@ -311,6 +312,8 @@ async function cmdRun(argv: string[]): Promise<number> {
     repetitions: { type: 'string' },
     'max-parallel': { type: 'string' },
     'keep-workspace': { type: 'boolean' },
+    // IMPL-031 (revisão): réplica intencional da mesma config, sem o lock.
+    'allow-concurrent': { type: 'boolean' },
   });
   const ctx = buildContext(parsed);
   const { out, values } = ctx;
@@ -329,8 +332,9 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   // --dry-run: valida, estima COM o catálogo (público sem key — IMPL-029; antes
   // saía sem catálogo e a estimativa dava $0) e espelha as recusas da execução
-  // real de agentes, que são só estas duas: orçamento ausente fora de TTY
-  // (recusa) e key ausente (pré-condição em `requires`). Nada é gasto.
+  // real de agentes: orçamento ausente fora de TTY, lock da mesma config e teto
+  // diário esgotado (recusas, na ordem da real — IMPL-031) e key ausente
+  // (pré-condição em `requires`). Nada é gasto.
   if (values['dry-run'] === true) {
     const apiKey = await tryResolveKey(values);
     let catalog: LoadedCatalog | null = null;
@@ -342,7 +346,15 @@ async function cmdRun(argv: string[]): Promise<number> {
       out.warn(`sem catálogo (${err.message}) — preços dos papéis de LLM saem 0 na estimativa.`);
     }
     const est = estimateRunCost(estimateInputFromConfig(configComOrcamento), catalog?.models ?? []);
-    const wouldRefuse = budget.kind === 'missing' ? [toRefusal(budgetRequiredError())] : [];
+    const guardas = spendGuardRefusals({
+      dataDir: ctx.dataDir,
+      config: applyAgentOverrides(configComOrcamento, values),
+      lock: values['allow-concurrent'] !== true,
+    });
+    const wouldRefuse = [
+      ...(budget.kind === 'missing' ? [toRefusal(budgetRequiredError())] : []),
+      ...guardas.map(toRefusal),
+    ];
     const requires = apiKey ? [] : [keyRequirement()];
     const resumo = {
       dryRun: true,
@@ -391,9 +403,34 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   const runConfigComFlags = applyAgentOverrides(configComOrcamento, values);
 
+  // Catálogo para a reserva otimista do ledger da máquina (sem ele a reserva
+  // por chamada vale 0 e o teto diário só pega DEPOIS do gasto).
+  let modelos: OpenRouterModel[] = [];
+  try {
+    modelos = (await loadCatalog(ctx, apiKey)).models;
+  } catch (err) {
+    if (!isCliError(err)) throw err;
+    out.warn(`sem catálogo (${err.message}) — a reserva do teto diário por chamada fica em 0.`);
+  }
+
   // Ctrl-C: primeiro aborta com elegância (a run finaliza/salva e imprime o
   // parcial), segundo mata. Mesmo padrão do chat (run.ts).
   const ac = new AbortController();
+
+  // IMPL-031 (revisão): a run de agentes passa pelas MESMAS camadas do
+  // compare/vary/train — teto diário da máquina somando processos (ledger em
+  // arquivo, via parentLedger) e lock por config (`run.locked`). Recusa aqui,
+  // antes de gastar (e antes de armar o handler de Ctrl-C).
+  const guards: SpendGuards = openSpendGuards({
+    dataDir: ctx.dataDir,
+    config: runConfigComFlags,
+    command: 'agents run',
+    models: modelos,
+    signal: ac.signal,
+    lock: values['allow-concurrent'] !== true,
+    warn: (m) => out.warn(m),
+  });
+
   let interrupts = 0;
   const onSigint = (): void => {
     interrupts += 1;
@@ -418,16 +455,18 @@ async function cmdRun(argv: string[]): Promise<number> {
     const unsub = subscribe(runId, (e) => emitRunEvent(out, e, { verbose: ctx.verbose }));
     out.info(`agents run ${runId} — ${runConfigComFlags.mode}`);
     try {
-      record = await runToCompletion(
-        runConfigComFlags,
-        apiKey,
-        prepareOptsFor(runConfigComFlags, apiKey, { runId, ctx: { signal: ac.signal } }),
-      );
+      guards.lock?.update({ runId });
+      guards.machine.setLabel(`agents run ${runId}`);
+      record = await runToCompletion(runConfigComFlags, apiKey, {
+        ...prepareOptsFor(runConfigComFlags, apiKey, { runId, ctx: { signal: ac.signal } }),
+        parentLedger: guards.parentLedger,
+      });
     } finally {
       unsub();
     }
   } finally {
     process.off('SIGINT', onSigint);
+    guards.close();
   }
 
   const summary = buildAgentSummary(record);
@@ -455,6 +494,8 @@ async function cmdRun(argv: string[]): Promise<number> {
     standings: record.standings,
     judgeScoreByContestant: record.judgeScoreByContestant,
     ...(summary ? { agentSummary: summary } : {}),
+    // A run parou (ou foi barrada) pelo teto DIÁRIO da máquina, não pelo --budget.
+    ...(guards.machine.capHit ? { dailyCapReached: true } : {}),
   };
   const code = exitFor(record, summary);
   // Falha sai SÓ pelo envelope de erro (resumo em `details`) — antes saía um

@@ -317,6 +317,52 @@ export function dropIdempotency(dataDir: string, rec: IdempotencyRecord): void {
   if (atual?.token === rec.token) unlinkQuietSync(idempotencyFile(dataDir, rec.key));
 }
 
+/**
+ * Validade de um registro de --idempotency-key. Depois dela o registro é
+ * coletado e a mesma key RODA DE NOVO (com gasto) — é o contrato de toda API
+ * idempotente (a key protege retentativas, não um histórico eterno). Sem isso
+ * `<data-dir>/idempotency` crescia para sempre.
+ */
+export const IDEMPOTENCY_TTL_MS = 30 * 24 * 3_600_000;
+
+/** Sobra de escrita interrompida (`*.tmp`) mais velha que isto é lixo. */
+const TMP_LEFTOVER_MS = 24 * 3_600_000;
+
+/**
+ * GC de `<data-dir>/idempotency`: remove registros com mais de `ttlMs` (pelo
+ * mtime) e temporários órfãos. Seguro com runs em voo: o heartbeat mantém o
+ * mtime do registro de um dono vivo fresco (15 s), e ainda assim o dono é
+ * checado antes de apagar. Devolve quantos arquivos saíram. Nunca lança.
+ */
+export function pruneIdempotency(dataDir: string, ttlMs: number = IDEMPOTENCY_TTL_MS, now: number = Date.now()): number {
+  const dir = path.join(dataDir, 'idempotency');
+  let nomes: string[];
+  try {
+    nomes = fs.readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  let removidos = 0;
+  for (const nome of nomes) {
+    const file = path.join(dir, nome);
+    const idade = ageMsSync(file, now);
+    if (!Number.isFinite(idade)) continue;
+    if (nome.endsWith('.tmp')) {
+      if (idade > TMP_LEFTOVER_MS) {
+        unlinkQuietSync(file);
+        removidos += 1;
+      }
+      continue;
+    }
+    if (!nome.endsWith('.json') || idade <= ttlMs) continue;
+    const rec = readJsonSync<IdempotencyRecord>(file);
+    if (rec && ownerAlive({ pid: rec.pid, host: rec.host }, idade, LOCK_STALE_MS)) continue;
+    unlinkQuietSync(file);
+    removidos += 1;
+  }
+  return removidos;
+}
+
 /** O dono do registro ainda está vivo? (PID nesta máquina; heartbeat de outra.) */
 export function idempotencyOwnerAlive(dataDir: string, rec: IdempotencyRecord): boolean {
   return ownerAlive({ pid: rec.pid, host: rec.host }, ageMsSync(idempotencyFile(dataDir, rec.key)), LOCK_STALE_MS);

@@ -27,7 +27,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,9 +39,11 @@ import {
   canonicalJson,
   claimIdempotency,
   configHash,
+  IDEMPOTENCY_TTL_MS,
   idempotencyFile,
   inspectRunLock,
   lockFileFor,
+  pruneIdempotency,
   readIdempotency,
 } from '../src/cli/runLock.js';
 import {
@@ -50,14 +52,16 @@ import {
   DailyCapExceeded,
   FileSpendLedger,
   isDailyCapSignal,
+  LEDGER_KEEP_DAYS,
   nextUtcMidnight,
   openMachineLedger,
+  pruneLedgerDays,
   readDailySnapshot,
   resolveDailyCap,
   utcDay,
   writeDailyCap,
 } from '../src/cli/spendLedger.js';
-import { hostName } from '../src/cli/fileGuard.js';
+import { hostName, withMutexSync } from '../src/cli/fileGuard.js';
 import { isBudgetSignal, isControlSignal } from '../src/budget.js';
 import { createGateway, setDefaultGateway, type FetchLike } from '../src/openrouter.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter, type FakeRequest } from './fakeOpenRouter.js';
@@ -331,6 +335,42 @@ describe('ledger em arquivo (soma processos) e teto diário', () => {
   });
 });
 
+describe('GC do estado anti-gasto no disco (ledger por dia, --idempotency-key)', () => {
+  it('pruneLedgerDays: apaga dias UTC além da janela (pelo NOME), mantém o de hoje e os recentes', () => {
+    const dir = tmp('pb-gc-ledger-');
+    const agora = Date.parse('2026-09-27T12:00:00Z');
+    const led = path.join(dir, 'ledger');
+    mkdirSync(led, { recursive: true });
+    for (const n of ['spend-2026-07-01.json', 'spend-2026-07-01.json.lock', 'spend-2026-08-27.json', 'spend-2026-08-28.json', 'spend-2026-09-27.json', 'outro.txt']) {
+      writeFileSync(path.join(led, n), '{}');
+    }
+    expect(pruneLedgerDays(dir, LEDGER_KEEP_DAYS, agora)).toBe(3);
+    expect(readdirSync(led).sort()).toEqual(['outro.txt', 'spend-2026-08-28.json', 'spend-2026-09-27.json']);
+    expect(pruneLedgerDays(tmp('pb-gc-vazio-'))).toBe(0); // sem diretório: nada, sem lançar
+  });
+
+  it('pruneIdempotency: registro vencido sai (mesmo com PID vivo: sem heartbeat há > TTL é PID reciclado); recente fica; temporário órfão sai', () => {
+    const dir = tmp('pb-gc-idem-');
+    const velho = (Date.now() - IDEMPOTENCY_TTL_MS - 3_600_000) / 1000;
+    const morto = claimIdempotency(dir, { key: 'k-velha', configHash: 'h', command: 'compare', runId: 'r1', sessionId: null })!;
+    writeFileSync(idempotencyFile(dir, 'k-velha'), JSON.stringify({ ...morto, pid: pidMorto() }));
+    utimesSync(idempotencyFile(dir, 'k-velha'), velho, velho);
+    claimIdempotency(dir, { key: 'k-viva-velha', configHash: 'h', command: 'compare', runId: 'r2', sessionId: null });
+    // Dono = este processo (PID vivo), mas sem heartbeat há > TTL: um dono de
+    // verdade renova o mtime a cada 15 s — isto é PID reciclado, sai também.
+    utimesSync(idempotencyFile(dir, 'k-viva-velha'), velho, velho);
+    claimIdempotency(dir, { key: 'k-nova', configHash: 'h', command: 'compare', runId: 'r3', sessionId: null });
+    const tmpOrfao = path.join(dir, 'idempotency', 'x.json.tmp');
+    writeFileSync(tmpOrfao, '{');
+    utimesSync(tmpOrfao, velho, velho);
+    expect(pruneIdempotency(dir)).toBe(3);
+    expect(readIdempotency(dir, 'k-velha')).toBeNull();
+    expect(readIdempotency(dir, 'k-viva-velha')).toBeNull();
+    expect(readIdempotency(dir, 'k-nova')).not.toBeNull();
+    expect(existsSync(tmpOrfao)).toBe(false);
+  });
+});
+
 describe('teto diário: configuração e relógio UTC', () => {
   it('precedência env > arquivo > default (US$ 20); "none" desliga; valor inválido é erro de config', () => {
     const dir = tmp('pb-cap-');
@@ -509,6 +549,71 @@ describe('MÉTRICA — 2 processos concorrentes: custo real ≤ 1,01× a soma do
   });
 });
 
+// --- 2b. mutex entre processos: soma EXATA -------------------------------------------
+//
+// Regressão da revisão: `withMutexSync` perdia a exclusão sob contenção NORMAL
+// (sem dono morto): o lock sumia entre o `open` e o `stat`, a idade de arquivo
+// inexistente valia +Infinity (> staleMs) e o processo apagava o lock NOVO de
+// outro — o read-modify-write do ledger perdia atualizações e o teto diário
+// estourava de forma intermitente (medido: 5864/6000 e 3855/4000 com o código
+// antigo). Aqui a soma tem de ser EXATA: nada de tolerância que mascare o bug
+// como flakiness do teste de métrica.
+
+const MUTEX_WORKER = path.join(ROOT, 'test', 'fixtures', 'mutexWorker.ts');
+
+describe('MUTEX entre processos — soma EXATA sob contenção (N processos × M operações)', { timeout: 180_000 }, () => {
+  async function largar(n: number, cfg: (i: number) => Record<string, unknown>): Promise<void> {
+    const barrier = path.join(tmp('pb-mx-barrier-'), 'b');
+    const procs = Array.from({ length: n }, (_, i) =>
+      spawnTsx([MUTEX_WORKER, JSON.stringify({ ...cfg(i), label: `p${i}`, barrier })], { ...process.env }).done,
+    );
+    await ateQue(() => Array.from({ length: n }, (_, i) => existsSync(`${barrier}.ready-p${i}`)).every(Boolean), 60_000, 'operários prontos');
+    writeFileSync(`${barrier}.go`, '');
+    for (const r of await Promise.all(procs)) expect(r.status, r.stderr).toBe(0);
+  }
+
+  it('withMutexSync: 4 processos × 2000 incrementos = 8000 exatos', async () => {
+    const dir = tmp('pb-mx-');
+    const counter = path.join(dir, 'contador.json');
+    await largar(4, () => ({ mode: 'mutex', dataDir: dir, counter, ops: 2000 }));
+    expect(JSON.parse(readFileSync(counter, 'utf-8'))).toEqual({ n: 8000 });
+    expect(existsSync(`${counter}.lock`)).toBe(false);
+  });
+
+  it('FileSpendLedger: 4 processos × 800 reserve/settle — calls e gasto EXATOS, nada pendente', async () => {
+    const dir = tmp('pb-mx-ledger-');
+    await largar(4, () => ({ mode: 'ledger', dataDir: dir, counter: path.join(dir, 'x'), ops: 800, costUsd: 0.001 }));
+    const [arquivo] = readdirSync(path.join(dir, 'ledger')).filter((n) => /^spend-.*\.json$/.test(n));
+    const d = JSON.parse(readFileSync(path.join(dir, 'ledger', arquivo), 'utf-8')) as {
+      entries: Record<string, { calls: number; spentUsd: number; pendingUsd: number }>;
+    };
+    const es = Object.values(d.entries);
+    expect(es).toHaveLength(4);
+    for (const e of es) {
+      expect(e.calls).toBe(800);
+      expect(e.pendingUsd).toBeCloseTo(0, 12);
+    }
+    expect(es.reduce((s, e) => s + e.calls, 0)).toBe(3200);
+    expect(ledgerTotal(dir)).toBeCloseTo(3.2, 9);
+  });
+
+  it('lock FRESCO de outro dono nunca é apagado (timeout, arquivo intacto); lock VELHO (dono morto) é quebrado', () => {
+    const dir = tmp('pb-mx-unit-');
+    const lock = path.join(dir, 'x.lock');
+    writeFileSync(lock, 'outro-dono token-fresco');
+    let rodou = false;
+    expect(() => withMutexSync(lock, () => (rodou = true), { timeoutMs: 150 })).toThrow(/Não consegui o lock/);
+    expect(rodou).toBe(false);
+    expect(readFileSync(lock, 'utf-8')).toBe('outro-dono token-fresco');
+
+    const velho = (Date.now() - 60_000) / 1000;
+    utimesSync(lock, velho, velho);
+    expect(withMutexSync(lock, () => 42, { staleMs: 10_000, timeoutMs: 2_000 })).toBe(42);
+    // Soltou o PRÓPRIO lock e não deixou sobra (nem a guarda de quebra).
+    expect(readdirSync(dir)).toEqual([]);
+  });
+});
+
 // --- 3. CLI em processo -----------------------------------------------------------
 
 const CENARIOS = [
@@ -560,9 +665,17 @@ interface Invocacao {
   errorCode?: string;
   details?: unknown;
   json?: { ok: boolean; data: Record<string, unknown> };
+  /** `formato: 'ndjson'`: uma linha (evento) por item, na ordem do stdout. */
+  linhas?: Record<string, unknown>[];
 }
 
-async function invocar(fake: FakeOpenRouter, dir: string, argv: string[], mode: 'compare' | 'training' = 'compare'): Promise<Invocacao> {
+async function invocar(
+  fake: FakeOpenRouter,
+  dir: string,
+  argv: string[],
+  mode: 'compare' | 'training' = 'compare',
+  formato: 'json' | 'ndjson' = 'json',
+): Promise<Invocacao> {
   const prev = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));
   resetOutputState();
   const out: string[] = [];
@@ -574,7 +687,12 @@ async function invocar(fake: FakeOpenRouter, dir: string, argv: string[], mode: 
   const cl = vi.spyOn(console, 'log').mockImplementation(() => undefined);
   const cw = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   try {
-    const exit = await cmdRun(mode, [...argv, '--data-dir', dir, '--json']);
+    const fmt = formato === 'json' ? ['--json'] : ['--output-format', 'ndjson'];
+    const exit = await cmdRun(mode, [...argv, '--data-dir', dir, ...fmt]);
+    if (formato === 'ndjson') {
+      const linhas = out.join('').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+      return { exit, linhas };
+    }
     return { exit, json: JSON.parse(out.join('')) as Invocacao['json'] };
   } catch (e) {
     const err = toCliError(e);
@@ -588,6 +706,25 @@ async function invocar(fake: FakeOpenRouter, dir: string, argv: string[], mode: 
     setDefaultGateway(prev);
   }
 }
+
+const TRAIN_CONFIG = {
+  mode: 'training',
+  theme: 'suporte ao cliente',
+  stages: 2,
+  datagenModelId: 'fake/gen',
+  judgeModelIds: ['fake/judge'],
+  referenceModelId: 'fake/ref',
+  referenceJudging: true,
+  contestantModelId: 'fake/a',
+  basePrompt: 'Voce e um atendente de suporte. Responda com base no contexto do produto.',
+  techniqueIds: ['persona', 'constraints'],
+  promptOptimization: true,
+  optimizerModelId: 'fake/opt',
+  iterations: 2,
+  holdoutRatio: 0,
+  finalists: 2,
+  timeoutMs: 60_000,
+};
 
 describe('CLI em processo — a run inteira passa pelo ledger da máquina', { timeout: 60_000 }, () => {
   afterEach(() => {
@@ -723,6 +860,60 @@ describe('CLI em processo — a run inteira passa pelo ledger da máquina', { ti
     expect(r.errorCode).toBe('run.orphaned');
     expect(fake.billedCalls()).toBe(0);
   });
+
+  it('verbo do CLI ≠ mode do arquivo (`train --config compare.json`): segue o mode EFETIVO — NDJSON com os eventos da run, key com o runId e o reuso devolve a MESMA run', async () => {
+    const dir = tmp('pb-cli-verbo-');
+    const fake = fakeOpenRouter({ catalog: CATALOGO, chat: rotaDoPipeline });
+    const argv = ['--config', configFile(dir), '--budget', '5', '--yes', '--force', '--key', VALID_KEY, '--idempotency-key', 'verbo-1'];
+    const nd = await invocar(fake, dir, argv, 'training', 'ndjson');
+    expect(nd.exit, JSON.stringify(nd)).toBe(EXIT.OK);
+    const tipos = nd.linhas!.map((l) => l.type);
+    // Antes: runId null no subscribe → só `start` + `result`, nenhum evento da run.
+    for (const t of ['run.started', 'stage.generated', 'stage.judged', 'run.finished']) expect(tipos, tipos.join(',')).toContain(t);
+    // Linha `result` do NDJSON: o payload vem espalhado na raiz da linha.
+    const resultado = nd.linhas!.at(-1) as { type: string; command: string; runId: string };
+    expect(resultado.type).toBe('result');
+    expect(resultado.command).toBe('compare'); // o resultado leva o mode que RODOU (o do arquivo)
+    const runId = resultado.runId;
+    expect(typeof runId).toBe('string');
+    expect(nd.linhas!.find((l) => l.type === 'run.started')).toMatchObject({ runId });
+    // O registro da key grava o id do que RODOU (run), não o do verbo (sessão).
+    expect(readIdempotency(dir, 'verbo-1')).toMatchObject({ runId, sessionId: null, command: 'compare' });
+    // O lançamento do ledger da máquina também leva o id da run.
+    expect(readDailySnapshot(dir).entries[0].label).toContain(runId);
+
+    // Mesma key, mesmo verbo divergente: REUSA na hora (antes: run.orphaned
+    // falso depois de ~2 min, e o agente pagava de novo com key nova).
+    const chamadas = fake.billedCalls();
+    const again = await invocar(fake, dir, argv, 'training');
+    expect(again.exit, JSON.stringify(again)).toBe(EXIT.OK);
+    expect(again.json!.data.runId).toBe(runId);
+    expect(again.json!.data.idempotency).toEqual({ key: 'verbo-1', reused: true, attached: false });
+    // O verbo que o agente digitou não muda o reuso: com o certo, idem.
+    const certo = await invocar(fake, dir, argv, 'compare');
+    expect(certo.exit).toBe(EXIT.OK);
+    expect(certo.json!.data.runId).toBe(runId);
+    expect(fake.billedCalls()).toBe(chamadas);
+  });
+
+  it('o inverso (`compare --config train.json`): roda a SESSÃO, a key grava o sessionId e o reuso devolve a mesma sessão', async () => {
+    const dir = tmp('pb-cli-verbo-inv-');
+    const fake = fakeOpenRouter({ catalog: CATALOGO, chat: rotaDoPipeline });
+    const f = path.join(dir, 'train.json');
+    writeFileSync(f, JSON.stringify(TRAIN_CONFIG));
+    const argv = ['--config', f, '--budget', '5', '--yes', '--force', '--key', VALID_KEY, '--idempotency-key', 'verbo-2'];
+    const a = await invocar(fake, dir, argv, 'compare');
+    expect(a.exit, JSON.stringify(a)).toBe(EXIT.OK);
+    const sessionId = a.json!.data.sessionId as string;
+    expect(typeof sessionId).toBe('string');
+    expect(readIdempotency(dir, 'verbo-2')).toMatchObject({ sessionId, runId: null, command: 'train' });
+    const chamadas = fake.billedCalls();
+    const b = await invocar(fake, dir, argv, 'compare');
+    expect(b.exit, JSON.stringify(b)).toBe(EXIT.OK);
+    expect(b.json!.data.sessionId).toBe(sessionId);
+    expect(b.json!.data.idempotency).toEqual({ key: 'verbo-2', reused: true, attached: false });
+    expect(fake.billedCalls()).toBe(chamadas);
+  });
 });
 
 // --- 4. CLI com 2 processos reais ---------------------------------------------------
@@ -758,11 +949,45 @@ describe('CLI — 2 processos reais (tsx) contra OpenRouter falso em 127.0.0.1',
     await srv.close();
   });
 
-  function cli(home: string, args: string[], extraEnv: Record<string, string> = {}) {
-    const env: NodeJS.ProcessEnv = { ...process.env, PROMPT_BUILDER_HOME: home, OPENROUTER_BASE_URL: srv.base, CI: '1', ...extraEnv };
+  function envCli(home: string, extraEnv: Record<string, string> = {}): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = { ...process.env, PROMPT_BUILDER_HOME: home, OPENROUTER_BASE_URL: srv.base, CI: '1' };
     delete env.OPENROUTER_API_KEY;
     delete env[DAILY_CAP_ENV];
-    return spawnTsx([ENTRY, ...args], env);
+    // `extraEnv` por ÚLTIMO: um teste pode ligar o teto diário por env.
+    return { ...env, ...extraEnv };
+  }
+
+  function cli(home: string, args: string[], extraEnv: Record<string, string> = {}) {
+    return spawnTsx([ENTRY, ...args], envCli(home, extraEnv));
+  }
+
+  /**
+   * Servidor MCP REAL (`prompt-builder mcp`, stdio): manda as requisições
+   * JSON-RPC, fecha o stdin e devolve as respostas (uma por `id`).
+   */
+  async function mcp(home: string, calls: { name: string; arguments: Record<string, unknown> }[]): Promise<{
+    status: number | null;
+    stderr: string;
+    respostas: { id: number; result?: { content: { text: string }[]; isError?: boolean } }[];
+  }> {
+    const child = spawn(TSX, [ENTRY, 'mcp', '--key', VALID_KEY], { env: envCli(home) });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d: Buffer) => (stdout += d.toString('utf-8')));
+    child.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf-8')));
+    const done = new Promise<number | null>((resolve) => child.on('close', resolve));
+    const linhas = [
+      { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18' } },
+      ...calls.map((c, i) => ({ jsonrpc: '2.0', id: i + 1, method: 'tools/call', params: c })),
+    ];
+    child.stdin.end(linhas.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    const status = await done;
+    const respostas = stdout
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as { id: number; result?: { content: { text: string }[]; isError?: boolean } })
+      .filter((r) => r.id !== 0);
+    return { status, stderr, respostas };
   }
 
   function envelope(r: ProcRun): { ok: boolean; data?: Record<string, unknown>; error?: { code: string; kind: string; details: Record<string, unknown> } } {
@@ -900,5 +1125,59 @@ describe('CLI — 2 processos reais (tsx) contra OpenRouter falso em 127.0.0.1',
     const bad = await cli(home, ['limits', 'set', '--daily', 'muito', '--json']).done;
     expect(bad.status).toBe(EXIT.USAGE);
     expect(envelope(bad).error!.code).toBe('usage.invalid_daily_cap');
+  });
+
+  it('MCP `run_benchmark` passa pelas MESMAS camadas: o gasto entra no ledger do dia (== fatura) e o teto diário esgotado barra a tool antes de gastar', async () => {
+    const home = tmp('pb-mcp-');
+    const antes = fake.billedUsd();
+    const r = await mcp(home, [{ name: 'run_benchmark', arguments: { config: PIPE_CONFIG, budgetUsd: 5 } }]);
+    expect(r.status, r.stderr).toBe(0);
+    const [resp] = r.respostas;
+    expect(resp.result!.isError, resp.result!.content[0].text).toBeFalsy();
+    const out = JSON.parse(resp.result!.content[0].text) as { runId: string; totalCostUsd: number; dailyCapReached?: boolean };
+    const gasto = fake.billedUsd() - antes;
+    expect(gasto).toBeGreaterThan(0);
+    expect(out.totalCostUsd).toBeCloseTo(gasto, 10);
+    // Antes: runToCompletion sem parentLedger — o ledger da máquina nem soube.
+    expect(ledgerTotal(home)).toBeCloseTo(gasto, 10);
+    const snap = readDailySnapshot(home);
+    expect(snap.entries.map((e) => e.label).join(',')).toContain('mcp run_benchmark');
+    expect(snap.pendingUsd).toBeCloseTo(0, 12);
+    expect(out.dailyCapReached).toBeUndefined();
+    expect(locks(home)).toEqual([]); // o lock da config foi solto no fim
+
+    // Teto diário já comido (pelo gasto acima + outro processo): a tool recusa
+    // ANTES de gastar, com a mensagem do teto — o agente via MCP não passa.
+    writeDailyCap(home, gasto + 0.01);
+    const outro = new FileSpendLedger({ dataDir: home, cap: { capUsd: gasto + 0.01, source: 'file' }, label: 'outro processo' });
+    outro.settle(outro.reserve(0.01), 0.01);
+    const chamadas = fake.billedCalls();
+    const barrado = await mcp(home, [{ name: 'run_benchmark', arguments: { config: PIPE_CONFIG, budgetUsd: 5 } }]);
+    expect(barrado.status, barrado.stderr).toBe(0);
+    expect(barrado.respostas[0].result!.isError).toBe(true);
+    expect(barrado.respostas[0].result!.content[0].text).toMatch(/teto diário/i);
+    expect(fake.billedCalls()).toBe(chamadas);
+  });
+
+  it('doctor com teto diário INVÁLIDO (env ou limits.json): exit 3 config.invalid_daily_cap — o mesmo com que toda run sai —, com o relatório em details', async () => {
+    keyData = { label: 'fake', usage: 0, limit: 10, limit_remaining: 10, limit_reset: 'daily' };
+    const home = tmp('pb-doctor-cap-');
+    const r = await cli(home, ['doctor', '--json', '--key', VALID_KEY], { [DAILY_CAP_ENV]: 'abc' }).done;
+    expect(r.status, r.stderr).toBe(EXIT.CONFIG);
+    const e = envelope(r);
+    expect(e.error!.code).toBe('config.invalid_daily_cap');
+    expect((e.error!.details.checks as Record<string, unknown>).dailyCap).toMatch(/^inválido/);
+    // A run com o mesmo teto sai com o MESMO código (paridade doctor × run).
+    const run = await cli(home, ['compare', '--config', configFile(home), '--budget', '5', '--yes', '--key', VALID_KEY, '--json'], {
+      [DAILY_CAP_ENV]: 'abc',
+    }).done;
+    expect(run.status).toBe(EXIT.CONFIG);
+    expect(envelope(run).error!.code).toBe('config.invalid_daily_cap');
+
+    const home2 = tmp('pb-doctor-cap-file-');
+    writeFileSync(path.join(home2, 'limits.json'), '{"dailyCapUsd": "muito"}');
+    const r2 = await cli(home2, ['doctor', '--json', '--key', VALID_KEY]).done;
+    expect(r2.status, r2.stderr).toBe(EXIT.CONFIG);
+    expect(envelope(r2).error!.code).toBe('config.invalid_daily_cap');
   });
 });

@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { PKG_DOCS_DIR, PKG_ROOT, pkgVersion } from '../../paths.js';
-import { setDataDir, loadRun, loadSession } from '../../storage.js';
+import { setDataDir, getDataDir, loadRun, loadSession } from '../../storage.js';
 import { ensureCatalog } from '../../modelsCache.js';
 import { toExportRow } from '../../modelCaps.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
@@ -28,6 +28,9 @@ import { prepareOptsFor } from '../../prepareRun.js';
 import { trainToCompletion } from '../../trainer.js';
 import { resolveHome, resolveKey, parse } from '../context.js';
 import { EXIT } from '../output.js';
+// IMPL-031 (revisão): as tools que GASTAM passam pelas mesmas camadas do CLI —
+// ledger da máquina (teto diário somando processos) e lock por config.
+import { withSpendGuards } from '../spendGuards.js';
 import type { RunConfig, RunRecord } from '../../types.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
@@ -167,19 +170,23 @@ const TOOLS: Tool[] = [
       if (base.mode === 'training') {
         throw new Error('Use train_prompt para o modo training.');
       }
-      await ensureCatalog(apiKey);
+      const cat = await ensureCatalog(apiKey);
       const cfg: RunConfig = { ...base, budgetUsd };
-      const rec = await runToCompletion(cfg, apiKey, prepareOptsFor(cfg, apiKey));
-      return {
-        runId: rec.id,
-        status: rec.status,
-        totalCostUsd: rec.totalCostUsd,
-        costByRole: rec.costByRole,
-        budgetExhausted: Boolean(rec.budgetExhausted),
-        stoppedAtPhase: rec.stoppedAtPhase,
-        standings: rec.standings,
-        judgeScoreByContestant: rec.judgeScoreByContestant,
-      };
+      const guard = { dataDir: getDataDir(), config: cfg, command: 'mcp run_benchmark', models: cat.models };
+      return withSpendGuards(guard, async (g) => {
+        const rec = await runToCompletion(cfg, apiKey, { ...prepareOptsFor(cfg, apiKey), parentLedger: g.parentLedger });
+        return {
+          runId: rec.id,
+          status: rec.status,
+          totalCostUsd: rec.totalCostUsd,
+          costByRole: rec.costByRole,
+          budgetExhausted: Boolean(rec.budgetExhausted),
+          stoppedAtPhase: rec.stoppedAtPhase,
+          standings: rec.standings,
+          judgeScoreByContestant: rec.judgeScoreByContestant,
+          ...(g.machine.capHit ? { dailyCapReached: true } : {}),
+        };
+      });
     },
   },
   {
@@ -202,22 +209,27 @@ const TOOLS: Tool[] = [
         throw new Error('budgetUsd é obrigatório e deve ser maior que zero.');
       }
       if (base.mode !== 'training') throw new Error('config.mode precisa ser "training".');
-      await ensureCatalog(apiKey);
-      const rec = await trainToCompletion({ ...base, budgetUsd }, apiKey);
-      const campeao = rec.bestPromptByIteration.at(-1);
-      return {
-        sessionId: rec.id,
-        status: rec.status,
-        totalCostUsd: rec.totalCostUsd,
-        costByRole: rec.costByRole,
-        iterationsDone: rec.bestPromptByIteration.length,
-        championPrompt: campeao?.systemPrompt,
-        holdout: rec.holdout,
-        significance: rec.significance,
-        // Sem o holdout o ganho NAO esta validado contra sobreajuste.
-        holdoutSkipped: Boolean(rec.holdoutSkipped),
-        budgetExhausted: Boolean(rec.budgetExhausted),
-      };
+      const cat = await ensureCatalog(apiKey);
+      const cfg = { ...base, budgetUsd };
+      const guard = { dataDir: getDataDir(), config: cfg, command: 'mcp train_prompt', models: cat.models };
+      return withSpendGuards(guard, async (g) => {
+        const rec = await trainToCompletion(cfg, apiKey, { parentLedger: g.parentLedger });
+        const campeao = rec.bestPromptByIteration.at(-1);
+        return {
+          sessionId: rec.id,
+          status: rec.status,
+          totalCostUsd: rec.totalCostUsd,
+          costByRole: rec.costByRole,
+          iterationsDone: rec.bestPromptByIteration.length,
+          championPrompt: campeao?.systemPrompt,
+          holdout: rec.holdout,
+          significance: rec.significance,
+          // Sem o holdout o ganho NAO esta validado contra sobreajuste.
+          holdoutSkipped: Boolean(rec.holdoutSkipped),
+          budgetExhausted: Boolean(rec.budgetExhausted),
+          ...(g.machine.capHit ? { dailyCapReached: true } : {}),
+        };
+      });
     },
   },
   {
@@ -264,13 +276,26 @@ const TOOLS: Tool[] = [
         return { ok: false, error: 'budgetUsd é obrigatório e deve ser maior que zero.' };
       }
       let rec: RunRecord;
+      let dailyCapReached = false;
       try {
-        await ensureCatalog(apiKey);
-        rec = await runToCompletion({ ...cfg, budgetUsd }, apiKey, prepareOptsFor(cfg, apiKey));
+        const cat = await ensureCatalog(apiKey);
+        const cfgB: RunConfig = { ...cfg, budgetUsd };
+        const guard = { dataDir: getDataDir(), config: cfgB, command: 'mcp run_agent_benchmark', models: cat.models };
+        rec = await withSpendGuards(guard, async (g) => {
+          const r = await runToCompletion(cfgB, apiKey, { ...prepareOptsFor(cfg, apiKey), parentLedger: g.parentLedger });
+          dailyCapReached = g.machine.capHit;
+          return r;
+        });
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
-      return { ok: true, runId: rec.id, totalCostUsd: rec.totalCostUsd, agentSummary: agentSummary(rec) };
+      return {
+        ok: true,
+        runId: rec.id,
+        totalCostUsd: rec.totalCostUsd,
+        agentSummary: agentSummary(rec),
+        ...(dailyCapReached ? { dailyCapReached: true } : {}),
+      };
     },
   },
   {
