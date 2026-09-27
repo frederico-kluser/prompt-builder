@@ -1220,9 +1220,11 @@ describe('IMPL-042 (revisão 2) — reversão fora do caminho de envio: o token 
     expect(pii.runPiiRefusal(check)).toBeNull(); // só "aviso": nem pede revisão
     expect(check.warnings.map((w) => w.path)).toEqual(['basePrompt']);
 
-    // O reescritor devolve o prompt que RECEBEU (com os tokens) reescrito.
+    // O reescritor devolve o prompt que RECEBEU (com os tokens) reescrito; o juiz
+    // do diff do contrato (IMPL-011, camada 2 do neverBreak) diz "nada violado".
     const fake = fakeOpenRouter({
       chat: (req) => {
+        if (req.system.includes('"violacoes"')) return { text: '{"violacoes":[]}' };
         const base = /<prompt_base>\n([\s\S]*?)\n<\/prompt_base>/.exec(req.user)?.[1] ?? '';
         return { text: `Seja sempre cordial e preciso. ${base} Nunca invente prazos.` };
       },
@@ -1246,7 +1248,10 @@ describe('IMPL-042 (revisão 2) — reversão fora do caminho de envio: o token 
     });
 
     const reqs = fake.chatRequests();
-    expect(reqs).toHaveLength(2); // uma por técnica, sem retry: nenhum contrato quebrou
+    // Uma reescrita + um juiz do diff por técnica, sem retry: nenhum contrato quebrou.
+    // O juiz também só vê token (reescrita e invariantes re-tokenizadas no mesmo cofre).
+    expect(reqs.filter((r) => !r.system.includes('"violacoes"'))).toHaveLength(2);
+    expect(reqs.filter((r) => r.system.includes('"violacoes"'))).toHaveLength(2);
     for (const req of reqs) {
       const corpo = JSON.stringify(req.body);
       for (const cru of [TEL, '3071-4455', MAIL, CNPJ]) expect(corpo).not.toContain(cru);
