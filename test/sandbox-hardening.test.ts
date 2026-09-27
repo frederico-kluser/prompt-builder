@@ -414,7 +414,8 @@ describe('erro do provedor ≠ execução concluída', () => {
       expect(res.repResults[0].oracle?.score).toBe(0);
       expect(res.repResults[0].verdict).toBeNull();
       expect(res.repResults[0].execution.infraError).toBe('Connection error.');
-      expect(res.incomplete).toBe(true);
+      // IMPL-032: `incomplete` é só controle; a rep sai do placar por não ter veredito.
+      expect(res.incomplete).toBe(false);
     } finally {
       setDataDir(anterior);
     }
@@ -1036,7 +1037,7 @@ describe.runIf(dockerReady && piImageId !== null)('Docker real: execução endur
         expect(r0.execution.infraError).toMatch(/502|upstream/i);
         expect(r0.oracle?.score).toBe(0);
         expect(r0.verdict).toBeNull();
-        expect(res.incomplete).toBe(true);
+        expect(res.incomplete).toBe(false); // IMPL-032: incomplete só por controle
         // A causa e a dica acionável (o log redigido do proxy) chegam a quem lê a resposta.
         expect(res.response.status).toBe('error');
         expect(res.response.errorMsg).toMatch(/proxy de inferência local/);

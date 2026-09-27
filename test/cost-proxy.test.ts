@@ -856,7 +856,10 @@ describe('runAgentStage — freio e custo medido pelo proxy da run', () => {
       const r0 = res.repResults[0];
       expect(gw.seen[0].costBrake).toBeDefined();
       expect(r0.stopReason).toBe('maxCost');
-      expect(r0.verdict).toBeNull(); // cortada, sem oráculo ⇒ fora do placar (nunca 'nao')
+      // IMPL-032: corte por limite (o freio do teto da EXECUÇÃO) é 'nao' e fica no
+      // denominador — tirá-lo recriava o viés de sobrevivência.
+      expect(r0.verdict).toBe('nao');
+      expect(r0.path).toBe('limit-cut');
       expect(r0.execution.infraError).toBeUndefined();
       expect(r0.costUsd).toBeCloseTo(0.08, 12);
       expect(res.response.costUsd).toBeCloseTo(0.08, 12);

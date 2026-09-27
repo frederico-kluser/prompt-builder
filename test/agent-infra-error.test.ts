@@ -101,6 +101,7 @@ function fakeOutcome(passo: Passo, modelId: string) {
 }
 
 import { decideInfraError, isOracleConclusive } from '../src/agent/infraError.js';
+import { agentStageProvenance } from '../src/agent/verdictTree.js';
 import { runAgentStage, type AgentGateway, type RunAgentStageParams } from '../src/agent/runAgentStage.js';
 import { createGateway, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
 import { getDataDir, setDataDir } from '../src/storage.js';
@@ -225,7 +226,10 @@ describe('runAgentStage — erro de infra fica FORA do placar (nunca nao)', () =
       expect(res.repResults[0].stopReason).toBe('error');
       expect(res.repResults[0].explanation).toContain(CONN);
       expect(res.repResults[0].execution.infraError).toBe(CONN);
-      expect(res.incomplete).toBe(true);
+      // IMPL-032: `incomplete` é só controle (cancelamento); a rep sem veredito
+      // por infra fica fora do placar pela AUSÊNCIA de veredito, com o motivo.
+      expect(res.incomplete).toBe(false);
+      expect(res.repResults[0].infraError).toContain(CONN);
       expect(res.response.status).toBe('error');
       expect(res.response.errorMsg).toContain(CONN);
       expect(f.chatRequests()).toHaveLength(0);
@@ -237,7 +241,7 @@ describe('runAgentStage — erro de infra fica FORA do placar (nunca nao)', () =
       const res = await runAgentStage(params({ verify: VERIFY }, gatewayFalso(infra())));
       expect(res.repResults[0].oracle?.score).toBe(0);
       expect(res.repResults[0].verdict).toBeNull();
-      expect(res.incomplete).toBe(true);
+      expect(res.incomplete).toBe(false); // IMPL-032: incomplete só por controle
     });
   });
 
@@ -357,5 +361,19 @@ describe('pipeline Node — container sem rota até o provedor não inventa nao'
         expect(rb.execution?.infraError).toBe(CONN);
       }
     });
+  });
+});
+
+describe('integração IMPL-036 × IMPL-004/033 — procedência da rep sem veredito por infra', () => {
+  it('rep sem veredito por erro de infra => competitor_error (papel do executor), não falha do juiz', () => {
+    const p = agentStageProvenance([
+      { path: 'error', verdict: null, explanation: 'x', infraError: `erro de infraestrutura (${CONN})` },
+    ]);
+    expect(p).toEqual({ error: { kind: 'competitor_error', message: `erro de infraestrutura (${CONN})` } });
+    // Juiz que falhou continua sendo do juiz.
+    const j = agentStageProvenance([
+      { path: 'no-oracle-judge', verdict: null, explanation: 'x', judgeError: { kind: 'judge_failed', message: 'HTTP 400' } },
+    ]);
+    expect(j.error?.kind).toBe('judge_failed');
   });
 });

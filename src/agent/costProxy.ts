@@ -573,7 +573,9 @@ export function createRunCostMeter(opts: RunCostMeterOptions = {}): RunCostMeter
     if (exec && prior) return refuse(ex, exec, prior);
 
     const promptTokens = promptTokensFromBytes(ex.contentLength);
-    const floor = computeCost(promptTokens, 0, catalog.get(modelId));
+    // Preço desconhecido/modelo fora do catálogo (IMPL-018: `null`, nunca 0 "grátis")
+    // não dá piso: a projeção fica com o que já se mediu (ou 0 na 1ª chamada).
+    const floor = computeCost(promptTokens, 0, catalog.get(modelId)) ?? 0;
     const projectedUsd = projectCallCost(exec?.stats, byModel.get(modelId), floor);
 
     // 1) Teto da EXECUÇÃO — antes de ir ao provedor.

@@ -469,7 +469,12 @@ describe('IMPL-042 (3) — prova ESTÁTICA: o ponto único é o único caminho a
     const quem = [...arquivosTs(join(ROOT, 'src')), ...arquivosTs(join(ROOT, 'web', 'src'))]
       .filter((f) => readFileSync(f, 'utf8').includes('/chat/completions'))
       .map((f) => f.slice(ROOT.length));
-    expect(quem).toEqual(['src/openrouter.ts']);
+    // Exceção CONHECIDA e única (IMPL-037): o proxy de inferência do modo agente
+    // repassa as chamadas do PRÓPRIO agente (a key fica nele). O modo agente não
+    // passa pela cascata no envio — por isso o pré-voo RECUSA dado pessoal de
+    // aparência real em run de agente sem exceção (runConfigSchema/enforceRunCompliance).
+    // Qualquer OUTRO arquivo aqui é um caminho novo fora do ponto único.
+    expect(quem.sort()).toEqual(['src/agent/inferenceProxy.ts', 'src/openrouter.ts']);
   });
 
   it('em src/openrouter.ts todo POST de chat usa o corpo de buildBody, e buildBody passa pela cascata', () => {

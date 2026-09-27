@@ -256,7 +256,7 @@ function summarizeResponse(rep: AgentRepResult): string {
  * julgamento de cada uma. Ver fluxo em §10 do plano.
  */
 export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgentStageResult> {
-  const { runId, contestant, stage, agentConfig, apiKey, dataDir, forcedPromptMode } = opts;
+  const { runId, stageIndex, contestant, stage, agentConfig, apiKey, dataDir, forcedPromptMode } = opts;
   const gateway = opts.gateway ?? DEFAULT_GATEWAY;
   const task = stage.agentTask;
   const judgeModelIds = opts.judgeModelIds ?? [];
@@ -342,10 +342,12 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
     meterLease.release();
     if (isControlSignal(err)) throw err;
     const errorMsg = `Falha ao subir o proxy de inferência local: ${(err as Error).message}`;
+    // Mesma regra do executor que não preparou (IMPL-032): cada rep conta pelo
+    // caminho 'error' — `incomplete` é só controle.
     return {
       response: responseError(contestant, modelId, errorMsg, 0),
-      repResults: [],
-      incomplete: true,
+      repResults: failedReps(runId, stageIndex, contestant.id, reps, errorMsg),
+      incomplete: false,
       errorMsg,
     };
   }
