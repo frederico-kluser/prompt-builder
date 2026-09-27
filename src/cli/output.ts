@@ -22,9 +22,13 @@ export const EXIT = {
   CONFIG: 3,
   AUTH: 4,
   NO_CREDIT: 5,
+  /** Run inconclusiva/invalida: terminou, mas sem evidencia que sustente conclusao. */
+  INCONCLUSIVE: 6,
   /** Resultado PARCIAL por orcamento esgotado — nao e erro. */
   BUDGET: 7,
   NETWORK: 8,
+  /** `runs wait --timeout` esgotou antes de a run chegar a um estado terminal. */
+  WAIT_TIMEOUT: 9,
   SIGINT: 130,
 } as const;
 

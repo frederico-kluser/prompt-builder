@@ -8,10 +8,13 @@ import {
   ensurePrivateSubtree,
   isValidRecordId,
   PRIVATE_DIR_MODE,
+  publicErrorMessage,
   readFileInside,
   resolveInside,
   writePrivateFileAtomic,
 } from './pathSafety.js';
+import { OWNER_HEARTBEAT_MS, OWNER_STALE_AFTER_MS } from './jobs.js';
+import { currentOwner, isOwnerAlive, isSignalStoppable, type ProcessOwner } from './procOwner.js';
 import type { RunMode, RunRecord, SessionRecord } from './types.js';
 
 // Raiz de persistencia. MUTAVEL de proposito: o servidor mantem o default
@@ -135,17 +138,25 @@ const saveQueues = new Map<string, Promise<unknown>>();
 
 export async function saveRun(record: RunRecord): Promise<void> {
   const target = fileFor(record.id); // valida o id ANTES de criar diretório
-  await ensureDir();
-  // snapshot sincrono: a fila persiste o estado na ordem das chamadas,
-  // sem JSON corrompido por mutacao concorrente do record.
+  // snapshot sincrono: a fila persiste o estado na ordem das CHAMADAS, sem
+  // JSON corrompido por mutacao concorrente do record. Nada de `await` antes
+  // de entrar na fila (IMPL-030): o dono da run é gravado DENTRO da fila — um
+  // await fora dela deixaria a escrita terminal passar à frente da 'running'.
   const data = JSON.stringify(record, null, 2);
+  const running = record.status === 'running';
+  const owner = ownerFileFor('run', record.id);
+  const write = async (): Promise<void> => {
+    await ensureDir();
+    // IMPL-030: quem grava 'running' é o DONO — o arquivo de dono nasce antes
+    // do primeiro record 'running' e some depois do terminal.
+    if (running) await acquireOwner('run', record.id, owner);
+    await writeAtomic(target, data);
+    if (!running) await releaseOwner(owner);
+  };
 
   const prev = saveQueues.get(record.id) ?? Promise.resolve();
   // segue a fila mesmo que a escrita anterior tenha falhado
-  const job = prev.then(
-    () => writeAtomic(target, data),
-    () => writeAtomic(target, data),
-  );
+  const job = prev.then(write, write);
   saveQueues.set(record.id, job);
   try {
     await job;
@@ -219,30 +230,287 @@ export async function listRuns(): Promise<RunSummary[]> {
   return summaries;
 }
 
-export async function markOrphansAsAborted(): Promise<void> {
-  const all = await listRuns();
-  for (const s of all) {
-    if (s.status === 'running') {
-      const r = await loadRun(s.id);
-      if (r && r.status === 'running') {
-        r.status = 'aborted';
-        r.finishedAt = new Date().toISOString();
-        await saveRun(r);
+/**
+ * Boot do servidor: runs/sessões órfãs viram 'aborted'. Desde o IMPL-030 a
+ * decisão é pelo DONO (PID/host/início): uma run de um `--detach` do CLI viva
+ * no mesmo data dir NÃO é mais marcada por engano. Record sem dono (versão
+ * antiga) segue a regra histórica do boot: órfão na hora (`locklessAfterMs: 0`).
+ */
+export async function markOrphansAsAborted(): Promise<OrphanSweepResult> {
+  return sweepOrphanRecords({ locklessAfterMs: 0 });
+}
+
+// ---------------------------------------------------------------------------
+// Dono da run/sessão em andamento (IMPL-030, R-12:REC-5)
+// ---------------------------------------------------------------------------
+// `runs/<id>.owner` / `sessions/<id>.owner` (0600; sem `.json`, então
+// `listRuns`/`listSessions` não os confundem com records): PID, host, token de
+// início e batimento do processo que está EXECUTANDO aquele record. Nasce na
+// primeira escrita 'running' (dentro da fila de escrita, antes do record) e
+// some depois da terminal. Uma run 'running' cujo dono morreu (SIGKILL do
+// shell do agente, queda do processo) é órfã — qualquer comando que a leia
+// pode marcá-la 'aborted' na hora, sem esperar timeout.
+
+export type OwnedRecordKind = 'run' | 'session';
+
+/** Conteúdo do arquivo de dono. */
+export interface RecordOwner extends ProcessOwner {
+  kind: OwnedRecordKind;
+  id: string;
+  acquiredAt: string;
+  heartbeatAt: string;
+  /**
+   * O dono é um comando de run do CLI que, no SIGTERM, para SÓ esta run
+   * (graciosamente). Só então `runs cancel` pode sinalizá-lo; servidor/MCP não.
+   */
+  signalStop?: boolean;
+}
+
+interface HeldOwner {
+  kind: OwnedRecordKind;
+  id: string;
+  file: string;
+  acquiredAt: string;
+}
+
+function ownerFileFor(kind: OwnedRecordKind, id: string): string {
+  assertValidRecordId(id, kind === 'run' ? 'id de run' : 'id de sessão');
+  return resolveInside(kind === 'run' ? runsDir() : sessionsDir(), `${id}.owner`);
+}
+
+/** Donos que ESTE processo segura, pela chave = caminho absoluto do arquivo. */
+const heldOwners = new Map<string, HeldOwner>();
+/** Operações por arquivo de dono, em série (batimento nunca recria um dono liberado). */
+const ownerOps = new Map<string, Promise<void>>();
+let ownerHeartbeat: ReturnType<typeof setInterval> | null = null;
+let ownerWarned = false;
+
+function serialOwnerOp(file: string, op: () => Promise<void>): Promise<void> {
+  const prev = ownerOps.get(file) ?? Promise.resolve();
+  const next = prev.then(op, op);
+  ownerOps.set(file, next);
+  void next.finally(() => {
+    if (ownerOps.get(file) === next) ownerOps.delete(file);
+  });
+  return next;
+}
+
+function ownerPayload(h: HeldOwner, heartbeatAt: string): string {
+  const eu = currentOwner();
+  const rec: RecordOwner = {
+    kind: h.kind,
+    id: h.id,
+    pid: eu.pid,
+    host: eu.host,
+    startToken: eu.startToken,
+    acquiredAt: h.acquiredAt,
+    heartbeatAt,
+    ...(isSignalStoppable() ? { signalStop: true } : {}),
+  };
+  return JSON.stringify(rec);
+}
+
+async function acquireOwner(kind: OwnedRecordKind, id: string, file: string): Promise<void> {
+  if (heldOwners.has(file)) return;
+  await serialOwnerOp(file, async () => {
+    if (heldOwners.has(file)) return;
+    const h: HeldOwner = { kind, id, file, acquiredAt: new Date().toISOString() };
+    try {
+      await writePrivateFileAtomic(file, ownerPayload(h, h.acquiredAt));
+      heldOwners.set(file, h);
+      ensureOwnerHeartbeat();
+    } catch (err) {
+      // A run NÃO morre por causa do dono: sem ele, a órfã só é reconhecida
+      // pela idade da última escrita (LOCKLESS_ORPHAN_AFTER_MS).
+      if (!ownerWarned) {
+        ownerWarned = true;
+        process.stderr.write(`[storage] não consegui gravar o dono de ${kind} ${id}: ${publicErrorMessage(err)}\n`);
       }
     }
+  });
+}
+
+/** Remove o arquivo de dono (deste processo ou de um dono morto já finalizado). */
+async function releaseOwner(file: string): Promise<void> {
+  heldOwners.delete(file); // síncrono: o próximo batimento já não o vê
+  if (heldOwners.size === 0) stopOwnerHeartbeat();
+  await serialOwnerOp(file, () => fs.rm(file, { force: true }));
+}
+
+function ensureOwnerHeartbeat(): void {
+  if (ownerHeartbeat) return;
+  ownerHeartbeat = setInterval(() => {
+    const agora = new Date().toISOString();
+    for (const h of [...heldOwners.values()]) {
+      void serialOwnerOp(h.file, async () => {
+        if (heldOwners.get(h.file) !== h) return; // liberado nesse meio-tempo
+        await writePrivateFileAtomic(h.file, ownerPayload(h, agora)).catch(() => undefined);
+      });
+    }
+  }, OWNER_HEARTBEAT_MS);
+  // Não segura o processo: quem o mantém vivo é a run.
+  ownerHeartbeat.unref?.();
+}
+
+function stopOwnerHeartbeat(): void {
+  if (ownerHeartbeat) {
+    clearInterval(ownerHeartbeat);
+    ownerHeartbeat = null;
   }
-  // Sessoes de treino orfas (processo reiniciou no meio): tambem abortadas.
-  const sessions = await listSessions();
-  for (const s of sessions) {
-    if (s.status === 'running') {
-      const rec = await loadSession(s.id);
-      if (rec && rec.status === 'running') {
-        rec.status = 'aborted';
-        rec.finishedAt = new Date().toISOString();
-        await saveSession(rec);
-      }
+}
+
+/** Lê o dono gravado de uma run/sessão (null = sem dono ou arquivo ilegível). */
+export async function readRecordOwner(kind: OwnedRecordKind, id: string): Promise<RecordOwner | null> {
+  if (!isValidRecordId(id)) return null;
+  try {
+    const raw = JSON.parse(await fs.readFile(ownerFileFor(kind, id), 'utf-8')) as Partial<RecordOwner>;
+    if (typeof raw.pid !== 'number' || typeof raw.host !== 'string') return null;
+    return {
+      kind,
+      id,
+      pid: raw.pid,
+      host: raw.host,
+      startToken: typeof raw.startToken === 'string' ? raw.startToken : null,
+      acquiredAt: typeof raw.acquiredAt === 'string' ? raw.acquiredAt : '',
+      heartbeatAt: typeof raw.heartbeatAt === 'string' ? raw.heartbeatAt : '',
+      ...(raw.signalStop === true ? { signalStop: true } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Runs/sessões cujo dono é ESTE processo (o que o encerramento forçado finaliza). */
+export function ownedRecords(): { kind: OwnedRecordKind; id: string }[] {
+  return [...heldOwners.values()].map((h) => ({ kind: h.kind, id: h.id }));
+}
+
+export type OwnerState = 'alive' | 'dead' | 'unknown';
+
+/**
+ * Estado do dono de um record 'running': `alive`/`dead` pelo arquivo de dono;
+ * `unknown` quando não há arquivo (versão antiga ou escrita do dono falhou) —
+ * aí quem decide é a idade da última escrita do record.
+ */
+export async function ownerStateOf(
+  kind: OwnedRecordKind,
+  id: string,
+  nowMs = Date.now(),
+): Promise<{ state: OwnerState; owner: RecordOwner | null }> {
+  const owner = await readRecordOwner(kind, id);
+  if (!owner) return { state: 'unknown', owner: null };
+  return { state: isOwnerAlive(owner, OWNER_STALE_AFTER_MS, nowMs) ? 'alive' : 'dead', owner };
+}
+
+export interface OrphanSweepOptions {
+  /**
+   * Record 'running' SEM dono vira órfão quando o arquivo não muda há isto
+   * (ms). Padrão: nunca (só donos mortos contam).
+   */
+  locklessAfterMs?: number;
+  /** Só este alvo (o `runs status/wait` de um id não varre o disco inteiro). */
+  only?: { kind: OwnedRecordKind; id: string };
+  nowMs?: number;
+}
+
+export interface OrphanSweepResult {
+  /** Runs marcadas 'aborted' agora. */
+  runs: string[];
+  /** Sessões marcadas 'aborted' agora. */
+  sessions: string[];
+}
+
+async function isOrphanRecord(
+  kind: OwnedRecordKind,
+  id: string,
+  nowMs: number,
+  locklessAfterMs: number | undefined,
+): Promise<boolean> {
+  const { state } = await ownerStateOf(kind, id, nowMs);
+  if (state === 'alive') return false;
+  if (state === 'dead') return true;
+  if (locklessAfterMs === undefined) return false;
+  if (locklessAfterMs <= 0) return true;
+  const st = await fs
+    .stat(kind === 'run' ? fileFor(id) : sessionFileFor(id))
+    .catch(() => null);
+  return st !== null && nowMs - st.mtimeMs >= locklessAfterMs;
+}
+
+/**
+ * Marca 'aborted' as runs/sessões 'running' cujo processo dono morreu. O
+ * record é RELIDO depois da decisão: o dono grava o terminal ANTES de apagar o
+ * arquivo de dono, então "sem dono" + record já terminal nunca é sobrescrito.
+ * 'aborted' sem `stoppedReason` = o processo morreu sem gravar o fim (órfã); o
+ * parcial fica legível.
+ */
+export async function sweepOrphanRecords(opts: OrphanSweepOptions = {}): Promise<OrphanSweepResult> {
+  const nowMs = opts.nowMs ?? Date.now();
+  const out: OrphanSweepResult = { runs: [], sessions: [] };
+  const alvos: { kind: OwnedRecordKind; id: string }[] = [];
+  if (opts.only) {
+    alvos.push(opts.only);
+  } else {
+    for (const r of await listRuns()) if (r.status === 'running') alvos.push({ kind: 'run', id: r.id });
+    for (const s of await listSessions()) if (s.status === 'running') alvos.push({ kind: 'session', id: s.id });
+  }
+  for (const alvo of alvos) {
+    if (!isValidRecordId(alvo.id)) continue;
+    if (!(await isOrphanRecord(alvo.kind, alvo.id, nowMs, opts.locklessAfterMs))) continue;
+    if (alvo.kind === 'run') {
+      const r = await loadRun(alvo.id).catch(() => null);
+      if (!r || r.status !== 'running') continue;
+      r.status = 'aborted';
+      r.finishedAt = new Date().toISOString();
+      await saveRun(r); // terminal: apaga o arquivo do dono morto
+      out.runs.push(alvo.id);
+    } else {
+      const s = await loadSession(alvo.id).catch(() => null);
+      if (!s || s.status !== 'running') continue;
+      s.status = 'aborted';
+      s.finishedAt = new Date().toISOString();
+      await saveSession(s);
+      out.sessions.push(alvo.id);
     }
   }
+  return out;
+}
+
+/**
+ * Encerramento FORÇADO deste processo (graça do SIGTERM esgotada, segundo
+ * sinal): toda run/sessão que ele ainda segura como 'running' é gravada
+ * 'aborted'/`stoppedReason: 'cancelled'` a partir do que já está em disco.
+ * Quem chama sai do processo logo depois — nenhuma escrita 'running' em voo
+ * chega a passar por cima.
+ */
+export async function abortOwnedRecords(): Promise<OrphanSweepResult> {
+  const out: OrphanSweepResult = { runs: [], sessions: [] };
+  for (const { kind, id } of ownedRecords()) {
+    try {
+      if (kind === 'run') {
+        const r = await loadRun(id);
+        if (r && r.status === 'running') {
+          r.status = 'aborted';
+          r.stoppedReason = 'cancelled';
+          r.finishedAt = new Date().toISOString();
+          await saveRun(r);
+          out.runs.push(id);
+        }
+      } else {
+        const s = await loadSession(id);
+        if (s && s.status === 'running') {
+          s.status = 'aborted';
+          s.stoppedReason = 'cancelled';
+          s.finishedAt = new Date().toISOString();
+          await saveSession(s);
+          out.sessions.push(id);
+        }
+      }
+    } catch (err) {
+      process.stderr.write(`[storage] não consegui finalizar ${kind} ${id}: ${publicErrorMessage(err)}\n`);
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,13 +530,18 @@ const sessionSaveQueues = new Map<string, Promise<unknown>>();
 
 export async function saveSession(record: SessionRecord): Promise<void> {
   const target = sessionFileFor(record.id);
-  await ensureSessionsDir();
+  // snapshot e ordem de chamada preservados — ver saveRun (IMPL-030)
   const data = JSON.stringify(record, null, 2);
+  const running = record.status === 'running';
+  const owner = ownerFileFor('session', record.id);
+  const write = async (): Promise<void> => {
+    await ensureSessionsDir();
+    if (running) await acquireOwner('session', record.id, owner);
+    await writeAtomic(target, data);
+    if (!running) await releaseOwner(owner);
+  };
   const prev = sessionSaveQueues.get(record.id) ?? Promise.resolve();
-  const job = prev.then(
-    () => writeAtomic(target, data),
-    () => writeAtomic(target, data),
-  );
+  const job = prev.then(write, write);
   sessionSaveQueues.set(record.id, job);
   try {
     await job;

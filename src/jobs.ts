@@ -2,7 +2,7 @@
 // R-13:REC-3). A execução durável (disco, idempotency-key, cancel entre
 // processos) mora em `jobManager.ts`; aqui só o que é puro.
 //
-// Um processo do prompt-builder (servidor MCP, start_run e, depois, o
+// Um processo do prompt-builder (servidor MCP, start_run e o processo filho do
 // `--detach` do CLI) roda NO MÁXIMO UMA run pesada por vez. Duas runs
 // simultâneas disputariam o MESMO limitador global do gateway (um por
 // processo) e o tempo — e portanto o gasto em voo — de cada uma ficaria
@@ -182,6 +182,46 @@ export const JOB_ORPHAN_AFTER_MS = 60_000;
  * prazo esgotado, batimento). 500 ms mantém o "0 chamada paga nova em < 2 s".
  */
 export const JOB_WATCH_INTERVAL_MS = 500;
+
+// ---------------------------------------------------------------------------
+// Execução longa no CLI (IMPL-030, R-12:REC-5 / DEC-4)
+// ---------------------------------------------------------------------------
+// Foreground de 20–40 min não é confiável: os agentes cortam o shell em
+// ~2–10 min. O CLI oferece `--detach` (processo filho destacado, NDJSON em
+// arquivo) + `runs status/wait/cancel`, e todo processo que grava uma run
+// 'running' deixa um arquivo de DONO (PID/host/início) ao lado dela — é o que
+// permite a qualquer comando reconhecer a run órfã (processo morto por
+// SIGKILL) e marcá-la 'aborted' na hora.
+
+/** O dono de uma run/sessão regrava o batimento do arquivo de dono a cada tanto… */
+export const OWNER_HEARTBEAT_MS = 15_000;
+/** …e, em OUTRO host (data dir compartilhado), sem batimento há isto = morto. */
+export const OWNER_STALE_AFTER_MS = JOB_ORPHAN_AFTER_MS;
+/**
+ * Record 'running' SEM arquivo de dono (gravado por uma versão antiga, ou a
+ * escrita do dono falhou): só vira órfão se o arquivo não muda há isto. No
+ * boot do servidor o limiar é 0 (comportamento histórico: tudo o que ficou
+ * 'running' de um processo anterior é órfão).
+ */
+export const LOCKLESS_ORPHAN_AFTER_MS = 10 * 60 * 1000;
+
+/** `runs wait` sem `--timeout`: 600 s (o teto do shell do Claude Code é 10 min). */
+export const RUNS_WAIT_DEFAULT_TIMEOUT_S = 600;
+/** `runs cancel` espera a confirmação (record terminal + processo encerrado) por até isto. */
+export const RUNS_CANCEL_DEFAULT_TIMEOUT_S = 15;
+/**
+ * Durante o `runs wait`, uma linha de narração (stderr) a cada tanto: o Gemini
+ * CLI cancela o comando por INATIVIDADE de saída (5 min); a linha zera o timer.
+ */
+export const WAIT_NARRATION_MS = 30_000;
+/** O pai do `--detach` espera o filho anunciar a run (ou recusar) por até isto. */
+export const DETACH_HANDSHAKE_MS = 30_000;
+/**
+ * Prazo de execução de um job destacado do CLI: o teto do gerente (24 h). O
+ * orçamento é o teto de gasto; o prazo só evita um processo esquecido para
+ * sempre.
+ */
+export const DETACHED_JOB_TTL_MS = MAX_JOB_TTL_MS;
 
 /** Idempotency-key aceita: texto não vazio, até 256 caracteres. */
 export function isValidIdempotencyKey(key: unknown): key is string {

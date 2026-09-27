@@ -4,7 +4,18 @@
 import { promises as fs, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { ensurePrivateDataDir, listRuns, loadRun, listSessions, loadSession, getDataDir, writePrivateDataFile } from '../../storage.js';
+import {
+  ensurePrivateDataDir,
+  listRuns,
+  loadRun,
+  listSessions,
+  loadSession,
+  getDataDir,
+  sweepOrphanRecords,
+  writePrivateDataFile,
+} from '../../storage.js';
+import { LOCKLESS_ORPHAN_AFTER_MS } from '../../jobs.js';
+import { runsCancel, runsStatus, runsWait } from './runsJobs.js';
 import { isValidRecordId } from '../../pathSafety.js';
 import { listTechniques } from '../../techniques.js';
 import { getLgpdData } from '../../lgpd.js';
@@ -133,11 +144,21 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     status: { type: 'string' },
     'prompt-only': { type: 'boolean' },
     out: { type: 'string', short: 'o' },
+    timeout: { type: 'string' },
+    reason: { type: 'string' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
 
+  // IMPL-030: acompanhamento de runs longas (`--detach` ou outro shell).
+  if (sub === 'status') return runsStatus(ctx);
+  if (sub === 'wait') return runsWait(ctx);
+  if (sub === 'cancel') return runsCancel(ctx);
+
   if (sub === 'list') {
+    // IMPL-030: run 'running' cujo processo dono morreu (SIGKILL do host) sai
+    // como 'aborted' — a lista nunca mostra 'running' para sempre.
+    await sweepOrphanRecords({ locklessAfterMs: LOCKLESS_ORPHAN_AFTER_MS });
     let rows = await listRuns();
     if (typeof parsed.values.status === 'string') {
       rows = rows.filter((r) => r.status === parsed.values.status);
@@ -160,6 +181,7 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   if (!id) throw new CliError(`Uso: prompt-builder runs ${sub} <id>`, EXIT.USAGE);
   // IMPL-024: id fora do formato nem chega ao disco (e não é ecoado).
   if (!isValidRecordId(id)) throw new CliError('Id de run inválido: use o id listado em `prompt-builder runs list`.', EXIT.USAGE);
+  await sweepOrphanRecords({ only: { kind: 'run', id }, locklessAfterMs: LOCKLESS_ORPHAN_AFTER_MS });
   const record = await loadRun(id);
   // IMPL-024: sem caminho absoluto do data dir no erro (o id já passou pela regex)
   if (!record) {
@@ -397,6 +419,7 @@ export async function cmdSessions(argv: string[]): Promise<number> {
   const { out } = ctx;
 
   if (sub === 'list') {
+    await sweepOrphanRecords({ locklessAfterMs: LOCKLESS_ORPHAN_AFTER_MS }); // IMPL-030
     const rows = (await listSessions()).slice(0, Number(parsed.values.limit ?? 20));
     if (out.isText) {
       for (const r of rows) {
@@ -412,6 +435,7 @@ export async function cmdSessions(argv: string[]): Promise<number> {
   const id = parsed.positionals[0];
   if (!id) throw new CliError(`Uso: prompt-builder sessions ${sub} <id>`, EXIT.USAGE);
   if (!isValidRecordId(id)) throw new CliError('Id de sessão inválido: use o id listado em `prompt-builder sessions list`.', EXIT.USAGE);
+  await sweepOrphanRecords({ only: { kind: 'session', id }, locklessAfterMs: LOCKLESS_ORPHAN_AFTER_MS }); // IMPL-030
   const record = await loadSession(id);
   if (!record) throw new CliError(`Sessão "${id}" não encontrada.`, EXIT.USAGE);
   const campeao = record.bestPromptByIteration.at(-1);

@@ -23,8 +23,16 @@
 //     dado como órfão ('failed') e a run fica 'aborted', legível.
 //
 // Layout (tudo 0700/0600, IMPL-024): <data>/jobs/<jobId>.json,
-// <data>/jobs/<jobId>.cancel (pedido de cancelamento) e
-// <data>/jobs/keys/<sha256>.json (idempotency-key → jobId).
+// <data>/jobs/<jobId>.cancel (pedido de cancelamento),
+// <data>/jobs/keys/<sha256>.json (idempotency-key → jobId) e, para os jobs
+// destacados do CLI (IMPL-030), <data>/jobs/<jobId>.ndjson (o stdout NDJSON do
+// processo filho) + <data>/jobs/<jobId>.log (o stderr).
+//
+// IMPL-030 — o `--detach` do CLI é um job como os outros: o pai cria o
+// registro (`createDetached`), o processo filho o ADOTA (`adopt`: dono = PID do
+// filho) e executa o comando; `runs status/wait/cancel` usam `status`/`wait`/
+// `cancel` daqui — a mesma vigia de 500 ms, o mesmo marcador de cancelamento e
+// a mesma reconciliação de órfão do MCP.
 
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -33,6 +41,7 @@ import path from 'node:path';
 import { RunCancelled, isBudgetSignal, isControlSignal } from './budget.js';
 import {
   DEFAULT_JOB_TTL_MS,
+  DETACHED_JOB_TTL_MS,
   HeavyLane,
   JOB_HEARTBEAT_MS,
   JOB_ORPHAN_AFTER_MS,
@@ -48,8 +57,9 @@ import {
 } from './jobs.js';
 import { ensureCatalog } from './modelsCache.js';
 import { runToCompletion } from './orchestrator.js';
-import { assertValidRecordId, publicErrorMessage, resolveInside } from './pathSafety.js';
+import { assertValidRecordId, isValidRecordId, publicErrorMessage, resolveInside } from './pathSafety.js';
 import { prepareOptsFor } from './prepareRun.js';
+import { currentOwner, isOwnerAlive, processStartToken } from './procOwner.js';
 import {
   ensurePrivateDataDir,
   getDataDir,
@@ -99,7 +109,8 @@ export interface JobRecord {
   /** Prazo de execução contado de `createdAt` (o `ttlMs` da extensão Tasks). */
   ttlMs: number;
   pollIntervalMs: number;
-  budgetUsd: number;
+  /** Teto em USD. Ausente = sem teto (`--detach --budget none` do CLI; o MCP sempre exige). */
+  budgetUsd?: number;
   /** Pré-atribuído na criação (benchmark/agente): conhecido antes de a run começar. */
   runId?: string;
   /** Treino: conhecido quando o laço começa. */
@@ -110,6 +121,8 @@ export interface JobRecord {
   idempotencyKeyHash?: string;
   ownerPid: number;
   ownerHost: string;
+  /** Token de início do processo dono (IMPL-030): PID reaproveitado não passa por vivo. */
+  ownerStartToken?: string | null;
   heartbeatAt: string;
   cancelRequestedAt?: string;
   cancelReason?: string;
@@ -118,6 +131,11 @@ export interface JobRecord {
   /** Mensagem pública (sem caminho absoluto) quando 'failed'. */
   error?: string;
   failure?: JobFailure;
+  /**
+   * Código de saída do COMANDO (jobs destacados do CLI, IMPL-030): o mesmo que
+   * o comando em foreground devolveria (0/6/7/130/…). `runs wait` o repassa.
+   */
+  exitCode?: number;
 }
 
 /** O que as ferramentas devolvem sobre um job (compacto: cada poll custa tokens). */
@@ -128,7 +146,7 @@ export interface JobView {
   statusMessage?: string;
   runId?: string;
   sessionId?: string;
-  budgetUsd: number;
+  budgetUsd?: number;
   createdAt: string;
   lastUpdatedAt: string;
   ttlMs: number;
@@ -139,6 +157,7 @@ export interface JobView {
   result?: Record<string, unknown>;
   error?: string;
   failure?: JobFailure;
+  exitCode?: number;
 }
 
 export interface JobExecHooks {
@@ -148,6 +167,8 @@ export interface JobExecHooks {
   runId?: string;
   /** Treino: o id da sessão assim que ela existe. */
   onSessionId(id: string): void;
+  /** Id da run quando ele só nasce na execução (job destacado do CLI). */
+  onRunId?(id: string): void;
 }
 
 export interface JobOutcome {
@@ -157,6 +178,13 @@ export interface JobOutcome {
   cancelled: boolean;
   runId?: string;
   sessionId?: string;
+  /** Código de saída do comando (jobs destacados do CLI). */
+  exitCode?: number;
+  /**
+   * A execução DEVOLVEU um fracasso (o comando do CLI saiu com erro): o job
+   * termina 'failed' (failure 'tool') com esta mensagem pública, sem exceção.
+   */
+  failed?: string;
 }
 
 /** Executa a parte CARA de um job. Injetável (testes); o padrão é o motor real. */
@@ -360,26 +388,72 @@ async function createExclusive(target: string, content: string): Promise<boolean
   }
 }
 
-function pidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM = existe, mas é de outro usuário.
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
 /**
- * O dono de um job não-terminal morreu? Mesmo host: pelo PID (vivo = não é
- * órfão, mesmo com batimento velho — laptop que dormiu acorda os dois lados
- * juntos). Outro host (data dir compartilhado): pelo batimento.
+ * O dono de um job não-terminal morreu? Mesmo host: pelo PID + token de início
+ * (vivo = não é órfão, mesmo com batimento velho — laptop que dormiu acorda os
+ * dois lados juntos; PID reaproveitado pelo kernel = morto, IMPL-030). Outro
+ * host (data dir compartilhado): pelo batimento.
  */
 export function isOrphanJob(rec: JobRecord, nowMs = Date.now(), host = os.hostname()): boolean {
   if (isTerminalJobStatus(rec.status)) return false;
-  if (rec.ownerHost === host) return !pidAlive(rec.ownerPid);
+  if (rec.ownerHost === host) {
+    return !isOwnerAlive(
+      { pid: rec.ownerPid, host: rec.ownerHost, startToken: rec.ownerStartToken ?? null },
+      JOB_ORPHAN_AFTER_MS,
+      nowMs,
+    );
+  }
   return nowMs - Date.parse(rec.heartbeatAt) > JOB_ORPHAN_AFTER_MS;
+}
+
+/** NDJSON (stdout) do processo filho de um job destacado do CLI. */
+export function jobNdjsonFile(id: string): string {
+  assertValidRecordId(id, 'jobId');
+  return resolveInside(jobsDir(), `${id}.ndjson`);
+}
+
+/** stderr do processo filho de um job destacado do CLI. */
+export function jobLogFile(id: string): string {
+  assertValidRecordId(id, 'jobId');
+  return resolveInside(jobsDir(), `${id}.log`);
+}
+
+/** Garante <data>/jobs (0700) e devolve o caminho. */
+export async function ensureJobsDir(): Promise<string> {
+  return ensurePrivateDataDir(jobsDir());
+}
+
+/**
+ * Todos os jobs em disco, do mais recente para o mais antigo (arquivo
+ * corrompido é ignorado). Base de `findJobFor` e do `runs status` por id.
+ */
+export async function listJobRecords(): Promise<JobRecord[]> {
+  let nomes: string[];
+  try {
+    nomes = await fs.readdir(jobsDir());
+  } catch {
+    return [];
+  }
+  const out: JobRecord[] = [];
+  for (const nome of nomes) {
+    if (!nome.endsWith('.json')) continue;
+    const id = nome.slice(0, -'.json'.length);
+    if (!isValidRecordId(id)) continue;
+    const rec = await readJobRecord(id).catch(() => null);
+    if (rec) out.push(rec);
+  }
+  return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/**
+ * O job de um id qualquer: o próprio jobId, ou o job cuja run/sessão é `id`
+ * (o mais recente). `null` = nenhum job conhece esse id.
+ */
+export async function findJobFor(id: string): Promise<JobRecord | null> {
+  if (!isValidRecordId(id)) return null;
+  const direto = await readJobRecord(id).catch(() => null);
+  if (direto) return direto;
+  return (await listJobRecords()).find((j) => j.runId === id || j.sessionId === id) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -410,6 +484,22 @@ export interface StartJobResult {
   /** false = a idempotency-key já apontava para este job (nada novo foi criado). */
   created: boolean;
 }
+
+/** Job destacado do CLI (IMPL-030): o pai cria, o processo filho adota. */
+export interface DetachedJobOptions {
+  kind: JobKind;
+  /** `cli:<comando>` — só diagnóstico. */
+  tool: string;
+  /** Teto em USD; ausente = `--budget none`. */
+  budgetUsd?: number;
+  /** Impressão digital do pedido (argv canônico). */
+  fingerprint: string;
+  /** Prazo de execução. Padrão DETACHED_JOB_TTL_MS (24 h). */
+  ttlMs?: number;
+}
+
+/** Execução de um job adotado: roda o trabalho com os ganchos do gerente. */
+export type AdoptedExecution = (hooks: JobExecHooks) => Promise<JobOutcome>;
 
 interface LiveJob {
   rec: JobRecord;
@@ -546,10 +636,31 @@ export class JobManager {
     return pendentes;
   }
 
+  /**
+   * Saída FORÇADA do processo (graça do SIGTERM esgotada, segundo sinal —
+   * IMPL-030): grava 'cancelled' em todo job deste processo ainda não
+   * terminal, sem esperar a execução (que ignorou o abort). Resolve depois das
+   * escritas; quem chama sai do processo em seguida.
+   */
+  async forceFinishLive(reason: string, exitCode?: number): Promise<void> {
+    const vivos = [...this.live.values()];
+    for (const live of vivos) {
+      if (isTerminalJobStatus(live.rec.status)) continue;
+      this.update(live, {
+        status: 'cancelled',
+        statusMessage: `encerramento forçado (${reason}); o parcial foi gravado em disco`,
+        finishedAt: nowIso(),
+        ...(exitCode !== undefined ? { exitCode } : {}),
+      });
+    }
+    await Promise.all(vivos.map((l) => l.writes));
+  }
+
   // --- criação ----------------------------------------------------------------
 
   private newRecord(input: RunJobInput, opts: StartJobOptions, fingerprint: string, keyHash?: string): JobRecord {
     const agora = nowIso();
+    const eu = currentOwner();
     return {
       id: randomUUID(),
       kind: input.kind,
@@ -568,8 +679,110 @@ export class JobManager {
       idempotencyKeyHash: keyHash,
       ownerPid: process.pid,
       ownerHost: this.host,
+      ownerStartToken: eu.startToken,
       heartbeatAt: agora,
     };
+  }
+
+  // --- jobs destacados do CLI (IMPL-030) --------------------------------------
+
+  /**
+   * PAI do `--detach`: grava o job (dono provisório = o próprio pai, vivo até
+   * o filho adotar) e devolve o registro. Nada roda aqui — quem executa é o
+   * processo filho, via `adopt`. Sem run pré-atribuída: o comando cria a sua e
+   * o id chega por `onRunId`/`onSessionId`.
+   */
+  async createDetached(opts: DetachedJobOptions): Promise<JobRecord> {
+    const agora = nowIso();
+    const eu = currentOwner();
+    const rec: JobRecord = {
+      id: randomUUID(),
+      kind: opts.kind,
+      tool: opts.tool,
+      status: 'queued',
+      statusMessage: 'iniciando o processo destacado',
+      createdAt: agora,
+      lastUpdatedAt: agora,
+      ttlMs: opts.ttlMs ?? DETACHED_JOB_TTL_MS,
+      pollIntervalMs: JOB_POLL_INTERVAL_MS,
+      ...(opts.budgetUsd !== undefined ? { budgetUsd: opts.budgetUsd } : {}),
+      fingerprint: opts.fingerprint,
+      ownerPid: eu.pid,
+      ownerHost: eu.host,
+      ownerStartToken: eu.startToken,
+      heartbeatAt: agora,
+    };
+    await this.persist(rec);
+    return rec;
+  }
+
+  /**
+   * PAI do `--detach`, logo depois do spawn: o dono passa a ser o FILHO (PID +
+   * token de início). Sem isto, se o pai saísse antes da adoção (handshake
+   * esgotado), o job pareceria órfão e um `runs status` o marcaria 'failed'
+   * com o filho vivo. Só mexe enquanto o job ainda é do pai ('queued'): o filho
+   * leva centenas de ms para subir, então não há escrita dele a sobrescrever.
+   */
+  async assignOwner(jobId: string, pid: number): Promise<void> {
+    const rec = await readJobRecord(jobId);
+    if (!rec || rec.status !== 'queued' || rec.ownerPid !== process.pid) return;
+    await this.persist({ ...rec, ownerPid: pid, ownerHost: this.host, ownerStartToken: processStartToken(pid) });
+  }
+
+  /**
+   * Marca 'failed' um job destacado cujo filho nem chegou a nascer (spawn
+   * falhou). Terminal ou já adotado: nada muda.
+   */
+  async failDetached(jobId: string, message: string, exitCode: number): Promise<void> {
+    const rec = await readJobRecord(jobId);
+    if (!rec || isTerminalJobStatus(rec.status)) return;
+    const agora = nowIso();
+    await this.persist({
+      ...rec,
+      status: 'failed',
+      failure: 'tool',
+      error: message,
+      statusMessage: `falhou: ${message}`,
+      exitCode,
+      lastUpdatedAt: agora,
+      finishedAt: agora,
+    });
+  }
+
+  /**
+   * FILHO do `--detach`: vira o dono do job (PID/início deste processo) e
+   * executa `exec` com os mesmos ganchos de qualquer job — vigia de 500 ms
+   * (marcador de cancelamento de OUTRO processo, prazo), batimento e escrita
+   * terminal. Devolve a promessa de término (resolve DEPOIS da escrita final).
+   * Job já cancelado antes de o filho começar (marcador presente) termina
+   * 'cancelled' sem executar nada.
+   */
+  async adopt(jobId: string, exec: AdoptedExecution): Promise<{ job: JobView; done: Promise<void> }> {
+    assertValidRecordId(jobId, 'jobId');
+    const rec = await readJobRecord(jobId);
+    if (!rec) throw new Error('Job destacado não encontrado no diretório de dados.');
+    if (isTerminalJobStatus(rec.status)) {
+      throw new Error(`Job destacado já terminou (${rec.status}); nada a executar.`);
+    }
+    const eu = currentOwner();
+    const agora = nowIso();
+    const adotado: JobRecord = {
+      ...rec,
+      ownerPid: eu.pid,
+      ownerHost: eu.host,
+      ownerStartToken: eu.startToken,
+      heartbeatAt: agora,
+      lastUpdatedAt: agora,
+      statusMessage: 'processo destacado iniciado',
+    };
+    await this.persist(adotado);
+    const marcador = await readJson<{ reason?: unknown }>(cancelMarkerFile(jobId)).catch(() => null);
+    const live = this.launch(adotado, exec);
+    // Cancelado entre a criação e a adoção: aborta já (a fila nem entrega a vez).
+    if (marcador) {
+      this.abortLive(live, typeof marcador.reason === 'string' ? marcador.reason.slice(0, 200) : 'cancelado antes de começar');
+    }
+    return { job: await this.view(adotado), done: live.done };
   }
 
   private async createAndLaunch(
@@ -580,8 +793,12 @@ export class JobManager {
   ): Promise<JobRecord> {
     const rec = this.newRecord(input, opts, fingerprint);
     await this.persist(rec);
-    this.launch(rec, input, apiKey);
+    this.launch(rec, this.execFor(input, apiKey));
     return rec;
+  }
+
+  private execFor(input: RunJobInput, apiKey: string): AdoptedExecution {
+    return (hooks) => this.executor(input, apiKey, hooks);
   }
 
   /**
@@ -616,7 +833,7 @@ export class JobManager {
       await this.persist(rec);
       const binding: KeyBinding = { jobId: rec.id, fingerprint, createdAt: rec.createdAt };
       if (await createExclusive(alvo, JSON.stringify(binding))) {
-        this.launch(rec, input, apiKey);
+        this.launch(rec, this.execFor(input, apiKey));
         return { rec, created: true };
       }
       await fs.rm(jobFile(rec.id), { force: true });
@@ -645,7 +862,7 @@ export class JobManager {
 
   // --- execução ---------------------------------------------------------------
 
-  private launch(rec: JobRecord, input: RunJobInput, apiKey: string): void {
+  private launch(rec: JobRecord, exec: AdoptedExecution): LiveJob {
     const live: LiveJob = {
       rec,
       controller: new AbortController(),
@@ -659,24 +876,46 @@ export class JobManager {
       .run(async () => {
         live.started = true;
         this.update(live, { status: 'working', statusMessage: 'em execução' });
-        return this.executor(input, apiKey, {
+        return exec({
           signal,
           runId: rec.runId,
-          onSessionId: (id) => this.update(live, { sessionId: id }),
+          onSessionId: (id) => {
+            if (live.rec.sessionId !== id) this.update(live, { sessionId: id });
+          },
+          onRunId: (id) => {
+            if (live.rec.runId !== id) this.update(live, { runId: id });
+          },
         });
       }, signal)
       .then(
         (out) => {
-          const alvo = out.sessionId ? `sessão ${out.sessionId}` : `run ${out.runId ?? rec.runId}`;
+          const runId = out.runId ?? live.rec.runId;
+          const sessionId = out.sessionId ?? live.rec.sessionId;
+          const alvo = sessionId ? `sessão ${sessionId}` : `run ${runId ?? '?'}`;
+          const onde = leituraDoResultado(live.rec, sessionId ?? runId);
+          const comum = {
+            result: out.summary,
+            runId,
+            sessionId,
+            finishedAt: nowIso(),
+            ...(out.exitCode !== undefined ? { exitCode: out.exitCode } : {}),
+          };
+          if (out.failed !== undefined) {
+            this.update(live, {
+              ...comum,
+              status: 'failed',
+              failure: 'tool',
+              error: out.failed,
+              statusMessage: `falhou: ${out.failed}`,
+            });
+            return;
+          }
           this.update(live, {
+            ...comum,
             status: out.cancelled ? 'cancelled' : 'completed',
             statusMessage: out.cancelled
-              ? `cancelada (${live.rec.cancelReason ?? 'sem motivo'}); parcial gravado na ${alvo} — leia com get_result`
-              : `concluída; ${alvo} — detalhes com get_result`,
-            result: out.summary,
-            runId: out.runId ?? live.rec.runId,
-            sessionId: out.sessionId ?? live.rec.sessionId,
-            finishedAt: nowIso(),
+              ? `cancelada (${live.rec.cancelReason ?? 'sem motivo'}); parcial gravado na ${alvo} — ${onde ?? 'leia com get_result'}`
+              : `concluída; ${alvo} — ${onde ?? 'detalhes com get_result'}`,
           });
         },
         (err: unknown) => {
@@ -691,6 +930,8 @@ export class JobManager {
                   ? `cancelada (${live.rec.cancelReason ?? 'sem motivo'}) antes do primeiro gasto`
                   : `cancelada na fila (${live.rec.cancelReason ?? 'sem motivo'}); nada foi gasto`,
               finishedAt: nowIso(),
+              // job destacado do CLI: o mesmo código do foreground (7 orçamento, 130 interrompido)
+              ...(live.rec.tool.startsWith('cli:') ? { exitCode: orcamento ? 7 : 130 } : {}),
             });
             return;
           }
@@ -711,6 +952,7 @@ export class JobManager {
         this.stopWatcherIfIdle();
       });
     this.ensureWatcher();
+    return live;
   }
 
   private abortLive(live: LiveJob, reason: string): void {
@@ -857,6 +1099,9 @@ export class JobManager {
       }
       await fs.rm(jobFile(id), { force: true });
       await fs.rm(cancelMarkerFile(id), { force: true });
+      // stdout/stderr do processo destacado (IMPL-030) saem junto: a run fica
+      await fs.rm(jobNdjsonFile(id), { force: true });
+      await fs.rm(jobLogFile(id), { force: true });
       removidos++;
     }
     return removidos;
@@ -872,7 +1117,7 @@ export class JobManager {
       statusMessage: rec.statusMessage,
       runId: rec.runId,
       sessionId: rec.sessionId,
-      budgetUsd: rec.budgetUsd,
+      ...(rec.budgetUsd !== undefined ? { budgetUsd: rec.budgetUsd } : {}),
       createdAt: rec.createdAt,
       lastUpdatedAt: rec.lastUpdatedAt,
       ttlMs: rec.ttlMs,
@@ -890,8 +1135,18 @@ export class JobManager {
     if (rec.result) v.result = rec.result;
     if (rec.error) v.error = rec.error;
     if (rec.failure) v.failure = rec.failure;
+    if (rec.exitCode !== undefined) v.exitCode = rec.exitCode;
     return v;
   }
+}
+
+/** Onde ler o resultado de um job destacado do CLI (`undefined` = job do MCP: get_result). */
+function leituraDoResultado(rec: JobRecord, id: string | undefined): string | undefined {
+  if (!rec.tool.startsWith('cli:')) return undefined;
+  if (!id) return 'detalhes com `prompt-builder runs status <jobId>`';
+  return rec.kind === 'training'
+    ? `detalhes com \`prompt-builder sessions show ${id}\``
+    : `detalhes com \`prompt-builder runs show ${id}\``;
 }
 
 async function progressOf(rec: JobRecord): Promise<JobProgress | undefined> {

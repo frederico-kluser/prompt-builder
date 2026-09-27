@@ -33,9 +33,11 @@ import {
 import { ensurePrivateDataDir, loadRun, getDataDir } from '../../storage.js';
 import { isValidRecordId } from '../../pathSafety.js';
 import { subscribe } from '../../events.js';
-import { buildContext, isAgentContext, parse, resolveKey } from '../context.js';
+import { buildContext, isAgentContext, parse, resolveHome, resolveKey } from '../context.js';
 import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
 import { emitRunEvent } from '../ndjson.js';
+import { forceExitNow, installGracefulStop } from '../runControl.js';
+import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
 import type { RunRecord, RunConfig } from '../../types.js';
 import type { AgentRunnerConfig, ExecutionRef } from '../../agent/types.js';
 
@@ -322,15 +324,28 @@ async function cmdDoctor(argv: string[]): Promise<number> {
 // run
 // ---------------------------------------------------------------------------
 
+const AGENTS_RUN_OPTIONS = {
+  config: { type: 'string', short: 'c' },
+  budget: { type: 'string' },
+  'dry-run': { type: 'boolean' },
+  detach: { type: 'boolean' },
+  repetitions: { type: 'string' },
+  'max-parallel': { type: 'string' },
+  'keep-workspace': { type: 'boolean' },
+} as const;
+
 async function cmdRun(argv: string[]): Promise<number> {
-  const parsed = parse(argv, {
-    config: { type: 'string', short: 'c' },
-    budget: { type: 'string' },
-    'dry-run': { type: 'boolean' },
-    repetitions: { type: 'string' },
-    'max-parallel': { type: 'string' },
-    'keep-workspace': { type: 'boolean' },
-  });
+  // IMPL-030: filho de um `--detach` — adota o job e roda o comando de sempre.
+  const jobId = takeDetachedJobId();
+  if (jobId) {
+    const home = resolveHome(parse(argv, AGENTS_RUN_OPTIONS).values);
+    return runAsDetachedChild(jobId, 'agent', home, (hooks) => runAgents(argv, hooks));
+  }
+  return runAgents(argv);
+}
+
+async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<number> {
+  const parsed = parse(argv, AGENTS_RUN_OPTIONS);
   const ctx = buildContext(parsed);
   const { out, values } = ctx;
 
@@ -372,6 +387,16 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   const runConfigComFlags = applyAgentOverrides(configComOrcamento, values);
 
+  if (values.detach === true) {
+    return launchDetached(ctx, {
+      command: 'agents.run',
+      kind: 'agent',
+      argv,
+      budgetUsd,
+      commandPrefix: ['agents', 'run'],
+    });
+  }
+
   // Ctrl-C: primeiro aborta com elegância (a run finaliza/salva e imprime o
   // parcial), segundo mata. Mesmo padrão do chat (run.ts).
   const ac = new AbortController();
@@ -383,15 +408,18 @@ async function cmdRun(argv: string[]): Promise<number> {
       ac.abort('SIGINT');
       return;
     }
-    process.exit(EXIT.SIGINT);
+    void forceExitNow(EXIT.SIGINT);
   };
   process.on('SIGINT', onSigint);
+  // IMPL-030: SIGTERM = parada graciosa (graça ~10 s, parcial gravado).
+  const stopGraceful = installGracefulStop(ac, { warn: (m) => out.warn(m) });
 
   let record: RunRecord;
   try {
     const runId = randomUUID();
     const unsub = subscribe(runId, (e) => emitRunEvent(out, e, { verbose: ctx.verbose }));
     out.info(`agents run ${runId} — ${runConfigComFlags.mode}`);
+    detached?.onRunId(runId);
     try {
       record = await runToCompletion(
         runConfigComFlags,
@@ -403,6 +431,7 @@ async function cmdRun(argv: string[]): Promise<number> {
     }
   } finally {
     process.off('SIGINT', onSigint);
+    stopGraceful();
   }
 
   const summary = buildAgentSummary(record);

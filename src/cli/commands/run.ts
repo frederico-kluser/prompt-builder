@@ -14,8 +14,10 @@ import { listItems } from '../../library.js';
 import { hasGabarito, toStageSpec } from '../../engine/libraryCore.js';
 import { estimateInputFromConfig, estimateRunCost, toPerMTok } from '../../estimate.js';
 import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
-import { buildNetworkContext, checkKey, isAgentContext, parse, type NetworkContext } from '../context.js';
+import { buildNetworkContext, checkKey, isAgentContext, parse, resolveHome, type NetworkContext } from '../context.js';
 import { emitRunEvent, emitSessionEventNdjson } from '../ndjson.js';
+import { forceExitNow, installGracefulStop } from '../runControl.js';
+import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
 import type {
   RunConfig,
   RunMode,
@@ -62,7 +64,11 @@ const OPTIONS = {
   'dry-run': { type: 'boolean' },
   yes: { type: 'boolean', short: 'y' },
   force: { type: 'boolean' },
+  // IMPL-030: roda num processo destacado; acompanhe por `runs status/wait/cancel`.
+  detach: { type: 'boolean' },
 } as const;
+
+const COMANDO: Record<RunMode, string> = { compare: 'compare', variation: 'vary', training: 'train' };
 
 function n(v: unknown, campo: string): number | undefined {
   if (typeof v !== 'string' || !v.trim()) return undefined;
@@ -418,6 +424,18 @@ function relatorioFinal(ctx: NetworkContext, record: RunRecord): void {
 }
 
 export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
+  // IMPL-030: filho de um `--detach` — adota o job e roda o comando de sempre.
+  const jobId = takeDetachedJobId();
+  if (jobId) {
+    const home = resolveHome(parse(argv, OPTIONS).values);
+    return runAsDetachedChild(jobId, mode === 'training' ? 'training' : 'benchmark', home, (hooks) =>
+      runCommand(mode, argv, hooks),
+    );
+  }
+  return runCommand(mode, argv);
+}
+
+async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBodyHooks): Promise<number> {
   const parsed = parse(argv, OPTIONS);
   const ctx = await buildNetworkContext(parsed);
   const { out, values } = ctx;
@@ -447,10 +465,22 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
     return EXIT.OK;
   }
 
-  await preflight(ctx, configComOrcamento, budgetUsd);
+  // O filho do `--detach` pula o pré-voo: o pai acabou de fazê-lo (e, num TTY,
+  // o humano aceitou avisos que o filho, sem TTY, transformaria em recusa).
+  if (!detached) await preflight(ctx, configComOrcamento, budgetUsd);
+
+  if (values.detach === true) {
+    return launchDetached(ctx, {
+      command: COMANDO[mode],
+      kind: mode === 'training' ? 'training' : 'benchmark',
+      argv,
+      budgetUsd,
+      commandPrefix: [COMANDO[mode]],
+    });
+  }
 
   // Ctrl-C: o primeiro aborta com elegancia (a run finaliza, salva e imprime o
-  // parcial); o segundo mata na hora.
+  // parcial); o segundo sai na hora, gravando o parcial do que ja esta em disco.
   const ac = new AbortController();
   let interrupts = 0;
   const onSigint = (): void => {
@@ -460,17 +490,21 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
       ac.abort('SIGINT');
       return;
     }
-    process.exit(EXIT.SIGINT);
+    void forceExitNow(EXIT.SIGINT);
   };
   process.on('SIGINT', onSigint);
+  // IMPL-030: SIGTERM (host cortando o shell, `kill`, `runs cancel`) = parada
+  // graciosa com graça de ~10 s; o record nunca fica 'running'.
+  const stopGraceful = installGracefulStop(ac, { warn: (m) => out.warn(m) });
 
   try {
     if (configComOrcamento.mode === 'training') {
-      return await runTraining(ctx, configComOrcamento, ac.signal);
+      return await runTraining(ctx, configComOrcamento, ac.signal, detached);
     }
-    return await runSingle(ctx, configComOrcamento, ac.signal);
+    return await runSingle(ctx, configComOrcamento, ac.signal, detached);
   } finally {
     process.off('SIGINT', onSigint);
+    stopGraceful();
   }
 }
 
@@ -478,6 +512,7 @@ async function runSingle(
   ctx: NetworkContext,
   config: RunConfig,
   signal: AbortSignal,
+  detached?: DetachedBodyHooks,
 ): Promise<number> {
   const { out } = ctx;
   // Id proprio + assinatura ANTES de comecar: sem isso ha corrida com o
@@ -486,6 +521,7 @@ async function runSingle(
   const unsub = subscribe(runId, (e) => emitRunEvent(out, e, { verbose: ctx.verbose }));
   out.event('start', { command: config.mode, runId });
   out.info(`run ${runId} — ${config.mode}`);
+  detached?.onRunId(runId);
 
   let record: RunRecord;
   try {
@@ -517,6 +553,7 @@ async function runTraining(
   ctx: NetworkContext,
   config: RunConfig,
   signal: AbortSignal,
+  detached?: DetachedBodyHooks,
 ): Promise<number> {
   const { out } = ctx;
   const cfg = config as TrainingConfig;
@@ -528,6 +565,7 @@ async function runTraining(
     signal,
     onSession: (id) => {
       sessionId = id;
+      detached?.onSessionId(id);
       out.event('start', { command: 'train', sessionId: id });
       out.info(`sessão ${id} — até ${cfg.iterations} iterações`);
       unsubSession = subscribeSession(id, (e) => {

@@ -56,9 +56,14 @@ RUNS
   train   --model <id>     treina um prompt ao longo de iterações
   <cmd> --config <arq>     usa um arena-config@1 (ver: docs config)
   <cmd> --dry-run          valida e estima SEM chamar nenhuma API
+  <cmd> --detach           roda num processo destacado (NDJSON em arquivo) e sai
 
 RESULTADOS
   runs list | show <id> | winner <id> [--prompt-only]
+  runs status <id>         estado de um job (--detach), run ou sessão
+  runs wait <id> [--timeout <s>]
+                           espera o fim (padrão 600 s; exit 9 se esgotar)
+  runs cancel <id>         parada graciosa: record 'aborted' com o parcial
   runs reproduce <id>      config reconstruído + comando p/ re-rodar a run
   runs export <id> [-o <arq>]
                            artefato auto-contido (config, gabaritos, prompts, juiz)
@@ -105,7 +110,8 @@ PARA AGENTES
 
 CÓDIGOS DE SAÍDA
   0 ok · 2 uso inválido · 3 config inválida · 4 auth · 5 sem crédito
-  7 parcial (orçamento esgotado) · 8 rede · 130 interrompido
+  6 inconclusiva · 7 parcial (orçamento esgotado) · 8 rede
+  9 \`runs wait\` esgotou o prazo · 130 interrompido (Ctrl-C, SIGTERM, runs cancel)
 `;
 
 /**
