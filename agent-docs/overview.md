@@ -40,8 +40,11 @@ HTTP 429) — não existe cap por comando.
   por permutação sobre todas as variantes da iteração, p ajustado ≤ 0,05 — sem
   isso "a melhor de K" ganharia sozinha por acaso. O gate registra o ganho bruto
   (máximo entre K) e o corrigido do winner's curse lado a lado com o p ajustado.
-  Sem promoção, o treino **convergiu** e para (continuar só queimaria custo
-  re-testando a régua).
+  Quem passa no gate ainda é **re-avaliado limpo**: candidato e régua respondem
+  de novo (vereditos novos) num minibatch de `max(5; ceil(0,3·n))` cenários de
+  treino, e só promove com melhora estrita. Com **paciência 2**, o treino só
+  **converge** e para depois de 2 iterações SEGUIDAS sem promoção. Acima de 6
+  técnicas, cada iteração usa 6 (elas rodam entre as iterações).
 - **Iterações seguintes** — o campeão vira a nova base, é re-testado *verbatim*
   como controle, e as variantes recebem as **lições** das falhas dele.
 - **Gate final** — campeão e base disputam nos cenários de holdout, com

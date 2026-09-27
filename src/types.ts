@@ -923,7 +923,35 @@ export interface BestOfKTest {
 }
 
 /** Condição do gate que segurou a promoção (IMPL-002). */
-export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance';
+/**
+ * `reeval` (IMPL-013): passou no gate da melhor de K, mas a re-avaliação LIMPA no
+ * minibatch não confirmou a melhora (ou não chegou a rodar até o fim).
+ */
+export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance' | 'reeval';
+
+/**
+ * Re-avaliação LIMPA do candidato antes de confirmar a promoção (IMPL-013,
+ * aceitação estilo GEPA): candidato e régua rodam de novo — respostas e
+ * vereditos NOVOS — num minibatch de max(5, ceil(0,3·n)) cenários de treino.
+ */
+export interface PromotionReeval {
+  /** Run da re-avaliação (ausente se ela nem começou). */
+  runId?: string;
+  candidateId: string;
+  controlId: string;
+  /** Cenários do minibatch = max(5, ceil(0,3·n)), limitado a n. */
+  size: number;
+  /** n: cenários de treino de onde o minibatch foi sorteado. */
+  poolSize: number;
+  /** Pareamento no minibatch (ausente se a run não terminou). */
+  pairing?: PairCoverage;
+  /** Δ candidato − régua nos pares completos do minibatch (p.p.). */
+  gainPp: number;
+  /** Melhora ESTRITA no minibatch → a promoção vale. */
+  confirmed: boolean;
+  /** Status da run quando ela não terminou (`error`/`aborted`) — não confirma. */
+  runStatus?: string;
+}
 
 /**
  * Gate de promoção de UMA iteração do treino, com o pareamento honesto
@@ -956,6 +984,12 @@ export interface IterationGate {
   sensitivity?: PairSensitivity<GateConclusion>;
   /** `inconclusive` = a decisão muda no pior/melhor caso → NÃO promove. */
   decision: 'promoted' | 'held' | 'inconclusive';
+  /**
+   * IMPL-013: re-avaliação limpa do candidato que passou no gate (ausente quando
+   * o gate já segurou, e em sessões antigas). Não confirmada → `held` com
+   * `heldBy: ['reeval']`.
+   */
+  reeval?: PromotionReeval;
 }
 
 /** Pareamento final da sessão (holdout, ou a última run de treino sem holdout). */

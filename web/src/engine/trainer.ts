@@ -6,6 +6,13 @@ import { composePrompt } from '../../../src/engine/promptGroup.js';
 import { addToPool, pickParent, sliceScores, type ParetoEntry } from '../../../src/engine/pareto.js';
 import { planHalving, survivorsOf } from '../../../src/engine/halving.js';
 import { seedFromId } from '../../../src/engine/duelCore.js';
+import {
+  pickReevalMinibatch,
+  reevalDecision,
+  shouldStopForPatience,
+  techniquesForIteration,
+  TRAINING_PATIENCE,
+} from '../../../src/engine/trainingPolicy.js';
 import { emitSessionEvent } from './events';
 import { saveSession } from './storage';
 import { computeMedals } from './medals';
@@ -16,6 +23,8 @@ import { formatIterationGate, pairedSignificance, VERDICT_SCORE } from './stats'
 import { BudgetLedger, isControlSignal } from '../../../src/budget.js';
 import type {
   Contestant,
+  IterationGate,
+  PromotionReeval,
   RunCtx,
   RunRecord,
   SessionRecord,
@@ -229,6 +238,64 @@ function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
   };
 }
 
+/**
+ * IMPL-013 — re-avaliação LIMPA do candidato antes de confirmar a promoção
+ * (aceitação estilo GEPA). O gate da melhor de K escolheu E testou o candidato
+ * nas MESMAS avaliações (winner's curse); aqui candidato e régua rodam de novo —
+ * respostas e vereditos NOVOS, nada reaproveitado — num minibatch de
+ * max(5, ceil(0,3·n)) cenários de TREINO (o holdout nunca entra), sem finais.
+ * Confirma só com melhora ESTRITA. O custo entra no ledger da sessão
+ * (`parentLedger`) e na estimativa pré-iteração (`estimateInputFromConfig`).
+ */
+async function reevaluateCandidate(args: {
+  cfg: TrainingConfig;
+  apiKey: string;
+  sessionId: string;
+  iteration: number;
+  selectionRun: RunRecord;
+  controlId: string;
+  candidateId: string;
+  trainStages: StageSpec[];
+  ledger: BudgetLedger;
+}): Promise<{ reeval: PromotionReeval; run?: RunRecord }> {
+  const { cfg, selectionRun, controlId, candidateId, trainStages } = args;
+  const minibatch = pickReevalMinibatch(trainStages, seedFromId(`reeval:${args.sessionId}:${args.iteration}`));
+  const base = { candidateId, controlId, size: minibatch.length, poolSize: trainStages.length };
+  const control = selectionRun.contestants.find((c) => c.id === controlId);
+  const candidate = selectionRun.contestants.find((c) => c.id === candidateId);
+  // Sem régua/candidato/cenário não há evidência limpa: não confirma.
+  if (!control || !candidate || minibatch.length === 0) {
+    return { reeval: { ...base, gainPp: 0, confirmed: false } };
+  }
+  const runId = randomUUID();
+  const run = await runToCompletion(
+    {
+      ...variationConfigFrom(cfg),
+      stages: minibatch.length,
+      customStages: undefined,
+      scenarioSeed: undefined,
+      // Só o veredito por referência decide; finais seriam custo sem uso aqui.
+      duels: false,
+    },
+    args.apiKey,
+    {
+      runId,
+      contestants: [{ ...control }, { ...candidate }],
+      pinnedStages: minibatch,
+      sessionId: args.sessionId,
+      iteration: args.iteration,
+      parentRunId: selectionRun.id,
+      parentLedger: args.ledger,
+    },
+  );
+  if (run.status !== 'finished') {
+    return { reeval: { ...base, runId, gainPp: 0, confirmed: false, runStatus: run.status }, run };
+  }
+  const { controlScores, championScores } = pairedStageScores(run.stages, controlId, candidateId);
+  const d = reevalDecision(controlScores, championScores);
+  return { reeval: { ...base, runId, pairing: d.pairing, gainPp: d.gainPp, confirmed: d.confirmed }, run };
+}
+
 async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void> {
   const cfg = record.config;
   const sessionId = record.id;
@@ -278,6 +345,13 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
   // convergido: a regua, que segurou o titulo). Usado na linhagem e no
   // pareamento da significancia.
   let championIdInLastRun = '';
+  // IMPL-013: paciência — iterações SEGUIDAS sem promoção (encerra em 2).
+  let semPromocao = 0;
+  // Enquanto nada foi promovido o campeão É a base: o carry já a re-testa, e
+  // repetir o 'original' seria um candidato nulo pago (e mais um no max-T).
+  let promovidas = 0;
+  // IMPL-013: K ≤ 6 técnicas por iteração; acima disso elas rodam na sessão.
+  const techSeed = seedFromId(`techniques:${sessionId}`);
 
   try {
     for (let i = 0; i < cfg.iterations; i++) {
@@ -291,7 +365,7 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           basePrompt: cfg.basePrompt,
           originalPrompt: cfg.basePrompt,
           includeOriginal: hasBase,
-          techniqueIds: cfg.techniqueIds,
+          techniqueIds: techniquesForIteration(cfg.techniqueIds, i, techSeed),
           manualVariants: cfg.manualVariants,
           promptOptimization,
           optimizerModelId,
@@ -309,7 +383,10 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
         // feedbackDriven nao foi desligado.
         const hint0 =
           cfg.feedbackDriven !== false && prevRun
-            ? buildLessons(prevRun, champion!.contestantId)
+            ? // IMPL-013: com paciência a iteração anterior pode não ter
+              // promovido — o campeão rodou nela como 'carry'; `v<k>` de lá é
+              // OUTRA variante. O id da última run é o que vale.
+              buildLessons(prevRun, championIdInLastRun)
             : '';
         // Reflexao GEPA POR LLM (opt-in, §7.5): o meta-modelo reescreve as
         // licoes deterministicas num bloco acionavel. Custo extra contado no
@@ -355,8 +432,8 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           carryPrompt: champion!.systemPrompt,
           carryLabel: `Melhor it.${i}`,
           carryParentId: champion!.contestantId,
-          includeOriginal: hasBase,
-          techniqueIds: cfg.techniqueIds,
+          includeOriginal: hasBase && promovidas > 0,
+          techniqueIds: techniquesForIteration(cfg.techniqueIds, i, techSeed),
           manualVariants: cfg.manualVariants,
           promptOptimization,
           optimizerModelId,
@@ -481,8 +558,40 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           runRec.contestants.map((c) => c.id),
         ),
       });
+      // IMPL-013: passou no gate da melhor de K → re-avaliação LIMPA num
+      // minibatch antes de confirmar (as avaliações da seleção não confirmam a
+      // própria seleção). Sem régua (treino sem prompt base, iteração 0) não há
+      // contra quem re-avaliar: a melhor vence por definição, como antes.
+      let gate: IterationGate | undefined = pick.gate;
+      let confirmed = pick.isWinner && Boolean(pick.best);
+      if (confirmed && pick.best && pick.control) {
+        const r = await reevaluateCandidate({
+          cfg,
+          apiKey,
+          sessionId,
+          iteration: i,
+          selectionRun: runRec,
+          controlId,
+          candidateId: pick.best.id,
+          trainStages: pinnedStages ?? [],
+          ledger,
+        });
+        syncLedger();
+        confirmed = r.reeval.confirmed;
+        if (gate) {
+          gate = confirmed
+            ? { ...gate, reeval: r.reeval }
+            : { ...gate, reeval: r.reeval, decision: 'held', heldBy: [...(gate.heldBy ?? []), 'reeval'] };
+        }
+        log(
+          sessionId,
+          `re-avaliacao limpa de ${pick.best.id} em ${r.reeval.size} cenarios: Δ ${r.reeval.gainPp.toFixed(1)}pp — ${
+            confirmed ? 'confirmada' : `NAO confirmada${r.reeval.runStatus ? ` (run ${r.reeval.runStatus})` : ''}`
+          }`,
+        );
+      }
       let promoted = false;
-      if (pick.isWinner && pick.best) {
+      if (confirmed && pick.best) {
         const wc = runRec.contestants.find((c) => c.id === pick.best!.id);
         champion = {
           contestantId: pick.best.id,
@@ -492,12 +601,15 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
         };
         championIdInLastRun = pick.best.id;
         promoted = true;
+        promovidas += 1;
       } else if (!champion) {
         // A regua segurou o titulo logo na 1a rodada.
         const controlC = runRec.contestants.find((c) => c.id === controlId);
         champion = {
           contestantId: controlId,
-          systemPrompt: controlC?.systemPrompt ?? cfg.basePrompt ?? '',
+          // Multi-prompt: o FRAGMENTO (com paciência o laço segue e o carry
+          // compõe de novo — o composto seria composto duas vezes).
+          systemPrompt: controlC?.promptFragment ?? controlC?.systemPrompt ?? cfg.basePrompt ?? '',
           label: controlC?.label ?? controlId,
         };
         championIdInLastRun = controlId;
@@ -520,7 +632,7 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
         golds: medalRow?.golds ?? 0,
         silvers: medalRow?.silvers ?? 0,
         bronzes: medalRow?.bronzes ?? 0,
-        ...(pick.gate ? { gate: pick.gate } : {}),
+        ...(gate ? { gate } : {}),
       });
 
       // F4.1: promocao entra no POOL (nunca derruba o campeao unico — o pool
@@ -554,34 +666,40 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           championId: champion.contestantId,
           gain: pick.gain,
           // IMPL-002: bruto (gain) e corrigido lado a lado, com o p ajustado.
-          ...promotionEventFields(pick.gate),
+          ...promotionEventFields(gate),
         });
         log(
           sessionId,
           `iteracao ${i + 1}: promovido ${champion.contestantId} (${
-            pick.gate ? formatIterationGate(pick.gate) : `ganho +${pick.gain.toFixed(1)}pp`
+            gate ? formatIterationGate(gate) : `ganho +${pick.gain.toFixed(1)}pp`
           })`,
         );
       }
       await saveSession(record);
 
-      if (!promoted) {
-        // Convergiu: a promocao exige margem real E significativa (max-T)
-        // sobre o campeao. Sem ganho — mesmo ja na iteracao 0 — nao ha
-        // campeao NOVO de onde derivar a
-        // proxima geracao; continuar so queimaria custo re-testando a regua.
+      // IMPL-013 — paciência 2: uma iteração sem promoção NÃO encerra a sessão
+      // (antes encerrava: paciência implícita 1). A próxima deriva de novo do
+      // campeão atual, com lições novas; só 2 SEGUIDAS sem promoção = convergiu.
+      semPromocao = promoted ? 0 : semPromocao + 1;
+      if (!promoted && shouldStopForPatience(semPromocao)) {
         record.convergedAtIteration = i;
         emitSessionEvent({ type: 'session.converged', sessionId, iteration: i });
         log(
           sessionId,
-          pick.gate?.decision === 'inconclusive'
-            ? `parou sem promocao na iteracao ${i + 1}: gate INCONCLUSIVO (${pick.gate.pairing.excludedPairs} de ${pick.gate.pairing.n} pares sem veredito; a decisao muda no pior/melhor caso)`
-            : pick.gate
-              ? `convergiu na iteracao ${i + 1} (${formatIterationGate(pick.gate)})`
-              : `convergiu na iteracao ${i + 1} (ganho ${pick.gain.toFixed(1)}pp < minGain ${minGain ?? 1})`,
+          gate?.decision === 'inconclusive'
+            ? `parou sem promocao na iteracao ${i + 1} (${semPromocao} seguidas): gate INCONCLUSIVO (${gate.pairing.excludedPairs} de ${gate.pairing.n} pares sem veredito; a decisao muda no pior/melhor caso)`
+            : gate
+              ? `convergiu na iteracao ${i + 1} (${semPromocao} seguidas sem promocao; ${formatIterationGate(gate)})`
+              : `convergiu na iteracao ${i + 1} (${semPromocao} seguidas sem promocao; ganho ${pick.gain.toFixed(1)}pp < minGain ${minGain ?? 1})`,
         );
         await saveSession(record);
         break;
+      }
+      if (!promoted) {
+        log(
+          sessionId,
+          `iteracao ${i + 1} sem promocao (${semPromocao}/${TRAINING_PATIENCE} da paciencia): segue com o campeao atual`,
+        );
       }
     }
 

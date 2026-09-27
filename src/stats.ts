@@ -968,9 +968,15 @@ export function formatIterationGate(gate: IterationGate): string {
       ? 'sem par completo'
       : r === 'min-gain'
         ? `Δ abaixo da margem`
-        : `p ajustado > ${gate.test?.alpha ?? 0.05}`,
+        : r === 'reeval'
+          ? `re-avaliação limpa não confirmou (Δ ${gate.reeval ? fmtSignedPp(gate.reeval.gainPp) : '?'} em ${gate.reeval?.size ?? '?'} cenários)`
+          : `p ajustado > ${gate.test?.alpha ?? 0.05}`,
   );
-  return `${GATE_DECISION_LABEL[gate.decision]}: ${summary}${why.length && gate.decision !== 'inconclusive' ? ` — segurou: ${why.join(', ')}` : ''}`;
+  // IMPL-013: promoção só vale depois da re-avaliação limpa — o Δ dela fica visível.
+  const reeval = gate.reeval?.confirmed
+    ? ` — confirmado na re-avaliação limpa (Δ ${fmtSignedPp(gate.reeval.gainPp)} em ${gate.reeval.size} cenários)`
+    : '';
+  return `${GATE_DECISION_LABEL[gate.decision]}: ${summary}${why.length && gate.decision !== 'inconclusive' ? ` — segurou: ${why.join(', ')}` : ''}${reeval}`;
 }
 
 /** `80%` / `62.5%` — completude e frações no relatório. */

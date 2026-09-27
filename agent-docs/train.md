@@ -28,7 +28,7 @@ prompt-builder train --config arena.json --budget 3 --output-format ndjson
 | `--judge <id>` | juiz; repita para um painel. **Não pode ser o `--model`.** |
 | `--techniques a,b,c` | técnicas de reescrita (`prompt-builder techniques`) |
 | `--base-prompt-file` | o prompt de partida; entra como controle |
-| `--iterations N` | teto de iterações (2–10). O laço para antes se convergir. |
+| `--iterations N` | teto de iterações (2–10; recomendado 3–5). O laço para antes se convergir (2 iterações seguidas sem promoção). |
 | `--min-gain N` | margem PRÁTICA mínima em pontos de judge-score para promover. Padrão: `max(1; 50/n)` — meia granularidade (com 8 cenários, 6,25 pontos). Além dela, o gate exige p ajustado ≤ 0,05 (ver abaixo) |
 | `--holdout-ratio N` | fatia reservada para o gate final (padrão 0,2; 0 desliga) |
 | `--stages N` | quantos cenários (1–50). Recomendado 6–12. |
@@ -67,12 +67,16 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
   bruto com K = 1) e `test.pAdjusted` o p ajustado do max-T (todas as K variantes
   da iteração contra a régua; `test.byContestant` traz o p de cada uma).
   Reporte os três lado a lado; `heldBy` diz o que segurou (`significance`,
-  `min-gain`, `no-pairs`).
+  `min-gain`, `no-pairs`, `reeval`).
 - `bestPromptByIteration[].gate.decision: "inconclusive"` — a promoção dependeria
-  dos vereditos ausentes (> 10% dos pares); o gate não promove e o treino para.
+  dos vereditos ausentes (> 10% dos pares); o gate não promove (conta para a
+  paciência: 2 iterações seguidas sem promoção encerram o treino).
   Investigue as falhas do juiz antes de rodar de novo.
 - `holdoutSkipped: true` — **o campeão não passou pelo gate**. Trate o ganho como
   não verificado.
+- `bestPromptByIteration[].gate.heldBy: ["reeval"]` — a melhor variante passou
+  no gate, mas a re-avaliação limpa (`gate.reeval`: minibatch, Δ limpo) não
+  confirmou a melhora. Promoção por acaso barrada — não é falha.
 - `convergedAtIteration` — o treino parou por falta de ganho, não por falta de
   iterações. Isso é um bom sinal, não uma falha.
 

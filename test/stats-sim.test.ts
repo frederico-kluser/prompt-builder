@@ -12,7 +12,9 @@ import {
   cellSeed,
   MAX_ABS_BIAS_PP,
   MAX_FALSE_PROMOTION,
+  MAX_SESSION_FALSE_PROMOTION,
   simulateCell,
+  simulateSession,
 } from '../scripts/stats-sim-core.js';
 
 describe('stats:sim reduzido — promoção falsa sob H0', () => {
@@ -61,5 +63,40 @@ describe('stats:sim — reprodutibilidade e grade', () => {
     expect(new Set(grid.map((c) => c.n))).toEqual(new Set([5, 8, 10, 12, 15, 20, 30, 40, 50]));
     expect(new Set(grid.map((c) => c.K))).toEqual(new Set([1, 2, 3, 4, 5, 6, 7, 8]));
     expect(grid.every((c) => c.trials === 20_000)).toBe(true);
+  });
+});
+
+// IMPL-013 (R-02b:REC-2) — a SESSÃO inteira: gate IMPL-002 + re-avaliação limpa
+// no minibatch max(5, ceil(0,3·n)) + paciência 2, até 5 iterações. Sob H0 toda
+// promoção na sessão é falsa. `npm run stats:sim -- --sessions` roda a grade.
+describe('stats:sim — promoção falsa por SESSÃO sob H0 (IMPL-013)', () => {
+  it('n=8 K=4 flip=0,15: < 30% (o laço antigo: ≈ 60,8%)', () => {
+    const r = simulateSession({ n: 8, K: 4, flip: 0.15, trials: 1500 });
+    expect(r).toMatchObject({ maxIterations: 5, patience: 2, reeval: true });
+    expect(r.sessionFalsePromotionRate).toBeLessThan(MAX_SESSION_FALSE_PROMOTION);
+    expect(r.sessionFalsePromotionUpper95).toBeLessThan(MAX_SESSION_FALSE_PROMOTION);
+    // Linha de base: Δ ≥ 1 p.p. sem teste, paciência 1 — a medição do item (60,8%).
+    expect(r.legacySessionFalsePromotionRate).toBeGreaterThan(0.5);
+    expect(r.legacySessionFalsePromotionRate).toBeLessThan(0.7);
+    // Paciência 2: sob H0 a sessão roda (pelo menos) 2 iterações, não 1.
+    expect(r.meanIterations).toBeGreaterThanOrEqual(2);
+  });
+
+  it('flip 0,30 e K = 6 (pior ruído, mais multiplicidade): segue < 30%', () => {
+    const r = simulateSession({ n: 8, K: 6, flip: 0.3, trials: 800 });
+    expect(r.sessionFalsePromotionRate).toBeLessThan(MAX_SESSION_FALSE_PROMOTION);
+    expect(r.legacySessionFalsePromotionRate).toBeGreaterThan(0.5);
+  });
+
+  it('a re-avaliação limpa barra candidatos que passaram no gate por acaso', () => {
+    const r = simulateSession({ n: 12, K: 6, flip: 0.3, trials: 800 });
+    expect(r.reevalRejectionRate).not.toBeNull();
+    expect(r.reevalRejectionRate!).toBeGreaterThan(0.3);
+  });
+
+  it('é determinística (seed da sessão derivada de n/K/flip)', () => {
+    const a = simulateSession({ n: 8, K: 4, flip: 0.3, trials: 200 });
+    const b = simulateSession({ n: 8, K: 4, flip: 0.3, trials: 200 });
+    expect({ ...a, ms: 0 }).toEqual({ ...b, ms: 0 });
   });
 });
