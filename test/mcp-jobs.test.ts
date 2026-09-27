@@ -712,8 +712,10 @@ describe('IMPL-026 — start_run/run_status/cancel_run com o motor real', () => 
         expect(rec?.stoppedReason).toBe('cancelled');
         expect(rec?.stages).toHaveLength(2);
         const byRole = rec!.costByRole!;
-        expect(COST_ROLES.reduce((acc, role) => acc + byRole[role].calls, 0)).toBe(fake.billedCalls());
-        expect(rec!.totalCostUsd).toBeCloseTo(fake.billedUsd(), 10);
+        // IMPL-017: abortada em voo sem id = gasto CONSERVADOR; o medido bate com a fatura.
+        const lg = rec!.costLedger ?? { conservativeUsd: 0, conservativeCalls: 0 };
+        expect(COST_ROLES.reduce((acc, role) => acc + byRole[role].calls, 0) - lg.conservativeCalls).toBe(fake.billedCalls());
+        expect(rec!.totalCostUsd - lg.conservativeUsd).toBeCloseTo(fake.billedUsd(), 10);
         const lido = (await callTool('get_result', { id: rec!.id })) as ToolText;
         expect(lido.isError).toBeUndefined();
         expect((JSON.parse(lido.content![0].text) as RunRecord).status).toBe('aborted');

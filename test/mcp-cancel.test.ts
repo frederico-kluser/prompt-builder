@@ -406,8 +406,13 @@ describe('IMPL-025 — run_benchmark/train_prompt reais: cancelamento de ponta a
         expect(rec.finishedAt).toBeDefined();
         // dinheiro medido: o record fecha com a fatura mesmo cortado no meio
         const byRole = rec.costByRole!;
-        expect(COST_ROLES.reduce((s, r) => s + byRole[r].calls, 0)).toBe(fake.billedCalls());
-        expect(rec.totalCostUsd).toBeCloseTo(fake.billedUsd(), 10);
+        // IMPL-017: a chamada abortada EM VOO pelo cancel (sem id de geração) é
+        // lançada como gasto CONSERVADOR (a reserva inteira — o provedor pode
+        // cobrar); o que foi medido bate com a fatura.
+        const lg = rec.costLedger ?? { conservativeUsd: 0, conservativeCalls: 0 };
+        expect(COST_ROLES.reduce((s, r) => s + byRole[r].calls, 0) - lg.conservativeCalls).toBe(fake.billedCalls());
+        expect(rec.totalCostUsd - lg.conservativeUsd).toBeCloseTo(fake.billedUsd(), 10);
+        expect(rec.totalCostUsd).toBeGreaterThanOrEqual(fake.billedUsd() - 1e-12);
         expect(rec.stages).toHaveLength(2); // os slots das etapas existem em todo corte
         if (papel === 'competitor' || papel === 'judge' || papel === 'duel') {
           // cenários (com gabarito) já materializados sobrevivem ao corte; as

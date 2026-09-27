@@ -191,8 +191,8 @@ describe('IMPL-045 rev — a estimativa conta repeats (compare)', () => {
   it('o portão de confirmação de custo vê o custo triplicado (e as chamadas também)', () => {
     // Catálogo calibrado para a run 1× ficar ABAIXO de US$ 1 e a 3× acima.
     const caro = parseModelsPayload({
-      // Recalibrado p/ os tetos do IMPL-016 (juiz 4096, duelo 2048, gabarito 3072).
-      data: ['gen/a', 'ref/a', 'judge/a', 'comp/a', 'comp/b'].map((id) => catalogItem(id, 8e-6, 2e-5)),
+      // Recalibrado p/ os tetos do IMPL-016 (juiz 4096, duelo 2048, gabarito 3072) e do IMPL-017 (datagen 8192).
+      data: ['gen/a', 'ref/a', 'judge/a', 'comp/a', 'comp/b'].map((id) => catalogItem(id, 6.5e-6, 1.6e-5)),
     });
     const um = estimateLaunchCost(base, caro);
     const tres = estimateLaunchCost({ ...base, repeats: 3 }, caro);

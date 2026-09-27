@@ -10,6 +10,7 @@
 //   (v)   estouro limitado a <= 1 chamada em voo por papel.
 // Tudo com transporte falso: zero rede, zero gasto.
 
+import { buildCaseInput } from '../src/engine/caseInput.js';
 import { describe, expect, it, vi } from 'vitest';
 import { BudgetLedger, isBudgetSignal, isControlSignal } from '../src/budget.js';
 import { runCompetitor } from '../src/competitor.js';
@@ -565,12 +566,8 @@ describe('IMPL-017 — costLedger no RunRecord', () => {
 // ---------------------------------------------------------------------------
 
 const ETAPA: StageSpec = { question: 'Diga oi.', productContext: 'Voce e um assistente.', maxTokens: 200 };
-/** Reserva do competidor para ETAPA (system = productContext, user = question). */
-const reservaEtapa = () =>
-  reservaDe(200, [
-    { role: 'system', content: ETAPA.productContext },
-    { role: 'user', content: ETAPA.question },
-  ]);
+/** Reserva do competidor para ETAPA — o caso montado por buildCaseInput (IMPL-009), como vai no fio. */
+const reservaEtapa = () => reservaDe(200, buildCaseInput(ETAPA));
 
 describe('IMPL-017 (revisão) — costUsd do competidor segue a regra do ledger', () => {
   it('timeout (conservador) + retry ok: costUsd soma as DUAS tentativas e bate com o ledger', async () => {
