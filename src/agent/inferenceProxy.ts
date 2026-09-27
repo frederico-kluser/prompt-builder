@@ -25,13 +25,14 @@
 //   bytes e tempos — nunca headers/corpos; a key e os tokens nunca aparecem (o
 //   `keyFingerprint` = sha256 truncado prova QUAL key foi injetada sem revelá-la).
 //
-// Ganchos (`hooks`) são o ponto de extensão do proxy de CUSTO (IMPL-035): freio
-// de orçamento ANTES de encaminhar (`beforeForward`), leitura do `usage.cost` do
-// último chunk SSE (`onResponseChunk`/`onExchangeEnd`) e rate limit local. Este
-// módulo não conta dinheiro: só roteia, autentica e registra. As chamadas do
-// agente já corriam fora do `chatCompletion` (o pi falava direto com o
-// provedor) — continuam fora do limitador AIMD do gateway; 429 do provedor
-// volta ao agente como veio (o pi tem retry próprio).
+// Ganchos (`hooks`) são o ponto de extensão do proxy de CUSTO (IMPL-035,
+// `costProxy.ts`): freio de orçamento ANTES de encaminhar (`beforeForward`),
+// leitura do `usage.cost` do último chunk SSE (`onResponseStart`/
+// `onResponseChunk`/`onExchangeEnd`, que devolve as anotações de custo gravadas
+// na MESMA linha do log) e o limitador local das chamadas do agente. Este módulo
+// não conta dinheiro: só roteia, autentica e registra. As chamadas do agente
+// continuam fora do limitador AIMD do GATEWAY (têm o seu, no proxy de custo);
+// 429 do provedor volta ao agente como veio (o pi tem retry próprio).
 //
 // ⚠️ Só Node (http/https/fs). Nunca importe do web — o modo agente não existe na SPA.
 // ----------------------------------------------------------------------------
@@ -139,12 +140,25 @@ export interface InferenceExchange {
   label: InferenceCredentialLabel;
   /** `performance.now()` da chegada da requisição. */
   startedAt: number;
+  /**
+   * `content-length` da requisição (bytes), quando o cliente o mandou. O proxy de
+   * custo estima o prompt por ele SEM ler o corpo (o corpo segue em streaming,
+   * sem buffer, para o upstream).
+   */
+  contentLength?: number;
 }
 
 /** Decisão do gate (`beforeForward`) — IMPL-035 recusa com 429 `budget_exhausted`. */
 export type InferenceGateDecision =
   | { allow: true }
-  | { allow: false; status: number; code: string; message: string };
+  | {
+      allow: false;
+      status: number;
+      code: string;
+      message: string;
+      /** Detalhes legíveis pelo agente, no `error.metadata` (formato do OpenRouter). */
+      metadata?: Record<string, unknown>;
+    };
 
 /** Resumo de uma troca encerrada (o que vai ao log, sem conteúdo). */
 export interface InferenceExchangeSummary {
@@ -165,10 +179,16 @@ export interface InferenceExchangeSummary {
 export interface InferenceProxyHooks {
   /** Antes de encaminhar. Recusa → a chamada NÃO chega ao provedor. */
   beforeForward?(ex: InferenceExchange): InferenceGateDecision | void | Promise<InferenceGateDecision | void>;
+  /** Headers do upstream chegaram (status + headers, antes do 1º byte do corpo). */
+  onResponseStart?(ex: InferenceExchange, status: number, headers: IncomingHttpHeaders): void;
   /** Cada chunk devolvido ao cliente (o stream SSE, byte a byte). */
   onResponseChunk?(ex: InferenceExchange, chunk: Buffer): void;
-  /** Fim da troca (sucesso, erro ou aborto). */
-  onExchangeEnd?(ex: InferenceExchange, summary: InferenceExchangeSummary): void;
+  /**
+   * Fim da troca (sucesso, erro, aborto ou recusa do gate). Chamado UMA vez por
+   * troca, ANTES da linha do log: o que devolver entra NA MESMA linha (ex.: o
+   * custo medido) — sem conteúdo, só números/ids (o log continua redigido).
+   */
+  onExchangeEnd?(ex: InferenceExchange, summary: InferenceExchangeSummary): Record<string, unknown> | void;
 }
 
 export interface InferenceProxyOptions {
@@ -190,6 +210,8 @@ export interface InferenceProxyOptions {
   upstreamIdleMs?: number;
   /** Candidatos à base do diretório do socket (teste). Default: XDG_RUNTIME_DIR, tmpdir, /tmp. */
   socketBaseDirs?: string[];
+  /** Metadados extras da linha `proxy.started` do log (ex.: versão do proxy de custo). */
+  logMeta?: Record<string, unknown>;
 }
 
 export interface InferenceProxyStats {
@@ -447,8 +469,14 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /** Erro no formato do OpenRouter (`{ error: { code, message } }`) — o SDK do agente o entende. */
-function errorBody(status: number, code: string, message: string): unknown {
-  return { error: { code: status, type: code, message } };
+function errorBody(status: number, code: string, message: string, metadata?: Record<string, unknown>): unknown {
+  return { error: { code: status, type: code, message, ...(metadata ? { metadata } : {}) } };
+}
+
+function parseContentLength(raw: string | string[] | undefined): number | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= 0 ? n : undefined;
 }
 
 /**
@@ -505,10 +533,26 @@ export async function startInferenceProxy(opts: InferenceProxyOptions): Promise<
     const auth = authenticate(req);
     const label = auth.status === 'ok' ? auth.cred.label : {};
     const subPath = pathname.startsWith(`${PROXY_API_PREFIX}/`) ? pathname.slice(PROXY_API_PREFIX.length) : pathname;
-    const ex: InferenceExchange = { id, method, path: subPath, label, startedAt };
+    const contentLength = parseContentLength(req.headers['content-length']);
+    const ex: InferenceExchange = {
+      id,
+      method,
+      path: subPath,
+      label,
+      startedAt,
+      ...(contentLength !== undefined ? { contentLength } : {}),
+    };
 
     const finish = (summary: Omit<InferenceExchangeSummary, 'totalMs'> & { totalMs?: number }, extra: Record<string, unknown> = {}): void => {
       const full: InferenceExchangeSummary = { ...summary, totalMs: round1(summary.totalMs ?? performance.now() - startedAt) };
+      // O gancho roda ANTES do log: as anotações dele (custo medido, escopo da
+      // recusa) saem na MESMA linha da troca — uma linha = uma chamada auditável.
+      let annotations: Record<string, unknown> | void = undefined;
+      try {
+        annotations = opts.hooks?.onExchangeEnd?.(ex, full);
+      } catch {
+        /* gancho de observação nunca derruba a resposta */
+      }
       log.write({
         event: 'exchange',
         id,
@@ -517,18 +561,14 @@ export async function startInferenceProxy(opts: InferenceProxyOptions): Promise<
         label,
         auth: auth.status,
         ...extra,
+        ...(annotations ?? {}),
         ...full,
       });
-      try {
-        opts.hooks?.onExchangeEnd?.(ex, full);
-      } catch {
-        /* gancho de observação nunca derruba a resposta */
-      }
     };
-    const reject = (status: number, code: string, message: string): void => {
+    const reject = (status: number, code: string, message: string, metadata?: Record<string, unknown>): void => {
       stats.rejected++;
       req.resume(); // drena o corpo que não vai a lugar nenhum
-      sendJson(res, status, errorBody(status, code, message));
+      sendJson(res, status, errorBody(status, code, message, metadata));
       finish({ status, reqBytes: 0, resBytes: 0 }, { upstreamAuth: null, rejected: code });
     };
 
@@ -581,6 +621,11 @@ export async function startInferenceProxy(opts: InferenceProxyOptions): Promise<
       upReq.on('response', (up) => {
         ttfbMs = round1(performance.now() - startedAt);
         const status = up.statusCode ?? 502;
+        try {
+          opts.hooks?.onResponseStart?.(ex, status, up.headers);
+        } catch {
+          /* observação */
+        }
         res.writeHead(status, clientResponseHeaders(up.headers));
         up.on('data', (chunk: Buffer) => {
           resBytes += chunk.length;
@@ -652,7 +697,7 @@ export async function startInferenceProxy(opts: InferenceProxyOptions): Promise<
         return;
       }
       if (decision && decision.allow === false) {
-        reject(decision.status, decision.code, decision.message);
+        reject(decision.status, decision.code, decision.message, decision.metadata);
         return;
       }
       // O cliente pode ter desistido enquanto o gate pensava: não abre uma
@@ -716,6 +761,7 @@ export async function startInferenceProxy(opts: InferenceProxyOptions): Promise<
     upstream: upstreamBase,
     listen: { tcp: tcpBaseUrl ?? null, unix: socketPath ?? null },
     keyFingerprint: fingerprint,
+    ...(opts.logMeta ?? {}),
   });
 
   let closed = false;

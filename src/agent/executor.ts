@@ -61,6 +61,60 @@ export interface InferenceRoute {
   logFile?: string;
 }
 
+/**
+ * Por que o proxy de CUSTO recusou uma chamada desta execução (IMPL-035 / R-14b
+ * DEC-5): o orçamento acabou ANTES da chamada seguinte. `execution` = o teto
+ * `maxCostUsd` desta execução; `run` = o orçamento da RUN (ledger).
+ */
+export interface CostBrakeStop {
+  scope: 'execution' | 'run';
+  /** Gasto que o freio considerou (medido + em voo + chamadas sem custo conhecido), USD. */
+  committedUsd: number;
+  /** Custo projetado da chamada recusada, USD. */
+  projectedUsd: number;
+  /** O teto (execução) ou o saldo (run) contra o qual a chamada foi medida, USD. */
+  limitUsd: number;
+  /** ISO do instante da 1ª recusa. */
+  at: string;
+}
+
+/** O que o proxy de custo MEDIU desta execução (`usage.cost` do último chunk SSE). */
+export interface MeasuredCost {
+  /** Soma do custo das chamadas encerradas (medido > catálogo; `unknown` soma 0). */
+  usd: number;
+  /** Chamadas encaminhadas ao provedor e encerradas (2xx). */
+  calls: number;
+  /** Com `usage.cost` (valor cobrado). */
+  exact: number;
+  /** Sem `usage.cost`, precificadas pelo catálogo. */
+  estimated: number;
+  /** Sem custo conhecido (stream abortado/ilegível) — NÃO é "custou zero". */
+  unknown: number;
+  /** Recusadas pelo freio de orçamento (nunca chegaram ao provedor). */
+  refused: number;
+  tokensIn: number;
+  tokensOut: number;
+  /** Ids de geração do OpenRouter (`gen-…`), na ordem — a ponte com a fatura. */
+  generationIds: string[];
+}
+
+/**
+ * O freio de custo de UMA execução, visto pelo executor (IMPL-035). Quem conta o
+ * dinheiro é o proxy de custo do produto (`costProxy.ts`): ele recusa a chamada
+ * que estouraria o orçamento com 429 `budget_exhausted` ANTES de ir ao provedor.
+ * O executor só precisa TRADUZIR essa recusa (sinal de CONTROLE, não erro do
+ * provedor) em `stopReason: 'maxCost'` e encerrar o agente — o kill por custo
+ * DERIVADO do executor continua como segunda barreira.
+ */
+export interface CostBrake {
+  /** A recusa por orçamento, se já houve (a 1ª; é pegajosa). */
+  stopped(): CostBrakeStop | null;
+  /** Avisa na 1ª recusa (dispara na hora se já houve). Devolve o "desinscrever". */
+  onStop(cb: (stop: CostBrakeStop) => void): () => void;
+  /** O custo MEDIDO até agora. */
+  measured(): MeasuredCost;
+}
+
 /** A execução de UMA tarefa num workspace já preparado. */
 export interface AgentRunOpts {
   /** Id da execução (uuid) — também é o nome do diretório em disco. */
@@ -85,6 +139,12 @@ export interface AgentRunOpts {
    * key, o modo container recusa e o modo host roda sem credencial (fakes).
    */
   inference?: InferenceRoute;
+  /**
+   * Freio de custo desta execução (IMPL-035), dono = o produto (proxy da run).
+   * Presente = o executor traduz a recusa do proxy em `stopReason: 'maxCost'` e
+   * mata o agente. Ausente (rota própria do executor) = o executor monta o dele.
+   */
+  costBrake?: CostBrake;
 }
 
 /**

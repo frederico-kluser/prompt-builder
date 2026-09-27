@@ -7,7 +7,7 @@
 //   list     [--json]                   varre <dataDir>/agent-runs/<runId>
 //   logs     <runId> --stage N --contestant <id> [--rep N] [--what ...]
 //   replay   <runId> --stage N --contestant <id> [--rep N]
-//   reconcile <runId> [--json]        custo derivado + reconciliação (§20.4)
+//   reconcile <runId> [--generations] [--json]  custo medido (proxy) × derivado × cobrado (§20.4, IMPL-035)
 //   gc       [--older-than 30d] [--dry-run]
 //
 // Contrato de saída idêntico ao resto do CLI: stdout é PAYLOAD, stderr é narração.
@@ -25,6 +25,13 @@ import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { runPreflight, type PreflightOpts } from '../../agent/doctor.js';
 import { defaultPiImageTag } from '../../agent/container.js';
+import {
+  COST_FIDELITY_TOLERANCE,
+  reconcileGenerations,
+  summarizeProxyCostLog,
+  type GenerationReconciliation,
+} from '../../agent/costProxy.js';
+import { getGateway } from '../../openrouter.js';
 import {
   agentRunsRoot,
   execDir,
@@ -745,33 +752,35 @@ async function cmdReplay(argv: string[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// reconcile — §20.4
+// reconcile — §20.4 + IMPL-035
 // ---------------------------------------------------------------------------
 //
-// O subcomando fecha a conta do custo de modo agente. VERIFICAÇÃO EMPÍRICA
-// (2026-08-23, ver reconcile-evidence.md): o `responseId` do pi (`gen-...`) NÃO
-// é aceito por `GET /api/v1/generation?id=...` (HTTP 404 "Generation not found")
-// com a mesma key da chamada. Por isso a reconciliação com o OpenRouter está
-// INDISPONÍVEL/INVERIFICADA nesta versão e o endpoint NÃO é chamado em
-// produção: ficamos com o resumo DERIVADO (soma dos `usage.costUsd` das
-// execuções de agente somada ao `totalCostUsd` da run) e um aviso explícito.
-// O `RunRecord.agentCostReconciled` (outra sub-tarefa da onda, NULL na 6.1)
-// permanece vazio pelo mesmo motivo.
+// Fecha a conta do custo de modo agente. Três números, lado a lado:
+//   - DERIVADO: o que cada execução registrou na resposta (hoje = o medido,
+//     quando a execução passou pelo proxy; o do executor, quando não);
+//   - MEDIDO: a soma do `usage.cost` que o proxy de custo leu do último chunk SSE
+//     de CADA chamada do agente (`inference-proxy.jsonl`, uma linha por chamada,
+//     com o id de geração do OpenRouter);
+//   - COBRADO (`--generations`): o `total_cost` que o OpenRouter lançou para cada
+//     id de geração (`GET /generation`, leitura de auditoria — não é chamada de
+//     LLM). Fidelidade exigida: |medido − cobrado| ≤ 2% por run (R-14b REC-2).
+// Histórico (2026-08-23): o `responseId` que o PI reporta (`gen-<unix>-…`) dava
+// 404 em `/generation`; os ids que o proxy lê vêm do PROVEDOR (`gen-<24>`), que é
+// o formato documentado.
 async function cmdReconcile(argv: string[]): Promise<number> {
-  const parsed = parse(argv, {});
+  const parsed = parse(argv, { generations: { type: 'boolean' } });
   const ctx = buildContext(parsed);
   const { out } = ctx;
   const runId = parsed.positionals[0];
   if (!runId) {
-    throw new CliError('Uso: prompt-builder agents reconcile <runId> [--json]', EXIT.USAGE);
+    throw new CliError('Uso: prompt-builder agents reconcile <runId> [--generations] [--json]', EXIT.USAGE);
   }
   const record = await loadRun(runId);
   if (!record) {
     throw new CliError(`Run de agente "${runId}" não encontrada em ${getDataDir()}.`, EXIT.USAGE);
   }
 
-  // Soma os custos DERIVADOS das execuções de agente (cada rep registra seu
-  // `usage.costUsd` no ledger/trajectory com source 'agent-derived'/'catalog').
+  // Soma o custo registrado por execução (resposta de cada contestant de agente).
   let derivedExecutionUsd = 0;
   let executions = 0;
   for (const s of record.stages) {
@@ -785,29 +794,81 @@ async function cmdReconcile(argv: string[]): Promise<number> {
   // totalCostUsd já embute as execuções + os demais papéis (juiz/gabarito/…).
   const totalUsd = typeof record.totalCostUsd === 'number' ? record.totalCostUsd : 0;
 
-  // AVISO EXPLÍCITO (§20.4 / Fase 4): reconciliar com o OpenRouter é
-  // impossível/indisponível — ver reconcile-evidence.md. NÃO chamamos o
-  // endpoint de geração em produção neste caso.
-  const aviso =
-    'reconciliação com o OpenRouter indisponível/não-verificada — custo permanece source \'catalog\'/\'agent-derived\'';
+  // MEDIDO: o log do proxy de custo da run (uma linha `exchange` por chamada).
+  const logFile = path.join(agentRunsRoot(), runId, 'inference-proxy.jsonl');
+  const logText = await fs.readFile(logFile, 'utf8').catch(() => undefined);
+  const measured = logText !== undefined ? summarizeProxyCostLog(logText) : undefined;
+
+  // COBRADO: só com --generations (usa a key; leitura de auditoria, não gasta).
+  let billing: GenerationReconciliation | undefined;
+  if (parsed.values.generations === true) {
+    if (!measured || measured.generationIds.length === 0) {
+      throw new CliError(
+        `Sem ids de geração no log do proxy (${logFile}) — nada a conferir com o OpenRouter.`,
+        EXIT.USAGE,
+      );
+    }
+    const apiKey = await resolveKey(parsed.values);
+    billing = await reconcileGenerations(measured, { baseUrl: getGateway().config.baseUrl, apiKey });
+  }
+
+  const aviso = measured
+    ? billing
+      ? !billing.fidelity.withinTolerance
+        ? `medido × cobrado fora da tolerância de ${COST_FIDELITY_TOLERANCE * 100}%`
+        : !billing.complete
+          ? `${billing.notFound + billing.errors} geração(ões) sem lançamento conferível no OpenRouter (404 pode ser transitório: rode de novo em alguns minutos)`
+          : undefined
+      : 'custo MEDIDO pelo proxy (usage.cost); confira com a fatura via --generations'
+    : `log do proxy de custo ausente (${logFile}) — run anterior ao IMPL-035: custo permanece derivado (source 'catalog'/'agent-derived')`;
 
   if (out.isText) {
     out.line(`reconcile ${record.id}  ${record.status}  ${record.mode}`);
     out.line(`execuções de agente: ${executions}`);
-    out.line(`custo DERIVADO das execuções: ${fmtUsd(derivedExecutionUsd)}`);
+    out.line(`custo registrado nas execuções: ${fmtUsd(derivedExecutionUsd)}`);
+    if (measured) {
+      out.line(
+        `custo MEDIDO pelo proxy: ${fmtUsd(measured.usd)} em ${measured.calls} chamada(s) ` +
+          `(${measured.exact} com usage.cost · ${measured.estimated} catálogo · ${measured.unknown} desconhecido · ` +
+          `${measured.refused} recusada(s) pelo freio)`,
+      );
+    }
+    if (billing) {
+      out.line(
+        `COBRADO pelo OpenRouter: ${fmtUsd(billing.billedUsd)} (${billing.found} geração(ões) conferida(s), ` +
+          `${billing.notFound} não encontrada(s), ${billing.errors} erro(s))`,
+      );
+      out.line(
+        `fidelidade: |medido − cobrado| = ${fmtUsd(billing.fidelity.diffUsd)} ` +
+          `(${(billing.fidelity.relative * 100).toFixed(2)}%) — ${billing.fidelity.withinTolerance ? 'OK' : 'FORA'} (≤ ${COST_FIDELITY_TOLERANCE * 100}%)`,
+      );
+    }
     out.line(`custo total da run (totalCostUsd): ${fmtUsd(totalUsd)}`);
-    out.warn(aviso);
+    if (aviso) out.warn(aviso);
   }
   out.result(true, 'agents.reconcile', {
     runId,
-    reconciled: false,
-    available: false,
+    // Conciliada = toda geração do log foi conferida E a fidelidade ficou na tolerância.
+    reconciled: billing !== undefined && billing.complete && billing.fidelity.withinTolerance,
+    available: measured !== undefined,
     executions,
     derivedExecutionUsd,
     totalCostUsd: totalUsd,
-    // `agentCostReconciled` é campo NULL na 6.1 (adicionado por outra sub-tarefa
-    // da onda); não o populamos porque não há billed a comparar.
-    note: aviso,
+    ...(measured
+      ? {
+          measured: {
+            usd: measured.usd,
+            calls: measured.calls,
+            exact: measured.exact,
+            estimated: measured.estimated,
+            unknown: measured.unknown,
+            refused: measured.refused,
+            generationIds: measured.generationIds.length,
+          },
+        }
+      : {}),
+    ...(billing ? { billing } : {}),
+    ...(aviso ? { note: aviso } : {}),
   });
   return EXIT.OK;
 }

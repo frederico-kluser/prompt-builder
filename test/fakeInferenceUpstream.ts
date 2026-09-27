@@ -17,11 +17,16 @@ export interface FakeUpstreamRequest {
 }
 
 export type FakeReply =
-  | { text: string; cost?: number; delayMs?: number }
-  | { toolCall: { name: string; args: Record<string, unknown> }; cost?: number }
+  | { text: string; cost?: number; delayMs?: number; id?: string }
+  | { toolCall: { name: string; args: Record<string, unknown> }; cost?: number; id?: string }
   | { status: number; error: string }
   /** Chunks crus (já com `data: `), com atraso entre eles — testa streaming real. */
-  | { rawChunks: string[]; gapMs: number };
+  | { rawChunks: string[]; gapMs: number }
+  /**
+   * Chunks crus com um TTFT: o 1º sai depois de `ttftMs` (o "modelo pensando") e
+   * o resto sai de uma vez (método do LiteLLM: payload de 1.000 chunks).
+   */
+  | { burst: string[]; ttftMs: number };
 
 export interface FakeUpstream {
   /** Base no formato do OpenRouter: `http://127.0.0.1:<porta>/api/v1`. */
@@ -30,7 +35,22 @@ export interface FakeUpstream {
   requests: FakeUpstreamRequest[];
   /** Respostas cuja conexão o CLIENTE (o proxy) fechou antes do fim. */
   aborted(): number;
+  /** Pico de chamadas de chat simultâneas vistas pelo upstream. */
+  maxConcurrent(): number;
+  /** Soma do `usage.cost` SERVIDO nas respostas de chat completas (a "fatura" do fake). */
+  billedUsd(): number;
+  /** `usage.cost` servido por id de geração (o que `GET /generation` lança por default). */
+  generations: Map<string, number>;
   close(): Promise<void>;
+}
+
+export interface FakeUpstreamOptions {
+  /**
+   * Lançamento de `GET /api/v1/generation?id=` (a "fatura" por geração). Recebe o
+   * id e o custo SERVIDO; devolve o `total_cost` a lançar, ou `null` = 404.
+   * Default: lança exatamente o custo servido (404 para id desconhecido).
+   */
+  invoice?: (id: string, servedUsd: number | undefined) => number | null;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -40,8 +60,11 @@ function chunk(obj: unknown): string {
 }
 
 /** Os chunks SSE de uma resposta (o ÚLTIMO traz `usage.cost`, como o OpenRouter). */
-export function sseChunks(reply: Exclude<FakeReply, { status: number } | { rawChunks: string[] }>, model = 'openai/gpt-4o-mini'): string[] {
-  const base = { id: 'gen-fake-037', object: 'chat.completion.chunk', created: 1_790_000_000, model };
+export function sseChunks(
+  reply: Exclude<FakeReply, { status: number } | { rawChunks: string[] } | { burst: string[] }>,
+  model = 'openai/gpt-4o-mini',
+): string[] {
+  const base = { id: reply.id ?? 'gen-fake-037', object: 'chat.completion.chunk', created: 1_790_000_000, model };
   const usage = { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15, cost: reply.cost ?? 0.0001 };
   if ('toolCall' in reply) {
     return [
@@ -82,10 +105,15 @@ export function sseChunks(reply: Exclude<FakeReply, { status: number } | { rawCh
  */
 export async function startFakeUpstream(
   script: (req: FakeUpstreamRequest, n: number) => FakeReply = () => ({ text: 'ok' }),
+  opts: FakeUpstreamOptions = {},
 ): Promise<FakeUpstream> {
   const requests: FakeUpstreamRequest[] = [];
+  const generations = new Map<string, number>();
   let chats = 0;
   let aborted = 0;
+  let active = 0;
+  let peak = 0;
+  let billed = 0;
   const server = http.createServer((req, res) => {
     res.on('close', () => {
       if (!res.writableFinished) aborted++;
@@ -110,12 +138,31 @@ export async function startFakeUpstream(
           res.end(JSON.stringify({ data: [] }));
           return;
         }
+        // Auditoria da fatura (IMPL-035): o `total_cost` lançado por geração.
+        if (req.method === 'GET' && req.url?.startsWith('/api/v1/generation')) {
+          const id = new URL(req.url, 'http://fake.local').searchParams.get('id') ?? '';
+          const served = generations.get(id);
+          const total = opts.invoice ? opts.invoice(id, served) : (served ?? null);
+          if (total === null) {
+            res.writeHead(404, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: { code: 404, message: `Generation ${id} not found` } }));
+            return;
+          }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ data: { id, total_cost: total, streamed: true } }));
+          return;
+        }
         if (req.method !== 'POST' || !req.url?.startsWith('/api/v1/chat/completions')) {
           res.writeHead(404, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ error: { code: 404, message: 'rota inexistente no upstream falso' } }));
           return;
         }
         const reply = script(rec, chats++);
+        active++;
+        peak = Math.max(peak, active);
+        res.on('close', () => {
+          active--;
+        });
         if ('status' in reply) {
           res.writeHead(reply.status, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ error: { code: reply.status, message: reply.error } }));
@@ -131,9 +178,21 @@ export async function startFakeUpstream(
           res.end();
           return;
         }
+        if ('burst' in reply) {
+          await sleep(reply.ttftMs);
+          if (res.destroyed) return;
+          for (const c of reply.burst) res.write(c);
+          res.end();
+          return;
+        }
         if ('delayMs' in reply && reply.delayMs) await sleep(reply.delayMs);
+        if (res.destroyed) return;
         for (const c of sseChunks(reply)) res.write(c);
         res.end();
+        const served = reply.cost ?? 0.0001;
+        billed += served;
+        const genId = reply.id ?? 'gen-fake-037';
+        generations.set(genId, (generations.get(genId) ?? 0) + served);
       })();
     });
   });
@@ -145,12 +204,31 @@ export async function startFakeUpstream(
     port,
     requests,
     aborted: () => aborted,
+    maxConcurrent: () => peak,
+    billedUsd: () => Math.round(billed * 1e9) / 1e9,
+    generations,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();
         server.close(() => resolve());
       }),
   };
+}
+
+/**
+ * Payload SSE de `n` chunks de conteúdo + o chunk de usage (com `cost`) + `[DONE]`
+ * — o formato do OpenRouter, para medir o overhead do proxy de custo.
+ */
+export function manyChunks(n: number, cost: number, id = 'gen-fake-035-burst'): string[] {
+  const base = { id, object: 'chat.completion.chunk', created: 1_790_000_000, model: 'openai/gpt-4o-mini' };
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    out.push(chunk({ ...base, choices: [{ index: 0, delta: { content: `t${i} ` }, finish_reason: null }] }));
+  }
+  out.push(chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }));
+  out.push(chunk({ ...base, choices: [], usage: { prompt_tokens: 50, completion_tokens: n, total_tokens: 50 + n, cost } }));
+  out.push('data: [DONE]\n\n');
+  return out;
 }
 
 /** Script de agente: 1ª chamada roda `command` no bash; a seguinte encerra com texto. */

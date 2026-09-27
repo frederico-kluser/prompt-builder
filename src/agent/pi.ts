@@ -66,8 +66,9 @@ import {
   sandboxProfile,
   writeEnvFile,
 } from './container.js';
-import type { InferenceRoute } from './executor.js';
+import type { CostBrake, CostBrakeStop, InferenceRoute } from './executor.js';
 import { startInferenceProxy, type InferenceProxy } from './inferenceProxy.js';
+import { applyMeasuredCost, COST_PROXY_VERSION, createRunCostMeter } from './costProxy.js';
 import { getGateway } from '../openrouter.js';
 
 // ----------------------------------------------------------------------------
@@ -362,34 +363,74 @@ export function writePiInferenceConfig(agentDir: string, provider: string, baseU
   return file;
 }
 
+/** O que a execução usa para falar com o modelo e frear o custo. */
+interface ResolvedInference {
+  route?: InferenceRoute;
+  /** Freio de custo (IMPL-035): o do chamador (junto da rota dele) ou o do proxy próprio. */
+  brake?: CostBrake;
+  /** true = o freio é DESTA execução (proxy próprio): o executor anota o custo medido. */
+  ownMeter: boolean;
+  close: () => Promise<void>;
+}
+
 /**
  * A rota da execução: a do chamador ou, sem ela e com a key no env, um proxy
- * PRÓPRIO desta execução (upstream = gateway do processo). `close` derruba o
- * proxy próprio (no-op para a rota do chamador, que tem dono).
+ * PRÓPRIO desta execução (upstream = gateway do processo), já com o proxy de
+ * CUSTO pendurado (teto `maxCostUsd` imposto antes da chamada, IMPL-035).
+ * `close` derruba o proxy próprio (no-op para a rota do chamador, que tem dono).
  */
-async function resolveInferenceRoute(
-  opts: AgentRunOpts,
-): Promise<{ route?: InferenceRoute; close: () => Promise<void> }> {
-  if (opts.inference) return { route: opts.inference, close: async () => undefined };
+async function resolveInferenceRoute(opts: AgentRunOpts): Promise<ResolvedInference> {
+  if (opts.inference) return { route: opts.inference, brake: opts.costBrake, ownMeter: false, close: async () => undefined };
   const hostKey = opts.env.OPENROUTER_API_KEY;
-  if (!hostKey) return { close: async () => undefined };
+  if (!hostKey) return { brake: opts.costBrake, ownMeter: false, close: async () => undefined };
   const gw = getGateway().config;
-  const own: InferenceProxy = await startInferenceProxy({
-    apiKey: hostKey,
-    upstreamBaseUrl: gw.baseUrl,
-    appUrl: gw.appUrl,
-    appTitle: gw.appTitle,
-    listen: opts.config.isolation?.kind === 'container' ? { unix: true } : { tcp: true },
-    logFile: existsSync(opts.workDir) ? path.join(opts.workDir, 'inference-proxy.jsonl') : undefined,
+  // Sem ledger (quem roda o pi solto não tem run): o freio é só o teto da execução.
+  const meter = createRunCostMeter({});
+  const execMeter = meter.openExecution({
+    execId: opts.execId,
+    modelId: opts.env.PI_MODEL_ID ?? 'desconhecido',
+    maxCostUsd: resolveLimits(opts).maxCostUsd,
   });
+  let own: InferenceProxy;
+  try {
+    own = await startInferenceProxy({
+      apiKey: hostKey,
+      upstreamBaseUrl: gw.baseUrl,
+      appUrl: gw.appUrl,
+      appTitle: gw.appTitle,
+      listen: opts.config.isolation?.kind === 'container' ? { unix: true } : { tcp: true },
+      logFile: existsSync(opts.workDir) ? path.join(opts.workDir, 'inference-proxy.jsonl') : undefined,
+      hooks: meter.hooks,
+      logMeta: { costProxy: COST_PROXY_VERSION },
+    });
+  } catch (err) {
+    execMeter.close();
+    throw err;
+  }
   const cred = own.issueCredential({ execId: opts.execId, role: 'agent' });
   return {
     route: own.route(cred),
+    // O freio é o do proxy que ROTEIA as chamadas: um `costBrake` do chamador
+    // sem rota não enxergaria nenhuma delas (nunca recusaria nada).
+    brake: execMeter,
+    ownMeter: true,
     close: async () => {
       cred.revoke();
+      await execMeter.settled();
       await own.close();
+      execMeter.close();
     },
   };
+}
+
+/** Linha de diagnóstico da recusa do freio (vai ao `stderrTail`/dossiê). */
+export function costBrakeHint(stop: CostBrakeStop): string {
+  const escopo = stop.scope === 'execution' ? 'teto da execução (maxCostUsd)' : 'orçamento da run';
+  return (
+    `freio de custo do proxy (${escopo}): US$ ${stop.committedUsd.toFixed(4)} comprometidos + ` +
+    `US$ ${stop.projectedUsd.toFixed(4)} projetados > US$ ${stop.limitUsd.toFixed(4)} — ` +
+    'a chamada seguinte foi recusada (429 budget_exhausted) ANTES de ir ao provedor.'
+  );
 }
 
 // ----------------------------------------------------------------------------
@@ -644,12 +685,24 @@ export const piExecutor: AgentExecutor = {
    * mesma onda).
    */
   async run(opts: AgentRunOpts, base?: PiRunOptions): Promise<AgentRunOutcome> {
-    const { route, close } = await resolveInferenceRoute(opts);
+    const inference = await resolveInferenceRoute(opts);
+    let outcome: PiRunOutcome;
     try {
-      return await runPiExecution(opts, base ?? {}, route);
+      outcome = await runPiExecution(opts, base ?? {}, inference.route, inference.brake);
     } finally {
-      await close();
+      await inference.close();
     }
+    // Proxy próprio: o custo MEDIDO (usage.cost) substitui o derivado do pi — o
+    // derivado fica na trajetória como auditoria. Com o freio do chamador, quem
+    // anota é ele (`runAgentStage`), que é o dono do medidor.
+    if (inference.ownMeter && inference.brake) {
+      const measured = inference.brake.measured();
+      if (measured.calls > 0) {
+        const trajectory = applyMeasuredCost(outcome.trajectory, measured);
+        outcome = { ...outcome, trajectory, usage: { ...outcome.usage, costUsd: trajectory.usage.costUsd } };
+      }
+    }
+    return outcome;
   },
 
   /**
@@ -673,7 +726,12 @@ export const piExecutor: AgentExecutor = {
  * `spawnAgent` (kill-tree, tetos, shouldStop) com argv/env da receita, alimenta o
  * parser JSONL a partir do stdout e devolve o `AgentRunOutcome`.
  */
-async function runPiExecution(opts: AgentRunOpts, baseOpts: PiRunOptions, route: InferenceRoute | undefined): Promise<PiRunOutcome> {
+async function runPiExecution(
+  opts: AgentRunOpts,
+  baseOpts: PiRunOptions,
+  route: InferenceRoute | undefined,
+  brake?: CostBrake,
+): Promise<PiRunOutcome> {
     const startedAt = Date.now();
 
     // --- diretórios por execução -------------------------------------------
@@ -920,6 +978,9 @@ async function runPiExecution(opts: AgentRunOpts, baseOpts: PiRunOptions, route:
 
     let shouldStopReason: AgentStopReason | null = null;
     const shouldStop = (): AgentStopReason | null => {
+      // 1ª barreira (IMPL-035): o proxy de custo recusou a chamada seguinte.
+      if (brake?.stopped()) return 'maxCost';
+      // 2ª barreira: o custo DERIVADO do próprio pi passou do teto.
       if (limits.maxCostUsd != null && parsed.costUsd > limits.maxCostUsd) return 'maxCost';
       if (limits.maxTurns != null && parsed.turns >= limits.maxTurns) return 'maxTurns';
       return null;
@@ -955,6 +1016,9 @@ async function runPiExecution(opts: AgentRunOpts, baseOpts: PiRunOptions, route:
         // Em container: gancho de kill do container por nome (o CLI docker ser
         // morto NÃO mata o container). Fire-and-forget — spawn.ts nunca awaita.
         onKill,
+        // Freio do proxy de custo: a recusa `budget_exhausted` mata o agente NA
+        // HORA (o pi entraria em backoff de retry, mudo, sem chunk de stdout).
+        onExternalStop: brake ? (stop) => brake.onStop(() => stop('maxCost')) : undefined,
       });
     } catch (err) {
       // Erro de spawn (binário ausente, permissão) → 'error'. CONTROLE: aborto
@@ -984,6 +1048,13 @@ async function runPiExecution(opts: AgentRunOpts, baseOpts: PiRunOptions, route:
     if (shouldStopReason && (stopReason === 'completed' || stopReason === 'error' || stopReason === 'maxOutput')) {
       stopReason = shouldStopReason;
     }
+    // A recusa do proxy de custo é CONTROLE, não erro do provedor: o pi que saiu
+    // sozinho depois do 429 (retentativas esgotadas → exit 0/≠0) vira 'maxCost'.
+    // Um kill que venceu antes (timeout/cancelamento) mantém o motivo dele.
+    const brakeStop = brake?.stopped() ?? null;
+    if (brakeStop && (stopReason === 'completed' || stopReason === 'error' || stopReason === 'maxOutput')) {
+      stopReason = 'maxCost';
+    }
     // processou 'completed' normal: o terminal confiável é o agent_settled, mas
     // um processo que sai com exit 0 e SEM o settled ainda é 'completed' honesto.
     if (stopReason === 'completed' && spawnResult.exitCode !== 0) {
@@ -996,14 +1067,16 @@ async function runPiExecution(opts: AgentRunOpts, baseOpts: PiRunOptions, route:
     // "processo morreu" (§18.3 → `nao`) e o agente levaria a culpa pela rede. Um
     // corte por limite/cancelamento que coincida com o erro mantém o motivo dele.
     const infraError =
-      parsed.providerError && (stopReason === 'completed' || stopReason === 'error')
+      !brakeStop && parsed.providerError && (stopReason === 'completed' || stopReason === 'error')
         ? parsed.providerError
         : undefined;
     if (infraError) stopReason = 'error';
 
     const durationMs = Date.now() - startedAt;
     let stderrTail = stderrRing.tail(STDERR_TAIL_LINES, `stderr (${spawnResult.stderrBytes} bytes)`);
-    if (parsed.providerError) {
+    if (brakeStop) {
+      stderrTail = `${costBrakeHint(brakeStop)}\n${stderrTail}`;
+    } else if (parsed.providerError) {
       stderrTail =
         `erro do provedor na última chamada do agente: ${parsed.providerError}` +
         (networkHint ? `\n${networkHint}` : '') +

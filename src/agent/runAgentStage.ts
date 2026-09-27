@@ -34,6 +34,13 @@ import { runOracle } from './oracle.js';
 import { aggregateAgentVerdict, judgeDossier } from './agentJudge.js';
 import { decideInfraError } from './infraError.js';
 import { acquireRunInferenceProxy, type InferenceProxyLease } from './inferenceProxy.js';
+import {
+  acquireRunCostMeter,
+  applyMeasuredCost,
+  COST_PROXY_VERSION,
+  type RunCostMeter,
+  type RunCostMeterLease,
+} from './costProxy.js';
 import { isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
 import { blindRankMap, seedFromId } from '../duels.js';
@@ -249,6 +256,14 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
   // UM por run: as etapas paralelas pegam empréstimos do mesmo proxy e o último
   // a devolver o fecha. O log redigido fica em `<runDir>/inference-proxy.jsonl`,
   // fora de qualquer mount do sandbox.
+  // Pendurado nele, o proxy de CUSTO da run (IMPL-035): mede o `usage.cost` de
+  // cada chamada do agente no MESMO ledger (`ctx.sink`), recusa a chamada que não
+  // cabe (429 `budget_exhausted`) ANTES de ir ao provedor e limita a taxa.
+  const meterLease: RunCostMeterLease = acquireRunCostMeter(runId, {
+    sink: opts.ctx.sink,
+    signal: opts.ctx.signal,
+    catalog: opts.catalog,
+  });
   let proxyLease: InferenceProxyLease;
   try {
     const gw = getGateway().config;
@@ -260,8 +275,11 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
       appTitle: gw.appTitle,
       listen: inContainer ? { unix: true } : { tcp: true },
       logFile: path.join(runDir, 'inference-proxy.jsonl'),
+      hooks: meterLease.meter.hooks,
+      logMeta: { costProxy: COST_PROXY_VERSION },
     });
   } catch (err) {
+    meterLease.release();
     if (isControlSignal(err)) throw err;
     const errorMsg = `Falha ao subir o proxy de inferência local: ${(err as Error).message}`;
     return {
@@ -284,9 +302,11 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
       systemPrompt,
       prepared,
       proxy: proxyLease.proxy,
+      meter: meterLease.meter,
     });
   } finally {
     await proxyLease.release();
+    meterLease.release();
   }
 }
 
@@ -303,12 +323,14 @@ interface RepsContext {
   systemPrompt: string;
   prepared: { bin: string; env: Record<string, string> };
   proxy: InferenceProxyLease['proxy'];
+  /** Medidor de custo da run (freio + medição por chamada). */
+  meter: RunCostMeter;
 }
 
 /** As N repetições da etapa (o laço do §10), com o proxy da run já no ar. */
 async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise<RunAgentStageResult> {
   const { runId, stageIndex, contestant, stage, agentConfig, apiKey, ctx, dataDir, catalog } = opts;
-  const { gateway, task, judgeModelIds, reps, promptMode, runConfig, limits, modelId, systemPrompt, prepared, proxy } = rc;
+  const { gateway, task, judgeModelIds, reps, promptMode, runConfig, limits, modelId, systemPrompt, prepared, proxy, meter } = rc;
 
   // Letra cega do candidato: MESMO mapa/shuffle que o orquestrador usa no ranking.
   const blindOrder = blindRankMap(opts.blindIds ?? [contestant.id], seedFromId(stage.question));
@@ -335,6 +357,7 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
       let seedCommit = '';
       let cacheRepoDir = '';
       let credential: ReturnType<typeof proxy.issueCredential> | undefined;
+      let execMeter: ReturnType<RunCostMeter['openExecution']> | undefined;
 
       try {
         // 1) workspace.prepare() — setup[] + files[] + seedCommit (§10.1).
@@ -365,13 +388,16 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
           PI_TASK: stage.question,
           PI_SYSTEM_PROMPT: systemPrompt,
         };
+        // Freio/medidor de custo DESTA execução (IMPL-035), registrado ANTES do
+        // token: a 1ª chamada já é medida contra o teto `maxCostUsd`.
+        execMeter = meter.openExecution({ execId, modelId, maxCostUsd: limits.maxCostUsd });
         // Token fictício DESTA execução (mapeamento execução → chamada conhecido
         // só do produto); revogado assim que a execução termina.
         credential = proxy.issueCredential({ runId, stageIndex, contestantId: contestant.id, repetition: rep, execId, role: 'agent' });
         const inference = proxy.route(credential);
 
-        const outcome = await gateway.run(
-          { execId, task, config: runConfig, workspaceDir, workDir: repAbs, bin: prepared.bin, env, inference },
+        const rawOutcome = await gateway.run(
+          { execId, task, config: runConfig, workspaceDir, workDir: repAbs, bin: prepared.bin, env, inference, costBrake: execMeter },
           {
             signal: ctx.signal,
             priceTokensIn: price.priceTokensIn,
@@ -394,11 +420,30 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
           },
         );
 
+        // As chamadas em voo desta execução terminam de ser anotadas (o agente
+        // morto no meio de um stream fecha a troca logo em seguida).
+        await execMeter.settled();
+
         // §18.3/§29.3: cancelamento da RUN é sinal de controle e SOBE — não vira
         // 'incomplete' mudo (o pipeline precisa saber que a run foi abortada).
-        if (ctx.signal?.aborted || outcome.stopReason === 'cancelled') {
+        if (ctx.signal?.aborted || rawOutcome.stopReason === 'cancelled') {
           throw new RunCancelled(ctx.signal?.reason);
         }
+        // IMPL-035: o proxy recusou a chamada seguinte por falta de saldo DA RUN
+        // → o `BudgetExceeded` do ledger SOBE como de qualquer papel (a run sai
+        // parcial por orçamento, exit 7). O gasto já está no ledger, por chamada.
+        const brakeStop = execMeter.stopped();
+        const runBudget = brakeStop?.scope === 'run' ? execMeter.budgetSignal() : undefined;
+        if (runBudget) throw runBudget;
+        // Teto da EXECUÇÃO: a recusa é controle traduzido em 'maxCost' — mesmo que
+        // o executor (um fake, um adaptador novo) não o tenha traduzido. Não é erro
+        // do provedor: sem `infraError`.
+        const outcome: typeof rawOutcome =
+          brakeStop && (rawOutcome.stopReason === 'completed' || rawOutcome.stopReason === 'error' || rawOutcome.stopReason === 'maxOutput')
+            ? { ...rawOutcome, stopReason: 'maxCost', infraError: undefined, trajectory: { ...rawOutcome.trajectory, stopReason: 'maxCost' } }
+            : brakeStop
+              ? { ...rawOutcome, infraError: undefined }
+              : rawOutcome;
 
         // 4) collect (diff/stat/files) + oráculo + trajetória (§10.4-9).
         const collect = await workspaceMgr.collect(workspaceDir, seedCommit, limits.maxDiffBytes);
@@ -422,7 +467,10 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
           });
         }
 
-        const trajectory: AgentTrajectory = outcome.trajectory;
+        // Custo MEDIDO pelo proxy (`usage.cost` de cada chamada) substitui o
+        // derivado do executor; o derivado fica como auditoria.
+        const measured = execMeter.measured();
+        const trajectory: AgentTrajectory = applyMeasuredCost(outcome.trajectory, measured);
         // F1 (§14 + reconciliação futura do proxy §20.4): persiste os
         // `responseIds` capturados pelo executor no próprio `trajectory.json`
         // como campo ADITIVO (cast — não altera o tipo `AgentTrajectory`). É a
@@ -537,6 +585,27 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
               cacheWrite: trajectory.usage.cacheWrite,
               costUsd: trajectory.usage.costUsd,
               costSource: trajectory.usage.costSource,
+              ...(trajectory.usage.agentDerivedCostUsd !== undefined
+                ? { agentDerivedCostUsd: trajectory.usage.agentDerivedCostUsd }
+                : {}),
+              proxy: {
+                calls: measured.calls,
+                exact: measured.exact,
+                estimated: measured.estimated,
+                unknown: measured.unknown,
+                refused: measured.refused,
+                generationIds: measured.generationIds,
+                ...(brakeStop
+                  ? {
+                      budgetStop: {
+                        scope: brakeStop.scope,
+                        committedUsd: brakeStop.committedUsd,
+                        projectedUsd: brakeStop.projectedUsd,
+                        limitUsd: brakeStop.limitUsd,
+                      },
+                    }
+                  : {}),
+              },
             },
             oracle,
             dossier: {
@@ -620,18 +689,24 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         });
         anyError = anyError || execFailed;
 
-        // 7) Ledger: UMA nota por rep (§20.3) — custo derivado, nunca 'unknown'.
-        try {
-          const reservation = ctx.sink?.reserve('agent', modelId, 0, 0) ?? { release: () => undefined };
-          ctx.sink?.note(reservation, {
-            role: 'agent',
-            modelId,
-            cost: { usd: trajectory.usage.costUsd, source: 'catalog' },
-            tokensIn: trajectory.usage.tokensIn,
-            tokensOut: trajectory.usage.tokensOut,
-          });
-        } catch (err) {
-          if (isControlSignal(err)) throw err; // fronteira de controle
+        // 7) Ledger. Com chamadas pelo proxy, CADA uma já foi anotada lá (papel
+        //    'agent', `usage.cost` medido) — anotar de novo aqui contaria em
+        //    dobro. Só um executor que NÃO passou pelo proxy (fake, adaptador sem
+        //    base URL configurável) cai no custo DERIVADO dele, como antes —
+        //    source 'catalog' (tabela), nunca 'unknown'.
+        if (measured.calls === 0 && trajectory.usage.costUsd > 0) {
+          try {
+            const reservation = ctx.sink?.reserve('agent', modelId, 0, 0) ?? { release: () => undefined };
+            ctx.sink?.note(reservation, {
+              role: 'agent',
+              modelId,
+              cost: { usd: trajectory.usage.costUsd, source: 'catalog' },
+              tokensIn: trajectory.usage.tokensIn,
+              tokensOut: trajectory.usage.tokensOut,
+            });
+          } catch (err) {
+            if (isControlSignal(err)) throw err; // fronteira de controle
+          }
         }
 
         totalCostUsd += trajectory.usage.costUsd;
@@ -684,6 +759,7 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         }
       } finally {
         credential?.revoke();
+        execMeter?.close();
         // 9) dispose do workspace (preserva com isolation.keepWorkspace).
         const keep = agentConfig.isolation?.keepWorkspace === true;
         try {

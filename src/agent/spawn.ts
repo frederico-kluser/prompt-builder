@@ -66,6 +66,15 @@ export interface SpawnAgentOpts {
    * Aditivo/genérico — não altera a semântica existente de `spawnAgent`.
    */
   onKill?: (reason: AgentStopReason) => void;
+  /**
+   * Opcional — gatilho EXTERNO de parada, empurrado (não consultado): recebe a
+   * função que mata a árvore com uma razão e pode devolver o "desinscrever",
+   * chamado quando o processo encerra. Pensado para o freio do proxy de custo
+   * (IMPL-035): a recusa `budget_exhausted` mata o agente NA HORA com 'maxCost',
+   * sem esperar o próximo chunk de stdout (o `shouldStop` só é consultado neles,
+   * e um agente em backoff de retry fica mudo).
+   */
+  onExternalStop?: (stop: (reason: AgentStopReason) => void) => (() => void) | void;
 }
 
 /**
@@ -182,6 +191,22 @@ export async function spawnAgent(opts: SpawnAgentOpts): Promise<SpawnAgentResult
   const onAbort = (): void => killTree('cancelled');
   opts.signal?.addEventListener('abort', onAbort, { once: true });
 
+  // Gatilho externo (freio de custo): pode disparar já na inscrição (recusa
+  // anterior ao spawn) — o killTree é idempotente e o close resolve normalmente.
+  let offExternal: (() => void) | void = undefined;
+  try {
+    offExternal = opts.onExternalStop?.((reason) => killTree(reason));
+  } catch {
+    /* um gatilho externo quebrado nunca derruba a execução */
+  }
+  const unsubscribeExternal = (): void => {
+    try {
+      if (typeof offExternal === 'function') offExternal();
+    } catch {
+      /* idem */
+    }
+  };
+
   // Regra 2: AMBOS os pipes consumidos SEMPRE e desde o primeiro byte. Ignorar
   // um (~64 KiB de buffer de OS) bloqueia o filho escrevendo nele.
   child.stdout.on('data', (buf: Buffer) => {
@@ -206,11 +231,13 @@ export async function spawnAgent(opts: SpawnAgentOpts): Promise<SpawnAgentResult
     child.on('error', (err) => {
       clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onAbort);
+      unsubscribeExternal();
       reject(err);
     });
     child.on('close', (code, sig) => {
       clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onAbort);
+      unsubscribeExternal();
       resolve({
         exitCode: code,
         signal: sig,
