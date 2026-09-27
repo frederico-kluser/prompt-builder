@@ -418,6 +418,8 @@ async function runLoop(
         contestantIds.length > 0 ? { contestantIds } : {},
       ),
       catalogo,
+      // Preço desconhecido (roteador, "-1") pelo PIOR CASO — espelho do Node (IMPL-018).
+      { unknownPrice: 'worst-case' },
     );
   let est = estimar(record.contestants.map((c) => c.id));
 

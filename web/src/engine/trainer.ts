@@ -319,7 +319,10 @@ async function trainingLoop(
   });
   const ctx: RunCtx = { signal, sink: ledger };
   record.budgetUsd = cfg.budgetUsd;
-  const estIter = estimateRunCost(estimateInputFromConfig(cfg as never), catalogo).perIteration;
+  // Porta de orçamento: preço desconhecido pelo pior caso (IMPL-018) — espelho do Node.
+  const estIter = estimateRunCost(estimateInputFromConfig(cfg as never), catalogo, {
+    unknownPrice: 'worst-case',
+  }).perIteration;
   const syncLedger = (): void => {
     const snap = ledger.snapshot();
     record.totalCostUsd = snap.spentUsd;
