@@ -591,10 +591,18 @@ export interface JudgeResult {
  * sem comparar contestants entre si. Base do judge-score.
  */
 export interface ReferenceJudgeResult {
-  /** Veredito ternario por contestant (consenso entre juizes, quando ha mais de um). */
+  /**
+   * Veredito ternario por contestant (consenso entre juizes, quando ha mais de
+   * um). SO vereditos legitimos: falha do juiz/competidor deixa a chave AUSENTE
+   * (IMPL-004) — o motivo fica em `verdictErrorByContestant`.
+   */
   verdictByContestant: Record<string, Verdict>;
-  /** Explicacao curta (1 frase) por contestant. */
+  /** Explicacao curta (1 frase) por contestant — so para vereditos presentes. */
   explanationByContestant: Record<string, string>;
+  /** Origem de cada veredito presente (IMPL-004). */
+  verdictSourceByContestant?: Record<string, VerdictSource>;
+  /** Motivo de cada veredito AUSENTE (IMPL-004). */
+  verdictErrorByContestant?: Record<string, VerdictError>;
   judgeModelId: string;
   inconclusive?: boolean;
   /**
@@ -629,10 +637,12 @@ export interface ReferenceJudgeResult {
    */
   judgeErrorByContestant?: Record<string, number>;
   /**
-   * IMPL-033 — repeticoes de agente SEM veredito por motivo que NAO e controle:
-   * verificador inconclusivo mesmo apos a re-verificacao (execucao invalida,
-   * a reexecutar) ou juiz que falhou sem oraculo para cair. Ficam FORA do
-   * denominador (sem observacao) — nunca viram 'nao' nem 'parcial'.
+   * IMPL-033 — repeticoes de agente SEM veredito por motivo que NAO e controle
+   * nem comportamento do agente: rep SEM oraculo cujo juiz falhou (apos as 2
+   * retentativas) ou nao foi chamado (sem juiz / dossie vazio). Ficam FORA do
+   * denominador (sem observacao) — nunca viram 'nao' nem 'parcial'. Check do
+   * oraculo que nao terminou NAO cai aqui: conta como check falho (ou, se nao
+   * rodou em NENHUMA execucao da etapa, a etapa inteira vira `error` para todos).
    */
   unscoredRepsByContestant?: Record<string, number>;
 }
@@ -775,9 +785,11 @@ export interface RunRecord {
   /** O mesmo, por contestant de agente (so as chaves com falha). */
   agentJudgeErrorsByContestant?: Record<string, number>;
   /**
-   * Repeticoes de agente SEM veredito por motivo nao-controle (verificador
-   * inconclusivo apos re-verificacao; juiz falhou sem oraculo), por contestant.
-   * Fora de judge-score/resolveRate/significancia — nunca contadas como 'nao'.
+   * Repeticoes de agente SEM veredito por motivo nao-controle (rep SEM oraculo
+   * cujo juiz falhou ou nao foi chamado), por contestant. Fora de judge-score e
+   * resolveRate. ⚠️ Na significancia, a exclusao pareada da etapa sem veredito
+   * e do IMPL-005 (`pairedStageScores`, cluster stats): ate ele entrar, a etapa
+   * em que o contestant ficou SEM nenhum veredito ainda e imputada 'nao' ali.
    */
   agentUnscoredRepsByContestant?: Record<string, number>;
   /** Classificacao final agregada (Copeland dos duelos / pontos do placar). */
@@ -1009,7 +1021,13 @@ export type RunEvent =
       execId: string; stopReason: AgentStopReason; turns: number; costUsd: number;
       diffStat?: { files: number; added: number; removed: number } }
   | { type: 'agent.verified'; runId: string; stageIndex: number; contestantId: string;
-      execId: string; results: { label: string; ok: boolean; exitCode: number }[] };
+      execId: string; results: { label: string; ok: boolean; exitCode: number }[];
+      /**
+       * Tentativa do oráculo (IMPL-033): ausente = 1ª verificação; 2+ =
+       * re-verificação cega de check que nem começou (só esses checks). O
+       * resultado que vale para um check é o da MAIOR tentativa em que ele aparece.
+       */
+      attempt?: number };
 
 export type SessionEvent =
   | { type: 'session.started'; sessionId: string; record: SessionRecord }

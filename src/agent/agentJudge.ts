@@ -80,22 +80,14 @@ function extractJson(text: string): string {
 }
 
 /**
- * Fallback regex: 1a ocorrencia de resolve|parcial|nao no texto cru. `null` =
- * nenhum rótulo reconhecível (lixo) — é FALHA do juiz, não 'parcial' (IMPL-033).
- * (A saída estrita validada por schema, sem este fallback, é o IMPL-034.)
- */
-function verdictFromText(text: string): Verdict | null {
-  const lower = text.toLowerCase();
-  // 'nao' antes de 'resolve' (texto "não resolve" nao pode virar 'resolve').
-  if (lower.includes('parcial')) return 'parcial';
-  if (/n[aã]o/.test(lower)) return 'nao';
-  if (lower.includes('resolve')) return 'resolve';
-  return null;
-}
-
-/**
- * Parse do veredito: JSON primeiro; regex como fallback; `null` = saída sem
- * veredito reconhecível (vira tentativa falha, re-tentada).
+ * Parse do veredito: SÓ o objeto JSON com `verdict` ∈ {resolve, parcial, nao}
+ * vale; qualquer outra coisa é `null` = saída inválida (tentativa falha,
+ * re-tentada com lembrete de formato e, esgotada, `judgeError` —
+ * `invalid_output`). NÃO há fallback por palavra no texto cru (IMPL-033,
+ * revisão): uma recusa como "Desculpe, não consigo avaliar" casava /n[aã]o/ e
+ * virava o veredito LEGÍTIMO 'nao' — rebaixava um oráculo 100% a 'parcial' sem
+ * retry e sem flag (o A3 por outra porta). A validação por schema completa é o
+ * IMPL-034; o que importa aqui é que texto livre nunca vira nota.
  */
 function parseJudgeReply(text: string): { verdict: Verdict; explanation: string } | null {
   try {
@@ -113,10 +105,9 @@ function parseJudgeReply(text: string): { verdict: Verdict; explanation: string 
       return { verdict, explanation };
     }
   } catch {
-    // JSON invalido — cai no fallback regex abaixo.
+    // JSON inválido — saída sem veredito (falha re-tentada), nunca adivinhado.
   }
-  const verdict = verdictFromText(text);
-  return verdict === null ? null : { verdict, explanation: '(veredito do juiz de agente)' };
+  return null;
 }
 
 /**
@@ -160,6 +151,11 @@ export interface JudgeDossierResult {
   judgeModelId: string;
   /** true = o juiz não conseguiu produzir um veredito confiável (falha total). */
   inconclusive?: boolean;
+  /**
+   * true = o juiz NEM foi chamado (sem juiz configurado ou dossiê vazio). Não é
+   * falha do juiz: sem `judgeError` e fora de `agentJudgeErrorCount`.
+   */
+  skipped?: boolean;
   /** Falha TOTAL do juiz (todos os juízes falharam após 1+2 tentativas). */
   judgeError?: VerdictError;
   /** Tentativas (chamadas) do juiz que mais tentou — auditoria/explicação. */
@@ -274,14 +270,15 @@ export async function judgeDossier(
   const judgeIds = [...new Set(judgeModelIds ?? [])];
   const judgeModelId = judgeIds.join('+');
 
-  // Sem juiz configurado ou dossiê vazio => sem veredito (sem chamadas LLM).
+  // Sem juiz configurado ou dossiê vazio => sem veredito e SEM chamada LLM.
+  // Nenhum juiz falhou (0 tentativas): é `skipped`, nunca `judgeError` — senão
+  // a contagem de falhas do juiz inflaria com um caso que não é falha.
   if (judgeIds.length === 0 || !dossierText.trim()) {
     return {
       verdict: null,
-      explanation: '(sem juiz configurado ou dossiê vazio)',
+      explanation: judgeIds.length === 0 ? 'sem juiz configurado' : 'dossiê vazio (nada para o juiz ler)',
       judgeModelId,
-      inconclusive: true,
-      judgeError: { kind: 'judge_failed', message: 'sem juiz configurado ou dossiê vazio' },
+      skipped: true,
       attempts: 0,
     };
   }

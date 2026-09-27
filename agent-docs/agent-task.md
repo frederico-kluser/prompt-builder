@@ -239,15 +239,24 @@ Mapeamento do oráculo para veredito:
 | Situação | Veredito | Juiz LLM |
 |---|---|---|
 | `forbiddenPaths` violado | **`nao`** | não roda (indiscutível) |
-| check inconclusivo (comando ausente / timeout do check) | re-verifica 2×; persistindo, **sem nota** (execução inválida, fora do denominador) | **não roda** — o juiz não supre o oráculo |
+| check que **pendura ou morre** (passa do `timeoutMs` do check / morto por sinal) | o check conta como **falho** no `score` (sem re-verificação: é o código sob teste) | conforme o `score` resultante — nunca promove |
+| check cujo comando **nem começa** (ausente / sem permissão) | re-verifica **só esse check** 2×; persistindo, conta como **falho** — se ele rodou em alguma outra execução da etapa (o agente quebrou o verificador) | conforme o `score` |
+| … e não rodou em **nenhuma** execução da etapa | **etapa inválida para TODOS** os contestants (`stage.error`, fora do placar de todos) — defeito da tarefa | não conta |
 | `score === 1` | **`resolve`** (candidato) | roda só para graduar qualidade; **não pode rebaixar para `nao`** |
 | `0 < score < 1` | **`parcial`** (candidato) | roda; pode confirmar ou rebaixar para `nao` — **nunca promover a `resolve`** |
 | `score === 0` | **`nao`** | não roda |
 
-Falha do juiz (exceção, timeout ou resposta sem veredito, mesmo após 2
-retentativas) **não mexe na nota**: fica o candidato do oráculo, com a flag
-`judgeError` contada por run (`agentJudgeErrorCount`). Sem oráculo não há
-candidato — a execução fica sem nota em vez de ganhar um `parcial` inventado.
+Falha do juiz (exceção, timeout ou resposta que não é o JSON pedido — recusa
+e texto livre incluídos —, mesmo após 2 retentativas) **não mexe na nota**: fica
+o candidato do oráculo, com a flag `judgeError` contada por run
+(`agentJudgeErrorCount`). Sem oráculo não há candidato — a execução fica sem nota
+em vez de ganhar um `parcial` inventado.
+
+Dica de autoria: prefira chamar a suíte por um programa que sempre existe no
+ambiente (`sh run_tests.sh`, `npm test`) a executar o script direto
+(`./run_tests.sh`): o comando sempre começa, e um script apagado pelo agente vira
+falha limpa do check. A invalidação da etapa fica para o que não começa em
+execução nenhuma (binário que falta na imagem/ambiente da tarefa).
 
 ## `judging`
 

@@ -381,11 +381,25 @@ export interface OracleResult {
     durationMs: number;
     /** Últimas N linhas, guardadas inteiras em oracle.json. */
     tail: string;
+    /**
+     * Por que o check NÃO terminou com exit normal (ausente = terminou). Nos
+     * três casos `ok` é false e o peso fica no denominador do `score`:
+     * - `spawn`   — o comando nem começou (ausente, sem permissão): o único caso
+     *               que pode ser defeito do AMBIENTE da tarefa; quem decide é a
+     *               célula (`oracleCellDefect`, IMPL-033);
+     * - `timeout` — passou do `timeoutMs` do check (código que pendura);
+     * - `signal`  — morto por sinal que não foi o nosso timeout (OOM, segfault).
+     * `timeout`/`signal` são desfecho do código sob teste: contam como check falho.
+     */
+    notRun?: OracleNotRun;
   }[];
   /** Soma ponderada dos ok / soma dos pesos, em [0,1]. */
   score: number;
   /** Caminhos proibidos que foram modificados. Não-vazio ⇒ veredito 'nao'. */
   violations: string[];
-  /** true = algum check não pôde rodar (comando ausente, timeout do próprio check). */
+  /** true = algum check não terminou com exit normal (ver `checks[].notRun`). */
   inconclusive: boolean;
 }
+
+/** Motivo de um check do oráculo não ter terminado com exit normal. */
+export type OracleNotRun = 'spawn' | 'timeout' | 'signal';

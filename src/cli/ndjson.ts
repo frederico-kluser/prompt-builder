@@ -281,6 +281,7 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         contestantId: e.contestantId,
         execId: e.execId,
         results: e.results,
+        ...(e.attempt !== undefined ? { attempt: e.attempt } : {}),
       });
       break;
     case 'run.error':

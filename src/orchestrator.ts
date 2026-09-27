@@ -20,7 +20,16 @@ import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { listModels } from './openrouter.js';
 import { runAgentStage, aggregateAgentVerdict } from './agent/runAgentStage.js';
-import { AGENT_VERDICT_TREE_VERSION, agentRateMetrics, stageObservations, tallyReps } from './agent/verdictTree.js';
+import {
+  AGENT_VERDICT_TREE_VERSION,
+  agentRateMetrics,
+  agentStageProvenance,
+  oracleCellDefect,
+  stageObservations,
+  tallyReps,
+  type RepCounts,
+} from './agent/verdictTree.js';
+import type { AgentRepResult } from './agent/runAgentStage.js';
 import type {
   Contestant,
   ReferenceJudgeResult,
@@ -31,6 +40,8 @@ import type {
   StageRecord,
   StageSpec,
   Verdict,
+  VerdictError,
+  VerdictSource,
 } from './types.js';
 
 function nowIso(): string {
@@ -583,8 +594,8 @@ async function runLoop(
       try {
         // Verditios dos contestants de runner 'agent' (agregados por rep) e os
         // que ficaram sem veredito — cancelamento, ou (IMPL-033) toda rep sem
-        // observação: execução inválida/juiz falho sem oráculo. Corte por
-        // limite conta 'nao' e fica no ranking/judge-score (IMPL-032).
+        // observação: sem oráculo e juiz falho/não chamado. Corte por limite e
+        // check que não terminou contam como falha e ficam no ranking/judge-score.
         const agentVerdicts: Record<string, Verdict> = {};
         const agentExplanations: Record<string, string> = {};
         const agentIncompleteIds = new Set<string>();
@@ -598,9 +609,20 @@ async function runLoop(
         // alimentam o diagnóstico "sucesso até o limite" (IMPL-032).
         const agentLimitCuts: Record<string, number> = {};
         // IMPL-033: reps com juiz falho (flag judgeError) e reps sem veredito por
-        // motivo NÃO-controle (execução inválida / juiz falhou sem oráculo).
+        // motivo NÃO-controle (sem oráculo: juiz falhou ou não foi chamado).
         const agentJudgeErrors: Record<string, number> = {};
         const agentUnscored: Record<string, number> = {};
+        // Procedência do veredito agregado de cada agente, nos nomes FIXOS do
+        // CONVENTIONS §2 (os consumidores do IMPL-004 leem esses dois mapas).
+        // Sai das reps (`agentStageProvenance`): o motivo da ausência é o real
+        // (juiz falhou / sem régua), não um 'competitor_error' genérico — no
+        // merge com o IMPL-004, este mapa prevalece para os agentes.
+        const agentVerdictSources: Record<string, VerdictSource> = {};
+        const agentVerdictErrors: Record<string, VerdictError> = {};
+        // Reps e contagens de cada agente — a regra da CÉLULA (defeito do
+        // ambiente) só pode ser aplicada depois que TODOS terminaram.
+        const agentRepsById: Record<string, AgentRepResult[]> = {};
+        const agentTallies: Record<string, RepCounts> = {};
         const agentContestants = record.contestants.filter((c) => c.runner === 'agent');
         const chatContestants = record.contestants.filter((c) => c.runner !== 'agent');
 
@@ -636,17 +658,13 @@ async function runLoop(
               // de execução TÊM veredito ('nao') e ficam no denominador.
               const tally = tallyReps(agentRes.repResults);
               const valid = tally.verdicts;
-              if (tally.judgeErrors > 0) {
-                agentJudgeErrors[contestant.id] = tally.judgeErrors;
-                record.agentJudgeErrorCount = (record.agentJudgeErrorCount ?? 0) + tally.judgeErrors;
-                const porContestant = (record.agentJudgeErrorsByContestant ??= {});
-                porContestant[contestant.id] = (porContestant[contestant.id] ?? 0) + tally.judgeErrors;
-              }
-              if (tally.unscored > 0) {
-                agentUnscored[contestant.id] = tally.unscored;
-                const porContestant = (record.agentUnscoredRepsByContestant ??= {});
-                porContestant[contestant.id] = (porContestant[contestant.id] ?? 0) + tally.unscored;
-              }
+              agentRepsById[contestant.id] = agentRes.repResults;
+              agentTallies[contestant.id] = tally;
+              if (tally.judgeErrors > 0) agentJudgeErrors[contestant.id] = tally.judgeErrors;
+              if (tally.unscored > 0) agentUnscored[contestant.id] = tally.unscored;
+              const proc = agentStageProvenance(agentRes.repResults);
+              if (proc.source) agentVerdictSources[contestant.id] = proc.source;
+              if (proc.error) agentVerdictErrors[contestant.id] = proc.error;
               if (valid.length === 0) {
                 agentIncompleteIds.add(contestant.id);
               } else {
@@ -660,8 +678,8 @@ async function runLoop(
               // observações independentes no denominador do judge-score e no
               // pareamento (cenário × repetição) do pairedSignificance. Reps
               // sem veredito NÃO entram no vetor — canceladas contam em
-              // repIncomplete, inválidas/juiz-sem-oráculo em
-              // unscoredRepsByContestant; reps cortadas por limite ENTRAM como 'nao'.
+              // repIncomplete, juiz-sem-oráculo em unscoredRepsByContestant;
+              // reps cortadas por limite ENTRAM como 'nao'.
               const reps = record.config.agent?.repetitions ?? 1;
               if (reps > 1) {
                 agentVerdictsByRep[contestant.id] = valid;
@@ -704,6 +722,41 @@ async function runLoop(
           if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
         }
 
+        // IMPL-033 (revisão) — DEFEITO DO AMBIENTE invalida a CÉLULA para TODOS
+        // (R-14a DEC-2). Check que nem começou (comando ausente/sem permissão)
+        // já entra no score de cada rep como FALHO; aqui se decide se isso era
+        // o agente (o check rodou em alguma outra execução da etapa: o ambiente
+        // serve) ou a tarefa (não rodou em NENHUMA: o ambiente não serve).
+        // No 2º caso a etapa sai do placar para todos — agentes E chat —, com
+        // `error` explícito; tirar só de quem falhou recriaria o viés de
+        // sobrevivência (quem quebra o verificador escaparia do denominador).
+        const defeito =
+          agentContestants.length > 0 ? oracleCellDefect(Object.values(agentRepsById).flat()) : null;
+        if (defeito) {
+          const msg =
+            `etapa inválida para TODOS os contestants: o verificador (${defeito.labels.join(', ')}) ` +
+            `nem começou em nenhuma das ${defeito.executions} execução(ões) — comando ausente ou sem ` +
+            `permissão no ambiente da tarefa (defeito da tarefa, não desempenho; R-14a DEC-2)`;
+          stageRecord.error = msg;
+          stageRecord.finishedAt = nowIso();
+          scheduleSave();
+          emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
+          log(runId, `stage ${i + 1} ${msg}`);
+          return;
+        }
+        // Contagens POR RUN só das etapas que valem (a inválida acima não soma).
+        for (const [id, t] of Object.entries(agentTallies)) {
+          if (t.judgeErrors > 0) {
+            record.agentJudgeErrorCount = (record.agentJudgeErrorCount ?? 0) + t.judgeErrors;
+            const porContestant = (record.agentJudgeErrorsByContestant ??= {});
+            porContestant[id] = (porContestant[id] ?? 0) + t.judgeErrors;
+          }
+          if (t.unscored > 0) {
+            const porContestant = (record.agentUnscoredRepsByContestant ??= {});
+            porContestant[id] = (porContestant[id] ?? 0) + t.unscored;
+          }
+        }
+
         // === FASE 3: julgamento POINTWISE. Com gabarito: cada resposta contra
         // a referencia (os duelos sairam daqui — viraram a fase 4 de finais).
         // Sem gabarito: juiz LISTWISE classico (compare antigo / fallback). ===
@@ -738,6 +791,8 @@ async function runLoop(
               refJudge = {
                 verdictByContestant: { ...agentVerdicts },
                 explanationByContestant: { ...agentExplanations },
+                verdictSourceByContestant: { ...agentVerdictSources },
+                ...(Object.keys(agentVerdictErrors).length > 0 && { verdictErrorByContestant: { ...agentVerdictErrors } }),
                 judgeModelId: record.config.judgeModelIds.join('+'),
                 // §18.4: quando a etapa tem reps>1, guarda o vetor plano por rep
                 // para o orquestrador montar o judge-score/vetor plano e a
@@ -775,10 +830,13 @@ async function runLoop(
                 ctx,
                 maxPricePerMTok,
               });
+              const erros = { ...(base.verdictErrorByContestant ?? {}), ...agentVerdictErrors };
               refJudge = {
                 ...base,
                 verdictByContestant: { ...base.verdictByContestant, ...agentVerdicts },
                 explanationByContestant: { ...base.explanationByContestant, ...agentExplanations },
+                verdictSourceByContestant: { ...(base.verdictSourceByContestant ?? {}), ...agentVerdictSources },
+                ...(Object.keys(erros).length > 0 && { verdictErrorByContestant: erros }),
                 // §18.4: reps>1 — anexa o vetor plano por rep e o count de
                 // incomplete dos agentes (chat não tem reps, fica de fora).
                 ...(Object.keys(agentVerdictsByRep).length > 0 && {
@@ -934,8 +992,9 @@ async function runLoop(
     // (§18.4 — cada rep de agente e uma observacao independente; vetor PLANO de
     // todas as etapas x todas as reps), senao o veredito agregado da etapa.
     // Veredito ausente = nenhuma observacao. Para agentes isso so acontece por
-    // cancelamento ou rep sem veredito legitimo (IMPL-033: verificador
-    // inconclusivo, juiz falho sem oraculo): corte por limite (timeout/maxTurns/maxCost/maxOutput)
+    // cancelamento ou rep sem veredito legitimo (IMPL-033: sem oraculo e juiz
+    // falho/nao chamado); etapa com defeito do ambiente sai para TODOS (error,
+    // sem referenceJudge). Corte por limite (timeout/maxTurns/maxCost/maxOutput)
     // chega aqui como 'nao' e CONTA no denominador (IMPL-032 / R-14a DEC-1 —
     // antes saia, e um agente que estourava o teto nas tarefas dificeis ficava
     // com nota perfeita nas faceis: vies de sobrevivencia). Chat numa run mista

@@ -7,8 +7,14 @@
 //   A3 — falha do juiz virava 'parcial' sem retry e sem flag (resolve→parcial).
 //        Agora: 2 retentativas; esgotadas, fica o veredito do ORÁCULO + a flag
 //        `judgeError`; sem oráculo, a rep fica sem veredito (Inspect: unscored).
-//   —  — verificador inconclusivo = execução inválida (re-verificada e, se
-//        persistir, sem veredito), nunca promoção pelo juiz.
+//   —  — verificador que não terminou nunca promove e nunca tira a rep do
+//        denominador: timeout/sinal do check = check FALHO (desfecho do código
+//        sob teste, sem re-verificação); comando que nem começou = re-verificado
+//        às cegas e, persistindo, FALHO — a menos que não rode em NENHUMA
+//        execução da etapa (defeito do ambiente: etapa inválida para TODOS).
+//        (Revisão: a 1ª versão tirava a rep inconclusiva só de quem pendurava o
+//        verificador — quem quebrava a suíte ganhava de quem falhava limpo.)
+//   —  — saída livre do juiz (recusa etc.) nunca vira veredito por palavra.
 // E a contagem de `judgeError` por run (record + resumo NDJSON/CLI).
 //
 // Camadas (todas sem rede e sem gasto):
@@ -19,7 +25,7 @@
 //   4. `runToCompletion` (Node) com o `pi` trocado por um executor falso.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -27,15 +33,18 @@ import path from 'node:path';
 // Executor FALSO no lugar do `pi` para a camada 4 (o orquestrador sempre usa o
 // `piExecutor` do módulo). O resto — git, oráculo, dossiê, store, árvore — é real.
 // ---------------------------------------------------------------------------
+type Escrita = string | { path: string; content: string };
 const fake = vi.hoisted(() => ({
-  /** Arquivos que a execução escreve, por pergunta. */
-  escreve: ((): string[] => ['done.txt']) as (question: string) => string[],
+  /** Arquivos que a execução escreve, por pergunta e modelo (string = conteúdo 'ok'). */
+  escreve: ((): Escrita[] => ['done.txt']) as (question: string, modelId: string) => Escrita[],
+  /** Arquivos que a execução APAGA (ex.: o script do verificador). */
+  apaga: ((): string[] => []) as (question: string, modelId: string) => string[],
   calls: 0,
 }));
 
 vi.mock('../src/agent/pi.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../src/agent/pi.js')>();
-  const { writeFileSync: write } = await import('node:fs');
+  const { writeFileSync: write, rmSync: rm } = await import('node:fs');
   const { join } = await import('node:path');
   return {
     ...orig,
@@ -45,7 +54,12 @@ vi.mock('../src/agent/pi.js', async (importOriginal) => {
       prepare: async () => ({ bin: 'pi-fake', env: {} }),
       run: async (opts: { workspaceDir: string; env: Record<string, string> }) => {
         fake.calls += 1;
-        for (const f of fake.escreve(opts.env.PI_TASK)) write(join(opts.workspaceDir, f), 'ok\n', 'utf8');
+        const { PI_TASK: q, PI_MODEL_ID: m } = opts.env;
+        for (const f of fake.escreve(q, m)) {
+          const e = typeof f === 'string' ? { path: f, content: 'ok\n' } : f;
+          write(join(opts.workspaceDir, e.path), e.content, 'utf8');
+        }
+        for (const f of fake.apaga(q, m)) rm(join(opts.workspaceDir, f), { force: true });
         return fakeOutcome('completed', opts.env.PI_MODEL_ID);
       },
     },
@@ -92,15 +106,23 @@ function fakeOutcome(stopReason: string, modelId: string) {
 
 import {
   AGENT_VERDICT_TREE_VERSION,
+  agentStageProvenance,
+  classifyStop,
   clampToOracleBand,
   decideRepVerdict,
+  mergeOracleRecheck,
+  oracleCellDefect,
+  recheckIndices,
   settleRepVerdict,
+  shouldRecheckOracle,
   tallyReps,
   type JudgeOutcome,
   type TreeInput,
 } from '../src/agent/verdictTree.js';
+import { subscribe } from '../src/events.js';
 import { AGENT_JUDGE_RETRIES, judgeDossier } from '../src/agent/agentJudge.js';
 import { runAgentStage, type AgentGateway, type RunAgentStageParams } from '../src/agent/runAgentStage.js';
+import { readArtifact } from '../src/agent/store.js';
 import { BudgetLedger, isControlSignal } from '../src/budget.js';
 import {
   createGateway,
@@ -111,10 +133,11 @@ import {
 import { getDataDir, setDataDir } from '../src/storage.js';
 import { runToCompletion } from '../src/orchestrator.js';
 import { normalizeRunRecord } from '../src/normalize.js';
+import { pairedStageScores } from '../src/trainer.js';
 import { emitRunEvent } from '../src/cli/ndjson.js';
 import type { Output } from '../src/cli/output.js';
-import type { RunConfig, RunRecord, StageSpec, Verdict } from '../src/types.js';
-import type { AgentTaskSpec } from '../src/agent/types.js';
+import type { RunConfig, RunEvent, RunRecord, StageSpec, Verdict } from '../src/types.js';
+import type { AgentTaskSpec, OracleNotRun, OracleResult } from '../src/agent/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeChatReply, type FakeOpenRouter } from './fakeOpenRouter.js';
 
 const KEY = 'sk-or-v1-fake-key-para-teste-0000000000';
@@ -208,36 +231,19 @@ describe('IMPL-033 — faixa do oráculo (puro)', () => {
     });
   });
 
-  it('verificador inconclusivo ⇒ execução inválida: sem veredito e o juiz NEM é consultado', () => {
-    for (const score of [0, 0.5, 1]) {
-      const d = decideRepVerdict({
-        stopReason: 'completed',
-        oracle: { score, violations: [], inconclusive: true },
-        diffEmpty: false,
-      });
-      expect(d).toMatchObject({ kind: 'unscored', path: 'oracle-inconclusive' });
-      // Mesmo que alguém passasse um juiz entusiasmado, a decisão não gradua.
-      expect(settleRepVerdict(d, { status: 'ok', verdict: 'resolve', explanation: 'x' })).toMatchObject({
-        verdict: null,
-        judgeUsed: false,
-      });
-    }
-    // Violação (medida no diff) e corte por limite continuam decidindo 'nao'.
-    expect(
-      decideRepVerdict({ stopReason: 'completed', oracle: { score: 0.5, violations: ['x'], inconclusive: true }, diffEmpty: false }),
-    ).toMatchObject({ kind: 'final', verdict: 'nao', path: 'oracle-violation' });
-    expect(
-      decideRepVerdict({ stopReason: 'timeout', oracle: { score: 1, violations: [], inconclusive: true }, diffEmpty: false }),
-    ).toMatchObject({ kind: 'final', verdict: 'nao', path: 'limit-cut' });
+  it('sem juiz chamado (skipped com motivo): oráculo fica; sem oráculo, sem veredito e SEM judgeError', () => {
+    const semOraculo = decideRepVerdict({ stopReason: 'completed', diffEmpty: false });
+    const s = settleRepVerdict(semOraculo, { status: 'skipped', reason: 'dossiê vazio (nada para o juiz ler)' });
+    expect(s).toMatchObject({ verdict: null, judgeUsed: false });
+    expect(s.judgeError).toBeUndefined();
+    expect(s.explanation).toContain('dossiê vazio');
   });
 
   it('varredura exaustiva: NENHUM caminho produz resolve acima do score do oráculo', () => {
     const motivos = ['completed', 'cancelled', 'error', 'timeout', 'maxTurns', 'maxCost', 'maxOutput', 'desconhecido'];
     const oraculos: Array<TreeInput['oracle']> = [undefined];
-    for (const score of [0, 0.001, 0.25, 0.5, 0.75, 0.999, 1]) {
-      for (const violations of [[], ['proibido.txt']]) {
-        for (const inconclusive of [false, true]) oraculos.push({ score, violations, inconclusive });
-      }
+    for (const score of [0, 0.001, 0.1, 0.25, 0.33, 0.5, 0.66, 0.75, 0.9, 0.999, 1]) {
+      for (const violations of [[], ['proibido.txt'], ['a', 'b']]) oraculos.push({ score, violations });
     }
     const juizes: Array<JudgeOutcome | undefined> = [
       undefined,
@@ -260,8 +266,8 @@ describe('IMPL-033 — faixa do oráculo (puro)', () => {
             casos += 1;
             const ctx = `${stopReason}/${JSON.stringify(oracle)}/${diffEmpty}/${JSON.stringify(j)}`;
             if (oracle) {
-              const limpo100 = oracle.score === 1 && oracle.violations.length === 0 && !oracle.inconclusive;
-              // (a) 'resolve' só com oráculo 100% limpo e conclusivo.
+              const limpo100 = oracle.score === 1 && oracle.violations.length === 0;
+              // (a) 'resolve' só com oráculo 100% limpo.
               if (s.verdict === 'resolve') expect(limpo100, ctx).toBe(true);
               // (b) oráculo em (0,1) nunca passa de 'parcial'.
               if (oracle.score > 0 && oracle.score < 1 && s.verdict !== null) {
@@ -271,8 +277,10 @@ describe('IMPL-033 — faixa do oráculo (puro)', () => {
               if ((oracle.score === 0 || oracle.violations.length > 0) && s.verdict !== null) {
                 expect(s.verdict, ctx).toBe('nao');
               }
-              // (d) verificador inconclusivo nunca é graduado pelo juiz.
-              if (oracle.inconclusive) expect(s.judgeUsed, ctx).toBe(false);
+              // (d) COM oráculo, fora do cancelamento, a rep SEMPRE tem veredito —
+              //     nada no comportamento do agente (nem a falha do juiz) a tira
+              //     do denominador: é o que fecha o viés de sobrevivência.
+              if (classifyStop(stopReason) !== 'cancelled') expect(s.verdict, ctx).not.toBeNull();
             }
             // (e) falha do juiz nunca inventa veredito: ou o do oráculo, ou nenhum.
             if (j?.status === 'failed' && d.kind === 'judge') {
@@ -288,15 +296,133 @@ describe('IMPL-033 — faixa do oráculo (puro)', () => {
     expect(casos).toBeGreaterThan(3000);
   });
 
+
   it('tallyReps separa observação, corte, cancelamento, sem-veredito e judgeError', () => {
     const t = tallyReps([
       { path: 'oracle-pass', verdict: 'resolve', judgeError: { kind: 'timeout', message: 't' } },
       { path: 'limit-cut', verdict: 'nao' },
-      { path: 'oracle-inconclusive', verdict: null },
+      { path: 'no-oracle-judge', verdict: null },
       { path: 'no-oracle-judge', verdict: null, judgeError: { kind: 'judge_failed', message: 'x' } },
       { path: 'cancelled', verdict: null },
     ]);
     expect(t).toEqual({ verdicts: ['resolve', 'nao'], limitCuts: 1, cancelled: 1, unscored: 2, judgeErrors: 2 });
+  });
+});
+
+/** Check de oráculo mínimo para os testes puros. */
+function chk(label: string, ok: boolean, notRun?: OracleNotRun, weight = 1): OracleResult['checks'][number] {
+  return {
+    label,
+    cmd: label,
+    exitCode: notRun ? -1 : ok ? 0 : 1,
+    expected: 0,
+    ok,
+    weight,
+    durationMs: 1,
+    tail: '',
+    ...(notRun ? { notRun } : {}),
+  };
+}
+function oraculo(checks: OracleResult['checks'], violations: string[] = []): OracleResult {
+  const w = checks.reduce((a, c) => a + c.weight, 0);
+  return {
+    checks,
+    score: w > 0 ? checks.reduce((a, c) => a + (c.ok ? c.weight : 0), 0) / w : 0,
+    violations,
+    inconclusive: checks.some((c) => c.notRun !== undefined),
+  };
+}
+
+describe('IMPL-033 (revisão) — verificador que não terminou: falha, re-verificação cega e célula (puro)', () => {
+  it('recheckIndices: SÓ o check que nem começou (spawn); timeout e sinal nunca', () => {
+    const o = oraculo([chk('a', true), chk('b', false, 'spawn'), chk('c', false, 'timeout'), chk('d', false, 'signal'), chk('e', false, 'spawn')]);
+    expect(recheckIndices(o)).toEqual([1, 4]);
+  });
+
+  it('shouldRecheckOracle: só quando o oráculo ainda muda a nota (completed/limit, sem violação)', () => {
+    const spawn = oraculo([chk('a', false, 'spawn')]);
+    expect(shouldRecheckOracle('completed', spawn)).toBe(true);
+    for (const lim of ['timeout', 'maxTurns', 'maxCost', 'maxOutput']) expect(shouldRecheckOracle(lim, spawn)).toBe(true);
+    // Desfecho já fixado: 'error' conta 'nao', violação decide 'nao', cancelamento sai.
+    for (const fixo of ['error', 'cancelled', 'desconhecido']) expect(shouldRecheckOracle(fixo, spawn)).toBe(false);
+    expect(shouldRecheckOracle('completed', oraculo([chk('a', false, 'spawn')], ['proibido.txt']))).toBe(false);
+    // Nada a re-verificar: check que pendurou/morreu é desfecho do código sob teste.
+    expect(shouldRecheckOracle('completed', oraculo([chk('a', false, 'timeout'), chk('b', false, 'signal')]))).toBe(false);
+  });
+
+  it('mergeOracleRecheck: troca só os checks re-verificados; o resto não ganha outra chance', () => {
+    const antes = oraculo([chk('a', false), chk('b', false, 'spawn', 2), chk('c', false, 'timeout')]);
+    expect(antes.score).toBe(0);
+    const recheck = oraculo([chk('b', true)]);
+    const depois = mergeOracleRecheck(antes, [1], recheck);
+    expect(depois.checks.map((c) => [c.label, c.ok, c.notRun ?? null])).toEqual([
+      ['a', false, null],
+      ['b', true, null],
+      ['c', false, 'timeout'],
+    ]);
+    // Peso do check re-verificado preservado (2 de 4) e fórmula do oráculo.
+    expect(depois.checks[1].weight).toBe(2);
+    expect(depois.score).toBe(0.5);
+    expect(depois.inconclusive).toBe(true); // o timeout continua lá
+    expect(antes.checks[1].ok).toBe(false); // sem mutar o anterior
+    // Persistiu: continua falho e marcado.
+    const persistiu = mergeOracleRecheck(antes, [1], oraculo([chk('b', false, 'spawn')]));
+    expect(persistiu.score).toBe(0);
+    expect(persistiu.checks[1].notRun).toBe('spawn');
+  });
+
+  it('oracleCellDefect: comando que não rodou em NENHUMA execução ⇒ defeito do ambiente (todos)', () => {
+    const quebrado = (): { oracle: OracleResult } => ({ oracle: oraculo([chk('done', true), chk('suite', false, 'spawn')]) });
+    expect(oracleCellDefect([quebrado(), quebrado(), quebrado()])).toEqual({ labels: ['suite'], executions: 3 });
+    // Execução sem oráculo (processo morreu antes) não conta nem a favor nem contra.
+    expect(oracleCellDefect([quebrado(), {}, quebrado()])).toEqual({ labels: ['suite'], executions: 2 });
+  });
+
+  it('oracleCellDefect: rodou em ALGUMA execução ⇒ o ambiente serve (a falha é de quem não rodou)', () => {
+    const naoRodou = { oracle: oraculo([chk('suite', false, 'spawn')]) };
+    const rodouEFalhou = { oracle: oraculo([chk('suite', false)]) };
+    const rodouEPassou = { oracle: oraculo([chk('suite', true)]) };
+    expect(oracleCellDefect([naoRodou, rodouEFalhou])).toBeNull();
+    expect(oracleCellDefect([naoRodou, naoRodou, rodouEPassou])).toBeNull();
+  });
+
+  it('oracleCellDefect: timeout/sinal em TODAS as execuções NÃO é defeito (é desfecho do código)', () => {
+    const pendurou = { oracle: oraculo([chk('suite', false, 'timeout')]) };
+    const morreu = { oracle: oraculo([chk('suite', false, 'signal')]) };
+    expect(oracleCellDefect([pendurou, pendurou])).toBeNull();
+    expect(oracleCellDefect([pendurou, morreu])).toBeNull();
+    // Sem nenhuma execução com oráculo: nada a decidir.
+    expect(oracleCellDefect([])).toBeNull();
+    expect(oracleCellDefect([{}, {}])).toBeNull();
+  });
+
+  it('agentStageProvenance: origem mais frágil entre as reps; sem veredito ⇒ motivo; cancelado ⇒ nada', () => {
+    const base = { explanation: 'x' };
+    expect(
+      agentStageProvenance([
+        { ...base, path: 'oracle-pass', verdict: 'resolve', source: 'ground-truth' },
+        { ...base, path: 'oracle-pass', verdict: 'resolve', source: 'judge' },
+      ]),
+    ).toEqual({ source: 'judge' });
+    expect(
+      agentStageProvenance([
+        { ...base, path: 'oracle-pass', verdict: 'resolve', source: 'degraded' },
+        { ...base, path: 'error', verdict: 'nao', source: 'auto' },
+      ]),
+    ).toEqual({ source: 'degraded' });
+    expect(agentStageProvenance([{ ...base, path: 'oracle-fail', verdict: 'nao', source: 'ground-truth' }])).toEqual({
+      source: 'ground-truth',
+    });
+    expect(
+      agentStageProvenance([
+        { ...base, path: 'no-oracle-judge', verdict: null, judgeError: { kind: 'timeout', message: 't' } },
+      ]),
+    ).toEqual({ error: { kind: 'timeout', message: 't' } });
+    // Sem oráculo e juiz não chamado: não é falha do juiz — é falta de régua.
+    expect(
+      agentStageProvenance([{ path: 'no-oracle-judge', verdict: null, explanation: 'sem oráculo e sem juiz configurado' }]),
+    ).toEqual({ error: { kind: 'no_reference', message: 'sem oráculo e sem juiz configurado' } });
+    expect(agentStageProvenance([{ ...base, path: 'cancelled', verdict: null }])).toEqual({});
   });
 });
 
@@ -360,6 +486,40 @@ describe('IMPL-033 — judgeDossier: retry 2× e falha estruturada (nunca parcia
       const r = await judgeDossier({ stage: STAGE, dossierText: 'diff', contestantId: 'a', judgeModelIds: ['fake/judge'], apiKey: KEY });
       expect(r.verdict).toBeNull();
       expect(r.judgeError?.kind).toBe('invalid_output');
+    });
+  });
+
+  it("recusa/texto livre com 'não' NÃO vira o veredito 'nao' (sem fallback por palavra): invalid_output", async () => {
+    const recusas = [
+      'Desculpe, não consigo avaliar este dossiê.',
+      'O agente NÃO resolve a tarefa.',
+      'veredito: parcial',
+      '```\nresolve\n```',
+    ];
+    for (const texto of recusas) {
+      await comJuiz(() => ({ text: texto }), async (f) => {
+        const r = await judgeDossier({ stage: STAGE, dossierText: 'diff', contestantId: 'a', judgeModelIds: ['fake/judge'], apiKey: KEY });
+        expect(r.verdict, texto).toBeNull();
+        expect(r.judgeError?.kind, texto).toBe('invalid_output');
+        expect(f.chatRequests(), texto).toHaveLength(1 + AGENT_JUDGE_RETRIES);
+      });
+    }
+    // JSON válido dentro de cerca/texto continua aceito (não é texto livre).
+    await comJuiz(() => ({ text: 'Segue:\n```json\n{"verdict": "não", "explanation": "x"}\n```' }), async () => {
+      const r = await judgeDossier({ stage: STAGE, dossierText: 'diff', contestantId: 'a', judgeModelIds: ['fake/judge'], apiKey: KEY });
+      expect(r).toMatchObject({ verdict: 'nao', attempts: 1 });
+    });
+  });
+
+  it('dossiê vazio / sem juiz ⇒ skipped (0 chamadas), SEM judgeError — não infla a contagem de falhas', async () => {
+    await comJuiz(() => JSON_OK('resolve'), async (f) => {
+      const vazio = await judgeDossier({ stage: STAGE, dossierText: '   ', contestantId: 'a', judgeModelIds: ['fake/judge'], apiKey: KEY });
+      expect(vazio).toMatchObject({ verdict: null, skipped: true, attempts: 0 });
+      expect(vazio.judgeError).toBeUndefined();
+      const semJuiz = await judgeDossier({ stage: STAGE, dossierText: 'diff', contestantId: 'a', judgeModelIds: [], apiKey: KEY });
+      expect(semJuiz).toMatchObject({ verdict: null, skipped: true });
+      expect(semJuiz.judgeError).toBeUndefined();
+      expect(f.chatRequests()).toHaveLength(0);
     });
   });
 
@@ -567,30 +727,132 @@ describe('IMPL-033 — runAgentStage: juiz confinado e falha preservando o orác
     });
   });
 
-  it('verificador inconclusivo persistente (comando ausente) ⇒ re-verificado 3×, sem veredito, 0 chamadas de juiz', async () => {
+  it('comando ausente persistente ⇒ re-verificado às cegas 2× e o check fica FALHO: nao no denominador, 0 juiz', async () => {
     await comJuiz(() => JSON_OK('resolve'), async (f) => {
       const res = await runAgentStage(
         params({ verify: [{ cmd: 'comando-que-nao-existe-impl033', label: 'fantasma' }] }, executorFalso(['done.txt'])),
       );
-      expect(res.repResults[0]).toMatchObject({ verdict: null, path: 'oracle-inconclusive', judgeUsed: false, oracleAttempts: 3 });
-      expect(res.repResults[0].oracle?.inconclusive).toBe(true);
+      // Antes (1ª versão): verdict null, fora do denominador. Agora: check falho.
+      expect(res.repResults[0]).toMatchObject({ verdict: 'nao', path: 'oracle-fail', judgeUsed: false, oracleAttempts: 3 });
+      expect(res.repResults[0].oracle?.checks[0]).toMatchObject({ ok: false, notRun: 'spawn', exitCode: -1 });
       expect(res.incomplete).toBe(false);
       expect(f.chatRequests()).toHaveLength(0);
     });
   });
 
-  it('verificador inconclusivo UMA vez (timeout do check) ⇒ re-verificação decide e o caminho segue normal', async () => {
-    await comJuiz(() => JSON_OK('resolve'), async () => {
-      // 1ª execução do check: marca e dorme além do timeout (inconclusivo);
-      // 2ª: a marca existe e o check passa — o soluço do verificador não vira nota.
+  it('check que PENDURA (timeout) ⇒ check falho SEM re-verificação: o código sob teste não ganha outra chance', async () => {
+    await comJuiz(() => JSON_OK('resolve'), async (f) => {
+      // 1ª execução: marca e dorme além do timeout. Se houvesse re-verificação,
+      // a 2ª passaria (a marca existe) — exatamente o retry dependente de
+      // resultado que a revisão proibiu.
       const instavel = {
         cmd: 'sh -c "if [ -f .reverificado ]; then exit 0; fi; touch .reverificado; sleep 5"',
         label: 'instável',
-        timeoutMs: 400,
+        timeoutMs: 300,
       };
-      const res = await runAgentStage(params({ verify: [instavel] }, executorFalso(['done.txt'])));
-      expect(res.repResults[0]).toMatchObject({ verdict: 'resolve', path: 'oracle-pass', oracleAttempts: 2 });
-      expect(res.repResults[0].oracle?.inconclusive).toBe(false);
+      const t0 = Date.now();
+      const res = await runAgentStage(params({ verify: [PASSA, instavel] }, executorFalso(['done.txt'])));
+      expect(Date.now() - t0).toBeLessThan(4_000);
+      expect(res.repResults[0]).toMatchObject({ verdict: 'parcial', path: 'oracle-partial', oracleAttempts: 1 });
+      expect(res.repResults[0].oracle?.score).toBe(0.5);
+      expect(res.repResults[0].oracle?.checks[1]).toMatchObject({ ok: false, notRun: 'timeout' });
+      // Juiz chamado dentro da faixa: 'resolve' confinado a 'parcial'.
+      expect(res.repResults[0].judgeVerdictBeforeClamp).toBe('resolve');
+      expect(f.chatRequests()).toHaveLength(1);
+    });
+  });
+
+  it('check que nem começou UMA vez ⇒ só ele é re-verificado (evento marca a tentativa) e decide', async () => {
+    const eventos: RunEvent[] = [];
+    const off = subscribe('run-impl033', (e) => eventos.push(e));
+    try {
+      await comJuiz(() => JSON_OK('resolve'), async () => {
+        // O check 1 não existe na 1ª passada; o check 2 o cria (e conta quantas
+        // vezes rodou). Só o 1 volta: o 2 roda UMA vez só.
+        const tarde = { cmd: './tarde.sh', label: 'tarde' };
+        const cria = {
+          cmd: 'sh -c "printf \'#!/bin/sh\\nexit 0\\n\' > tarde.sh && chmod +x tarde.sh && echo x >> cria.count"',
+          label: 'cria',
+        };
+        const task = { verify: [tarde, cria] };
+        const res = await runAgentStage(params(task, executorFalso(['done.txt'])));
+        const r = res.repResults[0];
+        expect(r).toMatchObject({ verdict: 'resolve', path: 'oracle-pass', oracleAttempts: 2 });
+        expect(r.oracle?.checks.map((c) => [c.label, c.ok, c.notRun ?? null])).toEqual([
+          ['tarde', true, null],
+          ['cria', true, null],
+        ]);
+        expect(r.oracle?.inconclusive).toBe(false);
+        const verif = eventos.filter(
+          (e): e is Extract<RunEvent, { type: 'agent.verified' }> => e.type === 'agent.verified' && e.execId === r.execution.execId,
+        );
+        expect(verif.map((e) => [e.results[0].label, e.results[0].ok, e.attempt ?? 1])).toEqual([
+          ['tarde', false, 1],
+          ['cria', true, 1],
+          ['tarde', true, 2],
+        ]);
+      });
+    } finally {
+      off();
+    }
+  });
+
+  it('desfecho já fixado (error / violação) ⇒ NÃO re-verifica (não gasta 2× o timeout à toa)', async () => {
+    await comJuiz(() => JSON_OK('resolve'), async () => {
+      const fantasma = { cmd: 'comando-que-nao-existe-impl033', label: 'fantasma' };
+      const erro: AgentGateway = {
+        ...executorFalso(['done.txt']),
+        run: async (opts) => {
+          writeFileSync(path.join(opts.workspaceDir, 'done.txt'), 'ok\n', 'utf8');
+          return fakeOutcome('error', opts.env.PI_MODEL_ID) as never;
+        },
+      };
+      const a = await runAgentStage(params({ verify: [fantasma] }, erro));
+      expect(a.repResults[0]).toMatchObject({ verdict: 'nao', path: 'error', oracleAttempts: 1 });
+      const b = await runAgentStage(
+        params({ verify: [fantasma], forbiddenPaths: ['done.txt'] }, executorFalso(['done.txt'])),
+      );
+      expect(b.repResults[0]).toMatchObject({ verdict: 'nao', path: 'oracle-violation', oracleAttempts: 1 });
+    });
+  });
+
+  it("recusa do juiz ('não consigo avaliar') com oráculo 100% ⇒ 'resolve' preservado + judgeError invalid_output", async () => {
+    await comJuiz(() => ({ text: 'Desculpe, não consigo avaliar este dossiê.' }), async () => {
+      const res = await runAgentStage(params({ verify: [PASSA] }, executorFalso(['done.txt'])));
+      expect(res.repResults[0]).toMatchObject({
+        verdict: 'resolve',
+        path: 'oracle-pass',
+        source: 'ground-truth',
+        judgeError: { kind: 'invalid_output' },
+      });
+    });
+  });
+
+  it('verdict.json por rep: veredito, origem, caminho, judgeError, veredito cru confinado e tentativas do oráculo', async () => {
+    await comJuiz(() => JSON_OK('resolve'), async () => {
+      const res = await runAgentStage(params({ verify: [PASSA, FALHA] }, executorFalso(['done.txt'])));
+      const r = res.repResults[0];
+      const arq = path.join(tmp, r.execution.dir, 'verdict.json');
+      expect(existsSync(arq)).toBe(true);
+      const v = JSON.parse(readFileSync(arq, 'utf8'));
+      expect(v).toMatchObject({
+        format: 'agent-verdict@1',
+        verdictTreeVersion: AGENT_VERDICT_TREE_VERSION,
+        execId: r.execution.execId,
+        path: 'oracle-partial',
+        verdict: 'parcial',
+        source: 'judge',
+        judgeUsed: true,
+        judgeVerdictBeforeClamp: 'resolve',
+        oracle: { score: 0.5, attempts: 1, notRun: [] },
+      });
+      // Legível pela mesma API de artefatos da CLI/UI (allowlist do store).
+      expect(await readArtifact(r.execution, 'verdict.json')).toContain('agent-verdict@1');
+    });
+    await comJuiz(() => HTTP_400, async () => {
+      const res = await runAgentStage(params({ verify: [PASSA] }, executorFalso(['done.txt'])));
+      const v = JSON.parse(readFileSync(path.join(tmp, res.repResults[0].execution.dir, 'verdict.json'), 'utf8'));
+      expect(v).toMatchObject({ verdict: 'resolve', source: 'ground-truth', judgeError: { kind: 'judge_failed' } });
     });
   });
 });
@@ -644,6 +906,7 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
   afterEach(() => {
     fake.calls = 0;
     fake.escreve = () => ['done.txt'];
+    fake.apaga = () => [];
   });
 
   it('juiz sempre falha: notas = oráculo (judge-score 100, não 50), agentJudgeErrorCount = execuções', async () => {
@@ -654,6 +917,9 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
       for (const s of rec.stages) {
         expect(s.referenceJudge!.verdictByContestant).toEqual({ 'fake/a': 'resolve', 'fake/b': 'resolve' });
         expect(s.referenceJudge!.judgeErrorByContestant).toEqual({ 'fake/a': 1, 'fake/b': 1 });
+        // Nomes do CONVENTIONS §2: a nota veio do oráculo (o juiz caiu).
+        expect(s.referenceJudge!.verdictSourceByContestant).toEqual({ 'fake/a': 'ground-truth', 'fake/b': 'ground-truth' });
+        expect(s.referenceJudge!.verdictErrorByContestant).toBeUndefined();
       }
       // Antes (A3): falha ⇒ 'parcial' ⇒ judge-score 50 para quem o oráculo aprovou.
       expect(rec.judgeScoreByContestant).toEqual({ 'fake/a': 100, 'fake/b': 100 });
@@ -706,11 +972,87 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
         // Chave AUSENTE — nunca 'parcial'/'nao' imputado.
         expect(s.referenceJudge!.verdictByContestant).toEqual({});
         expect(s.referenceJudge!.unscoredRepsByContestant).toEqual({ 'fake/a': 1, 'fake/b': 1 });
+        // Motivo da ausência nos nomes do CONVENTIONS §2 (consumidores do IMPL-004).
+        expect(s.referenceJudge!.verdictErrorByContestant).toMatchObject({
+          'fake/a': { kind: 'judge_failed' },
+          'fake/b': { kind: 'judge_failed' },
+        });
         expect(s.judge!.rankedContestantIds).toEqual([]);
       }
       expect(rec.agentJudgeErrorCount).toBe(4);
       expect(rec.agentUnscoredRepsByContestant).toEqual({ 'fake/a': 2, 'fake/b': 2 });
       expect(resumoNdjson(rec)).toMatchObject({ judgeErrors: 4, unscoredReps: 4 });
+    });
+  });
+
+  // ---- Revisão: verificador que não terminou NÃO pode inverter o ranking ----
+
+  it('agente cujo código PENDURA o check × agente que falha limpo: mesma nota (sem inversão; nada sai do denominador)', async () => {
+    // Reprodução da revisão: antes, fake/a (pendura) ficava com judge-score 100
+    // e resolveRate 1.0 e fake/b (falha limpo) com 75 e 0.5.
+    fake.escreve = (q, m) =>
+      m === 'fake/a' && q.startsWith('tarefa 0') ? ['done.txt', { path: 'hang.sh', content: 'sleep 5\n' }] : ['done.txt'];
+    await comJuiz(() => JSON_OK('resolve'), async () => {
+      const suite = { cmd: 'sh hang.sh', label: 'suite', timeoutMs: 300 };
+      const rec = await runToCompletion(configAgente([{ verify: [PASSA, suite] }, { verify: [PASSA] }]), KEY, {});
+      expect(rec.status, rec.error).toBe('finished');
+      expect(rec.stages.every((s) => !s.error && !s.incomplete)).toBe(true);
+      expect(rec.stages[0].referenceJudge!.verdictByContestant).toEqual({ 'fake/a': 'parcial', 'fake/b': 'parcial' });
+      expect(rec.stages[1].referenceJudge!.verdictByContestant).toEqual({ 'fake/a': 'resolve', 'fake/b': 'resolve' });
+      expect(rec.judgeScoreByContestant).toEqual({ 'fake/a': 75, 'fake/b': 75 });
+      expect(rec.resolveRateByContestant).toEqual({ 'fake/a': 0.5, 'fake/b': 0.5 });
+      expect(rec.agentUnscoredRepsByContestant).toEqual({});
+      // Vetor da significância: idêntico dos dois lados (nenhuma etapa some de um só).
+      const par = pairedStageScores(rec, 'fake/a', 'fake/b');
+      expect(par.controlScores).toEqual(par.championScores);
+      expect(rec.stages[0].referenceJudge!.verdictSourceByContestant).toEqual({ 'fake/a': 'judge', 'fake/b': 'judge' });
+    });
+  });
+
+  it('comando do verificador ausente em TODAS as execuções ⇒ etapa inválida para TODOS (error), fora do placar de todos', async () => {
+    await comJuiz(() => JSON_OK('resolve'), async () => {
+      const fantasma = { cmd: 'comando-que-nao-existe-impl033', label: 'suite' };
+      const rec = await runToCompletion(configAgente([{ verify: [PASSA, fantasma] }, { verify: [PASSA] }]), KEY, {});
+      expect(rec.status, rec.error).toBe('finished');
+      const inval = rec.stages[0];
+      expect(inval.error).toMatch(/inválida para TODOS/);
+      expect(inval.error).toContain('suite');
+      expect(inval.referenceJudge).toBeUndefined();
+      expect(inval.judge).toBeUndefined();
+      expect(inval.incomplete).toBeFalsy();
+      // Só a etapa válida conta — igual para os dois.
+      expect(rec.stages[1].referenceJudge!.verdictByContestant).toEqual({ 'fake/a': 'resolve', 'fake/b': 'resolve' });
+      expect(rec.judgeScoreByContestant).toEqual({ 'fake/a': 100, 'fake/b': 100 });
+      expect(rec.resolveRateByContestant).toEqual({ 'fake/a': 1, 'fake/b': 1 });
+      // A etapa inválida não soma contagem de rep (ela não vale para ninguém).
+      expect(rec.agentUnscoredRepsByContestant).toEqual({});
+      expect(rec.agentJudgeErrorCount).toBe(0);
+      const par = pairedStageScores(rec, 'fake/a', 'fake/b');
+      expect(par.controlScores).toEqual(par.championScores);
+    });
+  });
+
+  it('agente APAGA o script do verificador (os outros o rodam) ⇒ culpa do agente: check falho, nao; etapa válida', async () => {
+    const fixture = path.join(tmp, 'run_tests.fixture.sh');
+    writeFileSync(fixture, '#!/bin/sh\nexit 0\n', 'utf8');
+    chmodSync(fixture, 0o755);
+    fake.apaga = (_q, m) => (m === 'fake/a' ? ['run_tests.sh'] : []);
+    await comJuiz(() => JSON_OK('resolve'), async () => {
+      const task: AgentTaskSpec = {
+        setup: [{ cmd: `cp ${fixture} run_tests.sh` }],
+        verify: [{ cmd: './run_tests.sh', label: 'suite' }],
+      };
+      const rec = await runToCompletion(configAgente([task]), KEY, {});
+      expect(rec.status, rec.error).toBe('finished');
+      const s = rec.stages[0];
+      expect(s.error).toBeUndefined();
+      expect(s.referenceJudge!.verdictByContestant).toEqual({ 'fake/a': 'nao', 'fake/b': 'resolve' });
+      expect(s.referenceJudge!.verdictSourceByContestant).toEqual({ 'fake/a': 'ground-truth', 'fake/b': 'judge' });
+      expect(rec.judgeScoreByContestant).toEqual({ 'fake/a': 0, 'fake/b': 100 });
+      expect(rec.agentUnscoredRepsByContestant).toEqual({});
+      const exA = s.responses.find((r) => r.contestantId === 'fake/a')!.execution!;
+      const v = JSON.parse(readFileSync(path.join(tmp, exA.dir, 'verdict.json'), 'utf8'));
+      expect(v).toMatchObject({ verdict: 'nao', path: 'oracle-fail', oracle: { attempts: 3, notRun: [{ label: 'suite', cause: 'spawn' }] } });
     });
   });
 });

@@ -35,6 +35,8 @@ export interface DossierInput {
       exitCode: number;
       expected: number;
       tail: string;
+      /** O check não terminou com exit normal (conta FALHOU) — motivo p/ o juiz. */
+      notRun?: 'spawn' | 'timeout' | 'signal';
     }[];
     score: number;
     violations: string[];
@@ -368,10 +370,16 @@ function buildVerify(input: DossierInput): string {
     lines.push('(sem oráculo automático)');
     return lines.join('\n');
   }
+  const naoTerminou: Record<'spawn' | 'timeout' | 'signal', string> = {
+    spawn: 'o comando nem começou (ausente ou sem permissão)',
+    timeout: 'passou do tempo limite do check',
+    signal: 'o processo foi morto por sinal',
+  };
   for (const check of oracle.checks) {
     const status = check.ok ? 'PASSOU' : 'FALHOU';
     lines.push(
-      `[${status}]  ${check.label}       exit ${check.exitCode} (esperado ${check.expected})`,
+      `[${status}]  ${check.label}       exit ${check.exitCode} (esperado ${check.expected})` +
+        (check.notRun ? ` — não terminou: ${naoTerminou[check.notRun]}` : ''),
     );
     if (!check.ok && check.tail) {
       lines.push('    últimas linhas:');

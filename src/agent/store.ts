@@ -116,6 +116,8 @@ const ALLOWED_ARTIFACT_NAMES = new Set([
   'stderr.log',
   'stdout.log',
   'digests.json',
+  // Adjudicação da rep (IMPL-033): gravado por `runAgentStage` DEPOIS da coleta.
+  'verdict.json',
 ]);
 
 /** Valida que `name` é seguro e devolve o caminho relativo ao dir de execução. */

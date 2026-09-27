@@ -7,23 +7,38 @@
 // decide QUAL caminho a repetição toma e, quando o juiz é chamado, qual é o
 // candidato do oráculo e até onde o juiz pode rebaixar.
 //
-// Os 10 caminhos (é a ordem de avaliação e a dos testes):
-//   1 cancelled            → SEM veredito (incomplete). Sinal de controle: quem
-//                             chama re-lança RunCancelled e a ETAPA inteira sai.
-//   2 error                → 'nao' (o processo morreu). É o defeito A5 da R-14a;
-//                             a taxonomia transient × defect é do IMPL-094.
-//   3 limit-cut            → 'nao'. timeout/maxTurns/maxCost/maxOutput SEM oráculo
-//                             100%. Antes era `null` e saía do denominador (A4).
-//   4 oracle-violation     → 'nao' (forbiddenPaths tocados).
-//   5 oracle-inconclusive  → SEM veredito (unscored): o verificador não decidiu
-//                             nem após a re-verificação — execução INVÁLIDA, a
-//                             reexecutar; nunca promoção pelo juiz (IMPL-033).
-//   6 oracle-pass          → 'resolve' do oráculo; o juiz só rebaixa a 'parcial'.
-//   7 oracle-fail          → 'nao' (score 0).
-//   8 oracle-partial       → 'parcial' do oráculo; o juiz confirma ou rebaixa a
-//                             'nao' — NUNCA promove a 'resolve' (IMPL-033, A2).
-//   9 no-oracle-empty      → 'nao' (completou sem mudar nada).
-//  10 no-oracle-judge      → juiz pleno pelo dossiê (sem oráculo não há faixa).
+// Os 9 caminhos (é a ordem de avaliação e a dos testes):
+//   1 cancelled         → SEM veredito (incomplete). Sinal de controle: quem
+//                          chama re-lança RunCancelled e a ETAPA inteira sai.
+//   2 error             → 'nao' (o processo morreu). É o defeito A5 da R-14a;
+//                          a taxonomia transient × defect é do IMPL-094.
+//   3 limit-cut         → 'nao'. timeout/maxTurns/maxCost/maxOutput SEM oráculo
+//                          100%. Antes era `null` e saía do denominador (A4).
+//   4 oracle-violation  → 'nao' (forbiddenPaths tocados).
+//   5 oracle-pass       → 'resolve' do oráculo; o juiz só rebaixa a 'parcial'.
+//   6 oracle-fail       → 'nao' (score 0).
+//   7 oracle-partial    → 'parcial' do oráculo; o juiz confirma ou rebaixa a
+//                          'nao' — NUNCA promove a 'resolve' (IMPL-033, A2).
+//   8 no-oracle-empty   → 'nao' (completou sem mudar nada).
+//   9 no-oracle-judge   → juiz pleno pelo dossiê (sem oráculo não há faixa).
+//
+// Verificador que NÃO terminou (IMPL-033, revisão): check que não teve exit
+// normal entra no `score` como FALHO (`ok:false`, peso no denominador) — a rep
+// nunca sai do denominador por isso, e o juiz nunca a promove (o score < 1 já
+// põe o teto em 'parcial'). O motivo decide de quem é a culpa:
+//   - timeout/sinal do check: o código sob teste pendurou/morreu sob um teto
+//     da tarefa, igual para todos — é desfecho do agente (mesma lógica do corte
+//     por limite). SEM re-verificação: repetir só quando pendura seria retry
+//     dependente de resultado (daria a um check instável até 3 chances).
+//   - comando que nem começou (spawn): re-verificado às cegas (só esse check,
+//     no mesmo workspace, `recheckIndices`/`mergeOracleRecheck`); persistindo,
+//     a CÉLULA decide (`oracleCellDefect`): se o check rodou em alguma execução
+//     da etapa, o ambiente serve e a falha é do agente (conta como check falho);
+//     se não rodou em NENHUMA, é defeito do ambiente e a etapa fica inválida
+//     para TODOS os contestants (R-14a DEC-2) — simétrico, sem viés de
+//     sobrevivência. Antes (1ª versão do IMPL-033) a rep inconclusiva saía do
+//     denominador só para aquele contestant: quem pendurava a suíte de testes
+//     ganhava de quem falhava limpo (inversão de ranking reproduzida).
 //
 // Hierarquia oráculo > juiz (IMPL-033 / R-14a DEC-3, confiança ALTA): o oráculo
 // define a FAIXA [floor, ceiling] e o juiz só gradua dentro dela
@@ -48,7 +63,7 @@
 // ⚠️ Módulo PURO de propósito: sem `node:*`, sem `process.env`.
 // ----------------------------------------------------------------------------
 import type { Verdict, VerdictError, VerdictSource } from '../types.js';
-import type { AgentStopReason } from './types.js';
+import type { AgentStopReason, OracleNotRun, OracleResult } from './types.js';
 
 /**
  * Versão da semântica da árvore gravada em `RunRecord.agentVerdictTreeVersion`.
@@ -59,8 +74,9 @@ import type { AgentStopReason } from './types.js';
  *   (judge-score, resolveRate, significância).
  * - 3 (IMPL-033): juiz confinado à faixa do oráculo (oráculo parcial nunca
  *   vira 'resolve'); falha do juiz cai no veredito do oráculo (+ `judgeError`)
- *   ou deixa a rep sem veredito, em vez de 'parcial'; verificador inconclusivo
- *   deixa a rep sem veredito (execução inválida) em vez de pontuar.
+ *   ou, sem oráculo, deixa a rep sem veredito, em vez de 'parcial'; check que
+ *   não terminou conta como falho, e comando ausente em TODAS as execuções da
+ *   etapa invalida a etapa para todos (defeito do ambiente).
  * Notas de runs com versões diferentes NÃO são comparáveis entre si.
  */
 export const AGENT_VERDICT_TREE_VERSION = 3;
@@ -97,13 +113,12 @@ export function isLimitStop(stopReason: AgentStopReason | string): boolean {
   return classifyStop(stopReason) === 'limit';
 }
 
-/** Os 10 caminhos da árvore (ver cabeçalho). */
+/** Os 9 caminhos da árvore (ver cabeçalho). */
 export type VerdictPath =
   | 'cancelled'
   | 'error'
   | 'limit-cut'
   | 'oracle-violation'
-  | 'oracle-inconclusive'
   | 'oracle-pass'
   | 'oracle-fail'
   | 'oracle-partial'
@@ -115,7 +130,6 @@ export const VERDICT_PATHS: readonly VerdictPath[] = [
   'error',
   'limit-cut',
   'oracle-violation',
-  'oracle-inconclusive',
   'oracle-pass',
   'oracle-fail',
   'oracle-partial',
@@ -132,7 +146,7 @@ export interface JudgeDecision {
   path: JudgePath;
   /**
    * Veredito do ORÁCULO — é o que fica quando o juiz falha (ou não há juiz).
-   * `null` = sem oráculo (caminho 10): falha do juiz deixa a rep SEM veredito,
+   * `null` = sem oráculo (caminho 9): falha do juiz deixa a rep SEM veredito,
    * nunca um 'parcial' inventado (IMPL-033).
    */
   candidate: Verdict | null;
@@ -147,12 +161,6 @@ export interface JudgeDecision {
 export type TreeDecision =
   /** Sem veredito — SÓ cancelamento. A etapa sai inteira (quem chama re-lança). */
   | { kind: 'incomplete'; path: 'cancelled'; explanation: string }
-  /**
-   * Sem veredito por execução INVÁLIDA (verificador inconclusivo): não é
-   * controle — a etapa segue —, mas a rep não tem observação e sai do
-   * denominador. Nunca vai ao juiz (ele não pode suprir o oráculo).
-   */
-  | { kind: 'unscored'; path: 'oracle-inconclusive'; explanation: string }
   /** Veredito final, sem juiz. */
   | { kind: 'final'; path: VerdictPath; verdict: Verdict; source: VerdictSource; explanation: string }
   /** O juiz LLM gradua dentro de [floor, ceiling]. */
@@ -161,16 +169,17 @@ export type TreeDecision =
 export interface TreeInput {
   stopReason: AgentStopReason | string;
   /**
-   * Resultado do oráculo (verify[]/forbiddenPaths), quando houve.
-   * `inconclusive` = algum check não rodou (comando ausente, timeout do próprio
-   * check) — já DEPOIS das re-verificações de quem chama.
+   * Resultado do oráculo (verify[]/forbiddenPaths), quando houve. Check que não
+   * terminou já está no `score` como FALHO (ver cabeçalho) — a árvore não
+   * precisa saber o motivo; a invalidação por defeito do ambiente é da célula
+   * (`oracleCellDefect`, no orquestrador), não da rep.
    */
-  oracle?: { score: number; violations: string[]; inconclusive?: boolean };
+  oracle?: { score: number; violations: string[] };
   /** true = diff seed..HEAD vazio (o agente não mudou nada). */
   diffEmpty: boolean;
 }
 
-/** Percorre a árvore — ver os 10 caminhos no cabeçalho. */
+/** Percorre a árvore — ver os 9 caminhos no cabeçalho. */
 export function decideRepVerdict(input: TreeInput): TreeDecision {
   const { stopReason, oracle, diffEmpty } = input;
   const cls = classifyStop(stopReason);
@@ -193,18 +202,13 @@ export function decideRepVerdict(input: TreeInput): TreeDecision {
 
   // 3) Corte por limite. Exceção ÚNICA: o oráculo passou inteiro, sem violação —
   //    o mundo mudou de forma verificável e o critério é o teste, não a
-  //    despedida do agente. Qualquer outro corte é FALHA no denominador —
-  //    inclusive com verificador inconclusivo: o teto já decidiu, e um oráculo
-  //    que não confirmou 100% não salva a execução cortada.
-  const oraclePassing =
-    oracle !== undefined && oracle.violations.length === 0 && oracle.score === 1 && oracle.inconclusive !== true;
+  //    despedida do agente. Qualquer outro corte é FALHA no denominador.
+  const oraclePassing = oracle !== undefined && oracle.violations.length === 0 && oracle.score === 1;
   if (cls === 'limit' && !oraclePassing) {
     const detalhe = oracle
       ? oracle.violations.length > 0
         ? `; arquivos proibidos modificados: ${oracle.violations.join(', ')}`
-        : oracle.inconclusive
-          ? '; verificação automática inconclusiva'
-          : `; verificação automática em ${Math.round(oracle.score * 100)}%`
+        : `; verificação automática em ${Math.round(oracle.score * 100)}%`
       : '';
     return {
       kind: 'final',
@@ -215,10 +219,9 @@ export function decideRepVerdict(input: TreeInput): TreeDecision {
     };
   }
 
-  // 4-8) O ORÁCULO MANDA; o juiz só gradua dentro da faixa dele.
+  // 4-7) O ORÁCULO MANDA; o juiz só gradua dentro da faixa dele.
   if (oracle) {
-    // 4) Violação é medida no DIFF, não nos checks — decide mesmo com
-    //    verificador inconclusivo.
+    // 4) Violação é medida no DIFF, não nos checks.
     if (oracle.violations.length > 0) {
       return {
         kind: 'final',
@@ -228,19 +231,7 @@ export function decideRepVerdict(input: TreeInput): TreeDecision {
         explanation: `arquivos proibidos modificados: ${oracle.violations.join(', ')}`,
       };
     }
-    // 5) Verificador inconclusivo (check não rodou, mesmo re-verificado):
-    //    execução INVÁLIDA, sem veredito. Nem 'nao' (puniria a tarefa pelo
-    //    oráculo mal escrito/instável) nem juiz (o juiz não supre o oráculo:
-    //    seria promoção sem evidência — R-14a DEC-3).
-    if (oracle.inconclusive) {
-      return {
-        kind: 'unscored',
-        path: 'oracle-inconclusive',
-        explanation:
-          'verificação automática inconclusiva (check não rodou: comando ausente ou timeout do próprio check) — execução inválida, sem veredito; reexecutar',
-      };
-    }
-    // 6) Score 1: 'resolve' do oráculo; o juiz só pode rebaixar a 'parcial'.
+    // 5) Score 1: 'resolve' do oráculo; o juiz só pode rebaixar a 'parcial'.
     if (oracle.score === 1) {
       return {
         kind: 'judge',
@@ -251,7 +242,7 @@ export function decideRepVerdict(input: TreeInput): TreeDecision {
         explanation: 'verificação automática passou integralmente (score 1)',
       };
     }
-    // 7) Score 0: 'nao' sem juiz.
+    // 6) Score 0: 'nao' sem juiz.
     if (oracle.score === 0) {
       return {
         kind: 'final',
@@ -261,7 +252,7 @@ export function decideRepVerdict(input: TreeInput): TreeDecision {
         explanation: 'verificação automática falhou integralmente (score 0)',
       };
     }
-    // 8) Score ∈ (0,1): 'parcial' do oráculo; o juiz confirma ou cai a 'nao'.
+    // 7) Score ∈ (0,1): 'parcial' do oráculo; o juiz confirma ou cai a 'nao'.
     //    TETO 'parcial' — o juiz nunca promove a 'resolve' (defeito A2).
     return {
       kind: 'judge',
@@ -273,7 +264,7 @@ export function decideRepVerdict(input: TreeInput): TreeDecision {
     };
   }
 
-  // 9) Sem oráculo e sem diff: completou e não mudou nada — é uma resposta, errada.
+  // 8) Sem oráculo e sem diff: completou e não mudou nada — é uma resposta, errada.
   if (diffEmpty) {
     return {
       kind: 'final',
@@ -284,8 +275,8 @@ export function decideRepVerdict(input: TreeInput): TreeDecision {
     };
   }
 
-  // 10) Sem oráculo com diff: julgamento pleno pelo dossiê. Sem oráculo não há
-  //     faixa nem fallback: se o juiz falhar, a rep fica sem veredito.
+  // 9) Sem oráculo com diff: julgamento pleno pelo dossiê. Sem oráculo não há
+  //    faixa nem fallback: se o juiz falhar, a rep fica sem veredito.
   return {
     kind: 'judge',
     path: 'no-oracle-judge',
@@ -318,12 +309,15 @@ export type JudgeOutcome =
   | { status: 'ok'; verdict: Verdict; explanation: string; degraded?: boolean }
   /** Nenhum juiz produziu veredito válido mesmo após 1+2 tentativas. */
   | { status: 'failed'; error: VerdictError; attempts: number }
-  /** Não há juiz configurado — não é falha, mas também não há graduação. */
-  | { status: 'skipped' };
+  /**
+   * O juiz não foi chamado (sem juiz configurado, ou dossiê vazio — nada a
+   * ler). Não é falha do juiz (sem `judgeError`), mas também não há graduação.
+   */
+  | { status: 'skipped'; reason?: string };
 
 /** Veredito FINAL de uma repetição. */
 export interface SettledRepVerdict {
-  /** null = sem veredito (cancelamento, execução inválida ou juiz falhou sem oráculo). */
+  /** null = sem veredito (cancelamento, ou juiz falhou/não chamado sem oráculo). */
   verdict: Verdict | null;
   explanation: string;
   /** Origem do veredito presente (nomes do CONVENTIONS). Ausente quando `verdict` é null. */
@@ -344,10 +338,11 @@ export interface SettledRepVerdict {
  *      do piso);
  *   2. falha do juiz ⇒ veredito do ORÁCULO + `judgeError` (nunca 'parcial'
  *      inventado; sem oráculo ⇒ sem veredito);
- *   3. verificador inconclusivo ⇒ sem veredito, sem juiz.
+ *   3. juiz que não chegou a ser chamado (`skipped`: sem juiz, dossiê vazio)
+ *      não é falha do juiz — sem `judgeError`.
  */
 export function settleRepVerdict(decision: TreeDecision, judge?: JudgeOutcome): SettledRepVerdict {
-  if (decision.kind === 'incomplete' || decision.kind === 'unscored') {
+  if (decision.kind === 'incomplete') {
     return { verdict: null, explanation: decision.explanation, judgeUsed: false };
   }
   if (decision.kind === 'final') {
@@ -391,9 +386,141 @@ export function settleRepVerdict(decision: TreeDecision, judge?: JudgeOutcome): 
   }
   return {
     verdict: null,
-    explanation: 'sem oráculo e sem juiz configurado — sem veredito (fora do denominador)',
+    explanation: `sem oráculo e ${outcome.reason ?? 'sem juiz configurado'} — sem veredito (fora do denominador)`,
     judgeUsed: false,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Verificador que não terminou: re-verificação cega e defeito da CÉLULA
+// (IMPL-033, revisão — R-14a DEC-1/DEC-2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Índices dos checks a re-verificar: SÓ os que nem começaram (`notRun:
+ * 'spawn'` — comando ausente/sem permissão, o único motivo que pode ser soluço
+ * do ambiente, ex.: EAGAIN sob carga). Timeout e sinal NÃO entram: o comando
+ * rodou e o código sob teste pendurou/morreu — repetir só nesse caso seria
+ * retry dependente de resultado (um check instável ganharia até 3 chances).
+ */
+export function recheckIndices(oracle: Pick<OracleResult, 'checks'>): number[] {
+  const idx: number[] = [];
+  oracle.checks.forEach((c, i) => {
+    if (c.notRun === 'spawn') idx.push(i);
+  });
+  return idx;
+}
+
+/**
+ * Re-verificar só vale quando o oráculo ainda pode mudar a nota: execução que
+ * terminou ou foi cortada por limite (o corte só é salvo pelo oráculo 100%),
+ * SEM violação (que decide 'nao' de qualquer jeito). `error`/`cancelled` já
+ * têm desfecho fixo — re-verificar ali só gastaria tempo (até 2× o timeout).
+ */
+export function shouldRecheckOracle(
+  stopReason: AgentStopReason | string,
+  oracle: Pick<OracleResult, 'checks' | 'violations'>,
+): boolean {
+  const cls = classifyStop(stopReason);
+  if (cls !== 'completed' && cls !== 'limit') return false;
+  if (oracle.violations.length > 0) return false;
+  return recheckIndices(oracle).length > 0;
+}
+
+/**
+ * Funde a re-verificação de ALGUNS checks (`indices`, na ordem de `recheck`)
+ * no resultado anterior: substitui só esses checks e recalcula `score` e
+ * `inconclusive` com a MESMA fórmula do oráculo (Σ ok·peso / Σ peso). Os
+ * outros checks e as violações (medidas no diff) ficam como estavam — nenhum
+ * check que já tinha desfecho ganha outra chance.
+ */
+export function mergeOracleRecheck(prev: OracleResult, indices: number[], recheck: OracleResult): OracleResult {
+  const checks = prev.checks.map((c) => ({ ...c }));
+  indices.forEach((i, k) => {
+    const novo = recheck.checks[k];
+    if (novo && checks[i]) checks[i] = { ...novo, label: checks[i].label, weight: checks[i].weight };
+  });
+  const sumWeight = checks.reduce((a, c) => a + c.weight, 0);
+  const sumOk = checks.reduce((a, c) => a + (c.ok ? c.weight : 0), 0);
+  return {
+    checks,
+    score: sumWeight > 0 ? sumOk / sumWeight : 0,
+    violations: prev.violations,
+    inconclusive: checks.some((c) => c.notRun !== undefined),
+  };
+}
+
+/** O mínimo de uma rep que a regra da célula lê. */
+export interface CellRep {
+  oracle?: { checks: { label: string; notRun?: OracleNotRun }[] };
+}
+
+/** Defeito do ambiente numa célula (etapa): checks que não rodaram em NENHUMA execução. */
+export interface OracleCellDefect {
+  /** Rótulos dos checks que nem começaram em todas as execuções que rodaram o oráculo. */
+  labels: string[];
+  /** Execuções consideradas (todas as reps, de todos os contestants, com oráculo). */
+  executions: number;
+}
+
+/**
+ * Defeito do AMBIENTE da tarefa (R-14a DEC-2: "comando ausente → invalida a
+ * célula para TODOS"). Decidido na CÉLULA, não na rep, porque o mesmo sintoma
+ * (spawn falhou) tem dois donos: o ambiente (o comando não existe para
+ * ninguém) ou o agente (apagou/estragou o script). A régua é simétrica: se um
+ * check nem começou em NENHUMA das execuções da etapa que rodaram o oráculo —
+ * todos os contestants, todas as reps —, o ambiente não serve e a etapa é
+ * inválida para todos; se rodou em pelo menos uma, o ambiente serve e quem
+ * não conseguiu rodá-lo fica com o check FALHO (já contado assim no `score`).
+ * Timeout/sinal nunca são defeito do ambiente aqui (são desfecho do código).
+ * `null` = sem defeito (ou nenhuma execução rodou o oráculo).
+ */
+export function oracleCellDefect(reps: CellRep[]): OracleCellDefect | null {
+  const comOraculo = reps.filter((r) => r.oracle && r.oracle.checks.length > 0);
+  if (comOraculo.length === 0) return null;
+  const n = Math.min(...comOraculo.map((r) => r.oracle!.checks.length));
+  const labels: string[] = [];
+  for (let i = 0; i < n; i++) {
+    if (comOraculo.every((r) => r.oracle!.checks[i].notRun === 'spawn')) {
+      labels.push(comOraculo[0].oracle!.checks[i].label);
+    }
+  }
+  return labels.length > 0 ? { labels, executions: comOraculo.length } : null;
+}
+
+/** O mínimo de uma rep que a procedência do veredito da etapa lê. */
+export interface ProvenanceRep {
+  path: VerdictPath;
+  verdict: Verdict | null;
+  explanation: string;
+  source?: VerdictSource;
+  judgeError?: VerdictError;
+}
+
+/**
+ * Procedência do veredito AGREGADO de um contestant de agente numa etapa, nos
+ * nomes fixos do CONVENTIONS §2 (`verdictSourceByContestant` /
+ * `verdictErrorByContestant` do `ReferenceJudgeResult`):
+ * - com veredito: a origem mais "frágil" entre as reps que pontuaram —
+ *   `degraded` (painel reduzido) > `judge` (LLM) > `ground-truth` (oráculo) >
+ *   `auto` (regra) —, porque o agregado depende de todas elas;
+ * - sem veredito por motivo não-controle: o `judgeError` da 1ª rep que o tem
+ *   (juiz falhou sem oráculo) ou `no_reference` (sem oráculo e sem juiz/dossiê:
+ *   não houve régua — não é falha do juiz);
+ * - tudo cancelado: nada (controle; a etapa inteira sai).
+ */
+export function agentStageProvenance(reps: ProvenanceRep[]): { source?: VerdictSource; error?: VerdictError } {
+  const pontuadas = reps.filter((r) => r.verdict !== null);
+  if (pontuadas.length > 0) {
+    const ordem: VerdictSource[] = ['degraded', 'judge', 'ground-truth', 'auto'];
+    const fontes = new Set(pontuadas.map((r) => r.source ?? 'auto'));
+    return { source: ordem.find((f) => fontes.has(f)) ?? 'auto' };
+  }
+  const semVeredito = reps.filter((r) => r.path !== 'cancelled');
+  if (semVeredito.length === 0) return {};
+  const comErro = semVeredito.find((r) => r.judgeError);
+  if (comErro?.judgeError) return { error: comErro.judgeError };
+  return { error: { kind: 'no_reference', message: semVeredito[0].explanation.slice(0, 200) } };
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +541,7 @@ export interface RepCounts {
   limitCuts: number;
   /** Reps canceladas (controle). */
   cancelled: number;
-  /** Reps sem veredito por motivo NÃO-controle (inválida ou juiz sem oráculo). */
+  /** Reps sem veredito por motivo NÃO-controle (sem oráculo: juiz falhou ou não foi chamado). */
   unscored: number;
   /** Reps com a flag `judgeError`. */
   judgeErrors: number;
@@ -461,7 +588,11 @@ export function stageObservations(stage: AgentStageVerdicts, contestantId: strin
 export interface AgentRateMetrics {
   /**
    * MÉTRICA PRINCIPAL: fração de 'resolve' sobre TODAS as observações — corte
-   * por limite incluído como 'nao'. Viés de sobrevivência ≡ 0: nunca exclui.
+   * por limite e check que não terminou incluídos como falha. Nada que dependa
+   * do comportamento do agente tira uma rep do denominador; sem observação só
+   * ficam: cancelamento/orçamento (controle, a etapa inteira sai), etapa com
+   * defeito do ambiente (sai para TODOS) e rep SEM oráculo cujo juiz falhou ou
+   * não foi chamado (Inspect: `unscored`, reportada em `unscoredReps`).
    */
   resolveRateByContestant: Record<string, number>;
   /**
