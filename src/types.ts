@@ -738,6 +738,12 @@ export interface JudgeVerdict {
   motivo: string;
   /** @deprecated compat: records antigos guardavam so o binario. Derive de `verdict`. */
   acceptable?: boolean;
+  /**
+   * Canário do veredito (IMPL-006): código sorteado para a chamada que o juiz
+   * devolveu no JSON — prova de que o veredito seguiu o bloco INSTRUÇÕES.
+   * Ausente em records antigos.
+   */
+  canary?: string;
 }
 
 /** Resultado compacto de UM juiz numa etapa: ranking + vereditos. */
@@ -813,6 +819,11 @@ export interface ReferenceJudgeResult {
    * que a maioria endossa (nunca o voto de cima). So a chave dos empatados.
    */
   verdictTieByContestant?: Record<string, Verdict[]>;
+  /**
+   * Canário de CADA voto legítimo (IMPL-006) — 1 por juiz que votou, na ordem
+   * dos juízes. Só para vereditos presentes; ausente em records antigos.
+   */
+  canaryByContestant?: Record<string, string[]>;
   judgeModelId: string;
   inconclusive?: boolean;
   /**
@@ -861,6 +872,8 @@ export interface ReferenceJudgeResult {
 export interface DuelOrderResult {
   winner: 'a' | 'b' | 'tie';
   explanation: string;
+  /** Canário que o juiz devolveu nesta ordem (IMPL-006). Ausente no oráculo e em records antigos. */
+  canary?: string;
 }
 
 /** Resultado de UM duelo pairwise (2 ordens; desacordo entre ordens = empate). */

@@ -480,6 +480,8 @@ export interface JudgeVerdict {
   motivo: string;
   /** @deprecated compat: records antigos guardavam so o binario. Derive de `verdict`. */
   acceptable?: boolean;
+  /** Canário do veredito (IMPL-006) — espelho de src/types.ts. */
+  canary?: string;
 }
 
 /** Resultado compacto de UM juiz numa etapa: ranking + vereditos. */
@@ -555,6 +557,8 @@ export interface ReferenceJudgeResult {
    * que a maioria endossa (nunca o voto de cima). So a chave dos empatados.
    */
   verdictTieByContestant?: Record<string, Verdict[]>;
+  /** Canário de cada voto legítimo, 1 por juiz (IMPL-006). */
+  canaryByContestant?: Record<string, string[]>;
   judgeModelId: string;
   inconclusive?: boolean;
 }

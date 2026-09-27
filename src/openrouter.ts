@@ -252,6 +252,27 @@ function deterministicSampling(
 }
 
 /**
+ * `response_format` do pedido (IMPL-006). Saida estruturada por schema SO
+ * quando o catalogo declara `structured_outputs` para o modelo (capacidade vem
+ * do catalogo, nunca de tabela por modelo); sem isso — ou sem o modelo em
+ * cache — cai em `json_object`, que o OpenRouter aceita amplamente.
+ */
+export function responseFormatFor(
+  model: { supportedParameters?: string[] } | undefined,
+  params: { responseFormatJson?: boolean; responseSchema?: { name: string; schema: Record<string, unknown> } },
+): Record<string, unknown> | undefined {
+  const { responseSchema } = params;
+  if (responseSchema && model?.supportedParameters?.includes('structured_outputs')) {
+    return {
+      type: 'json_schema',
+      json_schema: { name: responseSchema.name, strict: true, schema: responseSchema.schema },
+    };
+  }
+  if (params.responseFormatJson || responseSchema) return { type: 'json_object' };
+  return undefined;
+}
+
+/**
  * Capacidades de ajuste declaradas pelo modelo (`supported_parameters`).
  * `reasoning` = aceita `reasoning` OU `reasoning_effort`; `effort` = aceita os
  * degraus discretos de `reasoning_effort` (formato nativo, ver applyReasoning).
@@ -937,6 +958,12 @@ export interface ChatCompletionParams {
   timeoutMs?: number;
   signal?: AbortSignal;
   responseFormatJson?: boolean;
+  /**
+   * Schema da saida (IMPL-006): vai como `response_format: json_schema` (strict)
+   * quando o catalogo declara `structured_outputs` para o modelo; senao cai em
+   * `json_object`. Quem pede valida a saida do mesmo jeito (zod estrito).
+   */
+  responseSchema?: { name: string; schema: Record<string, unknown> };
   // Nivel de raciocinio (reasoning effort). Ausente = nao envia `reasoning`
   // (comportamento anterior, identico). 'off' desliga explicitamente.
   reasoningLevel?: ReasoningLevel;
@@ -1241,7 +1268,7 @@ export class OpenRouterGateway {
 
   /** Corpo comum de chat/stream: amostragem determinista, esforco encaixado, teto de preco. */
   private buildBody(params: ChatCompletionParams, stream: boolean): Record<string, unknown> {
-    const { apiKey, modelId, messages, temperature = 0, maxTokens, responseFormatJson } = params;
+    const { apiKey, modelId, messages, temperature = 0, maxTokens } = params;
     const model = this.cachedModel(apiKey, modelId);
     const body: Record<string, unknown> = {
       model: modelId,
@@ -1250,7 +1277,8 @@ export class OpenRouterGateway {
     };
     if (stream) body.stream = true;
     if (typeof maxTokens === 'number' && maxTokens > 0) body.max_tokens = maxTokens;
-    if (responseFormatJson) body.response_format = { type: 'json_object' };
+    const responseFormat = responseFormatFor(model, params);
+    if (responseFormat) body.response_format = responseFormat;
     // O esforco pedido e ENCAIXADO no que este modelo declara aceitar (ver
     // fitEffort/applyReasoning): allowlist propria por modelo e raciocinio
     // obrigatorio em alguns (onde 'off' nao pode ser enviado).

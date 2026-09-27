@@ -1,8 +1,19 @@
+import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { matchExpected } from './engine/groundTruth.js';
 import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
 import { aggregateVerdicts, tieLabel } from './engine/verdictAggregate.js';
+import {
+  DATA_BLOCKS_NOTICE,
+  formatReminderFor,
+  instructionsBlock,
+  markedBlock,
+  newJudgeGuard,
+  parseStrictJudgeJson,
+  strictObjectSchema,
+  type JudgeGuard,
+} from './engine/judgeGuard.js';
 import type {
   CompetitorResponse,
   Contestant,
@@ -29,8 +40,11 @@ import type {
 // So a resposta `ok` VAZIA vira 'nao' automatico (fonte 'auto'): nao responder
 // e uma falha legitima do candidato, nao do pipeline.
 
-// Head portado do prompt-arena (fixa o contrato de veredito JSON).
-const SYSTEM_PROMPT = `Você é um juiz técnico estrito. Um modelo mais forte já produziu a RESPOSTA DE REFERÊNCIA (correta). Compare o CANDIDATO com ela. Ignore redação/estilo — julgue se o candidato alcança o MESMO resultado e intenção. Responda APENAS com um objeto JSON {"verdict": "resolve"|"parcial"|"nao", "explanation": "<uma frase curta em pt-BR>"} onde resolve = corresponde plenamente à referência, parcial = parcialmente/impreciso/faltando parte, nao = errado ou fez outra coisa.`;
+// Head portado do prompt-arena (fixa o contrato de veredito JSON). IMPL-006:
+// + aviso dos blocos marcados e o campo `canario`; o schema exato da saida vai
+// no bloco INSTRUCOES de cada chamada (e em `response_format`, quando o
+// catalogo permite).
+const SYSTEM_PROMPT = `Você é um juiz técnico estrito. Um modelo mais forte já produziu a RESPOSTA DE REFERÊNCIA (correta). Compare o CANDIDATO com ela. Ignore redação/estilo — julgue se o candidato alcança o MESMO resultado e intenção. ${DATA_BLOCKS_NOTICE} Responda APENAS com um objeto JSON {"canario": "<o CANÁRIO das INSTRUÇÕES>", "explanation": "<uma frase curta em pt-BR>", "verdict": "resolve"|"parcial"|"nao"} onde resolve = corresponde plenamente à referência, parcial = parcialmente/impreciso/faltando parte, nao = errado ou fez outra coisa.`;
 
 /**
  * O CONTRATO do juiz pointwise (F4.2): o texto fixo que define a escala de
@@ -40,60 +54,97 @@ const SYSTEM_PROMPT = `Você é um juiz técnico estrito. Um modelo mais forte j
  */
 export const JUDGE_CONTRACT_TEXT = SYSTEM_PROMPT;
 
-/** Lembrete anexado ao 2o pedido depois de uma saida fora do contrato. */
-const FORMAT_REMINDER =
-  'LEMBRETE DE FORMATO: a resposta anterior não seguiu o contrato. Responda APENAS com um objeto JSON ' +
-  '{"verdict": "resolve"|"parcial"|"nao", "explanation": "<uma frase curta em pt-BR>"} — sem markdown e sem texto antes ou depois.';
+// Formato: o lembrete do 2o pedido e POR VEREDITO (`formatReminderFor`, com o
+// canario e o schema — IMPL-006). Agregacao do painel: MAIORIA SIMPLES em
+// `engine/verdictAggregate.ts` (IMPL-007) — a media ordinal local arredondava
+// painel dividido PARA CIMA.
 
-// Agregacao do painel: MAIORIA SIMPLES em `engine/verdictAggregate.ts`
-// (IMPL-007) — a media ordinal local arredondava painel dividido PARA CIMA.
+/** Saida do juiz pointwise — JSON Schema `strict` (response_format + bloco INSTRUCOES). */
+export const REFERENCE_JUDGE_SCHEMA: Record<string, unknown> = strictObjectSchema({
+  canario: { type: 'string' },
+  explanation: { type: 'string' },
+  verdict: { type: 'string', enum: ['resolve', 'parcial', 'nao'] },
+});
 
-/** Recorta o objeto JSON da resposta do juiz (tolera texto em volta). */
-function extractJson(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed.startsWith('{')) return trimmed;
-  const first = trimmed.indexOf('{');
-  const last = trimmed.lastIndexOf('}');
-  if (first >= 0 && last > first) return trimmed.slice(first, last + 1);
-  return trimmed;
+/** O mesmo contrato em zod ESTRITO (campo a mais, valor fora do enum => invalido). */
+const referenceReplySchema = z
+  .object({
+    canario: z.string(),
+    explanation: z.string(),
+    verdict: z.enum(['resolve', 'parcial', 'nao']),
+  })
+  .strict();
+
+/**
+ * Parse ESTRITO do veredito (IMPL-006): o texto INTEIRO e um objeto JSON no
+ * schema, com o canario DESTE veredito. Qualquer outra coisa devolve `null`
+ * (saida invalida): quem chama pede UMA vez de novo com lembrete de formato e,
+ * persistindo, registra o veredito como AUSENTE (`invalid_output`). Sem
+ * recorte de `{...}` no meio do texto nem normalizacao ('Resolve', 'não'):
+ * o recorte deixava um JSON forjado pelo candidato virar veredito.
+ */
+export function parseJudgeReply(
+  text: string,
+  canary: string,
+): { verdict: Verdict; explanation: string; canary: string } | null {
+  const p = parseStrictJudgeJson(text, referenceReplySchema, canary);
+  if (!p) return null;
+  return {
+    verdict: p.verdict,
+    explanation: p.explanation.trim() || '(veredito do juiz de referência)',
+    canary: p.canario,
+  };
+}
+
+/** Prompt montado de UM veredito pointwise (marcador + canario mudam a cada chamada). */
+export interface ReferenceJudgePrompt {
+  system: string;
+  user: string;
+  guard: JudgeGuard;
+  formatReminder: string;
 }
 
 /**
- * Parse ESTRITO do veredito: objeto JSON com `verdict` em resolve|parcial|nao.
- * Qualquer outra coisa devolve `null` (saida invalida): quem chama pede UMA
- * vez de novo com lembrete de formato e, persistindo, registra o veredito como
- * AUSENTE (`invalid_output`). O antigo fallback por regex ("1a ocorrencia de
- * parcial/nao/resolve no texto cru; lixo => 'parcial'") foi removido: ele
- * transformava falha de formato em nota.
+ * Prompt do usuario (IMPL-006): referencia, pergunta, rubrica (prioritaria) e
+ * candidato, CADA UM num bloco marcado com o codigo sorteado para ESTE
+ * veredito, e o bloco INSTRUCOES anti-injecao por ultimo. O texto do candidato
+ * so aparece escapado e dentro de `⟦CANDIDATO·codigo⟧ … ⟦/CANDIDATO·codigo⟧`.
  */
-function parseJudgeReply(text: string): { verdict: Verdict; explanation: string } | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(extractJson(text));
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-  const p = parsed as { verdict?: unknown; explanation?: unknown };
-  const raw = typeof p.verdict === 'string' ? p.verdict.trim().toLowerCase() : '';
-  const verdict = raw === 'não' ? 'nao' : raw;
-  if (verdict !== 'resolve' && verdict !== 'parcial' && verdict !== 'nao') return null;
-  const explanation =
-    typeof p.explanation === 'string' && p.explanation.trim()
-      ? p.explanation.trim()
-      : '(veredito do juiz de referência)';
-  return { verdict, explanation };
-}
-
-/** Prompt do usuario: referencia no topo, pergunta, rubrica (prioritaria) e candidato. */
-function buildUserPrompt(stage: StageSpec, reference: string, candidateText: string): string {
+export function buildReferenceJudgePrompt(
+  stage: StageSpec,
+  reference: string,
+  candidateText: string,
+): ReferenceJudgePrompt {
   const rubric = stage.rubric?.trim();
-  let prompt = `REFERÊNCIA (resposta correta):\n${reference}\n\nPERGUNTA:\n${stage.question}`;
+  const guard = newJudgeGuard([reference, stage.question, rubric ?? '', candidateText]);
+  const partes = [
+    'REFERÊNCIA (resposta correta):',
+    markedBlock('REFERÊNCIA', guard.nonce, reference),
+    'PERGUNTA:',
+    markedBlock('PERGUNTA', guard.nonce, stage.question),
+  ];
   if (rubric) {
-    prompt += `\n\nCRITÉRIO DE CORRETUDE DESTA ETAPA (tem prioridade):\n${rubric}`;
+    partes.push('CRITÉRIO DE CORRETUDE DESTA ETAPA (tem prioridade):', markedBlock('CRITÉRIO', guard.nonce, rubric));
   }
-  prompt += `\n\nCANDIDATO:\n${candidateText}`;
-  return prompt;
+  partes.push(
+    'CANDIDATO (resposta a julgar):',
+    markedBlock('CANDIDATO', guard.nonce, candidateText),
+    instructionsBlock({
+      guard,
+      candidateLabels: ['CANDIDATO'],
+      rules: [
+        'Compare o CANDIDATO com a REFERÊNCIA; quando houver CRITÉRIO DE CORRETUDE, ele tem prioridade sobre a referência.',
+        '"verdict": resolve = corresponde plenamente; parcial = parcialmente/impreciso/faltando parte; nao = errado ou fez outra coisa. Escreva "explanation" (uma frase curta em pt-BR) ANTES de decidir o veredito.',
+      ],
+      outputSchema: REFERENCE_JUDGE_SCHEMA,
+    }),
+  );
+  return {
+    system: SYSTEM_PROMPT,
+    user: partes.join('\n\n'),
+    guard,
+    formatReminder: formatReminderFor(guard, REFERENCE_JUDGE_SCHEMA),
+  };
 }
 
 export interface JudgeStageReferenceParams {
@@ -112,7 +163,7 @@ export interface JudgeStageReferenceParams {
 }
 
 type SingleVerdict =
-  | { ok: true; judgeModelId: string; contestantId: string; verdict: Verdict; explanation: string }
+  | { ok: true; judgeModelId: string; contestantId: string; verdict: Verdict; explanation: string; canary: string }
   | { ok: false; judgeModelId: string; contestantId: string; error: VerdictError };
 
 /**
@@ -134,7 +185,9 @@ async function judgeOne(params: {
 }): Promise<SingleVerdict> {
   const { apiKey, judgeModelId, stage, reference, response, reasoningLevel, timeoutMs, ctx, maxPricePerMTok } =
     params;
-  const userPrompt = buildUserPrompt(stage, reference, response.text);
+  // Marcador + canario sorteados AQUI: um par novo por veredito (as
+  // re-tentativas do MESMO veredito reusam o par).
+  const prompt = buildReferenceJudgePrompt(stage, reference, response.text);
   const attempt = await callJudgeWithRetry({
     call: async (reminder) =>
       (
@@ -142,12 +195,13 @@ async function judgeOne(params: {
           apiKey,
           modelId: judgeModelId,
           messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: withReminder(userPrompt, reminder) },
+            { role: 'system', content: prompt.system },
+            { role: 'user', content: withReminder(prompt.user, reminder) },
           ],
           temperature: 0,
           maxTokens: 1024,
           responseFormatJson: true,
+          responseSchema: { name: 'veredito_pointwise', schema: REFERENCE_JUDGE_SCHEMA },
           reasoningLevel,
           timeoutMs,
           role: 'judge',
@@ -156,8 +210,8 @@ async function judgeOne(params: {
           maxPricePerMTok,
         })
       ).text,
-    parse: parseJudgeReply,
-    formatReminder: FORMAT_REMINDER,
+    parse: (text) => parseJudgeReply(text, prompt.guard.canary),
+    formatReminder: prompt.formatReminder,
     signal: ctx?.signal,
   });
   if (!attempt.ok) {
@@ -190,12 +244,15 @@ export async function judgeStageReference(
   const verdictSourceByContestant: Record<string, VerdictSource> = {};
   const verdictErrorByContestant: Record<string, VerdictError> = {};
   const verdictTieByContestant: Record<string, Verdict[]> = {};
+  // IMPL-006: o canario de CADA voto legitimo (1 por juiz), registrado.
+  const canaryByContestant: Record<string, string[]> = {};
   const result = (inconclusive?: boolean): ReferenceJudgeResult => ({
     verdictByContestant,
     explanationByContestant,
     verdictSourceByContestant,
     verdictErrorByContestant,
     ...(Object.keys(verdictTieByContestant).length > 0 ? { verdictTieByContestant } : {}),
+    ...(Object.keys(canaryByContestant).length > 0 ? { canaryByContestant } : {}),
     judgeModelId,
     ...(inconclusive ? { inconclusive: true } : {}),
   });
@@ -300,6 +357,7 @@ export async function judgeStageReference(
       ? `${tieLabel(agg.votes)}: ${autor.explanation}`
       : autor.explanation;
     if (agg.tie) verdictTieByContestant[r.contestantId] = agg.votes;
+    canaryByContestant[r.contestantId] = oks.map((v) => v.canary);
     // Painel reduzido: o veredito existe, mas vale menos — conta na regra de
     // run inconclusiva como 'degradado' (R-03b:REC-4).
     verdictSourceByContestant[r.contestantId] = oks.length < vs.length ? 'degraded' : 'judge';
