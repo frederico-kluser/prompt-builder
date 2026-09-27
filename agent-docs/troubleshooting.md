@@ -68,11 +68,25 @@ avisa no stderr. `models list` funciona offline; runs, não.
 ## Modo container — `docker: comando não encontrado` / daemon indisponível
 
 Quando `isolation.kind` é `"container"`, o run precisa do Docker **CLI** no PATH e de um
-**daemon acessível sem sudo** (o container chama o OpenRouter pela rede padrão). Se o CLI
+**daemon acessível sem sudo**. Se o CLI
 falta ou o daemon está inacessível, a preparação/execução falha. Instale/ative o Docker e
 garanta acesso sem sudo. Confirme com `agents doctor --container`: o pré-voo ecoa o estado
 do Docker (`· docker ok (prompt-builder-pi:<ver>)` ou `docker CLI AUSENTE` / `imagem ausente`)
 e **falha com exit `3`** quando o CLI/imagem faltam.
+
+## Modo container — execução em `error` com `Connection error.`
+
+O container roda com `--network none` (perfil endurecido): sem o proxy de inferência
+local, o `pi` não alcança o OpenRouter, esgota as retentativas e sai 0 — o prompt-builder
+marca a execução como **erro de infraestrutura** (`stopReason: "error"`, fora do placar) e
+põe no `stderr.log` a mensagem do provedor e a dica. Se você aceita o risco (a key fica ao
+alcance do agente), rode com `PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK=bridge` no ambiente
+do operador; o `argv.json` registra o desvio em `hardening.unsafe`.
+
+## Modo container — `não roda o agente como root`
+
+O container herda o uid do host e **nunca** roda como root. Execute o prompt-builder com
+um usuário comum (ou Docker rootless).
 
 ## Modo container — imagem docker `prompt-builder-pi:<ver>` ausente
 

@@ -19,8 +19,9 @@ da máquina não pode vazar para o experimento — e o `agents doctor` é quem *
 O isolamento de execução tem **três `isolation.kind`**: **`worktree`** (default —
 `git worktree` da raiz-de-mundo), **`clone`** (clone descartável por execução) e
 **`container`**. Em `container`, **cada execução do `pi` roda num container Docker
-efêmero** (`prompt-builder-pi:<ver>`, monta `/ws` + `/exec`, roda como o usuário do
-host), com a key do OpenRouter chegando por um **`--env-file` 0600 do host** (nunca
+efêmero e endurecido** (imagem `prompt-builder-pi:<ver>` pinada por digest sha256,
+`--cap-drop ALL`, `no-new-privileges`, rootfs read-only, `--network none`, roda como o
+usuário do host — nunca root), com a key do OpenRouter chegando por um **`--env-file` 0600 do host** (nunca
 em arquivo/volume) e a imagem criada/cacheada na **primeira preparação** de run em
 container. Exige Docker **CLI/daemon** acessível (sem sudo); valide com
 `agents doctor --container`.

@@ -45,15 +45,20 @@ import { createJsonlSplitter } from './jsonl.js';
 import { spawnAgent, type SpawnAgentResult } from './spawn.js';
 import type { AgentLimits, AgentStopReason, AgentTrajectory, AgentTurn } from './types.js';
 import {
+  assertDockerRuntime,
   buildDockerArgv,
+  buildSandboxRunArgv,
   CONTAINER_NAME_PREFIX,
   CONTAINER_PI_HOME_DIR,
   CONTAINER_SESSION_DIR,
+  containerAuditRecord,
   dockerCliEnv,
-  dockerRunAuditArgv,
-  ENV_FILE_MASK,
   ensurePiImage,
+  hardeningFlags,
+  hardeningProfile,
+  isDigestRef,
   killContainer,
+  sandboxNetworkHint,
   writeEnvFile,
 } from './container.js';
 
@@ -132,6 +137,37 @@ interface ParsedRun {
   settled: boolean;
   /** Turnos individualizados p/ a trajetória mínima (normalização completa é do `trajectory.ts`). */
   turnList: AgentTurn[];
+  /**
+   * Erro do PROVEDOR que encerrou o loop do agente: a última mensagem do
+   * assistente terminou com `stopReason: 'error'` (ex.: "Connection error." com
+   * as retentativas do pi esgotadas). `undefined` = a última resposta foi normal.
+   */
+  providerError?: string;
+}
+
+/**
+ * Se `rec` é o fim de uma mensagem do ASSISTENTE que terminou em erro do
+ * provedor, devolve a mensagem de erro; senão `undefined`. Pura.
+ *
+ * Por que importa: o pi SAI COM exit 0 e emite `agent_settled` mesmo quando
+ * nenhuma chamada ao modelo funcionou (medido: rede `none` → 4 tentativas com
+ * "Connection error.", `auto_retry_end{success:false}`, exit 0). Sem este sinal a
+ * execução viraria 'completed', o oráculo rodaria no workspace intocado e o
+ * placar ganharia um `nao` que é erro de INFRA, não do agente.
+ */
+export function piProviderError(rec: unknown): string | undefined {
+  const r = (rec ?? {}) as Record<string, unknown>;
+  if (r.type !== 'message_end') return undefined;
+  const msg = (r.message ?? {}) as Record<string, unknown>;
+  if (msg.role !== 'assistant' || msg.stopReason !== 'error') return undefined;
+  return toStr(msg.errorMessage) || 'erro do provedor sem mensagem';
+}
+
+/** A última mensagem do assistente foi normal? (limpa um erro transitório já superado). */
+function isAssistantMessageEnd(rec: unknown): boolean {
+  const r = (rec ?? {}) as Record<string, unknown>;
+  const msg = (r.message ?? {}) as Record<string, unknown>;
+  return r.type === 'message_end' && msg.role === 'assistant';
 }
 
 /** Resultado de `runSimple` (spawn único, drena os dois pipes). */
@@ -155,9 +191,9 @@ class RingBuffer {
   }
   /** Pequeno preâmbulo informativo + as últimas `lines` linhas. */
   tail(lines: number, header: string): string {
-    const trimmed = this.buf;
-    const all = header + '\n' + trimmed;
-    const split = all.split('\n').filter((l) => l.length > 0);
+    // Só o buffer entra no corte — antes o header ia junto e saía DUPLICADO
+    // quando o stderr era curto ("stderr (0 bytes)\nstderr (0 bytes)").
+    const split = this.buf.split('\n').filter((l) => l.length > 0);
     return (header ? `${header}\n` : '') + split.slice(-lines).join('\n');
   }
 }
@@ -330,6 +366,9 @@ function createPiParser(parsed: ParsedRun, baseOpts: PiRunOptions): (rec: unknow
   return (rec: unknown): void => {
     const r = (rec ?? {}) as Record<string, unknown>;
     const type = toStr(r.type);
+    // Erro do provedor: vale o da ÚLTIMA mensagem do assistente (uma falha
+    // transitória seguida de resposta normal não conta).
+    if (isAssistantMessageEnd(rec)) parsed.providerError = piProviderError(rec);
 
     switch (type) {
       // Next Turn — novas iterações do mesmo "turno" original (turn_start).
@@ -474,18 +513,28 @@ export const piExecutor: AgentExecutor = {
     if (process.env.PI_MODEL_ID) env.PI_MODEL_ID = process.env.PI_MODEL_ID;
 
     // --- modo CONTAINER (isolation.kind === 'container') ----------------------
-    // Cada execução roda num container Docker EFÊMERO. Aqui garantimos a imagem
-    // (`prompt-builder-pi:<version>`, CACHEADA por tag — não recria se existir),
-    // trocamos o binário para `docker` e estampamos a tag no env (`run`/`selfTest`
-    // a consomem). NÃO roda `npm install` isolado em modo container. Os modos
-    // 'worktree'/'clone' (install isolated/system) seguem INTOCADOS abaixo.
+    // Cada execução roda num container Docker EFÊMERO e ENDURECIDO. Aqui
+    // garantimos a imagem (`prompt-builder-pi:<version>`, CACHEADA por tag — não
+    // recria se existir) e a PINAMOS por digest: `PI_CONTAINER_IMAGE` leva o
+    // sha256 (é ele que vai ao `docker run` de TODAS as execuções da run — um
+    // rebuild da tag no meio não troca o conteúdo) e `PI_CONTAINER_IMAGE_REF` a
+    // tag pedida, só para a auditoria. Trocamos o binário para `docker`. NÃO roda
+    // `npm install` isolado em modo container. Os modos 'worktree'/'clone'
+    // (install isolated/system) seguem INTOCADOS abaixo.
     const isContainer = opts.isolation?.kind === 'container';
     if (isContainer) {
-      const tag = await ensurePiImage(opts.executorVersion, {
+      // Runtime alternativo (gVisor = `runsc`, opção de alto risco) validado
+      // ANTES de gastar: um nome ausente no daemon falharia só no 1º `docker run`.
+      if (opts.isolation?.runtime) await assertDockerRuntime(opts.isolation.runtime);
+      // O perfil é montado de novo por execução; aqui só falha CEDO (antes de
+      // buildar imagem) se ele for recusado — host root, válvula de rede inválida.
+      hardeningProfile({ runtime: opts.isolation?.runtime });
+      const pinned = await ensurePiImage(opts.executorVersion, {
         image: opts.isolation?.image,
         runDir: opts.runDir,
       });
-      env.PI_CONTAINER_IMAGE = tag;
+      env.PI_CONTAINER_IMAGE = pinned.digest;
+      env.PI_CONTAINER_IMAGE_REF = pinned.ref;
       return { bin: 'docker', env };
     }
 
@@ -532,21 +581,6 @@ export const piExecutor: AgentExecutor = {
     const sessionDir = baseOpts.sessionDir ?? path.join(opts.workDir, 'session');
     mkdirSync(sessionDir, { recursive: true });
 
-    // Streams CRUS de auditoria (§14): o stdout JSONL íntegro e o stderr INTEIRO
-    // do processo, gravados sob `<workDir>/` (que é o execDir — ver
-    // `execDir`/`runAgentStage`). São fontes de auditoria; degradam em silêncio
-    // se `workDir` não existir / a criação falhar (os logs seguem funcionando).
-    let rawOut: WriteStream | undefined;
-    let rawErr: WriteStream | undefined;
-    try {
-      if (existsSync(opts.workDir)) {
-        rawOut = createWriteStream(path.join(opts.workDir, 'events.raw.jsonl'), { flags: 'a' });
-        rawErr = createWriteStream(path.join(opts.workDir, 'stderr.raw.log'), { flags: 'a' });
-      }
-    } catch {
-      // degrade silencioso — auditoria é melhor-esforço
-    }
-
     // --- env da execução: base preparada + sessão ----------------------------
     const env: Record<string, string> = { ...opts.env, PI_CODING_AGENT_SESSION_DIR: sessionDir };
 
@@ -568,7 +602,9 @@ export const piExecutor: AgentExecutor = {
     const taskInput = readTaskInput(opts, env);
 
     const isContainer = opts.config.isolation?.kind === 'container';
-    const containerTag = env.PI_CONTAINER_IMAGE; // em modo container, `prepare()` estampa a tag
+    // Em modo container, `prepare()` estampa o DIGEST (sha256) e a tag pedida.
+    const containerImage = env.PI_CONTAINER_IMAGE;
+    const containerImageRef = env.PI_CONTAINER_IMAGE_REF ?? containerImage;
 
     // --- argv do pi (args posicionais após o binário `pi`) --------------------
     // Compartilhado host/container; diverge só em `--session-dir` e no caminho
@@ -607,7 +643,8 @@ export const piExecutor: AgentExecutor = {
     let onKill: ((reason: AgentStopReason) => void) | undefined;
     let containerName: string | undefined;
     let envFile: string | undefined;
-    let auditArgv: string[];
+    /** Dica para erro do provedor quando o sandbox está sem rede (container). */
+    let networkHint: string | undefined;
 
     if (isContainer) {
       // A key do OpenRouter NUNCA vai a argv/artefato/volume — entra SÓ pelo
@@ -619,12 +656,26 @@ export const piExecutor: AgentExecutor = {
             `(o canário/fake sem custo não roda em container).`,
         );
       }
-      // Garante os pontos de mount existirem ANTES do `docker run` — um bind de
-      // dir AUSENTE cria o diretório como root:root no host, e aí o usuário do
-      // host não conseguiria ler/apagar (owneria). `pi-home`/`session` sob
-      // workDir são criados como o usuário do host.
+      // Imagem por DIGEST, nunca por tag (IMPL-036): sem o sha256 do prepare()
+      // não há execução — falhar aqui é melhor do que rodar "a tag de agora".
+      if (!containerImage || !isDigestRef(containerImage)) {
+        throw new Error(
+          `piExecutor.run: modo container exige a imagem pinada por digest em PI_CONTAINER_IMAGE ` +
+            `(recebido "${containerImage ?? ''}") — o prepare() a resolve via ensurePiImage.`,
+        );
+      }
+      // Perfil fixo de endurecimento ANTES do env-file: se ele recusar (host
+      // root, válvula de rede inválida), a key nem chega a tocar o disco.
+      const profile = hardeningProfile({ runtime: opts.config.isolation?.runtime });
+      if (profile.unsafe.length > 0) {
+        // stderr (stdout do CLI é payload). Aviso POR EXECUÇÃO — é para incomodar.
+        console.error(`[agent] ⚠️ sandbox FORA do perfil endurecido: ${profile.unsafe.join('; ')}`);
+      }
+      // Garante os pontos de mount existirem ANTES do `docker run` (o `--mount`
+      // recusa origem ausente; o antigo `-v` a criava como root:root no host).
+      // `pi-home`/`session` sob workDir são criados como o usuário do host.
       mkdirSync(path.join(opts.workDir, 'pi-home'), { recursive: true });
-      mkdirSync(path.join(opts.workDir, 'session'), { recursive: true });
+      mkdirSync(sessionDir, { recursive: true });
 
       containerName = `${CONTAINER_NAME_PREFIX}${opts.execId}`;
       envFile = writeEnvFile({
@@ -645,38 +696,40 @@ export const piExecutor: AgentExecutor = {
         GIT_COMMITTER_NAME: 'agent',
         GIT_COMMITTER_EMAIL: 'agent@local',
       });
-      agentArgv = buildDockerArgv({
-        image: containerTag,
-        containerName,
-        envFile,
-        workspaceDir: opts.workspaceDir,
-        workDir: opts.workDir,
-        uid: typeof process.getuid === 'function' ? process.getuid() ?? 0 : 0,
-        gid: typeof process.getgid === 'function' ? process.getgid() ?? 0 : 0,
-        piArgv,
-      });
-      // Env do CLI docker = APENAS o mínimo do host — NUNCA a OPENROUTER_API_KEY
-      // nem as PI_* (o env do agente entra SÓ pelo env-file).
-      agentEnv = dockerCliEnv();
-      agentBin = 'docker';
-      agentCwd = opts.workspaceDir;
-      // Auditoria crua: forma DOCUMENTADA do comando (`docker run ...`) com o
-      // caminho do env-file MASCARADO.
-      auditArgv = dockerRunAuditArgv({
-        image: containerTag,
-        containerName,
-        envFile,
-        workspaceDir: opts.workspaceDir,
-        workDir: opts.workDir,
-        uid: typeof process.getuid === 'function' ? process.getuid() ?? 0 : 0,
-        gid: typeof process.getgid === 'function' ? process.getgid() ?? 0 : 0,
-        piArgv,
-      }).map((a) => (a === envFile ? ENV_FILE_MASK : a));
-      writeFileSync(
-        path.join(opts.workDir, 'argv.json'),
-        JSON.stringify({ mode: 'container', image: containerTag, argv: auditArgv }, null, 2),
-        'utf8',
-      );
+      // Daqui até o spawn, qualquer falha precisa apagar o env-file (ele carrega
+      // a key): o `finally` do spawn ainda não está armado.
+      try {
+        agentArgv = buildDockerArgv({
+          image: containerImage,
+          containerName,
+          envFile,
+          workspaceDir: opts.workspaceDir,
+          workDir: opts.workDir,
+          sessionDir,
+          profile,
+          piArgv,
+        });
+        // Env do CLI docker = APENAS o mínimo do host — NUNCA a OPENROUTER_API_KEY
+        // nem as PI_* (o env do agente entra SÓ pelo env-file).
+        agentEnv = dockerCliEnv();
+        agentBin = 'docker';
+        agentCwd = opts.workspaceDir;
+        // Auditoria crua: o comando EXATO (`docker run ...`) com o env-file
+        // MASCARADO, o digest sha256 que rodou e o perfil endurecido efetivo — é
+        // contra ele que se confere o `docker inspect` da execução.
+        const audit = containerAuditRecord({
+          imageDigest: containerImage,
+          imageRef: containerImageRef,
+          profile,
+          argv: ['docker', ...agentArgv],
+          envFile,
+        });
+        networkHint = sandboxNetworkHint(profile);
+        writeFileSync(path.join(opts.workDir, 'argv.json'), JSON.stringify(audit, null, 2), 'utf8');
+      } catch (err) {
+        rmSync(envFile, { force: true });
+        throw err;
+      }
       onKill = (): void => {
         // Fire-and-forget (spawn.ts nunca awaita onKill): matar o container por
         // nome não bloqueia o kill do CLI docker.
@@ -687,7 +740,26 @@ export const piExecutor: AgentExecutor = {
       agentArgv = piArgv;
       agentEnv = env;
       agentCwd = opts.workspaceDir;
-      auditArgv = piArgv;
+    }
+
+    // Streams CRUS de auditoria (§14): o stdout JSONL íntegro e o stderr INTEIRO
+    // do processo, gravados sob `<workDir>/` (que é o execDir — ver
+    // `execDir`/`runAgentStage`). São fontes de auditoria; degradam em silêncio
+    // se `workDir` não existir / a criação falhar (os logs seguem funcionando).
+    // Abertos SÓ depois das validações acima: um `throw` de pré-voo (imagem por
+    // tag, key ausente) não pode deixar stream aberto — o `open` assíncrono
+    // falhando depois viraria 'error' sem ouvinte e derrubaria o processo.
+    let rawOut: WriteStream | undefined;
+    let rawErr: WriteStream | undefined;
+    try {
+      if (existsSync(opts.workDir)) {
+        rawOut = createWriteStream(path.join(opts.workDir, 'events.raw.jsonl'), { flags: 'a' });
+        rawErr = createWriteStream(path.join(opts.workDir, 'stderr.raw.log'), { flags: 'a' });
+        rawOut.on('error', () => undefined);
+        rawErr.on('error', () => undefined);
+      }
+    } catch {
+      // degrade silencioso — auditoria é melhor-esforço
     }
 
     // --- estado do parser ----------------------------------------------------
@@ -784,9 +856,22 @@ export const piExecutor: AgentExecutor = {
     if (stopReason === 'completed' && spawnResult.exitCode !== 0) {
       stopReason = 'error';
     }
+    // O pi sai com exit 0 mesmo quando a ÚLTIMA chamada ao modelo falhou (rede,
+    // 5xx, key inválida — retentativas esgotadas). Isso é erro de INFRA: sem
+    // este rebaixamento a execução seria 'completed' e o oráculo daria um `nao`
+    // ao agente por um workspace que ele nunca pôde tocar.
+    if (stopReason === 'completed' && parsed.providerError) {
+      stopReason = 'error';
+    }
 
     const durationMs = Date.now() - startedAt;
-    const stderrTail = stderrRing.tail(STDERR_TAIL_LINES, `stderr (${spawnResult.stderrBytes} bytes)`);
+    let stderrTail = stderrRing.tail(STDERR_TAIL_LINES, `stderr (${spawnResult.stderrBytes} bytes)`);
+    if (parsed.providerError) {
+      stderrTail =
+        `erro do provedor na última chamada do agente: ${parsed.providerError}` +
+        (networkHint ? `\n${networkHint}` : '') +
+        `\n${stderrTail}`;
+    }
 
     // `sessionFile`: nome do arquivo do transcript deixado em sessionDir, se houver.
     const sessionFile = findSessionFile(sessionDir);
@@ -799,26 +884,37 @@ export const piExecutor: AgentExecutor = {
    * canário COMPLETO (tokens CANARY-* via execução real barata) vive no
    * `doctor` (onda 3.3) — este método é o gate barato do pré-voo.
    *
-   * Em MODO CONTAINER (`bin === 'docker'`), a verificação é a REAL: `docker run
-   * --rm <env.PI_CONTAINER_IMAGE> pi --version` — prova que a imagem existe e
-   * responde a versão. Aditiva e segura (não altera o caminho host).
+   * Em MODO CONTAINER (`bin === 'docker'`), a verificação é a REAL: `pi
+   * --version` num container efêmero com o PERFIL ENDURECIDO e a imagem pelo
+   * DIGEST de `env.PI_CONTAINER_IMAGE` — prova que a imagem existe e que o pi
+   * sobe sem capabilities, com rootfs read-only e sem rede. `flagsUsed` devolve
+   * as flags de endurecimento efetivamente aplicadas.
    */
   async selfTest(opts: SelfTestOpts): Promise<CleanRoomReport> {
     try {
       if (opts.bin === 'docker' && opts.env.PI_CONTAINER_IMAGE) {
-        // Verificação REAL da imagem via container efêmero (`--rm` cobre o exit).
-        const r = await runSimple(
-          ['docker', 'run', '--rm', opts.env.PI_CONTAINER_IMAGE, 'pi', '--version'],
-          { env: dockerCliEnv() },
-        );
-        if (r.code !== 0) {
+        const image = opts.env.PI_CONTAINER_IMAGE;
+        if (!isDigestRef(image)) {
           return {
             ok: false,
-            leaks: [`docker run <imagem> pi --version falhou: ${r.code ?? r.signal} ${r.stderr.slice(-500)}`],
+            leaks: [`imagem do sandbox não está pinada por digest sha256: "${image}"`],
             flagsUsed: [],
           };
         }
-        return { ok: true, leaks: [], piVersion: r.stdout.split('\n')[0].trim(), flagsUsed: [] };
+        const profile = hardeningProfile();
+        const r = await runSimple(
+          ['docker', ...buildSandboxRunArgv({ image, profile, command: ['pi', '--version'] })],
+          { env: dockerCliEnv() },
+        );
+        const flagsUsed = hardeningFlags(profile);
+        if (r.code !== 0) {
+          return {
+            ok: false,
+            leaks: [`docker run <imagem endurecida> pi --version falhou: ${r.code ?? r.signal} ${r.stderr.slice(-500)}`],
+            flagsUsed,
+          };
+        }
+        return { ok: true, leaks: [], piVersion: r.stdout.split('\n')[0].trim(), flagsUsed };
       }
       const r = await runSimple([opts.bin, '--version'], { env: opts.env });
       if (r.code !== 0) {

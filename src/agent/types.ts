@@ -190,8 +190,18 @@ export interface AgentRunnerConfig {
     kind?: 'worktree' | 'clone' | 'container';
     /** Guarda o workspace ao fim (debug). Default false — ocupa disco rápido. */
     keepWorkspace?: boolean;
-    /** Imagem, quando kind==='container'. */
+    /**
+     * Imagem, quando kind==='container': tag (resolvida para o digest sha256 na
+     * preparação) ou referência por digest (`repo@sha256:…`/`sha256:…`). O
+     * `docker run` usa SEMPRE o digest — nunca a tag (IMPL-036).
+     */
     image?: string;
+    /**
+     * Runtime OCI alternativo do Docker (ex.: `runsc` = gVisor), opt-in de ALTO
+     * RISCO operacional, fora do default (R-15 DEC-1: ~2× em syscalls, ~11× em
+     * I/O de arquivos pequenos). Ausente = runc do daemon + perfil endurecido.
+     */
+    runtime?: string;
   };
 
   /** Nível de esforço do agente. MESMA escada do repo (7 degraus). */

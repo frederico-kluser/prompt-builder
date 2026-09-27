@@ -115,8 +115,15 @@ const agentSchema = z.object({
       kind: z.enum(['worktree', 'clone', 'container']).optional(),
       // Guarda o workspace ao fim (debug). Default false.
       keepWorkspace: z.boolean().optional(),
-      // Imagem, quando kind==='container'.
+      // Imagem, quando kind==='container': tag (pinada no digest sha256 na
+      // preparacao) ou referencia por digest. O docker run usa SEMPRE o digest.
       image: z.string().optional(),
+      // Runtime OCI opt-in (ex.: 'runsc' = gVisor) — alto risco, fora do default.
+      // Mesmo formato de nome que o daemon registra (RUNTIME_NAME_RE, container.ts).
+      runtime: z
+        .string()
+        .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'runtime: nome de runtime Docker invalido')
+        .optional(),
     })
     .optional(),
   // Nivel de esforco do agente. MESMA escada do repo (7 degraus).

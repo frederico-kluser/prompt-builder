@@ -287,7 +287,8 @@ async function cmdDoctor(argv: string[]): Promise<number> {
     const d = preflight.docker;
     if (d) {
       if (d.imagePresent) {
-        out.line(`· docker ok (${d.image})`);
+        // O digest é o que a run usa (a tag só serve para achá-lo) — IMPL-036.
+        out.line(`· docker ok (${d.image}${d.digest ? ` → ${d.digest}` : ''})`);
       } else {
         out.warn(`· docker ${d.present ? '' : 'CLI AUSENTE — '}imagem '${d.image ?? '?'}' ausente`);
       }

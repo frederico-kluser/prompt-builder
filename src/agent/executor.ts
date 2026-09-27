@@ -32,8 +32,10 @@ export interface PrepareOpts {
    */
   isolation?: {
     kind?: 'worktree' | 'clone' | 'container';
-    /** Imagem Docker explícita — sobrescreve `prompt-builder-pi:<version>`. */
+    /** Imagem Docker explícita — sobrescreve `prompt-builder-pi:<version>` (tag ou digest). */
     image?: string;
+    /** Runtime OCI opt-in (ex.: `runsc`/gVisor) — validado no daemon ANTES da run. */
+    runtime?: string;
   };
 }
 

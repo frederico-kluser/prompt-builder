@@ -22,15 +22,22 @@ import path from 'node:path';
 import type { CleanRoomReport } from './executor.js';
 import type { AgentStopReason } from './types.js';
 import {
+  buildSandboxRunArgv,
   defaultPiImageTag,
-  CONTAINER_MEM_LIMIT,
   CONTAINER_NAME_PREFIX,
-  CONTAINER_PIDS_LIMIT,
   dockerCliEnv,
+  HARDENING_PROFILE_VERSION,
+  hardeningProfile,
+  isDigestRef,
+  resolveContainerNetwork,
+  resolveImageDigest,
+  sandboxNetworkHint,
   writeEnvFile,
   killContainer,
+  type HardeningProfile,
 } from './container.js';
 import { createJsonlSplitter } from './jsonl.js';
+import { piProviderError } from './pi.js';
 import { spawnAgent } from './spawn.js';
 import { getDataDir } from '../storage.js';
 
@@ -50,8 +57,11 @@ export interface PreflightResult {
   git: boolean;
   diskFreeGb: number;
   canary?: CleanRoomReport;
-  /** Estado do Docker — presente SÓ quando `isolation.kind === 'container'`. */
-  docker?: { present: boolean; image?: string; imagePresent: boolean };
+  /**
+   * Estado do Docker — presente SÓ quando `isolation.kind === 'container'`.
+   * `digest` = sha256 que a run usaria (a tag só serve para achá-lo).
+   */
+  docker?: { present: boolean; image?: string; imagePresent: boolean; digest?: string };
   errors: string[];
 }
 
@@ -73,7 +83,7 @@ export interface PreflightOpts {
    * Modo de isolamento a verificar (mesmo `isolation.kind` de `RunConfig`). Quando
    * `kind === 'container'`, o pré-voo também checa o Docker CLI e a imagem do pi.
    */
-  isolation?: { kind?: 'worktree' | 'clone' | 'container'; image?: string };
+  isolation?: { kind?: 'worktree' | 'clone' | 'container'; image?: string; runtime?: string };
 }
 
 /**
@@ -118,8 +128,10 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
     const dockerPresent = await detectDockerCli();
     const tag =
       opts.isolation.image ?? defaultPiImageTag(opts.expectedVersion ?? '');
-    const imagePresent = dockerPresent ? await dockerImagePresent(tag) : false;
-    dockerInfo = { present: dockerPresent, image: tag, imagePresent };
+    // Resolve a tag para o DIGEST — é ele (nunca a tag) que o `docker run` usa.
+    const pinned = dockerPresent ? await resolveImageDigest(tag) : null;
+    const imagePresent = pinned !== null;
+    dockerInfo = { present: dockerPresent, image: tag, imagePresent, ...(pinned ? { digest: pinned.digest } : {}) };
     if (!dockerPresent) {
       dockerFail = true;
       errors.push(
@@ -181,8 +193,13 @@ export interface CleanRoomCoreOpts {
    * parser/coleta de leaks é IDÊNTICO ao modo host.
    */
   container?: boolean;
-  /** Tag da imagem do pi a usar no modo container. Default `prompt-builder-pi:<versão>`. */
+  /**
+   * Imagem do pi no modo container: tag (resolvida para o digest sha256 antes do
+   * `docker run`) ou referência por digest. Obrigatória com `container: true`.
+   */
   image?: string;
+  /** Runtime OCI opt-in (ex.: `runsc`) — o canário mede o MESMO sandbox da run. */
+  runtime?: string;
 }
 
 /**
@@ -205,7 +222,7 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
       'runCleanRoomCanary: modo container exige `image` (tag da imagem do pi) explicitamente.',
     );
   }
-  const containerImage = opts.image ?? defaultPiImageTag('');
+  const containerImageRef = opts.image ?? defaultPiImageTag('');
 
   // Tokens por camada (Apêndice E). Cada camada da "sala" que o pi supostamente
   // isola recebe um marcador único: se qualquer um aparecer na resposta, há um
@@ -312,6 +329,9 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
         modelChanged = JSON.stringify(rec);
       }
     }
+    // Erro do provedor: vale o da ÚLTIMA mensagem do assistente.
+    const msg = rec.message as Record<string, unknown> | undefined;
+    if (rec.type === 'message_end' && msg?.role === 'assistant') providerError = piProviderError(rec);
     // Vazamento de token: procura em TODO valor de string do record (uma
     // resposta de agente pode aninhar texto em `content`/`text`/etc).
     collectCanaryLeaks(rec, canaries, leaks);
@@ -331,8 +351,33 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
   let onKill: ((reason: AgentStopReason) => void) | undefined;
   let envFilePath: string | undefined;
   let containerName: string | undefined;
+  /** Container sem rede: dica acionável se o modelo não responder. */
+  let networkHint: string | undefined;
+  /** Erro do provedor na ÚLTIMA resposta do modelo (o pi sai 0 mesmo assim). */
+  let providerError: string | undefined;
 
   if (isContainer) {
+    // O canário mede o MESMO sandbox da run: perfil endurecido + imagem pelo
+    // DIGEST. Sem digest resolvível ou com perfil recusado (host root, válvula
+    // de rede inválida) não há o que medir — relatório honesto, sem spawn.
+    let profile: HardeningProfile;
+    let imageDigest: string | undefined;
+    try {
+      profile = hardeningProfile({ runtime: opts.runtime });
+      imageDigest = isDigestRef(containerImageRef)
+        ? containerImageRef
+        : (await resolveImageDigest(containerImageRef))?.digest;
+    } catch (err) {
+      return { ok: false, leaks: [`sandbox do canário recusado: ${(err as Error).message}`], flagsUsed };
+    }
+    if (!imageDigest) {
+      return {
+        ok: false,
+        leaks: [`imagem ${containerImageRef} não encontrada no daemon — não há digest sha256 para rodar o canário.`],
+        flagsUsed,
+      };
+    }
+    networkHint = sandboxNetworkHint(profile);
     containerName = `${CONTAINER_NAME_PREFIX}doctor-${uuid}`;
     envFilePath = writeEnvFile({
       OPENROUTER_API_KEY: apiKey,
@@ -346,23 +391,20 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
       PI_TELEMETRY: '0',
       GIT_TERMINAL_PROMPT: '0',
     });
-    const uid = typeof process.getuid === 'function' ? process.getuid() ?? 0 : 0;
-    const gid = typeof process.getgid === 'function' ? process.getgid() ?? 0 : 0;
-    agentArgv = [
-      'run', '-i', '--rm',
-      '--name', containerName,
-      '--env-file', envFilePath,
-      '-v', `${projDir}:${containerProjDir}`,
-      '-v', `${homeDir}:${containerHomeDir}`,
-      '-v', `${sessDir}:${containerSessDir}`,
-      '-w', containerProjDir,
-      '-m', CONTAINER_MEM_LIMIT,
-      '--pids-limit', String(CONTAINER_PIDS_LIMIT),
-      '--user', `${uid}:${gid}`,
-      containerImage,
-      'pi',
-      ...argv,
-    ];
+    agentArgv = buildSandboxRunArgv({
+      image: imageDigest,
+      containerName,
+      profile,
+      interactive: true,
+      envFile: envFilePath,
+      mounts: [
+        { host: projDir, container: containerProjDir },
+        { host: homeDir, container: containerHomeDir },
+        { host: sessDir, container: containerSessDir },
+      ],
+      workdir: containerProjDir,
+      command: ['pi', ...argv],
+    });
     agentBin = 'docker';
     agentEnv = dockerCliEnv();
     agentCwd = projDir;
@@ -413,6 +455,14 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
     }
   }
 
+  if (providerError) {
+    // O pi sai com exit 0 mesmo sem resposta do modelo — sem resposta, a ausência
+    // de canários não prova isolamento nenhum.
+    leaks.push(
+      `o modelo não respondeu ao canário (erro do provedor: ${providerError}) — não foi possível afirmar isolamento.` +
+        (networkHint ? ` ${networkHint}` : ''),
+    );
+  }
   if (thinkingChanged) {
     leaks.push(`thinking_level_change divergente (pedido ${wantThinking}): ${thinkingChanged}`);
   }
@@ -480,19 +530,6 @@ async function detectDockerCli(): Promise<boolean> {
   }
 }
 
-/**
- * A imagem `<tag>` existe no daemon do host? `docker image inspect` SILENCIOSO
- * (stdout/stderr descartados) — o pré-voo NÃO builda (o build é da preparação).
- */
-async function dockerImagePresent(tag: string): Promise<boolean> {
-  try {
-    const out = await runSimple(['docker', 'image', 'inspect', tag], { env: dockerCliEnv() });
-    return out.code === 0;
-  } catch {
-    return false;
-  }
-}
-
 /** Espaço livre (GB) no filesystem de `dir`, via `fs.statfs` + 1 casa decimal. */
 function dfGb(dir: string): number {
   try {
@@ -537,7 +574,23 @@ async function cachedOrRunCanary(opts: PreflightOpts): Promise<CleanRoomReport> 
   // adicionado AQUI (no doctor), e não no cmdDoctor, para centralizar a regra:
   // qualquer chamador (CLI OU endpoint) herda a distinção de graça.
   const isContainer = opts.isolation?.kind === 'container';
-  const cacheKey = opts.cacheKey ? `${opts.cacheKey}${isContainer ? ':container' : ''}` : undefined;
+  // Em container, a chave inclui a versão do perfil endurecido, a rede, o
+  // runtime e o DIGEST da imagem: um "ok" medido num sandbox MAIS FRACO (perfil
+  // antigo, válvula `bridge`, runc em vez de runsc) ou noutro conteúdo de imagem
+  // (tag rebuildada) não vale para o sandbox de agora.
+  const containerImageRef = opts.isolation?.image ?? defaultPiImageTag(opts.expectedVersion ?? '');
+  let containerSuffix = '';
+  if (isContainer) {
+    let network = 'invalid';
+    try {
+      network = resolveContainerNetwork().network;
+    } catch {
+      /* válvula inválida: o canário vai recusar e o relatório não é cacheado */
+    }
+    const digest = (await resolveImageDigest(containerImageRef))?.digest ?? 'sem-imagem';
+    containerSuffix = `:container:h${HARDENING_PROFILE_VERSION}:${network}:${opts.isolation?.runtime ?? 'runc'}:${digest}`;
+  }
+  const cacheKey = opts.cacheKey ? `${opts.cacheKey}${containerSuffix}` : undefined;
   if (cacheKey) {
     const cacheFile = path.join(getDataDir(), 'agent-doctor-cache', `${createHash('sha256').update(cacheKey).digest('hex')}.json`);
     if (existsSync(cacheFile)) {
@@ -555,7 +608,8 @@ async function cachedOrRunCanary(opts: PreflightOpts): Promise<CleanRoomReport> 
     model: opts.model,
     bin: opts.bin,
     container: isContainer,
-    image: isContainer ? (opts.isolation?.image ?? defaultPiImageTag(opts.expectedVersion ?? '')) : undefined,
+    image: isContainer ? containerImageRef : undefined,
+    runtime: isContainer ? opts.isolation?.runtime : undefined,
   });
   if (cacheKey && report.ok) {
     try {

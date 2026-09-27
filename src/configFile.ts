@@ -176,7 +176,14 @@ export interface ArenaAgentConfigAgent {
   repetitions?: number; // int 1..10
   maxParallel?: number; // int 1..32
   limits: ArenaAgentConfigLimits;
-  isolation?: { kind?: 'worktree' | 'clone' | 'container'; keepWorkspace?: boolean; image?: string };
+  isolation?: {
+    kind?: 'worktree' | 'clone' | 'container';
+    keepWorkspace?: boolean;
+    /** Tag ou digest; o `docker run` usa SEMPRE o digest sha256 (IMPL-036). */
+    image?: string;
+    /** Runtime OCI opt-in (ex.: `runsc` = gVisor) — alto risco, fora do default. */
+    runtime?: string;
+  };
 }
 
 /** Contrato do arquivo de configuração do MODO AGENTE (`arena-agent-config@1`). */
@@ -723,6 +730,12 @@ const agentConfigSchema = z
             kind: z.enum(['worktree', 'clone', 'container'], "deve ser 'worktree', 'clone' ou 'container'").optional(),
             keepWorkspace: z.boolean('keepWorkspace deve ser boolean').optional(),
             image: z.string('image deve ser texto').optional(),
+            // Runtime OCI opt-in (gVisor = 'runsc'); mesmo formato que o daemon
+            // registra (RUNTIME_NAME_RE em src/agent/container.ts).
+            runtime: z
+              .string('runtime deve ser texto')
+              .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'runtime deve ser um nome de runtime Docker (ex.: runsc)')
+              .optional(),
           },
           'isolation deve ser um objeto',
         )
