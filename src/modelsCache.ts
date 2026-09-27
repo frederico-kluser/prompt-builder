@@ -14,7 +14,7 @@
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { listModels, primeModelsCache } from './openrouter.js';
+import { getGateway, listModels, primeModelsCache } from './openrouter.js';
 import { getDataDir } from './storage.js';
 import type { OpenRouterModel } from './types.js';
 
@@ -30,8 +30,9 @@ interface CatalogFile {
   data: OpenRouterModel[];
 }
 
+/** Base em vigor NO GATEWAY (configurado pelo ponto de entrada a partir do ambiente). */
 function baseUrl(): string {
-  return process.env.OPENROUTER_BASE_URL?.replace(/\/+$/, '') ?? 'https://openrouter.ai/api/v1';
+  return getGateway().config.baseUrl;
 }
 
 /**

@@ -2,6 +2,8 @@ import { idbGet, idbGetAll, idbPut, idbPutMany } from './idb';
 import type { ExpectedSpec } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
+import type { CostEntry, CostRole, RunCtx } from '../../src/types.js';
+export type { CostEntry, CostRole } from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
 import type { LgpdData } from './lgpd';
@@ -316,7 +318,14 @@ export interface RunRecord {
     losses: number;
     winRate: number;
   }[];
+  /** Custo TOTAL (todos os papéis), medido por `usage.cost` via ledger. */
   totalCostUsd: number;
+  /** Quebra do gasto por papel do pipeline. */
+  costByRole?: Record<CostRole, CostEntry>;
+  /** Quantas chamadas tiveram preço exato, estimado ou desconhecido. */
+  costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
+  upstreamCostUsd?: number;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -414,7 +423,8 @@ export async function createRun(config: RunConfig): Promise<string> {
   if (cfg.mode === 'variation') {
     const optimizerModelId = cfg.optimizerModelId ?? cfg.datagenModelId;
     const promptOptimization = cfg.promptOptimization !== false;
-    opts.prepare = () =>
+    // `runCtx` = ledger da run: o custo do reescritor entra na conta da run.
+    opts.prepare = (runCtx: RunCtx) =>
       generateContestants({
         apiKey,
         modelId: cfg.contestantModelId,
@@ -433,6 +443,7 @@ export async function createRun(config: RunConfig): Promise<string> {
         // Multi-prompt (F2/P0.4): grupo + fragmento-alvo.
         promptGroup: cfg.promptGroup,
         promptId: cfg.promptId,
+        ctx: runCtx,
       });
   }
   const { runId, record } = startRun(config as never, apiKey, opts as never);
@@ -507,6 +518,9 @@ export interface SessionRecord {
   pinnedStages?: StageSpec[];
   bestPromptByIteration: SessionIterationSummary[];
   totalCostUsd: number;
+  costByRole?: Record<CostRole, CostEntry>;
+  costAccuracy?: { exact: number; estimated: number; unknown: number };
+  upstreamCostUsd?: number;
   startedAt: string;
   finishedAt?: string;
   error?: string;

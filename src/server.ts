@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 import benchmarkRouter from './routes.js';
 import agentRouter from './agentRoutes.js';
 import { markOrphansAsAborted } from './storage.js';
+import { configureGatewayFromEnv } from './gatewayEnv.js';
+
+// Gateway de LLM a partir do ambiente (ja com o .env carregado pelo
+// `dotenv/config` acima): o gateway em si nao le o processo (IMPL-021).
+configureGatewayFromEnv();
 
 const app = express();
 const port = Number(process.env.BENCHMARK_PORT ?? 3001);

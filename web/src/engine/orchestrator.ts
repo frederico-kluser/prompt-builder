@@ -15,7 +15,9 @@ import { judgeScoreFromVerdicts } from './rank';
 import { emitEvent } from './events';
 import { saveRun } from './storage';
 import { contestantsFromConfig } from './normalize';
-import type { Contestant, RunConfig, RunRecord, StageRecord, StageSpec } from './types';
+import { listModels } from './openrouter';
+import { BudgetLedger, isControlSignal } from '../../../src/budget.js';
+import type { Contestant, RunConfig, RunCtx, RunRecord, StageRecord, StageSpec } from './types';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -53,11 +55,33 @@ export interface StartRunOpts {
   /**
    * Resolve os contestants no inicio da run (ex.: gerar variantes via optimizer),
    * emitindo variants.generating/generated. Usado pelo modo variacao.
+   * Recebe o `ctx` DA RUN (sinal + ledger): sem ele o reescritor chamava o
+   * gateway sem `sink` e o custo das variantes escapava do ledger e das
+   * portas de orcamento (IMPL-021 — soma(papeis) == fatura).
    */
-  prepare?: () => Promise<Contestant[]>;
+  prepare?: (ctx: RunCtx) => Promise<Contestant[]>;
   sessionId?: string;
   iteration?: number;
   parentRunId?: string;
+  /**
+   * Ledger EXTERNO (sessão de treino): a run reporta o próprio total e escreve
+   * no pai (espelho de src/orchestrator.ts). Ausente => a run cria o próprio.
+   */
+  parentLedger?: BudgetLedger;
+}
+
+/**
+ * Copia o ledger para o record. O custo da run é o do LEDGER — alimentado de
+ * dentro do gateway (`usage.cost` medido, catálogo só como fallback) para
+ * TODOS os papéis — e não mais a soma dos competidores a preço de catálogo
+ * (IMPL-021; a SPA subcontava por um múltiplo e ignorava cache/raciocínio).
+ */
+function syncLedger(record: RunRecord, ledger: BudgetLedger): void {
+  const snap = ledger.snapshot();
+  record.totalCostUsd = snap.spentUsd;
+  record.costByRole = snap.byRole;
+  record.costAccuracy = snap.accuracy;
+  if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
 }
 
 /**
@@ -109,9 +133,14 @@ async function executeRun(
   apiKey: string,
   opts: StartRunOpts,
 ): Promise<RunRecord> {
+  // Ledger: filho do da sessão (treino) ou próprio. Sem teto no web por ora —
+  // aqui ele é a contabilidade de ponto único (role + sink) do gateway.
+  const ledger = opts.parentLedger?.fork() ?? new BudgetLedger();
   try {
-    await runLoop(record, apiKey, opts);
+    await runLoop(record, apiKey, opts, ledger);
   } catch (err) {
+    // Mesmo falhando, o que já foi gasto aparece no record.
+    syncLedger(record, ledger);
     console.error(`[bench ${record.id}] run.error:`, err);
     record.status = 'error';
     record.error = err instanceof Error ? err.message : String(err);
@@ -139,8 +168,17 @@ export function runToCompletion(
   return executeRun(record, apiKey, opts);
 }
 
-async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): Promise<void> {
+async function runLoop(
+  record: RunRecord,
+  apiKey: string,
+  opts: StartRunOpts,
+  ledger: BudgetLedger,
+): Promise<void> {
   const { id: runId } = record;
+  // Contexto que atravessa todos os módulos de papel: o gateway contabiliza
+  // cada chamada no ledger com o papel certo (datagen/gabarito/competitor/
+  // judge/duel) — um ponto só, o mesmo do Node.
+  const ctx: RunCtx = { signal: ledger.signal, sink: ledger };
 
   // --- Persistencia com THROTTLE: as etapas paralelas geram MUITAS escritas;
   // coalescemos em no max. 1x/SAVE_INTERVAL_MS (trailing) e damos flush nos
@@ -175,6 +213,15 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
     contestants: record.contestants.length,
   });
 
+  // Catálogo QUENTE antes do primeiro gasto (espelho do Node): é o fallback de
+  // preço quando falta `usage.cost` e a allowlist de esforço/amostragem por
+  // modelo. Antes só o competidor esquentava — depois de o datagen já ter ido.
+  // Vem DEPOIS do run.started para a tela da run abrir sem esperar a rede.
+  await listModels(apiKey).catch((err: unknown) => {
+    console.warn(`[bench ${runId}] catalogo indisponivel: ${(err as Error).message}`);
+    return [];
+  });
+
   // compare-llms: falha a run CEDO (antes de qualquer chamada de LLM) se as
   // variantes forem invalidas. buildRecord nao pode lancar (e sincrono e a
   // rota espera o record de volta); sanitize e puro/barato, rodar 2x e inocuo.
@@ -190,7 +237,7 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
   // Resolve contestants on-demand (variacao: gera as variantes via optimizer).
   if (opts.prepare) {
     emitEvent({ type: 'variants.generating', runId });
-    const contestants = await opts.prepare();
+    const contestants = await opts.prepare(ctx);
     if (contestants.length < 2) {
       throw new Error(
         'Variacao precisa de ao menos 2 contestants validos (verifique as tecnicas/variantes ou o modelo optimizer).',
@@ -273,6 +320,7 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
       excludePrompts: seed.map((s) => s.question),
       reasoningLevel: record.config.reasoning?.datagen,
       timeoutMs: datagenTimeout,
+      ctx,
     });
     specs = mergeScenarios(seed, gerados).map(saneMaxTokens);
     if (specs.length === 0) {
@@ -293,12 +341,14 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
       modelId: record.config.referenceModelId ?? record.config.judgeModelIds[0],
       reasoningLevel: record.config.reasoning?.judge,
       timeoutMs: datagenTimeout,
+      ctx,
       // stageIndex -1 = progresso AGREGADO do lote (done/total de gabaritos
       // concluidos), nao de uma etapa especifica.
       onProgress: (done, total) =>
         emitEvent({ type: 'stage.gabarito', runId, stageIndex: -1, done, total }),
     });
   }
+  syncLedger(record, ledger);
 
   // REPEATS (F2 §7.9): clona as specs finais (com gabarito já preenchido).
   if (repeats > 1) {
@@ -357,10 +407,14 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
                 contestant.temperature ??
                 ('temperature' in record.config ? record.config.temperature : undefined),
               reasoningLevel: contestant.reasoningLevel ?? record.config.reasoning?.competitor,
+              ctx,
             });
 
             stageRecord.responses.push(response);
-            record.totalCostUsd += response.costUsd;
+            // Total verdadeiro vem do ledger (juiz/duelo/datagen nao sao
+            // atribuiveis a um contestant); `costByContestant` segue sendo a
+            // fatia dos competidores — agora com o custo MEDIDO (usage.cost).
+            syncLedger(record, ledger);
             if (record.costByContestant) {
               record.costByContestant[contestant.id] =
                 (record.costByContestant[contestant.id] ?? 0) + response.costUsd;
@@ -387,6 +441,7 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
               apiKey,
               reasoningLevel: record.config.reasoning?.judge,
               timeoutMs: record.config.timeoutMs,
+              ctx,
             });
             stageRecord.referenceJudge = refJudge;
 
@@ -429,9 +484,12 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
               judgeModelIds: record.config.judgeModelIds,
               timeoutMs: record.config.timeoutMs,
               passes: record.config.judgePasses,
+              ctx,
             });
           }
         } catch (judgeErr) {
+          // Sinal de controle (orcamento/cancelamento) nao e "juiz inconclusivo".
+          if (isControlSignal(judgeErr)) throw judgeErr;
           stageRecord.judge = {
             rankedContestantIds: [],
             acceptableByContestant: {},
@@ -458,6 +516,7 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
         }
 
         stageRecord.finishedAt = nowIso();
+        syncLedger(record, ledger);
         scheduleSave();
         emitEvent({
           type: 'stage.judged',
@@ -468,7 +527,9 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
           totalCostUsd: record.totalCostUsd,
         });
       } catch (stageErr) {
-        // rede de seguranca: qualquer imprevisto na etapa NAO mata a run
+        // rede de seguranca: qualquer imprevisto na etapa NAO mata a run —
+        // MENOS orcamento/cancelamento, que sao decisao, nao acidente.
+        if (isControlSignal(stageErr)) throw stageErr;
         const msg = stageErr instanceof Error ? stageErr.message : String(stageErr);
         stageRecord.error = stageRecord.error ?? msg;
         stageRecord.finishedAt = nowIso();
@@ -543,9 +604,11 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
               apiKey,
               reasoningLevel: record.config.reasoning?.judge,
               timeoutMs: record.config.timeoutMs,
+              ctx,
             });
             emitEvent({ type: 'stage.dueled', runId, stageIndex: st.index, duels: st.duels });
           } catch (duelErr) {
+            if (isControlSignal(duelErr)) throw duelErr;
             // Degrada: a etapa fica sem duelo, a run NUNCA cai por causa disso.
             log(
               runId,
@@ -640,6 +703,7 @@ async function runLoop(record: RunRecord, apiKey: string, opts: StartRunOpts): P
     log(runId, `diagnostico do juiz falhou (ignorado): ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  syncLedger(record, ledger);
   record.status = 'finished';
   record.finishedAt = nowIso();
   await flushSave();

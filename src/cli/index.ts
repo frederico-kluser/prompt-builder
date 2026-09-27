@@ -6,6 +6,7 @@
 // versionada dentro do proprio pacote (`docs`).
 
 import { pkgVersion } from '../paths.js';
+import { configureGatewayFromEnv } from '../gatewayEnv.js';
 import { CliError, EXIT, Output } from './output.js';
 import { buildContext, parse } from './context.js';
 import { cmdModels } from './commands/models.js';
@@ -170,6 +171,9 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
 }
 
 async function main(): Promise<void> {
+  // Gateway de LLM a partir do ambiente (OPENROUTER_*), antes de qualquer
+  // comando tocar a rede — o gateway em si nao le o processo (IMPL-021).
+  configureGatewayFromEnv();
   const argv = process.argv.slice(2);
   const cmd = argv[0] && !argv[0].startsWith('-') ? argv[0] : undefined;
   const rest = cmd ? argv.slice(1) : argv;

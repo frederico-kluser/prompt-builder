@@ -101,8 +101,11 @@ export interface StartRunOpts {
   /**
    * Resolve os contestants no inicio da run (ex.: gerar variantes via optimizer),
    * emitindo variants.generating/generated. Usado pelo modo variacao.
+   * Recebe o `ctx` DA RUN (sinal + ledger): sem ele o reescritor chamava o
+   * gateway sem `sink` e o custo das variantes escapava do ledger e das
+   * portas de orcamento (IMPL-021 — soma(papeis) == fatura).
    */
-  prepare?: () => Promise<Contestant[]>;
+  prepare?: (ctx: RunCtx) => Promise<Contestant[]>;
   sessionId?: string;
   iteration?: number;
   parentRunId?: string;
@@ -381,7 +384,7 @@ async function runLoop(
       return;
     }
     emitEvent({ type: 'variants.generating', runId });
-    const contestants = await opts.prepare();
+    const contestants = await opts.prepare(ctx);
     if (contestants.length < 2) {
       throw new Error(
         'Variacao precisa de ao menos 2 contestants validos (verifique as tecnicas/variantes ou o modelo optimizer).',

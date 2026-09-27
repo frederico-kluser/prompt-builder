@@ -37,7 +37,9 @@ export function prepareOptsFor(
   const promptOptimization = cfg.promptOptimization !== false;
   return {
     ...base,
-    prepare: () =>
+    // `runCtx` = contexto DA RUN (ledger da run + sinal): e ele que faz o custo
+    // do reescritor entrar no ledger. `options.ctx` so cobre chamadores antigos.
+    prepare: (runCtx?: RunCtx) =>
       generateContestants({
         apiKey,
         // F5: em modo agente (config.agent presente), as variantes de uma run
@@ -55,7 +57,7 @@ export function prepareOptsFor(
         optimizerModelId,
         reasoningLevel: cfg.reasoning?.rewriter,
         timeoutMs: cfg.timeoutMs,
-        ctx: options.ctx,
+        ctx: runCtx ?? options.ctx,
         // Contratos never-break (F2/P0.3) valem para a run variation solta,
         // igual ao treino — senão o modo variation escaparia do gate.
         contracts: cfg.contracts,

@@ -2,10 +2,28 @@
 import type { ExpectedSpec } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
+import type { CostEntry, CostRole, PricingTier } from '../../../src/types.js';
+
+// Contabilidade de custo: FONTE ÚNICA em src/types.ts (IMPL-021). Desde que os
+// módulos de papel e o gateway viraram shims, o web usa o MESMO ledger
+// (src/budget.ts) — duplicar estes tipos aqui só abriria espaço p/ divergir.
+export type {
+  CallCost,
+  CostEntry,
+  CostRole,
+  CostSink,
+  CostSource,
+  PricingTier,
+  Reservation,
+  RunCtx,
+} from '../../../src/types.js';
+export { COST_ROLES } from '../../../src/types.js';
 
 export interface OpenRouterModelPricing {
   prompt: number; // USD per token
   completion: number; // USD per token
+  /** Faixas de preço por tamanho de prompt (`pricing.overrides` do catálogo). */
+  overrides?: PricingTier[];
 }
 
 export interface OpenRouterModel {
@@ -483,7 +501,18 @@ export interface RunRecord {
     losses: number;
     winRate: number;
   }[];
+  /**
+   * Custo TOTAL da run — todos os papéis, lido do ledger (`usage.cost` medido;
+   * catálogo só como fallback). Antes o web somava só os competidores, com o
+   * preço do catálogo — subcontando por um múltiplo.
+   */
   totalCostUsd: number;
+  /** Quebra do gasto por papel do pipeline. */
+  costByRole?: Record<CostRole, CostEntry>;
+  /** Quantas chamadas tiveram preço exato, estimado ou desconhecido. */
+  costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
+  upstreamCostUsd?: number;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -519,6 +548,10 @@ export interface SessionRecord {
   pinnedStages?: StageSpec[]; // congelado apos a iteracao 0
   bestPromptByIteration: SessionIterationSummary[];
   totalCostUsd: number;
+  /** Quebra do gasto por papel, somando todas as runs da sessão + reescritor. */
+  costByRole?: Record<CostRole, CostEntry>;
+  costAccuracy?: { exact: number; estimated: number; unknown: number };
+  upstreamCostUsd?: number;
   startedAt: string;
   finishedAt?: string;
   error?: string;

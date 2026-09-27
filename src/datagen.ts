@@ -210,7 +210,11 @@ Gere os ${count} cenarios em JSON conforme as regras.`;
     apiKey,
     modelId,
     messages: [
-      { role: 'system', content: batchSystemPrompt(scenarioBrief) },
+      // `system` (e nao `batchSystemPrompt` direto): com regras de perfil o
+      // grounding renderizado abre o system. O Node descartava as regras aqui
+      // em silencio (a variavel era calculada e ignorada); o motor do web ja
+      // usava `system` — unificado no shim (IMPL-021).
+      { role: 'system', content: system },
       { role: 'user', content: userPrompt },
     ],
     temperature: 0.8,

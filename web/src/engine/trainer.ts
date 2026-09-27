@@ -1,5 +1,6 @@
 const randomUUID = (): string => crypto.randomUUID();
 import { runToCompletion } from './orchestrator';
+import { listModels } from './openrouter';
 import { generateContestants, llmReflectLessons } from './variator';
 import { composePrompt } from '../../../src/engine/promptGroup.js';
 import { addToPool, pickParent, sliceScores, type ParetoEntry } from '../../../src/engine/pareto.js';
@@ -11,8 +12,10 @@ import { computeMedals } from './medals';
 import { judgeScoreFromVerdicts, pickWinner, type RankEntry } from './rank';
 import { MIN_HOLDOUT_SCENARIOS, splitHoldout } from './holdout';
 import { pairedSignificance, VERDICT_SCORE } from './stats';
+import { BudgetLedger, isControlSignal } from '../../../src/budget.js';
 import type {
   Contestant,
+  RunCtx,
   RunRecord,
   SessionRecord,
   StageSpec,
@@ -258,6 +261,25 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
   const hasBase = Boolean(cfg.basePrompt && cfg.basePrompt.trim());
   const minGain = cfg.minGain ?? 1;
 
+  // Catálogo quente antes do primeiro gasto (espelho do Node): o reescritor da
+  // iteração 0 roda ANTES da 1ª run, e sem catálogo perde a allowlist de
+  // esforço/amostragem e o fallback de preço.
+  await listModels(apiKey).catch(() => []);
+
+  // UM ledger raiz para a sessão inteira (espelho de src/trainer.ts): as runs
+  // escrevem nele via `parentLedger` e o reescritor via `ctx`. É a fonte de
+  // verdade do gasto — antes o web somava `runRec.totalCostUsd` (só
+  // competidores) e o custo do reescritor/triagem sumia (IMPL-021).
+  const ledger = new BudgetLedger();
+  const ctx: RunCtx = { signal: ledger.signal, sink: ledger };
+  const syncLedger = (): void => {
+    const snap = ledger.snapshot();
+    record.totalCostUsd = snap.spentUsd;
+    record.costByRole = snap.byRole;
+    record.costAccuracy = snap.accuracy;
+    if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
+  };
+
   await saveSession(record);
   emitSessionEvent({ type: 'session.started', sessionId, record });
   log(sessionId, `started: ${cfg.iterations} iteracoes (minGain=${minGain})`);
@@ -301,6 +323,7 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           promptGroup: cfg.promptGroup,
           promptId: cfg.promptId,
           timeoutMs: cfg.timeoutMs,
+          ctx,
         });
       } else {
         // Reflection GEPA (deterministico — ver buildLessons): substitui a
@@ -323,11 +346,13 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
               theme: cfg.theme,
               reasoningLevel: cfg.reasoning?.rewriter,
               timeoutMs: cfg.timeoutMs,
+              ctx,
             });
             log(sessionId, `reflexao LLM aplicada (${hint.length} chars de licoes)`);
           } catch (err) {
-            // Sem budget ledger no browser, qualquer falha degrada para as
+            // Sinal de controle sobe; qualquer outra falha degrada para as
             // licoes deterministicas — nunca derruba a iteracao.
+            if (isControlSignal(err)) throw err;
             log(
               sessionId,
               `reflexao LLM falhou; licoes deterministicas seguem: ${err instanceof Error ? err.message : String(err)}`,
@@ -364,6 +389,7 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           promptGroup: cfg.promptGroup,
           promptId: cfg.promptId,
           timeoutMs: cfg.timeoutMs,
+          ctx,
         });
       }
 
@@ -398,8 +424,10 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
             sessionId,
             iteration: i,
             parentRunId: prevRun?.id,
+            parentLedger: ledger,
           },
         );
+        syncLedger();
         const { survivors, eliminated } = survivorsOf(
           rascunho.contestants.map((c) => ({ id: c.id, score: judgeScoreOf(rascunho, c.id) })),
           rodada1.keepCount,
@@ -426,9 +454,12 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
         sessionId,
         iteration: i,
         parentRunId: prevRun?.id,
+        parentLedger: ledger,
       });
 
-      record.totalCostUsd += runRec.totalCostUsd;
+      // O ledger e a fonte de verdade do gasto (todos os papeis de todas as
+      // runs + reescritor); somar `runRec.totalCostUsd` contaria duas vezes.
+      syncLedger();
 
       // F4.2: calibration drift — contrato do juiz diferente no meio da sessao
       // significa que o delta entre iteracoes pode ser do JUIZ, nao do prompt.
@@ -552,7 +583,9 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
     // 6) Gate final: holdout + significancia. NUNCA derruba a sessao — falha
     //    aqui vira warn e o treino termina com o que se tem.
     try {
-      await finalizeHoldout(record, apiKey, champion, championIdInLastRun, holdoutStages, prevRun);
+      await finalizeHoldout(record, apiKey, champion, championIdInLastRun, holdoutStages, prevRun, {
+        ledger,
+      });
     } catch (err) {
       console.warn(
         `[train ${sessionId}] gate de holdout/significancia falhou (sessao segue): ${
@@ -561,12 +594,14 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
       );
     }
 
+    syncLedger();
     record.status = 'finished';
     record.finishedAt = nowIso();
     await saveSession(record);
     emitSessionEvent({ type: 'session.finished', sessionId, record });
     log(sessionId, `finished: custo ${record.totalCostUsd}`);
   } catch (err) {
+    syncLedger();
     record.status = 'error';
     record.error = err instanceof Error ? err.message : String(err);
     record.finishedAt = nowIso();
@@ -590,6 +625,7 @@ async function finalizeHoldout(
   championIdInLastRun: string,
   holdoutStages: StageSpec[],
   lastRun: RunRecord | undefined,
+  ctxOpts: { ledger?: BudgetLedger } = {},
 ): Promise<void> {
   const cfg = record.config;
   const sessionId = record.id;
@@ -639,9 +675,17 @@ async function finalizeHoldout(
         // a run de holdout aparece como uma iteracao extra (N+1).
         iteration: cfg.iterations,
         parentRunId: lastRun?.id,
+        parentLedger: ctxOpts.ledger,
       },
     );
-    record.totalCostUsd += holdoutRun.totalCostUsd;
+    if (ctxOpts.ledger) {
+      const snap = ctxOpts.ledger.snapshot();
+      record.totalCostUsd = snap.spentUsd;
+      record.costByRole = snap.byRole;
+      record.costAccuracy = snap.accuracy;
+    } else {
+      record.totalCostUsd += holdoutRun.totalCostUsd;
+    }
     if (holdoutRun.status !== 'finished') {
       console.warn(
         `[train ${sessionId}] run de holdout terminou com status ${holdoutRun.status}; gate descartado`,

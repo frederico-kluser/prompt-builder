@@ -9,11 +9,13 @@
 // falha degrada para empate/ausência de duelos — NUNCA derruba a run.
 
 import { chatCompletion } from './openrouter';
+import { isControlSignal } from '../../../src/budget.js';
 import type {
   CompetitorResponse,
   Contestant,
   DuelOutcome,
   ReasoningLevel,
+  RunCtx,
   StageDuels,
   StageSpec,
   Verdict,
@@ -128,6 +130,9 @@ export interface RunStageDuelsOptions {
   apiKey: string;
   reasoningLevel?: ReasoningLevel;
   timeoutMs?: number;
+  /** Sinal de abort + ledger de custo (espelho de src/duels.ts). */
+  ctx?: RunCtx;
+  maxPricePerMTok?: { prompt?: number; completion?: number };
   /** Vereditos do juiz pointwise (refJudge) — ordenam o bracket. Ausente => score −1. */
   verdictByContestant?: Record<string, Verdict>;
   /**
@@ -163,6 +168,8 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
     apiKey,
     reasoningLevel,
     timeoutMs,
+    ctx,
+    maxPricePerMTok,
     verdictByContestant,
     oracleScoresByContestant,
     onPair,
@@ -249,9 +256,18 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
         timeoutMs,
         responseFormatJson: true,
         reasoningLevel,
+        // Papel 'duel' no ledger (IMPL-021): sem isto o gateway contaria o
+        // duelo como 'competitor' (o default de role).
+        role: 'duel',
+        signal: ctx?.signal,
+        sink: ctx?.sink,
+        maxPricePerMTok,
       });
       return parseDuelVerdict(result.text);
     } catch (err) {
+      // Sem o rethrow, orcamento estourado/cancelamento viraria empate em TODOS
+      // os duelos — uma final decidida por falta de dinheiro, sem ninguem saber.
+      if (isControlSignal(err)) throw err;
       // Ordem falhou => ESSA ordem vira empate (nunca inventa vencedor).
       return {
         winner: 'tie',
