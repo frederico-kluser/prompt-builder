@@ -17,6 +17,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -26,7 +27,14 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isLocalhostHost, parseAllowedHosts, resolveBindHost, startServer } from '../src/server.js';
+import {
+  ignoredHostEnv,
+  isLocalhostHost,
+  parseAllowedHosts,
+  requestedBindHosts,
+  resolveBindHost,
+  startServer,
+} from '../src/server.js';
 import { getDataDir, loadRun, loadSession, saveRun, saveSession, setDataDir } from '../src/storage.js';
 import {
   isSafePathSegment,
@@ -39,6 +47,7 @@ import { callTool } from '../src/cli/commands/mcp.js';
 import { readDocTopic } from '../src/cli/commands/knowledge.js';
 import { deleteItem, deleteProfile, importItems, saveProfile } from '../src/library.js';
 import type { RunRecord, SessionRecord } from '../src/types.js';
+import type { ExecutionRecord } from '../src/agent/types.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
@@ -180,12 +189,24 @@ describe('IMPL-024 — superfície HTTP (rotas + Host/Origin + bind)', () => {
     expect((server.address() as AddressInfo).address).toBe('127.0.0.1');
     expect(resolveBindHost([], {})).toBe('127.0.0.1');
     expect(resolveBindHost(['node', 'server.js', '--host', '0.0.0.0'], {})).toBe('0.0.0.0');
-    expect(resolveBindHost([], { HOST: '::1' })).toBe('::1');
+    expect(resolveBindHost([], { PB_HOST: '::1' })).toBe('::1');
     expect(isLocalhostHost('127.0.0.1')).toBe(true);
     expect(isLocalhostHost('[::1]')).toBe(true);
     expect(isLocalhostHost('0.0.0.0')).toBe(false);
     expect(isLocalhostHost('')).toBe(false);
     expect(parseAllowedHosts('Bench.Interno:8080, ,x.dev')).toEqual(['bench.interno', 'x.dev']);
+  });
+
+  it('HOST (genérico: containers/CI exportam o hostname) NÃO troca o bind; PB_HOST/--host trocam; o portão do agente ainda o vê', () => {
+    expect(resolveBindHost([], { HOST: 'meu-container' })).toBe('127.0.0.1');
+    expect(resolveBindHost([], { HOST: '10.0.0.5', PB_HOST: '::1' })).toBe('::1');
+    expect(resolveBindHost(['--host=0.0.0.0'], { PB_HOST: '::1' })).toBe('0.0.0.0');
+    expect(ignoredHostEnv([], { HOST: 'meu-container' })).toBe('meu-container');
+    expect(ignoredHostEnv([], { HOST: 'localhost' })).toBeUndefined();
+    expect(ignoredHostEnv([], {})).toBeUndefined();
+    expect(ignoredHostEnv([], { HOST: '0.0.0.0', PB_HOST: '0.0.0.0' })).toBeUndefined(); // é o bind efetivo
+    expect(requestedBindHosts(['--host', '::1'], { HOST: '0.0.0.0' })).toEqual(['::1', '0.0.0.0']);
+    expect(requestedBindHosts([], {})).toEqual([]);
   });
 
   it('caminho feliz: run salva com id UUID volta 200', async () => {
@@ -348,6 +369,44 @@ describe('IMPL-024 — entrypoint real do servidor (processo tsx)', () => {
     }
   }, 30_000);
 
+  it('HOST=<hostname> (fora de localhost) é ignorado: ouve em 127.0.0.1 e avisa no stderr', async () => {
+    const home = mkdtempSync(path.join(tmpdir(), 'pb-impl024-srv-'));
+    const child = spawn(TSX, [SERVER], {
+      cwd: home,
+      env: {
+        ...process.env,
+        BENCHMARK_PORT: '0',
+        PROMPT_BUILDER_HOME: home,
+        HOST: 'meu-container.local',
+        PB_HOST: '',
+        PROMPT_BUILDER_AGENTS: '',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    try {
+      let stderr = '';
+      child.stderr.on('data', (c: Buffer) => (stderr += c.toString()));
+      const linha = await new Promise<string>((resolve, reject) => {
+        let buf = '';
+        const t = setTimeout(() => reject(new Error(`servidor não subiu: ${buf} ${stderr}`)), 15_000);
+        child.stdout.on('data', (c: Buffer) => {
+          buf += c.toString();
+          const m = /listening on .*$/mu.exec(buf);
+          if (m) {
+            clearTimeout(t);
+            resolve(m[0]);
+          }
+        });
+        child.on('exit', (code) => reject(new Error(`servidor saiu (${code}): ${buf} ${stderr}`)));
+      });
+      expect(linha).toMatch(/\(bind 127\.0\.0\.1\)/u);
+      expect(stderr).toMatch(/HOST='meu-container\.local' ignorado/u);
+    } finally {
+      child.kill('SIGTERM');
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('PROMPT_BUILDER_AGENTS=1 + HOST=0.0.0.0 → recusa subir (exit 1), sem ouvir porta', async () => {
     const home = mkdtempSync(path.join(tmpdir(), 'pb-impl024-srv-'));
     try {
@@ -437,6 +496,40 @@ describe('IMPL-024 — ids, contenção e mensagens (núcleo)', () => {
     );
     expect(redactPaths('use ./data/runs e ../x (1/2)')).toBe('use ./data/runs e ../x (1/2)');
     expect(redactPaths(msg)).not.toMatch(ABS_PATH_RE);
+  });
+
+  it('redactPaths não vaza metade de caminho com ESPAÇO (entre aspas, Windows e home conhecida)', () => {
+    // formato dos erros do Node: o caminho vem entre aspas — redige até a aspa
+    expect(redactPaths("ENOENT: no such file or directory, open '/home/John Doe/.prompt-builder/runs/abc.json'", [])).toBe(
+      "ENOENT: no such file or directory, open '<caminho>/abc.json'",
+    );
+    expect(redactPaths("EACCES: permission denied, open 'C:\\Users\\John Doe\\.prompt-builder\\runs\\x.json'", [])).toBe(
+      "EACCES: permission denied, open '<caminho>/x.json'",
+    );
+    expect(redactPaths(`rename "/srv/meus dados/a b.tmp" -> "/srv/meus dados/a b"`, [])).toBe(
+      'rename "<caminho>/a b.tmp" -> "<caminho>/a b"',
+    );
+    // sem aspas: a home conhecida (com espaço) é reconhecida pelo prefixo
+    expect(redactPaths('Run não encontrada em C:\\Users\\John Doe\\.prompt-builder\\runs\\x.json.', ['C:\\Users\\John Doe'])).toBe(
+      'Run não encontrada em <caminho>/x.json.',
+    );
+    expect(redactPaths('nada em /home/John Doe/.prompt-builder', ['/home/John Doe'])).toBe('nada em <caminho>/.prompt-builder');
+    // a raiz conhecida não casa um prefixo de OUTRO nome (`/home/ana` ≠ `/home/anabela`)
+    expect(redactPaths('em /home/anabela/x', ['/home/ana'])).toBe('em <caminho>/x');
+    // default = a home do processo (os.homedir() lê o HOME)
+    const homeAnterior = process.env.HOME;
+    process.env.HOME = '/home/John Doe';
+    try {
+      const r = redactPaths('Run "x" não encontrada em /home/John Doe/.prompt-builder.');
+      expect(r).toBe('Run "x" não encontrada em <caminho>/.prompt-builder.');
+      expect(r).not.toContain('John');
+      expect(r).not.toContain('Doe');
+    } finally {
+      if (homeAnterior === undefined) delete process.env.HOME;
+      else process.env.HOME = homeAnterior;
+    }
+    // aspas sem caminho absoluto dentro seguem intactas
+    expect(redactPaths(`tópico 'quickstart' e "./data/x" e '/'`, [])).toBe(`tópico 'quickstart' e "./data/x" e '/'`);
   });
 });
 
@@ -532,6 +625,48 @@ describe('IMPL-024 — MCP (get_result/read_docs/get_agent_dossier) e CLI docs',
     }
   }, 20_000);
 
+  it('CLI: `runs show <uuid inexistente>` e `agents show|logs|replay|reconcile` → sem caminho absoluto; id malicioso → exit 2 sem eco', async () => {
+    const inexistente = randomUUID();
+    const [runs, show, logs, replay, reconcile, logsOk, replayOk] = await Promise.all([
+      runCli(['runs', 'show', inexistente, '--data-dir', tmp]),
+      runCli(['agents', 'show', '../../x', '--data-dir', tmp]),
+      runCli(['agents', 'logs', '../../x', '--stage', '0', '--contestant', 'a', '--data-dir', tmp]),
+      runCli(['agents', 'replay', '..%2Fx', '--stage', '0', '--contestant', 'a', '--data-dir', tmp]),
+      runCli(['agents', 'reconcile', '/etc/passwd', '--data-dir', tmp]),
+      runCli(['agents', 'logs', inexistente, '--stage', '0', '--contestant', 'a', '--data-dir', tmp]),
+      runCli(['agents', 'replay', inexistente, '--stage', '0', '--contestant', 'a', '--data-dir', tmp]),
+    ]);
+    expect(runs.code).toBe(2);
+    expect(runs.stderr).toMatch(/não encontrada/u);
+    for (const r of [show, logs, replay, reconcile]) {
+      expect(r.code, r.stderr).toBe(2);
+      expect(r.stderr).toMatch(/inválido/u);
+      expect(r.stderr).not.toContain('../../x');
+      expect(r.stderr).not.toContain('passwd');
+    }
+    // não encontrado (id válido) segue exit 1, mas cita só o caminho RELATIVO
+    for (const r of [logsOk, replayOk]) {
+      expect(r.code, r.stderr).toBe(1);
+      expect(r.stderr).toMatch(/relativo ao diretório de dados/u);
+    }
+    for (const r of [runs, show, logs, replay, reconcile, logsOk, replayOk]) {
+      expect(r.stderr).not.toContain(tmp);
+      expect(r.stderr).not.toMatch(ABS_PATH_RE);
+    }
+  }, 30_000);
+
+  it('CLI `library drop --profile ..` → exit 2 (uso inválido), e o data dir continua lá', async () => {
+    writeFileSync(path.join(tmp, 'sentinela.txt'), 'fica');
+    const [drop, init] = await Promise.all([
+      runCli(['library', 'drop', '--profile', '..', '--data-dir', tmp]),
+      runCli(['library', 'init', '--profile', 'a/../../b', '--data-dir', tmp]),
+    ]);
+    expect(drop.code, drop.stderr).toBe(2);
+    expect(init.code, init.stderr).toBe(2);
+    expect(drop.stderr).toMatch(/inválido/u);
+    expect(existsSync(path.join(tmp, 'sentinela.txt'))).toBe(true);
+  }, 30_000);
+
   it('CLI `runs show ../x` → exit 2 sem ecoar o caminho', async () => {
     const r = await runCli(['runs', 'show', '../../etc/passwd', '--data-dir', tmp]);
     expect(r.code).toBe(2);
@@ -554,7 +689,25 @@ describe.skipIf(process.platform === 'win32')('IMPL-024 — permissões do data 
   afterAll(() => {
     process.umask(umaskAnterior);
   });
+  // HOME/PROMPT_BUILDER_HOME/XDG_STATE_HOME trocados por teste e restaurados
+  // (os.homedir() lê o HOME a cada chamada no POSIX).
+  const ENV_KEYS = ['HOME', 'PROMPT_BUILDER_HOME', 'XDG_STATE_HOME'] as const;
+  let envAnterior: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
+  function comHome(home: string, extra: Partial<Record<(typeof ENV_KEYS)[number], string>> = {}): void {
+    for (const k of ENV_KEYS) {
+      if (!(k in envAnterior)) envAnterior[k] = process.env[k];
+      delete process.env[k];
+    }
+    process.env.HOME = home;
+    Object.assign(process.env, extra);
+  }
+
   afterEach(() => {
+    for (const [k, v] of Object.entries(envAnterior)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    envAnterior = {};
     setDataDir(anterior);
     rmSync(raiz, { recursive: true, force: true });
   });
@@ -579,6 +732,8 @@ describe.skipIf(process.platform === 'win32')('IMPL-024 — permissões do data 
   it('instalação ANTIGA (0755/0644) é corrigida por chmod explícito na próxima gravação', async () => {
     raiz = mkdtempSync(path.join(tmpdir(), 'pb-impl024-perm-'));
     anterior = getDataDir();
+    // o ~/.prompt-builder DE VERDADE (default do CLI): HOME aponta para `raiz`
+    comHome(raiz);
     const home = path.join(raiz, '.prompt-builder');
     const id = randomUUID();
     mkdirSync(path.join(home, 'runs'), { recursive: true });
@@ -630,11 +785,149 @@ describe.skipIf(process.platform === 'win32')('IMPL-024 — permissões do data 
     mkdirSync(home, { recursive: true });
     writeFileSync(path.join(home, 'key'), 'sk-antiga\n', { mode: 0o644 });
     chmodSync(path.join(home, 'key'), 0o644);
+    const inodeAntigo = statSync(path.join(home, 'key')).ino;
     const { writeStoredKey } = await import('../src/cli/context.js');
     setDataDir(home);
     await writeStoredKey('sk-nova');
     expect(modo(path.join(home, 'key'))).toBe(0o600);
+    // TOCTOU: a key NOVA foi para um arquivo novo (tmp 0600 + rename), nunca
+    // para o inode antigo 0644 com chmod depois
+    expect(statSync(path.join(home, 'key')).ino).not.toBe(inodeAntigo);
+    expect(readFileSync(path.join(home, 'key'), 'utf-8')).toBe('sk-nova\n');
+    expect(readdirSync(home).filter((f) => f.endsWith('.tmp'))).toEqual([]);
   });
+
+  it('raiz dedicada é decidida pelo default resolvido, NÃO pelo nome: projeto "prompt-builder" fica intocado; PROMPT_BUILDER_HOME recebe chmod', async () => {
+    raiz = mkdtempSync(path.join(tmpdir(), 'pb-impl024-perm-'));
+    anterior = getDataDir();
+    comHome(path.join(raiz, 'home-do-usuario'));
+    // `--data-dir` num projeto que por acaso se chama prompt-builder
+    const projeto = path.join(raiz, 'prompt-builder');
+    mkdirSync(projeto);
+    chmodSync(projeto, 0o755);
+    setDataDir(projeto);
+    await saveRun(runFixture(randomUUID()));
+    expect(modo(projeto)).toBe(0o755);
+    expect(modo(path.join(projeto, 'runs'))).toBe(0o700);
+
+    // o MESMO diretório declarado como home do prompt-builder → é dedicado
+    process.env.PROMPT_BUILDER_HOME = projeto;
+    await saveRun(runFixture(randomUUID()));
+    expect(modo(projeto)).toBe(0o700);
+
+    // $XDG_STATE_HOME/prompt-builder (default do CLI quando o XDG existe) também
+    const xdg = path.join(raiz, 'state');
+    const xdgHome = path.join(xdg, 'prompt-builder');
+    mkdirSync(xdgHome, { recursive: true });
+    chmodSync(xdgHome, 0o755);
+    delete process.env.PROMPT_BUILDER_HOME;
+    process.env.XDG_STATE_HOME = xdg;
+    setDataDir(xdgHome);
+    await saveSession(sessionFixture(randomUUID()));
+    expect(modo(xdgHome)).toBe(0o700);
+  });
+
+  it('PROMPT_BUILDER_HOME apontando para a PRÓPRIA home não vira chmod 0700 na home', async () => {
+    raiz = mkdtempSync(path.join(tmpdir(), 'pb-impl024-perm-'));
+    anterior = getDataDir();
+    chmodSync(raiz, 0o755);
+    comHome(raiz, { PROMPT_BUILDER_HOME: raiz });
+    setDataDir(raiz);
+    await saveRun(runFixture(randomUUID()));
+    expect(modo(raiz)).toBe(0o755);
+    expect(modo(path.join(raiz, 'runs'))).toBe(0o700);
+  });
+
+  it('biblioteca ANTIGA (0755/0644) numa raiz compartilhada: library/perfil/items viram 0700 e arquivos 0600; a raiz não é tocada', async () => {
+    raiz = mkdtempSync(path.join(tmpdir(), 'pb-impl024-perm-'));
+    anterior = getDataDir();
+    comHome(path.join(raiz, 'home-do-usuario'));
+    const data = path.join(raiz, 'data'); // `./data` do servidor
+    const perfilDir = path.join(data, 'library', 'antigo');
+    mkdirSync(path.join(perfilDir, 'items'), { recursive: true });
+    for (const d of [data, path.join(data, 'library'), perfilDir, path.join(perfilDir, 'items')]) chmodSync(d, 0o755);
+    writeFileSync(path.join(perfilDir, 'profile.json'), JSON.stringify({ id: 'antigo', name: 'antigo' }), { mode: 0o644 });
+    chmodSync(path.join(perfilDir, 'profile.json'), 0o644);
+    setDataDir(data);
+
+    await saveProfile({ id: 'antigo', name: 'antigo' });
+    const res = await importItems('antigo', [
+      { id: 'item-1', title: 't', tier: 'mft', question: 'q?', productContext: 'ctx', maxTokens: 256, expected: 'algo' },
+    ]);
+    expect(res.added).toBe(1);
+    expect(modo(data)).toBe(0o755); // raiz compartilhada: só o que é nosso
+    expect(modo(path.join(data, 'library'))).toBe(0o700);
+    expect(modo(perfilDir)).toBe(0o700);
+    expect(modo(path.join(perfilDir, 'items'))).toBe(0o700);
+    expect(modo(path.join(perfilDir, 'profile.json'))).toBe(0o600);
+    expect(modo(path.join(perfilDir, 'items', 'item-1.json'))).toBe(0o600);
+  });
+
+  it('artefatos de agente (agent-runs) e token: cadeia 0700 e arquivos 0600, inclusive session/', async () => {
+    raiz = mkdtempSync(path.join(tmpdir(), 'pb-impl024-perm-'));
+    anterior = getDataDir();
+    comHome(path.join(raiz, 'home-do-usuario'));
+    const data = path.join(raiz, 'data');
+    mkdirSync(path.join(data, 'agent-runs'), { recursive: true });
+    chmodSync(data, 0o755);
+    chmodSync(path.join(data, 'agent-runs'), 0o755); // árvore antiga
+    setDataDir(data);
+    const { writeExecution, ensureAgentsTokenFile } = await import('../src/agent/store.js');
+    const runId = randomUUID();
+    const { dir } = await writeExecution({
+      execId: 'e1',
+      runId,
+      stageIndex: 0,
+      contestantId: 'c1',
+      repetition: 0,
+      record: { execId: 'e1', dir: '' } as unknown as ExecutionRecord,
+      artifacts: { 'workspace.diff': 'diff --git a/x b/x', 'session/s1.jsonl': '{}\n' },
+    });
+    const abs = path.join(data, dir);
+    let atual = data;
+    for (const seg of path.relative(data, abs).split(path.sep)) {
+      atual = path.join(atual, seg);
+      expect(modo(atual), atual).toBe(0o700);
+    }
+    expect(modo(path.join(abs, 'session'))).toBe(0o700);
+    for (const f of ['workspace.diff', 'session/s1.jsonl', 'exec.json', 'digests.json']) {
+      expect(modo(path.join(abs, f)), f).toBe(0o600);
+    }
+    expect(modo(data)).toBe(0o755);
+
+    // token numa raiz NOVA: a raiz nasce 0700 e o token 0600
+    const nova = path.join(raiz, 'nova-raiz');
+    setDataDir(nova);
+    const token = await ensureAgentsTokenFile();
+    expect(modo(nova)).toBe(0o700);
+    expect(modo(token)).toBe(0o600);
+  });
+
+  it('CLI real com HOME isolado: `library init`, `registry init` e `doctor` deixam raiz/subdirs 0700 e arquivos 0600', async () => {
+    raiz = mkdtempSync(path.join(tmpdir(), 'pb-impl024-perm-'));
+    anterior = getDataDir();
+    const env = { HOME: raiz, USERPROFILE: raiz, PROMPT_BUILDER_HOME: '', XDG_STATE_HOME: '', OPENROUTER_API_KEY: '' };
+    const home = path.join(raiz, '.prompt-builder');
+
+    const lib = await runCli(['library', 'init', '--profile', 'teste', '--json'], env);
+    expect(lib.code, lib.stderr).toBe(0);
+    expect(modo(home)).toBe(0o700);
+    expect(modo(path.join(home, 'library'))).toBe(0o700);
+    expect(modo(path.join(home, 'library', 'teste'))).toBe(0o700);
+    expect(modo(path.join(home, 'library', 'teste', 'profile.json'))).toBe(0o600);
+
+    const reg = await runCli(['registry', 'init', '--json'], env);
+    expect(reg.code, reg.stderr).toBe(0);
+    expect(modo(path.join(home, 'prompt-registry.json'))).toBe(0o600);
+
+    // doctor numa HOME nova (antes deixava a raiz 0755): sem key, não toca a rede
+    const raiz2 = path.join(raiz, 'outra-home');
+    mkdirSync(raiz2);
+    const doc = await runCli(['doctor', '--json'], { ...env, HOME: raiz2, USERPROFILE: raiz2 });
+    expect(doc.code, doc.stderr).toBe(0);
+    expect(modo(path.join(raiz2, '.prompt-builder'))).toBe(0o700);
+    expect(modo(path.join(raiz2, '.prompt-builder', 'cache'))).toBe(0o700);
+  }, 40_000);
 });
 
 // ---------------------------------------------------------------------------

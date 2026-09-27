@@ -10,9 +10,8 @@
 // `src/engine/libraryCore.ts` (fonte única dos dois motores); aqui é só disco.
 
 import { promises as fs } from 'node:fs';
-import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { getDataDir } from './storage.js';
+import { getDataDir, writePrivateDataFile } from './storage.js';
 import { isSafePathSegment, resolveInside, UnsafePathError } from './pathSafety.js';
 import {
   coverageReport,
@@ -60,16 +59,11 @@ function itemFile(profileId: string, itemId: string): string {
   return resolveInside(itemsDir(profileId), `${segmento(itemId, 'item')}.json`);
 }
 
+// IMPL-024: a biblioteca mora no data dir (ao lado da key) e guarda cenários e
+// gabaritos — diretórios 0700 (raiz, library/, perfil, items/) e arquivos
+// 0600, com chmod explícito que corrige uma biblioteca antiga 0755/0644.
 async function writeAtomic(target: string, data: string): Promise<void> {
-  const tmp = `${target}.${randomUUID()}.tmp`;
-  try {
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(tmp, data, 'utf-8');
-    await fs.rename(tmp, target);
-  } catch (err) {
-    await fs.rm(tmp, { force: true }).catch(() => undefined);
-    throw err;
-  }
+  await writePrivateDataFile(target, data);
 }
 
 async function readJson<T>(file: string): Promise<T | undefined> {

@@ -15,7 +15,9 @@
 //
 // Node-only (fs/path): NÃO importe do web (a guarda engine-sync barra).
 
-import { promises as fs } from 'node:fs';
+import { chmodSync, mkdirSync, promises as fs } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -131,6 +133,14 @@ export const PRIVATE_FILE_MODE = 0o600;
 
 let chmodWarned = false;
 
+function warnChmod(err: unknown): void {
+  if (chmodWarned) return;
+  chmodWarned = true;
+  console.warn(
+    `[prompt-builder] aviso: não consegui restringir permissões (${(err as NodeJS.ErrnoException).code ?? 'erro'}).`,
+  );
+}
+
 /**
  * chmod explícito e tolerante: `mkdir({mode})`/`writeFile({mode})` só valem na
  * CRIAÇÃO — um diretório de uma versão antiga (0755) continuaria aberto. Falha
@@ -141,12 +151,7 @@ export async function chmodPrivate(target: string, mode: number): Promise<void> 
   try {
     await fs.chmod(target, mode);
   } catch (err) {
-    if (!chmodWarned) {
-      chmodWarned = true;
-      console.warn(
-        `[prompt-builder] aviso: não consegui restringir permissões (${(err as NodeJS.ErrnoException).code ?? 'erro'}).`,
-      );
-    }
+    warnChmod(err);
   }
 }
 
@@ -156,45 +161,137 @@ export async function ensurePrivateDir(dir: string): Promise<void> {
   await chmodPrivate(dir, PRIVATE_DIR_MODE);
 }
 
+/** `ensurePrivateDir` síncrono, para os poucos pontos que gravam com `*Sync`. */
+export function ensurePrivateDirSync(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
+  try {
+    chmodSync(dir, PRIVATE_DIR_MODE);
+  } catch (err) {
+    warnChmod(err);
+  }
+}
+
+/**
+ * mkdir -p de `dir` com 0700 e chmod EXPLÍCITO em CADA nível entre `base`
+ * (exclusive — a raiz não é tocada aqui) e `dir` (inclusive). Uma árvore de
+ * versão antiga (`library/`, `agent-runs/<id>/…` em 0755) fica fechada no
+ * primeiro nível — o que basta para ninguém mais atravessá-la —, e não só na
+ * folha. `dir` tem de estar estritamente dentro de `base`.
+ */
+export async function ensurePrivateSubtree(base: string, dir: string): Promise<void> {
+  const root = path.resolve(base);
+  const abs = path.resolve(dir);
+  if (!isStrictlyInside(root, abs)) throw new UnsafePathError('Caminho fora do diretório permitido.');
+  await fs.mkdir(abs, { recursive: true, mode: PRIVATE_DIR_MODE });
+  let atual = root;
+  for (const seg of path.relative(root, abs).split(path.sep)) {
+    atual = path.join(atual, seg);
+    await chmodPrivate(atual, PRIVATE_DIR_MODE);
+  }
+}
+
+/**
+ * Grava `data` em `target` via tmp ÚNICO (0600 desde a criação) + rename. O
+ * conteúdo novo nunca passa por um inode com permissão antiga: `writeFile` por
+ * cima de um arquivo 0644 seguido de chmod deixaria a janela em que o conteúdo
+ * NOVO (uma key, por exemplo) é legível por outros usuários. O rename leva o
+ * 0600 para o alvo e corrige, de quebra, um arquivo antigo 0644. O diretório
+ * pai já tem de existir (quem chama decide o mode dele).
+ */
+export async function writePrivateFileAtomic(target: string, data: string | Buffer): Promise<void> {
+  // tmp ÚNICO por escrita: duas escritas concorrentes no mesmo alvo não brigam
+  // pelo mesmo `.tmp` (era a causa de ENOENT no rename que derrubava a run).
+  const tmp = `${target}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(tmp, data, typeof data === 'string' ? { encoding: 'utf-8', mode: PRIVATE_FILE_MODE } : { mode: PRIVATE_FILE_MODE });
+    await fs.rename(tmp, target);
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Mensagens de erro sem caminho absoluto
 // ---------------------------------------------------------------------------
 
 // UMA regex com alternância, aplicada numa passada só: com `replace`s em
 // sequência, o `/x.json` que a troca do Windows acabou de produzir
-// (`<caminho>/x.json`) era casado de novo como caminho POSIX.
-//   1. `file://...`;
-//   2. UNC `\\host\share`;
-//   3. Windows `C:\...`/`C:/...` (sem letra/dígito antes);
-//   4. POSIX que não seja parte de URL (`https://x/y`) nem de relativo (`a/b`,
+// (`<caminho>/x.json`) era casado de novo como caminho POSIX. Na mesma posição
+// vale a PRIMEIRA alternativa, e a varredura é da esquerda para a direita:
+//   0. caminho ENTRE ASPAS (`open '/home/John Doe/x.json'` — o formato dos
+//      erros do Node): redigido até a aspa de fecho, com espaço e tudo;
+//   1. raiz CONHECIDA (a home do usuário, que pode ter espaço — `C:\Users\John
+//      Doe` — e por isso não pode depender do corte no primeiro espaço);
+//   2. `file://...`;
+//   3. UNC `\\host\share`;
+//   4. Windows `C:\...`/`C:/...` (sem letra/dígito antes);
+//   5. POSIX que não seja parte de URL (`https://x/y`) nem de relativo (`a/b`,
 //      `./x`, `../x`): a barra inicial não pode vir depois de palavra, `:`,
 //      `/`, `.`, `~` ou `-`.
-const ABS_PATH_RE = new RegExp(
-  [
-    String.raw`file:\/\/[^\s'"\x60<>]*`,
-    String.raw`\\\\[^\s'"\x60<>|]+`,
-    String.raw`(?<![\w])[A-Za-z]:[\\/][^\s'"\x60<>|]*`,
-    String.raw`(?<![\w:/.~-])\/(?:[^\s'"\x60<>|/]+\/)*[^\s'"\x60<>|/]*`,
-  ].join('|'),
-  'giu',
-);
+const PATH_END = String.raw`[^\s'"\x60<>|]*`;
+const QUOTED_ABS = String.raw`(['"\x60])((?:file:\/\/|\\\\|[A-Za-z]:[\\/]|\/)[^'"\x60\r\n]*)\1`;
+const GENERIC_ABS = [
+  String.raw`file:\/\/[^\s'"\x60<>]*`,
+  String.raw`\\\\[^\s'"\x60<>|]+`,
+  String.raw`(?<![\w])[A-Za-z]:[\\/]${PATH_END}`,
+  String.raw`(?<![\w:/.~-])\/(?:[^\s'"\x60<>|/]+\/)*[^\s'"\x60<>|/]*`,
+];
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/** Raízes redigidas por prefixo: a home (se não for `/` nem vazia). */
+function defaultKnownRoots(): string[] {
+  try {
+    const home = os.homedir();
+    return home && home.length > 1 ? [home] : [];
+  } catch {
+    return [];
+  }
+}
+
+const regexCache = new Map<string, RegExp>();
+
+function absPathRegex(knownRoots: readonly string[]): RegExp {
+  const roots = [...new Set(knownRoots.filter((r) => r.length > 1).map((r) => r.replace(/[\\/]+$/u, '')))]
+    // a mais longa primeiro: `/home/a b/proj` antes de `/home/a b`
+    .sort((a, b) => b.length - a.length);
+  const chave = roots.join('\0');
+  let re = regexCache.get(chave);
+  if (!re) {
+    // raiz inteira, sem continuar numa palavra (`/home/ana` não casa `/home/anab`)
+    const raizes = roots.map((r) => String.raw`(?<![\w:/.~-])${escapeRegExp(r)}(?![\w-])${PATH_END}`);
+    re = new RegExp([QUOTED_ABS, ...raizes, ...GENERIC_ABS].join('|'), 'giu');
+    regexCache.set(chave, re);
+  }
+  re.lastIndex = 0;
+  return re;
+}
 
 function keepBasename(p: string): string {
   const base = p.split(/[\\/]/u).filter(Boolean).at(-1);
   return base ? `<caminho>/${base}` : '<caminho>';
 }
 
+function redactOne(p: string): string {
+  if (p === '/') return p; // barra solta (ex.: `"/"` numa mensagem de regra)
+  if (/^file:/iu.test(p)) return '<caminho>';
+  return keepBasename(p);
+}
+
 /**
  * Troca todo caminho absoluto de uma mensagem por `<caminho>/<basename>`. O
  * basename fica (é o id/arquivo — útil para diagnosticar e não revela a
- * estrutura da máquina); o resto some. `file://` some inteiro.
+ * estrutura da máquina); o resto some. `file://` some inteiro. Caminho entre
+ * aspas é redigido até a aspa (espaço no meio não vaza metade do caminho), e as
+ * `knownRoots` (default: a home) são reconhecidas mesmo sem aspas.
  */
-export function redactPaths(message: string): string {
-  return message.replace(ABS_PATH_RE, (m) => {
-    if (m === '/') return m; // barra solta (ex.: `"/"` numa mensagem de regra)
-    if (/^file:/iu.test(m)) return '<caminho>';
-    return keepBasename(m);
-  });
+export function redactPaths(message: string, knownRoots: readonly string[] = defaultKnownRoots()): string {
+  return message.replace(absPathRegex(knownRoots), (m: string, aspa?: string, entreAspas?: string) =>
+    aspa !== undefined && entreAspas !== undefined ? `${aspa}${redactOne(entreAspas)}${aspa}` : redactOne(m),
+  );
 }
 
 /** Mensagem pública de um erro qualquer (sem caminho absoluto). */

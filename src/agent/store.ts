@@ -25,7 +25,8 @@
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { getDataDir } from '../storage.js';
+import { ensurePrivateDataDir, ensurePrivateDataRoot, getDataDir } from '../storage.js';
+import { writePrivateFileAtomic } from '../pathSafety.js';
 import type { ExecutionRecord, ExecutionRef } from './types.js';
 
 /** Raiz dos artefatos de agente. *Absoluta* — montada a partir de getDataDir(). */
@@ -41,17 +42,11 @@ export function execDir(runId: string, stageIndex: number, contestantId: string,
   return path.join('agent-runs', runId, 'stages', String(stageIndex), contestantId, String(repetition));
 }
 
-/** Primitiva de escrita atômica — mesmo padrão de storage.ts (suporta Buffer). */
-async function writeAtomic(target: string, data: string | Buffer): Promise<void> {
-  const tmp = `${target}.${randomUUID()}.tmp`;
-  try {
-    await fs.writeFile(tmp, data);
-    await fs.rename(tmp, target);
-  } catch (err) {
-    await fs.rm(tmp, { force: true }).catch(() => undefined);
-    throw err;
-  }
-}
+/**
+ * Primitiva de escrita atômica — a MESMA de storage.ts (suporta Buffer): tmp
+ * único 0600 + rename (IMPL-024: diff, trajetória e dossiê não saem 0644).
+ */
+const writeAtomic = writePrivateFileAtomic;
 
 // ---------------------------------------------------------------------------
 // Redação de segredos (§14.2) — NA ESCRITA, nunca na leitura: um arquivo em
@@ -164,7 +159,9 @@ export async function writeExecution(
 ): Promise<{ dir: string; digests: Record<string, string> }> {
   const dir = execDir(opts.runId, opts.stageIndex, opts.contestantId, opts.repetition);
   const abs = path.join(getDataDir(), dir);
-  await fs.mkdir(abs, { recursive: true });
+  // IMPL-024: agent-runs/ e cada nível até a execução em 0700 (chmod explícito
+  // corrige uma árvore antiga 0755).
+  await ensurePrivateDataDir(abs);
 
   const digests: Record<string, string> = {};
   const execTarget = path.join(abs, 'exec.json');
@@ -179,8 +176,8 @@ export async function writeExecution(
       // garante que NENHUMA key chega ao disco, mesmo se o chamador esquecer
       bytes = Buffer.from(redactAnyText(bytes.toString('utf-8')), 'utf-8');
     }
-    // artefatos podem morar em subdir (`session/*.jsonl`) — garante o pai
-    await fs.mkdir(path.dirname(target), { recursive: true });
+    // artefatos podem morar em subdir (`session/*.jsonl`) — garante o pai (0700)
+    if (path.dirname(target) !== abs) await ensurePrivateDataDir(path.dirname(target));
     await writeAtomic(target, bytes);
     digests[rel] = sha256Of(bytes);
   }
@@ -262,8 +259,8 @@ export async function ensureAgentsTokenFile(): Promise<string> {
   } catch {
     // Quando o dataDir ainda não existe (ex.: PROMPT_BUILDER_HOME apontando
     // para um caminho novo), o writeFile abaixo falharia com ENOENT. Cria o
-    // diretório primeiro (recursive; no-op se já existir).
-    await fs.mkdir(getDataDir(), { recursive: true });
+    // diretório primeiro — privado (IMPL-024), como todo writer do data dir.
+    await ensurePrivateDataRoot();
     await fs.writeFile(file, randomUUID() + '\n', { encoding: 'utf-8', mode: 0o600 });
   }
   // idempotente: garante o mode mesmo que o arquivo já exista

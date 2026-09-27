@@ -36,6 +36,7 @@ import { generateReferences } from '../../gabarito.js';
 import { BudgetLedger, isControlSignal } from '../../budget.js';
 import { buildContext, buildNetworkContext, isAgentContext, parse } from '../context.js';
 import { CliError, EXIT } from '../output.js';
+import { isUnsafePathError } from '../../pathSafety.js';
 
 const HELP = `prompt-builder library — banco persistente de cenários+gabaritos.
 
@@ -86,6 +87,17 @@ async function lerArquivoJson(file: string): Promise<unknown> {
 }
 
 export async function cmdLibrary(argv: string[]): Promise<number> {
+  try {
+    return await cmdLibraryInner(argv);
+  } catch (err) {
+    // IMPL-024: perfil/item fora do formato (`--profile ..`) é USO inválido —
+    // exit 2, não a falha genérica 1. Por `code`, nunca `instanceof`.
+    if (isUnsafePathError(err)) throw new CliError(err.message, EXIT.USAGE);
+    throw err;
+  }
+}
+
+async function cmdLibraryInner(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
   const parsed = parse(argv[0] === sub ? argv.slice(1) : argv, {
     profile: { type: 'string' },

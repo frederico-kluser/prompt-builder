@@ -10,7 +10,7 @@ import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { setDataDir, getDataDir } from '../storage.js';
+import { setDataDir, getDataDir, writePrivateDataFile } from '../storage.js';
 import { ensureCatalog } from '../modelsCache.js';
 import { validateKey, type KeyInfo } from '../openrouter.js';
 import { Output, CliError, EXIT, type OutputFormat } from './output.js';
@@ -123,10 +123,9 @@ export async function resolveKey(values: Record<string, unknown>): Promise<strin
 
 export async function writeStoredKey(key: string): Promise<string> {
   const target = keyFilePath();
-  await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-  await fs.writeFile(target, `${key}\n`, { encoding: 'utf-8', mode: 0o600 });
-  // writeFile({mode}) só vale na CRIAÇÃO: uma key antiga 0644 seguiria legível (IMPL-024).
-  await fs.chmod(target, 0o600);
+  // IMPL-024: raiz privada + tmp 0600 e rename — a key NOVA nunca passa por um
+  // inode antigo 0644 (writeFile por cima + chmod deixava essa janela).
+  await writePrivateDataFile(target, `${key}\n`);
   return target;
 }
 

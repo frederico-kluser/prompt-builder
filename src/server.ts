@@ -173,19 +173,50 @@ export function createApp(opts: AppOptions = {}): express.Express {
 // Bind
 // ---------------------------------------------------------------------------
 
+function hostFromArgv(argv: readonly string[]): string | undefined {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--host' && argv[i + 1]) return argv[i + 1];
+    if (argv[i]?.startsWith('--host=')) return argv[i].slice('--host='.length);
+  }
+  return undefined;
+}
+
 /**
- * Host de bind pedido. Precedência: `--host`, depois HOST, depois PB_HOST.
- * Sem nada: 127.0.0.1 (IMPL-024 — antes o default era todas as interfaces).
+ * Host de bind pedido. Precedência: `--host`, depois PB_HOST. Sem nada:
+ * 127.0.0.1 (IMPL-024 — antes o default era todas as interfaces).
+ *
+ * `HOST` NÃO entra no bind: é genérico demais — containers, CI e alguns shells
+ * exportam `HOST=<hostname>`, e honrá-lo trocaria o bind para o IP da LAN em
+ * silêncio (e `http://localhost:3001` deixaria de conectar). Ver
+ * `ignoredHostEnv` (aviso) e `requestedBindHosts` (portão do modo agente).
  */
 export function resolveBindHost(
   argv: readonly string[] = process.argv,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--host' && argv[i + 1]) return argv[i + 1];
-    if (argv[i]?.startsWith('--host=')) return argv[i].slice('--host='.length);
-  }
-  return env.HOST || env.PB_HOST || '127.0.0.1';
+  return hostFromArgv(argv) || env.PB_HOST || '127.0.0.1';
+}
+
+/** `HOST` presente, fora de localhost e diferente do bind efetivo → avisar que foi ignorado. */
+export function ignoredHostEnv(
+  argv: readonly string[] = process.argv,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const legado = env.HOST;
+  if (!legado || isLocalhostHost(legado)) return undefined;
+  return legado === resolveBindHost(argv, env) ? undefined : legado;
+}
+
+/**
+ * Todo host que alguém PEDIU (`--host`, PB_HOST e o legado HOST). O portão do
+ * modo agente recusa subir se QUALQUER um sair de localhost — mantém o
+ * comportamento fail-closed de antes, em que HOST=0.0.0.0 também barrava.
+ */
+export function requestedBindHosts(
+  argv: readonly string[] = process.argv,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return [hostFromArgv(argv), env.PB_HOST, env.HOST].filter((h): h is string => typeof h === 'string' && h !== '');
 }
 
 export function isLocalhostHost(host: string): boolean {
@@ -226,14 +257,24 @@ async function main(): Promise<void> {
 
   // Portão do modo agente (§21.5 — NÃO negociável): com /v1/agents montado o
   // processo DEVE ouvir em localhost — o corpo de /v1/agents/runs é execução
-  // de código. Bind não-local pedido => recusa SUBIR (exit 1).
-  if (agentsEnabled && !local) {
+  // de código. Bind não-local pedido (inclusive pelo HOST legado) => recusa
+  // SUBIR (exit 1).
+  const naoLocal = requestedBindHosts().find((h) => !isLocalhostHost(h));
+  if (agentsEnabled && naoLocal !== undefined) {
     console.error(
-      `[agents] REFUSING TO START: PROMPT_BUILDER_AGENTS=1 e o bind pedido ('${host}') ` +
+      `[agents] REFUSING TO START: PROMPT_BUILDER_AGENTS=1 e o bind pedido ('${naoLocal}') ` +
         'não é localhost. O router /v1/agents é execução remota de código (§21.5): expô-lo na ' +
-        'rede é entregar a máquina. Defina HOST=127.0.0.1 (ou remova HOST/PB_HOST) para subir.',
+        'rede é entregar a máquina. Remova HOST/PB_HOST/--host (ou use 127.0.0.1) para subir.',
     );
     process.exit(1);
+  }
+
+  const hostIgnorado = ignoredHostEnv();
+  if (hostIgnorado !== undefined) {
+    console.warn(
+      `[bench] aviso: HOST='${hostIgnorado}' ignorado para o bind (variável genérica demais — ` +
+        `containers/CI exportam o hostname). Ouvindo em '${host}'; para outra interface use PB_HOST ou --host.`,
+    );
   }
 
   const extraAllowedHosts = parseAllowedHosts(process.env.PB_ALLOWED_HOSTS);

@@ -24,6 +24,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { ensurePrivateSubtree } from '../pathSafety.js';
 import type { AgentRunOpts, PrepareOpts } from './executor.js';
 import { piExecutor } from './pi.js';
 import type { PiRunOptions, PiRunOutcome } from './pi.js';
@@ -219,6 +220,10 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
 
   // Preparação do executor UMA vez por etapa (bin/env não mudam entre reps).
   const runDir = path.join(dataDir, 'agent-runs', runId);
+  // IMPL-024: agent-runs/<runId> em 0700 ANTES de prepare/workspace/reps criarem
+  // qualquer coisa dentro (sessões, diffs, cache do repo): com raiz não dedicada
+  // (./data, --data-dir) a árvore do agente não nasce legível por outros.
+  await ensurePrivateSubtree(dataDir, runDir).catch(() => undefined);
   let prepared: { bin: string; env: Record<string, string> };
   try {
     prepared = await gateway.prepare({

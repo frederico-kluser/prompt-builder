@@ -1,16 +1,16 @@
 import { promises as fs } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 import { normalizeRunRecord } from './normalize.js';
 import {
   assertValidRecordId,
   chmodPrivate,
-  ensurePrivateDir,
+  ensurePrivateSubtree,
   isValidRecordId,
   PRIVATE_DIR_MODE,
-  PRIVATE_FILE_MODE,
   readFileInside,
   resolveInside,
+  writePrivateFileAtomic,
 } from './pathSafety.js';
 import type { RunMode, RunRecord, SessionRecord } from './types.js';
 
@@ -44,28 +44,77 @@ function sessionsDir(): string {
 // ---------------------------------------------------------------------------
 // Permissões (IMPL-024): diretórios 0700, arquivos 0600
 // ---------------------------------------------------------------------------
-// Runs e sessões carregam prompts, respostas e custos; no CLI moram em
-// ~/.prompt-builder, ao lado da key. `mkdir({mode})` só vale na criação, então
-// o chmod é EXPLÍCITO (corrige instalações antigas, criadas 0755).
+// Runs, sessões, biblioteca, artefatos de agente e cache carregam prompts,
+// respostas, diffs e custos; no CLI moram em ~/.prompt-builder, ao lado da key.
+// `mkdir({mode})` só vale na criação, então o chmod é EXPLÍCITO (corrige
+// instalações antigas, criadas 0755). TODO writer do data dir passa por
+// `ensurePrivateDataRoot`/`ensurePrivateDataDir` — não só os de runs/sessões.
 //
-// A RAIZ só recebe chmod quando tem o nome dedicado do default do CLI
-// (`~/.prompt-builder` ou `$XDG_STATE_HOME/prompt-builder`) — um `--data-dir .`
-// não pode mudar a permissão do projeto do usuário. Raiz nova nasce 0700 de
-// qualquer forma (mkdir com mode); os subdiretórios nossos sempre são 0700.
+// A RAIZ recebe chmod quando é NOVA (criada agora) ou quando é uma raiz
+// DEDICADA: o default resolvido do CLI (`~/.prompt-builder`,
+// `$XDG_STATE_HOME/prompt-builder`) ou `$PROMPT_BUILDER_HOME`. Nunca pelo nome:
+// um `--data-dir` apontando para um projeto que por acaso se chama
+// `prompt-builder` não pode ter a permissão trocada. Os subdiretórios nossos
+// sempre são 0700 — é o que protege o conteúdo quando a raiz é compartilhada
+// (`./data` do servidor, `--data-dir /srv/x`).
 
-function isDedicatedRoot(dir: string): boolean {
-  const nome = path.basename(dir);
-  return nome === '.prompt-builder' || nome === 'prompt-builder';
+/** Raízes que são do prompt-builder por definição (comparadas já resolvidas). */
+export function dedicatedDataRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const raizes = [path.join(os.homedir(), '.prompt-builder')];
+  if (env.XDG_STATE_HOME) raizes.push(path.join(env.XDG_STATE_HOME, 'prompt-builder'));
+  if (env.PROMPT_BUILDER_HOME) raizes.push(env.PROMPT_BUILDER_HOME);
+  return raizes.map((r) => path.resolve(r));
 }
 
-async function ensurePrivateRoot(): Promise<void> {
-  await fs.mkdir(baseDir, { recursive: true, mode: PRIVATE_DIR_MODE });
-  if (isDedicatedRoot(baseDir)) await chmodPrivate(baseDir, PRIVATE_DIR_MODE);
+function isDedicatedRoot(dir: string): boolean {
+  const abs = path.resolve(dir);
+  // Trava de sanidade: nunca a raiz do FS, a home ou um ANCESTRAL dela
+  // (`PROMPT_BUILDER_HOME=~` não pode virar chmod 0700 na home inteira).
+  if (abs === path.parse(abs).root) return false;
+  const relHome = path.relative(abs, path.resolve(os.homedir()));
+  if (relHome === '' || (!relHome.startsWith('..') && !path.isAbsolute(relHome))) return false;
+  return dedicatedDataRoots().includes(abs);
+}
+
+/**
+ * Garante a raiz do data dir (mkdir 0700) e, se ela for nova ou dedicada,
+ * chmod 0700 explícito. Devolve a raiz. Chame antes de gravar QUALQUER coisa
+ * no data dir.
+ */
+export async function ensurePrivateDataRoot(): Promise<string> {
+  const root = baseDir;
+  // `mkdir` recursivo devolve o 1º diretório que CRIOU (undefined se já existia)
+  const criada = await fs.mkdir(root, { recursive: true, mode: PRIVATE_DIR_MODE });
+  if (criada !== undefined || isDedicatedRoot(root)) await chmodPrivate(root, PRIVATE_DIR_MODE);
+  return root;
+}
+
+/**
+ * Diretório `dir` (absoluto, ESTRITAMENTE dentro do data dir) pronto para
+ * gravar: raiz garantida + cada nível entre a raiz e `dir` em 0700 com chmod
+ * explícito. Devolve `dir`.
+ */
+export async function ensurePrivateDataDir(dir: string): Promise<string> {
+  const root = await ensurePrivateDataRoot();
+  await ensurePrivateSubtree(root, dir);
+  return dir;
+}
+
+/**
+ * Grava um arquivo DO data dir (key, registro, item da biblioteca…): pais 0700
+ * com chmod explícito e o arquivo via tmp 0600 + rename (`writePrivateFileAtomic`
+ * — o conteúdo novo nunca passa por um inode antigo 0644). `target` tem de
+ * estar dentro do data dir.
+ */
+export async function writePrivateDataFile(target: string, data: string | Buffer): Promise<void> {
+  const dir = path.dirname(path.resolve(target));
+  if (dir === path.resolve(baseDir)) await ensurePrivateDataRoot();
+  else await ensurePrivateDataDir(dir);
+  await writePrivateFileAtomic(target, data);
 }
 
 async function ensureDir(): Promise<void> {
-  await ensurePrivateRoot();
-  await ensurePrivateDir(runsDir());
+  await ensurePrivateDataDir(runsDir());
 }
 
 /**
@@ -77,21 +126,8 @@ function fileFor(runId: string): string {
   return resolveInside(runsDir(), `${runId}.json`);
 }
 
-async function writeAtomic(target: string, data: string): Promise<void> {
-  // tmp UNICO por escrita: duas escritas concorrentes nao podem mais
-  // brigar pelo mesmo "<id>.json.tmp" (era a causa do ENOENT no rename,
-  // que derrubava a run inteira quando varios competidores terminavam juntos).
-  const tmp = `${target}.${randomUUID()}.tmp`;
-  try {
-    // tmp é SEMPRE novo (UUID), então o mode vale; o rename leva o 0600 para o
-    // alvo — um record antigo 0644 é corrigido na próxima gravação.
-    await fs.writeFile(tmp, data, { encoding: 'utf-8', mode: PRIVATE_FILE_MODE });
-    await fs.rename(tmp, target);
-  } catch (err) {
-    await fs.rm(tmp, { force: true }).catch(() => undefined);
-    throw err;
-  }
-}
+// tmp único (0600 desde a criação) + rename — ver `writePrivateFileAtomic`.
+const writeAtomic = writePrivateFileAtomic;
 
 // Serializa as escritas POR run. saveRun e chamado em paralelo (cada
 // competidor salva ao terminar); sem fila as gravacoes se atropelam.
@@ -214,8 +250,7 @@ export async function markOrphansAsAborted(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function ensureSessionsDir(): Promise<void> {
-  await ensurePrivateRoot();
-  await ensurePrivateDir(sessionsDir());
+  await ensurePrivateDataDir(sessionsDir());
 }
 
 function sessionFileFor(id: string): string {

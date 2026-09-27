@@ -4,7 +4,7 @@
 import { promises as fs, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { listRuns, loadRun, listSessions, loadSession, getDataDir } from '../../storage.js';
+import { ensurePrivateDataDir, listRuns, loadRun, listSessions, loadSession, getDataDir, writePrivateDataFile } from '../../storage.js';
 import { isValidRecordId } from '../../pathSafety.js';
 import { listTechniques } from '../../techniques.js';
 import { getLgpdData } from '../../lgpd.js';
@@ -161,7 +161,13 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   // IMPL-024: id fora do formato nem chega ao disco (e não é ecoado).
   if (!isValidRecordId(id)) throw new CliError('Id de run inválido: use o id listado em `prompt-builder runs list`.', EXIT.USAGE);
   const record = await loadRun(id);
-  if (!record) throw new CliError(`Run "${id}" não encontrada em ${getDataDir()}.`, EXIT.USAGE);
+  // IMPL-024: sem caminho absoluto do data dir no erro (o id já passou pela regex)
+  if (!record) {
+    throw new CliError(
+      `Run "${id}" não encontrada no diretório de dados (confira \`prompt-builder runs list\` e --data-dir).`,
+      EXIT.USAGE,
+    );
+  }
 
   if (sub === 'reproduce') {
     // Reprodutibilidade: o config equivalente ao da run salva + o comando EXATO
@@ -592,8 +598,13 @@ export async function cmdRegistry(argv: string[]): Promise<number> {
       // O registro é versionado junto com o código — nunca sobrescrever em silêncio.
       throw new CliError(`"${alvo}" já existe — não vou sobrescrever um registro.`, EXIT.CONFIG);
     }
-    await fs.mkdir(path.dirname(alvo), { recursive: true });
-    await fs.writeFile(alvo, exampleRegistryJson(), 'utf-8');
+    if (alvo === path.join(getDataDir(), 'prompt-registry.json')) {
+      // IMPL-024: no data dir, raiz 0700 e arquivo 0600 como todo o resto
+      await writePrivateDataFile(alvo, exampleRegistryJson());
+    } else {
+      await fs.mkdir(path.dirname(alvo), { recursive: true });
+      await fs.writeFile(alvo, exampleRegistryJson(), 'utf-8');
+    }
     out.info(`registro-exemplo gravado em ${alvo}`);
     out.result(true, 'registry.init', { file: alvo });
     return EXIT.OK;
@@ -672,7 +683,9 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
   };
 
   try {
-    await fs.mkdir(path.join(getDataDir(), 'cache'), { recursive: true });
+    // IMPL-024: raiz + cache/ em 0700 (o doctor não pode ser o único writer
+    // que deixa o data dir 0755)
+    await ensurePrivateDataDir(path.join(getDataDir(), 'cache'));
     checks.dataDirWritable = true;
   } catch (err) {
     checks.dataDirWritable = false;
