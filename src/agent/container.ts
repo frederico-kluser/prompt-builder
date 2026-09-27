@@ -60,9 +60,12 @@ export const CONTAINER_MEM_LIMIT = '2g';
 /** Limite de processos do container (SPIKE: `--pids-limit 512`). */
 export const CONTAINER_PIDS_LIMIT = 512;
 /**
- * Teto de CPUs por container (`--cpus`). Encaixado em `availableParallelism()`:
- * o daemon RECUSA `--cpus` acima do número de CPUs do host ("range of CPUs is
- * from 0.01 to N"), e um run em máquina de 1 vCPU não pode quebrar por isso.
+ * Teto de CPUs por container (`--cpus`). Encaixado no `NCPU` do DAEMON
+ * (`dockerDaemonCpus`/`sandboxProfile`), não no do processo cliente: o daemon
+ * RECUSA `--cpus` acima das CPUs DELE ("range of CPUs is from 0.01 to N") — e com
+ * `DOCKER_HOST` remoto ou a VM do Docker Desktop (1 vCPU num Mac de 8 núcleos) o
+ * cliente vê mais CPUs do que o daemon tem. `availableParallelism()` só é o
+ * fallback quando o daemon não responde (aí o `docker run` falharia de todo jeito).
  */
 export const CONTAINER_CPUS = 2;
 /**
@@ -335,12 +338,22 @@ export async function assertDockerRuntime(runtime: string): Promise<void> {
  *   conteúdo") nem puxada em silêncio: erro acionável pedindo o `docker pull`.
  * - Builda com Dockerfile embutido num contexto tmp LIMPO, env de build =
  *   `process.env` (o npm precisa de rede), log em `<runDir>/docker-build.log`.
- * - Ao fim valida com `pi --version` rodando JÁ no perfil endurecido (prova que
- *   o pi sobe com rootfs read-only, sem capabilities e sem rede).
+ * - Ao fim valida com `pi --version` rodando JÁ no perfil endurecido e no
+ *   runtime da run (`opts.runtime`) — prova que o pi sobe com rootfs read-only,
+ *   sem capabilities e sem rede NO sandbox que a run vai usar.
  */
 export async function ensurePiImage(
   version: string,
-  opts: { image?: string; runDir?: string } = {},
+  opts: {
+    image?: string;
+    runDir?: string;
+    /**
+     * Runtime OCI da run (`isolation.runtime`, ex.: `runsc`). A validação da
+     * imagem recém-buildada roda NELE: provar que o pi sobe em runc não prova
+     * que sobe no gVisor — sem isto só o 1º `docker run` real descobriria.
+     */
+    runtime?: string;
+  } = {},
 ): Promise<PinnedImage> {
   const tag = opts.image ?? defaultPiImageTag(version);
 
@@ -393,12 +406,11 @@ export async function ensurePiImage(
     throw new Error(`docker build de ${tag} terminou mas a imagem não aparece no daemon (inspect sem Id sha256).`);
   }
 
-  // Valida a imagem recém-buildada: `pi --version` no perfil ENDURECIDO, pelo digest.
+  // Valida a imagem recém-buildada: `pi --version` no perfil ENDURECIDO, pelo
+  // digest, no MESMO runtime e com o `--cpus` que o daemon aceita (o da run).
+  const profile = await sandboxProfile({ runtime: opts.runtime });
   const verify = await runDocker(
-    [
-      'docker',
-      ...buildSandboxRunArgv({ image: pinned.digest, profile: hardeningProfile(), command: ['pi', '--version'] }),
-    ],
+    ['docker', ...buildSandboxRunArgv({ image: pinned.digest, profile, command: ['pi', '--version'] })],
     { env: dockerCliEnv(), timeoutMs: VERIFY_TIMEOUT_MS },
   );
   if (verify.code !== 0) {
@@ -499,7 +511,11 @@ export interface HardeningOpts {
   runtime?: string;
   /** Env de onde ler a válvula `UNSAFE_NETWORK_ENV` (default `process.env`). */
   env?: Record<string, string | undefined>;
-  /** CPUs do host (default `availableParallelism()`). */
+  /**
+   * CPUs do DAEMON Docker (teto do `--cpus`). Default `availableParallelism()`
+   * do processo — só serve quando cliente e daemon são a mesma máquina; para um
+   * `docker run` real use `sandboxProfile()`, que pergunta ao daemon.
+   */
   hostCpus?: number;
 }
 
@@ -567,6 +583,51 @@ export function hardeningProfile(opts: HardeningOpts = {}): HardeningProfile {
     pull: 'never',
     unsafe,
   };
+}
+
+/** Interpreta `docker info --format '{{.NCPU}}'`. Pura. `undefined` = saída inválida. */
+export function parseDockerNcpu(stdout: string): number | undefined {
+  const t = stdout.trim();
+  if (!/^\d+$/.test(t)) return undefined;
+  const n = Number(t);
+  return n > 0 ? n : undefined;
+}
+
+/** NCPU por daemon (chave = `DOCKER_HOST`). Só sucesso é memorizado. */
+const daemonCpusCache = new Map<string, number>();
+
+/**
+ * Quantas CPUs o DAEMON Docker tem (`docker info` → `.NCPU`) — o teto real do
+ * `--cpus`. Memorizado por `DOCKER_HOST` (1 `docker info` por processo);
+ * `undefined` quando o daemon não responde (o chamador cai no fallback local).
+ */
+export async function dockerDaemonCpus(): Promise<number | undefined> {
+  const key = process.env.DOCKER_HOST ?? '';
+  const hit = daemonCpusCache.get(key);
+  if (hit !== undefined) return hit;
+  let res: SimpleResult;
+  try {
+    res = await runDocker(['docker', 'info', '--format', '{{.NCPU}}'], {
+      env: dockerCliEnv(),
+      timeoutMs: INSPECT_TIMEOUT_MS,
+    });
+  } catch {
+    return undefined; // docker CLI ausente
+  }
+  const n = res.code === 0 ? parseDockerNcpu(res.stdout) : undefined;
+  if (n !== undefined) daemonCpusCache.set(key, n);
+  return n;
+}
+
+/**
+ * O perfil de um `docker run` REAL do sandbox: `hardeningProfile` com o `--cpus`
+ * encaixado nas CPUs do DAEMON (não do processo cliente). É o que todo `docker
+ * run` do modo agente usa — execução do pi, `selfTest`, validação da imagem e
+ * canário do doctor. `opts.hostCpus` explícito dispensa a pergunta ao daemon.
+ */
+export async function sandboxProfile(opts: HardeningOpts = {}): Promise<HardeningProfile> {
+  const hostCpus = opts.hostCpus ?? (await dockerDaemonCpus());
+  return hardeningProfile({ ...opts, ...(hostCpus !== undefined ? { hostCpus } : {}) });
 }
 
 /** As flags do `docker run` que materializam o perfil (ordem estável — o teste fixa). */
@@ -752,7 +813,13 @@ export function containerAuditRecord(opts: {
  * Dica acionável quando o agente não alcança o provedor dentro do sandbox.
  * Com `--network none` (default) e SEM o proxy de inferência local, o pi não tem
  * rota até o OpenRouter: sai com exit 0 e "Connection error." — a execução vira
- * erro de INFRA (nunca `nao`). `undefined` quando a rede não é a causa provável.
+ * erro de INFRA (`infraError`: sem veredito, fora do placar — nunca `nao`; ver
+ * `infraError.ts`). `undefined` quando a rede não é a causa provável.
+ *
+ * É também a ÚNICA fonte da pergunta "o agente alcança o provedor?": o pré-voo
+ * (`agents doctor --container`, o passo antes de `agents run`) FALHA com esta
+ * dica — avisa cedo, sem gastar, em vez de deixar a run descobrir execução a
+ * execução. O proxy de inferência (IMPL-037) muda a resposta AQUI.
  */
 export function sandboxNetworkHint(profile: Pick<HardeningProfile, 'network'>): string | undefined {
   if (profile.network !== 'none') return undefined;

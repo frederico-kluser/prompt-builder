@@ -235,6 +235,12 @@ export interface ExecutionRef {
   durationMs: number;
   /** Por que a execução terminou. */
   stopReason: AgentStopReason;
+  /**
+   * Mensagem do provedor quando a execução terminou por erro de INFRA
+   * (`stopReason: 'error'` sem culpa do agente) — a repetição fica sem veredito,
+   * salvo oráculo conclusivo (IMPL-036, `infraError.ts`). Ausente em records antigos.
+   */
+  infraError?: string;
   /** Linhas +/- e nº de arquivos, do diff seed..HEAD. */
   diffStat?: { files: number; added: number; removed: number };
   /** Resultado do oráculo, quando houve. */

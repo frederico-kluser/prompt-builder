@@ -69,13 +69,26 @@ export interface AgentRunOutcome {
   usage: { tokensIn: number; tokensOut: number; costUsd: number };
   /** A trajetória NORMALIZADA (formato canônico, independente do executor). */
   trajectory: AgentTrajectory;
+  /**
+   * Presente quando a execução terminou por falha de INFRAESTRUTURA — o
+   * provedor/rede falhou na última chamada ao modelo (retentativas do executor
+   * esgotadas) — e não por decisão do agente. Vem com `stopReason: 'error'`, mas
+   * NÃO é o "processo morreu" do §18.3: quem julga deixa a execução SEM veredito
+   * (fora do placar, nunca `nao`), salvo oráculo conclusivo — ver `infraError.ts`.
+   * O texto é a mensagem do provedor (ex.: "Connection error.").
+   */
+  infraError?: string;
 }
 
 /** Configuração do auto-teste de sala limpa (`agents doctor --deep`). */
 export interface SelfTestOpts {
   /** Binário preparado. */
   bin: string;
-  /** env limpo a testar (o mesmo que a execução usaria). */
+  /**
+   * env limpo a testar (o mesmo que a execução usaria). No modo container,
+   * `PI_CONTAINER_IMAGE` (digest) e `PI_CONTAINER_RUNTIME` (runtime OCI opt-in)
+   * estampados pelo `prepare()` definem o sandbox que o auto-teste sobe.
+   */
   env: Record<string, string>;
   /** Diretório do run (pi-home/ vazio etc.). */
   runDir: string;

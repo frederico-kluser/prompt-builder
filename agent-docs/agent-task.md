@@ -140,14 +140,21 @@ repetição:
 - **Timeout/cancelamento:** mata o container **por nome** → `docker kill <nome>` +
   `docker rm -f <nome>` (fire-and-forget, idempotente). Nenhum órfão no host.
 - **Rede:** `--network none` por default — o agente **não** tem rota para fora. Até o
-  proxy de inferência local existir, o `pi` não alcança o OpenRouter nesse modo: a
-  execução termina como **erro de infraestrutura** (`stopReason: "error"`, fora do
-  placar — nunca `nao`) com a dica no `stderr.log`. Válvula **do operador** (variável de
+  proxy de inferência local existir, o `pi` não alcança o OpenRouter nesse modo, e o
+  `agents doctor --container` **falha (exit `3`)** dizendo isso — rode-o antes da run.
+  Se a run seguir mesmo assim, cada execução termina como **erro de infraestrutura**:
+  `stopReason: "error"` com `execution.infraError` (a mensagem do provedor) e a dica no
+  `stderr.log` — a repetição fica **sem veredito, fora do placar e das médias; nunca
+  `nao`** (a falha é da rede, não do agente). Válvula **do operador** (variável de
   ambiente, nunca campo do arquivo): `PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK=bridge`
-  devolve a rede padrão — a key fica ao alcance do agente; o uso é avisado no stderr e
-  registrado em `hardening.unsafe` do `argv.json`.
+  devolve a rede padrão — a key fica ao alcance do agente; o uso é avisado no stderr,
+  no `agents doctor` e registrado em `hardening.unsafe` do `argv.json`.
+- **`--cpus`** é encaixado nas CPUs do **daemon** (`docker info` → `NCPU`), não nas da
+  máquina que roda o CLI — `DOCKER_HOST` remoto e a VM do Docker Desktop têm menos.
 - **Pré-requisito:** Docker **CLI** no PATH **e** daemon acessível (sem sudo). Confira
-  com `agents doctor --container` (mostra a tag → digest que a run usaria).
+  com `agents doctor --container --config x.json` (mostra a tag → digest que a run
+  usaria; com `--config`, mede a `image`/`runtime` do arquivo — sem ele, a imagem
+  default em runc).
 
 **Nota de escopo (TODO de fase futura):** hoje só a **execução** do agente é isolada
 pelo container. `setup[]` e `verify[]` (oráculo) rodam no HOST. Isolar esses também via

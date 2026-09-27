@@ -32,7 +32,8 @@ O contrato completo da configuração está na próxima doc: `docs agent-task`.
 
 ```bash
 # 1. PROVE a sala limpa antes de qualquer coisa (canários, versão pinada, git, disco).
-#    Em modo container, use `--container` (vê se o Docker CLI/imagem existem — exit 3 se faltarem).
+#    Em modo container, use `--container --config x.json` (Docker CLI, imagem/runtime da run e
+#    rota até o provedor — exit 3 se faltarem; com --network none sem proxy, falha).
 prompt-builder agents doctor          # --deep roda o auto-teste de sala limpa
 
 # 2. Rode. --config declara a arena; --budget é o teto da run inteira.
@@ -63,6 +64,14 @@ O teto é imposto **matando** a execução (`SIGTERM` → graça → `SIGKILL`) 
 cobrada. Configurar `maxCostUsd: 0.05` e ver `0.061` **é o teto funcionando**.
 
 ## `stopReason` — por que a execução terminou (e o que isso significa)
+
+**Erro de infraestrutura não é `error` do agente.** Quando a execução termina porque o
+**provedor/rede** falhou na última chamada ao modelo (retentativas esgotadas — ex.:
+container com `--network none` sem proxy, `Connection error.`), o `stopReason` é `error`,
+mas a execução leva `infraError` e a repetição fica **sem veredito — fora do placar e das
+médias, nunca `nao`**. Exceção: oráculo conclusivo (passou 100% ou violou
+`forbiddenPaths`) decide como numa execução concluída. O `error` → `nao` da tabela é o
+processo que **morreu** sem erro do provedor.
 
 | `stopReason` | O que acontece | Efeito na nota |
 |---|---|---|

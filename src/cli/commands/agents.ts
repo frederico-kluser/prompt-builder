@@ -1,7 +1,7 @@
 // `agents` — a superfície CLI do MODO AGENTE (Agent Arena, plano §22).
 //
 // Subcomandos:
-//   doctor   [--deep] [--container] [--json]   pré-voo do executor (pi) + canário de sala limpa
+//   doctor   [--deep] [--container] [--config <arq>] [--json]   pré-voo do executor (pi) + canário de sala limpa
 //   run      --config <arq> --budget .. roda a arena até o fim (+ --dry-run)
 //   show     <runId> [--json]           record (loadRun) + execução via store
 //   list     [--json]                   varre <dataDir>/agent-runs/<runId>
@@ -23,7 +23,8 @@ import { prepareOptsFor } from '../../prepareRun.js';
 import { parseArenaAgentConfig } from '../../configFile.js';
 import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
-import { runPreflight } from '../../agent/doctor.js';
+import { runPreflight, type PreflightOpts } from '../../agent/doctor.js';
+import { defaultPiImageTag } from '../../agent/container.js';
 import {
   agentRunsRoot,
   execDir,
@@ -222,16 +223,41 @@ function resolveUnderAgentRuns(refDir: string): string {
 // doctor
 // ---------------------------------------------------------------------------
 
+/**
+ * O isolamento que o `agents doctor` verifica. Com `--config`, o sandbox DAQUELA
+ * run: `isolation.image`/`runtime` do arquivo (e a imagem default da
+ * `executorVersion` dele). Sem isso, o "ok" — inclusive o do canário, cacheado
+ * por imagem/runtime — seria de OUTRO sandbox (imagem default, runc) enquanto a
+ * run usaria outra imagem ou o gVisor. `--container` sozinho = imagem default.
+ */
+export function doctorIsolation(config: RunConfig | undefined, containerFlag: boolean): PreflightOpts['isolation'] {
+  const iso = config?.agent?.isolation;
+  if (config && (iso?.kind === 'container' || containerFlag)) {
+    return {
+      kind: 'container',
+      image: iso?.image ?? defaultPiImageTag(config.agent?.executorVersion ?? EXPECTED_PI_VERSION),
+      ...(iso?.runtime ? { runtime: iso.runtime } : {}),
+    };
+  }
+  return containerFlag ? { kind: 'container' } : undefined;
+}
+
 async function cmdDoctor(argv: string[]): Promise<number> {
   const parsed = parse(argv, {
     deep: { type: 'boolean' },
     model: { type: 'string' },
     container: { type: 'boolean' },
+    config: { type: 'string', short: 'c' },
   });
   const ctx = buildContext(parsed);
   const { out, values } = ctx;
   const deep = values.deep === true;
-  const containerMode = values.container === true;
+
+  const isolation = doctorIsolation(
+    typeof values.config === 'string' ? await readAgentConfigFile(values.config) : undefined,
+    values.container === true,
+  );
+  const containerMode = isolation?.kind === 'container';
 
   // runDir temporário para o doctor (salary: cria doctor-proj/doctor-home).
   let runDir = '';
@@ -266,7 +292,7 @@ async function cmdDoctor(argv: string[]): Promise<number> {
     apiKey,
     model,
     cacheKey: deep ? `pi-v${EXPECTED_PI_VERSION}:${model}` : undefined,
-    isolation: containerMode ? { kind: 'container' } : undefined,
+    isolation,
   });
 
   if (!preflight.ok) {

@@ -3,8 +3,10 @@
 // Duas camadas:
 //   1. Puras (rodam em qualquer máquina): o perfil FIXO de flags do `docker run`,
 //      a recusa de imagem por tag, o `argv.json` com o digest sha256, a válvula de
-//      rede do operador, o rebaixamento de "erro do provedor" para erro de infra e
-//      o schema de `isolation.runtime`.
+//      rede do operador, o rebaixamento de "erro do provedor" para erro de infra
+//      (`infraError` → repetição SEM veredito, nunca `nao`), o schema de
+//      `isolation.runtime` e — com um `docker` FALSO no PATH — o `--cpus` pelas CPUs
+//      do DAEMON e o runtime chegando à validação da imagem e ao selfTest.
 //   2. Docker real (só quando o daemon responde E a imagem já está no daemon —
 //      NUNCA puxa nem builda): `docker inspect` de uma execução REAL do pi em modo
 //      container, `/proc/1/status` do processo do agente (o que o amicontained
@@ -15,7 +17,7 @@
 
 import { execFile, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -29,6 +31,7 @@ import {
   CONTAINER_WS_DIR,
   containerAuditRecord,
   containerUser,
+  dockerDaemonCpus,
   ENV_FILE_MASK,
   ENV_FILE_PREFIX,
   ensurePiImage,
@@ -36,14 +39,20 @@ import {
   hardeningProfile,
   HARDENING_PROFILE_VERSION,
   isDigestRef,
+  parseDockerNcpu,
   parseDockerRuntimes,
   parseImageInspect,
   resolveContainerNetwork,
   resolveImageDigest,
   sandboxNetworkHint,
+  sandboxProfile,
   UNSAFE_NETWORK_ENV,
 } from '../src/agent/container.js';
-import { runCleanRoomCanary } from '../src/agent/doctor.js';
+import { runCleanRoomCanary, runPreflight } from '../src/agent/doctor.js';
+import { runAgentStage, type RunAgentStageParams } from '../src/agent/runAgentStage.js';
+import { doctorIsolation } from '../src/cli/commands/agents.js';
+import { getDataDir, setDataDir } from '../src/storage.js';
+import type { RunConfig } from '../src/types.js';
 import type { AgentRunOpts, AgentRunOutcome } from '../src/agent/executor.js';
 import { piExecutor, piProviderError, type PiRunOptions, type PiRunOutcome } from '../src/agent/pi.js';
 import { parseArenaAgentConfig } from '../src/configFile.js';
@@ -309,12 +318,12 @@ function runOpts(over: Partial<AgentRunOpts> & { env: Record<string, string> }):
   } as AgentRunOpts;
 }
 
-/** Um "pi" falso (shell) que imprime `lines` como JSONL e sai 0. */
-function fakePi(lines: unknown[]): string {
+/** Um "pi" falso (shell) que imprime `lines` como JSONL e sai com `exitCode` (default 0). */
+function fakePi(lines: unknown[], exitCode = 0): string {
   const dir = mkTmp('pb036-fakepi-');
   const file = path.join(dir, 'pi');
   const body = lines.map((l) => `printf '%s\\n' '${JSON.stringify(l).replaceAll("'", "'\\''")}'`).join('\n');
-  writeFileSync(file, `#!/bin/sh\ncat >/dev/null\n${body}\nexit 0\n`, 'utf8');
+  writeFileSync(file, `#!/bin/sh\ncat >/dev/null\n${body}\nexit ${exitCode}\n`, 'utf8');
   chmodSync(file, 0o755);
   return file;
 }
@@ -334,11 +343,13 @@ describe('erro do provedor ≠ execução concluída', () => {
     expect(piProviderError(null)).toBeUndefined();
   });
 
-  it('pi que sai 0 com a última chamada em erro vira stopReason `error` (infra), com a mensagem no stderrTail', async () => {
+  it('pi que sai 0 com a última chamada em erro vira stopReason `error` + `infraError` (infra), com a mensagem no stderrTail', async () => {
     const bin = fakePi([{ type: 'turn_start' }, providerErrorEnd, { type: 'agent_settled' }]);
     const out = await runPi(runOpts({ bin, env: { PATH: '/usr/bin:/bin', PI_MODEL_ID: 'x/y', PI_TASK: 'oi' } }));
     expect(out.exitCode).toBe(0);
     expect(out.stopReason).toBe('error');
+    // O marcador é o que separa "a rede caiu" de "o processo morreu" (§18.3 → nao).
+    expect(out.infraError).toBe('Connection error.');
     expect(out.stderrTail).toContain('Connection error.');
   });
 
@@ -346,8 +357,59 @@ describe('erro do provedor ≠ execução concluída', () => {
     const bin = fakePi([providerErrorEnd, normalEnd, { type: 'agent_settled' }]);
     const out = await runPi(runOpts({ bin, env: { PATH: '/usr/bin:/bin', PI_MODEL_ID: 'x/y', PI_TASK: 'oi' } }));
     expect(out.stopReason).toBe('completed');
+    expect(out.infraError).toBeUndefined();
     // O header do tail não sai mais duplicado.
     expect(out.stderrTail?.match(/stderr \(/g)).toHaveLength(1);
+  });
+
+  it('processo que MORRE (exit≠0) sem erro do provedor: `error` SEM `infraError`; com erro do provedor: infra', async () => {
+    const env = { PATH: '/usr/bin:/bin', PI_MODEL_ID: 'x/y', PI_TASK: 'oi' };
+    const morreu = await runPi(runOpts({ bin: fakePi([{ type: 'turn_start' }, normalEnd], 1), env }));
+    expect(morreu.stopReason).toBe('error');
+    expect(morreu.infraError).toBeUndefined();
+    const caiu = await runPi(runOpts({ bin: fakePi([{ type: 'turn_start' }, providerErrorEnd], 1), env }));
+    expect(caiu.stopReason).toBe('error');
+    expect(caiu.infraError).toBe('Connection error.');
+  });
+
+  it('ponta a ponta com o executor REAL: pi que não alcança o modelo → repetição SEM veredito (nunca nao)', async () => {
+    const bin = fakePi([{ type: 'turn_start' }, providerErrorEnd, { type: 'agent_settled' }]);
+    const dataDir = mkTmp('pb036-stage-');
+    const anterior = getDataDir();
+    setDataDir(dataDir);
+    try {
+      const params: RunAgentStageParams = {
+        runId: 'run-036',
+        stageIndex: 0,
+        contestant: { id: 'ag', label: 'ag', modelId: 'x/y', runner: 'agent' },
+        stage: {
+          question: 'crie done.txt',
+          productContext: 'repo vazio',
+          maxTokens: 100,
+          agentTask: { verify: [{ cmd: 'test -f done.txt', label: 'done' }] },
+        },
+        agentConfig: { executor: 'pi', executorVersion: '0.84.2', limits: { maxCostUsd: 0.05 } },
+        apiKey: 'sk-falsa',
+        ctx: {},
+        dataDir,
+        catalog: [],
+        judgeModelIds: [],
+        // Executor REAL (parser/rebaixamento do pi.ts) sobre o binário falso.
+        gateway: {
+          id: piExecutor.id,
+          prepare: async () => ({ bin, env: { PATH: '/usr/bin:/bin' } }),
+          run: (o, b) => runPi(o, b),
+        },
+      };
+      const res = await runAgentStage(params);
+      expect(res.repResults[0].stopReason).toBe('error');
+      expect(res.repResults[0].oracle?.score).toBe(0);
+      expect(res.repResults[0].verdict).toBeNull();
+      expect(res.repResults[0].execution.infraError).toBe('Connection error.');
+      expect(res.incomplete).toBe(true);
+    } finally {
+      setDataDir(anterior);
+    }
   });
 
   it('canário do doctor: modelo que não respondeu NÃO é "sala limpa"', async () => {
@@ -427,6 +489,237 @@ describe('schema de isolation.runtime', () => {
 });
 
 // ----------------------------------------------------------------------------
+// 5b. `docker` FALSO no PATH: `--cpus` pelas CPUs do DAEMON e runtime propagado
+// ----------------------------------------------------------------------------
+
+interface FakeDocker {
+  dir: string;
+  /** Cada chamada ao `docker` (args unidos por espaço), em ordem. */
+  calls(): string[];
+}
+
+/**
+ * Um `docker` falso (shell): registra cada chamada e simula o daemon — `info`
+ * (NCPU e runtimes), `image inspect` (ausente até o `build`), `build` e `run`
+ * (responde a versão do pi). O CLI do docker recebe só PATH/HOME/DOCKER_HOST
+ * (`dockerCliEnv`), então os caminhos vão EMBUTIDOS no script.
+ */
+function fakeDocker(opts: { ncpu: number; runtimes?: string[]; imagePresent?: boolean }): FakeDocker {
+  const dir = mkTmp('pb036-fakedocker-');
+  const log = path.join(dir, 'calls.log');
+  const built = path.join(dir, 'built');
+  if (opts.imagePresent) writeFileSync(built, '');
+  const inspect = JSON.stringify([{ Id: DIGEST, RepoDigests: [] }]);
+  const runtimes = JSON.stringify(Object.fromEntries((opts.runtimes ?? ['runc']).map((r) => [r, {}])));
+  const script = [
+    '#!/bin/sh',
+    `printf '%s\\n' "$*" >> '${log}'`,
+    'case "$1" in',
+    '  info)',
+    '    case "$*" in',
+    `      *NCPU*) echo ${opts.ncpu} ;;`,
+    `      *Runtimes*) echo '${runtimes}' ;;`,
+    '    esac ;;',
+    `  image) if [ -f '${built}' ]; then echo '${inspect}'; else echo 'Error: No such image' >&2; exit 1; fi ;;`,
+    `  build) : > '${built}' ;;`,
+    `  run) echo '${PI_VERSION_FAKE}' ;;`,
+    'esac',
+    'exit 0',
+    '',
+  ].join('\n');
+  writeFileSync(path.join(dir, 'docker'), script, { mode: 0o755 });
+  return {
+    dir,
+    calls: () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : []),
+  };
+}
+const PI_VERSION_FAKE = '0.84.2';
+
+/** Roda `fn` com o docker falso à frente no PATH e um DOCKER_HOST único (chave nova no memo de NCPU). */
+async function withFakeDocker<T>(fd: FakeDocker, fn: () => Promise<T>): Promise<T> {
+  const saved = { path: process.env.PATH, host: process.env.DOCKER_HOST };
+  process.env.PATH = `${fd.dir}:${saved.path ?? ''}`;
+  process.env.DOCKER_HOST = `unix://${fd.dir}/daemon-falso.sock`;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = saved.path;
+    if (saved.host === undefined) delete process.env.DOCKER_HOST;
+    else process.env.DOCKER_HOST = saved.host;
+  }
+}
+
+/** A chamada `docker run` registrada (a única que sobe container). */
+const runCalls = (fd: FakeDocker): string[] => fd.calls().filter((c) => c.startsWith('run '));
+
+describe('`--cpus` pelas CPUs do DAEMON (não do processo cliente)', () => {
+  it('parseDockerNcpu: inteiro positivo; lixo/zero = undefined', () => {
+    expect(parseDockerNcpu('8\n')).toBe(8);
+    expect(parseDockerNcpu(' 1 ')).toBe(1);
+    expect(parseDockerNcpu('0')).toBeUndefined();
+    expect(parseDockerNcpu('')).toBeUndefined();
+    expect(parseDockerNcpu('4.5')).toBeUndefined();
+    expect(parseDockerNcpu('Cannot connect to the Docker daemon')).toBeUndefined();
+  });
+
+  it('daemon de 1 vCPU (VM do Docker Desktop/DOCKER_HOST remoto): sandboxProfile encaixa `--cpus 1`, 1 `docker info` por daemon', async () => {
+    const fd = fakeDocker({ ncpu: 1 });
+    await withFakeDocker(fd, async () => {
+      expect(await dockerDaemonCpus()).toBe(1);
+      const p = await sandboxProfile({ uid: 1234, gid: 5678, env: {} });
+      expect(p.cpus).toBe(1);
+      // Sem a pergunta ao daemon, o cliente (esta máquina) diria outra coisa.
+      expect(hardeningProfile({ uid: 1234, gid: 5678, env: {} }).cpus).toBe(Math.min(2, availableParallelism()));
+      // Memorizado: a 2ª consulta não fala com o daemon de novo.
+      await sandboxProfile({ uid: 1234, gid: 5678, env: {} });
+      expect(fd.calls().filter((c) => c.startsWith('info ')).length).toBe(1);
+      // `hostCpus` explícito dispensa o daemon.
+      expect((await sandboxProfile({ uid: 1234, gid: 5678, env: {}, hostCpus: 16 })).cpus).toBe(2);
+    });
+  });
+
+  it('run() do pi em container grava no argv.json (e no argv) o `--cpus` do daemon', async () => {
+    const fd = fakeDocker({ ncpu: 1, imagePresent: true });
+    await withFakeDocker(fd, async () => {
+      const opts = runOpts({
+        bin: 'docker',
+        config: { executor: 'pi', executorVersion: '0.84.2', isolation: { kind: 'container' } },
+        env: { OPENROUTER_API_KEY: 'sk-falsa', PI_MODEL_ID: 'x/y', PI_TASK: 'oi', PI_CONTAINER_IMAGE: DIGEST },
+      });
+      await runPi(opts);
+      const audit = JSON.parse(readFileSync(path.join(opts.workDir, 'argv.json'), 'utf8'));
+      expect(audit.hardening.cpus).toBe(1);
+      expect(flagValues(audit.argv, '--cpus')).toEqual(['1']);
+      expect(runCalls(fd)[0]).toContain('--cpus 1');
+    });
+  });
+});
+
+describe('isolation.runtime chega a TODO `docker run` (validação da imagem e selfTest)', () => {
+  it('ensurePiImage: a validação de uma imagem recém-buildada roda no runtime da run', async () => {
+    const fd = fakeDocker({ ncpu: 4, runtimes: ['runc', 'runsc'] });
+    await withFakeDocker(fd, async () => {
+      const pinned = await ensurePiImage(PI_VERSION_FAKE, { image: 'pb-fake-impl036:1', runtime: 'runsc' });
+      expect(pinned.digest).toBe(DIGEST);
+      expect(fd.calls().some((c) => c.startsWith('build '))).toBe(true);
+      const [verify] = runCalls(fd);
+      expect(verify).toContain('--runtime runsc');
+      expect(verify).toContain('--cpus 2');
+      expect(verify).toContain(`${DIGEST} pi --version`);
+    });
+    // Sem runtime: runc do daemon, sem `--runtime`.
+    const semRuntime = fakeDocker({ ncpu: 4 });
+    await withFakeDocker(semRuntime, async () => {
+      await ensurePiImage(PI_VERSION_FAKE, { image: 'pb-fake-impl036:1' });
+      expect(runCalls(semRuntime)[0]).not.toContain('--runtime');
+    });
+  });
+
+  it('prepare() valida o runtime no daemon, builda/valida NELE e estampa PI_CONTAINER_RUNTIME para o selfTest', async () => {
+    const fd = fakeDocker({ ncpu: 1, runtimes: ['runc', 'runsc'] });
+    await withFakeDocker(fd, async () => {
+      const prep = await piExecutor.prepare({
+        install: 'system',
+        executorVersion: PI_VERSION_FAKE,
+        runDir: mkTmp('pb036-prep-'),
+        isolation: { kind: 'container', image: 'pb-fake-impl036:1', runtime: 'runsc' },
+      });
+      expect(prep.bin).toBe('docker');
+      expect(prep.env.PI_CONTAINER_IMAGE).toBe(DIGEST);
+      expect(prep.env.PI_CONTAINER_RUNTIME).toBe('runsc');
+      expect(fd.calls().some((c) => c.startsWith('info ') && c.includes('Runtimes'))).toBe(true);
+      const [verify] = runCalls(fd);
+      expect(verify).toContain('--runtime runsc');
+      expect(verify).toContain('--cpus 1');
+
+      // O selfTest recebe o env do prepare() e sobe o MESMO sandbox.
+      const report = await piExecutor.selfTest({ bin: prep.bin, env: prep.env, runDir: mkTmp('pb036-self-') });
+      expect(report.ok).toBe(true);
+      expect(flagValues(report.flagsUsed, '--runtime')).toEqual(['runsc']);
+      expect(flagValues(report.flagsUsed, '--cpus')).toEqual(['1']);
+      expect(runCalls(fd)[1]).toContain('--runtime runsc');
+    });
+  });
+
+  it('prepare() recusa runtime que o daemon não tem — antes de buildar', async () => {
+    const fd = fakeDocker({ ncpu: 4, runtimes: ['runc'] });
+    await withFakeDocker(fd, async () => {
+      await expect(
+        piExecutor.prepare({
+          install: 'system',
+          executorVersion: PI_VERSION_FAKE,
+          runDir: mkTmp('pb036-prep-'),
+          isolation: { kind: 'container', image: 'pb-fake-impl036:1', runtime: 'runsc' },
+        }),
+      ).rejects.toThrow(/não está registrado no daemon/);
+      expect(fd.calls().some((c) => c.startsWith('build '))).toBe(false);
+    });
+  });
+});
+
+// ----------------------------------------------------------------------------
+// 5c. doctor: rota até o provedor e o sandbox DAQUELA run (`--config`)
+// ----------------------------------------------------------------------------
+
+describe('agents doctor --container: falha CEDO quando o agente não alcança o provedor', () => {
+  it('rede `none` sem proxy de inferência: erro acionável, ok=false e o canário (que gastaria) nem roda', async () => {
+    const saved = process.env[UNSAFE_NETWORK_ENV];
+    delete process.env[UNSAFE_NETWORK_ENV];
+    try {
+      const r = await runPreflight({
+        expectedVersion: '0.84.2',
+        runDir: mkTmp('pb036-doctor-'),
+        apiKey: 'sk-falsa',
+        model: 'x/y',
+        isolation: { kind: 'container', image: 'pb-inexistente-impl036:0' },
+      });
+      expect(r.ok).toBe(false);
+      expect(r.errors.join(' ')).toMatch(/não alcança o provedor.*--network none/);
+      expect(r.errors.join(' ')).toContain(`${UNSAFE_NETWORK_ENV}=bridge`);
+      expect(r.canary).toBeUndefined();
+    } finally {
+      if (saved !== undefined) process.env[UNSAFE_NETWORK_ENV] = saved;
+    }
+  });
+
+  it('válvula `bridge` do operador: a rota existe (sem esse erro), mas o desvio aparece no pré-voo', async () => {
+    const saved = process.env[UNSAFE_NETWORK_ENV];
+    process.env[UNSAFE_NETWORK_ENV] = 'bridge';
+    try {
+      const r = await runPreflight({
+        expectedVersion: '0.84.2',
+        runDir: mkTmp('pb036-doctor-'),
+        isolation: { kind: 'container', image: 'pb-inexistente-impl036:0' },
+      });
+      const all = r.errors.join(' ');
+      expect(all).not.toMatch(/não alcança o provedor/);
+      expect(all).toMatch(/FORA do perfil endurecido.*network=bridge/);
+    } finally {
+      if (saved === undefined) delete process.env[UNSAFE_NETWORK_ENV];
+      else process.env[UNSAFE_NETWORK_ENV] = saved;
+    }
+  });
+
+  it('doctorIsolation: com --config, image/runtime/versão DAQUELA run chegam ao pré-voo (e à chave do canário)', () => {
+    const cfg = (isolation?: Record<string, unknown>) =>
+      ({ agent: { executor: 'pi', executorVersion: '0.90.0', ...(isolation ? { isolation } : {}) } }) as unknown as RunConfig;
+    expect(doctorIsolation(cfg({ kind: 'container', image: 'meu/pi@' + DIGEST, runtime: 'runsc' }), false)).toEqual({
+      kind: 'container',
+      image: 'meu/pi@' + DIGEST,
+      runtime: 'runsc',
+    });
+    // Sem image no arquivo: a imagem default da executorVersion DO ARQUIVO (a que a run builda).
+    expect(doctorIsolation(cfg({ kind: 'container' }), false)).toEqual({ kind: 'container', image: 'prompt-builder-pi:0.90.0' });
+    // Arquivo em worktree: sem --container, o doctor é o de host.
+    expect(doctorIsolation(cfg({ kind: 'worktree' }), false)).toBeUndefined();
+    expect(doctorIsolation(cfg(), true)).toEqual({ kind: 'container', image: 'prompt-builder-pi:0.90.0' });
+    // Sem --config: comportamento de antes.
+    expect(doctorIsolation(undefined, true)).toEqual({ kind: 'container' });
+    expect(doctorIsolation(undefined, false)).toBeUndefined();
+  });
+});
+
+// ----------------------------------------------------------------------------
 // 6. Docker real (opcional por ambiente — nunca puxa/builda imagem)
 // ----------------------------------------------------------------------------
 
@@ -441,6 +734,11 @@ const dockerReady =
   process.env.PB_SKIP_DOCKER_TESTS !== '1' &&
   spawnSync('docker', ['info', '--format', '{{.ServerVersion}}'], { encoding: 'utf8', timeout: 15_000 }).status === 0;
 const piImageId = dockerReady ? dockerImageId(PI_IMAGE) : null;
+/** NCPU do daemon real (a fonte do teto de `--cpus`). */
+function daemonNcpu(): number {
+  const r = spawnSync('docker', ['info', '--format', '{{.NCPU}}'], { encoding: 'utf8', timeout: 15_000 });
+  return Number(r.stdout.trim());
+}
 
 /** Campos de `/proc/<pid>/status` que o amicontained resume. */
 function procStatus(text: string): Record<string, string> {
@@ -587,6 +885,9 @@ describe.runIf(dockerReady && piImageId !== null)('Docker real: execução endur
         expect(audit.argv).toContain(piImageId);
         expect(audit.argv).not.toContain(PI_IMAGE);
         expect(audit.hardening).toMatchObject({ capDrop: ['ALL'], readOnlyRootfs: true, network: 'none', pidsLimit: 512 });
+        // `--cpus` encaixado nas CPUs do DAEMON (e é o que o container recebeu).
+        expect(audit.hardening.cpus).toBe(Math.min(2, daemonNcpu()));
+        expect(hc.NanoCpus).toBe(audit.hardening.cpus * 1e9);
         expect(JSON.stringify(audit)).not.toContain('FALSA');
 
         expect(out.stopReason).toBe('cancelled');
@@ -618,6 +919,82 @@ describe.runIf(dockerReady && piImageId !== null)('Docker real: execução endur
     const bad = await piExecutor.selfTest({ bin: 'docker', env: { PI_CONTAINER_IMAGE: PI_IMAGE }, runDir: mkTmp('pb036-self-') });
     expect(bad.ok).toBe(false);
   }, 60_000);
+
+  it('selfTest sobe o runtime estampado pelo prepare(): runtime ausente no daemon REPROVA (antes rodava em runc e passava)', async () => {
+    const report = await piExecutor.selfTest({
+      bin: 'docker',
+      env: { PI_CONTAINER_IMAGE: piImageId as string, PI_CONTAINER_RUNTIME: 'pb-runtime-inexistente-impl036' },
+      runDir: mkTmp('pb036-self-'),
+    });
+    expect(report.ok).toBe(false);
+    expect(flagValues(report.flagsUsed, '--runtime')).toEqual(['pb-runtime-inexistente-impl036']);
+  }, 60_000);
+
+  it('dockerDaemonCpus lê o NCPU do daemon real; o pré-voo recusa runtime que o daemon não tem', async () => {
+    expect(await dockerDaemonCpus()).toBe(daemonNcpu());
+    const r = await runPreflight({
+      expectedVersion: PI_VERSION,
+      runDir: mkTmp('pb036-doctor-'),
+      isolation: { kind: 'container', image: PI_IMAGE, runtime: 'pb-runtime-inexistente-impl036' },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(' ')).toMatch(/não está registrado no daemon/);
+  }, 60_000);
+
+  it(
+    'run REAL em container com --network none e SEM proxy: a repetição fica SEM veredito (fora do placar) — nunca nao',
+    async () => {
+      // O caso da revisão: o default endurecido sem o proxy de inferência
+      // (IMPL-037). O pi esgota as retentativas (~15 s) com "Connection error." e
+      // sai 0. Key FALSA: nada sai da máquina.
+      const saved = { key: process.env.OPENROUTER_API_KEY, net: process.env[UNSAFE_NETWORK_ENV] };
+      process.env.OPENROUTER_API_KEY = 'sk-or-v1-FALSA-impl-036';
+      delete process.env[UNSAFE_NETWORK_ENV];
+      const dataDir = mkTmp('pb036-stage-docker-');
+      const anterior = getDataDir();
+      setDataDir(dataDir);
+      try {
+        const res = await runAgentStage({
+          runId: 'run-036-docker',
+          stageIndex: 0,
+          contestant: { id: 'ag', label: 'ag', modelId: 'openai/gpt-4o-mini', runner: 'agent' },
+          stage: {
+            question: 'crie o arquivo done.txt',
+            productContext: 'repo vazio',
+            maxTokens: 100,
+            agentTask: { verify: [{ cmd: 'test -f done.txt', label: 'done' }] },
+          },
+          agentConfig: {
+            executor: 'pi',
+            executorVersion: PI_VERSION,
+            install: 'system',
+            isolation: { kind: 'container' },
+            limits: { maxCostUsd: 0.05, timeoutMs: 120_000 },
+          },
+          apiKey: 'sk-or-v1-FALSA-impl-036',
+          ctx: {},
+          dataDir,
+          catalog: [],
+          judgeModelIds: [],
+        });
+        const r0 = res.repResults[0];
+        expect(r0.stopReason).toBe('error');
+        expect(r0.execution.infraError).toMatch(/Connection error/);
+        expect(r0.oracle?.score).toBe(0);
+        expect(r0.verdict).toBeNull();
+        expect(res.incomplete).toBe(true);
+        // A causa e a dica acionável chegam a quem lê a resposta.
+        expect(res.response.status).toBe('error');
+        expect(res.response.errorMsg).toContain(UNSAFE_NETWORK_ENV);
+      } finally {
+        setDataDir(anterior);
+        if (saved.key === undefined) delete process.env.OPENROUTER_API_KEY;
+        else process.env.OPENROUTER_API_KEY = saved.key;
+        if (saved.net !== undefined) process.env[UNSAFE_NETWORK_ENV] = saved.net;
+      }
+    },
+    150_000,
+  );
 });
 
 // A métrica de startup (p50 < 2 s, endurecido < +10% vs padrão) não é teste

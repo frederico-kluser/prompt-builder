@@ -32,6 +32,7 @@ import { execDir, redactEnv, sha256Of, writeExecution } from './store.js';
 import { buildDossier } from './dossier.js';
 import { runOracle } from './oracle.js';
 import { aggregateAgentVerdict, judgeDossier } from './agentJudge.js';
+import { decideInfraError } from './infraError.js';
 import { isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
 import { blindRankMap, seedFromId } from '../duels.js';
@@ -352,6 +353,13 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
         (trajectory as unknown as { responseIds?: string[] }).responseIds = outcome.responseIds ?? [];
         const stopReason = outcome.stopReason;
         const durationMs = outcome.durationMs;
+        // Erro de INFRA (provedor/rede — IMPL-036): sem veredito, salvo oráculo
+        // conclusivo. Decidido AQUI, na fronteira do executor, ANTES da árvore:
+        // para ela, `stopReason: 'error'` é "processo morreu" e contaria `nao`.
+        const infra = decideInfraError(outcome.infraError, oracle);
+        // A execução "falhou" de verdade? Infra resgatada pelo oráculo NÃO: ela
+        // tem resultado verificável, fica `ok` e duela nas finais.
+        const execFailed = stopReason === 'error' && infra.kind !== 'oracle-decides';
 
         // 5) dossiê (full, cego) + writeExecution (§16).
         const dossier = buildDossier({
@@ -489,6 +497,7 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           toolCalls: outcome.toolCalls,
           durationMs,
           stopReason,
+          ...(outcome.infraError ? { infraError: outcome.infraError } : {}),
           diffStat: { files: collect.files, added: collect.added, removed: collect.removed },
           oracle: oracle
             ? {
@@ -504,17 +513,22 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
 
         // 6) VEREDITO da repetição (§17.1 / §18.3 / §15.2). Só o serve quem NÃO
         //    ficou incomplete e precisa de juiz LLM (graduação / sem oráculo).
-        const adjudication = await adjudicateRep({
-          stopReason,
-          oracle,
-          diffEmpty: collect.files === 0 && collect.added === 0 && collect.removed === 0,
-          stage,
-          dossierText: dossier.text,
-          contestantId: contestant.id,
-          judgeModelIds,
-          apiKey,
-          ctx,
-        });
+        const adjudication =
+          infra.kind === 'no-verdict'
+            ? { verdict: null, explanation: infra.explanation, judgeUsed: false }
+            : await adjudicateRep({
+                // Oráculo conclusivo após erro de infra: a árvore decide como numa
+                // execução concluída (o `stopReason` gravado continua 'error').
+                stopReason: infra.kind === 'oracle-decides' ? 'completed' : stopReason,
+                oracle,
+                diffEmpty: collect.files === 0 && collect.added === 0 && collect.removed === 0,
+                stage,
+                dossierText: dossier.text,
+                contestantId: contestant.id,
+                judgeModelIds,
+                apiKey,
+                ctx,
+              });
 
         repResults.push({
           repetition: rep,
@@ -526,7 +540,7 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           judgeUsed: adjudication.judgeUsed,
           costUsd: trajectory.usage.costUsd,
         });
-        anyError = anyError || stopReason === 'error';
+        anyError = anyError || execFailed;
 
         // 7) Ledger: UMA nota por rep (§20.3) — custo derivado, nunca 'unknown'.
         try {
@@ -567,8 +581,8 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
             tokensIn: trajectory.usage.tokensIn,
             tokensOut: trajectory.usage.tokensOut,
             costUsd: trajectory.usage.costUsd,
-            status: stopReason === 'error' ? 'error' : 'ok',
-            errorMsg: stopReason === 'error' ? (outcome.stderrTail ?? 'execução falhou') : undefined,
+            status: execFailed ? 'error' : 'ok',
+            errorMsg: execFailed ? (outcome.stderrTail ?? 'execução falhou') : undefined,
             execution,
           };
         }

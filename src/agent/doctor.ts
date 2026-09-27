@@ -22,6 +22,7 @@ import path from 'node:path';
 import type { CleanRoomReport } from './executor.js';
 import type { AgentStopReason } from './types.js';
 import {
+  assertDockerRuntime,
   buildSandboxRunArgv,
   defaultPiImageTag,
   CONTAINER_NAME_PREFIX,
@@ -32,6 +33,7 @@ import {
   resolveContainerNetwork,
   resolveImageDigest,
   sandboxNetworkHint,
+  sandboxProfile,
   writeEnvFile,
   killContainer,
   type HardeningProfile,
@@ -123,6 +125,8 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
   // Aqui só afirmamos que o CLI e a imagem existem, ou listamos o que falta em
   // `errors` para o CLI/endpoint ecoar de forma legível.
   let dockerFail = false;
+  /** Sandbox sem rota até o provedor (ou perfil recusado): nenhuma execução julgaria. */
+  let sandboxFail = false;
   let dockerInfo: PreflightResult['docker'];
   if (opts.isolation?.kind === 'container') {
     const dockerPresent = await detectDockerCli();
@@ -146,6 +150,32 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
           'em container (ou o smoke da Onda 2) para buildá-la.',
       );
     }
+    // Runtime opt-in (gVisor): o MESMO gate que a preparação da run aplica.
+    if (dockerPresent && opts.isolation.runtime) {
+      try {
+        await assertDockerRuntime(opts.isolation.runtime);
+      } catch (err) {
+        dockerFail = true;
+        errors.push((err as Error).message);
+      }
+    }
+    // Perfil endurecido + rota até o provedor (IMPL-036). Sem rede e sem o proxy
+    // de inferência local (IMPL-037), o agente NÃO alcança o modelo: toda
+    // execução terminaria em erro de infra, sem veredito. A sala não está pronta
+    // — falhar AQUI, antes de gastar, é o aviso cedo e acionável.
+    try {
+      const profile = hardeningProfile({ runtime: opts.isolation.runtime });
+      const hint = sandboxNetworkHint(profile);
+      if (hint) {
+        sandboxFail = true;
+        errors.push(`modo container: o agente não alcança o provedor — ${hint}`);
+      }
+      // Válvula do operador ligada: não falha, mas fica À VISTA no pré-voo.
+      for (const u of profile.unsafe) errors.push(`⚠️ sandbox FORA do perfil endurecido: ${u}`);
+    } catch (err) {
+      sandboxFail = true;
+      errors.push(`perfil endurecido do sandbox recusado: ${(err as Error).message}`);
+    }
   }
 
   // --- disco ---------------------------------------------------------------
@@ -158,10 +188,11 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
   }
 
   // --- canário de sala limpa (cacheado) -----------------------------------
-  // Só roda quando há chave de API — sem LLM, o canário não prova nada.
+  // Só roda quando há chave de API — sem LLM, o canário não prova nada. Com o
+  // sandbox sem rota até o provedor, também não: o modelo nunca responderia.
   let canary: CleanRoomReport | undefined;
   let canaryFail = false;
-  if (opts.apiKey) {
+  if (opts.apiKey && !sandboxFail) {
     canary = await cachedOrRunCanary(opts);
     if (!canary.ok) {
       canaryFail = true;
@@ -169,7 +200,7 @@ export async function runPreflight(opts: PreflightOpts): Promise<PreflightResult
     }
   }
 
-  const ok = !piFail && gitPresent && !canaryFail && !dockerFail;
+  const ok = !piFail && gitPresent && !canaryFail && !dockerFail && !sandboxFail;
   return {
     ok,
     pi,
@@ -363,7 +394,7 @@ export async function runCleanRoomCanary(opts: CleanRoomCoreOpts): Promise<Clean
     let profile: HardeningProfile;
     let imageDigest: string | undefined;
     try {
-      profile = hardeningProfile({ runtime: opts.runtime });
+      profile = await sandboxProfile({ runtime: opts.runtime });
       imageDigest = isDigestRef(containerImageRef)
         ? containerImageRef
         : (await resolveImageDigest(containerImageRef))?.digest;

@@ -55,10 +55,10 @@ import {
   dockerCliEnv,
   ensurePiImage,
   hardeningFlags,
-  hardeningProfile,
   isDigestRef,
   killContainer,
   sandboxNetworkHint,
+  sandboxProfile,
   writeEnvFile,
 } from './container.js';
 
@@ -153,7 +153,8 @@ interface ParsedRun {
  * nenhuma chamada ao modelo funcionou (medido: rede `none` → 4 tentativas com
  * "Connection error.", `auto_retry_end{success:false}`, exit 0). Sem este sinal a
  * execução viraria 'completed', o oráculo rodaria no workspace intocado e o
- * placar ganharia um `nao` que é erro de INFRA, não do agente.
+ * placar ganharia um `nao` que é erro de INFRA, não do agente. Com ele, o
+ * outcome sai com `infraError` e a repetição fica SEM veredito (`infraError.ts`).
  */
 export function piProviderError(rec: unknown): string | undefined {
   const r = (rec ?? {}) as Record<string, unknown>;
@@ -525,16 +526,22 @@ export const piExecutor: AgentExecutor = {
     if (isContainer) {
       // Runtime alternativo (gVisor = `runsc`, opção de alto risco) validado
       // ANTES de gastar: um nome ausente no daemon falharia só no 1º `docker run`.
-      if (opts.isolation?.runtime) await assertDockerRuntime(opts.isolation.runtime);
+      const runtime = opts.isolation?.runtime;
+      if (runtime) await assertDockerRuntime(runtime);
       // O perfil é montado de novo por execução; aqui só falha CEDO (antes de
       // buildar imagem) se ele for recusado — host root, válvula de rede inválida.
-      hardeningProfile({ runtime: opts.isolation?.runtime });
+      await sandboxProfile({ runtime });
+      // A validação de uma imagem recém-buildada roda no MESMO runtime da run.
       const pinned = await ensurePiImage(opts.executorVersion, {
         image: opts.isolation?.image,
         runDir: opts.runDir,
+        runtime,
       });
       env.PI_CONTAINER_IMAGE = pinned.digest;
       env.PI_CONTAINER_IMAGE_REF = pinned.ref;
+      // O `selfTest` recebe só o env (não a config): o runtime viaja nele para o
+      // auto-teste subir o MESMO sandbox da run. Nunca entra no env-file do agente.
+      if (runtime) env.PI_CONTAINER_RUNTIME = runtime;
       return { bin: 'docker', env };
     }
 
@@ -666,7 +673,7 @@ export const piExecutor: AgentExecutor = {
       }
       // Perfil fixo de endurecimento ANTES do env-file: se ele recusar (host
       // root, válvula de rede inválida), a key nem chega a tocar o disco.
-      const profile = hardeningProfile({ runtime: opts.config.isolation?.runtime });
+      const profile = await sandboxProfile({ runtime: opts.config.isolation?.runtime });
       if (profile.unsafe.length > 0) {
         // stderr (stdout do CLI é payload). Aviso POR EXECUÇÃO — é para incomodar.
         console.error(`[agent] ⚠️ sandbox FORA do perfil endurecido: ${profile.unsafe.join('; ')}`);
@@ -857,12 +864,16 @@ export const piExecutor: AgentExecutor = {
       stopReason = 'error';
     }
     // O pi sai com exit 0 mesmo quando a ÚLTIMA chamada ao modelo falhou (rede,
-    // 5xx, key inválida — retentativas esgotadas). Isso é erro de INFRA: sem
-    // este rebaixamento a execução seria 'completed' e o oráculo daria um `nao`
-    // ao agente por um workspace que ele nunca pôde tocar.
-    if (stopReason === 'completed' && parsed.providerError) {
-      stopReason = 'error';
-    }
+    // 5xx, key inválida — retentativas esgotadas). Isso é erro de INFRA, não
+    // decisão do agente: `stopReason` vira 'error' (o executor falhou) e o
+    // outcome leva `infraError` — sem o marcador, o `error` seria lido como
+    // "processo morreu" (§18.3 → `nao`) e o agente levaria a culpa pela rede. Um
+    // corte por limite/cancelamento que coincida com o erro mantém o motivo dele.
+    const infraError =
+      parsed.providerError && (stopReason === 'completed' || stopReason === 'error')
+        ? parsed.providerError
+        : undefined;
+    if (infraError) stopReason = 'error';
 
     const durationMs = Date.now() - startedAt;
     let stderrTail = stderrRing.tail(STDERR_TAIL_LINES, `stderr (${spawnResult.stderrBytes} bytes)`);
@@ -876,7 +887,7 @@ export const piExecutor: AgentExecutor = {
     // `sessionFile`: nome do arquivo do transcript deixado em sessionDir, se houver.
     const sessionFile = findSessionFile(sessionDir);
 
-    return makeOutcome(opts, parsed, { ...spawnResult, stopReason }, durationMs, stderrTail, sessionFile);
+    return makeOutcome(opts, parsed, { ...spawnResult, stopReason }, durationMs, stderrTail, sessionFile, infraError);
   },
 
   /**
@@ -901,7 +912,9 @@ export const piExecutor: AgentExecutor = {
             flagsUsed: [],
           };
         }
-        const profile = hardeningProfile();
+        // O MESMO sandbox da run: runtime estampado pelo prepare() e `--cpus`
+        // encaixado nas CPUs do daemon.
+        const profile = await sandboxProfile({ runtime: opts.env.PI_CONTAINER_RUNTIME });
         const r = await runSimple(
           ['docker', ...buildSandboxRunArgv({ image, profile, command: ['pi', '--version'] })],
           { env: dockerCliEnv() },
@@ -976,6 +989,7 @@ function makeOutcome(
   durationMs: number,
   stderrTail: string,
   sessionFile?: string,
+  infraError?: string,
 ): PiRunOutcome {
   const usage = {
     tokensIn: parsed.tokensIn,
@@ -1008,6 +1022,7 @@ function makeOutcome(
     durationMs,
     usage: { tokensIn: parsed.tokensIn, tokensOut: parsed.tokensOut, costUsd: parsed.costUsd },
     trajectory,
+    ...(infraError ? { infraError } : {}),
     // Fatos aditivos p/ o store/O doctor (fora do contrato `AgentRunOutcome`).
     parseErrors: parsed.parseErrors,
     responseIds: parsed.responseIds,

@@ -74,14 +74,25 @@ garanta acesso sem sudo. Confirme com `agents doctor --container`: o pré-voo ec
 do Docker (`· docker ok (prompt-builder-pi:<ver>)` ou `docker CLI AUSENTE` / `imagem ausente`)
 e **falha com exit `3`** quando o CLI/imagem faltam.
 
-## Modo container — execução em `error` com `Connection error.`
+## Modo container — execução em `error` com `Connection error.` / doctor: `o agente não alcança o provedor`
 
 O container roda com `--network none` (perfil endurecido): sem o proxy de inferência
-local, o `pi` não alcança o OpenRouter, esgota as retentativas e sai 0 — o prompt-builder
-marca a execução como **erro de infraestrutura** (`stopReason: "error"`, fora do placar) e
-põe no `stderr.log` a mensagem do provedor e a dica. Se você aceita o risco (a key fica ao
-alcance do agente), rode com `PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK=bridge` no ambiente
-do operador; o `argv.json` registra o desvio em `hardening.unsafe`.
+local, o `pi` não alcança o OpenRouter. O `agents doctor --container` já **falha com exit
+`3`** por isso (é o aviso cedo, sem gastar). Se a run seguir, o `pi` esgota as
+retentativas e sai 0 — o prompt-builder marca a execução como **erro de infraestrutura**
+(`stopReason: "error"` + `execution.infraError`) e põe no `stderr.log` a mensagem do
+provedor e a dica. A repetição fica **sem veredito — fora do placar e das médias, nunca
+`nao`** (exceto se o oráculo já for conclusivo: passou 100% ou violou `forbiddenPaths`).
+Um processo que **morre** sem erro do provedor continua `error` → `nao`. Se você aceita o
+risco (a key fica ao alcance do agente), rode com
+`PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK=bridge` no ambiente do operador; o doctor avisa e
+o `argv.json` registra o desvio em `hardening.unsafe`.
+
+## Modo container — `range of CPUs is from 0.01 to N`
+
+O `--cpus` do sandbox é encaixado no `NCPU` do **daemon** (`docker info`). Se o erro
+aparecer, o daemon não respondeu ao `docker info` no preparo (o fallback usa as CPUs da
+máquina do CLI) — confira `docker info --format '{{.NCPU}}'` com o mesmo `DOCKER_HOST`.
 
 ## Modo container — `não roda o agente como root`
 
