@@ -31,10 +31,11 @@ import type { PiRunOptions, PiRunOutcome } from './pi.js';
 import { createWorkspaceManager, type CollectResult } from './workspace.js';
 import { execDir, redactEnv, sha256Of, writeExecution } from './store.js';
 import { buildDossier } from './dossier.js';
-import { runOracle } from './oracle.js';
+import { captureSeedGuard, runOracle } from './oracle.js';
 import { aggregateAgentVerdict, judgeDossier, type AgentJudgeRubric } from './agentJudge.js';
 import {
   AGENT_VERDICT_TREE_VERSION,
+  classifyStop,
   decideRepVerdict,
   mergeOracleRecheck,
   recheckIndices,
@@ -437,6 +438,9 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         workspaceDir = ws.workspaceDir;
         seedCommit = ws.seedCommit;
         cacheRepoDir = ws.cacheRepoDir;
+        // SHA-256 dos protegidos NO SEED, antes do agente acordar (IMPL-039):
+        // pelo filesystem, não pelo git — pega arquivo ignorado e rename.
+        const seedGuard = await captureSeedGuard(workspaceDir, task);
 
         // 2) task.txt + system-prompt.txt no repetitionDir (§12.5).
         writeFileSync(path.join(repAbs, 'task.txt'), stage.question, 'utf8');
@@ -517,7 +521,7 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
 
         let oracle: AgentOracleResult | undefined;
         let oracleAttempts = 0;
-        if (task.verify?.length || task.forbiddenPaths?.length) {
+        if (task.verify?.length || task.forbiddenPaths?.length || task.rebuild) {
           const verify = task.verify ?? [];
           oracleAttempts = 1;
           oracle = await runOracle({
@@ -525,6 +529,10 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
             verify,
             forbiddenPaths: task.forbiddenPaths,
             diffFiles: collect.nameStatus,
+            seedSnapshot: seedGuard,
+            rebuild: task.rebuild,
+            detectors: task.detectors,
+            diff: collect.diff,
             onCheck: (c) =>
               emitEvent({
                 type: 'agent.verified',
@@ -580,7 +588,15 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         // Erro de INFRA (provedor/rede — IMPL-036): sem veredito, salvo oráculo
         // conclusivo. Decidido AQUI, na fronteira do executor, ANTES da árvore:
         // para ela, `stopReason: 'error'` é "processo morreu" e contaria `nao`.
-        const infra = decideInfraError(outcome.infraError, oracle);
+        // IMPL-039: rebuild de dependências que falhou (registry/rede fora,
+        // lockfile ausente…) também é INFRA: os checks não rodaram e o oráculo
+        // não disse nada sobre o agente — sem veredito, salvo violação (que é
+        // conclusiva). Cancelamento segue a árvore (controle).
+        const rebuildFalhou =
+          oracle?.rebuild && !oracle.rebuild.ok && classifyStop(outcome.stopReason) !== 'cancelled'
+            ? `rebuild de dependências falhou (\`${oracle.rebuild.cmd}\`, exit ${oracle.rebuild.exitCode}); checks não rodaram`
+            : undefined;
+        const infra = decideInfraError(outcome.infraError ?? rebuildFalhou, oracle);
         // A execução "falhou" de verdade? Infra resgatada pelo oráculo NÃO: ela
         // tem resultado verificável, fica `ok` e duela nas finais.
         const execFailed = stopReason === 'error' && infra.kind !== 'oracle-decides';
@@ -926,6 +942,24 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
 // oráculo + judgeError). Aqui só se CHAMA o juiz LLM nos caminhos que graduam.
 // ---------------------------------------------------------------------------
 
+/**
+ * Explicação de `nao` por violação, separando CAMINHO PROTEGIDO de ACHADO DOS
+ * DETECTORES (modo `fail`): "arquivos proibidos modificados: src/x.ts" para um
+ * `|| true` num arquivo de código enganava quem lê o veredito.
+ */
+function violationExplanation(oracle: AgentOracleResult): string {
+  const byDetector = new Set(oracle.detectorViolations ?? []);
+  const protectedPaths = oracle.violations.filter((p) => !byDetector.has(p));
+  const parts: string[] = [];
+  if (protectedPaths.length > 0) parts.push(`arquivos proibidos modificados: ${protectedPaths.join(', ')}`);
+  if (byDetector.size > 0) {
+    const kinds = (p: string): string =>
+      [...new Set((oracle.findings ?? []).filter((f) => f.path === p).map((f) => f.kind))].join('/') || 'suspeito';
+    parts.push(`atalho suspeito (detectores em modo fail): ${[...byDetector].map((p) => `${p} [${kinds(p)}]`).join(', ')}`);
+  }
+  return parts.join('; ');
+}
+
 async function adjudicateRep(opts: {
   stopReason: AgentStopReason;
   oracle?: AgentOracleResult;
@@ -938,7 +972,12 @@ async function adjudicateRep(opts: {
   ctx: RunCtx;
 }): Promise<SettledRepVerdict & { path: VerdictPath }> {
   const { stopReason, oracle, diffEmpty, stage, dossierText, contestantId, judgeModelIds, apiKey, ctx } = opts;
-  const d = decideRepVerdict({ stopReason, oracle, diffEmpty });
+  const d0 = decideRepVerdict({ stopReason, oracle, diffEmpty });
+  // IMPL-039: violação separa CAMINHO PROTEGIDO de ACHADO DOS DETECTORES.
+  const d =
+    d0.kind === 'final' && d0.path === 'oracle-violation' && oracle
+      ? { ...d0, explanation: violationExplanation(oracle) }
+      : d0;
 
   // Cancelamento (quem chama re-lança RunCancelled — §18.3; defensivo, o laço
   // já sobe o sinal antes daqui) e veredito final: sem juiz.

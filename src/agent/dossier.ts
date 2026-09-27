@@ -37,6 +37,7 @@
 // 2403.14720) leva o ASR de >50% a <2%; JudgeDeceiver passa de 90% sem defesa.
 // ----------------------------------------------------------------------------
 import { createHash } from 'node:crypto';
+import type { OracleNotRun } from './types.js';
 
 export interface DossierInput {
   header: {
@@ -59,7 +60,7 @@ export interface DossierInput {
       expected: number;
       tail: string;
       /** O check não terminou com exit normal (conta FALHOU) — motivo p/ o juiz. */
-      notRun?: 'spawn' | 'timeout' | 'signal';
+      notRun?: OracleNotRun;
     }[];
     score: number;
     violations: string[];
@@ -212,7 +213,7 @@ export interface DossierFacts {
       status: 'PASSOU' | 'FALHOU';
       exit: number;
       esperado: number;
-      naoTerminou?: 'spawn' | 'timeout' | 'signal';
+      naoTerminou?: OracleNotRun;
     }[];
     violacoes: number;
   };
@@ -566,10 +567,11 @@ function buildVerify(input: DossierInput, q: Quote): string {
     lines.push('(sem oráculo automático)');
     return lines.join('\n');
   }
-  const naoTerminou: Record<'spawn' | 'timeout' | 'signal', string> = {
+  const naoTerminou: Record<OracleNotRun, string> = {
     spawn: 'o comando nem começou (ausente ou sem permissão)',
     timeout: 'passou do tempo limite do check',
     signal: 'o processo foi morto por sinal',
+    rebuild: 'não rodou: o rebuild de dependências falhou',
   };
   for (const check of oracle.checks) {
     const status = check.ok ? 'PASSOU' : 'FALHOU';

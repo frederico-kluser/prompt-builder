@@ -173,8 +173,17 @@ export interface ArenaAgentTaskConfig {
   repo?: { kind: 'git'; url?: string; path?: string; ref: string; shallow?: boolean };
   setup?: { cmd: string; timeoutMs?: number }[];
   files?: { path: string; content: string }[];
-  verify?: { label?: string; cmd: string; expectExit?: number; timeoutMs?: number; weight?: number }[];
+  verify?: {
+    label?: string;
+    cmd: string;
+    expectExit?: number;
+    timeoutMs?: number;
+    weight?: number;
+    kind?: 'fail_to_pass' | 'pass_to_pass';
+  }[];
   forbiddenPaths?: string[];
+  rebuild?: { cmd?: string; lockfiles?: string[]; protect?: string[]; timeoutMs?: number };
+  detectors?: 'off' | 'warn' | 'fail';
   contextFiles?: boolean;
   limits?: ArenaAgentConfigLimits;
 }
@@ -753,6 +762,10 @@ const agentTaskSchema = z
               expectExit: z.number('deve ser número inteiro').int('deve ser número inteiro').optional(),
               timeoutMs: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
               weight: z.number('deve ser número').positive('deve ser maior que zero').optional(),
+              // IMPL-039: F2P (default) × P2P (regressão: quebrar = falha).
+              kind: z
+                .enum(['fail_to_pass', 'pass_to_pass'], 'kind deve ser "fail_to_pass" ou "pass_to_pass"')
+                .optional(),
             },
             'cada verify deve ser { cmd }',
           ),
@@ -760,6 +773,19 @@ const agentTaskSchema = z
         )
         .optional(),
       forbiddenPaths: z.array(z.string('caminho deve ser texto'), 'deve ser uma lista de caminhos').optional(),
+      // IMPL-039: rebuild de dependências do lockfile do seed antes do verify[].
+      rebuild: z
+        .object(
+          {
+            cmd: z.string('cmd deve ser texto').min(1, 'cmd não pode ser vazio').optional(),
+            lockfiles: z.array(z.string('caminho deve ser texto'), 'lockfiles deve ser uma lista').optional(),
+            protect: z.array(z.string('caminho deve ser texto'), 'protect deve ser uma lista').optional(),
+            timeoutMs: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
+          },
+          'rebuild deve ser um objeto',
+        )
+        .optional(),
+      detectors: z.enum(['off', 'warn', 'fail'], 'detectors deve ser "off", "warn" ou "fail"').optional(),
       contextFiles: z.boolean('contextFiles deve ser boolean').optional(),
       limits: agentLimitsSchema.optional(),
     },

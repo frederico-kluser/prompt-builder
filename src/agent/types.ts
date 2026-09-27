@@ -75,6 +75,12 @@ export interface AgentTaskSpec {
     weight?: number;
     /** Rótulo curto p/ o dossiê e o CSV ("testes unitários", "typecheck", "lint"). */
     label?: string;
+    /**
+     * IMPL-039 — papel do check. `fail_to_pass` (default) = o que a tarefa pede
+     * (falha no seed, tem de passar); `pass_to_pass` = REGRESSÃO (passava no seed
+     * e tem de continuar passando). Quebrar um P2P zera a nota: a execução FALHOU.
+     */
+    kind?: 'fail_to_pass' | 'pass_to_pass';
   }[];
 
   /**
@@ -82,9 +88,42 @@ export interface AgentTaskSpec {
    * sem gastar juiz. Existe porque a forma mais barata de "passar no teste" é
    * editar o teste — é o reward hacking clássico deste domínio, e ele precisa de
    * uma barreira determinística, não de um pedido educado no prompt.
-   * Globs simples (prefixo de caminho + `*`).
+   * Semântica GITIGNORE (IMPL-039, `guard.ts`): `*.test.ts` casa em qualquer
+   * nível, `/test/` ancora na raiz, `dir/` casa tudo dentro, `**`, `!` reinclui.
+   * Checado pelo diff (inclusive a ORIGEM de renames) E por SHA-256 do arquivo
+   * contra o seed no filesystem (pega arquivo ignorado pelo `.gitignore`).
    */
   forbiddenPaths?: string[];
+
+  /**
+   * IMPL-039 — rebuild de dependências ANTES do `verify[]`: os `lockfiles` voltam
+   * aos bytes do seed e `cmd` reconstrói (default `npm ci --ignore-scripts
+   * --no-audit --no-fund`). Com rebuild ligado,
+   * `lockfiles` e `protect` (default `node_modules/`) entram no hash de
+   * protegidos: dependência adulterada pelo agente é VIOLAÇÃO — e o rebuild a
+   * neutraliza para os checks rodarem contra dependências limpas. Falha do
+   * rebuild = oráculo inconclusivo, checks não rodam (nunca contra deps sujas)
+   * e a repetição fica SEM veredito (infra, nunca `nao`) — salvo violação.
+   * O default `npm ci --ignore-scripts` não roda `postinstall`/`prepare` do
+   * pacote raiz: um script de instalação plantado pelo agente adulteraria
+   * `node_modules` DEPOIS do snapshot pós.
+   */
+  rebuild?: {
+    cmd?: string;
+    /** Default `['package-lock.json']`. */
+    lockfiles?: string[];
+    /** Padrões (gitignore) do que o rebuild reconstrói. Default `['node_modules/']`. */
+    protect?: string[];
+    timeoutMs?: number;
+  };
+
+  /**
+   * IMPL-039 — detectores estáticos sobre o diff (skip/only/todo, xfail,
+   * exit(0)/`|| true`, teste apagado, config de runner editada). Heurística:
+   * `'warn'` (default) só registra em `oracle.json`; `'fail'` vira violação
+   * (veredito `nao` sem LLM); `'off'` desliga.
+   */
+  detectors?: 'off' | 'warn' | 'fail';
 
   /**
    * default false — ver o aviso em §12.2 do plano. `--no-context-files` (default)
@@ -435,24 +474,60 @@ export interface OracleResult {
     /** Últimas N linhas, guardadas inteiras em oracle.json. */
     tail: string;
     /**
-     * Por que o check NÃO terminou com exit normal (ausente = terminou). Nos
-     * três casos `ok` é false e o peso fica no denominador do `score`:
+     * Por que o check NÃO terminou com exit normal (ausente = terminou). Em
+     * todos os casos `ok` é false e o peso fica no denominador do `score`:
      * - `spawn`   — o comando nem começou (ausente, sem permissão): o único caso
      *               que pode ser defeito do AMBIENTE da tarefa; quem decide é a
      *               célula (`oracleCellDefect`, IMPL-033);
      * - `timeout` — passou do `timeoutMs` do check (código que pendura);
-     * - `signal`  — morto por sinal que não foi o nosso timeout (OOM, segfault).
-     * `timeout`/`signal` são desfecho do código sob teste: contam como check falho.
+     * - `signal`  — morto por sinal que não foi o nosso timeout (OOM, segfault);
+     * - `rebuild` — não rodou porque o rebuild de dependências falhou (IMPL-039:
+     *               infra — a rep fica sem veredito, ver runAgentStage).
+     * `timeout`/`signal` são desfecho do código sob teste: contam como check falho
+     * (num P2P, regressão — IMPL-039).
      */
     notRun?: OracleNotRun;
+    /** IMPL-039: papel do check (ausente = `fail_to_pass`). */
+    kind?: 'fail_to_pass' | 'pass_to_pass';
+    /** IMPL-039: não rodou por falha do rebuild de dependências. */
+    skipped?: boolean;
   }[];
   /** Soma ponderada dos ok / soma dos pesos, em [0,1]. */
   score: number;
-  /** Caminhos proibidos que foram modificados. Não-vazio ⇒ veredito 'nao'. */
+  /** Caminhos proibidos que foram modificados. Não-vazio ⇒ veredito 'nao' (e `score` 0). */
   violations: string[];
-  /** true = algum check não terminou com exit normal (ver `checks[].notRun`). */
+  /**
+   * true = algum check não terminou com exit normal (ver `checks[].notRun`) ou
+   * o hash dos protegidos foi truncado (IMPL-039).
+   */
   inconclusive: boolean;
+  // --- IMPL-039 (opcionais: `oracle.json` antigos não têm) ---------------------
+  /** Nota antes das penalidades (violação / P2P quebrado). */
+  rawScore?: number;
+  f2p?: { passed: number; total: number };
+  /**
+   * `broken` ⇒ regressão: a execução falhou (score 0) — inclui P2P que travou
+   * (timeout) ou morreu por sinal. `unverified` = P2P que não pôde ser aferido
+   * (spawn error/rebuild): com ele > 0 a nota cheia NÃO basta para `resolve`.
+   */
+  p2p?: { passed: number; total: number; broken: boolean; unverified?: number };
+  /** Mudanças nos arquivos protegidos por SHA-256 vs o seed (filesystem). */
+  protectedChanges?: { path: string; change: 'modified' | 'deleted' | 'added' | 'renamed'; to?: string }[];
+  /**
+   * true = o percurso dos protegidos bateu no teto de entradas (seed ou pós):
+   * o hash NÃO foi comparado (evita `added`/`deleted` fantasma pelo corte) e só
+   * o diff do git vigiou `forbiddenPaths`. O oráculo fica `inconclusive`.
+   */
+  guardTruncated?: boolean;
+  /** Violações que vieram SÓ dos detectores em modo `fail` (não de caminho protegido). */
+  detectorViolations?: string[];
+  /** Caches de ferramenta apagados antes do rebuild/checks (`__pycache__`, `node_modules/.vite`…). */
+  purged?: string[];
+  /** Achados dos detectores estáticos (`detectors`). */
+  findings?: { kind: 'skip' | 'xfail' | 'exit0' | 'test-deleted' | 'runner-config'; path: string; detail: string }[];
+  /** Rebuild de dependências rodado antes dos checks. */
+  rebuild?: { cmd: string; exitCode: number; ok: boolean; durationMs: number; tail: string; restored: string[] };
 }
 
-/** Motivo de um check do oráculo não ter terminado com exit normal. */
-export type OracleNotRun = 'spawn' | 'timeout' | 'signal';
+/** Motivo de um check do oráculo não ter terminado com exit normal (IMPL-033 + `rebuild` do IMPL-039). */
+export type OracleNotRun = 'spawn' | 'timeout' | 'signal' | 'rebuild';

@@ -64,6 +64,7 @@
 // ----------------------------------------------------------------------------
 import type { StageSpec, Verdict, VerdictError, VerdictSource } from '../types.js';
 import type { AgentStopReason, OracleNotRun, OracleResult } from './types.js';
+import { scoreChecks } from './checkScore.js';
 import type { AgentJudgeRubric } from './agentJudge.js';
 
 /**
@@ -175,7 +176,16 @@ export interface TreeInput {
    * precisa saber o motivo; a invalidação por defeito do ambiente é da célula
    * (`oracleCellDefect`, no orquestrador), não da rep.
    */
-  oracle?: { score: number; violations: string[] };
+  oracle?: {
+    score: number;
+    violations: string[];
+    /**
+     * IMPL-039: PASS_TO_PASS. `broken` já zerou o `score` (regressão = 'nao');
+     * `unverified > 0` = regressão NÃO aferida: a nota cheia não sustenta
+     * 'resolve' (teto 'parcial') nem salva um corte por limite.
+     */
+    p2p?: { broken: boolean; unverified?: number };
+  };
   /** true = diff seed..HEAD vazio (o agente não mudou nada). */
   diffEmpty: boolean;
 }
@@ -204,7 +214,9 @@ export function decideRepVerdict(input: TreeInput): TreeDecision {
   // 3) Corte por limite. Exceção ÚNICA: o oráculo passou inteiro, sem violação —
   //    o mundo mudou de forma verificável e o critério é o teste, não a
   //    despedida do agente. Qualquer outro corte é FALHA no denominador.
-  const oraclePassing = oracle !== undefined && oracle.violations.length === 0 && oracle.score === 1;
+  const p2pUnverified = (oracle?.p2p?.unverified ?? 0) > 0;
+  const oraclePassing =
+    oracle !== undefined && oracle.violations.length === 0 && oracle.score === 1 && !p2pUnverified;
   if (cls === 'limit' && !oraclePassing) {
     const detalhe = oracle
       ? oracle.violations.length > 0
@@ -232,6 +244,19 @@ export function decideRepVerdict(input: TreeInput): TreeDecision {
         explanation: `arquivos proibidos modificados: ${oracle.violations.join(', ')}`,
       };
     }
+    // 5') Score 1 com P2P NÃO aferido (IMPL-039): os F2P passaram, mas a
+    //     regressão ficou em aberto — o oráculo não sustenta 'resolve'. Mesma
+    //     faixa do oráculo parcial (candidato 'parcial', teto 'parcial').
+    if (oracle.score === 1 && p2pUnverified) {
+      return {
+        kind: 'judge',
+        path: 'oracle-partial',
+        candidate: 'parcial',
+        floor: 'nao',
+        ceiling: 'parcial',
+        explanation: 'F2P passaram, mas PASS_TO_PASS não pôde ser aferido — regressão não descartada',
+      };
+    }
     // 5) Score 1: 'resolve' do oráculo; o juiz só pode rebaixar a 'parcial'.
     if (oracle.score === 1) {
       return {
@@ -250,7 +275,9 @@ export function decideRepVerdict(input: TreeInput): TreeDecision {
         path: 'oracle-fail',
         verdict: 'nao',
         source: 'ground-truth',
-        explanation: 'verificação automática falhou integralmente (score 0)',
+        explanation: oracle.p2p?.broken
+          ? 'regressão: teste(s) PASS_TO_PASS quebrado(s) — a execução falhou (score 0)'
+          : 'verificação automática falhou integralmente (score 0)',
       };
     }
     // 7) Score ∈ (0,1): 'parcial' do oráculo; o juiz confirma ou cai a 'nao'.
@@ -442,15 +469,27 @@ export function mergeOracleRecheck(prev: OracleResult, indices: number[], rechec
   const checks = prev.checks.map((c) => ({ ...c }));
   indices.forEach((i, k) => {
     const novo = recheck.checks[k];
-    if (novo && checks[i]) checks[i] = { ...novo, label: checks[i].label, weight: checks[i].weight };
+    // O papel (F2P×P2P) é da TAREFA, não da re-verificação.
+    if (novo && checks[i]) checks[i] = { ...novo, label: checks[i].label, weight: checks[i].weight, ...(checks[i].kind ? { kind: checks[i].kind } : {}) };
   });
-  const sumWeight = checks.reduce((a, c) => a + c.weight, 0);
-  const sumOk = checks.reduce((a, c) => a + (c.ok ? c.weight : 0), 0);
+  // MESMA conta do oráculo (IMPL-039): F2P×P2P, P2P quebrado zera; violação zera.
+  const s = scoreChecks(
+    checks.map((c) => ({
+      ok: c.ok,
+      weight: c.weight,
+      ...(c.kind ? { kind: c.kind } : {}),
+      inconclusive: c.notRun !== undefined,
+      ...(c.notRun ? { reason: c.notRun } : {}),
+    })),
+  );
+  const temP2P = checks.some((c) => c.kind === 'pass_to_pass');
   return {
+    ...prev,
     checks,
-    score: sumWeight > 0 ? sumOk / sumWeight : 0,
+    score: prev.violations.length > 0 ? 0 : s.score,
     violations: prev.violations,
-    inconclusive: checks.some((c) => c.notRun !== undefined),
+    inconclusive: checks.some((c) => c.notRun !== undefined) || prev.guardTruncated === true,
+    ...(prev.rawScore !== undefined || temP2P ? { rawScore: s.rawScore, f2p: s.f2p, p2p: s.p2p } : {}),
   };
 }
 

@@ -26,6 +26,8 @@
 export interface InfraOracleView {
   score: number;
   violations: string[];
+  /** IMPL-039: P2P não aferido tira a conclusividade da nota cheia. */
+  p2p?: { unverified?: number };
 }
 
 export type InfraDecision =
@@ -39,9 +41,14 @@ export type InfraDecision =
    */
   | { kind: 'oracle-decides'; explanation: string };
 
-/** O oráculo diz algo DEFINITIVO sobre o que o agente fez (100% ou violação)? */
+/**
+ * O oráculo diz algo DEFINITIVO sobre o que o agente fez (100% ou violação)?
+ * Nota cheia com P2P não aferido (IMPL-039) NÃO é 100%: a regressão ficou em aberto.
+ */
 export function isOracleConclusive(oracle?: InfraOracleView): boolean {
-  return oracle !== undefined && (oracle.violations.length > 0 || oracle.score === 1);
+  if (oracle === undefined) return false;
+  if (oracle.violations.length > 0) return true;
+  return oracle.score === 1 && (oracle.p2p?.unverified ?? 0) === 0;
 }
 
 /** Decide o destino de uma repetição a partir do marcador de infra do executor. */
