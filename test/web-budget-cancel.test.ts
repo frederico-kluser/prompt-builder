@@ -71,6 +71,37 @@ const CENARIOS = [
   },
 ];
 
+// Treino que PROMOVE precisa de n suficiente: desde o gate da melhor de K
+// (IMPL-002, max-T exato) 2 pares nunca chegam a p <= 0,05 (piso 2^-n), e sem
+// promoção a sessão converge na rodada 0. Com 6 pares unânimes, p = 2^-6.
+const CENARIOS_TREINO = [
+  ...CENARIOS,
+  {
+    question: 'Como cancelo a assinatura mensal do aplicativo de musica sem pagar multa?',
+    productContext: 'Assinatura mensal sem fidelidade: cancelamento pelo app, efetivo no fim do ciclo pago.',
+    maxTokens: 300,
+    rubric: 'Deve dizer que nao ha multa e que vale no fim do ciclo.',
+  },
+  {
+    question: 'Minha geladeira nova chegou com a porta amassada, o que devo fazer?',
+    productContext: 'Avaria no transporte: recusar ou abrir chamado em ate 7 dias com fotos da embalagem.',
+    maxTokens: 300,
+    rubric: 'Deve citar 7 dias e as fotos.',
+  },
+  {
+    question: 'Quais documentos preciso levar para retirar um pedido na agencia dos Correios?',
+    productContext: 'Retirada em agencia: documento oficial com foto e codigo de rastreio do objeto.',
+    maxTokens: 300,
+    rubric: 'Deve citar documento com foto e codigo de rastreio.',
+  },
+  {
+    question: 'Posso parcelar a compra de um notebook no boleto bancario?',
+    productContext: 'Boleto: somente a vista, com 5% de desconto; parcelamento so no cartao em ate 10x.',
+    maxTokens: 300,
+    rubric: 'Deve dizer que boleto e so a vista e citar o cartao em 10x.',
+  },
+];
+
 const MODELOS = ['fake/gen', 'fake/ref', 'fake/judge', 'fake/a', 'fake/b', 'fake/opt'];
 
 interface PipelineOpts {
@@ -80,6 +111,8 @@ interface PipelineOpts {
   cost?: (modelId: string, n: number) => number;
   /** Juiz reprova a resposta do prompt base (força promoção no treino). */
   harshOnBase?: boolean;
+  /** Cenários que o datagen devolve (default: os 2 de {@link CENARIOS}). */
+  cenarios?: readonly (typeof CENARIOS)[number][];
 }
 
 /** Pipeline falso completo: datagen → gabarito → competidores (stream) → juiz → duelos. */
@@ -90,7 +123,7 @@ function fakePipeline(opts: PipelineOpts = {}): FakeOpenRouter {
     catalog: MODELOS.map((id) => catalogItem(id, price(id), price(id))),
     chat: (req, n) => {
       const usage = { prompt_tokens: 100, completion_tokens: 20, cost: cost(req.model, n) };
-      if (req.model === 'fake/gen') return { text: JSON.stringify({ stages: CENARIOS }), usage };
+      if (req.model === 'fake/gen') return { text: JSON.stringify({ stages: opts.cenarios ?? CENARIOS }), usage };
       if (req.model === 'fake/opt') {
         const tecnica = /tecnica id="([^"]+)"/.exec(req.user)?.[1] ?? 'x';
         return {
@@ -554,25 +587,33 @@ describe('IMPL-020 (i) — teto menor que a estimativa para a run com parcial ho
     expect(fake.chatRequests().map(papel).filter((p) => p === 'competitor')).toHaveLength(0);
   });
 
+
   it('treino: a porta POR ITERAÇÃO para antes de uma rodada que não cabe, mantendo o campeão', async () => {
-    // Cada chamada custa US$ 0,05 de verdade (rodada 0 ≈ US$ 1); a estimativa
-    // de uma rodada (catálogo) ≈ US$ 0,5. Teto 1,4: a rodada 0 cabe inteira,
-    // mas gasto(≈1) + rodada(≈0,5) > 1,4 => a rodada 1 nem começa.
+    // Cada chamada custa US$ 0,05 de verdade (rodada 0 com 6 cenários ≈ US$ 2,9);
+    // a estimativa de uma rodada (catálogo) ≈ US$ 2,5. Teto 4: a rodada 0 cabe
+    // inteira, mas gasto(≈2,9) + rodada(≈2,5) > 4 => a rodada 1 nem começa.
+    // 6 cenários (não 2): a rodada 0 precisa PROMOVER para haver rodada 1, e o
+    // gate da melhor de K (IMPL-002) não promove com menos de 5 pares.
     const fake = fakePipeline({
       price: (id) => (id === 'fake/judge' ? 2e-5 : 1e-9),
       cost: () => 0.05,
       harshOnBase: true,
+      cenarios: CENARIOS_TREINO,
     });
     usarGateway(fake.fetch);
-    const { record } = await startWebTraining({ ...TRAINING, budgetUsd: 1.4 } as never, KEY);
+    const { record } = await startWebTraining(
+      { ...TRAINING, stages: CENARIOS_TREINO.length, budgetUsd: 4 } as never,
+      KEY,
+    );
     await esperar(() => record.status !== 'running', 10_000);
     const sessao = record as SessionRecord;
     expect(sessao.stoppedReason, JSON.stringify({ st: sessao.status, err: sessao.error })).toBe('budget');
     expect(sessao.status).toBe('aborted');
     expect(sessao.stoppedAtIteration).toBe(1);
     expect(sessao.bestPromptByIteration).toHaveLength(1); // a rodada 0 completa ficou
+    expect(sessao.bestPromptByIteration[0]?.gate?.decision).toBe('promoted');
     expect(sessao.runIds).toHaveLength(1); // a rodada 1 nem foi criada
-    expect(sessao.totalCostUsd).toBeLessThanOrEqual(1.4);
+    expect(sessao.totalCostUsd).toBeLessThanOrEqual(4);
   });
 
   it('variationConfigFrom do web NÃO copia budgetUsd (senão N iterações gastariam N× o teto)', () => {
