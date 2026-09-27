@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
+import { aggregateVerdicts } from './engine/verdictAggregate.js';
 import type {
   CompetitorResponse,
   JudgeResult,
@@ -69,8 +70,6 @@ const judgeSchema = z.object({
     .default([]),
 });
 
-const ORDINAL: Record<Verdict, number> = { nao: 0, parcial: 1, resolve: 2 };
-
 /**
  * Normaliza o veredito cru do juiz (ternario, com fallback ao binario antigo).
  * Valor irreconhecivel => `null` (saida invalida), NUNCA 'parcial': o antigo
@@ -85,16 +84,8 @@ function toVerdict(raw: { veredito?: string; acceptable?: boolean }): Verdict | 
   return null;
 }
 
-/**
- * Agrega vereditos ternarios por media ordinal (resolve=2, parcial=1, nao=0).
- * So e chamada com >= 1 voto legitimo (lista vazia nao vira veredito).
- */
-function aggregateVerdict(verdicts: Verdict[]): Verdict {
-  const avg = verdicts.reduce((s, v) => s + ORDINAL[v], 0) / verdicts.length;
-  if (avg >= 1.5) return 'resolve';
-  if (avg >= 0.5) return 'parcial';
-  return 'nao';
-}
+// Agregacao do painel: MAIORIA SIMPLES em `engine/verdictAggregate.ts`
+// (IMPL-007) — a media ordinal local arredondava painel dividido PARA CIMA.
 
 function shuffle<T>(arr: T[]): T[] {
   const a = [...arr];
@@ -350,6 +341,7 @@ export async function judgeStage(params: JudgeStageParams): Promise<JudgeResult>
   const acceptableByContestant: Record<string, boolean> = {};
   const verdictSourceByContestant: Record<string, VerdictSource> = {};
   const verdictErrorByContestant: Record<string, VerdictError> = {};
+  const verdictTieByContestant: Record<string, Verdict[]> = {};
   const okResponses: CompetitorResponse[] = [];
   for (const r of responses) {
     const semVeredito = unjudgeableReason(r);
@@ -404,8 +396,9 @@ export async function judgeStage(params: JudgeStageParams): Promise<JudgeResult>
     judges.map((j) => j.rankedContestantIds),
   );
 
-  // Veredito TERNARIO de consenso (media ordinal entre os juizes que VOTARAM) e
-  // o binario "aceitavel" derivado dele (resolve|parcial => aceitavel).
+  // Veredito TERNARIO de consenso (MAIORIA SIMPLES entre os juizes que VOTARAM;
+  // sem maioria clara => empate tecnico com o nivel que a maioria endossa,
+  // nunca o voto de cima — IMPL-007) e o binario "aceitavel" derivado dele.
   // Painel reduzido (algum juiz falhou) => fonte 'degraded'.
   const fonte: VerdictSource = judges.length < judgeIds.length ? 'degraded' : 'judge';
   for (const id of ids) {
@@ -415,9 +408,10 @@ export async function judgeStage(params: JudgeStageParams): Promise<JudgeResult>
       if (v) vs.push(v.verdict);
     }
     if (vs.length === 0) continue; // defensivo: o parse estrito garante 1 por rotulo
-    const agg = aggregateVerdict(vs);
-    verdictByContestant[id] = agg;
-    acceptableByContestant[id] = agg !== 'nao';
+    const agg = aggregateVerdicts(vs)!;
+    verdictByContestant[id] = agg.verdict;
+    acceptableByContestant[id] = agg.verdict !== 'nao';
+    if (agg.tie) verdictTieByContestant[id] = agg.votes;
     verdictSourceByContestant[id] = fonte;
   }
 
@@ -434,6 +428,7 @@ export async function judgeStage(params: JudgeStageParams): Promise<JudgeResult>
     verdictByContestant,
     verdictSourceByContestant,
     verdictErrorByContestant,
+    ...(Object.keys(verdictTieByContestant).length > 0 ? { verdictTieByContestant } : {}),
     judges,
     blindMap: judges[0].blindMap,
     rawJudgeText,

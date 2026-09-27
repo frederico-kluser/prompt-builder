@@ -7,6 +7,7 @@ import { judgeStageReference } from './refJudge';
 import { blindRankMap, pickFinalists, runStageDuels, seedFromId, VERDICT_SCORE } from './duels';
 import { oracleScoresFromVerdicts } from '../../../src/engine/duelCore.js';
 import { assessVerdictIntegrity } from '../../../src/engine/verdictIntegrity.js';
+import { VERDICT_AGGREGATION } from '../../../src/engine/verdictAggregate.js';
 import { fairnessWarningsForModels } from './llmVariants';
 import { JUDGE_CONTRACT_TEXT } from './refJudge';
 import { pinJudgeContract, verbosityReport } from '../../../src/engine/judgeCalibration.js';
@@ -121,6 +122,9 @@ function buildRecord(config: RunConfig, opts: StartRunOpts): RunRecord {
     scoreboard: Object.fromEntries(contestants.map((c) => [c.id, 0])),
     costByContestant: Object.fromEntries(contestants.map((c) => [c.id, 0])),
     totalCostUsd: 0,
+    // IMPL-007: vereditos de painel por MAIORIA SIMPLES (empate tecnico) — marca a
+    // escala do judge-score; record sem isto = media ordinal antiga (inflada).
+    verdictAggregation: VERDICT_AGGREGATION,
     startedAt: nowIso(),
     sessionId: opts.sessionId,
     iteration: opts.iteration,
@@ -448,7 +452,7 @@ async function runLoop(
 
             // JudgeResult SINTETIZADO para nao quebrar scoreboard/medals/UI:
             // ranking SEMPRE por veredito (resolve > parcial > nao). Os duelos so
-            // acontecem na fase 4, entao nao ha ordem Copeland para consultar aqui.
+            // acontecem na fase 4, entao nao ha ordem de duelos para consultar aqui.
             // O desempate NAO pode ser a ordem dos contestants: o controle
             // ('original'/'carry') e sempre o primeiro do array, entao sort estavel
             // daria a ele todos os 1os lugares em empate — enviesando medalhas e
@@ -647,9 +651,10 @@ async function runLoop(
 
   const stagesComDuelos = record.stages.filter((s) => s.duels);
   if (stagesComDuelos.length > 0) {
-    // Copeland agregado cross-estagio: vitoria 1, empate 0.5, derrota 0.
+    // Taxa de vitória agregada cross-estagio (IMPL-007, R-04:DEC-5): vitoria 1,
+    // empate 0.5, derrota 0, dividido pelos duelos disputados. NAO e Copeland.
     const acc = new Map(
-      record.contestants.map((c) => [c.id, { points: 0, wins: 0, ties: 0, losses: 0 }]),
+      record.contestants.map((c) => [c.id, { wins: 0, ties: 0, losses: 0 }]),
     );
     for (const s of stagesComDuelos) {
       for (const d of s.duels!.duels) {
@@ -657,16 +662,12 @@ async function runLoop(
         const B = acc.get(d.b);
         if (!A || !B) continue;
         if (d.outcome === 'a') {
-          A.points += 1;
           A.wins += 1;
           B.losses += 1;
         } else if (d.outcome === 'b') {
-          B.points += 1;
           B.wins += 1;
           A.losses += 1;
         } else {
-          A.points += 0.5;
-          B.points += 0.5;
           A.ties += 1;
           B.ties += 1;
         }
@@ -683,8 +684,8 @@ async function runLoop(
           winRate: played > 0 ? Number(((s.wins + 0.5 * s.ties) / played).toFixed(4)) : 0,
         };
       })
-      // Estavel: empate de pontos E winRate mantem a ordem dos contestants.
-      .sort((a, b) => b.points - a.points || b.winRate - a.winRate);
+      // Estavel: empate de taxa (e de vitorias) mantem a ordem dos contestants.
+      .sort((a, b) => b.winRate - a.winRate || b.wins - a.wins);
   }
 
   // F3.6 + F4.2 (PLANO-PARIDADE): avisos de imparcialidade + diagnostico do

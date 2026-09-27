@@ -2,6 +2,7 @@ import { chatCompletion } from './openrouter.js';
 import { matchExpected } from './engine/groundTruth.js';
 import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
+import { aggregateVerdicts, tieLabel } from './engine/verdictAggregate.js';
 import type {
   CompetitorResponse,
   Contestant,
@@ -44,21 +45,8 @@ const FORMAT_REMINDER =
   'LEMBRETE DE FORMATO: a resposta anterior não seguiu o contrato. Responda APENAS com um objeto JSON ' +
   '{"verdict": "resolve"|"parcial"|"nao", "explanation": "<uma frase curta em pt-BR>"} — sem markdown e sem texto antes ou depois.';
 
-const VERDICT_ORDINAL: Record<Verdict, number> = { nao: 0, parcial: 1, resolve: 2 };
-
-/**
- * Agrega vereditos ternarios por media ordinal (resolve=2, parcial=1, nao=0;
- * media >= 1.5 => resolve, >= 0.5 => parcial, senao nao). Copia LOCAL de
- * `aggregateVerdict` de judge.ts (la nao e exportado) — manter sincronizado.
- * So e chamada com >= 1 veredito LEGITIMO: lista vazia nao vira veredito
- * (antes devolvia 'parcial' — um veredito imputado).
- */
-function aggregateVerdict(verdicts: Verdict[]): Verdict {
-  const avg = verdicts.reduce((s, v) => s + VERDICT_ORDINAL[v], 0) / verdicts.length;
-  if (avg >= 1.5) return 'resolve';
-  if (avg >= 0.5) return 'parcial';
-  return 'nao';
-}
+// Agregacao do painel: MAIORIA SIMPLES em `engine/verdictAggregate.ts`
+// (IMPL-007) — a media ordinal local arredondava painel dividido PARA CIMA.
 
 /** Recorta o objeto JSON da resposta do juiz (tolera texto em volta). */
 function extractJson(text: string): string {
@@ -181,16 +169,19 @@ async function judgeOne(params: {
 /**
  * Julga TODAS as respostas de uma etapa contra o gabarito (`stage.reference`),
  * pointwise. Multi-juiz: cada juiz vota por competidor e o veredito agregado e
- * a media ordinal dos votos LEGITIMOS; painel reduzido (parte dos juizes
- * falhou) => fonte 'degraded'; nenhum voto => veredito AUSENTE com o motivo.
- * A explanation agregada e a do 1o juiz que deu o veredito agregado.
+ * a MAIORIA SIMPLES dos votos LEGITIMOS (IMPL-007); sem maioria clara =>
+ * EMPATE TECNICO (`verdictTieByContestant`), gravado com o nivel que a maioria
+ * endossa — nunca o voto de cima. Painel reduzido (parte dos juizes falhou) =>
+ * fonte 'degraded'; nenhum voto => veredito AUSENTE com o motivo. A explanation
+ * agregada vem de um juiz que votou EXATAMENTE o veredito agregado (em empate,
+ * nunca do juiz que deu o voto mais alto).
  */
 export async function judgeStageReference(
   opts: JudgeStageReferenceParams,
 ): Promise<ReferenceJudgeResult> {
   const { stage, responses, contestants, apiKey, reasoningLevel, ctx, maxPricePerMTok } = opts;
   const timeoutMs = opts.timeoutMs ?? 90_000;
-  // dedup: um mesmo juiz duas vezes distorceria a media ordinal.
+  // dedup: um mesmo juiz duas vezes votaria dobrado na maioria.
   const judgeIds = [...new Set(opts.judgeModelIds ?? [])];
   const judgeModelId = judgeIds.join('+');
 
@@ -198,11 +189,13 @@ export async function judgeStageReference(
   const explanationByContestant: Record<string, string> = {};
   const verdictSourceByContestant: Record<string, VerdictSource> = {};
   const verdictErrorByContestant: Record<string, VerdictError> = {};
+  const verdictTieByContestant: Record<string, Verdict[]> = {};
   const result = (inconclusive?: boolean): ReferenceJudgeResult => ({
     verdictByContestant,
     explanationByContestant,
     verdictSourceByContestant,
     verdictErrorByContestant,
+    ...(Object.keys(verdictTieByContestant).length > 0 ? { verdictTieByContestant } : {}),
     judgeModelId,
     ...(inconclusive ? { inconclusive: true } : {}),
   });
@@ -298,9 +291,15 @@ export async function judgeStageReference(
       continue;
     }
     algumVeredito = true;
-    const agg = aggregateVerdict(oks.map((v) => v.verdict));
-    verdictByContestant[r.contestantId] = agg;
-    explanationByContestant[r.contestantId] = (oks.find((v) => v.verdict === agg) ?? oks[0]).explanation;
+    const agg = aggregateVerdicts(oks.map((v) => v.verdict))!;
+    verdictByContestant[r.contestantId] = agg.verdict;
+    // O veredito agregado e sempre um dos votos (mediana inferior): a explanation
+    // vem de quem votou ELE — nunca do juiz que deu o voto inflado.
+    const autor = oks.find((v) => v.verdict === agg.verdict)!;
+    explanationByContestant[r.contestantId] = agg.tie
+      ? `${tieLabel(agg.votes)}: ${autor.explanation}`
+      : autor.explanation;
+    if (agg.tie) verdictTieByContestant[r.contestantId] = agg.votes;
     // Painel reduzido: o veredito existe, mas vale menos — conta na regra de
     // run inconclusiva como 'degradado' (R-03b:REC-4).
     verdictSourceByContestant[r.contestantId] = oks.length < vs.length ? 'degraded' : 'judge';

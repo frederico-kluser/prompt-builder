@@ -507,7 +507,8 @@ describe.each([
     expect(d.failedDuels).toHaveLength(1);
     expect([d.failedDuels![0].a, d.failedDuels![0].b].sort()).toEqual(['a', 'b']);
     expect(d.failedDuels![0].error.kind).toBe('judge_failed');
-    expect(d.points).toEqual({ a: 0, b: 0, c: 2 });
+    // taxa de vitória: o duelo a×b sem resultado sai do numerador E do denominador.
+    expect(d.winRate).toEqual({ a: 0, b: 0, c: 1 });
   });
 
   it('saída inválida => 1 pedido com lembrete; persistindo => invalid_output (o regex antigo daria "A")', async () => {
@@ -524,7 +525,7 @@ describe.each([
     expect(d.failedDuels?.[0].error.kind).toBe('invalid_output');
     expect(fake.chatRequests()).toHaveLength(4); // 2 ordens × (original + lembrete)
     expect(fake.chatRequests().filter((r) => r.user.includes('LEMBRETE DE FORMATO'))).toHaveLength(2);
-    expect(d.points).toEqual({ a: 0, b: 0 });
+    expect(d.winRate).toEqual({ a: 0, b: 0 });
   });
 
   it('sem gabarito: oráculo empatado = empate legítimo; faltar o score de um lado = sem resultado', async () => {
@@ -711,7 +712,7 @@ describe('assessVerdictIntegrity — >10% por papel ou n efetivo < 5 => inconclu
     const duels = (falhou: boolean): StageRecord['duels'] => ({
       placementByContestant: {},
       order: [],
-      points: {},
+      winRate: {},
       topK: 2,
       duels: [
         {

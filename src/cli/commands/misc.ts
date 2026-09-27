@@ -13,6 +13,7 @@ import { arenaConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
 import { sampleSizeWarning } from '../../engine/judgeCalibration.js';
+import { judgeScaleWarning } from '../../engine/verdictAggregate.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import { buildContext, buildNetworkContext, checkKey, keyFilePath, parse, removeStoredKey, writeStoredKey } from '../context.js';
 import { CliError, EXIT, fmtUsd, renderSpend, type Output } from '../output.js';
@@ -253,6 +254,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
       if (diag.verbosity.warning) out.line(`! ${diag.verbosity.warning}`);
     }
     for (const aviso of record.fairnessWarnings ?? []) out.line(`! ${aviso}`);
+    const escala = judgeScaleWarning(record);
+    if (escala) out.line(`! ${escala}`);
     const amostra = sampleSizeWarning(record.stages.length, 'etapas');
     if (amostra) out.line(`! ${amostra}`);
   }
@@ -260,6 +263,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     run: record,
     judgeDiagnostics: record.judgeDiagnostics ?? null,
     fairnessWarnings: record.fairnessWarnings ?? [],
+    // IMPL-007: judge-score de painel em escala antiga (média ordinal inflada).
+    judgeScaleWarning: judgeScaleWarning(record) ?? null,
     sampleWarnings: [sampleSizeWarning(record.stages.length, 'etapas')].filter(Boolean),
   });
   return EXIT.OK;

@@ -201,7 +201,7 @@ const baseFields = {
   scenarioSeed: z.array(stageSpecSchema).max(50).optional(),
   // Nº de finalistas (melhores por judge-score) que disputam os duelos. 0 = sem finais.
   finalists: z.number().int().min(0).max(12).optional(),
-  // Liga/desliga a fase de finais (duelos Copeland entre os finalistas).
+  // Liga/desliga a fase de finais (duelos entre os finalistas, por taxa de vitória).
   duels: z.boolean().optional(),
   // Teto de gasto em USD para a run/sessao inteira. Ausente = sem limite.
   budgetUsd: z.number().positive().optional(),

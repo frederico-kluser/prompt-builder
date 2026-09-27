@@ -394,6 +394,12 @@ export interface JudgeResult {
   verdictSourceByContestant?: Record<string, VerdictSource>;
   /** Motivo de cada veredito AUSENTE (IMPL-004) — nunca vira 'parcial'/'nao'. */
   verdictErrorByContestant?: Record<string, VerdictError>;
+  /**
+   * EMPATE TECNICO do painel (IMPL-007): contestantId -> votos (pior -> melhor)
+   * quando nenhum veredito teve maioria estrita. O veredito gravado e o nivel
+   * que a maioria endossa (nunca o voto de cima). So a chave dos empatados.
+   */
+  verdictTieByContestant?: Record<string, Verdict[]>;
   /** Resultado individual de cada juiz (placar aditivo por juiz + justificativas na UI). */
   judges: SingleJudgeResult[];
   blindMap: Record<string, string>; // letra -> contestantId (do 1o juiz; cosmetico)
@@ -419,6 +425,12 @@ export interface ReferenceJudgeResult {
   verdictSourceByContestant?: Record<string, VerdictSource>;
   /** Motivo de cada veredito AUSENTE (IMPL-004). */
   verdictErrorByContestant?: Record<string, VerdictError>;
+  /**
+   * EMPATE TECNICO do painel (IMPL-007): contestantId -> votos (pior -> melhor)
+   * quando nenhum veredito teve maioria estrita. O veredito gravado e o nivel
+   * que a maioria endossa (nunca o voto de cima). So a chave dos empatados.
+   */
+  verdictTieByContestant?: Record<string, Verdict[]>;
   judgeModelId: string;
   inconclusive?: boolean;
 }
@@ -436,16 +448,26 @@ export interface DuelOutcome {
 }
 
 /**
- * Duelos round-robin da etapa (bracket top-K): placar Copeland (vitoria 1,
- * empate 0.5) com placements fracionarios quando ha empate de pontos.
+ * Duelos round-robin da etapa (bracket top-K): placar por TAXA DE VITÓRIA
+ * (vitoria 1, empate 0.5, dividido pelos duelos disputados) com placements
+ * fracionarios quando ha empate de taxa.
  */
 export interface StageDuels {
   /** Placement final por contestant (1 = melhor; fracionario em empate). */
   placementByContestant: Record<string, number>;
   /** ContestantIds ordenados do melhor ao pior placement. */
   order: string[];
-  /** Pontos Copeland por contestant. */
-  points: Record<string, number>;
+  /**
+   * Taxa de vitória por contestant nos duelos da etapa (IMPL-007, R-04:DEC-5):
+   * (vitórias + ½·empates) / duelos disputados, em 0..1. É a régua do placar —
+   * NÃO é Copeland (Copeland = maioria par-a-par). Fora do bracket = 0.
+   */
+  winRate: Record<string, number>;
+  /**
+   * @deprecated Records anteriores ao IMPL-007: soma vitória 1/empate 0.5,
+   * rotulada "pontos Copeland" por engano. `normalizeRunRecord` deriva `winRate`.
+   */
+  points?: Record<string, number>;
   /** Só duelos com resultado LEGÍTIMO — os únicos que pontuam. */
   duels: DuelOutcome[];
   /** Duelos sem resultado (IMPL-004): fora do placar, contados em `failureCountByRole.duel`. */
@@ -503,7 +525,7 @@ export interface StageRecord {
   judge?: JudgeResult;
   /** Julgamento pointwise contra o gabarito (quando a etapa tem `reference`). */
   referenceJudge?: ReferenceJudgeResult;
-  /** Duelos pairwise (Copeland) da etapa (quando duelos ligados). */
+  /** Duelos pairwise da etapa, placar por taxa de vitória (quando duelos ligados). */
   duels?: StageDuels;
   /** @deprecated Avaliador fundido no juiz. Presente so em records antigos. */
   evaluation?: StageEvaluation;
@@ -528,6 +550,12 @@ export interface RunRecord {
   costByContestant?: Record<string, number>;
   /** Judge-score agregado por contestant: (resolve + 0.5*parcial) / total * 100. */
   judgeScoreByContestant?: Record<string, number>;
+  /**
+   * Convencao de agregacao do painel de juizes (IMPL-007). `'majority'` =
+   * maioria simples com empate tecnico. AUSENTE = record antigo (media ordinal
+   * arredondada para cima): judge-score de painel >= 2 juizes NAO comparavel.
+   */
+  verdictAggregation?: 'majority';
   /** Ids dos finalistas (top-N por judge-score) que disputaram os duelos. */
   finalists?: string[];
   /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
@@ -538,12 +566,16 @@ export interface RunRecord {
     verbosity: { n: number; r: number; biased: boolean; warning: string };
   };
 
-  /** Classificacao final agregada (Copeland dos duelos / pontos do placar). */
+  /**
+   * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
+   * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).
+   */
   standings?: {
     id: string;
     label: string;
     isControl: boolean;
-    points: number;
+    /** @deprecated records anteriores ao IMPL-007 (soma vitória 1/empate 0.5); use `winRate`. */
+    points?: number;
     wins: number;
     ties: number;
     losses: number;

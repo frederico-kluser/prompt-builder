@@ -56,6 +56,6 @@ prompt-builder runs winner <runId> --json
 prompt-builder runs show <runId> --json | jq '.data.run.judgeScoreByContestant'
 ```
 
-Se as finais rodaram, a régua é `standings` (pontos Copeland dos duelos); senão
+Se as finais rodaram, a régua é `standings` (taxa de vitória nos duelos); senão
 é o judge-score médio. O CLI sempre diz qual das duas foi usada — elas não são
 intercambiáveis.

@@ -432,9 +432,11 @@ function relatorioFinal(ctx: NetworkContext, record: RunRecord): void {
   // judge-score nao sao intercambiaveis.
   if (record.standings?.length) {
     out.line();
-    out.line('Classificação (duelos das finais):');
+    out.line('Classificação (duelos das finais, por taxa de vitória):');
     for (const s of record.standings) {
-      out.line(`  ${s.label.padEnd(24)} ${s.points} pts  (${s.wins}V ${s.ties}E ${s.losses}D)`);
+      // IMPL-007: taxa de vitória = (V + ½E) / disputados — rótulo honesto do placar.
+      const taxa = `${Math.round(s.winRate * 100)}%`.padStart(4);
+      out.line(`  ${s.label.padEnd(24)} taxa de vitória ${taxa}  (${s.wins}V ${s.ties}E ${s.losses}D)`);
     }
   } else if (record.judgeScoreByContestant) {
     out.line();

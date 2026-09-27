@@ -11,9 +11,28 @@ prompt-builder sessions list | show | winner
 
 - **`judgeScoreByContestant`** — `(resolve + 0,5 × parcial) / julgados × 100`
   sobre os cenários com gabarito (veredito ausente fica fora da conta).
-  Comparável **entre runs** com o mesmo juiz.
-- **`standings`** — pontos Copeland dos duelos das finais (vitória 1, empate
-  0,5). Só existe se as finais rodaram, e mede apenas os **finalistas** entre si.
+  Comparável **entre runs** com o mesmo juiz **e a mesma convenção de
+  agregação** (ver abaixo).
+- **`standings`** — **taxa de vitória** (`winRate`) nos duelos das finais:
+  `(vitórias + 0,5 × empates) / duelos disputados`, em 0..1, com V–E–D ao lado.
+  Só existe se as finais rodaram, e mede apenas os **finalistas** entre si.
+  (Records antigos traziam também `points`, a soma crua — não use.)
+
+## Painel de juízes: maioria simples e empate técnico
+
+Com 2+ juízes (`judgeModelIds`), o veredito de cada cenário é a **maioria
+simples** dos votos. Sem maioria clara é **empate técnico**: o contestant ganha
+chave em `verdictTieByContestant[id]` (os votos, do pior ao melhor) e o
+veredito gravado é o nível que a maioria endossa — `resolve`+`parcial` vira
+`parcial`, `parcial`+`nao` vira `nao`, **nunca** o voto de cima. Painel ímpar
+(3 juízes) quase não empata.
+
+**Mudança de escala:** até o IMPL-007 o painel usava média ordinal arredondada
+para cima (`resolve`+`parcial` contava `resolve`). Runs novas gravam
+`verdictAggregation: "majority"`; run **sem** esse campo e com 2+ juízes tem
+judge-score em outra escala (inflado) — `runs show` avisa
+(`judgeScaleWarning`) e ele não deve ser comparado com o de runs novas. Com
+juiz único nada muda.
 
 O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 `finalists: 0`, orçamento), a régua é o judge-score.
@@ -34,6 +53,8 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 | `stages[].incomplete` | etapa cortada no meio — **fora** do placar e do julgamento |
 | `stages[].referenceJudge` | vereditos pointwise por contestant, com o motivo |
 | `finalists` | ids que disputaram a final |
+| `verdictAggregation` | `"majority"` = painel por maioria simples (IMPL-007); ausente = escala antiga |
+| `stages[].referenceJudge.verdictTieByContestant` | empates técnicos do painel: id → votos |
 | `judgeDiagnostics` | pin do **contrato do juiz** (hash do prompt + modelos) + viés de verbosidade medido (correlação score×comprimento) |
 | `fairnessWarnings` | avisos de imparcialidade (juiz da família do competidor) — não-bloqueantes |
 | `repeats` (compare) | `record.stages.length === cenários × repeats` — cópias são observações independentes |

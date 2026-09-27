@@ -18,6 +18,7 @@
 // ----------------------------------------------------------------------------
 import { chatCompletion } from '../openrouter.js';
 import { isControlSignal } from '../budget.js';
+import { aggregateVerdicts } from '../engine/verdictAggregate.js';
 import type { ReasoningLevel, RunCtx, StageSpec, Verdict } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -46,19 +47,14 @@ Responda APENAS com {"verdict": "resolve"|"parcial"|"nao",
 resolve = a tarefa foi cumprida; parcial = incompleta, imprecisa, ou cumprida com
 efeito colateral relevante; nao = não cumprida, ou cumprida burlando o critério.`;
 
-const VERDICT_ORDINAL: Record<Verdict, number> = { nao: 0, parcial: 1, resolve: 2 };
-
 /**
- * Agrega vereditos ternarios por media ordinal (resolve=2, parcial=1, nao=0;
- * media >= 1.5 => resolve, >= 0.5 => parcial, senao nao). Copia LOCAL do
- * `aggregateVerdict` de refJudge.ts (nao exportado), mantido em sincronia.
+ * Agrega vereditos ternarios (juizes ou repeticoes) por MAIORIA SIMPLES — fonte
+ * unica em `engine/verdictAggregate.ts` (IMPL-007): sem maioria clara =>
+ * empate tecnico com o nivel que a maioria endossa, nunca o voto de cima (a
+ * antiga media ordinal fazia resolve+parcial => resolve).
  */
 export function aggregateAgentVerdict(verdicts: Verdict[]): Verdict {
-  if (verdicts.length === 0) return 'parcial';
-  const avg = verdicts.reduce((s, v) => s + VERDICT_ORDINAL[v], 0) / verdicts.length;
-  if (avg >= 1.5) return 'resolve';
-  if (avg >= 0.5) return 'parcial';
-  return 'nao';
+  return aggregateVerdicts(verdicts)?.verdict ?? 'parcial';
 }
 
 /** Recorta o objeto JSON da resposta do juiz (tolera texto em volta). */

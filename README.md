@@ -107,7 +107,7 @@ mini-benchmark independente e auto-contido:
 flowchart LR
   T([Tema + config]) --> DG[1 · Datagen<br/>gera o cenário]
   DG --> C{2 · Participantes<br/>respondem em paralelo}
-  C --> J[3 · Juiz<br/>veredito vs gabarito<br/>+ duelos Copeland]
+  C --> J[3 · Juiz<br/>veredito vs gabarito<br/>+ duelos por taxa de vitória]
   J --> S[(Placar + Heatmap)]
   S -->|próxima etapa| DG
   S --> R([Run finalizada])
@@ -122,8 +122,10 @@ flowchart LR
    em *streaming*. A UI mostra o texto crescendo, a velocidade (chars/s), latência, tokens e custo.
 3. **Julgamento** — por default (fora do compare clássico) é **por referência**: um **gabarito**
    temp-0 é gerado por cenário, o juiz classifica cada resposta isoladamente contra ele
-   (**resolve / parcial / não**, com explicação de 1 frase) e os melhores disputam **duelos
-   Copeland** (cada par nas duas ordens; empate em desacordo). Sem gabarito (ou no compare
+   (**resolve / parcial / não**, com explicação de 1 frase; com 2+ juízes vale a **maioria
+   simples**, e painel dividido é **empate técnico**, nunca arredondado para cima) e os melhores
+   disputam **duelos** classificados por **taxa de vitória** (cada par nas duas ordens; empate em
+   desacordo). Sem gabarito (ou no compare
    clássico), cai no **juiz listwise** clássico: ordena as respostas às cegas e dá o veredito de
    aceitabilidade ("dá para usar em produção sem causar erro/dano?").
 4. **Todas as etapas rodam em paralelo** (cenários pré-gerados juntos; execução concorrente
@@ -241,9 +243,9 @@ sequenceDiagram
   end
   O->>UI: stage.judging
   O->>J: vereditos vs gabarito (pointwise, cego)
-  O->>J: duelos Copeland (2 ordens por par)
+  O->>J: duelos (2 ordens por par)
   O->>UI: stage.dueled / duel.progress
-  J-->>O: vereditos + ordem Copeland (JudgeResult sintetizado)
+  J-->>O: vereditos + ordem por taxa de vitória (JudgeResult sintetizado)
   O->>UI: stage.judged (placar + custo atualizados)
 ```
 
@@ -330,7 +332,7 @@ prompt-builder/
 │  ├─ datagen.ts             # Gera o cenário (question/productContext/maxTokens)
 │  ├─ competitor.ts          # Roda 1 participante (streaming, retry, progresso, custo)
 │  ├─ judge.ts               # Juiz listwise (fallback — ranking cego + vereditos)
-│  ├─ gabarito.ts / refJudge.ts / duels.ts   # Julgamento por referência: gabarito, vereditos pointwise, duelos Copeland
+│  ├─ gabarito.ts / refJudge.ts / duels.ts   # Julgamento por referência: gabarito, vereditos pointwise, duelos (taxa de vitória)
 │  ├─ rank.ts / holdout.ts / stats.ts        # Promoção (minGain), holdout, significância bootstrap
 │  ├─ llmVariants.ts / reasoning.ts / dedup.ts / scenarioPack.ts   # compare-llms, reasoning por papel, dedup, pacote de cenários
 │  ├─ openrouter.ts          # Cliente OpenRouter: models, chat, stream, custo, validateKey

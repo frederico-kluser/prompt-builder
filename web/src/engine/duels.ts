@@ -1,7 +1,7 @@
 // Duelos round-robin (Critério 2, portado do prompt-arena): depois do juiz
 // pointwise, cada PAR de candidatos é julgado head-to-head contra a REFERÊNCIA,
 // nas DUAS ordens (desacordo => empate — cancela viés de posição), e o placar
-// Copeland (vitória 1, empate 0.5) vira o placement da etapa. O round-robin é
+// taxa de vitória ((vitória 1 + empate 0.5) / disputados) vira o placement da etapa. O round-robin é
 // QUADRÁTICO (C(n,2) pares × 2 ordens, no modelo mais caro do pipeline), então
 // só duelam um BRACKET: normalmente os FINALISTAS globais da run (`duelists`,
 // escolhidos por `pickFinalists` depois de todas as etapas); sem eles, o bracket
@@ -194,7 +194,7 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
   const semDuelos = (placement: number): StageDuels => ({
     placementByContestant: Object.fromEntries(okIds.map((id) => [id, placement])),
     order: [...okIds],
-    points: Object.fromEntries(okIds.map((id) => [id, 0])),
+    winRate: Object.fromEntries(okIds.map((id) => [id, 0])),
     duels: [],
     topK: topKGravado,
   });
@@ -357,25 +357,25 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
   const duels = julgados.flatMap((j) => (j.ok ? [j.duel] : []));
   const failedDuels = julgados.flatMap((j) => (j.ok ? [] : [j.failure]));
 
-  const { points, placementById, order } = standingsFromDuels(ids, duels);
+  const { winRate, placementById, order } = standingsFromDuels(ids, duels);
 
-  // Fora do bracket (não selecionado): placement = bracketSize + 1, pontos 0.
+  // Fora do bracket (não selecionado): placement = bracketSize + 1, taxa 0.
   const inBracket = new Set(ids);
   const blindRank = blindRankMap(okIds, seed);
   const outsiders = okIds
     .filter((id) => !inBracket.has(id))
     .sort((a, b) => scoreOf(b) - scoreOf(a) || (blindRank.get(a) ?? 0) - (blindRank.get(b) ?? 0));
   const placementByContestant: Record<string, number> = { ...placementById };
-  const allPoints: Record<string, number> = { ...points };
+  const allWinRate: Record<string, number> = { ...winRate };
   for (const id of outsiders) {
     placementByContestant[id] = ids.length + 1;
-    allPoints[id] = 0;
+    allWinRate[id] = 0;
   }
 
   return {
     placementByContestant,
     order: [...order, ...outsiders],
-    points: allPoints,
+    winRate: allWinRate,
     duels,
     ...(failedDuels.length > 0 ? { failedDuels } : {}),
     topK: topKGravado,

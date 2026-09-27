@@ -310,18 +310,24 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
 
 // ---------------------------------------------------------------------------
 // Finais: os N melhores por judge-score duelam entre si em todos os cenarios.
-// Podio (Copeland) + confrontos agregados por par.
+// Podio (taxa de vitoria nos duelos) + confrontos agregados por par.
 // ---------------------------------------------------------------------------
 
 /** Linha do pódio: stats de duelo quando ja houve duelo, senao o judge-score. */
 interface FinalsRow {
   id: string;
   label: string;
-  points?: number;
+  /** Taxa de vitória nos duelos (0..1) — IMPL-007: o placar é win-rate. */
+  winRate?: number;
   wins?: number;
   ties?: number;
   losses?: number;
   score?: number;
+}
+
+/** Taxa de vitória em % — rótulo honesto do placar dos duelos (IMPL-007, R-11a:DEC-4). */
+function formatWinRate(winRate: number): string {
+  return `${Math.round(winRate * 100)}%`;
 }
 
 /** Confronto agregado de um par de finalistas em TODOS os cenários. */
@@ -342,7 +348,7 @@ interface FinalsPanelProps {
 
 /**
  * Bloco "Final": os N finalistas (top judge-score) e o resultado dos duelos
- * entre eles — pódio com pontos Copeland e V–E–D, e um accordion enxuto com os
+ * entre eles — pódio com taxa de vitória e V–E–D, e um accordion enxuto com os
  * confrontos.
  */
 export function FinalsPanel({ record, progress }: FinalsPanelProps) {
@@ -362,13 +368,13 @@ export function FinalsPanel({ record, progress }: FinalsPanelProps) {
       return standings.map((s) => ({
         id: s.id,
         label: s.label,
-        points: s.points,
+        winRate: s.winRate,
         wins: s.wins,
         ties: s.ties,
         losses: s.losses,
       }));
     }
-    // Ainda sem Copeland (duelos rodando): pódio provisório por judge-score.
+    // Ainda sem duelos (rodando): pódio provisório por judge-score.
     return finalistIds.map((id) => ({
       id,
       label: labelOf(id),
@@ -417,6 +423,13 @@ export function FinalsPanel({ record, progress }: FinalsPanelProps) {
         </div>
       )}
 
+      {rows.some((r) => typeof r.winRate === 'number') && (
+        <div className="flex items-center gap-3 px-4 pt-3 text-[11px] text-muted-foreground">
+          <span className="flex-1">Finalista</span>
+          <span className="shrink-0">taxa de vitória</span>
+          <span className="w-16 shrink-0 text-right">V–E–D</span>
+        </div>
+      )}
       <ol className="p-2">
         {rows.map((r, i) => (
           <li key={r.id} className="flex items-center gap-3 rounded-lg px-2 py-2">
@@ -429,9 +442,14 @@ export function FinalsPanel({ record, progress }: FinalsPanelProps) {
             <span className="min-w-0 flex-1 truncate text-sm" title={r.label}>
               {r.label}
             </span>
-            {typeof r.points === 'number' ? (
+            {typeof r.winRate === 'number' ? (
               <>
-                <span className="shrink-0 text-[13px] font-medium tabular">{r.points} pts</span>
+                <span
+                  className="shrink-0 text-[13px] font-medium tabular"
+                  title="Taxa de vitória: (vitórias + ½ empate) / duelos disputados"
+                >
+                  {formatWinRate(r.winRate)}
+                </span>
                 <span className="w-16 shrink-0 text-right text-[12px] text-muted-foreground tabular">
                   {r.wins}–{r.ties}–{r.losses}
                 </span>
@@ -533,7 +551,7 @@ export function applyEvent(prev: RunRecord, event: any): RunRecord {
       return { ...next, finalists: finalists.map((f) => f.id), judgeScoreByContestant: scores };
     }
     case 'stage.dueled': {
-      // Duelos (Copeland) da etapa — rodam DEPOIS de todas as etapas, na fase
+      // Duelos da etapa — rodam DEPOIS de todas as etapas, na fase
       // de finais. Por indice, como os demais handlers: sob execucao paralela
       // os eventos chegam fora de ordem e push desalinharia o array.
       const s = next.stages[event.stageIndex];

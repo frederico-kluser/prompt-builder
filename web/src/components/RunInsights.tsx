@@ -9,6 +9,7 @@ import type { RunRecord, Verdict } from '../api';
 import { diffLines } from '../diff';
 import { DiffView, MiniLabel, Pre, SectionHead, Tag } from './primitives';
 import { VERDICT_META, verdictOf, trunc } from '../pages/runShared';
+import { judgeScaleWarning } from '../../../src/engine/verdictAggregate.js';
 
 // ----------------------------------------------------------------------------
 // 1) FailureDigest — "por que perdeu", por variante
@@ -260,7 +261,13 @@ export function JudgeDiagnostics({ record }: { record: RunRecord }) {
     contract: { hash: string; modelIds: string[] };
     verbosity: { n: number; r: number; biased: boolean; warning: string };
   } }).judgeDiagnostics;
-  const avisos = (record as unknown as { fairnessWarnings?: string[] }).fairnessWarnings ?? [];
+  // IMPL-007: record anterior à agregação por maioria => judge-score de painel
+  // em outra escala; o aviso vem primeiro porque muda como ler o número.
+  const escala = judgeScaleWarning(record);
+  const avisos = [
+    ...(escala ? [escala] : []),
+    ...((record as unknown as { fairnessWarnings?: string[] }).fairnessWarnings ?? []),
+  ];
   if (!diag && avisos.length === 0) return null;
   return (
     <section className="flex flex-col gap-1.5">

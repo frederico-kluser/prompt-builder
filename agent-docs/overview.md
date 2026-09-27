@@ -14,8 +14,9 @@ Uma **run** é um mini-benchmark auto-contido, repetido em N **cenários**:
    juiz **não é veredito**: fica ausente (fora da média) e, se passar de 10%
    num papel ou sobrarem < 5 cenários julgados, a run sai `inconclusive`.
 5. **Finais** — terminado o julgamento, os **N melhores por judge-score médio**
-   duelam entre si em cada cenário (Copeland: cada par nas duas ordens;
-   desacordo entre as ordens = empate).
+   duelam entre si em cada cenário (cada par nas duas ordens; desacordo entre
+   as ordens = empate); a classificação é a **taxa de vitória**
+   `(vitórias + 0,5 × empates) / duelos disputados`.
 
 Todas as etapas rodam **em paralelo**. A concorrência das chamadas é controlada
 por um limitador global adaptativo (cresce no sucesso, recua pela metade em
