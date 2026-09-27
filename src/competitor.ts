@@ -1,6 +1,7 @@
 import { chatCompletionStream, isGatewayBlocked } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { finishSignalsOf, retryMaxTokens } from './engine/truncation.js';
+import { buildCaseInput } from './engine/caseInput.js';
 import type {
   CallFinishSignals,
   CompetitorOutcomeCounts,
@@ -16,7 +17,11 @@ export interface RunCompetitorParams {
   /** Chave estavel do competidor. compare: === modelId. */
   contestantId: string;
   modelId: string;
-  /** Override do system message; ausente => usa stage.productContext. */
+  /**
+   * Variante sob teste: vira o system message, e SÓ ele (ausente => sem
+   * system). O productContext chega SEMPRE, como bloco de dado delimitado no
+   * user (`buildCaseInput`, IMPL-009).
+   */
   systemPrompt?: string;
   stage: StageSpec;
   timeoutMs?: number;
@@ -86,10 +91,10 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
       const res = await chatCompletionStream({
         apiKey,
         modelId,
-        messages: [
-          { role: 'system', content: systemPrompt ?? stage.productContext },
-          { role: 'user', content: stage.question },
-        ],
+        // Montagem única do caso (IMPL-009 / R-05:REC-1): antes era
+        // `systemPrompt ?? stage.productContext` e, com variante, o contexto
+        // do cenário sumia do payload enquanto gabarito e juiz o viam.
+        messages: buildCaseInput(stage, systemPrompt),
         // deterministicSampling (openrouter.ts) so envia temperature a quem
         // suporta — reasoning models ignoram sem quebrar.
         temperature,

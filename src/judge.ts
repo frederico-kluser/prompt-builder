@@ -158,7 +158,7 @@ async function rankOnePass(
   const userPrompt = `PERGUNTA DO USUARIO:
 ${stage.question}
 
-CONTEXTO FORNECIDO AOS MODELOS:
+CONTEXTO DO CASO (entregue a todos os modelos como dado, antes da pergunta):
 ${stage.productContext}
 ${rubricBlock}
 RESPOSTAS A AVALIAR:

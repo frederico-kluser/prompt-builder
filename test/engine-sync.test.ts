@@ -47,6 +47,9 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   judge: 'shim',
   refJudge: 'shim',
   variator: 'shim',
+  // IMPL-009 (R-05:REC-1): montagem única do input do caso — o canônico mora
+  // em src/engine/ (ver CANONICO_EM).
+  caseInput: 'shim',
   // Pares mantidos à mão (seams diferentes). Ao mudar UM lado, mude o outro.
   configFile: 'mirror',
   duels: 'mirror', // a MATEMÁTICA é compartilhada via src/engine/duelCore.ts (src lê dossiê de agente do disco)
@@ -57,6 +60,14 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   types: 'mirror',
   // Client-only de propósito.
   promptStore: 'web-only',
+};
+
+/**
+ * Shims cujo canônico NÃO está na raiz de `src/` (módulos puros de
+ * `src/engine/`). Ausente = `src/<nome>.ts`.
+ */
+const CANONICO_EM: Record<string, string> = {
+  caseInput: 'engine/caseInput',
 };
 
 /**
@@ -88,11 +99,12 @@ describe('guarda de sincronia src/ × web/src/engine/', () => {
       if (kind !== 'shim') continue;
       const caminho = join(WEB_ENGINE, `${nome}.ts`);
       const fonte = readFileSync(caminho, 'utf8');
-      expect(fonte, `web/src/engine/${nome}.ts deve re-exportar src/${nome}.js`).toContain(
-        `from '../../../src/${nome}.js'`,
+      const canonico = CANONICO_EM[nome] ?? nome;
+      expect(fonte, `web/src/engine/${nome}.ts deve re-exportar src/${canonico}.js`).toContain(
+        `from '../../../src/${canonico}.js'`,
       );
       // E o canônico precisa existir.
-      expect(existsSync(join(SRC, `${nome}.ts`)), `src/${nome}.ts sumiu`).toBe(true);
+      expect(existsSync(join(SRC, `${canonico}.ts`)), `src/${canonico}.ts sumiu`).toBe(true);
     }
   });
 
@@ -195,5 +207,8 @@ describe('guarda de sincronia src/ × web/src/engine/', () => {
     const duelsWeb = await import('../web/src/engine/duels.js');
     expect(duelsWeb.pickFinalists).toBe(duelsCore.pickFinalists);
     expect(duelsWeb.standingsFromDuels).toBe(duelsCore.standingsFromDuels);
+    const caseCore = await import('../src/engine/caseInput.js');
+    const caseWeb = await import('../web/src/engine/caseInput.js');
+    expect(caseWeb.buildCaseInput).toBe(caseCore.buildCaseInput);
   });
 });

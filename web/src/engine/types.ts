@@ -100,7 +100,7 @@ export interface Contestant {
   label: string;
   /** Modelo real OpenRouter (usado para preco/getModel). */
   modelId: string;
-  /** Override do system message; ausente => usa stage.productContext (compare). */
+  /** Variante: vira o system message (ausente => sem system, compare). O productContext vai sempre no user, como dado (buildCaseInput). */
   systemPrompt?: string;
   /** Tecnica da biblioteca que gerou esta variante (ausente = verbatim/original). */
   techniqueId?: string;

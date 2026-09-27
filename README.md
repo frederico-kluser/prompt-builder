@@ -115,7 +115,8 @@ flowchart LR
 
 1. **Datagen** — um modelo recebe o tema (e um `scenarioBrief` opcional) e produz os **cenários**
    em lotes paralelos: uma pergunta de usuário (`question`), um **contexto de produto**
-   (`productContext`, que vira o *system prompt*: políticas, FAQs, dados, restrições) e um teto de
+   (`productContext`: políticas, FAQs, dados, restrições — entregue ao participante como bloco de
+   dado delimitado antes da pergunta; a variante sob teste é o único *system prompt*) e um teto de
    tokens sugerido (`maxTokens`). Cada etapa varia o tipo de tarefa (extração, raciocínio,
    comparação, recusa…). Um **pacote de cenários** importado vira seed e mescla com os gerados.
 2. **Participantes** — respondem **ao mesmo cenário em paralelo** (com limite de concorrência),
