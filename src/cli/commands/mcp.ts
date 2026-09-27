@@ -6,9 +6,9 @@
 // instalacao — inclusive de quem so quer o CLI — e o cold start rapido e
 // metade da vantagem de um binario sobre um servidor MCP.
 //
-// A superficie e deliberadamente PEQUENA (6 ferramentas): o schema de cada uma
-// entra no contexto do agente a cada turno, entao cada ferramenta a mais e um
-// imposto permanente de tokens.
+// A superficie e deliberadamente PEQUENA: o schema de cada ferramenta entra no
+// contexto do agente a cada turno, entao cada ferramenta a mais e um imposto
+// permanente de tokens.
 //
 // Cancelamento cooperativo (IMPL-025, R-13:REC-4): o laço de leitura NUNCA
 // espera uma ferramenta — `ping`, `tools/list` e `notifications/cancelled`
@@ -18,30 +18,46 @@
 // (ledger + fetch em voo); cancelada pelo cliente, a chamada grava o parcial
 // (record 'aborted', stoppedReason 'cancelled') e NÃO recebe resposta. EOF do
 // stdin e SIGTERM abortam tudo com graça de ~10 s antes de sair.
+//
+// Jobs (IMPL-026, R-13:REC-3): runs levam MINUTOS e o penhasco dos clientes é
+// ~60 s — o retry depois do timeout virava uma 2ª run cobrada (gasto N×). O
+// caminho universal é start_run → run_status → cancel_run (idempotency-key no
+// start: retry = MESMO job); nenhum tools/call segura mais de 25 s (as tools
+// longas de antes esperam até isso e devolvem o jobId); 1 run pesada por
+// processo, com fila; e `CreateTaskResult` (extensão io.modelcontextprotocol/
+// tasks) SÓ para o cliente que declarou a extensão — sem ela, -32021.
 
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { RunCancelled, isControlSignal } from '../../budget.js';
-import { HeavyLane, SHUTDOWN_GRACE_MS, processLane, settleWithin } from '../../jobs.js';
+import {
+  BLOCKING_TOOL_LIMIT_MS,
+  HeavyLane,
+  SHUTDOWN_GRACE_MS,
+  clampJobTtlMs,
+  clampWaitMs,
+  isTerminalJobStatus,
+  isValidIdempotencyKey,
+  processLane,
+  settleWithin,
+} from '../../jobs.js';
+import { JobManager, defaultJobManager, type JobView, type RunJobInput } from '../../jobManager.js';
 import { PKG_DOCS_DIR, pkgVersion } from '../../paths.js';
-import { assertValidRecordId, publicErrorMessage } from '../../pathSafety.js';
+import { assertValidRecordId, isValidRecordId, publicErrorMessage } from '../../pathSafety.js';
 import { readDocTopic } from './knowledge.js';
 import { setDataDir, loadRun, loadSession } from '../../storage.js';
 import { ensureCatalog } from '../../modelsCache.js';
 import { toExportRow } from '../../modelCaps.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
-import { parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
+import { ARENA_AGENT_CONFIG_FORMAT, parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
 import { arenaConfigToRunConfig, arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
-import { runToCompletion } from '../../orchestrator.js';
 import { readArtifact } from '../../agent/store.js';
-import { prepareOptsFor } from '../../prepareRun.js';
-import { trainToCompletion } from '../../trainer.js';
 import { resolveHome, resolveKey, parse } from '../context.js';
 import { EXIT } from '../output.js';
-import type { RunConfig, RunRecord } from '../../types.js';
+import type { RunConfig } from '../../types.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const SERVER_INFO = { name: 'prompt-builder', version: pkgVersion() };
@@ -65,6 +81,15 @@ export interface ToolCtx {
    * é cancelável e só a parte cara entra nela — validação e catálogo não.
    */
   exclusive<T>(fn: () => Promise<T>): Promise<T>;
+  /** Jobs do processo (IMPL-026): start_run/run_status/cancel_run e as tools longas. */
+  jobs: JobManager;
+  /**
+   * O cliente declarou a extensão Tasks (nesta requisição ou no initialize):
+   * só então uma tool longa pode devolver `CreateTaskResult`.
+   */
+  tasks: boolean;
+  /** Teto da espera de uma tool longa antes de devolver o jobId (< 30 s). */
+  blockingWaitMs: number;
 }
 
 export interface McpTool {
@@ -73,8 +98,240 @@ export interface McpTool {
   inputSchema: Record<string, unknown>;
   /** Não precisa de key (lê disco/docs embarcadas): funciona sem OPENROUTER_API_KEY. */
   noKey?: boolean;
+  /** Saída em JSON compacto (tools de poll: cada chamada custa tokens). */
+  compact?: boolean;
   run: (args: Record<string, unknown>, apiKey: string, ctx: ToolCtx) => Promise<unknown>;
 }
+
+// ---------------------------------------------------------------------------
+// Extensão Tasks (io.modelcontextprotocol/tasks, SEP-2663 — spec 2026-07-28)
+// ---------------------------------------------------------------------------
+
+export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
+/** MissingRequiredClientCapability (renumerado de -32003 na spec 2026-07-28). */
+export const MISSING_CAPABILITY = -32021;
+const CLIENT_CAPS_META = 'io.modelcontextprotocol/clientCapabilities';
+
+/** `capabilities` declara a extensão Tasks? (`extensions[TASKS_EXTENSION]` objeto) */
+function declaresTasks(capabilities: unknown): boolean {
+  const ext = (capabilities as { extensions?: unknown } | null | undefined)?.extensions;
+  if (!ext || typeof ext !== 'object') return false;
+  const v = (ext as Record<string, unknown>)[TASKS_EXTENSION];
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** Declaração POR REQUISIÇÃO (era 2026-07-28): `params._meta[clientCapabilities]`. */
+function requestDeclaresTasks(params: unknown): boolean {
+  const meta = (params as { _meta?: unknown } | null | undefined)?._meta;
+  if (!meta || typeof meta !== 'object') return false;
+  return declaresTasks((meta as Record<string, unknown>)[CLIENT_CAPS_META]);
+}
+
+/** Resultado de `tools/call` que é uma TASK (em vez de CallToolResult). */
+export interface CreateTaskResult {
+  resultType: 'task';
+  taskId: string;
+  status: TaskStatus;
+  statusMessage?: string;
+  createdAt: string;
+  lastUpdatedAt: string;
+  ttlMs: number | null;
+  pollIntervalMs: number;
+}
+
+export type TaskStatus = 'working' | 'input_required' | 'completed' | 'failed' | 'cancelled';
+
+/**
+ * Job → estado de task. Fila e execução = `working`. Erro da FERRAMENTA
+ * (config inválida em tempo de execução, catálogo fora) é `completed` com
+ * `isError` — a spec proíbe `failed` para isso; `failed` fica para o que não
+ * é resultado de ferramenta (dono do job morreu).
+ */
+function taskStatusOf(job: JobView): TaskStatus {
+  if (job.status === 'queued' || job.status === 'working') return 'working';
+  if (job.status === 'failed') return job.failure === 'orphaned' ? 'failed' : 'completed';
+  return job.status;
+}
+
+function taskBase(job: JobView): Omit<CreateTaskResult, 'resultType'> {
+  return {
+    taskId: job.jobId,
+    status: taskStatusOf(job),
+    statusMessage:
+      job.status === 'queued' && job.queuePosition
+        ? `na fila de runs pesadas (posição ${job.queuePosition})`
+        : job.statusMessage,
+    createdAt: job.createdAt,
+    lastUpdatedAt: job.lastUpdatedAt,
+    ttlMs: job.ttlMs,
+    pollIntervalMs: job.pollIntervalMs,
+  };
+}
+
+/**
+ * Resultado de `tasks/get`: o estado da task e, quando `completed`, o
+ * CallToolResult (o MESMO resumo que a tool bloqueante devolvia; erro de
+ * ferramenta vai como `isError`). `cancelled` não promete resultado: o
+ * parcial é lido por get_result (o id está no statusMessage).
+ */
+export function taskGetResult(job: JobView): Record<string, unknown> {
+  const base: Record<string, unknown> = { resultType: 'complete', ...taskBase(job) };
+  const status = taskStatusOf(job);
+  if (status === 'completed') {
+    base.result =
+      job.status === 'failed'
+        ? { content: [{ type: 'text', text: job.error ?? 'o job falhou' }], isError: true }
+        : { content: [{ type: 'text', text: JSON.stringify(job.result ?? {}, null, 2) }], isError: false };
+  } else if (status === 'failed') {
+    base.error = { code: -32603, message: job.error ?? 'o job falhou' };
+  }
+  return base;
+}
+
+/** Marca um resultado JÁ no formato do protocolo (não vira texto JSON). */
+const RAW_RESULT = Symbol('mcp.rawResult');
+type RawResult = { [RAW_RESULT]: Record<string, unknown> };
+
+function rawResult(result: Record<string, unknown>): RawResult {
+  return { [RAW_RESULT]: result };
+}
+
+function isRawResult(v: unknown): v is RawResult {
+  return typeof v === 'object' && v !== null && RAW_RESULT in v;
+}
+
+// ---------------------------------------------------------------------------
+// Tools longas sobre jobs (IMPL-026)
+// ---------------------------------------------------------------------------
+
+/** Graça para o job parar depois que a requisição que o esperava foi cancelada. */
+const CANCEL_SETTLE_MS = SHUTDOWN_GRACE_MS;
+
+function budgetOf(v: unknown): number {
+  const budgetUsd = numOf(v);
+  if (budgetUsd === undefined || !Number.isFinite(budgetUsd) || budgetUsd <= 0) {
+    throw new Error('budgetUsd é obrigatório e deve ser maior que zero.');
+  }
+  return budgetUsd;
+}
+
+function optionalIdempotencyKey(v: unknown): string | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (!isValidIdempotencyKey(v)) {
+    throw new Error('idempotencyKey deve ser um texto de 1 a 256 caracteres (ex.: um UUID seu).');
+  }
+  return v;
+}
+
+/** Motivo legível de um sinal abortado (sem o prefixo "Run cancelada:"). */
+function motivoDoSinal(signal: AbortSignal): string {
+  const r: unknown = signal.reason;
+  const msg = r instanceof Error ? r.message : typeof r === 'string' ? r : 'requisição cancelada';
+  return umaLinha(msg.replace(/^Run cancelada:\s*/u, '') || 'requisição cancelada');
+}
+
+/** Resposta de job ainda em andamento: o agente segue por run_status. */
+function emAndamento(job: JobView): Record<string, unknown> {
+  return {
+    jobId: job.jobId,
+    status: job.status,
+    statusMessage: job.statusMessage,
+    runId: job.runId,
+    sessionId: job.sessionId,
+    queuePosition: job.queuePosition,
+    progress: job.progress,
+    pollIntervalMs: job.pollIntervalMs,
+    next:
+      'A run segue em segundo plano. Acompanhe com run_status({jobId}) a cada ≥ 5 s; ' +
+      'pare com cancel_run({jobId}). Não chame esta tool de novo sem a MESMA idempotencyKey.',
+  };
+}
+
+/**
+ * Resultado de uma tool longa a partir do job: terminal = o MESMO resumo que
+ * a tool sempre devolveu; em andamento = o handle do job.
+ */
+function resultadoDoJob(job: JobView, errosComoResultado: boolean): unknown {
+  if (job.status === 'failed') {
+    const msg = job.error ?? 'o job falhou';
+    if (errosComoResultado) return { ok: false, error: msg, jobId: job.jobId };
+    throw new Error(msg);
+  }
+  if (job.result) return job.result;
+  if (isTerminalJobStatus(job.status)) {
+    return { jobId: job.jobId, status: job.status, statusMessage: job.statusMessage };
+  }
+  return emAndamento(job);
+}
+
+/**
+ * Tool longa (run_benchmark/train_prompt/run_agent_benchmark) sobre um job:
+ * cria (ou reencontra pela idempotency-key) e espera no MÁXIMO
+ * `blockingWaitMs` (< 30 s). Cliente com Tasks declarada recebe a task na
+ * hora. Requisição cancelada (notifications/cancelled, EOF, SIGTERM) cancela
+ * o job que ela esperava e devolve o parcial (o session suprime a resposta
+ * quando quem cancelou foi o cliente).
+ */
+async function runLongTool(
+  tool: string,
+  input: RunJobInput,
+  args: Record<string, unknown>,
+  apiKey: string,
+  ctx: ToolCtx,
+  errosComoResultado = false,
+): Promise<unknown> {
+  const { job } = await ctx.jobs.start(input, apiKey, {
+    tool,
+    idempotencyKey: optionalIdempotencyKey(args.idempotencyKey),
+    ttlMs: clampJobTtlMs(args.ttlSeconds),
+  });
+  // "Durably created": o registro já está em disco — tasks/get resolve.
+  if (ctx.tasks) return rawResult({ resultType: 'task', ...taskBase(job) });
+  // A requisição cancelada cancela o job que ela espera DENTRO do evento de
+  // abort: `cancel` de um job deste processo aborta o sinal do motor antes do
+  // primeiro await. Qualquer salto assíncrono aqui (ler status, progresso)
+  // deixava chamadas pagas saírem depois do cancel.
+  const pararJob = (): void => void ctx.jobs.cancel(job.jobId, motivoDoSinal(ctx.signal)).catch(() => undefined);
+  if (ctx.signal.aborted) pararJob();
+  else ctx.signal.addEventListener('abort', pararJob, { once: true });
+  try {
+    const fim = await ctx.jobs.wait(job.jobId, ctx.blockingWaitMs, ctx.signal);
+    if (ctx.signal.aborted) {
+      const parado = await ctx.jobs.wait(job.jobId, CANCEL_SETTLE_MS);
+      return resultadoDoJob(parado ?? job, errosComoResultado);
+    }
+    return resultadoDoJob(fim ?? job, errosComoResultado);
+  } finally {
+    ctx.signal.removeEventListener('abort', pararJob);
+  }
+}
+
+/**
+ * Config de start_run: arena-agent-config@1 (objeto ou JSON string),
+ * arena-config@1 ou RunConfig. O TIPO do job sai da própria config.
+ */
+async function jobInputFromStartArgs(args: Record<string, unknown>): Promise<RunJobInput> {
+  const budgetUsd = budgetOf(args.budgetUsd);
+  let raw: unknown = args.config;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      throw new Error('config não é um JSON válido.');
+    }
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config é obrigatório (objeto).');
+  if ((raw as Record<string, unknown>).format === ARENA_AGENT_CONFIG_FORMAT) {
+    const cfg = parseAgentConfigRaw(raw);
+    return { kind: cfg.mode === 'training' ? 'training' : 'agent', config: { ...cfg, budgetUsd }, budgetUsd };
+  }
+  const cfg = await toRunConfig(raw);
+  return { kind: cfg.mode === 'training' ? 'training' : 'benchmark', config: { ...cfg, budgetUsd }, budgetUsd };
+}
+
+// Schemas curtos de propósito: tools/list entra no contexto do agente a cada
+// turno. `ttlSeconds` só aparece no start_run (as tools longas o aceitam igual).
+const IDEMPOTENCY_KEY_SCHEMA = { type: 'string', description: 'retry com a mesma chave = mesmo job' };
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
 const numOf = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined);
@@ -108,26 +365,6 @@ function parseAgentConfigRaw(config: unknown): RunConfig {
   const c = arenaAgentConfigToRunConfig(p.config);
   if (!c.ok) throw new Error(c.error);
   return c.config;
-}
-
-// Derivado do record, nao inferido: conta so respostas de agente (com execution).
-// "cut" = a execucao parou pela parede/teto (nao e um veredito 'nao').
-const AGENT_CUT_REASONS = new Set(['maxTurns', 'maxCost', 'timeout', 'maxOutput', 'cancelled']);
-
-function agentSummary(rec: { stages: { responses: { costUsd: number; execution?: { turns: number; stopReason: string; oracle?: { score: number } } }[] }[] }) {
-  const execs = rec.stages.flatMap((s) => s.responses.filter((r) => r.execution));
-  if (execs.length === 0) return undefined;
-  const executions = execs.length;
-  const failed = execs.filter((r) => r.execution!.stopReason === 'error').length;
-  const incomplete = execs.filter((r) => AGENT_CUT_REASONS.has(r.execution!.stopReason)).length;
-  const avgTurns = execs.reduce((a, r) => a + r.execution!.turns, 0) / executions;
-  const avgCostUsd = execs.reduce((a, r) => a + r.costUsd, 0) / executions;
-  const withOracle = execs.filter((r) => r.execution!.oracle !== undefined);
-  const oracleRate =
-    withOracle.length > 0
-      ? withOracle.reduce((a, r) => a + (r.execution!.oracle!.score ?? 0), 0) / withOracle.length
-      : undefined;
-  return { executions, failed, incomplete, avgTurns, avgCostUsd, oracleRate };
 }
 
 const TOOLS: McpTool[] = [
@@ -175,83 +412,122 @@ const TOOLS: McpTool[] = [
     },
   },
   {
+    name: 'start_run',
+    description:
+      'Inicia uma run (compare/vary/training/agentes) em segundo plano e devolve o jobId na hora. ' +
+      'Depois: run_status (poll ≥ 5 s) e cancel_run. idempotencyKey obrigatória: reuse-a nos retries ' +
+      '(mesma chave = mesmo job, nunca uma 2ª run paga).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        // `type` único de propósito: clientes com schema subconjunto de
+        // OpenAPI (Gemini) recusam união de tipos. String JSON é aceita também.
+        config: { type: 'object', description: 'arena-config@1, RunConfig ou arena-agent-config@1' },
+        budgetUsd: { type: 'number', description: 'teto de gasto em USD' },
+        idempotencyKey: IDEMPOTENCY_KEY_SCHEMA,
+        ttlSeconds: { type: 'number', description: 'prazo máximo; passado, cancela (padrão 7200)' },
+      },
+      required: ['config', 'budgetUsd', 'idempotencyKey'],
+    },
+    compact: true,
+    run: async (args, apiKey, { jobs }) => {
+      if (!isValidIdempotencyKey(args.idempotencyKey)) {
+        throw new Error(
+          'idempotencyKey é obrigatória (texto de 1 a 256 caracteres): gere uma (ex.: UUID) e REUSE-a ' +
+            'nos retries deste mesmo pedido.',
+        );
+      }
+      const input = await jobInputFromStartArgs(args);
+      // Só valida e grava: o catálogo e a run rodam no job (fora do caminho da
+      // resposta — o id sai em < 500 ms). Se ESTA requisição for cancelada
+      // depois daqui, o job segue: o retry com a mesma chave o reencontra.
+      const { job, created } = await jobs.start(input, apiKey, {
+        tool: 'start_run',
+        idempotencyKey: args.idempotencyKey,
+        ttlMs: clampJobTtlMs(args.ttlSeconds),
+      });
+      return { created, ...job };
+    },
+  },
+  {
+    name: 'run_status',
+    description: 'Estado de um job (fila, progresso, gasto) e, no fim, o resumo. waitSeconds ≤ 25 espera o fim.',
+    inputSchema: {
+      type: 'object',
+      properties: { jobId: { type: 'string' }, waitSeconds: { type: 'number' } },
+      required: ['jobId'],
+    },
+    noKey: true,
+    compact: true,
+    run: async (args, _key, { jobs, signal }) => {
+      assertValidRecordId(args.jobId, 'jobId');
+      const v = await jobs.wait(args.jobId, clampWaitMs(args.waitSeconds), signal);
+      if (!v) throw new Error('job não encontrado (id desconhecido ou já expirado).');
+      return v;
+    },
+  },
+  {
+    name: 'cancel_run',
+    description: 'Cancela um job: nenhuma chamada paga nova; o parcial fica gravado (get_result).',
+    inputSchema: {
+      type: 'object',
+      properties: { jobId: { type: 'string' }, waitSeconds: { type: 'number' } },
+      required: ['jobId'],
+    },
+    noKey: true,
+    compact: true,
+    run: async (args, _key, { jobs, signal }) => {
+      assertValidRecordId(args.jobId, 'jobId');
+      const pedido = await jobs.cancel(args.jobId, 'cancel_run');
+      if (!pedido) throw new Error('job não encontrado (id desconhecido ou já expirado).');
+      const v = await jobs.wait(args.jobId, clampWaitMs(args.waitSeconds, 10_000), signal);
+      return v ?? pedido;
+    },
+  },
+  {
     name: 'run_benchmark',
     description:
-      'Roda um benchmark (compare ou vary) até o fim e devolve o resultado. ' +
-      'budgetUsd é OBRIGATÓRIO — é o teto de gasto em dólares.',
+      'Benchmark (compare ou vary): espera até 25 s e devolve o resultado ou o jobId (siga com ' +
+      'run_status). Prefira start_run. budgetUsd é OBRIGATÓRIO.',
     inputSchema: {
       type: 'object',
       properties: {
         config: { type: 'object' },
         budgetUsd: { type: 'number', description: 'teto de gasto em USD' },
+        idempotencyKey: IDEMPOTENCY_KEY_SCHEMA,
       },
       required: ['config', 'budgetUsd'],
     },
-    run: async (args, apiKey, { signal, exclusive }) => {
+    run: async (args, apiKey, ctx) => {
       const base = await toRunConfig(args.config);
-      const budgetUsd = numOf(args.budgetUsd);
-      if (budgetUsd === undefined || budgetUsd <= 0) {
-        throw new Error('budgetUsd é obrigatório e deve ser maior que zero.');
-      }
+      const budgetUsd = budgetOf(args.budgetUsd);
       if (base.mode === 'training') {
         throw new Error('Use train_prompt para o modo training.');
       }
-      await ensureCatalog(apiKey);
-      const cfg: RunConfig = { ...base, budgetUsd };
-      // IMPL-025: o sinal da requisição É o do motor (mesmo caminho do Ctrl-C do CLI).
-      const rec = await exclusive(() =>
-        runToCompletion(cfg, apiKey, prepareOptsFor(cfg, apiKey, { ctx: { signal } })),
-      );
-      return {
-        runId: rec.id,
-        status: rec.status,
-        stoppedReason: rec.stoppedReason,
-        totalCostUsd: rec.totalCostUsd,
-        costByRole: rec.costByRole,
-        budgetExhausted: Boolean(rec.budgetExhausted),
-        stoppedAtPhase: rec.stoppedAtPhase,
-        standings: rec.standings,
-        judgeScoreByContestant: rec.judgeScoreByContestant,
-      };
+      const input: RunJobInput = { kind: 'benchmark', config: { ...base, budgetUsd }, budgetUsd };
+      return runLongTool('run_benchmark', input, args, apiKey, ctx);
     },
   },
   {
     name: 'train_prompt',
     description:
-      'Treina um system prompt ao longo de iterações e devolve o prompt campeão, ' +
-      'com holdout e significância. budgetUsd é OBRIGATÓRIO.',
+      'Treina um system prompt (campeão, holdout, significância): espera até 25 s e devolve o ' +
+      'resultado ou o jobId. Prefira start_run. budgetUsd é OBRIGATÓRIO.',
     inputSchema: {
       type: 'object',
       properties: {
         config: { type: 'object', description: 'configuração com mode "training"' },
         budgetUsd: { type: 'number' },
+        idempotencyKey: IDEMPOTENCY_KEY_SCHEMA,
       },
       required: ['config', 'budgetUsd'],
     },
-    run: async (args, apiKey, { signal, exclusive }) => {
+    run: async (args, apiKey, ctx) => {
       const base = await toRunConfig(args.config);
-      const budgetUsd = numOf(args.budgetUsd);
-      if (budgetUsd === undefined || budgetUsd <= 0) {
-        throw new Error('budgetUsd é obrigatório e deve ser maior que zero.');
-      }
+      const budgetUsd = budgetOf(args.budgetUsd);
       if (base.mode !== 'training') throw new Error('config.mode precisa ser "training".');
-      await ensureCatalog(apiKey);
-      const rec = await exclusive(() => trainToCompletion({ ...base, budgetUsd }, apiKey, { signal }));
-      const campeao = rec.bestPromptByIteration.at(-1);
-      return {
-        sessionId: rec.id,
-        status: rec.status,
-        stoppedReason: rec.stoppedReason,
-        totalCostUsd: rec.totalCostUsd,
-        costByRole: rec.costByRole,
-        iterationsDone: rec.bestPromptByIteration.length,
-        championPrompt: campeao?.systemPrompt,
-        holdout: rec.holdout,
-        significance: rec.significance,
-        // Sem o holdout o ganho NAO esta validado contra sobreajuste.
-        holdoutSkipped: Boolean(rec.holdoutSkipped),
-        budgetExhausted: Boolean(rec.budgetExhausted),
-      };
+      const input: RunJobInput = { kind: 'training', config: { ...base, budgetUsd }, budgetUsd };
+      return runLongTool('train_prompt', input, args, apiKey, ctx);
     },
   },
   {
@@ -282,17 +558,18 @@ const TOOLS: McpTool[] = [
   {
     name: 'run_agent_benchmark',
     description:
-      'Roda um benchmark de AGENTES (arena-agent-config@1) até o fim e devolve um resumo. ' +
-      'config é um JSON string; budgetUsd é OBRIGATÓRIO.',
+      'Benchmark de AGENTES (arena-agent-config@1): espera até 25 s e devolve o resumo ou o jobId. ' +
+      'Prefira start_run. config é um JSON string; budgetUsd é OBRIGATÓRIO.',
     inputSchema: {
       type: 'object',
       properties: {
         config: { type: 'string', description: 'JSON string de arena-agent-config@1' },
         budgetUsd: { type: 'number', description: 'teto de gasto em USD' },
+        idempotencyKey: IDEMPOTENCY_KEY_SCHEMA,
       },
       required: ['config', 'budgetUsd'],
     },
-    run: async (args, apiKey, { signal, exclusive }) => {
+    run: async (args, apiKey, ctx) => {
       // Validacao nunca derruba o servidor: erros viram {ok:false, error}.
       let cfg: RunConfig;
       try {
@@ -304,26 +581,14 @@ const TOOLS: McpTool[] = [
       if (budgetUsd === undefined || budgetUsd <= 0) {
         return { ok: false, error: 'budgetUsd é obrigatório e deve ser maior que zero.' };
       }
-      let rec: RunRecord;
+      const input: RunJobInput = { kind: 'agent', config: { ...cfg, budgetUsd }, budgetUsd };
       try {
-        await ensureCatalog(apiKey);
-        rec = await exclusive(() =>
-          runToCompletion({ ...cfg, budgetUsd }, apiKey, prepareOptsFor(cfg, apiKey, { ctx: { signal } })),
-        );
+        return await runLongTool('run_agent_benchmark', input, args, apiKey, ctx, true);
       } catch (err) {
-        // Cancelado na fila: controle, não erro de config (IMPL-025).
         if (isControlSignal(err)) throw err;
         // IMPL-024: erro de workspace/executor costuma citar caminho absoluto.
         return { ok: false, error: publicErrorMessage(err) };
       }
-      return {
-        ok: true,
-        runId: rec.id,
-        status: rec.status,
-        stoppedReason: rec.stoppedReason,
-        totalCostUsd: rec.totalCostUsd,
-        agentSummary: agentSummary(rec),
-      };
     },
   },
   {
@@ -395,7 +660,16 @@ export interface CallToolOptions {
   log?: (msg: string) => void;
   /** Só testes: substitui a tabela de ferramentas. */
   tools?: readonly McpTool[];
+  /** Jobs (IMPL-026). Padrão: o gerente do processo (fila do processo). */
+  jobs?: JobManager;
+  /** O cliente declarou a extensão Tasks para esta chamada. */
+  tasks?: boolean;
+  /** Teto da espera de uma tool longa (padrão e máximo: BLOCKING_TOOL_LIMIT_MS). */
+  blockingWaitMs?: number;
 }
+
+/** Resultado de `tools/call`: CallToolResult ou, com Tasks declarada, a task. */
+export type ToolCallResponse = ToolCallResult | CreateTaskResult;
 
 /** Sinal que nunca aborta — chamadas diretas (testes, CLI) sem cancelamento. */
 const NUNCA_ABORTA = new AbortController().signal;
@@ -411,7 +685,7 @@ export async function callTool(
   args: Record<string, unknown>,
   getKey: () => Promise<string> = async () => '',
   opts: CallToolOptions = {},
-): Promise<ToolCallResult | null> {
+): Promise<ToolCallResponse | null> {
   const tool = (opts.tools ?? TOOLS).find((t) => t.name === name);
   if (!tool) return null;
   const signal = opts.signal ?? NUNCA_ABORTA;
@@ -427,11 +701,17 @@ export async function callTool(
       }
       return lane.run(fn, signal);
     },
+    jobs: opts.jobs ?? defaultJobManager(),
+    tasks: opts.tasks === true,
+    // Nenhum tools/call segura mais que o teto (< 30 s), nem por configuração.
+    blockingWaitMs: Math.min(opts.blockingWaitMs ?? BLOCKING_TOOL_LIMIT_MS, BLOCKING_TOOL_LIMIT_MS),
   };
   try {
     const key = tool.noKey ? '' : await getKey();
     const out = await tool.run(args, key, ctx);
-    return { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] };
+    if (isRawResult(out)) return out[RAW_RESULT] as unknown as CreateTaskResult;
+    const text = tool.compact ? JSON.stringify(out) : JSON.stringify(out, null, 2);
+    return { content: [{ type: 'text', text }] };
   } catch (err) {
     return { content: [{ type: 'text', text: publicErrorMessage(err) }], isError: true };
   }
@@ -452,6 +732,10 @@ export interface McpSessionOptions {
   graceMs?: number;
   /** Só testes: substitui a tabela de ferramentas. */
   tools?: readonly McpTool[];
+  /** Jobs do processo (IMPL-026). Padrão: um gerente sobre `lane`. */
+  jobs?: JobManager;
+  /** Teto da espera de uma tool longa (padrão/máximo BLOCKING_TOOL_LIMIT_MS). */
+  blockingWaitMs?: number;
 }
 
 export interface ShutdownResult {
@@ -487,9 +771,10 @@ function umaLinha(v: unknown, max = 200): string {
  * que a ferramenta devolveu (e que NÃO vai ao cliente): onde ficou gravado,
  * como terminou e quanto o ledger mediu. É o "log do ledger" do cancelamento.
  */
-function resumoDoParcial(result: ToolCallResult | null): string | undefined {
+function resumoDoParcial(result: ToolCallResponse | null): string | undefined {
   try {
-    const out = JSON.parse(result?.content[0]?.text ?? '') as {
+    const texto = result && 'content' in result ? result.content[0]?.text : undefined;
+    const out = JSON.parse(texto ?? '') as {
       runId?: unknown;
       sessionId?: unknown;
       status?: unknown;
@@ -515,9 +800,17 @@ export class McpSession {
   private readonly inflight = new Map<string, InflightCall>();
   private closing: Promise<ShutdownResult> | null = null;
   private readonly log: (msg: string) => void;
+  /** Jobs deste processo: start_run/run_status/cancel_run, tools longas e Tasks. */
+  readonly jobs: JobManager;
+  /**
+   * O cliente declarou a extensão Tasks no `initialize` (sessão legacy). Na
+   * era 2026-07-28 a declaração vem POR REQUISIÇÃO em `_meta` — as duas valem.
+   */
+  private tasksNaSessao = false;
 
   constructor(private readonly opts: McpSessionOptions) {
     this.log = opts.log ?? (() => undefined);
+    this.jobs = opts.jobs ?? new JobManager({ lane: opts.lane, log: this.log });
   }
 
   /** Chamadas de ferramenta ainda em andamento. */
@@ -566,11 +859,15 @@ export class McpSession {
     try {
       switch (req.method) {
         case 'initialize': {
-          const pedido = str((req.params as Record<string, unknown>)?.protocolVersion);
+          const params = (req.params ?? {}) as Record<string, unknown>;
+          const pedido = str(params.protocolVersion);
+          this.tasksNaSessao = declaresTasks(params.capabilities);
           this.reply(req.id, {
             // Ecoa a versao pedida quando conhecida; senao anuncia a nossa.
             protocolVersion: pedido ?? PROTOCOL_VERSION,
-            capabilities: { tools: {} },
+            // A extensão só é anunciada a quem a declarou: cliente legacy sem
+            // ela não vê campo desconhecido em `capabilities`.
+            capabilities: this.tasksNaSessao ? { tools: {}, extensions: { [TASKS_EXTENSION]: {} } } : { tools: {} },
             serverInfo: SERVER_INFO,
           });
           return;
@@ -603,6 +900,11 @@ export class McpSession {
           }
           this.startCall(req.id as string | number, req.params);
           return;
+        case 'tasks/get':
+        case 'tasks/cancel':
+        case 'tasks/update':
+          if (!isNotification) this.handleTask(req.id as string | number, req.method, req.params);
+          return;
         default:
           if (!isNotification) {
             this.replyError(req.id, -32601, `Método não suportado: ${umaLinha(req.method, 80)}`);
@@ -624,14 +926,16 @@ export class McpSession {
     const graceMs = this.opts.graceMs ?? SHUTDOWN_GRACE_MS;
     const calls = [...this.inflight.values()];
     for (const c of calls) c.controller.abort(new RunCancelled(`servidor MCP encerrando (${reason})`));
-    if (calls.length > 0) {
+    // Jobs deste processo morrem com ele: cada run grava o parcial (IMPL-026).
+    const jobs = this.jobs.shutdown(`servidor MCP encerrando (${reason})`);
+    if (calls.length > 0 || jobs.length > 0) {
       this.log(
-        `[mcp] encerrando (${reason}): ${calls.length} chamada(s) em andamento abortada(s); ` +
-          `graça de ${Math.round(graceMs / 1000)} s para gravar o parcial`,
+        `[mcp] encerrando (${reason}): ${calls.length} chamada(s) e ${jobs.length} job(s) em andamento ` +
+          `abortado(s); graça de ${Math.round(graceMs / 1000)} s para gravar o parcial`,
       );
     }
     this.closing = settleWithin(
-      calls.map((c) => c.done),
+      [...calls.map((c) => c.done), ...jobs],
       graceMs,
     ).then((ok) => {
       const pending = this.inflight.size;
@@ -674,6 +978,9 @@ export class McpSession {
           lane: this.opts.lane,
           log: this.log,
           tools: this.opts.tools,
+          jobs: this.jobs,
+          tasks: this.tasksNaSessao || requestDeclaresTasks(params),
+          blockingWaitMs: this.opts.blockingWaitMs,
         });
         if (call.cancelled) {
           // Spec (Cancellation): quem recebe o cancelamento NÃO responde. Não
@@ -717,12 +1024,56 @@ export class McpSession {
     call.controller.abort(new RunCancelled(`cliente MCP cancelou (${motivo})`));
   }
 
+  /**
+   * `tasks/get` | `tasks/cancel` | `tasks/update` (extensão Tasks). Cliente que
+   * não declarou a extensão recebe -32021 com `data.requiredCapabilities`
+   * (MUST da spec). Assíncrono (lê disco), mas nunca prende o laço de leitura.
+   */
+  private handleTask(id: string | number, method: string, params: unknown): void {
+    if (!this.tasksNaSessao && !requestDeclaresTasks(params)) {
+      this.replyError(id, MISSING_CAPABILITY, 'Missing required client capability', {
+        requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } },
+      });
+      return;
+    }
+    const taskId = (params as { taskId?: unknown } | null | undefined)?.taskId;
+    void (async () => {
+      try {
+        if (method === 'tasks/update') {
+          // Nenhum job daqui pede input (nunca fica em input_required).
+          this.replyError(id, -32602, 'A task não está aguardando input (input_required).');
+          return;
+        }
+        if (!isValidRecordId(taskId)) {
+          this.replyError(id, -32602, 'taskId inválido.');
+          return;
+        }
+        if (method === 'tasks/cancel') {
+          // Cooperativo: reconhece o pedido; o estado vira 'cancelled' quando a
+          // run gravar o parcial (tasks/get mostra).
+          const v = await this.jobs.cancel(taskId, 'tasks/cancel do cliente');
+          if (!v) this.replyError(id, -32602, 'Failed to retrieve task: Task not found');
+          else this.reply(id, { resultType: 'complete' });
+          return;
+        }
+        const job = await this.jobs.status(taskId, { progress: false });
+        if (!job) {
+          this.replyError(id, -32602, 'Failed to retrieve task: Task not found');
+          return;
+        }
+        this.reply(id, taskGetResult(job));
+      } catch (err) {
+        this.replyError(id, -32603, publicErrorMessage(err));
+      }
+    })();
+  }
+
   private reply(id: unknown, result: unknown): void {
     this.opts.write({ jsonrpc: '2.0', id, result });
   }
 
-  private replyError(id: unknown, code: number, message: string): void {
-    this.opts.write({ jsonrpc: '2.0', id, error: { code, message } });
+  private replyError(id: unknown, code: number, message: string, data?: unknown): void {
+    this.opts.write({ jsonrpc: '2.0', id, error: data === undefined ? { code, message } : { code, message, data } });
   }
 }
 

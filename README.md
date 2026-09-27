@@ -37,9 +37,18 @@ Também expõe um **servidor MCP** no mesmo binário:
 claude mcp add --transport stdio arena -- npx -y prompt-builder-cli mcp
 ```
 
-Cancelar a chamada no cliente (`notifications/cancelled`) interrompe a run na hora: nenhuma
-chamada paga nova sai, o parcial fica gravado como `aborted` (`stoppedReason: "cancelled"`) e
-é lido por `get_result`. Fechar o stdin ou mandar `SIGTERM` faz o mesmo com até ~10 s de graça.
+Runs levam minutos e os clientes MCP cortam uma chamada em ~60 s, então o caminho é por
+**job**: `start_run` devolve o `jobId` na hora (a run roda em segundo plano, uma por processo,
+as demais em fila), `run_status` acompanha e `cancel_run` interrompe. `idempotencyKey` é
+obrigatória no `start_run`: um retry com a MESMA chave — até de outro processo — devolve o mesmo
+job em vez de pagar uma segunda run. `run_benchmark`/`train_prompt`/`run_agent_benchmark`
+continuam, mas esperam no máximo ~25 s e então devolvem o `jobId`. Cliente que declara a
+extensão `io.modelcontextprotocol/tasks` recebe uma task (`tasks/get`, `tasks/cancel`).
+
+Cancelar (`cancel_run`, `tasks/cancel` ou `notifications/cancelled` da chamada) interrompe a run
+na hora: nenhuma chamada paga nova sai, o parcial fica gravado como `aborted`
+(`stoppedReason: "cancelled"`) e é lido por `get_result`. Fechar o stdin ou mandar `SIGTERM` faz
+o mesmo com até ~10 s de graça; um job que passa do prazo (`ttlSeconds`, padrão 2 h) também.
 
 Três coisas que o CLI garante e a UI não garantia:
 
