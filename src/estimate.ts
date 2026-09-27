@@ -322,12 +322,14 @@ export function estimateRunCost(
     input.mode === 'training' ? Math.max(0, Math.floor(input.reevalStages ?? 0)) : 0;
   if (reevalStages > 0) {
     const mComp = model(input.contestantModelIds[0]);
-    byRole.competitor += reevalStages * 2 * priceCall(mComp, ctxIn, maxOut);
+    // `price` (IMPL-018): preço desconhecido vai para unknownPriceModelIds /
+    // pior caso, nunca soma null nem "grátis".
+    byRole.competitor += reevalStages * 2 * price(mComp, ctxIn, maxOut);
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
       byRole.judge += input.referenceJudging
-        ? reevalStages * 2 * priceCall(m, ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE)
-        : reevalStages * input.judgePasses * priceCall(m, ctxIn + 2 * maxOut, 800);
+        ? reevalStages * 2 * price(m, ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE)
+        : reevalStages * input.judgePasses * price(m, ctxIn + 2 * maxOut, 800);
     }
   }
 

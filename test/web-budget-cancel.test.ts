@@ -396,8 +396,10 @@ describe('IMPL-020 (iii) — confirmação de custo com faixa e drivers', () => 
     const rewriter = est.drivers.find((d) => d.role === 'rewriter')!;
     expect(rewriter.calls).toBe(2 * 3); // 2 técnicas × 3 rodadas
     const competitor = est.drivers.find((d) => d.role === 'competitor')!;
-    // 10 cenários × 3 variantes × 3 rodadas + holdout (5 cenários × 2).
-    expect(competitor.calls).toBe(10 * 3 * 3 + 5 * 2);
+    // 10 cenários × 3 variantes × 3 rodadas + re-avaliação limpa por rodada
+    // (IMPL-013: 2 contestants × minibatch de max(5; 30% dos 5 de treino) = 5)
+    // + holdout (5 cenários × 2).
+    expect(competitor.calls).toBe(10 * 3 * 3 + 3 * 2 * 5 + 5 * 2);
   });
 
   it('teto abaixo do piso da faixa é sinalizado (a run vai parar antes do fim)', () => {
