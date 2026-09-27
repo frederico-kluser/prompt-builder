@@ -11,16 +11,36 @@
 // aqui: `verify[]` e `forbiddenPaths` são de outro módulo (§10, passo 8). Este
 // arquivo não conhece `verify` de propósito.
 //
+// IMPL-038 (R-15 REC-4) — o git do HOST nunca toca um `.git` que código não
+// confiável pôde escrever:
+// - `setup[]` roda pelo `CommandRunner` injetado (sandbox em modo container;
+//   host EXPLÍCITO, sem isolamento, no modo host).
+// - A régua do diff mora num `--git-dir` de AUDITORIA criado pelo produto, fora
+//   do workspace e de qualquer mount. seed e resultado são snapshots de CÓPIAS
+//   da árvore (`copyTreeBytes`: só bytes, symlink não seguido, sem `.git`),
+//   commitados por plumbing (`write-tree`/`commit-tree` — hook nenhum dispara).
+// - O agente recebe um `.git` NOVO, clonado do repo de auditoria (HEAD = seed),
+//   e pode fazer o que quiser com ele: o `collect()` não o lê nem o executa
+//   (caso E3: `pre-commit`/`core.fsmonitor` plantados não rodam no host).
+//
 // ⚠️ ESPELHO CLIENT-SIDE: NÃO existe. O navegador não tem `child_process`,
 // filesystem nem git — o modo agente é impossível na SPA (§7.3 / §10 do plano).
 // Não "consertar" essa assimetria.
 // ----------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AgentLimits, AgentTaskSpec } from './types.js';
+import {
+  copyTreeBytes,
+  hostCommandRunner,
+  safeGit,
+  safeGitOrThrow,
+  writeFileNoFollow,
+  type CommandRunner,
+} from './sandboxExec.js';
 
 // O teto de bytes do diff considerado, quando a tarefa não diz nada (§AgentLimits).
 const DEFAULT_MAX_DIFF_BYTES = 512 * 1024;
@@ -47,6 +67,11 @@ export interface PreparedWorkspace {
   seedCommit: string;
   /** Repo cache (bare) do seed; endereçado por hash de (url|path, ref). Usado no dispose. */
   cacheRepoDir: string;
+  /**
+   * `--git-dir` de AUDITORIA (bare, fora do workspace, nunca montado): guarda o
+   * seed e o `agent-result`. É dele — nunca do `.git` do agente — que sai o diff.
+   */
+  auditGitDir: string;
 }
 
 /**
@@ -68,6 +93,20 @@ export interface CollectResult {
   removed: number;
   /** Nº de arquivos no diff (linhas do `--numstat`). */
   files: number;
+  /**
+   * Cópia (só bytes, sem `.git`) do estado FINAL do agente — presente só com
+   * `keepSnapshot`. É a base do sandbox verificador; quem pediu apaga.
+   */
+  snapshotDir?: string;
+}
+
+/** ONDE roda o `setup[]` (IMPL-038). Default: host explícito, sem isolamento. */
+export interface PrepareOpts {
+  /**
+   * Fábrica do runner, chamada com o `workspaceDir` recém-criado (o sandbox
+   * monta exatamente esse diretório em `/ws`).
+   */
+  setupRunner?: (workspaceDir: string) => CommandRunner;
 }
 
 /**
@@ -79,21 +118,26 @@ export interface WorkspaceManager {
    * repo-semente (bare, por hash de (url|path, ref)), um worktree efêmero
    * `--detach`, roda `setup[]` e grava `files[]`, e por fim faz o `seedCommit`.
    */
-  prepare(task: {
-    repo?: AgentTaskSpec['repo'];
-    setup?: AgentTaskSpec['setup'];
-    files?: AgentTaskSpec['files'];
-    limits?: AgentLimits;
-  }): Promise<PreparedWorkspace>;
+  prepare(
+    task: {
+      repo?: AgentTaskSpec['repo'];
+      setup?: AgentTaskSpec['setup'];
+      files?: AgentTaskSpec['files'];
+      limits?: AgentLimits;
+    },
+    opts?: PrepareOpts,
+  ): Promise<PreparedWorkspace>;
 
   /**
-   * Depois de o agente rodar: commita o resultado e colhe o artefato.
-   * NUNCA roda o oráculo (é de outro módulo).
+   * Depois de o agente rodar: copia a árvore (só bytes, sem `.git`), commita a
+   * CÓPIA no repo de auditoria e colhe o artefato. NUNCA roda git no `.git` do
+   * workspace nem o oráculo (é de outro módulo).
    */
   collect(
     workspaceDir: string,
     seedCommit: string,
     maxDiffBytes?: number,
+    opts?: { keepSnapshot?: boolean },
   ): Promise<CollectResult>;
 
   /** Derruba o workspace e faz prune do cache. Use num `finally`/`try/finally`. */
@@ -105,11 +149,14 @@ export function createWorkspaceManager(opts: {
   cacheDir: string;
 }): WorkspaceManager {
   const { cacheDir } = opts;
+  // workspaceDir → auditGitDir (o `collect`/`dispose` mantêm a assinatura antiga).
+  const auditByWorkspace = new Map<string, string>();
 
   return {
-    async prepare(task) {
+    async prepare(task, prepareOpts) {
       const limits = task.limits;
       const workspaceDir = freshWorkspaceDir();
+      let auditGitDir = '';
 
       // --- 1. repo-semente (cacheado) OU workspace vazio — §13.1 / §13.3.
       // Endereçamento do cache por hash de (url|path, ref): o MESMO repo com
@@ -148,109 +195,195 @@ export function createWorkspaceManager(opts: {
         // Sem repo => workspace vazio (`git init` + commit vazio) — §13.3.
         // A definição de artefato permanece idêntica: diff contra o commit vazio
         // = tudo o que o agente criou.
-        await git(['init'], workspaceDir, limits);
+        // (sem `git init` aqui: o `.git` do agente é o clone do passo 5)
       }
 
       try {
-        await setUpIdentity(workspaceDir);
-
         // --- 3. setup[] — ANTES do seedCommit (regra 3 / §10.1).
         // Rodar setup antes do commit faz o `node_modules` do npm ci etc. NÃO
         // aparecer no diff do agente — o diff mede O QUE O AGENTE FEZ, não o que
         // o ambiente trouxe. `{ shell: false }`: o prompt vem da config da
-        // tarefa e `shell: true` seria injeção de comando (§11.2).
-        if (task.setup) {
+        // tarefa e `shell: true` seria injeção de comando (§11.2). ONDE roda é do
+        // runner (IMPL-038): "é só npm ci" executa scripts do repo — em modo
+        // container isso acontece no sandbox, nunca no host.
+        if (task.setup?.length) {
+          const runner = prepareOpts?.setupRunner?.(workspaceDir) ?? hostCommandRunner();
           for (const step of task.setup) {
             const argv = splitCommandLine(step.cmd);
             if (argv.length === 0) continue;
-            const r = await runProcess(argv, {
+            let out = '';
+            const r = await runner.exec({
+              argv,
               cwd: workspaceDir,
               timeoutMs: step.timeoutMs,
+              onOutput: (b) => {
+                out = (out + b.toString('utf8')).slice(-4000);
+              },
             });
-            if (r.code !== 0) {
+            if (r.code !== 0 || r.spawnFailed) {
               throw new Error(
-                `setup falhou no comando ${step.cmd}: exit ${r.code ?? r.signal}` +
-                  (r.stderr ? `\nstderr: ${r.stderr.slice(-2000)}` : ''),
+                `setup falhou no comando ${step.cmd}: exit ${r.code ?? r.signal ?? r.error}` +
+                  (out ? `\nsaída: ${out.slice(-2000)}` : '') +
+                  (r.error ? `\nerro: ${r.error}` : ''),
               );
             }
           }
         }
 
         // --- 3b. files[] — fixtures escritos depois do setup.
+        // Sem seguir symlink (IMPL-038): o setup, que pode ter rodado no
+        // sandbox, não desvia a escrita do host para fora do workspace.
         if (task.files) {
-          for (const f of task.files) {
-            const abs = path.resolve(workspaceDir, f.path);
-            mkdirSync(path.dirname(abs), { recursive: true });
-            writeFileSync(abs, f.content, 'utf8');
-          }
+          for (const f of task.files) writeFileNoFollow(workspaceDir, f.path, f.content);
         }
 
-        // --- 4. seedCommit — a régua do diff (§10.1).
-        // `git add -A` respeita o .gitignore, mas o commit pós-setup resolve as
-        // tarefas sem .gitignore decente sem depender da higiene do repo-semente.
-        await git(['add', '-A'], workspaceDir, limits);
-        await git(['commit', '--allow-empty', '-q', '-m', 'seed'], workspaceDir, limits);
+        // --- 4. seedCommit — a régua do diff (§10.1), no repo de AUDITORIA.
+        // O setup acima pode ter escrito no `.git` do workspace (hooks, config
+        // com filtro): o seed sai de uma CÓPIA da árvore, commitada num
+        // `--git-dir` que só o produto escreveu. `add -A` respeita o .gitignore
+        // da árvore, como antes.
+        auditGitDir = mkdtempSync(path.join(tmpdir(), 'pb-audit-git-'));
+        await safeGitOrThrow(['init', '--bare', '-q', '--initial-branch=main', auditGitDir]);
+        const seedCommit = await snapshotCommit(auditGitDir, workspaceDir, null, 'seed', limits);
+        await safeGitOrThrow(['--git-dir', auditGitDir, 'update-ref', 'refs/heads/main', seedCommit]);
 
-        const seedCommit = await gitOrThrow(['rev-parse', 'HEAD'], workspaceDir, limits);
-        return { workspaceDir, seedCommit, cacheRepoDir };
+        // --- 5. o `.git` do AGENTE: clone limpo do repo de auditoria (HEAD =
+        // seed). Some o gitfile do worktree (que apontava para um caminho do
+        // host) e qualquer coisa que o setup tenha plantado no `.git`.
+        await giveAgentFreshGit(auditGitDir, workspaceDir);
+
+        auditByWorkspace.set(workspaceDir, auditGitDir);
+        return { workspaceDir, seedCommit, cacheRepoDir, auditGitDir };
       } catch (err) {
         // Se a preparação falhou, não deixe worktree (ou init parcial) órfão.
         await teardownWorkspace(cacheRepoDir, workspaceDir, repoRooted).catch(() => {});
+        if (auditGitDir) rmSync(auditGitDir, { recursive: true, force: true });
         throw err;
       }
     },
 
-    async collect(workspaceDir, seedCommit, maxDiffBytes) {
+    async collect(workspaceDir, seedCommit, maxDiffBytes, collectOpts) {
       const maxDiff = maxDiffBytes ?? DEFAULT_MAX_DIFF_BYTES;
-      await setUpIdentity(workspaceDir);
-
-      // --- 5/10.2 — commitar o resultado é de graça e resolve arquivos novos.
-      // `git add -A -N` + `git diff` tem casos-limite com renomeação/submódulo.
-      // Como o workspace é descartável, `add -A && commit` é mais simples e faz
-      // `diff seed..HEAD` capturar criações, remoções e renomeações sem exceção.
-      await git(['add', '-A'], workspaceDir);
-      await git(['commit', '--allow-empty', '-q', '-m', 'agent-result'], workspaceDir);
-      const commitSha = await gitOrThrow(['rev-parse', 'HEAD'], workspaceDir);
-
-      // regexp determinístico; seedCommit vem de `rev-parse` (hex) e não do usuário.
-      const safeSeed = /^[0-9a-f]{40}$/i.test(seedCommit) ? seedCommit : await resolveRef(workspaceDir, seedCommit);
-
-      const range = `${safeSeed}..HEAD`;
-      const [diffOut, numstat, nameStatus] = await Promise.all([
-        git(['diff', '--no-color', range], workspaceDir),
-        git(['diff', '--no-color', '--numstat', range], workspaceDir),
-        git(['diff', '--no-color', '--name-status', range], workspaceDir),
-      ]);
-
-      const statText = numstat.stdout;
-      const parsed = parseNumstat(statText);
-      const nsList = parseNameStatus(nameStatus.stdout);
-
-      // Truncamento por bytes, NUNCA cortando em silêncio (regra 5).
-      let diff = diffOut.stdout;
-      let diffTruncated = false;
-      if (Buffer.byteLength(diff, 'utf8') > maxDiff) {
-        const marker = `[... ${Buffer.byteLength(diff, 'utf8') - maxDiff} bytes omitidos ...]`;
-        diff = Buffer.from(diff, 'utf8').subarray(0, maxDiff).toString('utf8') + '\n' + marker;
-        diffTruncated = true;
+      const auditGitDir = auditByWorkspace.get(workspaceDir);
+      if (!auditGitDir) {
+        throw new Error(`collect sem repo de auditoria para ${workspaceDir} (o workspace não veio deste prepare)`);
       }
 
-      return {
-        commitSha,
-        diff,
-        diffTruncated,
-        statText,
-        nameStatus: nsList,
-        added: parsed.added,
-        removed: parsed.removed,
-        files: parsed.files,
-      };
+      // --- 5/10.2 (IMPL-038) — cópia de árvore + git do PRODUTO na cópia.
+      // Nunca `git add/commit` no `.git` do agente: ali ele pode ter plantado
+      // `pre-commit`, `core.fsmonitor`, pager, filtros (vetor GitSpawn). A cópia
+      // só lê bytes e deixa todo `.git` de fora; o commit `agent-result` é
+      // plumbing sobre o `--git-dir` de auditoria, com o seed como pai — o diff
+      // `seed..result` captura criações, remoções e renomeações sem exceção.
+      const snapshotDir = mkdtempSync(path.join(tmpdir(), 'pb-collect-'));
+      let keep = false;
+      try {
+        const safeSeed = /^[0-9a-f]{40}$/i.test(seedCommit)
+          ? seedCommit
+          : await safeGitOrThrow(['--git-dir', auditGitDir, 'rev-parse', `${seedCommit}^{commit}`]);
+        const commitSha = await snapshotCommit(auditGitDir, workspaceDir, safeSeed, 'agent-result', undefined, snapshotDir);
+        await safeGitOrThrow(['--git-dir', auditGitDir, 'update-ref', 'refs/heads/agent-result', commitSha]);
+
+        const range = [safeSeed, commitSha];
+        const base = ['--git-dir', auditGitDir, 'diff', '--no-color', '--no-ext-diff', '--no-textconv'];
+        const [diffOut, numstat, nameStatus] = await Promise.all([
+          safeGit([...base, ...range]),
+          safeGit([...base, '--numstat', ...range]),
+          safeGit([...base, '--name-status', ...range]),
+        ]);
+        const statText = numstat.stdout;
+        const parsed = parseNumstat(statText);
+        const nsList = parseNameStatus(nameStatus.stdout);
+
+        // Truncamento por bytes, NUNCA cortando em silêncio (regra 5).
+        let diff = diffOut.stdout;
+        let diffTruncated = false;
+        if (Buffer.byteLength(diff, 'utf8') > maxDiff) {
+          const marker = `[... ${Buffer.byteLength(diff, 'utf8') - maxDiff} bytes omitidos ...]`;
+          diff = Buffer.from(diff, 'utf8').subarray(0, maxDiff).toString('utf8') + '\n' + marker;
+          diffTruncated = true;
+        }
+
+        keep = collectOpts?.keepSnapshot === true;
+        return {
+          commitSha,
+          diff,
+          diffTruncated,
+          statText,
+          nameStatus: nsList,
+          added: parsed.added,
+          removed: parsed.removed,
+          files: parsed.files,
+          ...(keep ? { snapshotDir } : {}),
+        };
+      } finally {
+        if (!keep) rmSync(snapshotDir, { recursive: true, force: true });
+      }
     },
 
     async dispose(cacheRepoDir, workspaceDir) {
+      const audit = auditByWorkspace.get(workspaceDir);
+      auditByWorkspace.delete(workspaceDir);
+      if (audit) rmSync(audit, { recursive: true, force: true });
       await teardownWorkspace(cacheRepoDir, workspaceDir, true);
     },
   };
+}
+
+/**
+ * Snapshot de uma árvore no repo de AUDITORIA: copia `srcDir` (só bytes, sem
+ * `.git`, symlink recriado sem seguir) para `intoDir` (ou um tmp descartável),
+ * monta um índice próprio com `add -A` e fecha o commit por PLUMBING
+ * (`write-tree` + `commit-tree`) — nenhum hook existe nem dispara. O `.git` de
+ * `srcDir` nunca é lido.
+ */
+async function snapshotCommit(
+  auditGitDir: string,
+  srcDir: string,
+  parent: string | null,
+  message: string,
+  limits?: AgentLimits,
+  intoDir?: string,
+): Promise<string> {
+  const copyDir = intoDir ?? mkdtempSync(path.join(tmpdir(), 'pb-snap-'));
+  const indexFile = path.join(mkdtempSync(path.join(tmpdir(), 'pb-snap-idx-')), 'index');
+  try {
+    copyTreeBytes(srcDir, copyDir, { symlinks: 'recreate', excludeGit: true });
+    const env = { GIT_INDEX_FILE: indexFile };
+    const t = limits?.timeoutMs;
+    await safeGitOrThrow(['--git-dir', auditGitDir, '--work-tree', copyDir, 'add', '-A'], { env, timeoutMs: t });
+    const tree = await safeGitOrThrow(['--git-dir', auditGitDir, 'write-tree'], { env, timeoutMs: t });
+    return await safeGitOrThrow(
+      ['--git-dir', auditGitDir, 'commit-tree', tree, ...(parent ? ['-p', parent] : []), '-m', message],
+      { env, timeoutMs: t },
+    );
+  } finally {
+    rmSync(path.dirname(indexFile), { recursive: true, force: true });
+    if (!intoDir) rmSync(copyDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Troca o `.git` do workspace por um clone LIMPO do repo de auditoria (HEAD =
+ * seed, índice = seed, sem remote apontando para o host). O agente segue
+ * acordando "dentro de um repositório git REAL" — e o que ele fizer com ele
+ * não volta ao host: o `collect()` não o lê.
+ */
+async function giveAgentFreshGit(auditGitDir: string, workspaceDir: string): Promise<void> {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'pb-wsgit-'));
+  try {
+    const clone = path.join(tmp, 'r');
+    await safeGitOrThrow(['clone', '-q', '--no-checkout', '--no-hardlinks', auditGitDir, clone]);
+    const gitDir = path.join(workspaceDir, '.git');
+    rmSync(gitDir, { recursive: true, force: true });
+    cpSync(path.join(clone, '.git'), gitDir, { recursive: true });
+    await safeGitOrThrow(['--git-dir', gitDir, 'remote', 'remove', 'origin']);
+    await safeGitOrThrow(['--git-dir', gitDir, '--work-tree', workspaceDir, 'read-tree', 'HEAD']);
+    await safeGitOrThrow(['--git-dir', gitDir, 'config', 'user.name', GIT_IDENTITY.name]);
+    await safeGitOrThrow(['--git-dir', gitDir, 'config', 'user.email', GIT_IDENTITY.email]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -265,20 +398,20 @@ async function teardownWorkspace(
   workspaceDir: string,
   repoRooted: boolean,
 ): Promise<void> {
-  if (repoRooted && cacheRepoDir && pathExists(cacheRepoDir)) {
-    try {
-      await git(['-C', cacheRepoDir, 'worktree', 'remove', '--force', workspaceDir], cacheRepoDir);
-    } catch {
-      // Já removido, ou não é worktree deste cache.
-    }
+  // O `.git` do workspace foi trocado por um clone limpo (IMPL-038) e pode ter
+  // sido reescrito pelo agente: NENHUM git roda nele. Apaga o diretório primeiro
+  // e só então faz `worktree prune` NO CACHE (repo do produto) — o registro do
+  // worktree some porque o caminho deixou de existir.
+  rmSync(workspaceDir, { recursive: true, force: true });
+  // Só num cache BARE de verdade: `git -C <dir>` num diretório que não é repo
+  // subiria até um repo que o contenha (o `./data` dentro de um checkout).
+  if (repoRooted && cacheRepoDir && pathExists(path.join(cacheRepoDir, 'HEAD'))) {
     try {
       await git(['-C', cacheRepoDir, 'worktree', 'prune'], cacheRepoDir);
     } catch {
       // cache pode não existir/repo corrompido — melhor esforço.
     }
   }
-  // Garante a remoção quando o workspace não era um worktree linkado.
-  rmSync(workspaceDir, { recursive: true, force: true });
 }
 
 // ----------------------------------------------------------------------------
@@ -339,26 +472,6 @@ function runProcess(
 /** Roda `git <args>` no cwd dado. Nunca lança; devolve a saída bruta. */
 async function git(args: string[], cwd: string, limits?: AgentLimits): Promise<ProcResult> {
   return runProcess(['git', ...args], { cwd, timeoutMs: limits?.timeoutMs });
-}
-
-/** Variante que lança se o git falhar; devolve o stdout trimado. */
-async function gitOrThrow(args: string[], cwd: string, limits?: AgentLimits): Promise<string> {
-  const r = await git(args, cwd, limits);
-  if (r.code !== 0) {
-    throw new Error(`git ${args.join(' ')} falhou: exit ${r.code ?? r.signal} ${r.stderr}`);
-  }
-  return r.stdout.trim();
-}
-
-/** Resolve ref -> sha (para o caso de um seedCommit passado como nome de tag). */
-async function resolveRef(workspaceDir: string, ref: string): Promise<string> {
-  return gitOrThrow(['rev-parse', `${ref}^{commit}`], workspaceDir);
-}
-
-/** Configura identidade git local no workspace (idempotente). */
-async function setUpIdentity(dir: string): Promise<void> {
-  await git(['config', 'user.name', GIT_IDENTITY.name], dir);
-  await git(['config', 'user.email', GIT_IDENTITY.email], dir);
 }
 
 /**

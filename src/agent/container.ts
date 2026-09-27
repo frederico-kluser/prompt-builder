@@ -48,6 +48,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:
 import { availableParallelism, tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawnCollect, type CommandRunner } from './sandboxExec.js';
 import {
   INFERENCE_PROXY_VERSION,
   PROXY_API_PREFIX,
@@ -723,9 +724,20 @@ export interface SandboxRunSpec {
   interactive?: boolean;
   /** env-file 0600 do host. */
   envFile?: string;
+  /**
+   * `-e K=V` explícitos — SÓ valores não secretos e fixos (ex.: `HOME=/tmp` do
+   * verificador). Segredo nunca vai por aqui (fica visível no `argv`).
+   */
+  env?: Record<string, string>;
   mounts?: SandboxMount[];
   /** `-w` dentro do container. */
   workdir?: string;
+  /**
+   * `--entrypoint` (string vazia = SEM entrypoint da imagem). O verificador usa
+   * `''`: o entrypoint do `node:*` troca comando desconhecido por `node <cmd>`,
+   * e um binário ausente viraria "falhou" em vez de "o check não rodou".
+   */
+  entrypoint?: string;
 }
 
 /**
@@ -746,8 +758,13 @@ export function buildSandboxRunArgv(spec: SandboxRunSpec): string[] {
     ...(spec.containerName ? ['--name', spec.containerName] : []),
     ...hardeningFlags(spec.profile),
     ...(spec.envFile ? ['--env-file', spec.envFile] : []),
+    ...Object.entries(spec.env ?? {}).flatMap(([k, v]) => {
+      if (!ENV_KEY_RE.test(k) || /[\n\r]/.test(v)) throw new Error(`variável inválida para o sandbox: ${k}`);
+      return ['-e', `${k}=${v}`];
+    }),
     ...(spec.mounts ?? []).flatMap((m) => ['--mount', mountArg(m)]),
     ...(spec.workdir ? ['-w', spec.workdir] : []),
+    ...(spec.entrypoint !== undefined ? ['--entrypoint', spec.entrypoint] : []),
     spec.image,
     ...spec.command,
   ];
@@ -792,6 +809,11 @@ export interface DockerRunSpec {
   workDir: string;
   /** Sessão do pi no host (default `<workDir>/session`) → `/exec/session`. */
   sessionDir?: string;
+  /**
+   * Casa do pi no host (default `<workDir>/pi-home`) → `/exec/pi-home`. O
+   * executor passa um STAGING fora do dir de execução (IMPL-038 copy-in/out).
+   */
+  piHomeDir?: string;
   /** Perfil endurecido (`hardeningProfile()`). */
   profile: HardeningProfile;
   /** argv do `pi` DENTRO do container (já com `--session-dir /exec/session`). */
@@ -825,7 +847,7 @@ export function buildDockerArgv(spec: DockerRunSpec): string[] {
     mounts: [
       { host: spec.workspaceDir, container: CONTAINER_WS_DIR },
       { host: spec.sessionDir ?? path.join(spec.workDir, 'session'), container: CONTAINER_SESSION_DIR },
-      { host: path.join(spec.workDir, 'pi-home'), container: CONTAINER_PI_HOME_DIR },
+      { host: spec.piHomeDir ?? path.join(spec.workDir, 'pi-home'), container: CONTAINER_PI_HOME_DIR },
       ...(spec.inferenceSocketDir ? [inferenceProxyMount(spec.inferenceSocketDir)] : []),
     ],
     workdir: CONTAINER_WS_DIR,
@@ -1079,4 +1101,91 @@ export async function killContainer(name: string): Promise<void> {
       /* idempotente — já removido / daemon indisponível */
     }
   }
+}
+// ----------------------------------------------------------------------------
+// Sandbox VERIFICADOR / de setup (IMPL-038 / R-15 REC-4)
+// ----------------------------------------------------------------------------
+
+/** Onde o diretório de trabalho do verificador aparece dentro do container. */
+export const VERIFIER_WS_DIR = '/ws';
+/** Prefixo dos containers efêmeros de setup/verify (matar por nome no timeout). */
+export const VERIFIER_NAME_PREFIX = 'pb-verify-';
+
+/**
+ * `docker run` saiu com 125 = o DOCKER falhou (daemon, imagem, flag) — o
+ * comando da tarefa nem rodou. 126/127 com a assinatura do runtime OCI = o
+ * binário do check não existe na imagem. Os dois casos são "o oráculo não
+ * rodou" (inconclusivo), exatamente como o `spawn` ENOENT do modo host.
+ */
+export function dockerRunDidNotStart(code: number | null, output: string): boolean {
+  if (code === 125) return true;
+  if (code === 126 || code === 127) {
+    return /OCI runtime|executable file not found|failed to create task|exec format error/i.test(output);
+  }
+  return false;
+}
+
+/**
+ * Runner de comandos DENTRO de um sandbox endurecido NOVO por comando: `docker
+ * run --rm` com o perfil fixo (`hardeningFlags`), a imagem por DIGEST, o
+ * `mountDir` do host em `/ws` (cwd) e NADA mais montado — nem o dir de
+ * execução/auditoria, nem o `.git` do agente (o chamador monta uma CÓPIA). O
+ * env do container é o da imagem + `env` explícito (sem env-file): um check que
+ * imprime o ambiente não enxerga segredo do host. O CLI do docker recebe só
+ * `dockerCliEnv()` e roda com cwd neutro.
+ */
+export function sandboxCommandRunner(opts: {
+  /** Digest sha256 (`PinnedImage.digest`) — tag é recusada pelo builder. */
+  image: string;
+  profile: HardeningProfile;
+  /** Diretório do HOST montado em `/ws` (read-write: é uma cópia descartável). */
+  mountDir: string;
+  /** `-e` fixos e NÃO secretos. Default `HOME=/tmp` (rootfs read-only). */
+  env?: Record<string, string>;
+}): CommandRunner {
+  const mountDir = path.resolve(opts.mountDir);
+  const env = opts.env ?? { HOME: '/tmp', CI: '1' };
+  return {
+    where: 'sandbox',
+    isolated: true,
+    async exec(req) {
+      const rel = path.relative(mountDir, path.resolve(req.cwd));
+      if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        return { code: null, signal: null, spawnFailed: true, timedOut: false, error: `cwd fora do diretório montado: ${req.cwd}` };
+      }
+      const name = `${VERIFIER_NAME_PREFIX}${randomUUID()}`;
+      let argv: string[];
+      try {
+        argv = buildSandboxRunArgv({
+          image: opts.image,
+          containerName: name,
+          profile: opts.profile,
+          env,
+          mounts: [{ host: mountDir, container: VERIFIER_WS_DIR }],
+          entrypoint: '',
+          workdir: rel ? path.posix.join(VERIFIER_WS_DIR, rel.split(path.sep).join('/')) : VERIFIER_WS_DIR,
+          command: req.argv,
+        });
+      } catch (err) {
+        return { code: null, signal: null, spawnFailed: true, timedOut: false, error: (err as Error).message };
+      }
+      let seen = '';
+      const r = await spawnCollect(['docker', ...argv], {
+        cwd: tmpdir(),
+        env: dockerCliEnv(),
+        timeoutMs: req.timeoutMs,
+        onOutput: (b) => {
+          if (seen.length < 4096) seen += b.toString('utf8');
+          req.onOutput?.(b);
+        },
+        onTimeout: () => void killContainer(name),
+      });
+      // Cinto-e-suspensório: `--rm` cobre o exit normal; timeout/erro não.
+      if (r.timedOut || r.code === null) await killContainer(name).catch(() => undefined);
+      if (!r.timedOut && dockerRunDidNotStart(r.code, seen)) {
+        return { ...r, spawnFailed: true, error: seen.trim().slice(-500) };
+      }
+      return r;
+    },
+  };
 }
