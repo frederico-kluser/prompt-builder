@@ -43,6 +43,7 @@ import {
   ensureAgentsTokenFile,
 } from './agent/store.js';
 import type { ExecutionRef } from './agent/types.js';
+import { isTerminalRunStatus } from './types.js';
 import type { RunRecord } from './types.js';
 
 const router = Router();
@@ -352,8 +353,7 @@ router.get('/runs/:id/events', async (req, res) => {
   // Snapshot leve: o record já carrega ExecutionRefs, não trajetórias (§21.7).
   send({ type: 'snapshot', record: normalizeRunRecord(record) });
 
-  const isTerminal =
-    record.status === 'finished' || record.status === 'error' || record.status === 'aborted';
+  const isTerminal = isTerminalRunStatus(record.status); // inclui 'inconclusive' (IMPL-004)
   if (isTerminal) {
     if (record.status === 'error') {
       send({ type: 'run.error', runId, error: record.error ?? 'Run terminou com erro.' });
@@ -391,8 +391,7 @@ router.post('/runs/:id/cancel', async (req, res) => {
       res.status(404).json({ error: 'Run não encontrada' });
       return;
     }
-    const terminal =
-      record.status === 'finished' || record.status === 'error' || record.status === 'aborted';
+    const terminal = isTerminalRunStatus(record.status); // inclui 'inconclusive' (IMPL-004)
     if (terminal) {
       res.status(409).json({ error: 'Run já terminou — nada a cancelar.' });
       return;

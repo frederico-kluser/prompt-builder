@@ -8,7 +8,7 @@ mexe em arquivos de verdade dentro de um workspace isolado e termina deixando um
 
 > **Um agente é um competidor cuja resposta não é um texto, e sim um par
 > (artefato, trajetória).** Quase todo o resto do motor continua valendo:
-> placar aditivo, judge-score, finais Copeland, orçamento, NDJSON, CSV.
+> placar aditivo, judge-score, finais por taxa de vitória, orçamento, NDJSON, CSV.
 
 O runner é `'agent'` (contra `'chat'`); o executor é o **`pi`** (pi.dev) rodando
 em **sala limpa**: versão pinada (`executorVersion`), instalado isolado da máquina

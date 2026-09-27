@@ -219,6 +219,14 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         ...base,
         stageIndex: e.stageIndex,
         verdicts: e.judge.verdictByContestant ?? {},
+        // IMPL-004: veredito AUSENTE nao aparece em `verdicts` — so o motivo, enxuto.
+        ...(e.judge.verdictErrorByContestant && Object.keys(e.judge.verdictErrorByContestant).length
+          ? {
+              missing: Object.fromEntries(
+                Object.entries(e.judge.verdictErrorByContestant).map(([id, err]) => [id, err.kind]),
+              ),
+            }
+          : {}),
         ranked: e.judge.rankedContestantIds,
         scoreboard: e.scoreboard,
         totalCostUsd: e.totalCostUsd,
@@ -237,6 +245,10 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         ...base,
         stageIndex: e.stageIndex,
         pairs: e.duels.duels.map((d) => ({ a: d.a, b: d.b, winner: d.outcome })),
+        // IMPL-004: duelo sem resultado nao pontua — listado a parte, com o motivo.
+        ...(e.duels.failedDuels?.length
+          ? { failedPairs: e.duels.failedDuels.map((d) => ({ a: d.a, b: d.b, error: d.error.kind })) }
+          : {}),
       });
       break;
     case 'duel.progress':
@@ -279,6 +291,10 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
           : {}),
         // IMPL-014: taxa de truncamento + alerta acima de 2%.
         ...truncationFields(e.record),
+        ...(e.record.failureCountByRole ? { failureCountByRole: e.record.failureCountByRole } : {}),
+        ...(e.record.status === 'inconclusive'
+          ? { inconclusiveReasons: e.record.verdictIntegrity?.reasons ?? [] }
+          : {}),
       });
       break;
     }

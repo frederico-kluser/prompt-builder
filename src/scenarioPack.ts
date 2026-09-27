@@ -6,6 +6,7 @@
 import { z } from 'zod';
 import { rougeL } from './dedup.js';
 import { checkImportPii, type PiiImportCheck } from './engine/pii.js';
+import { stageLabelIssues } from './engine/groundTruth.js';
 import type { ScenarioPack, StageSpec } from './types.js';
 
 /** Valor do campo `format` gravado ao EXPORTAR — versão do contrato. */
@@ -69,6 +70,12 @@ const scenarioSchema = z.object({
       z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
     ])
     .optional(),
+  // Todos os rotulos validos (IMPL-003): obrigatorio com `expected` curto.
+  labelSet: z
+    .array(z.string('labelSet deve ser lista de textos').min(1, 'rótulo vazio em labelSet'), 'labelSet deve ser uma lista de rótulos')
+    .min(1, 'labelSet não pode ser vazio')
+    .max(200, 'labelSet não pode passar de 200 rótulos')
+    .optional(),
   origin: z.enum(['ai', 'import'], "origin deve ser 'ai' ou 'import'").optional(),
 });
 
@@ -87,6 +94,12 @@ const packSchema = z.object({
   scenarios: z
     .array(scenarioSchema, 'scenarios deve ser uma lista de cenários')
     .min(1, 'O pacote não contém cenários'),
+}).superRefine((pack, ctx) => {
+  // IMPL-003: pacote é config (vira scenarioSeed) — rótulo curto sem labelSet
+  // é recusado aqui, com a mesma regra dos schemas de run.
+  for (const { index, message } of stageLabelIssues(pack.scenarios)) {
+    ctx.addIssue({ code: 'custom', path: ['scenarios', index, 'labelSet'], message });
+  }
 });
 
 // Converte os issues do zod numa frase PT-BR com o caminho do campo —

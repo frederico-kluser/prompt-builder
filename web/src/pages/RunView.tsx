@@ -409,6 +409,19 @@ export function RunView() {
       {/* LGPD (IMPL-042): o que saiu pseudonimizado é dito, nunca silencioso — dado de
           empresa (CNPJ, fixo, CEP, e-mail funcional) nem pede revisão na Nova Run. */}
       {piiNote && <Banner className="mt-4">{piiNote}</Banner>}
+      {record.status === 'inconclusive' && (
+        <Banner tone="warn" className="mt-4">
+          <strong>Run inconclusiva:</strong> o resultado não sustenta conclusão — falha do juiz não
+          vira nota, então vereditos perdidos ficam fora da média.
+          {record.verdictIntegrity?.reasons?.length ? (
+            <ul className="mt-1.5 list-disc pl-5 text-muted-foreground">
+              {record.verdictIntegrity.reasons.map((motivo) => (
+                <li key={motivo}>{motivo}</li>
+              ))}
+            </ul>
+          ) : null}
+        </Banner>
+      )}
 
       <SectionHead>Resultados</SectionHead>
       <ScoreHeatmap record={record} ranked={!isRunning} onStageClick={openStageFromHeatmap} />

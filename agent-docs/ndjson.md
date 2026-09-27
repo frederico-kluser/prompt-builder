@@ -44,12 +44,12 @@ Erro é a linha `result` com `ok: false` e o **mesmo** objeto `error` do
 | `progress` | lotes agregados | `phase` (`gabarito` \| `duels`), `done`, `total` |
 | `competitor.finished` | uma resposta pronta | `contestantId`, `status` (`ok`\|`blocked`\|`refused`\|`error`), `tokensIn/Out`, `costUsd`, `chars`, `truncated`/`truncationRetried` (só quando `true`) |
 | `stage.incomplete` | etapa fora do placar e das médias | `stageIndex`, `reason` (`truncation`), `detail`, `contestantIds` (quem truncou) |
-| `stage.judging` / `stage.judged` | julgamento | `verdicts`, `ranked`, `scoreboard`, `totalCostUsd` |
+| `stage.judging` / `stage.judged` | julgamento | `verdicts`, `missing` (id → motivo do veredito **ausente**), `ranked`, `scoreboard`, `totalCostUsd` |
 | `finals.started` | finais | `finalists[]` |
-| `stage.dueled` | duelos de um cenário | `pairs[]` |
+| `stage.dueled` | duelos de um cenário | `pairs[]`, `failedPairs[]` (sem resultado — não pontuam) |
 | `budget` | gasto acumulado | `spentUsd`, `budgetUsd`, `byRole` |
 | `budget.gate` | uma porta decidiu | `phase`, `projectedUsd`, `remainingUsd`, `decision` |
-| `run.finished` | run terminou | `status`, `totalCostUsd`, `standings`, `competitorOutcomeCounts`, `truncationRate`/`truncationCounts`/`truncationByRole` (todos os papéis; + `truncationAlert` acima de 2%) |
+| `run.finished` | run terminou | `status` (`finished` \| `inconclusive` \| …), `totalCostUsd`, `standings`, `failureCountByRole`, `inconclusiveReasons`, `competitorOutcomeCounts`, `truncationRate`/`truncationCounts`/`truncationByRole` (todos os papéis; + `truncationAlert` acima de 2%) |
 | `iteration.started` / `iteration.finished` / `iteration.promoted` | treino | `iteration`, `runId`, `gain` (bruto); no `promoted` também `gainCorrected`, `pAdjusted`, `k`, `method`, `minGain` |
 | `session.holdout` / `session.converged` / `session.finished` | treino | ver `docs train` |
 | `result` | última linha | `ok`, `status`, `totalCostUsd`, `budgetExhausted`, `stoppedReason`, `dailyCapReached`, `idempotency` (`reused` = nada gasto agora), … — ou `ok:false` + `error` |

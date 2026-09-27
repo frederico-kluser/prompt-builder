@@ -10,6 +10,7 @@ import { sanitizeLlmVariants, MIN_LLM_VARIANTS, MAX_LLM_VARIANTS } from './llmVa
 import { validatePromptGroup } from './engine/promptGroup.js';
 import { promptContractsSchema } from './engine/contracts.js';
 import { checkRunPii, runPiiMessage, runPiiRefusal } from './engine/pii.js';
+import { stageLabelIssues } from './engine/groundTruth.js';
 import type { RunConfig } from './types.js';
 
 // Nivel de esforco de raciocinio (ReasoningLevel de types.ts / REASONING_LEVELS
@@ -147,6 +148,9 @@ const stageSpecSchema = z.object({
       z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
     ])
     .optional(),
+  // TODOS os rotulos validos da etapa (IMPL-003). Obrigatorio com `expected`
+  // curto (<=5 palavras) — o superRefine abaixo aplica `labelSetIssue`.
+  labelSet: z.array(z.string().min(1)).min(1).max(200).optional(),
   // Proveniencia da etapa: gerada pela IA ou importada de pacote JSON.
   origin: z.enum(['ai', 'import']).optional(),
   // A etapa, quando executada por um agente. AUSENTE => a etapa so serve ao
@@ -205,7 +209,7 @@ const baseFields = {
   scenarioSeed: z.array(stageSpecSchema).max(50).optional(),
   // Nº de finalistas (melhores por judge-score) que disputam os duelos. 0 = sem finais.
   finalists: z.number().int().min(0).max(12).optional(),
-  // Liga/desliga a fase de finais (duelos Copeland entre os finalistas).
+  // Liga/desliga a fase de finais (duelos entre os finalistas, por taxa de vitória).
   duels: z.boolean().optional(),
   // Teto de gasto em USD para a run/sessao inteira. Ausente = sem limite.
   budgetUsd: z.number().positive().optional(),
@@ -337,6 +341,23 @@ export const runConfigSchema = z
     z.discriminatedUnion('mode', [compareObj, variationObj, trainingObj]),
   )
   .superRefine((cfg, ctx) => {
+    // ---------------------------------------------------------- rotulos (IMPL-003)
+    // Rotulo esperado CURTO sem `labelSet` e erro de config (R-03b:DEC-4): sem o
+    // conjunto de rotulos validos o verificador estrito nao reconhece a resposta
+    // que lista/hesita entre rotulos. O CLI traduz em exit 3 (EXIT.CONFIG).
+    for (const [campo, lista] of [
+      ['customStages', cfg.customStages],
+      ['scenarioSeed', cfg.scenarioSeed],
+    ] as const) {
+      for (const { index, message } of stageLabelIssues(lista)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [campo, index, 'labelSet'],
+          message: `etapa ${index + 1}: ${message}`,
+        });
+      }
+    }
+
     // ------------------------------------------------------------ dado pessoal
     // LGPD (IMPL-042): um RunConfig CRU e importacao como qualquer outra — CLI
     // (`--config`, flags, `estimate`, `config validate`), MCP, HTTP (POST

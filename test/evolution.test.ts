@@ -2,7 +2,8 @@
 //
 // Travam o comportamento determinístico dos módulos portados do prompt-arena
 // ANTES de qualquer refactor: seeds, cadeias de desempate, pisos e a
-// semântica Copeland. Se um golden aqui mudar, a mudança é deliberada e
+// semântica do placar dos duelos (taxa de vitória — IMPL-007 trocou a soma
+// "Copeland" pela taxa, de propósito). Se um golden aqui mudar, a mudança é deliberada e
 // precisa ser revisada — não pode passar despercebida num refactor "de leve".
 
 import { describe, expect, it } from 'vitest';
@@ -35,8 +36,14 @@ describe('rank.ts — judge-score e promoção com margem', () => {
     expect(judgeScoreFromVerdicts([])).toBe(0);
   });
 
-  it('veredito ausente conta como nao (resposta com erro não pontua)', () => {
-    expect(judgeScoreFromVerdicts(['resolve', undefined])).toBe(50);
+  // IMPL-004/IMPL-005 (R-03b:REC-4): o contrato MUDOU de propósito. Antes o
+  // ausente contava como 'nao' — um veredito imputado que movia o score mais
+  // que o minGain. Agora ausente = sem observação: fora do numerador E do
+  // denominador.
+  it('veredito ausente é EXCLUÍDO (nem numerador nem denominador), nunca vira nao', () => {
+    expect(judgeScoreFromVerdicts(['resolve', undefined])).toBe(100);
+    expect(judgeScoreFromVerdicts(['resolve', 'nao', undefined, undefined])).toBe(50);
+    expect(judgeScoreFromVerdicts([undefined, undefined])).toBe(0);
   });
 
   it('rankEntries: judgeScore desc → placement asc → menos erros → prompt mais curto', () => {
@@ -198,7 +205,7 @@ describe('stats.ts — teste pareado exato determinístico', () => {
   });
 });
 
-describe('duels.ts — seeds cegas, bracket e Copeland', () => {
+describe('duels.ts — seeds cegas, bracket e taxa de vitória', () => {
   it('seedFromId (FNV-1a) é estável (golden)', () => {
     expect(seedFromId('qualquer pergunta')).toMatchInlineSnapshot(`2467653837`);
     expect(seedFromId('x')).toBe(seedFromId('x'));
@@ -277,7 +284,7 @@ describe('duels.ts — seeds cegas, bracket e Copeland', () => {
     expect(pickFinalists(entries, 0, 5)).toEqual(['b', 'c', 'a']);
   });
 
-  it('standingsFromDuels: Copeland (1 / 0.5 / 0) e placements fracionários em empate', () => {
+  it('standingsFromDuels: taxa de vitória ((1 / 0.5 / 0) ÷ disputados) e placements fracionários em empate', () => {
     const duel = (a: string, b: string, outcome: 'a' | 'b' | 'tie'): DuelOutcome => ({
       a,
       b,
@@ -285,17 +292,17 @@ describe('duels.ts — seeds cegas, bracket e Copeland', () => {
       order2: { winner: outcome, explanation: '' },
       outcome,
     });
-    const { points, placementById, order } = standingsFromDuels(
+    const { winRate, placementById, order } = standingsFromDuels(
       ['x', 'y', 'z'],
       [duel('x', 'y', 'a'), duel('x', 'z', 'b'), duel('y', 'z', 'tie')],
     );
-    // x: 1 vitória + 1 derrota = 1 · y: 1 derrota + 1 empate = 0.5 · z: 1 vitória + 1 empate = 1.5
-    expect(points).toEqual({ x: 1, y: 0.5, z: 1.5 });
+    // x: (1 vitória + 1 derrota)/2 = 0.5 · y: (1 derrota + 1 empate)/2 = 0.25 · z: (1 vitória + 1 empate)/2 = 0.75
+    expect(winRate).toEqual({ x: 0.5, y: 0.25, z: 0.75 });
     expect(order).toEqual(['z', 'x', 'y']);
     expect(placementById['z']).toBe(1);
   });
 
-  it('standingsFromDuels: empate de pontos divide a média dos ranks (placement fracionário)', () => {
+  it('standingsFromDuels: empate de taxa divide a média dos ranks (placement fracionário)', () => {
     const duel = (a: string, b: string, outcome: 'a' | 'b' | 'tie'): DuelOutcome => ({
       a,
       b,

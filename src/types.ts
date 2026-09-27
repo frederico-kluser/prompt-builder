@@ -516,6 +516,13 @@ export interface StageSpec {
    * lista = alternativas aceitaveis, objeto = par campo->valor (resposta JSON).
    */
   expected?: ExpectedSpec;
+  /**
+   * TODOS os rotulos validos da etapa (IMPL-003 / R-03b:DEC-4). Obrigatorio
+   * quando `expected` e rotulo curto (<=5 palavras): sem ele a config e
+   * recusada (`labelSetIssue`, exit 3 no CLI). O verificador estrito usa o
+   * conjunto para reconhecer resposta que lista/hesita entre varios rotulos.
+   */
+  labelSet?: string[];
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
   /**
@@ -546,6 +553,9 @@ export interface StageSpec {
  *               Defesa do gateway: o cenario fica SEM veredito para o prompt;
  * - `refused` — o MODELO recusou (`message.refusal`); resposta legitima, julgavel;
  * - `error`   — infraestrutura (rede, 5xx, timeout, key).
+ * Regra de origem do veredito (IMPL-004, `engine/verdictIntegrity.ts`):
+ * `blocked`/`error` => SEM veredito (nunca 'nao' imputado); `ok` vazio =>
+ * 'nao' automatico; `refused` => julgado normalmente.
  */
 export type CompetitorStatus = 'ok' | 'error' | 'blocked' | 'refused';
 
@@ -753,11 +763,25 @@ export interface JudgeResult {
   rankedContestantIds: string[];
   /**
    * Aceitavel por contestant (compat/placar): MAIORIA dos juizes; derivado do
-   * ternario (resolve|parcial => aceitavel). Respostas com erro/vazias = false.
+   * ternario (resolve|parcial => aceitavel). Resposta vazia = false; contestant
+   * SEM veredito (erro de infra, bloqueio, juiz que falhou — IMPL-004) = sem chave.
    */
   acceptableByContestant: Record<string, boolean>;
-  /** Veredito TERNARIO agregado por contestant (consenso entre juizes). Ausente em records antigos. */
+  /**
+   * Veredito TERNARIO agregado por contestant (consenso entre juizes). Ausente em
+   * records antigos. Contestant SEM veredito legitimo nao tem chave aqui (IMPL-004).
+   */
   verdictByContestant?: Record<string, Verdict>;
+  /** Origem de cada veredito presente (IMPL-004). */
+  verdictSourceByContestant?: Record<string, VerdictSource>;
+  /** Motivo de cada veredito AUSENTE (IMPL-004) — nunca vira 'parcial'/'nao'. */
+  verdictErrorByContestant?: Record<string, VerdictError>;
+  /**
+   * EMPATE TECNICO do painel (IMPL-007): contestantId -> votos (pior -> melhor)
+   * quando nenhum veredito teve maioria estrita. O veredito gravado e o nivel
+   * que a maioria endossa (nunca o voto de cima). So a chave dos empatados.
+   */
+  verdictTieByContestant?: Record<string, Verdict[]>;
   /** Resultado individual de cada juiz (placar aditivo por juiz + justificativas na UI). */
   judges: SingleJudgeResult[];
   blindMap: Record<string, string>; // letra -> contestantId (do 1o juiz; cosmetico)
@@ -783,6 +807,12 @@ export interface ReferenceJudgeResult {
   verdictSourceByContestant?: Record<string, VerdictSource>;
   /** Motivo de cada veredito AUSENTE (IMPL-004). */
   verdictErrorByContestant?: Record<string, VerdictError>;
+  /**
+   * EMPATE TECNICO do painel (IMPL-007): contestantId -> votos (pior -> melhor)
+   * quando nenhum veredito teve maioria estrita. O veredito gravado e o nivel
+   * que a maioria endossa (nunca o voto de cima). So a chave dos empatados.
+   */
+  verdictTieByContestant?: Record<string, Verdict[]>;
   judgeModelId: string;
   inconclusive?: boolean;
   /**
@@ -827,28 +857,70 @@ export interface ReferenceJudgeResult {
   unscoredRepsByContestant?: Record<string, number>;
 }
 
+/** Uma ordem de apresentação de um duelo, nos termos REAIS do par ('a' = 1º do par). */
+export interface DuelOrderResult {
+  winner: 'a' | 'b' | 'tie';
+  explanation: string;
+}
+
 /** Resultado de UM duelo pairwise (2 ordens; desacordo entre ordens = empate). */
 export interface DuelOutcome {
   a: string;
   b: string;
-  order1: { winner: 'a' | 'b' | 'tie'; explanation: string };
-  order2: { winner: 'a' | 'b' | 'tie'; explanation: string };
+  order1: DuelOrderResult;
+  order2: DuelOrderResult;
   /** Resultado combinado das 2 ordens. */
   outcome: 'a' | 'b' | 'tie';
+  /**
+   * Quem decidiu (IMPL-004): `judge` = juiz LLM nas 2 ordens; `ground-truth` =
+   * oráculo determinístico (scores de ground-truth/verify). Ausente em records
+   * antigos.
+   */
+  source?: VerdictSource;
 }
 
 /**
- * Duelos round-robin da etapa (bracket top-K): placar Copeland (vitoria 1,
- * empate 0.5) com placements fracionarios quando ha empate de pontos.
+ * Duelo SEM resultado legítimo (IMPL-004, R-03b:REC-4): alguma ordem falhou
+ * (juiz caiu, timeout após a 2ª chance, saída inválida após o lembrete) ou
+ * faltou régua. Antes a ordem que falhava virava EMPATE e o empate entrava no
+ * placar — um veredito imputado. Agora o duelo vai para
+ * `StageDuels.failedDuels` e NÃO pontua: fora de `duels`, nenhum consumidor
+ * (standings, pódio, NDJSON) o conta por engano.
+ */
+export interface DuelFailure {
+  a: string;
+  b: string;
+  /** Ordens que chegaram a produzir vencedor (só auditoria — não pontuam). */
+  order1?: DuelOrderResult;
+  order2?: DuelOrderResult;
+  error: VerdictError;
+}
+
+/**
+ * Duelos round-robin da etapa (bracket top-K): placar por TAXA DE VITÓRIA
+ * (vitoria 1, empate 0.5, dividido pelos duelos disputados) com placements
+ * fracionarios quando ha empate de taxa.
  */
 export interface StageDuels {
   /** Placement final por contestant (1 = melhor; fracionario em empate). */
   placementByContestant: Record<string, number>;
   /** ContestantIds ordenados do melhor ao pior placement. */
   order: string[];
-  /** Pontos Copeland por contestant. */
-  points: Record<string, number>;
+  /**
+   * Taxa de vitória por contestant nos duelos da etapa (IMPL-007, R-04:DEC-5):
+   * (vitórias + ½·empates) / duelos disputados, em 0..1. É a régua do placar —
+   * NÃO é Copeland (Copeland = maioria par-a-par). Fora do bracket = 0.
+   */
+  winRate: Record<string, number>;
+  /**
+   * @deprecated Records anteriores ao IMPL-007: soma vitória 1/empate 0.5,
+   * rotulada "pontos Copeland" por engano. `normalizeRunRecord` deriva `winRate`.
+   */
+  points?: Record<string, number>;
+  /** Só duelos com resultado LEGÍTIMO — os únicos que pontuam. */
   duels: DuelOutcome[];
+  /** Duelos sem resultado (IMPL-004): fora do placar, contados em `failureCountByRole.duel`. */
+  failedDuels?: DuelFailure[];
   /** Tamanho do bracket usado (0 = round-robin completo). */
   topK: number;
 }
@@ -898,7 +970,7 @@ export interface StageRecord {
   judge?: JudgeResult;
   /** Julgamento pointwise contra o gabarito (quando a etapa tem `reference`). */
   referenceJudge?: ReferenceJudgeResult;
-  /** Duelos pairwise (Copeland) da etapa (quando duelos ligados). */
+  /** Duelos pairwise da etapa, placar por taxa de vitória (quando duelos ligados). */
   duels?: StageDuels;
   /** @deprecated Avaliador fundido no juiz. Presente so em records antigos. */
   evaluation?: StageEvaluation;
@@ -930,7 +1002,48 @@ export interface StageRecord {
   finishedAt?: string;
 }
 
-export type RunStatus = 'running' | 'finished' | 'error' | 'aborted';
+/**
+ * `inconclusive` (IMPL-004, R-03b:REC-4): a run TERMINOU, mas a evidência não
+ * sustenta conclusão — falha + julgamento degradado > 10% dos vereditos de
+ * algum papel, ou n efetivo < 5 cenários julgados por contestant (ver
+ * `engine/verdictIntegrity.ts`). É TERMINAL: use `isTerminalRunStatus`.
+ */
+export type RunStatus = 'running' | 'finished' | 'inconclusive' | 'error' | 'aborted';
+
+/** Status em que a run/sessão não muda mais (fecha SSE/EventSource, polling, exit code). */
+export const TERMINAL_RUN_STATUSES: readonly RunStatus[] = [
+  'finished',
+  'inconclusive',
+  'error',
+  'aborted',
+] as const;
+
+/**
+ * Helper PURO e ÚNICO para "a run acabou?" — listas soltas de status esqueciam
+ * o status novo e o cliente reconectava para sempre. Aceita `string` porque o
+ * record pode vir de disco/IndexedDB (status desconhecido => não-terminal).
+ */
+export function isTerminalRunStatus(status: string | null | undefined): boolean {
+  return (TERMINAL_RUN_STATUSES as readonly string[]).includes(status ?? '');
+}
+
+/**
+ * Diagnóstico de integridade do veredito da run (IMPL-004): a conta por trás do
+ * status `inconclusive`, gravada para quem lê o record auditar a decisão.
+ */
+export interface VerdictIntegrity {
+  /** Vereditos esperados por papel (denominador da taxa de falha). */
+  expectedByRole: Partial<Record<CostRole, number>>;
+  /** Vereditos DEGRADADOS (painel reduzido) por papel — somam às falhas. */
+  degradedByRole: Partial<Record<CostRole, number>>;
+  /** Cenários DISTINTOS com veredito legítimo, por contestant (n efetivo). */
+  judgedScenariosByContestant: Record<string, number>;
+  /** Limiares aplicados (registrados para a regra ser reproduzível). */
+  maxFailureRate: number;
+  minJudgedScenarios: number;
+  /** Motivos em PT-BR quando inconclusiva; vazio = conclusiva. */
+  reasons: string[];
+}
 
 export interface RunRecord {
   id: string;
@@ -988,22 +1101,31 @@ export interface RunRecord {
   /**
    * Repeticoes de agente SEM veredito por motivo nao-controle (rep SEM oraculo
    * cujo juiz falhou ou nao foi chamado), por contestant. Fora de judge-score e
-   * resolveRate. ⚠️ Na significancia, a exclusao pareada da etapa sem veredito
-   * e do IMPL-005 (`pairedStageScores`, cluster stats): ate ele entrar, a etapa
-   * em que o contestant ficou SEM nenhum veredito ainda e imputada 'nao' ali.
+   * resolveRate. Na significancia, a etapa em que o contestant ficou SEM
+   * nenhum veredito sai dos DOIS lados do par (IMPL-005, `pairedStageScores`).
    */
   agentUnscoredRepsByContestant?: Record<string, number>;
-  /** Classificacao final agregada (Copeland dos duelos / pontos do placar). */
+  /**
+   * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
+   * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).
+   */
   standings?: {
     id: string;
     label: string;
     isControl: boolean;
-    points: number;
+    /** @deprecated records anteriores ao IMPL-007 (soma vitória 1/empate 0.5); use `winRate`. */
+    points?: number;
     wins: number;
     ties: number;
     losses: number;
     winRate: number;
   }[];
+  /**
+   * Convencao de agregacao do painel de juizes (IMPL-007). `'majority'` =
+   * maioria simples com empate tecnico. AUSENTE = record antigo (media ordinal
+   * arredondada para cima): judge-score de painel >= 2 juizes NAO comparavel.
+   */
+  verdictAggregation?: 'majority';
   /** Ids dos finalistas (top-N por judge-score) que disputaram os duelos. */
   finalists?: string[];
   /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
@@ -1076,6 +1198,17 @@ export interface RunRecord {
   stoppedAtPhase?: RunPhase;
   /** Por que parou cedo. Discrimina o status 'aborted'. */
   stoppedReason?: 'budget' | 'cancelled';
+  /**
+   * Vereditos PERDIDOS por papel (IMPL-004), presente em toda run que terminou
+   * o pipeline (0 = papel medido e sem falha): juiz que falhou/saida invalida
+   * apos o lembrete/timeout apos a 2a chance/sem regua (judge), duelo sem
+   * resultado (duel), erro de infra do competidor (competitor/agent), cenario
+   * que pediu gabarito e ficou sem (gabarito). Bloqueio do gateway NAO entra
+   * aqui (e defesa, contada a parte pelo `gw`) — mas reduz o n efetivo.
+   */
+  failureCountByRole?: Partial<Record<CostRole, number>>;
+  /** A conta que decidiu `inconclusive` (IMPL-004). */
+  verdictIntegrity?: VerdictIntegrity;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -1385,6 +1518,8 @@ export interface SessionRecord {
   judgeDrift?: boolean;
   /** Quebra do gasto por papel, somando todas as runs da sessao. */
   costByRole?: Record<CostRole, CostEntry>;
+  /** Soma do `failureCountByRole` de todas as runs da sessao (IMPL-004). */
+  failureCountByRole?: Partial<Record<CostRole, number>>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   upstreamCostUsd?: number;
   budgetUsd?: number;

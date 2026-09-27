@@ -95,14 +95,28 @@ const CONFIG = {
 interface CostView {
   status: string;
   error?: string;
+  failureCountByRole?: Partial<Record<CostRole, number>>;
+  verdictIntegrity?: { reasons: string[] };
   totalCostUsd: number;
   costByRole?: Record<CostRole, CostEntry>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   costByContestant?: Record<string, number>;
 }
 
+/**
+ * A run TERMINOU o pipeline. IMPL-004: com 2 cenários (< piso de 5 julgados
+ * por contestant) ela sai `inconclusive`, não `finished` — e o ÚNICO motivo
+ * pode ser o n efetivo: nenhum veredito perdido em papel nenhum.
+ */
+function conferirTermino(rec: CostView): void {
+  expect(rec.status, rec.error).toBe('inconclusive');
+  expect(rec.verdictIntegrity?.reasons).toEqual([expect.stringMatching(/^n efetivo < 5 cenários julgados/)]);
+  expect(rec.failureCountByRole).toBeDefined();
+  expect(Object.values(rec.failureCountByRole ?? {}).every((n) => n === 0)).toBe(true);
+}
+
 function conferirConta(rec: CostView, fake: FakeOpenRouter): void {
-  expect(rec.status, rec.error).toBe('finished');
+  conferirTermino(rec);
   const byRole = rec.costByRole!;
   expect(byRole, 'record sem costByRole: custo não veio do ledger').toBeDefined();
   const soma = COST_ROLES.reduce((s, r) => s + byRole[r].usd, 0);
@@ -198,7 +212,7 @@ describe('IMPL-021 — soma(papéis) == total nos dois motores (transporte falso
   } as const;
 
   function conferirVariation(rec: CostView, fake: FakeOpenRouter): void {
-    expect(rec.status, rec.error).toBe('finished');
+    conferirTermino(rec);
     const byRole = rec.costByRole!;
     expect(byRole.rewriter.calls).toBe(2); // uma reescrita por técnica
     expect(byRole.competitor.calls).toBe(6); // original + 2 variantes × 2 cenários

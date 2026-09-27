@@ -62,8 +62,8 @@
   {
     "topic": "troubleshooting",
     "title": "Problemas comuns",
-    "summary": "400 no esforço, 402 sem crédito, 403 = bloqueio (não é key), dado pessoal recusado (--allow-pii/--pii-mode), modelo fora do catálogo, run.locked, teto diário, doctor exit 4, truncamento > 2%, tudo 'parcial', run travada",
-    "approxTokens": 1500
+    "summary": "400 no esforço, 402 sem crédito, 403 = bloqueio (não é key), dado pessoal recusado (--allow-pii/--pii-mode), modelo fora do catálogo, run.locked, teto diário, doctor exit 4, truncamento > 2%, run inconclusiva (código 6), tudo 'parcial', run travada",
+    "approxTokens": 1700
   },
   {
     "topic": "config",

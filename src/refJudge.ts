@@ -1,21 +1,33 @@
 import { chatCompletion } from './openrouter.js';
-import { isControlSignal } from './budget.js';
 import { matchExpected } from './engine/groundTruth.js';
+import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
+import { unjudgeableReason } from './engine/verdictIntegrity.js';
+import { aggregateVerdicts, tieLabel } from './engine/verdictAggregate.js';
 import type {
   CompetitorResponse,
   Contestant,
   ReasoningLevel,
   ReferenceJudgeResult,
   StageSpec,
-  Verdict, RunCtx } from './types.js';
+  Verdict,
+  VerdictError,
+  VerdictSource,
+  RunCtx,
+} from './types.js';
 
 // Juiz POINTWISE contra o gabarito (`StageSpec.reference`), portado do
 // referenceJudge.mjs do prompt-arena (vocabulario local: resolve/parcial/nao).
 // Cada resposta e classificada ISOLADAMENTE contra a referencia — sem comparar
 // contestants entre si (isso e papel dos duelos). E a base do judge-score.
-// Degrada, NUNCA derruba a run: sem referencia => 'parcial' p/ todos; resposta
-// com erro/vazia => 'nao' automatico (sem gastar LLM); chamada que falha =>
-// 'parcial' com a mensagem de erro na explanation.
+//
+// Falha NAO e veredito (IMPL-004, R-03b:REC-4). Degrada sem derrubar a run,
+// mas NUNCA imputa nota: juiz que falhou, saida invalida apos o lembrete,
+// timeout apos a 2a chance, cenario sem gabarito, competidor com erro de infra
+// ou bloqueado => a chave do contestant fica AUSENTE de `verdictByContestant`
+// e o motivo vai em `verdictErrorByContestant`. Antes tudo isso virava
+// 'parcial' — nota inventada que entrava nas medias e nas licoes do treino.
+// So a resposta `ok` VAZIA vira 'nao' automatico (fonte 'auto'): nao responder
+// e uma falha legitima do candidato, nao do pipeline.
 
 // Head portado do prompt-arena (fixa o contrato de veredito JSON).
 const SYSTEM_PROMPT = `Você é um juiz técnico estrito. Um modelo mais forte já produziu a RESPOSTA DE REFERÊNCIA (correta). Compare o CANDIDATO com ela. Ignore redação/estilo — julgue se o candidato alcança o MESMO resultado e intenção. Responda APENAS com um objeto JSON {"verdict": "resolve"|"parcial"|"nao", "explanation": "<uma frase curta em pt-BR>"} onde resolve = corresponde plenamente à referência, parcial = parcialmente/impreciso/faltando parte, nao = errado ou fez outra coisa.`;
@@ -28,20 +40,13 @@ const SYSTEM_PROMPT = `Você é um juiz técnico estrito. Um modelo mais forte j
  */
 export const JUDGE_CONTRACT_TEXT = SYSTEM_PROMPT;
 
-const VERDICT_ORDINAL: Record<Verdict, number> = { nao: 0, parcial: 1, resolve: 2 };
+/** Lembrete anexado ao 2o pedido depois de uma saida fora do contrato. */
+const FORMAT_REMINDER =
+  'LEMBRETE DE FORMATO: a resposta anterior não seguiu o contrato. Responda APENAS com um objeto JSON ' +
+  '{"verdict": "resolve"|"parcial"|"nao", "explanation": "<uma frase curta em pt-BR>"} — sem markdown e sem texto antes ou depois.';
 
-/**
- * Agrega vereditos ternarios por media ordinal (resolve=2, parcial=1, nao=0;
- * media >= 1.5 => resolve, >= 0.5 => parcial, senao nao). Copia LOCAL de
- * `aggregateVerdict` de judge.ts (la nao e exportado) — manter sincronizado.
- */
-function aggregateVerdict(verdicts: Verdict[]): Verdict {
-  if (verdicts.length === 0) return 'parcial';
-  const avg = verdicts.reduce((s, v) => s + VERDICT_ORDINAL[v], 0) / verdicts.length;
-  if (avg >= 1.5) return 'resolve';
-  if (avg >= 0.5) return 'parcial';
-  return 'nao';
-}
+// Agregacao do painel: MAIORIA SIMPLES em `engine/verdictAggregate.ts`
+// (IMPL-007) — a media ordinal local arredondava painel dividido PARA CIMA.
 
 /** Recorta o objeto JSON da resposta do juiz (tolera texto em volta). */
 function extractJson(text: string): string {
@@ -53,38 +58,31 @@ function extractJson(text: string): string {
   return trimmed;
 }
 
-/** Fallback regex: 1a ocorrencia de resolve|parcial|nao no texto cru. */
-function verdictFromText(text: string): Verdict {
-  const lower = text.toLowerCase();
-  // ORDEM IMPORTA: 'parcial' e 'nao' ANTES de 'resolve' — um texto como
-  // "não resolve o problema" contem "resolve" como substring e NAO pode
-  // virar 'resolve'.
-  if (lower.includes('parcial')) return 'parcial';
-  if (/n[aã]o/.test(lower)) return 'nao';
-  if (lower.includes('resolve')) return 'resolve';
-  return 'parcial'; // lixo => neutro
-}
-
-/** Parse tolerante do veredito: JSON primeiro; regex como fallback; lixo => 'parcial'. */
-function parseJudgeReply(text: string): { verdict: Verdict; explanation: string } {
+/**
+ * Parse ESTRITO do veredito: objeto JSON com `verdict` em resolve|parcial|nao.
+ * Qualquer outra coisa devolve `null` (saida invalida): quem chama pede UMA
+ * vez de novo com lembrete de formato e, persistindo, registra o veredito como
+ * AUSENTE (`invalid_output`). O antigo fallback por regex ("1a ocorrencia de
+ * parcial/nao/resolve no texto cru; lixo => 'parcial'") foi removido: ele
+ * transformava falha de formato em nota.
+ */
+function parseJudgeReply(text: string): { verdict: Verdict; explanation: string } | null {
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(extractJson(text)) as {
-      verdict?: unknown;
-      explanation?: unknown;
-    };
-    const raw = typeof parsed.verdict === 'string' ? parsed.verdict.trim().toLowerCase() : '';
-    const verdict = raw === 'não' ? 'nao' : raw;
-    if (verdict === 'resolve' || verdict === 'parcial' || verdict === 'nao') {
-      const explanation =
-        typeof parsed.explanation === 'string' && parsed.explanation.trim()
-          ? parsed.explanation.trim()
-          : '(veredito do juiz de referência)';
-      return { verdict, explanation };
-    }
+    parsed = JSON.parse(extractJson(text));
   } catch {
-    // JSON invalido — cai no fallback regex abaixo.
+    return null;
   }
-  return { verdict: verdictFromText(text), explanation: '(veredito do juiz de referência)' };
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const p = parsed as { verdict?: unknown; explanation?: unknown };
+  const raw = typeof p.verdict === 'string' ? p.verdict.trim().toLowerCase() : '';
+  const verdict = raw === 'não' ? 'nao' : raw;
+  if (verdict !== 'resolve' && verdict !== 'parcial' && verdict !== 'nao') return null;
+  const explanation =
+    typeof p.explanation === 'string' && p.explanation.trim()
+      ? p.explanation.trim()
+      : '(veredito do juiz de referência)';
+  return { verdict, explanation };
 }
 
 /** Prompt do usuario: referencia no topo, pergunta, rubrica (prioritaria) e candidato. */
@@ -113,14 +111,16 @@ export interface JudgeStageReferenceParams {
   maxPricePerMTok?: { prompt?: number; completion?: number };
 }
 
-interface SingleVerdict {
-  judgeModelId: string;
-  contestantId: string;
-  verdict: Verdict;
-  explanation: string;
-}
+type SingleVerdict =
+  | { ok: true; judgeModelId: string; contestantId: string; verdict: Verdict; explanation: string }
+  | { ok: false; judgeModelId: string; contestantId: string; error: VerdictError };
 
-/** UM juiz avaliando UMA resposta contra a referencia. NUNCA lanca: erro => 'parcial'. */
+/**
+ * UM juiz avaliando UMA resposta contra a referencia, com a re-tentativa
+ * SELETIVA de `judgeRetry` (timeout 1x; saida invalida => 1 pedido com
+ * lembrete). Nunca lanca erro comum: falha volta como `{ ok: false, error }`.
+ * `BudgetExceeded`/`RunCancelled` sobem (controle, nao erro).
+ */
 async function judgeOne(params: {
   apiKey: string;
   judgeModelId: string;
@@ -134,58 +134,71 @@ async function judgeOne(params: {
 }): Promise<SingleVerdict> {
   const { apiKey, judgeModelId, stage, reference, response, reasoningLevel, timeoutMs, ctx, maxPricePerMTok } =
     params;
-  try {
-    const result = await chatCompletion({
-      apiKey,
-      modelId: judgeModelId,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserPrompt(stage, reference, response.text) },
-      ],
-      temperature: 0,
-      maxTokens: 1024,
-      responseFormatJson: true,
-      reasoningLevel,
-      timeoutMs,
-      role: 'judge',
-      signal: ctx?.signal,
-      sink: ctx?.sink,
-      maxPricePerMTok,
-    });
-    const parsed = parseJudgeReply(result.text);
-    return { judgeModelId, contestantId: response.contestantId, ...parsed };
-  } catch (err) {
-    // ESTE e o catch mais perigoso do repositorio: sem o rethrow, um estouro de
-    // orcamento viraria veredito 'parcial' em TODO competidor e a run sairia
-    // "concluida" com notas inventadas. Sinal de controle sobe.
-    if (isControlSignal(err)) throw err;
-    const msg = (err instanceof Error ? err.message : String(err)).slice(0, 160);
-    return {
-      judgeModelId,
-      contestantId: response.contestantId,
-      verdict: 'parcial',
-      explanation: `Juiz de referência falhou: ${msg}`,
-    };
+  const userPrompt = buildUserPrompt(stage, reference, response.text);
+  const attempt = await callJudgeWithRetry({
+    call: async (reminder) =>
+      (
+        await chatCompletion({
+          apiKey,
+          modelId: judgeModelId,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: withReminder(userPrompt, reminder) },
+          ],
+          temperature: 0,
+          maxTokens: 1024,
+          responseFormatJson: true,
+          reasoningLevel,
+          timeoutMs,
+          role: 'judge',
+          signal: ctx?.signal,
+          sink: ctx?.sink,
+          maxPricePerMTok,
+        })
+      ).text,
+    parse: parseJudgeReply,
+    formatReminder: FORMAT_REMINDER,
+    signal: ctx?.signal,
+  });
+  if (!attempt.ok) {
+    return { ok: false, judgeModelId, contestantId: response.contestantId, error: attempt.error };
   }
+  return { ok: true, judgeModelId, contestantId: response.contestantId, ...attempt.value };
 }
 
 /**
  * Julga TODAS as respostas de uma etapa contra o gabarito (`stage.reference`),
  * pointwise. Multi-juiz: cada juiz vota por competidor e o veredito agregado e
- * a media ordinal; a explanation agregada e a do 1o juiz que deu o veredito
- * agregado (fallback: a do 1o juiz).
+ * a MAIORIA SIMPLES dos votos LEGITIMOS (IMPL-007); sem maioria clara =>
+ * EMPATE TECNICO (`verdictTieByContestant`), gravado com o nivel que a maioria
+ * endossa — nunca o voto de cima. Painel reduzido (parte dos juizes falhou) =>
+ * fonte 'degraded'; nenhum voto => veredito AUSENTE com o motivo. A explanation
+ * agregada vem de um juiz que votou EXATAMENTE o veredito agregado (em empate,
+ * nunca do juiz que deu o voto mais alto).
  */
 export async function judgeStageReference(
   opts: JudgeStageReferenceParams,
 ): Promise<ReferenceJudgeResult> {
   const { stage, responses, contestants, apiKey, reasoningLevel, ctx, maxPricePerMTok } = opts;
   const timeoutMs = opts.timeoutMs ?? 90_000;
-  // dedup: um mesmo juiz duas vezes distorceria a media ordinal.
+  // dedup: um mesmo juiz duas vezes votaria dobrado na maioria.
   const judgeIds = [...new Set(opts.judgeModelIds ?? [])];
   const judgeModelId = judgeIds.join('+');
 
   const verdictByContestant: Record<string, Verdict> = {};
   const explanationByContestant: Record<string, string> = {};
+  const verdictSourceByContestant: Record<string, VerdictSource> = {};
+  const verdictErrorByContestant: Record<string, VerdictError> = {};
+  const verdictTieByContestant: Record<string, Verdict[]> = {};
+  const result = (inconclusive?: boolean): ReferenceJudgeResult => ({
+    verdictByContestant,
+    explanationByContestant,
+    verdictSourceByContestant,
+    verdictErrorByContestant,
+    ...(Object.keys(verdictTieByContestant).length > 0 ? { verdictTieByContestant } : {}),
+    judgeModelId,
+    ...(inconclusive ? { inconclusive: true } : {}),
+  });
 
   // `contestants` e a fonte de verdade da lista; respostas com id desconhecido
   // entram ao fim (defensivo — o pipeline passa as duas listas alinhadas).
@@ -199,18 +212,20 @@ export async function judgeStageReference(
     }
   }
 
-  // Resposta ausente/com erro/vazia => 'nao' AUTOMATICO (sem gastar LLM).
+  // Regra de origem (CONVENTIONS): sem resposta/erro de infra/bloqueio =>
+  // SEM veredito (motivo registrado); resposta vazia => 'nao' automatico.
   const judgeable: CompetitorResponse[] = [];
   for (const id of orderedIds) {
     const r = byContestant.get(id);
-    if (!r) {
+    const semVeredito = unjudgeableReason(r);
+    if (semVeredito) {
+      verdictErrorByContestant[id] = semVeredito;
+    } else if (r!.text.trim().length === 0) {
       verdictByContestant[id] = 'nao';
-      explanationByContestant[id] = 'Sem resposta registrada nesta etapa.';
-    } else if (r.status !== 'ok' || r.text.trim().length === 0) {
-      verdictByContestant[id] = 'nao';
-      explanationByContestant[id] = 'Resposta com erro ou vazia (veredito automático).';
+      explanationByContestant[id] = 'Resposta vazia (veredito automático).';
+      verdictSourceByContestant[id] = 'auto';
     } else {
-      judgeable.push(r);
+      judgeable.push(r!);
     }
   }
 
@@ -220,41 +235,28 @@ export async function judgeStageReference(
   // 'ground-truth' para o registro mostrar que NENHUM juiz LLM opinou.
   if (stage.expected !== undefined) {
     for (const r of judgeable) {
-      const gt = matchExpected(r.text, stage.expected);
+      // Verificador ESTRITO (IMPL-003): o labelSet da etapa deixa a lista de
+      // rótulos/hesitação ("positivo | negativo") visível — sem ele só a
+      // negação/hesitação sobre o próprio rótulo é detectada.
+      const gt = matchExpected(r.text, stage.expected, { labelSet: stage.labelSet });
       verdictByContestant[r.contestantId] = gt.verdict;
       explanationByContestant[r.contestantId] = gt.explanation;
+      verdictSourceByContestant[r.contestantId] = 'ground-truth';
     }
-    return { verdictByContestant, explanationByContestant, judgeModelId: 'ground-truth' };
+    return { ...result(), judgeModelId: 'ground-truth' };
   }
+
+  if (judgeable.length === 0) return result(true);
 
   const reference = stage.reference?.trim() ?? '';
-
-  // Sem gabarito => degrada TODOS os julgaveis p/ 'parcial', zero chamadas LLM.
-  if (!reference) {
-    for (const r of judgeable) {
-      verdictByContestant[r.contestantId] = 'parcial';
-      explanationByContestant[r.contestantId] = '(sem referência para este cenário)';
-    }
-    return {
-      verdictByContestant,
-      explanationByContestant,
-      judgeModelId,
-      inconclusive: judgeIds.length === 0 || judgeable.length === 0 ? true : undefined,
-    };
-  }
-
-  // Sem juizes ou sem nada julgavel => inconclusivo (sem chamadas LLM).
-  if (judgeIds.length === 0 || judgeable.length === 0) {
-    for (const r of judgeable) {
-      verdictByContestant[r.contestantId] = 'parcial';
-      explanationByContestant[r.contestantId] = '(sem juiz configurado)';
-    }
-    return {
-      verdictByContestant,
-      explanationByContestant,
-      judgeModelId,
-      inconclusive: true,
-    };
+  // Sem gabarito ou sem juiz => sem régua: NENHUM veredito (antes: 'parcial'
+  // para todos, zero chamadas — a nota mais perigosa, porque parecia neutra).
+  if (!reference || judgeIds.length === 0) {
+    const error: VerdictError = !reference
+      ? { kind: 'no_reference', message: 'Cenário sem gabarito — o juiz pointwise não tem régua.' }
+      : { kind: 'judge_failed', message: 'Nenhum juiz configurado.' };
+    for (const r of judgeable) verdictErrorByContestant[r.contestantId] = error;
+    return result(true);
   }
 
   // UMA chamada por (juiz x competidor), TODAS em paralelo — sem cap local;
@@ -277,15 +279,32 @@ export async function judgeStageReference(
     ),
   );
 
-  // Multi-juiz: veredito agregado por media ordinal; explanation = a do 1o
-  // juiz que deu o veredito agregado (fallback: a do 1o juiz).
+  let algumVeredito = false;
   for (const r of judgeable) {
     const vs = singles.filter((s) => s.contestantId === r.contestantId);
-    const agg = aggregateVerdict(vs.map((v) => v.verdict));
-    verdictByContestant[r.contestantId] = agg;
-    explanationByContestant[r.contestantId] =
-      (vs.find((v) => v.verdict === agg) ?? vs[0])?.explanation ?? '';
+    const oks = vs.filter((s): s is Extract<SingleVerdict, { ok: true }> => s.ok);
+    if (oks.length === 0) {
+      const falha = vs.find((s): s is Extract<SingleVerdict, { ok: false }> => !s.ok);
+      const error = falha?.error ?? { kind: 'judge_failed' as const, message: 'Juiz sem resposta.' };
+      verdictErrorByContestant[r.contestantId] =
+        judgeIds.length > 1 ? { ...error, message: `${falha?.judgeModelId}: ${error.message}` } : error;
+      continue;
+    }
+    algumVeredito = true;
+    const agg = aggregateVerdicts(oks.map((v) => v.verdict))!;
+    verdictByContestant[r.contestantId] = agg.verdict;
+    // O veredito agregado e sempre um dos votos (mediana inferior): a explanation
+    // vem de quem votou ELE — nunca do juiz que deu o voto inflado.
+    const autor = oks.find((v) => v.verdict === agg.verdict)!;
+    explanationByContestant[r.contestantId] = agg.tie
+      ? `${tieLabel(agg.votes)}: ${autor.explanation}`
+      : autor.explanation;
+    if (agg.tie) verdictTieByContestant[r.contestantId] = agg.votes;
+    // Painel reduzido: o veredito existe, mas vale menos — conta na regra de
+    // run inconclusiva como 'degradado' (R-03b:REC-4).
+    verdictSourceByContestant[r.contestantId] = oks.length < vs.length ? 'degraded' : 'judge';
   }
 
-  return { verdictByContestant, explanationByContestant, judgeModelId };
+  // Nenhum veredito de juiz na etapa inteira: a etapa nao pontua no placar.
+  return result(!algumVeredito);
 }

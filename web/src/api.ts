@@ -47,6 +47,17 @@ export type {
   StageIncompleteReason,
   TruncationSignal,
 } from '../../src/types.js';
+// Integridade do veredito (IMPL-004): fonte única em src/types.ts.
+import type { DuelFailure, VerdictError, VerdictIntegrity, VerdictSource } from '../../src/types.js';
+import { isTerminalRunStatus } from '../../src/types.js';
+export type {
+  DuelFailure,
+  VerdictError,
+  VerdictErrorKind,
+  VerdictIntegrity,
+  VerdictSource,
+} from '../../src/types.js';
+export { isTerminalRunStatus } from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelLifecycleSnapshot } from '../../src/engine/modelLifecycle.js';
 export type {
@@ -267,7 +278,10 @@ export interface CompetitorResponse {
   tokensIn: number;
   tokensOut: number;
   costUsd: number;
-  /** `blocked` = moderação/guardrail (sem veredito); `refused` = o modelo recusou (julgável); `error` = infra. */
+  /**
+   * Union FIXO do CONVENTIONS (dono `gw`) — espelho de src/types.ts. `blocked` =
+   * moderação/guardrail (sem veredito); `refused` = o modelo recusou (julgável); `error` = infra.
+   */
   status: 'ok' | 'error' | 'blocked' | 'refused';
   errorMsg?: string;
   finishReason?: string;
@@ -292,6 +306,8 @@ export interface StageSpec {
   reference?: string;
   /** Rotulo esperado (ground-truth): veredito deterministico sem juiz LLM. */
   expected?: ExpectedSpec;
+  /** Todos os rotulos validos da etapa; obrigatorio com `expected` curto (IMPL-003). */
+  labelSet?: string[];
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
 }
@@ -324,6 +340,16 @@ export interface JudgeResult {
   acceptableByContestant: Record<string, boolean>;
   /** Veredito ternario agregado por contestant (consenso). Ausente em records antigos. */
   verdictByContestant?: Record<string, Verdict>;
+  /** Origem de cada veredito presente (IMPL-004). */
+  verdictSourceByContestant?: Record<string, VerdictSource>;
+  /** Motivo de cada veredito AUSENTE (IMPL-004) — sem chave em verdictByContestant. */
+  verdictErrorByContestant?: Record<string, VerdictError>;
+  /**
+   * EMPATE TECNICO do painel (IMPL-007): contestantId -> votos (pior -> melhor)
+   * quando nenhum veredito teve maioria estrita. O veredito gravado e o nivel
+   * que a maioria endossa (nunca o voto de cima). So a chave dos empatados.
+   */
+  verdictTieByContestant?: Record<string, Verdict[]>;
   /** Resultado individual de cada juiz. */
   judges: SingleJudgeResult[];
   blindMap: Record<string, string>;
@@ -337,6 +363,16 @@ export interface ReferenceJudgeResult {
   verdictByContestant: Record<string, Verdict>;
   /** Explicacao curta (1 frase) por contestant. */
   explanationByContestant: Record<string, string>;
+  /** Origem de cada veredito presente (IMPL-004). */
+  verdictSourceByContestant?: Record<string, VerdictSource>;
+  /** Motivo de cada veredito AUSENTE (IMPL-004) — sem chave em verdictByContestant. */
+  verdictErrorByContestant?: Record<string, VerdictError>;
+  /**
+   * EMPATE TECNICO do painel (IMPL-007): contestantId -> votos (pior -> melhor)
+   * quando nenhum veredito teve maioria estrita. O veredito gravado e o nivel
+   * que a maioria endossa (nunca o voto de cima). So a chave dos empatados.
+   */
+  verdictTieByContestant?: Record<string, Verdict[]>;
   judgeModelId: string;
   inconclusive?: boolean;
 }
@@ -349,17 +385,30 @@ export interface DuelOutcome {
   order2: { winner: 'a' | 'b' | 'tie'; explanation: string };
   /** Resultado combinado das 2 ordens. */
   outcome: 'a' | 'b' | 'tie';
+  /** Quem decidiu (IMPL-004): juiz LLM ou oráculo. */
+  source?: VerdictSource;
 }
 
-/** Duelos round-robin da etapa (bracket top-K): placar Copeland, placements fracionarios em empate. */
+/** Duelos round-robin da etapa (bracket top-K): placar por taxa de vitória, placements fracionarios em empate. */
 export interface StageDuels {
   /** Placement final por contestant (1 = melhor; fracionario em empate). */
   placementByContestant: Record<string, number>;
   /** ContestantIds ordenados do melhor ao pior placement. */
   order: string[];
-  /** Pontos Copeland por contestant (vitoria 1, empate 0.5). */
-  points: Record<string, number>;
+  /**
+   * Taxa de vitória por contestant nos duelos da etapa (IMPL-007, R-04:DEC-5):
+   * (vitórias + ½·empates) / duelos disputados, em 0..1. É a régua do placar —
+   * NÃO é Copeland (Copeland = maioria par-a-par). Fora do bracket = 0.
+   */
+  winRate: Record<string, number>;
+  /**
+   * @deprecated Records anteriores ao IMPL-007: soma vitória 1/empate 0.5,
+   * rotulada "pontos Copeland" por engano. `normalizeRunRecord` deriva `winRate`.
+   */
+  points?: Record<string, number>;
   duels: DuelOutcome[];
+  /** Duelos SEM resultado (IMPL-004) — fora do placar. */
+  failedDuels?: DuelFailure[];
   /** Tamanho do bracket usado (0 = round-robin completo). */
   topK: number;
 }
@@ -389,7 +438,7 @@ export interface StageRecord {
   judge?: JudgeResult;
   /** Julgamento pointwise contra o gabarito (quando a etapa tem `reference`). */
   referenceJudge?: ReferenceJudgeResult;
-  /** Duelos pairwise (Copeland) da etapa (quando duelos ligados). */
+  /** Duelos pairwise da etapa, placar por taxa de vitória (quando duelos ligados). */
   duels?: StageDuels;
   /** @deprecated Avaliador fundido no juiz. Presente so em records antigos. */
   evaluation?: StageEvaluation;
@@ -418,7 +467,7 @@ export interface CompetitorLiveState {
 
 export interface RunRecord {
   id: string;
-  status: 'running' | 'finished' | 'error' | 'aborted';
+  status: 'running' | 'finished' | 'inconclusive' | 'error' | 'aborted';
   config: RunConfig;
   mode?: RunMode;
   contestants?: Contestant[];
@@ -429,14 +478,24 @@ export interface RunRecord {
   judgeScoreByContestant?: Record<string, number>;
   /** n nominal × efetivo por contestant e pares com a regua (IMPL-005). */
   completeness?: RunCompleteness;
+  /**
+   * Convencao de agregacao do painel de juizes (IMPL-007). `'majority'` =
+   * maioria simples com empate tecnico. AUSENTE = record antigo (media ordinal
+   * arredondada para cima): judge-score de painel >= 2 juizes NAO comparavel.
+   */
+  verdictAggregation?: 'majority';
   /** Ids dos finalistas (top-N por judge-score) que disputaram os duelos. */
   finalists?: string[];
-  /** Classificacao final agregada (Copeland dos duelos / pontos do placar). */
+  /**
+   * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
+   * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).
+   */
   standings?: {
     id: string;
     label: string;
     isControl: boolean;
-    points: number;
+    /** @deprecated records anteriores ao IMPL-007 (soma vitória 1/empate 0.5); use `winRate`. */
+    points?: number;
     wins: number;
     ties: number;
     losses: number;
@@ -476,6 +535,10 @@ export interface RunRecord {
   finishSignalsByRole?: Partial<Record<CostRole, FinishSignalCounts>>;
   /** LGPD (IMPL-042): campos com dado pessoal achados no pré-voo (caminho + tipos, nunca o valor). */
   piiReport?: PiiRunReport;
+  /** Vereditos PERDIDOS por papel (IMPL-004). */
+  failureCountByRole?: Partial<Record<CostRole, number>>;
+  /** A conta que decidiu `inconclusive` (IMPL-004). */
+  verdictIntegrity?: VerdictIntegrity;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -759,6 +822,8 @@ export interface SessionRecord {
   bestPromptByIteration: SessionIterationSummary[];
   totalCostUsd: number;
   costByRole?: Record<CostRole, CostEntry>;
+  /** Soma do `failureCountByRole` de todas as runs da sessão (IMPL-004). */
+  failureCountByRole?: Partial<Record<CostRole, number>>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   upstreamCostUsd?: number;
   budgetUsd?: number;
@@ -875,7 +940,7 @@ export function openSessionStream(
   const live = getSessionRecord(id);
   if (live) {
     onEvent({ type: 'snapshot', record: live });
-    if (live.status !== 'running') return () => undefined;
+    if (isTerminalRunStatus(live.status)) return () => undefined;
     return subscribeSession(id, onEvent);
   }
   // Roda nesta aba mas o record vivo ainda não foi publicado: os eventos vêm do motor.
@@ -1200,7 +1265,7 @@ export function openRunStream(
   const live = getRunRecord(id);
   if (live) {
     onEvent({ type: 'snapshot', record: live });
-    if (live.status !== 'running') return () => undefined;
+    if (isTerminalRunStatus(live.status)) return () => undefined;
     return subscribeRun(id, onEvent);
   }
   // Roda nesta aba mas o record vivo ainda não foi publicado: os eventos vêm do motor.
@@ -1211,7 +1276,7 @@ export function openRunStream(
     onEvent({ type: 'snapshot', record: rec });
     if (rec.status === 'error') {
       onEvent({ type: 'run.error', runId: id, error: rec.error ?? 'Run terminou com erro.' });
-    } else if (rec.status !== 'running') {
+    } else if (isTerminalRunStatus(rec.status)) {
       onEvent({ type: 'run.finished', runId: id, record: rec });
     }
   };

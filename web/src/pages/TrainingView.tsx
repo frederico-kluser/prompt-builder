@@ -327,8 +327,11 @@ function BestPromptStudio({
               <span className="truncate text-[13px]">{v.label}</span>
               {v.isOriginal && <Tag>base</Tag>}
             </span>
-            <span className="shrink-0 text-[12px] text-muted-foreground tabular">
-              {v.score === undefined ? '—' : `${Math.round(v.score)} pts`}
+            <span
+              className="shrink-0 text-[12px] text-muted-foreground tabular"
+              title={v.score === undefined ? undefined : `judge-score ${v.score.toFixed(1)}`}
+            >
+              {v.score === undefined ? '—' : `score ${Math.round(v.score)}`}
             </span>
           </button>
         ))}
@@ -777,7 +780,7 @@ export function TrainingView() {
           </SectionHead>
           <ScoreHeatmap
             record={roundShown}
-            ranked={roundShown.status === 'finished'}
+            ranked={roundShown.status === 'finished' || roundShown.status === 'inconclusive'}
             onStageClick={() => navigate(`/runs/${roundShown.id}`)}
           />
 

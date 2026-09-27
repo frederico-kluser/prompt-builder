@@ -36,7 +36,7 @@ npx prompt-builder-cli sessions winner <sessionId> --apply prompt.md
 3. `--dry-run` antes de run cara, com as mesmas flags: mesmo exit da real, sem key.
 4. O juiz nunca é competidor (o schema rejeita).
 5. `--json`/`--output-format ndjson`: payload no stdout, narração no stderr.
-6. Exit `7` = parcial por orçamento (resultado válido); `10` = portão recusou.
+6. Exit `7` = parcial por orçamento (resultado válido); `6` = inconclusiva (não promova); `10` = portão recusou.
 7. Retentativa = mesma `--idempotency-key` (sem ela: `run.locked`).
 
 ## Documentação embarcada (casada com a versão instalada)

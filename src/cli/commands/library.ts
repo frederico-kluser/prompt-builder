@@ -10,6 +10,7 @@ import { promises as fs } from 'node:fs';
 import {
   coverageReport,
   hasGabarito,
+  labelIssue,
   mergeSeedItems,
   normalizeLibraryItem,
   stableItemId,
@@ -53,7 +54,8 @@ USO
                                          seed IDEMPOTENTE por id (o que existe, não sobrescreve)
   library seed --profile <id> --generate <N> --theme <t> --model <id> [--budget <usd>]
                                          gera N itens via datagen + gabarito por item
-  library verify --profile <id>          itens SEM gabarito (recusados no evolve; exit 3)
+  library verify --profile <id>          itens SEM gabarito ou rótulo curto sem labelSet
+                                         (recusados no evolve; exit 3)
   library coverage --profile <id>        cobertura tier × dimensão + lacunas
   library export --profile <id> -o <arq> exporta como prompt-builder-pack@1
   library rm --profile <id> <itemId>     remove um item
@@ -67,7 +69,9 @@ Regras de geração (--rules): { templates: { system, user? }, grounding?: { con
 Item da biblioteca aceita os campos enriquecidos do prompt-arena:
   title, tier (mft|invariance|adversarial|edge), persona, context,
   successCriteria[], rationale, dimensionTags[], question, productContext,
-  maxTokens, rubric, reference | expected, origin.
+  maxTokens, rubric, reference | expected (+ labelSet), origin.
+Rótulo curto em expected (≤5 palavras) exige labelSet = todos os rótulos
+válidos da etapa (ex.: "labelSet": ["positivo","negativo","neutro"]).
 `;
 
 function exigirProfile(values: Record<string, unknown>): string {
@@ -341,28 +345,49 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
       const profileId = exigirProfile(parsed.values);
       const itens = await listItems(profileId);
       const semGabarito = itens.filter((i) => !hasGabarito(i));
+      // IMPL-003: rótulo curto sem labelSet (itens gravados antes da regra).
+      const rotuloInvalido = itens
+        .map((i) => ({ item: i, erro: labelIssue(i) }))
+        .filter((x): x is { item: LibraryItem; erro: string } => x.erro !== null);
+      const ok = semGabarito.length === 0 && rotuloInvalido.length === 0;
       if (out.isText) {
         if (!itens.length) out.line('(perfil vazio)');
         if (semGabarito.length) {
           out.line(`${semGabarito.length} item(ns) SEM gabarito (recusados no evolve):`);
           for (const it of semGabarito) out.line(`  ${it.id.padEnd(16)} ${it.title}`);
           out.info('Adicione `reference` (texto) ou `expected` (rótulo) a cada um.');
-        } else if (itens.length) {
+        }
+        if (rotuloInvalido.length) {
+          out.line(`${rotuloInvalido.length} item(ns) com rótulo sem labelSet válido (recusados no evolve):`);
+          for (const { item, erro } of rotuloInvalido) out.line(`  ${item.id.padEnd(16)} ${erro}`);
+          out.info('Adicione `labelSet` com TODOS os rótulos válidos da etapa a cada um.');
+        }
+        if (ok && itens.length) {
           out.line(`ok: ${itens.length} itens, todos com gabarito (reference ou expected)`);
         }
       }
-      if (semGabarito.length) {
+      if (!ok) {
+        const partes = [
+          ...(semGabarito.length ? [`${semGabarito.length} sem gabarito`] : []),
+          ...(rotuloInvalido.length ? [`${rotuloInvalido.length} com rótulo sem labelSet válido`] : []),
+        ];
         throw new CliError(
-          `${semGabarito.length} de ${itens.length} item(ns) sem gabarito (recusados no evolve).`,
+          `${partes.join(' e ')} de ${itens.length} item(ns) (recusados no evolve).`,
           EXIT.CONFIG,
-          { total: itens.length, withoutGabarito: semGabarito.map((i) => i.id) },
           {
-            code: 'library.missing_gabarito',
-            hint: 'Adicione `reference` (texto) ou `expected` (rótulo) a cada item de details.withoutGabarito e rode `library verify` de novo.',
+            total: itens.length,
+            withoutGabarito: semGabarito.map((i) => i.id),
+            withoutLabelSet: rotuloInvalido.map((x) => x.item.id),
+          },
+          {
+            code: semGabarito.length ? 'library.missing_gabarito' : 'library.missing_label_set',
+            hint:
+              'Adicione `reference` (texto) ou `expected` (rótulo) a cada item de details.withoutGabarito e ' +
+              '`labelSet` (todos os rótulos válidos) a cada item de details.withoutLabelSet; rode `library verify` de novo.',
           },
         );
       }
-      out.result(true, 'library.verify', { total: itens.length, withoutGabarito: [] });
+      out.result(true, 'library.verify', { total: itens.length, withoutGabarito: [], withoutLabelSet: [] });
       return EXIT.OK;
     }
 

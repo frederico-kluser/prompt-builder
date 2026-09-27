@@ -639,6 +639,8 @@ export function NewRun() {
           rubric: sc.rubric ?? '',
           reference: sc.reference,
           expected: sc.expected,
+          // IMPL-003: sem o labelSet o verificador estrito perde a lista de rótulos.
+          labelSet: sc.labelSet,
           origin: 'import' as const,
         })),
       });

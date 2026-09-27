@@ -132,9 +132,9 @@ PARA AGENTES
 CÓDIGOS DE SAÍDA (error.kind entre parênteses)
   0 ok · 1 falha inesperada (internal) · 2 uso inválido (usage)
   3 config inválida (config) · 4 auth (auth) · 5 sem crédito (credit)
-  6 run inconclusiva (inconclusive) · 7 parcial, orçamento esgotado (control)
-  8 rede (network) · 9 espera esgotada (timeout) · 10 portão recusou (gate)
-  130 interrompido (control)
+  6 run inconclusiva (inconclusive: vereditos perdidos > 10% ou < 5 cenários julgados)
+  7 parcial, orçamento esgotado (control) · 8 rede (network) · 9 espera esgotada (timeout)
+  10 portão recusou (gate) · 130 interrompido (control)
 `;
 
 /**

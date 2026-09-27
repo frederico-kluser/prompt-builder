@@ -9,6 +9,7 @@ import { listRuns, loadRun, listSessions, loadSession } from './storage.js';
 import { subscribe, subscribeSession } from './events.js';
 import { runConfigSchema } from './runConfigSchema.js';
 import { prepareOptsFor } from './prepareRun.js';
+import { isTerminalRunStatus } from './types.js';
 import type { CompareConfig, CompetitorResponse, RunRecord } from './types.js';
 
 const router = Router();
@@ -150,8 +151,9 @@ router.get('/runs/:id/events', async (req, res) => {
 
   send({ type: 'snapshot', record });
 
-  const isTerminal =
-    record.status === 'finished' || record.status === 'error' || record.status === 'aborted';
+  // Helper único (IMPL-004): lista solta esquecia 'inconclusive' e o cliente
+  // ficava pendurado num stream que nunca mais emitiria nada.
+  const isTerminal = isTerminalRunStatus(record.status);
   if (isTerminal) {
     // evento terminal correto: 'error' vira run.error (UI mostra o motivo),
     // o resto vira run.finished. Em ambos o cliente fecha o EventSource.
@@ -338,8 +340,9 @@ router.get('/sessions/:id/events', async (req, res) => {
 
   send({ type: 'snapshot', record });
 
-  const isTerminal =
-    record.status === 'finished' || record.status === 'error' || record.status === 'aborted';
+  // Helper único (IMPL-004): lista solta esquecia 'inconclusive' e o cliente
+  // ficava pendurado num stream que nunca mais emitiria nada.
+  const isTerminal = isTerminalRunStatus(record.status);
   if (isTerminal) {
     if (record.status === 'error') {
       send({ type: 'session.error', sessionId, error: record.error ?? 'Sessao terminou com erro.' });

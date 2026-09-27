@@ -20,6 +20,7 @@ import {
   formatSignificance,
   runCompleteness,
 } from '../../stats.js';
+import { judgeScaleWarning } from '../../engine/verdictAggregate.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import {
   buildCatalogContext,
@@ -308,6 +309,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     for (const a of record.modelLifecycle?.alerts ?? []) {
       out.line(`! ciclo de vida (em ${record.modelLifecycle!.capturedAt.slice(0, 10)}): ${a.message}`);
     }
+    const escala = judgeScaleWarning(record);
+    if (escala) out.line(`! ${escala}`);
     const amostra = sampleSizeWarning(record.stages.length, 'etapas');
     if (amostra) out.line(`! ${amostra}`);
   }
@@ -317,6 +320,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     judgeDiagnostics: record.judgeDiagnostics ?? null,
     fairnessWarnings: record.fairnessWarnings ?? [],
     lifecycleAlerts: record.modelLifecycle?.alerts ?? [],
+    // IMPL-007: judge-score de painel em escala antiga (média ordinal inflada).
+    judgeScaleWarning: judgeScaleWarning(record) ?? null,
     sampleWarnings: [sampleSizeWarning(record.stages.length, 'etapas')].filter(Boolean),
   });
   return EXIT.OK;

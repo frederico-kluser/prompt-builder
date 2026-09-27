@@ -6,6 +6,8 @@ import { generateReferences } from './gabarito';
 import { judgeStageReference } from './refJudge';
 import { blindRankMap, pickFinalists, runStageDuels, seedFromId, VERDICT_SCORE } from './duels';
 import { oracleScoresFromVerdicts } from '../../../src/engine/duelCore.js';
+import { assessVerdictIntegrity } from '../../../src/engine/verdictIntegrity.js';
+import { VERDICT_AGGREGATION } from '../../../src/engine/verdictAggregate.js';
 import { fairnessWarningsForModels } from './llmVariants';
 import { JUDGE_CONTRACT_TEXT } from './refJudge';
 import { pinJudgeContract, verbosityReport } from '../../../src/engine/judgeCalibration.js';
@@ -184,6 +186,9 @@ function buildRecord(config: RunConfig, opts: StartRunOpts): RunRecord {
     // IMPL-014: idem — "0% truncado" tambem e informacao.
     truncationRate: 0,
     truncationCounts: { calls: 0, truncated: 0 },
+    // IMPL-007: vereditos de painel por MAIORIA SIMPLES (empate tecnico) — marca a
+    // escala do judge-score; record sem isto = media ordinal antiga (inflada).
+    verdictAggregation: VERDICT_AGGREGATION,
     startedAt: nowIso(),
     sessionId: opts.sessionId,
     iteration: opts.iteration,
@@ -790,21 +795,25 @@ async function runLoop(
 
             // JudgeResult SINTETIZADO para nao quebrar scoreboard/medals/UI:
             // ranking SEMPRE por veredito (resolve > parcial > nao). Os duelos so
-            // acontecem na fase 4, entao nao ha ordem Copeland para consultar aqui.
+            // acontecem na fase 4, entao nao ha ordem de duelos para consultar aqui.
             // O desempate NAO pode ser a ordem dos contestants: o controle
             // ('original'/'carry') e sempre o primeiro do array, entao sort estavel
             // daria a ele todos os 1os lugares em empate — enviesando medalhas e
             // placar a favor da regua. Usa o shuffle cego semeado pelo conteudo da
             // etapa (mesmo criterio dos duelos): deterministico e neutro.
+            // Contestant SEM veredito (juiz que falhou, competidor com erro de
+            // infra/bloqueado — IMPL-004) fica FORA do ranking: sem pontos e sem
+            // 'nao' imputado — por isso o `filter` (espelho de src/).
             const ordemCega = blindRankMap(
               record.contestants.map((c) => c.id),
               seedFromId(stageSpec.question),
             );
             const ranked = [...record.contestants]
+              .filter((c) => refJudge.verdictByContestant[c.id] !== undefined)
               .sort(
                 (a, b) =>
-                  VERDICT_SCORE[refJudge.verdictByContestant[b.id] ?? 'nao'] -
-                    VERDICT_SCORE[refJudge.verdictByContestant[a.id] ?? 'nao'] ||
+                  VERDICT_SCORE[refJudge.verdictByContestant[b.id]] -
+                    VERDICT_SCORE[refJudge.verdictByContestant[a.id]] ||
                   (ordemCega.get(a.id) ?? 0) - (ordemCega.get(b.id) ?? 0),
               )
               .map((c) => c.id);
@@ -814,6 +823,8 @@ async function runLoop(
                 Object.entries(refJudge.verdictByContestant).map(([id, v]) => [id, v !== 'nao']),
               ),
               verdictByContestant: { ...refJudge.verdictByContestant },
+              verdictSourceByContestant: { ...refJudge.verdictSourceByContestant },
+              verdictErrorByContestant: { ...refJudge.verdictErrorByContestant },
               judges: [],
               blindMap: {},
               rawJudgeText: 'Juiz de referência (gabarito)',
@@ -835,12 +846,22 @@ async function runLoop(
         } catch (judgeErr) {
           // Sinal de controle (orcamento/cancelamento) nao e "juiz inconclusivo".
           if (isControlSignal(judgeErr)) throw judgeErr;
+          const motivo = judgeErr instanceof Error ? judgeErr.message : String(judgeErr);
+          // IMPL-004: a etapa fica SEM veredito para todos — com o motivo, para
+          // a falha entrar em failureCountByRole (espelho de src/).
           stageRecord.judge = {
             rankedContestantIds: [],
             acceptableByContestant: {},
+            verdictByContestant: {},
+            verdictErrorByContestant: Object.fromEntries(
+              record.contestants.map((c) => [
+                c.id,
+                { kind: 'judge_failed' as const, message: motivo.slice(0, 200) },
+              ]),
+            ),
             judges: [],
             blindMap: {},
-            rawJudgeText: judgeErr instanceof Error ? judgeErr.message : String(judgeErr),
+            rawJudgeText: motivo,
             inconclusive: true,
           };
           log(runId, `stage ${i + 1} juiz falhou: ${stageRecord.judge.rawJudgeText}`);
@@ -908,8 +929,10 @@ async function runLoop(
   // Espelho do Node.
   const stagesComRef = record.stages.filter((s) => s.referenceJudge && !s.incomplete);
   if (stagesComRef.length > 0) {
-    // judge-score = (resolve + 0.5*parcial) / total * 100, por contestant,
-    // sobre as etapas com juiz de referencia (ausente conta como 'nao').
+    // judge-score = (resolve + 0.5*parcial) / julgados * 100, por contestant,
+    // sobre as etapas com juiz de referencia. Veredito AUSENTE (IMPL-004) é
+    // "sem evidência": `judgeScoreFromVerdicts` o tira do numerador E do
+    // denominador — nunca conta como 'nao'.
     record.judgeScoreByContestant = Object.fromEntries(
       record.contestants.map((c) => [
         c.id,
@@ -1010,9 +1033,10 @@ async function runLoop(
 
   const stagesComDuelos = record.stages.filter((s) => s.duels);
   if (stagesComDuelos.length > 0) {
-    // Copeland agregado cross-estagio: vitoria 1, empate 0.5, derrota 0.
+    // Taxa de vitória agregada cross-estagio (IMPL-007, R-04:DEC-5): vitoria 1,
+    // empate 0.5, derrota 0, dividido pelos duelos disputados. NAO e Copeland.
     const acc = new Map(
-      record.contestants.map((c) => [c.id, { points: 0, wins: 0, ties: 0, losses: 0 }]),
+      record.contestants.map((c) => [c.id, { wins: 0, ties: 0, losses: 0 }]),
     );
     for (const s of stagesComDuelos) {
       for (const d of s.duels!.duels) {
@@ -1020,16 +1044,12 @@ async function runLoop(
         const B = acc.get(d.b);
         if (!A || !B) continue;
         if (d.outcome === 'a') {
-          A.points += 1;
           A.wins += 1;
           B.losses += 1;
         } else if (d.outcome === 'b') {
-          B.points += 1;
           B.wins += 1;
           A.losses += 1;
         } else {
-          A.points += 0.5;
-          B.points += 0.5;
           A.ties += 1;
           B.ties += 1;
         }
@@ -1046,8 +1066,8 @@ async function runLoop(
           winRate: played > 0 ? Number(((s.wins + 0.5 * s.ties) / played).toFixed(4)) : 0,
         };
       })
-      // Estavel: empate de pontos E winRate mantem a ordem dos contestants.
-      .sort((a, b) => b.points - a.points || b.winRate - a.winRate);
+      // Estavel: empate de taxa (e de vitorias) mantem a ordem dos contestants.
+      .sort((a, b) => b.winRate - a.winRate || b.wins - a.wins);
   }
 
   // IMPL-005 (R-04:REC-2): n nominal × efetivo por contestant, motivo de cada
@@ -1103,14 +1123,26 @@ async function runLoop(
     log(runId, `diagnostico do juiz falhou (ignorado): ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // IMPL-004 (R-03b:REC-4): só é `finished` se a evidência sustenta conclusão
+  // — senão `inconclusive` (terminal), com a conta no record (espelho de src/).
+  const integridade = assessVerdictIntegrity({
+    stages: record.stages,
+    contestants: record.contestants,
+    referenceJudging,
+  });
+  record.failureCountByRole = integridade.failureCountByRole;
+  record.verdictIntegrity = integridade.integrity;
+  for (const motivo of integridade.integrity.reasons) log(runId, `inconclusiva: ${motivo}`);
+
   syncLedger(record, ledger);
   // Parou numa porta (finais sem orçamento): o resultado é PARCIAL e diz isso —
-  // `aborted` + `stoppedReason`, nunca 'finished' com cara de completo.
-  record.status = record.stoppedReason ? 'aborted' : 'finished';
+  // `aborted` + `stoppedReason`, nunca 'finished' com cara de completo. Sem
+  // parada, só é `finished` se a evidência sustenta conclusão (IMPL-004).
+  record.status = record.stoppedReason ? 'aborted' : integridade.inconclusive ? 'inconclusive' : 'finished';
   record.finishedAt = nowIso();
   await flushSave();
   emitEvent({ type: 'run.finished', runId, record });
-  log(runId, record.stoppedReason ? `encerrada (${record.stoppedReason})` : 'finished', {
+  log(runId, record.stoppedReason ? `encerrada (${record.stoppedReason})` : record.status, {
     totalCostUsd: record.totalCostUsd,
   });
 }

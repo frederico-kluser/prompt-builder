@@ -14,7 +14,7 @@ import { parseArenaConfig } from '../../configFile.js';
 import { checkRunPii, describeRunPii } from '../../engine/pii.js';
 import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
-import { hasGabarito, toStageSpec } from '../../engine/libraryCore.js';
+import { hasGabarito, labelIssue, toStageSpec } from '../../engine/libraryCore.js';
 import { formatGateSummary, formatSignificance } from '../../stats.js';
 import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, type Output } from '../output.js';
 import {
@@ -178,7 +178,12 @@ function resolveBudget(values: Record<string, unknown>, warn: (m: string) => voi
   return { kind: 'unset' };
 }
 
-async function readConfigFile(
+/**
+ * Lê e valida `--config` (arena-config@1 ou RunConfig cru). Todo problema de
+ * config sai como `CliError(EXIT.CONFIG)` = exit 3 — exportado para o teste
+ * de contrato do exit code (IMPL-003).
+ */
+export async function readConfigFile(
   file: string,
   pii: { allowPii?: boolean; piiMode?: 'redact' | 'synthetic' } = {},
 ): Promise<RunConfig> {
@@ -220,6 +225,20 @@ async function readConfigFile(
           `Evolve recusa itens SEM gabarito (reference ou expected) — paridade com o 409 do prompt-arena: ${semGabarito
             .map((i) => i.id)
             .join(', ')}. Corrija com \`prompt-builder library verify --profile ${lib.profile}\`.`,
+          EXIT.CONFIG,
+        );
+      }
+      // IMPL-003: os itens viram customStages DEPOIS do parseRunConfig da
+      // tradução — sem esta checagem um item antigo de rótulo curto sem
+      // labelSet escaparia da regra do schema.
+      const semLabelSet = selecionados
+        .map((i) => ({ id: i.id, erro: labelIssue(i) }))
+        .filter((x): x is { id: string; erro: string } => x.erro !== null);
+      if (semLabelSet.length) {
+        throw new CliError(
+          `Itens com rótulo esperado sem labelSet válido: ${semLabelSet
+            .map((x) => `${x.id} (${x.erro})`)
+            .join('; ')}. Corrija com \`prompt-builder library verify --profile ${lib.profile}\`.`,
           EXIT.CONFIG,
         );
       }
@@ -411,9 +430,15 @@ function renderDryRun(out: Output, config: RunConfig, rep: PreflightReport): voi
  * tratar diferente: terminou (0), parou por orcamento com resultado parcial (7)
  * e foi interrompido pelo usuario (130).
  */
-function exitFor(stoppedReason: 'budget' | 'cancelled' | undefined, budgetExhausted?: boolean): number {
+export function exitFor(
+  stoppedReason: 'budget' | 'cancelled' | undefined,
+  budgetExhausted?: boolean,
+  status?: string,
+): number {
   if (stoppedReason === 'cancelled') return EXIT.SIGINT;
   if (budgetExhausted || stoppedReason === 'budget') return EXIT.BUDGET;
+  // IMPL-004: terminou, mas a evidencia nao sustenta conclusao.
+  if (status === 'inconclusive') return EXIT.INCONCLUSIVE;
   return EXIT.OK;
 }
 
@@ -425,6 +450,11 @@ function relatorioFinal(out: Output, record: RunRecord): void {
   }
   if (record.budgetExhausted) {
     out.line(`Parou em   ${record.stoppedAtPhase ?? '?'} — orçamento esgotado`);
+  }
+  if (record.status === 'inconclusive') {
+    // IMPL-004: o resultado existe, mas nao sustenta conclusao — dizer o porque.
+    out.warn('run INCONCLUSIVA — o resultado não sustenta conclusão:');
+    for (const motivo of record.verdictIntegrity?.reasons ?? []) out.warn(`  ${motivo}`);
   }
   // IMPL-010: bloqueio (moderação/guardrail do gateway) NÃO é erro de key nem
   // falha do prompt — sai numa linha própria, separado de recusa e de erro.
@@ -457,9 +487,11 @@ function relatorioFinal(out: Output, record: RunRecord): void {
   // judge-score nao sao intercambiaveis.
   if (record.standings?.length) {
     out.line();
-    out.line('Classificação (duelos das finais):');
+    out.line('Classificação (duelos das finais, por taxa de vitória):');
     for (const s of record.standings) {
-      out.line(`  ${s.label.padEnd(24)} ${s.points} pts  (${s.wins}V ${s.ties}E ${s.losses}D)`);
+      // IMPL-007: taxa de vitória = (V + ½E) / disputados — rótulo honesto do placar.
+      const taxa = `${Math.round(s.winRate * 100)}%`.padStart(4);
+      out.line(`  ${s.label.padEnd(24)} taxa de vitória ${taxa}  (${s.wins}V ${s.ties}E ${s.losses}D)`);
     }
   } else if (record.judgeScoreByContestant) {
     out.line();
@@ -529,7 +561,7 @@ function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
     );
   }
   // ok:true com exit != 0 so para PARCIAL (7/130): `stoppedReason` diz qual.
-  out.result(true, record.config.mode, {
+  const resumo = {
     runId: record.id,
     status: record.status,
     totalCostUsd: record.totalCostUsd,
@@ -542,9 +574,27 @@ function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
     competitorOutcomeCounts: record.competitorOutcomeCounts,
     // IMPL-014: truncationRate (+ truncationAlert acima de 2%) — mesmo formato do NDJSON.
     ...truncationFields(record),
+    // IMPL-004: falhas por papel e, se inconclusiva, o porquê.
+    failureCountByRole: record.failureCountByRole,
+    inconclusiveReasons: record.verdictIntegrity?.reasons,
     ...extrasData(x),
-  });
-  return exitFor(record.stoppedReason, record.budgetExhausted);
+  };
+  const exit = exitFor(record.stoppedReason, record.budgetExhausted, record.status);
+  // IMPL-004 × IMPL-028: inconclusiva (6) sai pelo envelope único de erro, com
+  // o resultado inteiro em `details` — há resultado, mas ele não sustenta conclusão.
+  if (exit === EXIT.INCONCLUSIVE) {
+    throw new CliError(
+      `Run ${record.id} inconclusiva: ${(record.verdictIntegrity?.reasons ?? []).join('; ') || 'o resultado não sustenta conclusão'}.`,
+      exit,
+      resumo,
+      {
+        code: 'run.inconclusive',
+        hint: `Não promova com base nela; leia o record com \`prompt-builder runs show ${record.id} --json\` (verdictIntegrity, failureCountByRole).`,
+      },
+    );
+  }
+  out.result(true, record.config.mode, resumo);
+  return exit;
 }
 
 /** Desfecho de uma sessao de treino (recem-rodada ou reaproveitada). */

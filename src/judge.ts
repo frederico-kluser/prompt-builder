@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
-import { isControlSignal } from './budget.js';
+import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
+import { unjudgeableReason } from './engine/verdictIntegrity.js';
+import { aggregateVerdicts } from './engine/verdictAggregate.js';
 import type {
   CompetitorResponse,
   JudgeResult,
@@ -10,6 +12,8 @@ import type {
   RunCtx,
   StageSpec,
   Verdict,
+  VerdictError,
+  VerdictSource,
 } from './types.js';
 
 // Juiz LISTWISE e COMPACTO: uma unica chamada por juiz devolve (a) o RANKING de
@@ -19,6 +23,14 @@ import type {
 // aceitabilidade por MAIORIA. Cada juiz pode rodar 1 ou 2 passagens (shuffles
 // diferentes) para reduzir vies de posicao; a aceitabilidade vem da 1a passagem
 // (independe da ordem). O prompt e neutro (anti-vies de tamanho e de posicao).
+//
+// Falha NAO e veredito (IMPL-004, R-03b:REC-4): a saida do juiz e validada de
+// forma ESTRITA (JSON no schema, ranking com TODOS os rotulos, veredito
+// reconhecivel para cada um). Invalida => UM novo pedido com lembrete de
+// formato; persistindo, a passagem falha. Sem nenhuma passagem valida o juiz
+// nao vota; sem nenhum juiz, os contestants ficam SEM veredito (motivo em
+// `verdictErrorByContestant`). Antes: regex de letras no texto cru e 'parcial'
+// para quem o juiz nao classificou — notas inventadas no placar e nas medias.
 
 const SYSTEM_PROMPT = `Voce e um juiz imparcial de respostas de IA. Recebe a pergunta do usuario, o CONTEXTO fornecido aos modelos e VARIAS respostas anonimizadas (rotuladas A, B, C, ...).
 
@@ -58,26 +70,22 @@ const judgeSchema = z.object({
     .default([]),
 });
 
-const ORDINAL: Record<Verdict, number> = { nao: 0, parcial: 1, resolve: 2 };
-
-/** Normaliza o veredito cru do juiz (ternario, com fallback ao binario antigo). */
-function toVerdict(raw: { veredito?: string; acceptable?: boolean }): Verdict {
+/**
+ * Normaliza o veredito cru do juiz (ternario, com fallback ao binario antigo).
+ * Valor irreconhecivel => `null` (saida invalida), NUNCA 'parcial': o antigo
+ * "ambiguo => neutro" era um veredito imputado.
+ */
+function toVerdict(raw: { veredito?: string; acceptable?: boolean }): Verdict | null {
   const s = (raw.veredito ?? '').trim().toLowerCase();
   if (s.startsWith('resolv') || s === 'sim' || s === 'ok' || s === 'true') return 'resolve';
   if (s.startsWith('parc')) return 'parcial';
   if (s.startsWith('nao') || s.startsWith('não') || s === 'no' || s === 'false') return 'nao';
   if (typeof raw.acceptable === 'boolean') return raw.acceptable ? 'resolve' : 'nao';
-  return 'parcial'; // ambiguo => neutro
+  return null;
 }
 
-/** Agrega vereditos ternarios por media ordinal (resolve=2, parcial=1, nao=0). */
-function aggregateVerdict(verdicts: Verdict[]): Verdict {
-  if (verdicts.length === 0) return 'parcial';
-  const avg = verdicts.reduce((s, v) => s + ORDINAL[v], 0) / verdicts.length;
-  if (avg >= 1.5) return 'resolve';
-  if (avg >= 0.5) return 'parcial';
-  return 'nao';
-}
+// Agregacao do painel: MAIORIA SIMPLES em `engine/verdictAggregate.ts`
+// (IMPL-007) — a media ordinal local arredondava painel dividido PARA CIMA.
 
 function shuffle<T>(arr: T[]): T[] {
   const a = [...arr];
@@ -130,6 +138,52 @@ interface PassResult {
   blindMap: Record<string, string>;
 }
 
+type PassAttempt = { ok: true; pass: PassResult } | { ok: false; error: VerdictError };
+
+/** Lembrete anexado ao 2o pedido depois de uma saida fora do contrato. */
+function formatReminder(labels: string[]): string {
+  return (
+    'LEMBRETE DE FORMATO: a resposta anterior não seguiu o contrato. Responda APENAS com JSON válido, sem markdown: ' +
+    `{"ranking":[...],"verdicts":[{"label":"<letra>","justificativa":"<1-2 frases>","veredito":"resolve|parcial|nao"}]} — ` +
+    `"ranking" com TODOS estes rótulos exatamente uma vez: ${JSON.stringify(labels)}; e UM item em "verdicts" para CADA rótulo.`
+  );
+}
+
+/**
+ * Parse ESTRITO de uma passagem: JSON no schema, ranking cobrindo TODOS os
+ * rotulos (duplicatas/rotulos estranhos ignorados) e veredito reconhecivel
+ * para CADA rotulo. Qualquer lacuna => `null` (saida invalida).
+ */
+function parsePass(
+  text: string,
+  labels: string[],
+): { ranking: string[]; verdicts: Map<string, { verdict: Verdict; motivo: string }> } | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(extractJson(text));
+  } catch {
+    return null;
+  }
+  const parsed = judgeSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  const labelSet = new Set(labels);
+  const ranking: string[] = [];
+  for (const l of parsed.data.ranking.map((x) => x.trim().toUpperCase())) {
+    if (labelSet.has(l) && !ranking.includes(l)) ranking.push(l);
+  }
+  if (ranking.length !== labels.length) return null;
+  const verdicts = new Map<string, { verdict: Verdict; motivo: string }>();
+  for (const v of parsed.data.verdicts) {
+    const label = v.label.trim().toUpperCase();
+    if (!labelSet.has(label) || verdicts.has(label)) continue;
+    const verdict = toVerdict(v);
+    if (verdict === null) return null;
+    verdicts.set(label, { verdict, motivo: (v.justificativa || v.motivo || '').trim() });
+  }
+  if (verdicts.size !== labels.length) return null;
+  return { ranking, verdicts };
+}
+
 /** Uma passagem de UM juiz: embaralha, pede ranking + vereditos, devolve por contestantId. */
 async function rankOnePass(
   apiKey: string,
@@ -138,7 +192,7 @@ async function rankOnePass(
   judgeModelId: string,
   timeoutMs: number,
   extra: { ctx?: RunCtx; maxPricePerMTok?: { prompt?: number; completion?: number }; reasoningLevel?: ReasoningLevel } = {},
-): Promise<PassResult | null> {
+): Promise<PassAttempt> {
   const shuffled = shuffle(okResponses);
   const blindMap: Record<string, string> = {};
   const letterToContestant: Record<string, string> = {};
@@ -167,82 +221,41 @@ ${blocks.join('\n\n')}
 Em "ranking", ordene TODOS estes rotulos da melhor para a pior: ${JSON.stringify(labels)}.
 Em "verdicts", de para CADA rotulo: "acceptable" (bool) e "motivo" (<= 1 frase).`;
 
-  let parsedRanking: string[];
-  let parsedVerdicts: { label: string; verdict: Verdict; motivo: string }[] = [];
-  try {
-    const result = await chatCompletion({
-      apiKey,
-      modelId: judgeModelId,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0,
-      timeoutMs,
-      responseFormatJson: true,
-      reasoningLevel: extra.reasoningLevel,
-      role: 'judge',
-      signal: extra.ctx?.signal,
-      sink: extra.ctx?.sink,
-      maxPricePerMTok: extra.maxPricePerMTok,
-    });
-    const parsed = judgeSchema.safeParse(JSON.parse(extractJson(result.text)));
-    if (parsed.success) {
-      parsedRanking = parsed.data.ranking.map((l) => l.trim().toUpperCase());
-      parsedVerdicts = parsed.data.verdicts.map((v) => ({
-        label: v.label.trim().toUpperCase(),
-        verdict: toVerdict(v),
-        motivo: (v.justificativa || v.motivo || '').trim(),
-      }));
-    } else {
-      // fallback: extrai letras validas na ordem em que aparecem no texto cru
-      parsedRanking = (result.text.toUpperCase().match(/[A-Z]/g) ?? []).filter(
-        (l) => l in letterToContestant,
-      );
-    }
-  } catch (err) {
-    // Sem o rethrow, um estouro de orcamento viraria "passagem invalida" e a
-    // etapa sairia sem ranking — resultado incompleto com cara de completo.
-    if (isControlSignal(err)) throw err;
-    return null;
-  }
+  // Controle (orcamento/cancelamento) sobe de dentro de callJudgeWithRetry:
+  // sem isso a etapa sairia sem ranking — incompleta com cara de completa.
+  const attempt = await callJudgeWithRetry({
+    call: async (reminder) =>
+      (
+        await chatCompletion({
+          apiKey,
+          modelId: judgeModelId,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: withReminder(userPrompt, reminder) },
+          ],
+          temperature: 0,
+          timeoutMs,
+          responseFormatJson: true,
+          reasoningLevel: extra.reasoningLevel,
+          role: 'judge',
+          signal: extra.ctx?.signal,
+          sink: extra.ctx?.sink,
+          maxPricePerMTok: extra.maxPricePerMTok,
+        })
+      ).text,
+    parse: (text) => parsePass(text, labels),
+    formatReminder: formatReminder(labels),
+    signal: extra.ctx?.signal,
+  });
+  if (!attempt.ok) return { ok: false, error: attempt.error };
 
-  // ranking: letras -> contestantIds, sem duplicar; anexa faltantes ao fim (ordem do shuffle).
-  const seen = new Set<string>();
-  const order: string[] = [];
-  for (const letter of parsedRanking) {
-    const cid = letterToContestant[letter];
-    if (cid && !seen.has(cid)) {
-      seen.add(cid);
-      order.push(cid);
-    }
-  }
-  for (const r of shuffled) {
-    if (!seen.has(r.contestantId)) {
-      seen.add(r.contestantId);
-      order.push(r.contestantId);
-    }
-  }
-  if (order.length === 0) return null;
-
-  // verdicts por contestantId; default "aceitavel" p/ quem o juiz nao classificou.
-  const verdictByCid: Record<string, JudgeVerdict> = {};
-  for (const v of parsedVerdicts) {
-    const cid = letterToContestant[v.label];
-    if (cid && !(cid in verdictByCid)) {
-      verdictByCid[cid] = { contestantId: cid, verdict: v.verdict, motivo: v.motivo };
-    }
-  }
-  const verdicts: JudgeVerdict[] = okResponses.map(
-    (r) =>
-      verdictByCid[r.contestantId] ?? {
-        contestantId: r.contestantId,
-        verdict: 'parcial',
-        motivo: '',
-      },
-  );
-
-  return { order, verdicts, blindMap };
+  const order = attempt.value.ranking.map((l) => letterToContestant[l]);
+  const verdicts: JudgeVerdict[] = okResponses.map((r) => {
+    const letter = labels.find((l) => letterToContestant[l] === r.contestantId)!;
+    const v = attempt.value.verdicts.get(letter)!;
+    return { contestantId: r.contestantId, verdict: v.verdict, motivo: v.motivo };
+  });
+  return { ok: true, pass: { order, verdicts, blindMap } };
 }
 
 /** Agrega varias ordenacoes por POSICAO MEDIA (menor = melhor). Empate -> 1a ordenacao. */
@@ -271,8 +284,8 @@ function aggregate(ids: string[], orders: string[][]): string[] {
 /**
  * UM juiz: roda `passes` passagens EM PARALELO (anti-vies de posicao) e agrega o
  * ranking por posicao media; os vereditos vem da 1a passagem valida (a
- * aceitabilidade independe da ordem). Devolve null se nenhuma passagem produzir
- * ranking valido.
+ * aceitabilidade independe da ordem). Sem nenhuma passagem valida o juiz nao
+ * vota — devolve o motivo da 1a falha.
  */
 async function runOneJudge(
   apiKey: string,
@@ -282,14 +295,21 @@ async function runOneJudge(
   passes: number,
   timeoutMs: number,
   extra: { ctx?: RunCtx; maxPricePerMTok?: { prompt?: number; completion?: number }; reasoningLevel?: ReasoningLevel } = {},
-): Promise<SingleJudgeResult | null> {
+): Promise<{ ok: true; judge: SingleJudgeResult } | { ok: false; judgeModelId: string; error: VerdictError }> {
   const passResults = await Promise.all(
     Array.from({ length: passes }, () =>
       rankOnePass(apiKey, stage, okResponses, judgeModelId, timeoutMs, extra),
     ),
   );
-  const valid = passResults.filter((p): p is PassResult => p !== null);
-  if (valid.length === 0) return null;
+  const valid = passResults.flatMap((p) => (p.ok ? [p.pass] : []));
+  if (valid.length === 0) {
+    const falha = passResults.find((p): p is Extract<PassAttempt, { ok: false }> => !p.ok);
+    return {
+      ok: false,
+      judgeModelId,
+      error: falha?.error ?? { kind: 'judge_failed', message: 'Juiz sem passagem válida.' },
+    };
+  }
 
   const ids = okResponses.map((r) => r.contestantId);
   const rankedContestantIds = aggregate(
@@ -297,10 +317,13 @@ async function runOneJudge(
     valid.map((p) => p.order),
   );
   return {
-    judgeModelId,
-    rankedContestantIds,
-    verdicts: valid[0].verdicts,
-    blindMap: valid[0].blindMap,
+    ok: true,
+    judge: {
+      judgeModelId,
+      rankedContestantIds,
+      verdicts: valid[0].verdicts,
+      blindMap: valid[0].blindMap,
+    },
   };
 }
 
@@ -312,51 +335,58 @@ export async function judgeStage(params: JudgeStageParams): Promise<JudgeResult>
   // dedup: um mesmo juiz duas vezes distorceria a maioria e o placar aditivo.
   const judgeIds = [...new Set(judgeModelIds ?? [])];
 
-  const okResponses = responses.filter((r) => r.status === 'ok' && r.text.trim().length > 0);
-  // respostas com erro/vazias sao automaticamente NAO aceitaveis (sem gastar LLM).
-  const failedIds = responses
-    .filter((r) => !(r.status === 'ok' && r.text.trim().length > 0))
-    .map((r) => r.contestantId);
-  const autoFalse = (): Record<string, boolean> => {
-    const acc: Record<string, boolean> = {};
-    for (const id of failedIds) acc[id] = false;
-    return acc;
-  };
-  // respostas com erro/vazias => veredito "nao" (sem gastar LLM).
-  const autoNao = (): Record<string, Verdict> => {
-    const acc: Record<string, Verdict> = {};
-    for (const id of failedIds) acc[id] = 'nao';
-    return acc;
-  };
-
-  if (okResponses.length === 0 || judgeIds.length === 0) {
+  // Regra de origem (CONVENTIONS): erro de infra/bloqueio => SEM veredito
+  // (motivo registrado); resposta vazia => 'nao' automatico (sem gastar LLM).
+  const verdictByContestant: Record<string, Verdict> = {};
+  const acceptableByContestant: Record<string, boolean> = {};
+  const verdictSourceByContestant: Record<string, VerdictSource> = {};
+  const verdictErrorByContestant: Record<string, VerdictError> = {};
+  const verdictTieByContestant: Record<string, Verdict[]> = {};
+  const okResponses: CompetitorResponse[] = [];
+  for (const r of responses) {
+    const semVeredito = unjudgeableReason(r);
+    if (semVeredito) {
+      verdictErrorByContestant[r.contestantId] = semVeredito;
+    } else if (r.text.trim().length === 0) {
+      verdictByContestant[r.contestantId] = 'nao';
+      acceptableByContestant[r.contestantId] = false;
+      verdictSourceByContestant[r.contestantId] = 'auto';
+    } else {
+      okResponses.push(r);
+    }
+  }
+  const semJuiz = (rawJudgeText: string, error?: VerdictError): JudgeResult => {
+    if (error) for (const r of okResponses) verdictErrorByContestant[r.contestantId] = error;
     return {
       rankedContestantIds: [],
-      acceptableByContestant: autoFalse(),
-      verdictByContestant: autoNao(),
+      acceptableByContestant,
+      verdictByContestant,
+      verdictSourceByContestant,
+      verdictErrorByContestant,
       judges: [],
       blindMap: {},
-      rawJudgeText: judgeIds.length === 0 ? 'Nenhum juiz configurado.' : '',
+      rawJudgeText,
       inconclusive: true,
     };
+  };
+
+  if (okResponses.length === 0) return semJuiz('');
+  if (judgeIds.length === 0) {
+    return semJuiz('Nenhum juiz configurado.', { kind: 'judge_failed', message: 'Nenhum juiz configurado.' });
   }
 
   // Roda TODOS os juizes EM PARALELO — SEM cap local; o limitador global throttla.
   const results = await Promise.all(
     judgeIds.map((jid) => runOneJudge(apiKey, stage, okResponses, jid, passes, timeoutMs, extra)),
   );
-  const judges = results.filter((j): j is SingleJudgeResult => j !== null);
+  const judges = results.flatMap((j) => (j.ok ? [j.judge] : []));
+  const falhas = results.flatMap((j) => (j.ok ? [] : [j]));
 
   if (judges.length === 0) {
-    return {
-      rankedContestantIds: [],
-      acceptableByContestant: autoFalse(),
-      verdictByContestant: autoNao(),
-      judges: [],
-      blindMap: {},
-      rawJudgeText: 'Nenhum juiz retornou ranking valido.',
-      inconclusive: true,
-    };
+    const f = falhas[0];
+    const error: VerdictError =
+      judgeIds.length > 1 ? { ...f.error, message: `${f.judgeModelId}: ${f.error.message}` } : f.error;
+    return semJuiz('Nenhum juiz retornou saída válida.', error);
   }
 
   const ids = okResponses.map((r) => r.contestantId);
@@ -366,33 +396,39 @@ export async function judgeStage(params: JudgeStageParams): Promise<JudgeResult>
     judges.map((j) => j.rankedContestantIds),
   );
 
-  // Veredito TERNARIO de consenso (media ordinal entre juizes) e o binario
-  // "aceitavel" derivado dele (resolve|parcial => aceitavel) para o placar/compat.
-  const verdictByContestant: Record<string, Verdict> = {};
-  const acceptableByContestant: Record<string, boolean> = {};
+  // Veredito TERNARIO de consenso (MAIORIA SIMPLES entre os juizes que VOTARAM;
+  // sem maioria clara => empate tecnico com o nivel que a maioria endossa,
+  // nunca o voto de cima — IMPL-007) e o binario "aceitavel" derivado dele.
+  // Painel reduzido (algum juiz falhou) => fonte 'degraded'.
+  const fonte: VerdictSource = judges.length < judgeIds.length ? 'degraded' : 'judge';
   for (const id of ids) {
     const vs: Verdict[] = [];
     for (const j of judges) {
       const v = j.verdicts.find((x) => x.contestantId === id);
       if (v) vs.push(v.verdict);
     }
-    const agg = aggregateVerdict(vs);
-    verdictByContestant[id] = agg;
-    acceptableByContestant[id] = agg !== 'nao';
-  }
-  for (const id of failedIds) {
-    verdictByContestant[id] = 'nao';
-    acceptableByContestant[id] = false;
+    if (vs.length === 0) continue; // defensivo: o parse estrito garante 1 por rotulo
+    const agg = aggregateVerdicts(vs)!;
+    verdictByContestant[id] = agg.verdict;
+    acceptableByContestant[id] = agg.verdict !== 'nao';
+    if (agg.tie) verdictTieByContestant[id] = agg.votes;
+    verdictSourceByContestant[id] = fonte;
   }
 
   const rawJudgeText =
     `${judges.length} juiz(es)${passes === 2 ? ' x2 passagens' : ''}. ` +
-    `Consenso (melhor->pior): ${rankedContestantIds.join(' > ')}`;
+    `Consenso (melhor->pior): ${rankedContestantIds.join(' > ')}` +
+    (falhas.length
+      ? ` · ${falhas.length} juiz(es) sem saída válida: ${falhas.map((f) => `${f.judgeModelId} (${f.error.kind})`).join(', ')}`
+      : '');
 
   return {
     rankedContestantIds,
     acceptableByContestant,
     verdictByContestant,
+    verdictSourceByContestant,
+    verdictErrorByContestant,
+    ...(Object.keys(verdictTieByContestant).length > 0 ? { verdictTieByContestant } : {}),
     judges,
     blindMap: judges[0].blindMap,
     rawJudgeText,

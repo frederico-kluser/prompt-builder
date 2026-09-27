@@ -21,6 +21,7 @@ import { pairCoverage, pairedStageScores, stageScoresByContestant } from './stat
 import { formatIterationGate, pairedSignificance, VERDICT_SCORE } from './stats';
 import { BudgetLedger, isControlSignal, RunCancelled } from './budget';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
+import { mergeFailureCounts } from '../../../src/engine/verdictIntegrity.js';
 import type {
   Contestant,
   RunCtx,
@@ -112,7 +113,7 @@ const LESSONS_PREFIX =
  * que o veredito nao foi 'resolve', com cap de 4000 chars no total. O variator
  * injeta o resultado em `<licoes_da_iteracao_anterior>`.
  */
-function buildLessons(run: RunRecord, championId: string): string {
+export function buildLessons(run: RunRecord, championId: string): string {
   const items: string[] = [];
   for (const s of run.stages) {
     if (items.length >= 8) break;
@@ -129,11 +130,13 @@ function buildLessons(run: RunRecord, championId: string): string {
     )
       .replace(/\s+/g, ' ')
       .trim();
-    // Estagio sem veredito E sem motivo (o pipeline falhou ali) nao vira licao:
-    // seria ruido, nao uma fraqueza observada do campeao.
-    if (verdict === undefined && !motivo) continue;
+    // Veredito AUSENTE (juiz que falhou, competidor com erro de infra/bloqueado
+    // — IMPL-004) NUNCA vira licao: o motivo dele descreve o PIPELINE, nao uma
+    // fraqueza do campeao, e a licao falsa empurraria o reescritor para
+    // "consertar" o que nao estava quebrado (R-03b:REC-4).
+    if (verdict === undefined) continue;
     const question = (s.spec?.question ?? '?').replace(/\s+/g, ' ').trim().slice(0, 60);
-    items.push(`- [${question}] veredito=${verdict ?? '?'} — ${motivo.slice(0, 200)}`);
+    items.push(`- [${question}] veredito=${verdict} — ${motivo.slice(0, 200)}`);
   }
   if (!items.length) return '';
   return (LESSONS_PREFIX + items.join('\n')).slice(0, 4000);
@@ -517,6 +520,9 @@ async function trainingLoop(
       // runs + reescritor); somar `runRec.totalCostUsd` contaria duas vezes.
       syncLedger();
 
+      // IMPL-004: vereditos perdidos da sessao = soma das runs (iteracoes,
+      // triagem e holdout) — a mesma conta que cada run carrega.
+      record.failureCountByRole = mergeFailureCounts(record.failureCountByRole, runRec.failureCountByRole);
       // A run da iteração parou por orçamento/cancelamento => a sessão para
       // também, com o campeão da iteração ANTERIOR (a desta ficou parcial e
       // não pode promover ninguém).
@@ -832,6 +838,9 @@ async function finalizeHoldout(
         record.stoppedAtPhase ??= 'holdout';
       }
     }
+    record.failureCountByRole = mergeFailureCounts(record.failureCountByRole, holdoutRun.failureCountByRole);
+    // `inconclusive` (IMPL-004) tambem descarta o gate: holdout com vereditos
+    // perdidos demais ou n efetivo < 5 nao valida campeao nenhum.
     if (holdoutRun.status !== 'finished') {
       console.warn(
         `[train ${sessionId}] run de holdout terminou com status ${holdoutRun.status}; gate descartado`,

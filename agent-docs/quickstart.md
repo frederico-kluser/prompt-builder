@@ -55,9 +55,12 @@ npx prompt-builder-cli sessions winner <sessionId> --apply prompt.md
 5. **O juiz não pode competir.** Nenhum modelo em `judges` pode ser o modelo sob
    teste nem um competidor — o schema rejeita (viés de auto-preferência).
 6. **Leia o código de saída.** `0` ok · `1` falha inesperada · `2` uso inválido ·
-   `3` config inválida · `4` auth · `5` sem crédito · `6` run inconclusiva ·
+   `3` config inválida · `4` auth · `5` sem crédito · `6` **run inconclusiva** ·
    `7` **parcial, orçamento esgotado** · `8` rede · `9` espera esgotada ·
    `10` portão recusou (ex.: handoff com holdout regredido) · `130` interrompido. O `7` não é erro: há resultado válido, só incompleto.
+   O `6` também traz resultado, mas ele **não sustenta conclusão** (vereditos
+   perdidos > 10% num papel ou < 5 cenários julgados por contestant) — não
+   promova um prompt com base nele.
    Sob `--json`/`ndjson`, **todo** erro sai no stdout como
    `{ok:false, command, error:{code, kind, message, hint, details}}` — decida
    pelo `error.kind` e rode o que `error.hint` sugere (`docs ndjson`).

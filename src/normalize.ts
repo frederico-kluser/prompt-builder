@@ -5,6 +5,7 @@ import type {
   RunRecord,
   StageRecord,
 } from './types.js';
+import { standingsFromDuels } from './engine/duelCore.js';
 
 /**
  * Deriva os contestants a partir da config.
@@ -53,8 +54,20 @@ export function normalizeRunRecord(raw: any): RunRecord {
   // whitelist e engolia em silencio todo campo novo do RunRecord — foi assim que
   // `judgeScoreByContestant`, `standings` e `finalists` sumiam ao reler a run do
   // disco/IndexedDB (o painel de finais vinha vazio depois de um F5).
+  // IMPL-007: `winRate` e a regua das finais. Record muito antigo sem ela =>
+  // deriva de V/E/D (mesma conta do orquestrador).
+  const standings = Array.isArray(raw?.standings)
+    ? raw.standings.map((st: any) => {
+        if (typeof st?.winRate === 'number') return st;
+        const played = (st?.wins ?? 0) + (st?.ties ?? 0) + (st?.losses ?? 0);
+        const winRate = played > 0 ? Number((((st?.wins ?? 0) + 0.5 * (st?.ties ?? 0)) / played).toFixed(4)) : 0;
+        return { ...st, winRate };
+      })
+    : raw?.standings;
+
   return {
     ...raw,
+    ...(standings ? { standings } : {}),
     id: raw.id,
     status: raw.status,
     config,
@@ -123,5 +136,22 @@ function normalizeStage(raw: any): StageRecord {
     live = mapped;
   }
 
-  return { ...raw, responses, judge, evaluation, live };
+  // IMPL-007: o placar dos duelos virou `winRate` (a soma `points` era chamada
+  // de "Copeland" por engano). Record antigo sem `winRate` => recomputa dos
+  // duelos gravados; `points` fica como estava (so leitura, @deprecated).
+  let duels = raw?.duels;
+  if (duels && typeof duels === 'object' && !duels.winRate) {
+    const ids = [
+      ...new Set([
+        ...Object.keys(duels.placementByContestant ?? {}),
+        ...Object.keys(duels.points ?? {}),
+      ]),
+    ];
+    duels = {
+      ...duels,
+      winRate: standingsFromDuels(ids, Array.isArray(duels.duels) ? duels.duels : []).winRate,
+    };
+  }
+
+  return { ...raw, responses, judge, evaluation, live, ...(duels ? { duels } : {}) };
 }
