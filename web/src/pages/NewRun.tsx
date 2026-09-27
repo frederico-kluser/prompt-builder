@@ -28,6 +28,7 @@ import {
   modelCaps,
 } from '../api';
 import { AREA_LIVRE, creatorPrefix, familiaFor, filterModels, type LgpdData } from '../lgpd';
+import { defaultMinGain, GATE_ALPHA } from '../engine/rank';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
 import {
   SmoothTabs,
@@ -353,7 +354,8 @@ export function NewRun() {
   const [refJudgingChoice, setRefJudgingChoice] = useState<boolean | null>(null);
   const [finalists, setFinalists] = useState(DEFAULT_FINALISTS);
   const [duelsOn, setDuelsOn] = useState(true);
-  const [minGain, setMinGain] = useState(1);
+  // IMPL-002: '' = margem AUTOMÁTICA (max(1; 50/n), resolvida no gate); número = fixa.
+  const [minGain, setMinGain] = useState('');
   const [holdoutRatio, setHoldoutRatio] = useState(0.2);
   const [feedbackDriven, setFeedbackDriven] = useState(true);
 
@@ -731,7 +733,7 @@ export function NewRun() {
     if (config.variation?.manualVariants) setManualVariants(config.variation.manualVariants);
     if (config.training?.iterations !== undefined)
       setIterations(Math.max(2, Math.min(10, Math.round(config.training.iterations))));
-    if (config.training?.minGain !== undefined) setMinGain(config.training.minGain);
+    if (config.training?.minGain !== undefined) setMinGain(String(config.training.minGain));
     if (config.training?.holdoutRatio !== undefined)
       setHoldoutRatio(Math.max(0, Math.min(0.5, config.training.holdoutRatio)));
     if (config.training?.feedbackDriven !== undefined) setFeedbackDriven(config.training.feedbackDriven);
@@ -949,7 +951,10 @@ export function NewRun() {
         ...(mode === 'training'
           ? {
               iterations: Math.max(2, Math.min(10, Math.round(iterations))),
-              minGain: Math.max(0, Math.min(100, minGain)),
+              // Vazio = sem minGain no config: o gate aplica max(1; 50/n) (IMPL-002).
+              ...(minGain.trim() !== '' && Number.isFinite(Number(minGain))
+                ? { minGain: Math.max(0, Math.min(100, Number(minGain))) }
+                : {}),
               holdoutRatio: Math.max(0, Math.min(0.5, holdoutRatio)),
               feedbackDriven,
             }
@@ -1493,14 +1498,15 @@ export function NewRun() {
 
                 {mode === 'training' && (
                   <>
-                    <NumRow
+                    <TxtNumRow
                       label="Margem p/ promover"
-                      sub="Quanto a vencedora precisa superar a campeã atual para virar a base da próxima rodada. Sem essa margem, o treino para."
+                      sub={`Quanto a vencedora precisa superar a campeã atual (em pontos). Vazio = automática, max(1; 50/n): ${Number(defaultMinGain(stages).toFixed(2))} com ${stages} cenários. Além da margem, ela precisa passar no teste da melhor de K (p ajustado ≤ ${GATE_ALPHA}); sem isso, o treino para.`}
                       value={minGain}
                       onChange={setMinGain}
                       min={0}
                       max={100}
                       step={0.5}
+                      placeholder="auto"
                     />
                     <NumRow
                       label="Validação (%)"

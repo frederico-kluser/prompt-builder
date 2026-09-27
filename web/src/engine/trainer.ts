@@ -9,10 +9,10 @@ import { seedFromId } from '../../../src/engine/duelCore.js';
 import { emitSessionEvent } from './events';
 import { saveSession } from './storage';
 import { computeMedals } from './medals';
-import { judgeScoreFromVerdicts, pickWinner, type RankEntry } from './rank';
+import { judgeScoreFromVerdicts, pickWinner, promotionEventFields, type RankEntry } from './rank';
 import { MIN_HOLDOUT_SCENARIOS, splitHoldout } from './holdout';
 import { pairCoverage, pairedStageScores, stageScoresByContestant } from './stats';
-import { pairedSignificance, VERDICT_SCORE } from './stats';
+import { formatIterationGate, pairedSignificance, VERDICT_SCORE } from './stats';
 import { BudgetLedger, isControlSignal } from '../../../src/budget.js';
 import type {
   Contestant,
@@ -235,7 +235,9 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
   const optimizerModelId = cfg.optimizerModelId ?? cfg.datagenModelId;
   const promptOptimization = cfg.promptOptimization !== false;
   const hasBase = Boolean(cfg.basePrompt && cfg.basePrompt.trim());
-  const minGain = cfg.minGain ?? 1;
+  // IMPL-002: ausente = margem pratica default max(1; 50/n), resolvida NO GATE
+  // (depende do n de pares da iteracao). O gate tambem exige p ajustado <= 0,05.
+  const minGain = cfg.minGain;
 
   // Catálogo quente antes do primeiro gasto (espelho do Node): o reescritor da
   // iteração 0 roda ANTES da 1ª run, e sem catálogo perde a allowlist de
@@ -258,7 +260,7 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
 
   await saveSession(record);
   emitSessionEvent({ type: 'session.started', sessionId, record });
-  log(sessionId, `started: ${cfg.iterations} iteracoes (minGain=${minGain})`);
+  log(sessionId, `started: ${cfg.iterations} iteracoes (minGain=${minGain ?? 'auto max(1; 50/n)'}, gate max-T a 5%)`);
 
   let pinnedStages: StageSpec[] | undefined;
   // Fatia de holdout (split anti-overfit na iteracao 0): fica so EM MEMORIA —
@@ -462,10 +464,12 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
         record.pinnedStages = pinnedStages;
       }
 
-      // 4) Gate de promocao por margem (port do evolve.mjs): a melhor variante
+      // 4) Gate de promocao (port do evolve.mjs + IMPL-002): a melhor variante
       //    so vira campea se superar a REGUA desta iteracao por >= minGain
-      //    pontos de judge-score. A regua e o 'original' (base) na iteracao 0 e
-      //    o 'carry' (campeao anterior re-testado verbatim) nas demais.
+      //    pontos de judge-score E passar no max-T sobre as K variantes (p
+      //    ajustado <= 0,05 — a "melhor de K" nao ganha mais sozinha). A regua e
+      //    o 'original' (base) na iteracao 0 e o 'carry' (campeao anterior
+      //    re-testado verbatim) nas demais.
       const controlId = i === 0 ? 'original' : 'carry';
       // IMPL-005: o ganho e o Δ PAREADO (so etapas com veredito nos DOIS
       // lados; ausente nunca vira 'nao') e, com >10% de pares excluidos, a
@@ -549,14 +553,22 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           iteration: i,
           championId: champion.contestantId,
           gain: pick.gain,
+          // IMPL-002: bruto (gain) e corrigido lado a lado, com o p ajustado.
+          ...promotionEventFields(pick.gate),
         });
-        log(sessionId, `iteracao ${i + 1}: promovido ${champion.contestantId} (ganho +${pick.gain.toFixed(1)}pp)`);
+        log(
+          sessionId,
+          `iteracao ${i + 1}: promovido ${champion.contestantId} (${
+            pick.gate ? formatIterationGate(pick.gate) : `ganho +${pick.gain.toFixed(1)}pp`
+          })`,
+        );
       }
       await saveSession(record);
 
       if (!promoted) {
-        // Convergiu: a promocao exige margem real sobre o campeao. Sem ganho —
-        // mesmo ja na iteracao 0 — nao ha campeao NOVO de onde derivar a
+        // Convergiu: a promocao exige margem real E significativa (max-T)
+        // sobre o campeao. Sem ganho — mesmo ja na iteracao 0 — nao ha
+        // campeao NOVO de onde derivar a
         // proxima geracao; continuar so queimaria custo re-testando a regua.
         record.convergedAtIteration = i;
         emitSessionEvent({ type: 'session.converged', sessionId, iteration: i });
@@ -564,7 +576,9 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           sessionId,
           pick.gate?.decision === 'inconclusive'
             ? `parou sem promocao na iteracao ${i + 1}: gate INCONCLUSIVO (${pick.gate.pairing.excludedPairs} de ${pick.gate.pairing.n} pares sem veredito; a decisao muda no pior/melhor caso)`
-            : `convergiu na iteracao ${i + 1} (ganho ${pick.gain.toFixed(1)}pp < minGain ${minGain})`,
+            : pick.gate
+              ? `convergiu na iteracao ${i + 1} (${formatIterationGate(pick.gate)})`
+              : `convergiu na iteracao ${i + 1} (ganho ${pick.gain.toFixed(1)}pp < minGain ${minGain ?? 1})`,
         );
         await saveSession(record);
         break;

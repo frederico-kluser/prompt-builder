@@ -9,7 +9,11 @@ export type { PairedSignificance, SignificanceMethod, StoredSignificance } from 
 // Pareamento honesto (IMPL-005): fonte única em src/types.ts, como a significância.
 import type { IterationGate, RunCompleteness, SessionPairing } from '../../src/types.js';
 export type {
+  BestOfKEntry,
+  BestOfKTest,
+  GateHoldReason,
   IterationGate,
+  MultiplicityMethod,
   ObservationCoverage,
   PairCoverage,
   PairSensitivity,
@@ -149,7 +153,11 @@ export interface RunConfig {
   scenarioSeed?: StageSpec[];
   /** compare-llms: variantes de config {modelo, temp, reasoning}. */
   competitorConfigs?: { modelId: string; temperature?: number; reasoningLevel?: ReasoningLevel }[];
-  /** training: margem minima de ganho (pp) p/ promover; sem ganho = convergiu. Default 1.0. */
+  /**
+   * training: margem PRATICA minima de ganho (pp) p/ promover; sem ganho =
+   * convergiu. Ausente = max(1; 50/n) (meia granularidade — IMPL-002); o gate
+   * tambem exige p ajustado (max-T sobre as K variantes) <= 0,05.
+   */
   minGain?: number;
   /** training: fracao de cenarios p/ holdout (clamp [0, 0.5]). Default 0.2. */
   holdoutRatio?: number;

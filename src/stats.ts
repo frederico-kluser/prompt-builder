@@ -10,7 +10,8 @@
 // do cenário, cada diferença troca de sinal com prob. 1/2, e enumerar os 2^n′
 // sinais dá a distribuição nula exata — para qualquer n, com empates e zeros.
 // IC95% por INVERSÃO do mesmo teste e teste do sinal exato como sensibilidade.
-// É SUPORTE À DECISÃO; o gate da melhor de K (max-T) é outro item.
+// É SUPORTE À DECISÃO; o gate da melhor de K (max-T) vive em `engine/bestOfK.ts`
+// (IMPL-002) e reusa este núcleo (pmf binomial, PRNG, tetos da enumeração).
 //
 // IMPL-005 (R-04:REC-2): pareamento HONESTO. Par sem veredito sai dos DOIS
 // lados — antes o trainer imputava 'nao' (0/0), inflando n e misturando falha
@@ -18,6 +19,8 @@
 // record, e exclusões > 10% disparam a sensibilidade pior/melhor caso.
 
 import type {
+  IterationGate,
+  MultiplicityMethod,
   ObservationCoverage,
   PairCoverage,
   PairedSignificance,
@@ -145,8 +148,9 @@ function completeDiffs(pairs: readonly AlignedPair[]): number[] {
  * em 53 bits) escalada por potência de 2 (exata): as probabilidades saem diádicas
  * e EXATAS, e somas delas também — é o que garante "p exato ±1e-9" nas sondas.
  * Acima de {@link MAX_EXACT_N} (fora do uso real) vai por log para não estourar.
+ * Exportada para a enumeração conjunta do gate da melhor de K (`engine/bestOfK.ts`).
  */
-function halfBinomialPmf(c: number): Float64Array {
+export function halfBinomialPmf(c: number): Float64Array {
   const row = new Float64Array(c + 1);
   if (c <= MAX_EXACT_N) {
     row[0] = 1;
@@ -584,6 +588,26 @@ function extremeDiffs(pairs: readonly AlignedPair[], scenario: 'worst' | 'best')
 }
 
 /**
+ * Scores (controle, campeão) de TODOS os pares nominais (posicionais) com os
+ * ausentes imputados no extremo — mesma regra de {@link extremeDiffs}. O gate
+ * da melhor de K (IMPL-002) precisa dos SCORES, não só das diferenças, para
+ * refazer o max-T conjunto no pior/melhor caso.
+ */
+export function imputeExtremes(
+  controlScores: readonly PairScore[],
+  championScores: readonly PairScore[],
+  scenario: 'worst' | 'best',
+): { control: number[]; champion: number[] } {
+  const controlMissing = scenario === 'worst' ? SCORE_CEIL : SCORE_FLOOR;
+  const championMissing = scenario === 'worst' ? SCORE_FLOOR : SCORE_CEIL;
+  const pairs = alignPairs(controlScores, championScores);
+  return {
+    control: pairs.map(({ control: c }) => (isObs(c) ? c : controlMissing)),
+    champion: pairs.map(({ champion: h }) => (isObs(h) ? h : championMissing)),
+  };
+}
+
+/**
  * Cobertura do pareamento campeão × controle: n nominal, n efetivo, pares
  * excluídos (dos DOIS lados), completude e as médias SÓ sobre os pares
  * completos — é o Δ honesto que o gate e o holdout usam. Com exclusões > 10%
@@ -873,6 +897,80 @@ export function formatSignificance(sig: StoredSignificance): string {
     `pior Δ ${fmtSignedPp(s.worst.meanDiffPp)}, melhor Δ ${fmtSignedPp(s.best.meanDiffPp)} → ` +
     (s.inconclusive ? 'INCONCLUSIVO' : 'conclusão robusta')
   );
+}
+
+/** O que a linha do gate da melhor de K mostra (gate gravado ou evento `iteration.promoted`). */
+export interface GateSummaryLike {
+  /** Ganho BRUTO (p.p.) — o máximo entre K. */
+  gainPp: number;
+  /** Ganho corrigido do winner's curse (p.p.). */
+  gainCorrectedPp?: number;
+  /** p ajustado (FWER) da melhor. */
+  pAdjusted?: number;
+  /** Variantes testadas. */
+  k?: number;
+  method?: MultiplicityMethod;
+  enumeration?: SignificanceMethod;
+  minGain?: number;
+  minGainSource?: 'config' | 'default';
+}
+
+/**
+ * Linha do gate da melhor de K (IMPL-002, R-04:REC-3): ganho BRUTO e CORRIGIDO
+ * lado a lado com o p AJUSTADO — o mesmo texto no CLI, no log do treino e na UI.
+ * Ex.: `ganho bruto +18.8pp (máximo entre 4) · corrigido +6.2pp · p ajustado=0.031
+ * (max-T, exato) · margem 6.25pp (auto)`. Gates antigos (sem teste) mostram só o Δ.
+ */
+export function formatGateSummary(g: GateSummaryLike): string {
+  const parts = [
+    typeof g.k === 'number' && g.k > 1
+      ? `ganho bruto ${fmtSignedPp(g.gainPp)} (máximo entre ${g.k})`
+      : `ganho ${fmtSignedPp(g.gainPp)}`,
+  ];
+  if (typeof g.gainCorrectedPp === 'number' && typeof g.k === 'number' && g.k > 1) {
+    parts.push(`corrigido ${fmtSignedPp(g.gainCorrectedPp)}`);
+  }
+  if (typeof g.pAdjusted === 'number') {
+    const how = [g.method === 'holm' ? 'Holm' : 'max-T', g.enumeration === 'monte-carlo' ? 'Monte Carlo' : g.enumeration ? 'exato' : '']
+      .filter(Boolean)
+      .join(', ');
+    parts.push(`${formatPValue(g.pAdjusted).replace('p', 'p ajustado')} (${how})`);
+  }
+  if (typeof g.minGain === 'number') {
+    parts.push(`margem ${g.minGain.toFixed(2).replace(/\.?0+$/, '')}pp${g.minGainSource === 'default' ? ' (auto)' : ''}`);
+  }
+  return parts.join(' · ');
+}
+
+const GATE_DECISION_LABEL: Record<IterationGate['decision'], string> = {
+  promoted: 'promovida',
+  held: 'mantida a régua',
+  inconclusive: 'INCONCLUSIVO',
+};
+
+/**
+ * Linha completa do gate de uma iteração: decisão, a linha de
+ * {@link formatGateSummary} e, quando segurou, o que segurou.
+ */
+export function formatIterationGate(gate: IterationGate): string {
+  const summary = formatGateSummary({
+    gainPp: gate.gainPp,
+    gainCorrectedPp: gate.gainCorrectedPp,
+    pAdjusted: gate.test?.pAdjusted,
+    k: gate.test?.k,
+    method: gate.test?.method,
+    enumeration: gate.test?.enumeration,
+    minGain: gate.minGain,
+    minGainSource: gate.minGainSource,
+  });
+  const why = (gate.heldBy ?? []).map((r) =>
+    r === 'no-pairs'
+      ? 'sem par completo'
+      : r === 'min-gain'
+        ? `Δ abaixo da margem`
+        : `p ajustado > ${gate.test?.alpha ?? 0.05}`,
+  );
+  return `${GATE_DECISION_LABEL[gate.decision]}: ${summary}${why.length && gate.decision !== 'inconclusive' ? ` — segurou: ${why.join(', ')}` : ''}`;
 }
 
 /** `80%` / `62.5%` — completude e frações no relatório. */

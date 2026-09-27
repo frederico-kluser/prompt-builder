@@ -13,7 +13,13 @@ import { arenaConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
 import { sampleSizeWarning } from '../../engine/judgeCalibration.js';
-import { formatPairCoverage, formatRunCompleteness, formatSignificance, runCompleteness } from '../../stats.js';
+import {
+  formatIterationGate,
+  formatPairCoverage,
+  formatRunCompleteness,
+  formatSignificance,
+  runCompleteness,
+} from '../../stats.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import { buildContext, buildNetworkContext, checkKey, keyFilePath, parse, removeStoredKey, writeStoredKey } from '../context.js';
 import { CliError, EXIT, fmtUsd, renderSpend, type Output } from '../output.js';
@@ -478,6 +484,10 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     out.line(`${record.id}  ${record.status}`);
     out.line(`tema: ${record.config.theme}`);
     out.line(`iterações: ${record.bestPromptByIteration.length}/${record.config.iterations}`);
+    // IMPL-002: gate de cada iteração — bruto × corrigido × p ajustado (max-T).
+    for (const it of record.bestPromptByIteration) {
+      if (it.gate) out.line(`  iteração ${it.iteration + 1}: ${formatIterationGate(it.gate)}`);
+    }
     // IMPL-005: pareamento final (n nominal × efetivo) e significância.
     if (record.pairing) {
       out.line(`pareamento (${record.pairing.source}): ${formatPairCoverage(record.pairing)}`);
@@ -540,7 +550,8 @@ export async function cmdConfig(argv: string[]): Promise<number> {
       },
       effort: { judge: 'high', datagen: 'low' },
       variation: { optimize: true, techniques: ['persona', 'constraints', 'format'] },
-      training: { iterations: 3, minGain: 1, holdoutRatio: 0.2 },
+      // minGain ausente = margem prática default max(1; 50/n) (IMPL-002).
+      training: { iterations: 3, holdoutRatio: 0.2 },
       finalists: 3,
       limits: { maxOutputTokens: 600 },
     };

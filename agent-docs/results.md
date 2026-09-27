@@ -47,7 +47,7 @@ nunca `nao`: o par sai **dos dois lados** das médias e do teste. Compare sempre
 
 | Campo | O que é |
 |---|---|
-| `bestPromptByIteration[]` | o campeão pós-gate de cada iteração, com o prompt e o `gate` (Δ pareado `gainPp`, `pairing`, `sensitivity`, `decision`: `promoted` \| `held` \| `inconclusive`) |
+| `bestPromptByIteration[]` | o campeão pós-gate de cada iteração, com o prompt e o `gate` (Δ pareado BRUTO `gainPp`, `gainCorrectedPp` do winner's curse, `test` da melhor de K com `pAdjusted`/`k`/`method`, `minGain` + `minGainSource`, `heldBy`, `pairing`, `sensitivity`, `decision`: `promoted` \| `held` \| `inconclusive`) |
 | `convergedAtIteration` | parou por falta de ganho (bom sinal) |
 | `holdout` | `{ n, controlScore, championScore, gain, regressed, nEfetivo, excludedPairs, completeness }` — scores são médias só sobre os pares completos |
 | `pairing` | o pareamento final (`source`: `holdout` \| `training`): `n`, `nEfetivo`, `excludedPairs`, `completeness`, Δ — presente mesmo quando `significance` é `null` |

@@ -29,7 +29,7 @@ prompt-builder train --config arena.json --budget 3 --output-format ndjson
 | `--techniques a,b,c` | técnicas de reescrita (`prompt-builder techniques`) |
 | `--base-prompt-file` | o prompt de partida; entra como controle |
 | `--iterations N` | teto de iterações (2–10). O laço para antes se convergir. |
-| `--min-gain N` | margem mínima em pontos de judge-score para promover (padrão 1) |
+| `--min-gain N` | margem PRÁTICA mínima em pontos de judge-score para promover. Padrão: `max(1; 50/n)` — meia granularidade (com 8 cenários, 6,25 pontos). Além dela, o gate exige p ajustado ≤ 0,05 (ver abaixo) |
 | `--holdout-ratio N` | fatia reservada para o gate final (padrão 0,2; 0 desliga) |
 | `--stages N` | quantos cenários (1–50). Recomendado 6–12. |
 | `--effort-judge high` | o juiz é a tarefa mais sensível — vale gastar aqui |
@@ -61,6 +61,13 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
   `pairing.worstMeanDiffPp`/`bestMeanDiffPp`): Δ com os ausentes no pior caso
   (campeão perde todos) e no melhor. `sensitivity.inconclusive: true` = a
   conclusão depende dos ausentes — reporte **inconclusivo**.
+- `bestPromptByIteration[].gate` — o gate da **melhor de K** de cada iteração:
+  `gainPp` é o ganho BRUTO (o máximo entre K — inflado pela seleção),
+  `gainCorrectedPp` o ganho CORRIGIDO do winner's curse (conservador; igual ao
+  bruto com K = 1) e `test.pAdjusted` o p ajustado do max-T (todas as K variantes
+  da iteração contra a régua; `test.byContestant` traz o p de cada uma).
+  Reporte os três lado a lado; `heldBy` diz o que segurou (`significance`,
+  `min-gain`, `no-pairs`).
 - `bestPromptByIteration[].gate.decision: "inconclusive"` — a promoção dependeria
   dos vereditos ausentes (> 10% dos pares); o gate não promove e o treino para.
   Investigue as falhas do juiz antes de rodar de novo.
@@ -76,8 +83,11 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
   modelo em `--reference`.
 - **Ganho alto no treino e nenhum no holdout** — sobreajuste aos cenários.
   Aumente `--stages` ou o `--holdout-ratio`.
-- **Convergiu na iteração 0** — nenhuma variante superou a base pela margem.
-  Baixe `--min-gain`, troque as técnicas, ou aceite que a base já é boa.
+- **Convergiu na iteração 0** — nenhuma variante superou a base com margem E
+  significância. Veja `gate.heldBy`: `significance` com poucos cenários é o
+  esperado (com n ≤ 10 e +10 pontos de efeito real o teste raramente passa) —
+  aumente `--stages` antes de baixar `--min-gain`; menos técnicas também ajudam
+  (cada variante a mais entra na correção). Ou aceite que a base já é boa.
 
 
 ## Dataset estável — `prompt-builder library`

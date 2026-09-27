@@ -396,7 +396,12 @@ export interface TrainingConfig extends RunConfigBase, SingleModelFields {
   mode: 'training';
   /** Numero fixo de iteracoes. */
   iterations: number;
-  /** Margem minima de ganho (pp) sobre o campeao para promover; sem ganho = convergiu. Default 1.0. */
+  /**
+   * Margem PRATICA minima de ganho (pp) sobre o campeao para promover; sem ganho
+   * = convergiu. Ausente = max(1; 50/n), n = pares com veredito nos dois lados
+   * (meia granularidade — IMPL-002). Alem da margem, o gate exige p ajustado
+   * (max-T sobre as K variantes) <= 0,05.
+   */
   minGain?: number;
   /** Fracao de cenarios reservada p/ holdout (clamp [0, 0.5]). Default 0.2. */
   holdoutRatio?: number;
@@ -844,7 +849,7 @@ export interface PairCoverage {
 
 /** Conclusão do relatório de significância (teste BILATERAL a 5%). */
 export type SignificanceConclusion = 'better' | 'worse' | 'no-difference';
-/** Conclusão do gate de promoção (Δ ≥ minGain). */
+/** Conclusão do gate de promoção (Δ ≥ minGain e p ajustado ≤ α — IMPL-002). */
 export type GateConclusion = 'promote' | 'hold';
 
 /** Um dos três cenários da análise de sensibilidade. */
@@ -875,17 +880,78 @@ export interface PairSensitivity<C extends string = string> {
   inconclusive: boolean;
 }
 
+/** Correção de multiplicidade do gate da melhor de K (IMPL-002). */
+export type MultiplicityMethod = 'max-t' | 'holm';
+
+/** Uma variante no teste da melhor de K (escala p.p.). */
+export interface BestOfKEntry {
+  /** Δ pareado variante − régua (p.p.) sobre os pares completos. */
+  gainPp: number;
+  /** Pares completos com a régua. */
+  nEfetivo: number;
+  /** p unilateral marginal (sem correção). */
+  pRaw: number;
+  /** p unilateral ajustado (FWER sobre as K). */
+  pAdjusted: number;
+}
+
+/**
+ * Teste da melhor de K de UMA iteração (IMPL-002, R-04:REC-3): max-T por
+ * permutação (Westfall-Young step-down, troca de sinais CONJUNTA por cenário)
+ * ou Holm (fallback). Tudo UNILATERAL (H1: variante > régua).
+ */
+export interface BestOfKTest {
+  method: MultiplicityMethod;
+  /** Distribuição nula por enumeração exata ou Monte Carlo semeado. */
+  enumeration: SignificanceMethod;
+  /** 2^m vetores de sinais (exato) ou B (Monte Carlo). */
+  permutations: number;
+  /** Seed do Monte Carlo (ausente no exato). */
+  seed?: number;
+  /** α do gate (FWER unilateral). */
+  alpha: number;
+  /** Variantes testadas — a família do FWER (as que têm ≥ 1 par completo). */
+  k: number;
+  /** Cenários com ≥ 1 par completo. */
+  nScenarios: number;
+  /** p ajustado do `bestId` — o que o gate compara com `alpha`. */
+  pAdjusted: number;
+  /** p marginal do `bestId` (sem correção) — referência. */
+  pRaw: number;
+  /** Por variante (chave = contestantId). */
+  byContestant: Record<string, BestOfKEntry>;
+}
+
+/** Condição do gate que segurou a promoção (IMPL-002). */
+export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance';
+
 /**
  * Gate de promoção de UMA iteração do treino, com o pareamento honesto
- * best × régua (IMPL-005). `gainPp` é o Δ pareado — o que decide a promoção.
+ * best × régua (IMPL-005) e o teste da melhor de K (IMPL-002). Promove só se
+ * Δ ≥ minGain E p ajustado ≤ α E a decisão sobrevive à sensibilidade.
  */
 export interface IterationGate {
   controlId: string;
   bestId: string;
+  /** Margem aplicada (p.p.): a do config, ou o default max(1; 50/nEfetivo). */
   minGain: number;
-  /** Δ best − régua (p.p.) só sobre os pares completos (0 sem par completo). */
+  /** IMPL-002: `config` = minGain explícito; `default` = max(1; 50/n). Ausente em sessões antigas. */
+  minGainSource?: 'config' | 'default';
+  /**
+   * Δ best − régua (p.p.) só sobre os pares completos (0 sem par completo). É o
+   * ganho BRUTO — o máximo entre K, inflado pela seleção (winner's curse).
+   */
   gainPp: number;
+  /**
+   * IMPL-002: ganho CORRIGIDO do winner's curse (p.p.) = bruto − inflação
+   * esperada da seleção entre K. Conservador; igual ao bruto com K = 1.
+   */
+  gainCorrectedPp?: number;
   pairing: PairCoverage;
+  /** IMPL-002: o teste da melhor de K (ausente em sessões antigas). */
+  test?: BestOfKTest;
+  /** IMPL-002: o que segurou a promoção (ausente quando promoveu). */
+  heldBy?: GateHoldReason[];
   /** Presente quando exclusões > 10%: a promoção só vale se for robusta. */
   sensitivity?: PairSensitivity<GateConclusion>;
   /** `inconclusive` = a decisão muda no pior/melhor caso → NÃO promove. */
@@ -1120,7 +1186,24 @@ export type SessionEvent =
       runId: string;
       winnerContestantId: string;
     }
-  | { type: 'iteration.promoted'; sessionId: string; iteration: number; championId: string; gain: number }
+  | {
+      type: 'iteration.promoted';
+      sessionId: string;
+      iteration: number;
+      championId: string;
+      /** Ganho BRUTO (p.p.) — o máximo entre K (mantido por compatibilidade). */
+      gain: number;
+      /** IMPL-002: ganho corrigido do winner's curse (p.p.), lado a lado com o bruto. */
+      gainCorrected?: number;
+      /** IMPL-002: p ajustado (FWER sobre as K variantes) da promovida. */
+      pAdjusted?: number;
+      /** IMPL-002: variantes testadas na iteração (a família do FWER). */
+      k?: number;
+      /** IMPL-002: correção de multiplicidade aplicada. */
+      method?: MultiplicityMethod;
+      /** IMPL-002: margem aplicada (p.p.). */
+      minGain?: number;
+    }
   | { type: 'session.holdout'; sessionId: string; holdout: SessionRecord['holdout'] }
   | { type: 'session.converged'; sessionId: string; iteration: number }
   | { type: 'session.finished'; sessionId: string; record: SessionRecord }

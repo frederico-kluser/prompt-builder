@@ -13,7 +13,7 @@ import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
 import { hasGabarito, toStageSpec } from '../../engine/libraryCore.js';
 import { estimateInputFromConfig, estimateRunCost, toPerMTok } from '../../estimate.js';
-import { formatSignificance } from '../../stats.js';
+import { formatGateSummary, formatSignificance } from '../../stats.js';
 import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
 import { buildNetworkContext, checkKey, isAgentContext, parse, type NetworkContext } from '../context.js';
 import { emitRunEvent, emitSessionEventNdjson } from '../ndjson.js';
@@ -544,7 +544,17 @@ async function runTraining(
           );
         }
         if (e.type === 'iteration.promoted' && out.isText) {
-          out.info(`  iteração ${e.iteration + 1}: promovido (+${e.gain.toFixed(1)}pp)`);
+          // IMPL-002: bruto (máximo entre K) e corrigido lado a lado com o p ajustado.
+          out.info(
+            `  iteração ${e.iteration + 1}: promovido — ${formatGateSummary({
+              gainPp: e.gain,
+              gainCorrectedPp: e.gainCorrected,
+              pAdjusted: e.pAdjusted,
+              k: e.k,
+              method: e.method,
+              minGain: e.minGain,
+            })}`,
+          );
         }
       });
     },

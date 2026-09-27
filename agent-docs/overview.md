@@ -34,9 +34,14 @@ HTTP 429) — não existe cap por comando.
 - **Split de holdout** — depois da iteração 0, uma fatia dos cenários
   (`holdoutRatio`, padrão 0,2) é **reservada** e fica fora do treino. Com menos
   de 5 cenários reservados, o holdout é descartado e tudo treina.
-- **Promoção com margem** — a melhor variante só vira campeã se superar o
-  controle por pelo menos `minGain` pontos de judge-score. Sem ganho, o treino
-  **convergiu** e para (continuar só queimaria custo re-testando a régua).
+- **Promoção com margem E teste** — a melhor variante só vira campeã se superar
+  o controle por pelo menos `minGain` pontos de judge-score (padrão
+  `max(1; 50/n)`, meia granularidade) E passar no teste da **melhor de K**: max-T
+  por permutação sobre todas as variantes da iteração, p ajustado ≤ 0,05 — sem
+  isso "a melhor de K" ganharia sozinha por acaso. O gate registra o ganho bruto
+  (máximo entre K) e o corrigido do winner's curse lado a lado com o p ajustado.
+  Sem promoção, o treino **convergiu** e para (continuar só queimaria custo
+  re-testando a régua).
 - **Iterações seguintes** — o campeão vira a nova base, é re-testado *verbatim*
   como controle, e as variantes recebem as **lições** das falhas dele.
 - **Gate final** — campeão e base disputam nos cenários de holdout, com

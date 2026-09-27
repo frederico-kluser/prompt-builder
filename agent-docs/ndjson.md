@@ -27,7 +27,7 @@ O stream **sempre** abre em `start` e **sempre** termina em `result`.
 | `budget` | gasto acumulado | `spentUsd`, `budgetUsd`, `byRole` |
 | `budget.gate` | uma porta decidiu | `phase`, `projectedUsd`, `remainingUsd`, `decision` |
 | `run.finished` | run terminou | `status`, `totalCostUsd`, `standings` |
-| `iteration.started` / `iteration.finished` / `iteration.promoted` | treino | `iteration`, `runId`, `gain` |
+| `iteration.started` / `iteration.finished` / `iteration.promoted` | treino | `iteration`, `runId`, `gain` (bruto); no `promoted` também `gainCorrected`, `pAdjusted`, `k`, `method`, `minGain` |
 | `session.holdout` / `session.converged` / `session.finished` | treino | ver `docs train` |
 | `result` | última linha | `ok`, `status`, `totalCostUsd`, `budgetExhausted`, … |
 

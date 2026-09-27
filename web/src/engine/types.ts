@@ -27,10 +27,14 @@ export type {
   StoredSignificance,
 } from '../../../src/types.js';
 // Pareamento honesto (IMPL-005): FONTE ÚNICA em src/types.ts, como a significância.
-import type { IterationGate, RunCompleteness, SessionPairing } from '../../../src/types.js';
+import type { IterationGate, MultiplicityMethod, RunCompleteness, SessionPairing } from '../../../src/types.js';
 export type {
+  BestOfKEntry,
+  BestOfKTest,
   GateConclusion,
+  GateHoldReason,
   IterationGate,
+  MultiplicityMethod,
   ObservationCoverage,
   PairCoverage,
   PairSensitivity,
@@ -260,7 +264,12 @@ export interface TrainingConfig extends RunConfigBase, SingleModelFields {
   mode: 'training';
   /** Numero fixo de iteracoes. */
   iterations: number;
-  /** Margem minima de ganho (pp) sobre o campeao para promover; sem ganho = convergiu. Default 1.0. */
+  /**
+   * Margem PRATICA minima de ganho (pp) sobre o campeao para promover; sem ganho
+   * = convergiu. Ausente = max(1; 50/n), n = pares com veredito nos dois lados
+   * (meia granularidade — IMPL-002). Alem da margem, o gate exige p ajustado
+   * (max-T sobre as K variantes) <= 0,05.
+   */
   minGain?: number;
   /** Fracao de cenarios reservada p/ holdout (clamp [0, 0.5]). Default 0.2. */
   holdoutRatio?: number;
@@ -688,7 +697,24 @@ export type SessionEvent =
       runId: string;
       winnerContestantId: string;
     }
-  | { type: 'iteration.promoted'; sessionId: string; iteration: number; championId: string; gain: number }
+  | {
+      type: 'iteration.promoted';
+      sessionId: string;
+      iteration: number;
+      championId: string;
+      /** Ganho BRUTO (p.p.) — o máximo entre K (mantido por compatibilidade). */
+      gain: number;
+      /** IMPL-002: ganho corrigido do winner's curse (p.p.), lado a lado com o bruto. */
+      gainCorrected?: number;
+      /** IMPL-002: p ajustado (FWER sobre as K variantes) da promovida. */
+      pAdjusted?: number;
+      /** IMPL-002: variantes testadas na iteração (a família do FWER). */
+      k?: number;
+      /** IMPL-002: correção de multiplicidade aplicada. */
+      method?: MultiplicityMethod;
+      /** IMPL-002: margem aplicada (p.p.). */
+      minGain?: number;
+    }
   | { type: 'session.holdout'; sessionId: string; holdout: SessionRecord['holdout'] }
   | { type: 'session.converged'; sessionId: string; iteration: number }
   | { type: 'session.finished'; sessionId: string; record: SessionRecord }

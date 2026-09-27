@@ -376,20 +376,24 @@ describe('IMPL-005 — gate de promoção com Δ pareado', () => {
   });
 
   it('decisão que muda no pior caso = gate INCONCLUSIVO: não promove', () => {
-    // 8 pares completos: 1 × (+0,5) e 7 × 0 → Δ 6,25pp ≥ 1 (promoveria). Os 2
-    // ausentes da variante (controle 'resolve' ali) no pior caso: Δ = −15pp.
-    const scoresById = { original: [...rep(0.5, 8), 1, 1], v1: [1, ...rep(0.5, 7), null, null] };
-    const pick = pickWinner([entry('original', 60, true), entry('v1', 56.25)], { minGain: 1, scoresById });
-    expect(pick.gain).toBeCloseTo(6.25, 10);
+    // IMPL-002: o gate agora também exige p ajustado ≤ 0,05, então o observado
+    // precisa passar no TESTE (antes bastava "+0,5 em 1 de 8", p = 0,5). 8
+    // pares completos, todos +0,5 → Δ 50pp, p = 2^−8. Os 2 ausentes da variante
+    // (controle 'resolve' ali) no pior caso: Δ = 20pp mas p = 0,232 → segura.
+    const scoresById = { original: [...rep(0.5, 8), 1, 1], v1: [...rep(1, 8), null, null] };
+    const pick = pickWinner([entry('original', 60, true), entry('v1', 100)], { minGain: 1, scoresById });
+    expect(pick.gain).toBeCloseTo(50, 10);
     expect(pick.isWinner).toBe(false);
     expect(pick.gate?.decision).toBe('inconclusive');
     expect(pick.gate?.sensitivity).toMatchObject({
       excludedFraction: 0.2,
-      observed: { conclusion: 'promote', meanDiffPp: 6.25 },
-      worst: { conclusion: 'hold', meanDiffPp: -15 },
+      observed: { conclusion: 'promote', meanDiffPp: 50 },
+      worst: { conclusion: 'hold', meanDiffPp: 20 },
       best: { conclusion: 'promote' },
       inconclusive: true,
     });
+    expect(pick.gate?.sensitivity?.observed.pValue).toBeCloseTo(1 / 256, 12);
+    expect(pick.gate?.sensitivity?.worst.pValue).toBeCloseTo(59.5 / 256, 12);
   });
 
   it('efeito robusto aos extremos promove mesmo com > 10% excluídos', () => {

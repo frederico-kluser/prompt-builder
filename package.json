@@ -58,6 +58,7 @@
     "dev": "concurrently -n bench,web -c blue,green \"tsx watch src/server.ts\" \"npm run web:dev\"",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "stats:sim": "tsx scripts/stats-sim.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "web:dev": "npm --prefix web run dev",

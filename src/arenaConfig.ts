@@ -169,7 +169,9 @@ export function arenaConfigToRunConfig(
       ...(file.mode === 'training'
         ? {
             iterations: clamp(Math.round(file.training?.iterations ?? d.iterations), 2, 10),
-            minGain: clamp(file.training?.minGain ?? 1, 0, 100),
+            // IMPL-002: sem minGain no arquivo o gate usa o default max(1; 50/n)
+            // — cravar 1 aqui desligaria a margem ligada à granularidade.
+            ...(file.training?.minGain !== undefined ? { minGain: clamp(file.training.minGain, 0, 100) } : {}),
             holdoutRatio: clamp(file.training?.holdoutRatio ?? 0.2, 0, 0.5),
             feedbackDriven: file.training?.feedbackDriven !== false,
             ...(file.training?.reflection ? { reflection: file.training.reflection } : {}),

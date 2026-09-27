@@ -1,4 +1,6 @@
 // IMPL-005 — contrato do pareamento honesto NO TREINO, nos dois motores.
+// IMPL-002 — e o gate da melhor de K no laço: max-T sobre as K variantes, p
+// ajustado e ganho corrigido no record e no evento `iteration.promoted`.
 //
 // O laço real (`trainToCompletion` no Node, `startTraining` na SPA) roda com
 // o orchestrator e o reescritor trocados por dublês DETERMINÍSTICOS: cada
@@ -117,6 +119,8 @@ vi.mock('../web/src/engine/storage', () => ({
 }));
 
 import { createGateway, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
+import { subscribeSession as subscribeNodeSession } from '../src/events.js';
+import type { SessionEvent } from '../src/types.js';
 import { getDataDir, setDataDir } from '../src/storage.js';
 import { trainToCompletion } from '../src/trainer.js';
 import { startTraining as startWebTraining } from '../web/src/engine/trainer.js';
@@ -275,14 +279,15 @@ describe('IMPL-005 — sem holdout: pareamento da última run de treino', () => 
 
 describe('IMPL-005 — gate inconclusivo não promove', () => {
   beforeAll(() => {
-    // 10 cenários: base parcial em tudo; v1 resolve só no cenário 0, parcial em
-    // 1–7 e SEM veredito em 8–9 → Δ observado 6,25pp (≥ minGain), mas no pior
-    // caso −5pp: a promoção dependeria dos ausentes.
+    // 10 cenários: base parcial em 0–7 e resolve em 8–9; v1 resolve em 0–7 e
+    // SEM veredito em 8–9 → Δ observado 50pp com p = 2^−8 (promoveria: IMPL-002
+    // exige o teste, não só a margem), mas no pior caso (v1 perde os 2
+    // ausentes) Δ = 20pp com p = 0,232: a promoção dependeria dos ausentes.
     dubles.estado.nCenarios = 10;
     dubles.estado.treino = (i, id) => {
-      if (id === 'original') return 'parcial';
+      if (id === 'original') return i >= 8 ? 'resolve' : 'parcial';
       if (i >= 8) return undefined;
-      return i === 0 ? 'resolve' : 'parcial';
+      return 'resolve';
     };
   });
   afterAll(() => {
@@ -295,11 +300,125 @@ describe('IMPL-005 — gate inconclusivo não promove', () => {
       expect(rec.status, rec.error).toBe('finished');
       const it0 = rec.bestPromptByIteration[0];
       expect(it0.gate?.decision).toBe('inconclusive');
-      expect(it0.gate?.gainPp).toBe(6.25);
+      expect(it0.gate?.gainPp).toBe(50);
       expect(it0.gate?.sensitivity?.worst.conclusion).toBe('hold');
       expect(it0.winnerContestantId).toBe('original');
       expect(rec.bestPromptByIteration).toHaveLength(1);
       expect(rec.convergedAtIteration).toBe(0);
+    });
+  }
+});
+
+// --- IMPL-002: o laço usa o gate da melhor de K ------------------------------------
+
+type ComEventos = { rec: SessionRecord; eventos: SessionEvent[] };
+
+async function treinarNodeComEventos(cfg: TrainingConfig): Promise<ComEventos> {
+  const eventos: SessionEvent[] = [];
+  let unsub = (): void => undefined;
+  const rec = await trainToCompletion(cfg, KEY, {
+    onSession: (id) => {
+      unsub = subscribeNodeSession(id, (e) => eventos.push(e));
+    },
+  });
+  unsub();
+  return { rec, eventos };
+}
+
+async function treinarWebComEventos(cfg: TrainingConfig): Promise<ComEventos> {
+  const eventos: SessionEvent[] = [];
+  const { sessionId, record } = await startWebTraining(cfg as never, KEY);
+  await new Promise<void>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('sessão não terminou')), 10_000);
+    const unsub = subscribeSession(sessionId, (e) => {
+      eventos.push(e as unknown as SessionEvent);
+      if (e.type === 'session.finished' || e.type === 'session.error') {
+        clearTimeout(t);
+        unsub();
+        resolve();
+      }
+    });
+  });
+  return { rec: record as unknown as SessionRecord, eventos };
+}
+
+const MOTORES_EVENTOS = [
+  ['Node', treinarNodeComEventos],
+  ['SPA', treinarWebComEventos],
+] as const;
+
+const K3: Contestant[] = [
+  ...CONTESTANTS,
+  { id: 'v2', label: 'Variante 2', modelId: 'fake/a', systemPrompt: 'Prompt variante 2.' },
+  { id: 'v3', label: 'Variante 3', modelId: 'fake/a', systemPrompt: 'Prompt variante 3, mais longa.' },
+];
+
+describe('IMPL-002 — efeito real: promove com p ajustado e ganho corrigido', () => {
+  beforeAll(() => {
+    dubles.estado.contestants = K3;
+    // 20 cenários: base parcial; v1 resolve tudo (+50pp); v3 resolve metade; v2 = base.
+    dubles.estado.treino = (i, id) => {
+      if (id === 'v1') return 'resolve';
+      if (id === 'v3') return i % 2 ? 'resolve' : 'parcial';
+      return 'parcial';
+    };
+  });
+  afterAll(() => {
+    dubles.estado.contestants = CONTESTANTS;
+  });
+
+  for (const [nome, treinar] of MOTORES_EVENTOS) {
+    it(`${nome}: gate max-T sobre K = 3 no record e no evento iteration.promoted`, async () => {
+      const { rec, eventos } = await treinar(config({ holdoutRatio: 0, minGain: undefined }));
+      expect(rec.status, rec.error).toBe('finished');
+      const gate = rec.bestPromptByIteration[0].gate!;
+      expect(gate).toMatchObject({
+        bestId: 'v1',
+        decision: 'promoted',
+        gainPp: 50,
+        minGain: 2.5, // default max(1; 50/20)
+        minGainSource: 'default',
+      });
+      expect(gate.test).toMatchObject({ method: 'max-t', enumeration: 'exact', k: 3, alpha: 0.05, nScenarios: 20 });
+      expect(gate.test!.pAdjusted).toBeLessThanOrEqual(0.05);
+      expect(gate.gainCorrectedPp).toBeLessThanOrEqual(gate.gainPp);
+      const promo = eventos.find((e) => e.type === 'iteration.promoted');
+      expect(promo).toMatchObject({
+        type: 'iteration.promoted',
+        championId: 'v1',
+        gain: 50,
+        gainCorrected: gate.gainCorrectedPp,
+        pAdjusted: gate.test!.pAdjusted,
+        k: 3,
+        method: 'max-t',
+        minGain: 2.5,
+      });
+    });
+  }
+});
+
+describe('IMPL-002 — melhor de K por acaso: o gate segura (o antigo promovia)', () => {
+  beforeAll(() => {
+    dubles.estado.contestants = K3;
+    // v1 = base + 'resolve' num único cenário: Δ 2,5pp ≥ margem (2,5pp com
+    // n = 20; o gate antigo, 1pp, promovia) mas p = 0,5 → não é evidência.
+    dubles.estado.treino = (i, id) => (id === 'v1' && i === 0 ? 'resolve' : 'parcial');
+  });
+  afterAll(() => {
+    dubles.estado.contestants = CONTESTANTS;
+  });
+
+  for (const [nome, treinar] of MOTORES_EVENTOS) {
+    it(`${nome}: 'held' por significância, sem iteration.promoted, treino converge`, async () => {
+      const { rec, eventos } = await treinar(config({ holdoutRatio: 0, iterations: 3, minGain: undefined }));
+      expect(rec.status, rec.error).toBe('finished');
+      const gate = rec.bestPromptByIteration[0].gate!;
+      expect(gate).toMatchObject({ bestId: 'v1', decision: 'held', gainPp: 2.5, minGain: 2.5 });
+      expect(gate.heldBy).toEqual(['significance']);
+      expect(gate.test!.pAdjusted).toBeGreaterThan(0.05);
+      expect(rec.bestPromptByIteration).toHaveLength(1);
+      expect(rec.convergedAtIteration).toBe(0);
+      expect(eventos.some((e) => e.type === 'iteration.promoted')).toBe(false);
     });
   }
 });
