@@ -5,9 +5,12 @@
 // `max_tokens` (finish_reason: length) virava status 'ok' com texto truncado,
 // entrava no placar e o juiz a punia como 'nao' — truncagem silenciosa. Contratos
 // provados aqui (transporte FALSO, zero rede, zero gasto):
-//  (i)   o record persiste finishReason/nativeFinishReason em 100% das respostas
-//        de competidor e do gabarito; o juiz recebe os sinais no resultado de
-//        chatCompletion (a parte do juiz truncado é o IMPL-015);
+//  (i)   o record persiste finishReason/nativeFinishReason em 100% das chamadas
+//        de competidor e de gabarito (por chamada, com a 1ª tentativa truncada
+//        em `firstAttempt`) e de JUIZ/duelo/datagen (agregado por papel em
+//        `finishSignalsByRole`, contado no gateway -> ledger — ponto único); a
+//        `truncationRate` cobre TODOS os papéis. Invalidar o veredito de um
+//        juiz truncado é o IMPL-015;
 //  (ii)  fixture com finish_reason: length marca a etapa incomplete
 //        (incompleteReason 'truncation') e a exclui do placar e das médias —
 //        Node e SPA (mirror);
@@ -32,7 +35,15 @@ import {
   truncationAlert,
   truncationSignals,
   truncationStats,
+  truncationStatsByRole,
+  tallyFinish,
+  emptyFinishCounts,
+  FINISH_ABSENT,
+  FINISH_OTHER,
+  MAX_REASON_KEYS,
+  describeTruncatedReference,
 } from '../src/engine/truncation.js';
+import { BudgetLedger } from '../src/budget.js';
 import { normalizeRunRecord } from '../src/normalize.js';
 import { variationConfigFrom } from '../src/trainer.js';
 import { setDataDir, getDataDir } from '../src/storage.js';
@@ -42,7 +53,7 @@ import { runToCompletion as runWeb } from '../web/src/engine/orchestrator.js';
 import { subscribeRun } from '../web/src/engine/events.js';
 import { cmdRun } from '../src/cli/commands/run.js';
 import { Output } from '../src/cli/output.js';
-import { emitRunEvent } from '../src/cli/ndjson.js';
+import { emitRunEvent, truncationFields } from '../src/cli/ndjson.js';
 import type {
   CallFinishSignals,
   Contestant,
@@ -226,6 +237,119 @@ describe('IMPL-014 (i) — gateway extrai finish_reason/native_finish_reason e d
 });
 
 // ---------------------------------------------------------------------------
+// (i) Juiz/duelo/datagen: sinais de fim no ponto único (gateway -> ledger)
+// ---------------------------------------------------------------------------
+
+describe('IMPL-014 (i) — sinais de fim de TODO papel chegam ao ledger (juiz e duelo inclusive)', () => {
+  it('juiz truncado é contado; falha in-band é cobrada SEM sinal de fim; sobe a cadeia; snapshot é cópia', async () => {
+    const respostas: FakeChatReply[] = [
+      { text: '{"verdict":"resolve","explanation":"ok"}', finishReason: 'stop', nativeFinishReason: 'end_turn' },
+      // Juiz pointwise a 1024 com raciocínio alto: cortado no teto (o caso do IMPL-015).
+      {
+        text: '{"verdict":"res',
+        finishReason: 'length',
+        nativeFinishReason: 'max_tokens',
+        usage: { prompt_tokens: 10, completion_tokens: 1024, cost: 0.002, completion_tokens_details: { reasoning_tokens: 1000 } },
+      },
+      // 200 com corpo de erro: cobrada, mas não completou — sem sinal de fim.
+      { text: '', error: { message: 'provider rejeitou o parâmetro' } },
+      // Duelo (stream) sem finish_reason: a ausência também é contada.
+      { text: '{"winner":"A","explanation":"ok"}' },
+    ];
+    const fake = fakeOpenRouter({ chat: (_r, n) => respostas[n] });
+    const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
+    const sessao = new BudgetLedger();
+    const ledger = sessao.fork();
+    await gw.chatCompletion({ apiKey: KEY, modelId: 'j', messages: msgs, maxTokens: 1024, role: 'judge', sink: ledger });
+    const cortada = await gw.chatCompletion({ apiKey: KEY, modelId: 'j', messages: msgs, maxTokens: 1024, role: 'judge', sink: ledger });
+    expect(cortada.truncated).toBe(true);
+    await expect(
+      gw.chatCompletion({ apiKey: KEY, modelId: 'j', messages: msgs, maxTokens: 1024, role: 'judge', sink: ledger }),
+    ).rejects.toThrow(/provider rejeitou/);
+    await gw.chatCompletionStream({ apiKey: KEY, modelId: 'd', messages: msgs, maxTokens: 512, role: 'duel', sink: ledger });
+
+    const snap = ledger.snapshot();
+    expect(snap.byRole.judge.calls).toBe(3); // a falha in-band foi cobrada…
+    expect(snap.finishByRole.judge).toEqual({
+      calls: 2, // …mas só as 2 que completaram têm sinal de fim
+      truncated: 1,
+      finishReasons: { stop: 1, length: 1 },
+      nativeFinishReasons: { end_turn: 1, max_tokens: 1 },
+      signals: { finish_length: 1, native_length: 1, reasoning_at_cap: 1 },
+    });
+    expect(snap.finishByRole.duel).toEqual({
+      calls: 1,
+      truncated: 0,
+      finishReasons: { [FINISH_ABSENT]: 1 },
+      nativeFinishReasons: { [FINISH_ABSENT]: 1 },
+      signals: {},
+    });
+    expect(snap.finishByRole.competitor).toBeUndefined(); // só papéis com chamada
+    // Sobe a cadeia como o custo: a sessão de treino vê o total.
+    expect(sessao.snapshot().finishByRole.judge).toMatchObject({ calls: 2, truncated: 1 });
+    // O snapshot vai direto para o record: não pode ser o objeto vivo do ledger.
+    snap.finishByRole.judge!.calls = 99;
+    snap.finishByRole.judge!.finishReasons.stop = 99;
+    expect(ledger.snapshot().finishByRole.judge).toMatchObject({ calls: 2, finishReasons: { stop: 1 } });
+  });
+
+  it('finish_reason malformado (não-string) não lança antes da contabilidade: a chamada segue cobrada', async () => {
+    const fake = fakeOpenRouter({
+      chat: () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'veredito' }, finish_reason: 123, native_finish_reason: { x: 1 } }],
+            usage: { prompt_tokens: 1, completion_tokens: 3, cost: 0.004 },
+          }),
+          { status: 200 },
+        ),
+    });
+    const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
+    const ledger = new BudgetLedger();
+    const r = await gw.chatCompletion({ apiKey: KEY, modelId: 'j', messages: msgs, maxTokens: 64, role: 'judge', sink: ledger });
+    expect(r.finishReason).toBeUndefined();
+    expect(r.truncated).toBe(false);
+    expect(ledger.snapshot().spentUsd).toBeCloseTo(0.004, 10);
+    expect(ledger.snapshot().finishByRole.judge).toMatchObject({ calls: 1, finishReasons: { [FINISH_ABSENT]: 1 } });
+  });
+
+  it('tallyFinish: ausente vira (none), histograma limitado a MAX_REASON_KEYS, sinais contados', () => {
+    const c = emptyFinishCounts();
+    tallyFinish(c, { tokensOut: 1, contentChars: 1, truncated: false });
+    expect(c.finishReasons).toEqual({ [FINISH_ABSENT]: 1 });
+    for (let k = 0; k < MAX_REASON_KEYS + 5; k++) {
+      tallyFinish(c, { finishReason: `motivo-${k}`, tokensOut: 1, contentChars: 1, truncated: false });
+    }
+    // 1 (none) + 23 motivos preenchem as 24 chaves; os 6 seguintes caem em (other).
+    expect(Object.keys(c.finishReasons)).toHaveLength(MAX_REASON_KEYS + 1);
+    expect(c.finishReasons[FINISH_OTHER]).toBe(6);
+    tallyFinish(c, { finishReason: 'motivo-0', tokensOut: 1, contentChars: 1, truncated: false });
+    expect(c.finishReasons['motivo-0']).toBe(2); // chave conhecida segue contando
+    expect(c.calls).toBe(MAX_REASON_KEYS + 7);
+
+    const t = emptyFinishCounts();
+    tallyFinish(t, { finishReason: 'length', tokensOut: 9, contentChars: 0, truncated: true, truncationSignals: ['finish_length', 'empty_with_tokens'] });
+    expect(t).toEqual({
+      calls: 1,
+      truncated: 1,
+      finishReasons: { length: 1 },
+      nativeFinishReasons: { [FINISH_ABSENT]: 1 },
+      signals: { finish_length: 1, empty_with_tokens: 1 },
+    });
+  });
+
+  it('truncationStatsByRole soma TODOS os papéis; o alerta diz quais papéis truncaram', () => {
+    const porPapel = { judge: { calls: 10, truncated: 3 }, competitor: { calls: 90, truncated: 0 } };
+    const stats = truncationStatsByRole(porPapel);
+    expect(stats).toEqual({ calls: 100, truncated: 3, rate: 0.03 });
+    const msg = truncationAlert(stats, porPapel);
+    expect(msg).toMatch(/3 de 100 chamadas \(3,0%\) saíram truncadas no teto de tokens \(juiz 3 de 10\)/);
+    expect(msg).not.toMatch(/competidor/); // quem não truncou não aparece
+    expect(truncationStatsByRole(undefined)).toEqual({ calls: 0, truncated: 0, rate: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Competidor e gabarito: 1 retry com teto x2
 // ---------------------------------------------------------------------------
 
@@ -268,6 +392,15 @@ describe('IMPL-014 — competidor: 1 retry com max_tokens x2', () => {
       tokensOut: 350,
     });
     expect(r.costUsd).toBeCloseTo(0.005, 10);
+    // A 1ª tentativa (a truncada) não some: sinal que disparou, teto e gasto de tokens.
+    expect(r.firstAttempt).toEqual({
+      finishReason: 'length',
+      tokensOut: 300,
+      contentChars: 'Metade da resp'.length,
+      maxTokens: 300,
+      truncated: true,
+      truncationSignals: ['finish_length'],
+    });
   });
 
   it('truncou nas DUAS: truncated=true, exatamente 2 chamadas (sem laço)', async () => {
@@ -283,6 +416,7 @@ describe('IMPL-014 — competidor: 1 retry com max_tokens x2', () => {
       nativeFinishReason: 'MAX_TOKENS',
       truncationSignals: ['finish_length', 'native_length'],
     });
+    expect(r.firstAttempt).toMatchObject({ truncated: true, maxTokens: 200, nativeFinishReason: 'MAX_TOKENS' });
   });
 
   it('resposta completa: 1 chamada, truncated=false persistido (sinal de fim em 100% das respostas)', async () => {
@@ -291,6 +425,7 @@ describe('IMPL-014 — competidor: 1 retry com max_tokens x2', () => {
     expect(fake.chatRequests()).toHaveLength(1);
     expect(r).toMatchObject({ truncated: false, finishReason: 'stop', maxTokens: 300 });
     expect(r.truncationRetried).toBeUndefined();
+    expect(r.firstAttempt).toBeUndefined();
   });
 
   it('bloqueio por filtro não é repetido nem marcado como truncado', async () => {
@@ -310,6 +445,8 @@ describe('IMPL-014 — competidor: 1 retry com max_tokens x2', () => {
     const r = await runCompetitor({ apiKey: KEY, contestantId: 'c', modelId: 'm', stage: STAGE, retries: 1 });
     expect(r.status).toBe('error');
     expect(r.truncationRetried).toBe(true);
+    // O retry falhou, mas os sinais da 1ª (truncada) ficam no record.
+    expect(r.firstAttempt).toMatchObject({ truncated: true, finishReason: 'length', maxTokens: 300, tokensOut: 300 });
     expect(r.costUsd).toBeCloseTo(0.004, 10);
     // Entra na taxa: 1 chamada completou e truncou.
     expect(truncationStats([{ responses: [r] }])).toMatchObject({ calls: 1, truncated: 1 });
@@ -343,6 +480,13 @@ describe('IMPL-014 (i) — gabarito: sinais persistidos, retry x2 e régua corta
     expect(fake.chatRequests().map((p) => p.body?.max_tokens)).toEqual([1500, 3000]);
     expect(out[0].reference).toBe('Gabarito completo.');
     expect(calls.get(0)).toMatchObject({ finishReason: 'stop', truncated: false, truncationRetried: true, maxTokens: 3000 });
+    // A 1ª tentativa (a truncada) fica em `firstAttempt` — antes o retry sobrescrevia.
+    expect(calls.get(0)?.firstAttempt).toMatchObject({
+      finishReason: 'length',
+      truncated: true,
+      maxTokens: 1500,
+      truncationSignals: ['finish_length', 'empty_with_tokens'],
+    });
   });
 
   it('truncada nas duas: referência DESCARTADA (etapa segue sem gabarito) e sinal truncated persistido', async () => {
@@ -351,12 +495,16 @@ describe('IMPL-014 (i) — gabarito: sinais persistidos, retry x2 e régua corta
     const calls = new Map<number, CallFinishSignals>();
     const out = await generateReferences({ stages: [STAGE], apiKey: KEY, modelId: 'ref', onCall: (i, c) => calls.set(i, c) });
     expect(out[0].reference).toBeUndefined();
-    expect(calls.get(0)).toMatchObject({ finishReason: 'length', truncated: true, truncationRetried: true });
+    expect(calls.get(0)).toMatchObject({ finishReason: 'length', truncated: true, truncationRetried: true, maxTokens: 3000 });
+    expect(calls.get(0)?.firstAttempt).toMatchObject({ finishReason: 'length', truncated: true, maxTokens: 1500 });
   });
 
-  it('finishSignalsOf copia a decisão do gateway (não recalcula)', () => {
+  it('finishSignalsOf copia a decisão do gateway (não recalcula); com a 1ª tentativa marca o retry', () => {
     const s = finishSignalsOf({ text: 'abc', tokensOut: 9, finishReason: 'stop', truncated: false }, 100);
     expect(s).toEqual({ finishReason: 'stop', tokensOut: 9, contentChars: 3, maxTokens: 100, truncated: false });
+    const primeira = finishSignalsOf({ text: '', tokensOut: 100, finishReason: 'length', truncated: true }, 100);
+    const retry = finishSignalsOf({ text: 'abc', tokensOut: 9, finishReason: 'stop', truncated: false }, 200, primeira);
+    expect(retry).toMatchObject({ truncationRetried: true, maxTokens: 200, firstAttempt: primeira });
   });
 });
 
@@ -448,17 +596,64 @@ function conferirTruncamento(rec: RunRecord, fake: ReturnType<typeof fakeDaRun>,
   for (const st of [st1, st2]) {
     expect(st.gabaritoCall).toMatchObject({ finishReason: 'stop', nativeFinishReason: 'end_turn', truncated: false });
   }
+  // A 1ª tentativa (a truncada) fica persistida — qual sinal disparou e o teto.
+  expect(truncada.firstAttempt).toMatchObject({
+    finishReason: 'length',
+    nativeFinishReason: 'max_tokens',
+    truncated: true,
+    maxTokens: 300,
+    truncationSignals: ['finish_length', 'native_length'],
+  });
   // O custo das DUAS tentativas fica na fatia do contestant (usage.cost default 0.001).
   expect(rec.costByContestant?.['fake/long']).toBeCloseTo(0.003, 10);
 
-  // truncationRate: gabaritos 2 + etapa 1 (a, b, long×2) + etapa 2 (3) = 9 chamadas, 2 truncadas.
-  expect(rec.truncationCounts).toEqual({ calls: 9, truncated: 2 });
-  expect(rec.truncationRate).toBe(Number((2 / 9).toFixed(4)));
+  // (i) JUIZ, duelo e datagen: os sinais de fim chegam ao record pelo ponto
+  // único (gateway -> ledger -> finishSignalsByRole) — 100% das chamadas que
+  // completaram, papel a papel, igual ao que o ledger cobrou.
+  const porPapel = rec.finishSignalsByRole!;
+  expect(Object.keys(porPapel).sort()).toEqual(['competitor', 'datagen', 'duel', 'gabarito', 'judge']);
+  for (const papel of ['datagen', 'gabarito', 'competitor', 'judge', 'duel'] as const) {
+    expect(porPapel[papel]!.calls, papel).toBe(rec.costByRole![papel].calls);
+    const somaMotivos = Object.values(porPapel[papel]!.finishReasons).reduce((a, b) => a + b, 0);
+    expect(somaMotivos, `${papel}: todo finish_reason contado (ausente = ${FINISH_ABSENT})`).toBe(porPapel[papel]!.calls);
+  }
+  // Juiz: 3 chamadas (só a Pergunta 2 foi julgada), finish_reason 'stop' nas 3.
+  expect(porPapel.judge).toEqual({
+    calls: 3,
+    truncated: 0,
+    finishReasons: { stop: 3 },
+    nativeFinishReasons: { [FINISH_ABSENT]: 3 },
+    signals: {},
+  });
+  // Competidor: 7 tentativas (a, b, long×2 na P1; 3 na P2), 2 truncadas.
+  expect(porPapel.competitor).toEqual({
+    calls: 7,
+    truncated: 2,
+    finishReasons: { stop: 5, length: 2 },
+    nativeFinishReasons: { end_turn: 5, max_tokens: 2 },
+    signals: { finish_length: 2, native_length: 2 },
+  });
+  expect(porPapel.gabarito).toMatchObject({ calls: 2, truncated: 0, finishReasons: { stop: 2 }, nativeFinishReasons: { end_turn: 2 } });
+  // Duelo sem finish_reason (o fake não manda): a AUSÊNCIA também é registrada, não some.
+  expect(porPapel.duel).toMatchObject({ calls: 2, truncated: 0, finishReasons: { [FINISH_ABSENT]: 2 } });
+  expect(porPapel.datagen).toMatchObject({ calls: 1, truncated: 0 });
+  // Nada escapa do agregado: soma dos papéis = toda requisição de chat que o fake viu.
+  expect(fake.chatRequests()).toHaveLength(15);
+
+  // truncationRate da run: TODOS os papéis — datagen 1 + gabaritos 2 +
+  // competidor 7 + juiz 3 + duelo 2 = 15 chamadas, 2 truncadas.
+  expect(rec.truncationCounts).toEqual({ calls: 15, truncated: 2 });
+  expect(rec.truncationRate).toBe(Number((2 / 15).toFixed(4)));
+  // Conferência independente: a visão por etapa (competidor + gabarito, sinais
+  // guardados por chamada) bate com as duas fatias do agregado do ledger.
+  expect(truncationStats(rec.stages)).toEqual({ calls: 9, truncated: 2, rate: Number((2 / 9).toFixed(4)) });
+  expect(porPapel.competitor!.calls + porPapel.gabarito!.calls).toBe(9);
 
   // (iv) sobrevive a um F5 (disco/IndexedDB): nada engolido pelo whitelist.
   const relido = normalizeRunRecord(JSON.parse(JSON.stringify(rec)));
   expect(relido.truncationRate).toBe(rec.truncationRate);
   expect(relido.truncationCounts).toEqual(rec.truncationCounts);
+  expect(relido.finishSignalsByRole).toEqual(rec.finishSignalsByRole);
   expect(relido.stages[i1]).toMatchObject({ incomplete: true, incompleteReason: 'truncation' });
   expect(relido.stages[i1].gabaritoCall).toEqual(st1.gabaritoCall);
   expect(relido.stages[i1].responses.find((r) => r.contestantId === 'fake/long')).toEqual(truncada);
@@ -537,6 +732,182 @@ describe('IMPL-014 (ii) — run inteira: etapa truncada fica incomplete e fora d
     expect(next.stages[0]).toMatchObject({ incomplete: true, incompleteReason: 'truncation' });
     // Índice inexistente não quebra (evento antes do stage.generating).
     expect(() => applyEvent(prev as never, { type: 'stage.incomplete', stageIndex: 5, reason: 'truncation' })).not.toThrow();
+    // stage.generated leva os sinais do gabarito (a UI marca "gabarito truncado" ao vivo).
+    const gabaritoCall = { finishReason: 'length', tokensOut: 3000, contentChars: 0, maxTokens: 3000, truncated: true };
+    const gerada = applyEvent(prev as never, {
+      type: 'stage.generated',
+      runId: 'r',
+      stageIndex: 0,
+      spec: { question: 'P?', productContext: 'ctx', maxTokens: 300 },
+      gabaritoCall,
+      warning: 'x',
+    });
+    expect(gerada.stages[0].gabaritoCall).toEqual(gabaritoCall);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (i) + aviso visível: juiz truncado no record e gabarito truncado descartado
+// ---------------------------------------------------------------------------
+
+/**
+ * O gabarito da Pergunta 2 trunca SEMPRE (inclusive no retry x2) e o juiz
+ * pointwise trunca ao julgar `fake/b` na Pergunta 1. Os competidores completam.
+ */
+function fakeJuizEGabaritoTruncados() {
+  return fakeOpenRouter({
+    catalog: ['fake/gen', 'fake/ref', 'fake/judge', 'fake/a', 'fake/b'].map((id) => catalogItem(id, 1e-9, 1e-9)),
+    chat: (req) => {
+      if (req.model === 'fake/gen') return { text: JSON.stringify({ stages: CENARIOS }) };
+      if (req.model === 'fake/ref') {
+        return req.user.includes('Pergunta 2')
+          ? { text: 'Gabarito pela met', finishReason: 'length', nativeFinishReason: 'max_tokens' }
+          : { text: 'Gabarito completo.', finishReason: 'stop', nativeFinishReason: 'end_turn' };
+      }
+      if (req.stream) return { text: `Resposta de ${req.model}`, finishReason: 'stop', nativeFinishReason: 'end_turn' };
+      if (req.system.includes('juiz técnico estrito')) {
+        // Pointwise: o raciocínio comeu o teto de 1024 ao julgar fake/b.
+        return req.user.includes('Resposta de fake/b')
+          ? { text: '{"verdict":"resolve","explanation":"confere"}', finishReason: 'length', nativeFinishReason: 'max_tokens' }
+          : { text: '{"verdict":"resolve","explanation":"confere"}', finishReason: 'stop' };
+      }
+      // Listwise (etapa sem gabarito): ranking + vereditos válidos.
+      return {
+        text: JSON.stringify({
+          ranking: ['A', 'B'],
+          verdicts: [
+            { label: 'A', acceptable: true, motivo: 'ok' },
+            { label: 'B', acceptable: true, motivo: 'ok' },
+          ],
+        }),
+        finishReason: 'stop',
+      };
+    },
+  });
+}
+
+const CONFIG_JUIZ = {
+  mode: 'compare',
+  theme: 'suporte',
+  stages: 2,
+  datagenModelId: 'fake/gen',
+  judgeModelIds: ['fake/judge'],
+  referenceModelId: 'fake/ref',
+  referenceJudging: true,
+  competitorModelIds: ['fake/a', 'fake/b'],
+  finalists: 0,
+  timeoutMs: 5_000,
+} as const;
+
+function conferirJuizEGabarito(rec: RunRecord, fake: ReturnType<typeof fakeJuizEGabaritoTruncados>, eventos: RunEvent[]): void {
+  expect(rec.status, rec.error).toBe('finished');
+  const i1 = rec.stages.findIndex((s) => s.spec?.question.includes('Pergunta 1'));
+  const i2 = rec.stages.findIndex((s) => s.spec?.question.includes('Pergunta 2'));
+  const [st1, st2] = [rec.stages[i1], rec.stages[i2]];
+
+  // Gabarito da P2: truncado nas duas tentativas, descartado; 1ª tentativa persistida.
+  expect(st2.spec?.reference).toBeUndefined();
+  expect(st2.gabaritoCall).toMatchObject({
+    finishReason: 'length',
+    nativeFinishReason: 'max_tokens',
+    truncated: true,
+    truncationRetried: true,
+    maxTokens: 3000,
+    firstAttempt: { finishReason: 'length', truncated: true, maxTokens: 1500 },
+  });
+  // A etapa segue (julgada sem régua, listwise) — não é incomplete.
+  expect(st2.incomplete).toBeFalsy();
+  expect(st2.referenceJudge).toBeUndefined();
+  expect(st2.judge?.inconclusive).toBeFalsy();
+  // Aviso VISÍVEL no stage.generated (antes: só console.warn) — sem o texto do gabarito.
+  const gerados = eventos.filter((e): e is Extract<RunEvent, { type: 'stage.generated' }> => e.type === 'stage.generated');
+  const ev2 = gerados.find((e) => e.stageIndex === i2)!;
+  expect(ev2.warning).toMatch(new RegExp(`Gabarito da etapa ${i2 + 1} truncado no teto de 3000 tokens`));
+  expect(ev2.warning).toMatch(/julgada SEM gabarito/);
+  expect(ev2.warning).not.toContain('Gabarito pela met');
+  expect(ev2.gabaritoCall).toMatchObject({ truncated: true });
+  expect(gerados.find((e) => e.stageIndex === i1)?.warning).toBeUndefined();
+  expect(st1.gabaritoCall).toMatchObject({ truncated: false, finishReason: 'stop' });
+
+  // (i) JUIZ: o finish_reason de 100% das chamadas do juiz está no record,
+  // inclusive a truncada (antes o refJudge jogava o sinal fora).
+  const juiz = rec.finishSignalsByRole!.judge!;
+  expect(juiz.calls).toBe(rec.costByRole!.judge.calls);
+  expect(juiz.calls).toBe(fake.chatRequests().filter((r) => r.model === 'fake/judge').length);
+  expect(juiz).toEqual({
+    calls: 3, // 2 pointwise (P1) + 1 listwise (P2)
+    truncated: 1,
+    finishReasons: { stop: 2, length: 1 },
+    nativeFinishReasons: { [FINISH_ABSENT]: 2, max_tokens: 1 },
+    signals: { finish_length: 1, native_length: 1 },
+  });
+  expect(rec.finishSignalsByRole!.gabarito).toMatchObject({ calls: 3, truncated: 2 });
+  // A truncationRate conta o juiz: 1 (juiz) + 2 (gabarito da P2) de 11
+  // chamadas (datagen 1 + gabaritos 3 + competidores 4 + juiz 3).
+  expect(fake.chatRequests()).toHaveLength(11);
+  expect(rec.truncationCounts).toEqual({ calls: 11, truncated: 3 });
+  // O resultado (--json/NDJSON) quebra por papel e o alerta diz quem truncou.
+  const campos = truncationFields(rec);
+  expect(campos.truncationByRole).toMatchObject({ judge: { calls: 3, truncated: 1 }, gabarito: { calls: 3, truncated: 2 } });
+  expect(campos.truncationAlert).toMatch(/gabarito 2 de 3/);
+  expect(campos.truncationAlert).toMatch(/juiz 1 de 3/);
+
+  // Sobrevive a um F5 (disco/IndexedDB).
+  const relido = normalizeRunRecord(JSON.parse(JSON.stringify(rec)));
+  expect(relido.finishSignalsByRole).toEqual(rec.finishSignalsByRole);
+  expect(relido.stages[i2].gabaritoCall).toEqual(st2.gabaritoCall);
+}
+
+describe('IMPL-014 (i) — juiz truncado no record e gabarito truncado com aviso visível (Node + SPA)', () => {
+  let anterior: OpenRouterGateway | undefined;
+  let dirAnterior: string;
+  let tmp: string;
+  let silencio: Array<{ mockRestore(): void }> = [];
+
+  beforeAll(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'pb-impl014-juiz-'));
+    dirAnterior = getDataDir();
+    setDataDir(tmp);
+    silencio = [
+      vi.spyOn(console, 'log').mockImplementation(() => undefined),
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined),
+      vi.spyOn(console, 'error').mockImplementation(() => undefined),
+    ];
+  });
+  afterEach(() => {
+    if (anterior) setDefaultGateway(anterior);
+    anterior = undefined;
+  });
+  afterAll(() => {
+    silencio.forEach((s) => s.mockRestore());
+    setDataDir(dirAnterior);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('Node (src/orchestrator)', async () => {
+    const fake = fakeJuizEGabaritoTruncados();
+    anterior = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));
+    const eventos: RunEvent[] = [];
+    const unsub = subscribe('run-impl014-juiz-node', (e) => eventos.push(e));
+    try {
+      const rec = await runNode(CONFIG_JUIZ as unknown as RunConfig, KEY, { runId: 'run-impl014-juiz-node' });
+      conferirJuizEGabarito(rec, fake, eventos);
+    } finally {
+      unsub();
+    }
+  });
+
+  it('SPA (web/src/engine/orchestrator) — mirror', async () => {
+    const fake = fakeJuizEGabaritoTruncados();
+    anterior = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));
+    const eventos: RunEvent[] = [];
+    const unsub = subscribeRun('run-impl014-juiz-web', (e) => eventos.push(e as unknown as RunEvent));
+    try {
+      const rec = await runWeb(CONFIG_JUIZ as never, KEY, { runId: 'run-impl014-juiz-web' });
+      conferirJuizEGabarito(rec as unknown as RunRecord, fake, eventos);
+    } finally {
+      unsub();
+    }
   });
 });
 
@@ -599,6 +970,15 @@ describe('IMPL-014 (iii) — `run --json` emite truncationRate e o alerta acima 
     expect(payload.data.truncationRate).toBe(Number((counts.truncated / counts.calls).toFixed(4)));
     expect(payload.data.truncationRate as number).toBeGreaterThan(TRUNCATION_ALERT_RATE);
     expect(payload.data.truncationAlert).toMatch(/acima do limite de 2%/);
+    // Quebra por papel (o juiz entra no denominador; quem truncou foi o competidor).
+    const porPapel = payload.data.truncationByRole as Record<string, { calls: number; truncated: number }>;
+    expect(porPapel.competitor).toEqual({ calls: 7, truncated: 2 });
+    // compare clássico (sem julgamento por referência): a P2 é julgada listwise — 1 chamada de juiz.
+    expect(porPapel.judge).toEqual({ calls: 1, truncated: 0 });
+    expect(porPapel.datagen).toEqual({ calls: 1, truncated: 0 });
+    expect(Object.values(porPapel).reduce((a, c) => a + c.calls, 0)).toBe(counts.calls);
+    expect(counts).toEqual({ calls: 9, truncated: 2 });
+    expect(payload.data.truncationAlert).toMatch(/\(competidor 2 de 7\)/);
     // Narração (stderr) também avisa; o stdout segue sendo SÓ o payload JSON.
     expect(stderr.join('')).toMatch(/truncadas no teto de tokens/);
   });
@@ -621,6 +1001,25 @@ describe('IMPL-014 (iii) — `run --json` emite truncationRate e o alerta acima 
       emitRunEvent(out, { type: 'run.finished', runId: 'r', record: { ...base, truncationRate: 0.5, truncationCounts: { calls: 2, truncated: 1 } } as unknown as RunRecord });
       // Record anterior ao IMPL-014: nenhum campo novo inventado.
       emitRunEvent(out, { type: 'run.finished', runId: 'r', record: base as unknown as RunRecord });
+      // Gabarito truncado e descartado: aviso no stage.generated (sem o texto do gabarito).
+      const gabaritoCall = { finishReason: 'length', tokensOut: 3000, contentChars: 12, maxTokens: 3000, truncated: true };
+      const spec = { question: 'P?', productContext: 'ctx', maxTokens: 300 };
+      emitRunEvent(out, { type: 'stage.generated', runId: 'r', stageIndex: 1, spec, gabaritoCall, warning: describeTruncatedReference(1, gabaritoCall) });
+      emitRunEvent(out, { type: 'stage.generated', runId: 'r', stageIndex: 0, spec: { ...spec, reference: 'ok' } });
+      // Quebra por papel a partir do agregado do record.
+      emitRunEvent(out, {
+        type: 'run.finished',
+        runId: 'r',
+        record: {
+          ...base,
+          truncationRate: 0.1,
+          truncationCounts: { calls: 10, truncated: 1 },
+          finishSignalsByRole: {
+            judge: { calls: 4, truncated: 1, finishReasons: { stop: 3, length: 1 }, nativeFinishReasons: {}, signals: {} },
+            competitor: { calls: 6, truncated: 0, finishReasons: { stop: 6 }, nativeFinishReasons: {}, signals: {} },
+          },
+        } as unknown as RunRecord,
+      });
     } finally {
       spy.mockRestore();
     }
@@ -630,6 +1029,13 @@ describe('IMPL-014 (iii) — `run --json` emite truncationRate e o alerta acima 
     expect(ev[1].truncationAlert).toBeUndefined();
     expect(ev[2].truncationAlert).toMatch(/1 de 2 chamadas \(50,0%\)/);
     expect('truncationRate' in ev[3]).toBe(false);
+    expect(ev[4]).toMatchObject({ type: 'stage.generated', stageIndex: 1, hasReference: false, referenceTruncated: true });
+    expect(ev[4].warning).toMatch(/Gabarito da etapa 2 truncado no teto de 3000 tokens/);
+    expect(ev[5]).toMatchObject({ type: 'stage.generated', stageIndex: 0, hasReference: true });
+    expect('warning' in ev[5] || 'referenceTruncated' in ev[5]).toBe(false);
+    // O histograma completo fica no record (`runs show`); o stream leva só calls/truncated.
+    expect(ev[6].truncationByRole).toEqual({ judge: { calls: 4, truncated: 1 }, competitor: { calls: 6, truncated: 0 } });
+    expect(ev[6].truncationAlert).toMatch(/\(juiz 1 de 4\)/);
   });
 });
 
@@ -638,7 +1044,7 @@ describe('IMPL-014 (iii) — `run --json` emite truncationRate e o alerta acima 
 // ---------------------------------------------------------------------------
 
 describe('IMPL-014 (iv) — whitelists: normalizeRunRecord e variationConfigFrom', () => {
-  it('normalizeRunRecord preserva truncationRate/Counts, incompleteReason, gabaritoCall e os sinais das respostas', () => {
+  it('normalizeRunRecord preserva truncationRate/Counts, finishSignalsByRole, incompleteReason, gabaritoCall e os sinais das respostas (com a 1ª tentativa)', () => {
     const raw = JSON.parse(
       JSON.stringify({
         id: 'r1',
@@ -650,7 +1056,15 @@ describe('IMPL-014 (iv) — whitelists: normalizeRunRecord e variationConfigFrom
             startedAt: 'x',
             incomplete: true,
             incompleteReason: 'truncation',
-            gabaritoCall: { finishReason: 'stop', tokensOut: 10, contentChars: 40, maxTokens: 1500, truncated: false },
+            gabaritoCall: {
+              finishReason: 'stop',
+              tokensOut: 10,
+              contentChars: 40,
+              maxTokens: 3000,
+              truncated: false,
+              truncationRetried: true,
+              firstAttempt: { finishReason: 'length', tokensOut: 1500, contentChars: 0, maxTokens: 1500, truncated: true },
+            },
             responses: [
               {
                 modelId: 'm',
@@ -663,6 +1077,7 @@ describe('IMPL-014 (iv) — whitelists: normalizeRunRecord e variationConfigFrom
                 maxTokens: 600,
                 truncationSignals: ['finish_length', 'native_length'],
                 truncationRetried: true,
+                firstAttempt: { finishReason: 'length', tokensOut: 300, contentChars: 4, maxTokens: 300, truncated: true },
               },
             ],
           },
@@ -672,15 +1087,21 @@ describe('IMPL-014 (iv) — whitelists: normalizeRunRecord e variationConfigFrom
         startedAt: 'x',
         truncationRate: 0.6667,
         truncationCounts: { calls: 3, truncated: 2 },
+        finishSignalsByRole: {
+          judge: { calls: 1, truncated: 0, finishReasons: { stop: 1 }, nativeFinishReasons: { '(none)': 1 }, signals: {} },
+        },
       }),
     );
     const rec = normalizeRunRecord(raw);
     expect(rec.truncationRate).toBe(0.6667);
     expect(rec.truncationCounts).toEqual({ calls: 3, truncated: 2 });
+    expect(rec.finishSignalsByRole).toEqual({
+      judge: { calls: 1, truncated: 0, finishReasons: { stop: 1 }, nativeFinishReasons: { '(none)': 1 }, signals: {} },
+    });
     expect(rec.stages[0]).toMatchObject({
       incomplete: true,
       incompleteReason: 'truncation',
-      gabaritoCall: { finishReason: 'stop', maxTokens: 1500, truncated: false },
+      gabaritoCall: { finishReason: 'stop', maxTokens: 3000, truncated: false, firstAttempt: { maxTokens: 1500, truncated: true } },
     });
     expect(rec.stages[0].responses[0]).toMatchObject({
       contestantId: 'm',
@@ -691,6 +1112,7 @@ describe('IMPL-014 (iv) — whitelists: normalizeRunRecord e variationConfigFrom
       maxTokens: 600,
       truncationSignals: ['finish_length', 'native_length'],
       truncationRetried: true,
+      firstAttempt: { finishReason: 'length', maxTokens: 300, truncated: true },
     });
   });
 
@@ -746,7 +1168,10 @@ describe('IMPL-014 (iv) — whitelists: normalizeRunRecord e variationConfigFrom
       const st1 = rec.stages.find((s) => s.spec?.question.includes('Pergunta 1'))!;
       expect(st1).toMatchObject({ incomplete: true, incompleteReason: 'truncation' });
       expect(rec.judgeScoreByContestant).toEqual({ original: 100, v1: 100 });
-      expect(rec.truncationCounts).toEqual({ calls: 7, truncated: 2 }); // 2 gabaritos + (1 + 2) + 2
+      // 2 gabaritos + competidor (1 + 2 na P1, 2 na P2) + juiz 2 (só a P2 julgada) = 9.
+      expect(rec.truncationCounts).toEqual({ calls: 9, truncated: 2 });
+      expect(rec.finishSignalsByRole?.judge).toMatchObject({ calls: 2, truncated: 0, finishReasons: { stop: 2 } });
+      expect(truncationStats(rec.stages)).toMatchObject({ calls: 7, truncated: 2 });
     } finally {
       setDefaultGateway(anterior);
       setDataDir(dirAnterior);

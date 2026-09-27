@@ -125,6 +125,13 @@ export interface CostSink {
       cost: CallCost;
       tokensIn: number;
       tokensOut: number;
+      /**
+       * Sinais de fim da chamada (IMPL-014) — presentes quando a chamada
+       * COMPLETOU (ausentes no 200 com corpo de erro, que lanca). E por aqui
+       * que os sinais de TODO papel (juiz, duelo, datagen, reescritor…) chegam
+       * ao RunRecord sem cada papel precisar persisti-los.
+       */
+      finish?: CallFinishSignals;
     },
   ): void;
 }
@@ -521,9 +528,12 @@ export type TruncationSignal =
   | 'empty_with_tokens';
 
 /**
- * Os sinais de fim de UMA chamada, persistidos (IMPL-014): os 4 sinais do
- * R-07b:REC-2 (finish_reason, native_finish_reason, reasoning_tokens vs teto e
- * tamanho do conteudo) + a decisao. Hoje vai no gabarito
+ * Os sinais de fim de UMA chamada (IMPL-014): os 4 sinais do R-07b:REC-2
+ * (finish_reason, native_finish_reason, reasoning_tokens vs teto e tamanho do
+ * conteudo) + a decisao. O gateway monta um por chamada que completou e o
+ * entrega ao ledger (`CostSink.note`), que agrega por papel em
+ * `RunRecord.finishSignalsByRole` — e assim que juiz/duelo/datagen tem os
+ * sinais no record. Por chamada, persistidos no gabarito
  * (`StageRecord.gabaritoCall`); o competidor guarda os mesmos campos soltos na
  * `CompetitorResponse` (nomes fixados no CONVENTIONS).
  */
@@ -543,6 +553,32 @@ export interface CallFinishSignals {
   truncationSignals?: TruncationSignal[];
   /** true = a 1a tentativa truncou e estes sinais sao do retry com teto x2. */
   truncationRetried?: boolean;
+  /**
+   * Sinais da 1a tentativa, a que TRUNCOU e foi repetida com teto x2 — qual
+   * sinal disparou e quanto raciocinio ela gastou (calibra o teto, R-07b:REC-1).
+   * Presente so quando `truncationRetried`.
+   */
+  firstAttempt?: CallFinishSignals;
+}
+
+/**
+ * Sinais de fim AGREGADOS de um papel numa run (IMPL-014): contados no ponto
+ * unico da contabilidade (gateway -> ledger), entao cobrem 100% das chamadas
+ * que completaram — inclusive juiz, duelo, datagen e reescritor, que nao
+ * guardam sinal por chamada no record. Cada tentativa conta (o retry x2 e uma
+ * chamada).
+ */
+export interface FinishSignalCounts {
+  /** Chamadas que completaram (com sinal de fim observado). */
+  calls: number;
+  /** Quantas sairam truncadas (decisao do gateway). */
+  truncated: number;
+  /** Histograma de `finish_reason` normalizado (`(none)` = ausente). */
+  finishReasons: Record<string, number>;
+  /** Histograma de `native_finish_reason` cru (`(none)` = ausente). */
+  nativeFinishReasons: Record<string, number>;
+  /** Quantas chamadas mostraram cada sinal (inclusive os auxiliares que sozinhos nao decidem). */
+  signals: Partial<Record<TruncationSignal, number>>;
 }
 
 /** Por que uma etapa ficou `incomplete` (fora do placar e das medias). */
@@ -583,6 +619,8 @@ export interface CompetitorResponse {
    * latencia sao da tentativa final.
    */
   truncationRetried?: boolean;
+  /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
+  firstAttempt?: CallFinishSignals;
   /**
    * Ponteiro para os artefatos da execução de agente em disco. NUNCA o
    * conteúdo: o RunRecord é resserializado inteiro a cada saveRun (throttled
@@ -772,7 +810,8 @@ export interface StageRecord {
    * Sinais de fim da chamada que gerou o gabarito desta etapa (IMPL-014). Com
    * `repeats > 1` fica so no 1o clone do cenario (o gabarito e 1 chamada).
    * `truncated: true` = o gabarito saiu cortado mesmo apos o retry x2 e foi
-   * DESCARTADO (regua cortada nao julga ninguem) — a etapa segue sem `reference`.
+   * DESCARTADO (regua cortada nao julga ninguem) — a etapa segue sem `reference`
+   * (julgada listwise) e o `stage.generated` leva um `warning` visivel.
    */
   gabaritoCall?: CallFinishSignals;
   startedAt: string;
@@ -844,15 +883,23 @@ export interface RunRecord {
    */
   competitorOutcomeCounts?: CompetitorOutcomeCounts;
   /**
-   * Fracao (0..1, 4 casas) das chamadas de competidor + gabarito desta run que
-   * sairam TRUNCADAS no teto de tokens (IMPL-014 / R-07b:REC-2), contando cada
+   * Fracao (0..1, 4 casas) das chamadas de LLM desta run — TODOS os papeis:
+   * competidor, gabarito, juiz, duelo, datagen, reescritor — que sairam
+   * TRUNCADAS no teto de tokens (IMPL-014 / R-07b:REC-2), contando cada
    * tentativa (o retry x2 e uma chamada). Acima de `TRUNCATION_ALERT_RATE`
    * (2%) o CLI/UI alertam: o teto de tokens esta baixo para estes modelos.
-   * Ausente = record anterior ao IMPL-014.
+   * A quebra por papel esta em `finishSignalsByRole`. Ausente = record
+   * anterior ao IMPL-014.
    */
   truncationRate?: number;
   /** Numerador/denominador de `truncationRate` (chamadas com sinal de fim observado). */
   truncationCounts?: { calls: number; truncated: number };
+  /**
+   * Os 4 sinais de fim (finish_reason, native_finish_reason, raciocinio ≈ teto,
+   * conteudo vazio com tokens) AGREGADOS por papel (IMPL-014), contados no
+   * gateway para 100% das chamadas que completaram. So papeis com chamada.
+   */
+  finishSignalsByRole?: Partial<Record<CostRole, FinishSignalCounts>>;
   /** Teto de gasto configurado (ausente = sem limite). */
   budgetUsd?: number;
   /** true = a run parou porque o orcamento acabou. */
@@ -985,7 +1032,19 @@ export type RunEvent =
   | { type: 'variants.generating'; runId: string }
   | { type: 'variants.generated'; runId: string; contestants: Contestant[] }
   | { type: 'stage.generating'; runId: string; stageIndex: number }
-  | { type: 'stage.generated'; runId: string; stageIndex: number; spec: StageSpec }
+  | {
+      type: 'stage.generated';
+      runId: string;
+      stageIndex: number;
+      spec: StageSpec;
+      /** Sinais de fim da chamada do gabarito desta etapa (IMPL-014). */
+      gabaritoCall?: CallFinishSignals;
+      /**
+       * Aviso visivel (PT-BR) sobre a etapa — hoje: gabarito truncado mesmo apos
+       * o retry x2 e DESCARTADO, entao a etapa e julgada sem gabarito.
+       */
+      warning?: string;
+    }
   | { type: 'stage.failed'; runId: string; stageIndex: number; error: string }
   /**
    * Etapa marcada `incomplete` (IMPL-014): fica fora do placar e das medias.

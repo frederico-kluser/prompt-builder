@@ -47,11 +47,15 @@ Mais de 2% das chamadas bateram no `max_tokens` (`finish_reason: length`, ou o
 raciocínio comeu o teto e não sobrou resposta). Cada resposta truncada já foi
 refeita **uma vez** com o teto x2; a que continuou cortada deixa a etapa
 `incomplete` (`incompleteReason: "truncation"`), fora do placar e das médias —
-nunca vira veredito `nao`. Para corrigir: suba `--max-output-tokens` (ou
-`maxTokens` do cenário) ou baixe o esforço de raciocínio (`--effort-competitor`).
+nunca vira veredito `nao`. A taxa cobre **todos os papéis** e o alerta diz
+quais truncaram (`truncationByRole` no `--json`). Para corrigir: competidor →
+suba `--max-output-tokens` (ou `maxTokens` do cenário) ou baixe
+`--effort-competitor`; juiz, duelo ou gabarito (tetos fixos de 1024/512/1500
+tokens) → baixe `--effort-judge`. Gabarito que continuou truncado é descartado
+(`stage.generated` traz `warning`) e a etapa é julgada sem gabarito.
 
 ```bash
-prompt-builder runs show <runId> --json | jq '.data.run | {truncationRate, truncationCounts}'
+prompt-builder runs show <runId> --json | jq '.data.run | {truncationRate, truncationCounts, finishSignalsByRole}'
 ```
 
 ## Todos os vereditos vieram `parcial`

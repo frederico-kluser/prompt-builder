@@ -8,11 +8,20 @@
 // `content` vazio e `completion_tokens` todos de raciocinio.
 //
 // Modulo PURO (sem rede, sem Node): o gateway (`src/openrouter.ts`) decide o
-// `truncated` de cada chamada aqui, os papeis persistem os sinais e os dois
-// orquestradores (Node e SPA) calculam a `truncationRate` da run com a mesma
-// funcao — fonte unica, o web importa direto de `src/engine/`.
+// `truncated` de cada chamada aqui e entrega os sinais ao ledger (ponto unico
+// da contabilidade), que os agrega POR PAPEL com `tallyFinish` — e assim que o
+// juiz, o duelo, o datagen e o reescritor tem os sinais no RunRecord sem cada
+// papel persisti-los. Competidor e gabarito guardam, alem disso, os sinais
+// por chamada. Os dois orquestradores (Node e SPA) calculam a
+// `truncationRate` da run com a mesma funcao — fonte unica, o web importa
+// direto de `src/engine/`.
 
-import type { CallFinishSignals, TruncationSignal } from '../types.js';
+import type {
+  CallFinishSignals,
+  CostRole,
+  FinishSignalCounts,
+  TruncationSignal,
+} from '../types.js';
 
 /**
  * `native_finish_reason` que significam "parou no teto", comparados sem caixa:
@@ -101,11 +110,13 @@ export interface FinishedCallLike {
  * Registro persistido (`CallFinishSignals`) de uma chamada que completou. NAO
  * recalcula a decisao: ela e do gateway (`ChatCompletionResult.truncated`),
  * ponto unico — aqui so se copia o que ele observou + o teto usado.
+ * `firstAttempt`: sinais da 1a tentativa (a que truncou) quando esta chamada e
+ * o retry com teto x2 — marca `truncationRetried` e guarda os dois.
  */
 export function finishSignalsOf(
   res: FinishedCallLike,
   maxTokens: number | undefined,
-  truncationRetried = false,
+  firstAttempt?: CallFinishSignals,
 ): CallFinishSignals {
   return {
     ...(res.finishReason ? { finishReason: res.finishReason } : {}),
@@ -113,11 +124,77 @@ export function finishSignalsOf(
     ...(typeof res.reasoningTokens === 'number' ? { reasoningTokens: res.reasoningTokens } : {}),
     tokensOut: res.tokensOut,
     contentChars: res.text.length,
-    ...(typeof maxTokens === 'number' ? { maxTokens } : {}),
+    ...(typeof maxTokens === 'number' && maxTokens > 0 ? { maxTokens } : {}),
     truncated: res.truncated === true,
     ...(res.truncationSignals?.length ? { truncationSignals: [...res.truncationSignals] } : {}),
-    ...(truncationRetried ? { truncationRetried: true } : {}),
+    ...(firstAttempt ? { truncationRetried: true, firstAttempt } : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Agregado por papel (ledger -> RunRecord.finishSignalsByRole)
+// ---------------------------------------------------------------------------
+
+/** Chave do histograma quando o provedor nao mandou `finish_reason`/`native_finish_reason`. */
+export const FINISH_ABSENT = '(none)';
+/** Chave que absorve motivos novos depois de `MAX_REASON_KEYS` distintos (record limitado). */
+export const FINISH_OTHER = '(other)';
+/** Teto de chaves distintas por histograma: o texto vem do provedor, o record e reescrito inteiro a cada save. */
+export const MAX_REASON_KEYS = 24;
+
+export function emptyFinishCounts(): FinishSignalCounts {
+  return { calls: 0, truncated: 0, finishReasons: {}, nativeFinishReasons: {}, signals: {} };
+}
+
+function bumpReason(hist: Record<string, number>, raw: string | undefined): void {
+  const key = raw?.trim().slice(0, 48) || FINISH_ABSENT;
+  const slot = key in hist || Object.keys(hist).length < MAX_REASON_KEYS ? key : FINISH_OTHER;
+  hist[slot] = (hist[slot] ?? 0) + 1;
+}
+
+/**
+ * Soma UMA chamada que completou ao agregado do papel (muta `counts`). Os 4
+ * sinais do R-07b:REC-2 ficam contados: motivo normalizado, motivo nativo,
+ * raciocinio ≈ teto e conteudo vazio com tokens (os dois ultimos em `signals`).
+ */
+export function tallyFinish(counts: FinishSignalCounts, call: CallFinishSignals): FinishSignalCounts {
+  counts.calls += 1;
+  if (call.truncated) counts.truncated += 1;
+  bumpReason(counts.finishReasons, call.finishReason);
+  bumpReason(counts.nativeFinishReasons, call.nativeFinishReason);
+  for (const sinal of call.truncationSignals ?? []) {
+    counts.signals[sinal] = (counts.signals[sinal] ?? 0) + 1;
+  }
+  return counts;
+}
+
+/** Copia profunda (o record nao pode compartilhar objeto vivo com o ledger). */
+export function cloneFinishCounts(c: FinishSignalCounts): FinishSignalCounts {
+  return {
+    calls: c.calls,
+    truncated: c.truncated,
+    finishReasons: { ...c.finishReasons },
+    nativeFinishReasons: { ...c.nativeFinishReasons },
+    signals: { ...c.signals },
+  };
+}
+
+/**
+ * Taxa de truncamento da RUN a partir do agregado por papel: TODAS as chamadas
+ * que completaram, de todo papel (competidor, gabarito, juiz, duelo, datagen,
+ * reescritor). E o que vai para `RunRecord.truncationRate`/`truncationCounts`.
+ */
+export function truncationStatsByRole(
+  byRole: Partial<Record<CostRole, Pick<FinishSignalCounts, 'calls' | 'truncated'>>> | undefined,
+): TruncationStats {
+  let calls = 0;
+  let truncated = 0;
+  for (const c of Object.values(byRole ?? {})) {
+    if (!c) continue;
+    calls += c.calls;
+    truncated += c.truncated;
+  }
+  return { calls, truncated, rate: calls > 0 ? Number((truncated / calls).toFixed(4)) : 0 };
 }
 
 /** Teto do retry por truncamento (inteiro, nunca menor que o original + 1). */
@@ -141,11 +218,14 @@ export interface TruncationStats {
 }
 
 /**
- * Taxa de truncamento da run: competidores + gabaritos, CADA TENTATIVA conta
- * (a 1a tentativa que truncou e foi repetida tambem e uma chamada truncada — e
- * justamente o que calibra o teto, R-07b:REC-1). Respostas sem `truncated`
- * (erro de infra, 403, records antigos, agente) ficam fora do denominador.
- * Puro e idempotente: recalculado do record inteiro, nunca incrementado.
+ * Visao POR ETAPA do truncamento — so competidores + gabaritos, derivada do
+ * que o record guarda por chamada (CADA TENTATIVA conta: a 1a que truncou e
+ * foi repetida tambem e uma chamada truncada — e justamente o que calibra o
+ * teto, R-07b:REC-1). Respostas sem `truncated` (erro de infra, 403, records
+ * antigos, agente) ficam fora do denominador. A `truncationRate` da run vem
+ * do agregado por papel (`truncationStatsByRole`), que cobre tambem juiz,
+ * duelo e datagen; esta funcao e a conferencia independente das duas fatias
+ * que tem sinal por chamada. Puro e idempotente.
  */
 export function truncationStats(stages: ReadonlyArray<StageLike>): TruncationStats {
   let calls = 0;
@@ -172,15 +252,52 @@ export function truncationStats(stages: ReadonlyArray<StageLike>): TruncationSta
 }
 
 /**
- * Mensagem de alerta (PT-BR) quando a taxa passa de 2%; `undefined` abaixo.
- * Estritamente ACIMA do limiar ("> 2%"), como no criterio da pesquisa.
+ * Os campos de truncamento do RunRecord a partir do agregado por papel do
+ * ledger — o MESMO calculo nos dois orquestradores (chamado no `syncLedger`).
  */
-export function truncationAlert(stats: Pick<TruncationStats, 'calls' | 'truncated' | 'rate'>): string | undefined {
+export function truncationRecordFields(finishByRole: Partial<Record<CostRole, FinishSignalCounts>>): {
+  finishSignalsByRole: Partial<Record<CostRole, FinishSignalCounts>>;
+  truncationRate: number;
+  truncationCounts: { calls: number; truncated: number };
+} {
+  const t = truncationStatsByRole(finishByRole);
+  return {
+    finishSignalsByRole: finishByRole,
+    truncationRate: t.rate,
+    truncationCounts: { calls: t.calls, truncated: t.truncated },
+  };
+}
+
+/** Rotulo PT-BR de cada papel no texto do alerta (espelha `ROLE_LABEL` de budget.ts sem importa-lo: sem ciclo). */
+const ROLE_PT: Record<CostRole, string> = {
+  datagen: 'datagen',
+  gabarito: 'gabarito',
+  competitor: 'competidor',
+  judge: 'juiz',
+  duel: 'duelo',
+  rewriter: 'reescritor',
+  agent: 'agente',
+};
+
+/**
+ * Mensagem de alerta (PT-BR) quando a taxa passa de 2%; `undefined` abaixo.
+ * Estritamente ACIMA do limiar ("> 2%"), como no criterio da pesquisa. Com
+ * `byRole`, diz QUAIS papeis truncaram — o teto a subir (ou o esforco a
+ * baixar) depende de quem foi cortado: competidor, gabarito ou juiz.
+ */
+export function truncationAlert(
+  stats: Pick<TruncationStats, 'calls' | 'truncated' | 'rate'>,
+  byRole?: Partial<Record<CostRole, Pick<FinishSignalCounts, 'calls' | 'truncated'>>>,
+): string | undefined {
   if (!(stats.calls > 0) || !(stats.rate > TRUNCATION_ALERT_RATE)) return undefined;
   const pct = (stats.rate * 100).toFixed(1).replace('.', ',');
+  const papeis = Object.entries(byRole ?? {})
+    .filter(([, c]) => c && c.truncated > 0)
+    .map(([role, c]) => `${ROLE_PT[role as CostRole] ?? role} ${c!.truncated} de ${c!.calls}`);
   return (
-    `${stats.truncated} de ${stats.calls} chamadas (${pct}%) saíram truncadas no teto de tokens — ` +
-    `acima do limite de ${(TRUNCATION_ALERT_RATE * 100).toFixed(0)}%. Etapas com resposta truncada ficaram ` +
+    `${stats.truncated} de ${stats.calls} chamadas (${pct}%) saíram truncadas no teto de tokens` +
+    (papeis.length ? ` (${papeis.join(', ')})` : '') +
+    ` — acima do limite de ${(TRUNCATION_ALERT_RATE * 100).toFixed(0)}%. Etapas com resposta truncada ficaram ` +
     `fora do placar; aumente o teto (maxTokens/--max-output-tokens) ou baixe o esforço de raciocínio.`
   );
 }
@@ -205,5 +322,20 @@ export function describeTruncatedStage(
   return (
     `Etapa ${stageIndex + 1} incompleta por truncamento: ${quem} — resposta cortada no teto de tokens ` +
     `mesmo após o retry com teto x2. Etapa fora do placar e das médias (não foi julgada).`
+  );
+}
+
+/**
+ * Aviso (PT-BR) do gabarito que CONTINUOU truncado depois do retry x2 e foi
+ * descartado — vai no evento `stage.generated` (`warning`) dos dois
+ * orquestradores. Regua cortada nao julga ninguem: a etapa segue SEM gabarito
+ * (juiz listwise), fora do judge-score por referencia.
+ */
+export function describeTruncatedReference(stageIndex: number, call: CallFinishSignals): string {
+  const sinais = call.truncationSignals?.length ? `; sinais: ${call.truncationSignals.join(', ')}` : '';
+  return (
+    `Gabarito da etapa ${stageIndex + 1} truncado no teto de ${call.maxTokens ?? '?'} tokens mesmo após o ` +
+    `retry com teto x2 (${call.finishReason ?? call.nativeFinishReason ?? 'sem finish_reason'}${sinais}) — ` +
+    `descartado; a etapa é julgada SEM gabarito (juiz listwise) e fica fora do judge-score por referência.`
   );
 }

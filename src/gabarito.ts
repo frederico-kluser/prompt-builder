@@ -104,16 +104,21 @@ export async function generateReferences(
         // Truncamento (IMPL-014 / R-07b:DEC-2): UM retry com teto x2. E o
         // modo de falha tipico do gabarito — juiz/referencia com raciocinio
         // alto consome os 1500 tokens e devolve `length` com conteudo vazio.
+        // Os sinais da 1a tentativa (a truncada) ficam em `firstAttempt`:
+        // qual sinal disparou e quanto raciocinio ela gastou calibram o teto.
         if (result.truncated) {
+          const primeira = ultima;
           maxTokens = retryMaxTokens(maxTokens);
           result = await chamar(maxTokens);
-          ultima = finishSignalsOf(result, maxTokens, true);
+          ultima = finishSignalsOf(result, maxTokens, primeira);
         }
         const reference = result.text.trim();
         if (result.truncated) {
           // Regua CORTADA nao julga ninguem: descartada, a etapa segue sem
           // `reference` (mesma degradacao do gabarito vazio). O sinal fica
-          // persistido em `StageRecord.gabaritoCall` e entra na truncationRate.
+          // persistido em `StageRecord.gabaritoCall`, entra na truncationRate e
+          // o orquestrador AVISA no `stage.generated` (`warning`) — ver
+          // `describeTruncatedReference`.
           console.warn(
             `[gabarito] referência da etapa ${index + 1} truncada no teto mesmo com max_tokens=${maxTokens}; descartada.`,
           );

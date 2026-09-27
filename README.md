@@ -611,8 +611,10 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
 - **Truncamento nunca é silencioso:** o gateway lê `finish_reason`/`native_finish_reason` (JSON e
   stream) + raciocínio ≈ teto + conteúdo vazio com tokens; competidor e gabarito repetem 1x com
   `max_tokens` x2. Resposta ainda truncada deixa a etapa `incomplete` (`incompleteReason:
-  truncation`), fora do placar e das médias; o record traz `truncationRate` e o CLI/UI alertam
-  acima de 2%.
+  truncation`), fora do placar e das médias; o record traz `truncationRate` (todas as chamadas,
+  juiz e duelo inclusive), os sinais de fim agregados por papel (`finishSignalsByRole`) e o
+  CLI/UI alertam acima de 2% dizendo quais papéis truncaram. Gabarito ainda truncado é
+  descartado com aviso visível (a etapa é julgada sem gabarito).
 
 ---
 

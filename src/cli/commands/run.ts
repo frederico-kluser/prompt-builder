@@ -17,7 +17,9 @@ import { isKnownPrice } from '../../engine/pricing.js';
 import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
 import { buildNetworkContext, checkKey, isAgentContext, parse, type NetworkContext } from '../context.js';
 import { emitRunEvent, emitSessionEventNdjson, truncationFields } from '../ndjson.js';
+import { ROLE_LABEL } from '../../budget.js';
 import type {
+  CostRole,
   RunConfig,
   RunMode,
   RunRecord,
@@ -449,10 +451,18 @@ function relatorioFinal(ctx: NetworkContext, record: RunRecord): void {
   // IMPL-014: truncamento no teto de tokens — etapas cortadas saem do placar.
   const trunc = truncationFields(record);
   const etapasTruncadas = record.stages.filter((s) => s.incompleteReason === 'truncation').length;
+  const gabaritosTruncados = record.stages.filter((s) => s.gabaritoCall?.truncated).length;
   if (trunc.truncationCounts && trunc.truncationCounts.truncated > 0) {
+    // Quebra por papel: o teto a subir depende de QUEM foi cortado.
+    const papeis = Object.entries(trunc.truncationByRole ?? {})
+      .filter(([, c]) => c && c.truncated > 0)
+      .map(([role, c]) => `${ROLE_LABEL[role as CostRole] ?? role} ${c!.truncated}/${c!.calls}`)
+      .join(', ');
     out.line(
       `Truncadas  ${trunc.truncationCounts.truncated} de ${trunc.truncationCounts.calls} chamadas ` +
-        `(${((trunc.truncationRate ?? 0) * 100).toFixed(1)}%) · ${etapasTruncadas} etapa(s) fora do placar`,
+        `(${((trunc.truncationRate ?? 0) * 100).toFixed(1)}%)${papeis ? ` [${papeis}]` : ''} · ` +
+        `${etapasTruncadas} etapa(s) fora do placar` +
+        (gabaritosTruncados > 0 ? ` · ${gabaritosTruncados} gabarito(s) descartado(s)` : ''),
     );
   }
 

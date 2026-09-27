@@ -1,7 +1,8 @@
 import { chatCompletionStream, isGatewayBlocked } from './openrouter.js';
 import { isControlSignal } from './budget.js';
-import { retryMaxTokens } from './engine/truncation.js';
+import { finishSignalsOf, retryMaxTokens } from './engine/truncation.js';
 import type {
+  CallFinishSignals,
   CompetitorOutcomeCounts,
   CompetitorResponse,
   CompetitorStatus,
@@ -68,6 +69,14 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
   let truncationRetried = false;
   /** Custo da 1a tentativa truncada — o dinheiro saiu, entra no costUsd final. */
   let spentOnTruncated = 0;
+  /**
+   * Sinais da 1a tentativa (a truncada): sem isto so sobrava `truncationRetried`
+   * e uma linha de log — qual sinal disparou e quanto raciocinio ela gastou
+   * (o que calibra o teto) se perdiam. Persistidos em `firstAttempt`.
+   */
+  let firstAttempt: CallFinishSignals | undefined;
+  const retryFields = (): Pick<CompetitorResponse, 'truncationRetried' | 'firstAttempt'> =>
+    truncationRetried ? { truncationRetried: true, ...(firstAttempt ? { firstAttempt } : {}) } : {};
 
   let attempt = 0;
   let lastError: unknown;
@@ -115,6 +124,7 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
       if (truncated && !truncationRetried) {
         truncationRetried = true;
         spentOnTruncated += res.cost.usd;
+        firstAttempt = finishSignalsOf(res, maxTokens);
         maxTokens = retryMaxTokens(maxTokens);
         console.error(
           `[competitor ${modelId}] resposta truncada no teto (${(res.truncationSignals ?? []).join(', ')}); ` +
@@ -143,7 +153,7 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
         ...(typeof res.reasoningTokens === 'number' ? { reasoningTokens: res.reasoningTokens } : {}),
         maxTokens,
         ...(res.truncationSignals?.length ? { truncationSignals: res.truncationSignals } : {}),
-        ...(truncationRetried ? { truncationRetried: true } : {}),
+        ...retryFields(),
       };
     } catch (err) {
       // Orcamento/cancelamento sao SINAIS DE CONTROLE: repetir a chamada so
@@ -166,7 +176,7 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
           costUsd: spentOnTruncated,
           status: 'blocked',
           errorMsg: err.message,
-          ...(truncationRetried ? { truncationRetried: true } : {}),
+          ...retryFields(),
         };
       }
       lastError = err;
@@ -186,7 +196,7 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
     costUsd: spentOnTruncated,
     status: 'error',
     errorMsg: lastError instanceof Error ? lastError.message : String(lastError),
-    ...(truncationRetried ? { truncationRetried: true } : {}),
+    ...retryFields(),
   };
 }
 

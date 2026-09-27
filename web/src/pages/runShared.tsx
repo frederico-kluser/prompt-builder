@@ -214,19 +214,26 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
         <div className="min-w-fit">
           <div className="grid items-center gap-1 pb-1.5" style={gridStyle}>
             <div />
-            {stages.map((s, i) => (
-              <div
-                key={s.index}
-                title={onStageClick ? `Cenário ${i + 1} — clique para abrir` : `Cenário ${i + 1}`}
-                className={cn(
-                  'grid h-6 place-items-center rounded-[5px] text-[11px] text-muted-foreground tabular',
-                  onStageClick && 'cursor-pointer hover:bg-muted focus-visible:bg-muted focus-visible:outline-none',
-                )}
-                {...clickProps(s.index)}
-              >
-                {i + 1}
-              </div>
-            ))}
+            {stages.map((s, i) => {
+              // IMPL-014: gabarito truncado mesmo após o retry x2 foi descartado —
+              // o cenário é julgado SEM régua (listwise). Marca visível no cabeçalho.
+              const semRegua = s.gabaritoCall?.truncated === true;
+              const base = `Cenário ${i + 1}${semRegua ? ' — gabarito truncado no teto e descartado: julgado sem gabarito' : ''}`;
+              return (
+                <div
+                  key={s.index}
+                  title={onStageClick ? `${base} — clique para abrir` : base}
+                  className={cn(
+                    'grid h-6 place-items-center rounded-[5px] text-[11px] text-muted-foreground tabular',
+                    semRegua && 'underline decoration-dotted underline-offset-2',
+                    onStageClick && 'cursor-pointer hover:bg-muted focus-visible:bg-muted focus-visible:outline-none',
+                  )}
+                  {...clickProps(s.index)}
+                >
+                  {semRegua ? `${i + 1}✂` : i + 1}
+                </div>
+              );
+            })}
             <div
               className="pr-1 text-right text-[11px] text-muted-foreground"
               title="(resolve + ½·parcial) ÷ julgados × 100"
@@ -492,7 +499,11 @@ export function applyEvent(prev: RunRecord, event: any): RunRecord {
     }
     case 'stage.generated': {
       const s = next.stages[event.stageIndex];
-      if (s) s.spec = event.spec;
+      if (s) {
+        s.spec = event.spec;
+        // IMPL-014: sinais do gabarito (inclusive "truncado e descartado").
+        if (event.gabaritoCall) s.gabaritoCall = event.gabaritoCall;
+      }
       return next;
     }
     case 'stage.incomplete': {

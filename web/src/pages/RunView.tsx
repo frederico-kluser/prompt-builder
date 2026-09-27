@@ -450,12 +450,21 @@ function StageRow({ stage, byId, contestants }: StageRowProps) {
           <span className="shrink-0 font-mono text-[12px] text-muted-foreground tabular">{numLabel}</span>
           <span className="min-w-0 flex-1 truncate text-[13px]">{snippet}</span>
           {stage.error && <Tag className="shrink-0">pulado</Tag>}
+          {stage.gabaritoCall?.truncated && <Tag className="shrink-0">gabarito truncado</Tag>}
         </span>
       </AccordionTrigger>
       <AccordionPanel className="px-4 pb-4">
         {stage.error && (
           <Banner className="mb-4">
             <strong>Cenário pulado:</strong> {stage.error}
+          </Banner>
+        )}
+        {/* IMPL-014: régua cortada não julga ninguém — o gabarito foi descartado. */}
+        {stage.gabaritoCall?.truncated && (
+          <Banner tone="warn" className="mb-4">
+            <strong>Gabarito truncado:</strong> cortado no teto de {stage.gabaritoCall.maxTokens ?? '?'} tokens
+            mesmo após o retry com teto x2 ({stage.gabaritoCall.finishReason ?? stage.gabaritoCall.nativeFinishReason ?? 'sem finish_reason'}).
+            Foi descartado: este cenário é julgado sem gabarito (juiz listwise) e fica fora do judge-score por referência.
           </Banner>
         )}
 
@@ -522,7 +531,11 @@ function StageRow({ stage, byId, contestants }: StageRowProps) {
                       </span>
                     )}
                     {!r.truncated && r.truncationRetried && (
-                      <span className="text-muted-foreground"> · truncou na 1ª tentativa; refeita com teto {r.maxTokens}</span>
+                      <span className="text-muted-foreground">
+                        {' '}· truncou na 1ª tentativa
+                        {r.firstAttempt?.truncationSignals?.length ? ` (${r.firstAttempt.truncationSignals.join(', ')})` : ''}
+                        ; refeita com teto {r.maxTokens}
+                      </span>
                     )}
                   </div>
                   {explanation && (

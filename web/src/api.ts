@@ -6,12 +6,18 @@ import type {
   CallFinishSignals,
   CostEntry,
   CostRole,
+  FinishSignalCounts,
   RunCtx,
   StageIncompleteReason,
   TruncationSignal,
 } from '../../src/types.js';
 export type { CostEntry, CostRole } from '../../src/types.js';
-export type { CallFinishSignals, StageIncompleteReason, TruncationSignal } from '../../src/types.js';
+export type {
+  CallFinishSignals,
+  FinishSignalCounts,
+  StageIncompleteReason,
+  TruncationSignal,
+} from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
 import type { LgpdData } from './lgpd';
@@ -200,6 +206,8 @@ export interface CompetitorResponse {
   maxTokens?: number;
   truncationSignals?: TruncationSignal[];
   truncationRetried?: boolean;
+  /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
+  firstAttempt?: CallFinishSignals;
 }
 
 export interface StageSpec {
@@ -370,9 +378,11 @@ export interface RunRecord {
   upstreamCostUsd?: number;
   /** Desfechos não-ok dos competidores, separados (IMPL-010): bloqueio ≠ recusa ≠ erro. */
   competitorOutcomeCounts?: { blocked: number; refused: number; error: number };
-  /** Fração de chamadas (competidor + gabarito) truncadas no teto (IMPL-014); alerta acima de 2%. */
+  /** Fração das chamadas de LLM da run (todos os papéis) truncadas no teto (IMPL-014); alerta acima de 2%. */
   truncationRate?: number;
   truncationCounts?: { calls: number; truncated: number };
+  /** Os 4 sinais de fim agregados por papel — 100% das chamadas que completaram (IMPL-014). */
+  finishSignalsByRole?: Partial<Record<CostRole, FinishSignalCounts>>;
   startedAt: string;
   finishedAt?: string;
   error?: string;

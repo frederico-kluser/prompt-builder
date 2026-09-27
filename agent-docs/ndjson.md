@@ -18,7 +18,7 @@ O stream **sempre** abre em `start` e **sempre** termina em `result`.
 | `start` | primeira linha | `command`, `runId` ou `sessionId` |
 | `run.started` | run começou | `mode`, `stages`, `contestants[]` |
 | `variants.generating` / `variants.generated` | geração de variantes | `contestants[]` |
-| `stage.generating` / `stage.generated` | cenários | `stageIndex`, `question`, `hasReference` |
+| `stage.generating` / `stage.generated` | cenários | `stageIndex`, `question`, `hasReference`; `referenceTruncated` + `warning` quando o gabarito truncou mesmo após o retry x2 e foi descartado (etapa julgada sem gabarito) |
 | `progress` | lotes agregados | `phase` (`gabarito` \| `duels`), `done`, `total` |
 | `competitor.finished` | uma resposta pronta | `contestantId`, `status` (`ok`\|`blocked`\|`refused`\|`error`), `tokensIn/Out`, `costUsd`, `chars`, `truncated`/`truncationRetried` (só quando `true`) |
 | `stage.incomplete` | etapa fora do placar e das médias | `stageIndex`, `reason` (`truncation`), `detail`, `contestantIds` (quem truncou) |
@@ -27,7 +27,7 @@ O stream **sempre** abre em `start` e **sempre** termina em `result`.
 | `stage.dueled` | duelos de um cenário | `pairs[]` |
 | `budget` | gasto acumulado | `spentUsd`, `budgetUsd`, `byRole` |
 | `budget.gate` | uma porta decidiu | `phase`, `projectedUsd`, `remainingUsd`, `decision` |
-| `run.finished` | run terminou | `status`, `totalCostUsd`, `standings`, `competitorOutcomeCounts`, `truncationRate`/`truncationCounts` (+ `truncationAlert` acima de 2%) |
+| `run.finished` | run terminou | `status`, `totalCostUsd`, `standings`, `competitorOutcomeCounts`, `truncationRate`/`truncationCounts`/`truncationByRole` (todos os papéis; + `truncationAlert` acima de 2%) |
 | `iteration.started` / `iteration.finished` / `iteration.promoted` | treino | `iteration`, `runId`, `gain` |
 | `session.holdout` / `session.converged` / `session.finished` | treino | ver `docs train` |
 | `result` | última linha | `ok`, `status`, `totalCostUsd`, `budgetExhausted`, … |

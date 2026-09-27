@@ -57,7 +57,7 @@
     "topic": "troubleshooting",
     "title": "Problemas comuns",
     "summary": "400 no esforço, 402 sem crédito, 403 = bloqueio (não é key), truncamento > 2%, tudo 'parcial', run travada",
-    "approxTokens": 1050
+    "approxTokens": 1150
   },
   {
     "topic": "config",

@@ -18,10 +18,11 @@ import { contestantsFromConfig } from './normalize';
 import { listModels } from './openrouter';
 import { BudgetLedger, isControlSignal } from '../../../src/budget.js';
 import {
+  describeTruncatedReference,
   describeTruncatedStage,
   truncatedResponses,
   truncationAlert,
-  truncationStats,
+  truncationRecordFields,
 } from '../../../src/engine/truncation.js';
 import type {
   CallFinishSignals,
@@ -96,13 +97,9 @@ function syncLedger(record: RunRecord, ledger: BudgetLedger): void {
   record.costByRole = snap.byRole;
   record.costAccuracy = snap.accuracy;
   if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
-}
-
-/** Taxa de truncamento do record inteiro (IMPL-014) — mesma funcao pura do Node. */
-function syncTruncation(record: RunRecord): void {
-  const t = truncationStats(record.stages);
-  record.truncationRate = t.rate;
-  record.truncationCounts = { calls: t.calls, truncated: t.truncated };
+  // IMPL-014 (espelho do Node): sinais de fim por papel + taxa de truncamento
+  // da run, do MESMO ponto unico do custo — 100% das chamadas, juiz inclusive.
+  Object.assign(record, truncationRecordFields(snap.finishByRole));
 }
 
 /**
@@ -390,10 +387,21 @@ async function runLoop(
   specs.forEach((spec, i) => {
     record.stages[i].spec = spec;
     // O gabarito e UMA chamada por cenario: com repeats, so o 1o clone guarda
-    // os sinais (senao a truncationRate contaria a mesma chamada N vezes).
+    // os sinais (senao a visao por etapa contaria a mesma chamada N vezes).
     const call = i % repeats === 0 ? gabaritoCalls.get(i / repeats) : undefined;
     if (call) record.stages[i].gabaritoCall = call;
-    emitEvent({ type: 'stage.generated', runId, stageIndex: i, spec });
+    // Gabarito truncado apos o retry x2 foi descartado: aviso VISIVEL (Node idem),
+    // um por gabarito — com repeats, no 1o clone (onde a chamada fica persistida).
+    const warning = call?.truncated ? describeTruncatedReference(i, call) : undefined;
+    if (warning) log(runId, warning);
+    emitEvent({
+      type: 'stage.generated',
+      runId,
+      stageIndex: i,
+      spec,
+      ...(call ? { gabaritoCall: call } : {}),
+      ...(warning ? { warning } : {}),
+    });
   });
   for (let i = specs.length; i < record.stages.length; i++) {
     const msg = `Datagen entregou menos cenarios que o alvo apos dedup/falha de lote; etapa descartada.`;
@@ -401,7 +409,7 @@ async function runLoop(
     record.stages[i].finishedAt = nowIso();
     emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
   }
-  syncTruncation(record);
+  syncLedger(record, ledger);
   scheduleSave();
 
   // Contestants ja sao finais aqui (opts.prepare rodou). Controle = ancora do
@@ -449,7 +457,6 @@ async function runLoop(
             // Bloqueio (defesa do gateway) ≠ recusa do modelo ≠ erro de infra —
             // tres contagens separadas no record (IMPL-010 / R-21:REC-6).
             record.competitorOutcomeCounts = countCompetitorOutcomes(record.stages);
-            syncTruncation(record);
             // Total verdadeiro vem do ledger (juiz/duelo/datagen nao sao
             // atribuiveis a um contestant); `costByContestant` segue sendo a
             // fatia dos competidores — agora com o custo MEDIDO (usage.cost).
@@ -767,9 +774,13 @@ async function runLoop(
       // Bloqueio NAO e erro de key nem falha do prompt: e a defesa do gateway.
       log(runId, 'desfechos dos competidores (bloqueio ≠ recusa ≠ erro)', { ...desfechos });
     }
-    // IMPL-014: acima de 2% de chamadas truncadas o teto esta baixo p/ estes modelos.
-    syncTruncation(record);
-    const alertaTrunc = truncationAlert({ ...record.truncationCounts!, rate: record.truncationRate! });
+    // IMPL-014: acima de 2% de chamadas truncadas (TODOS os papeis) o teto
+    // esta baixo p/ estes modelos; o alerta diz quais papeis truncaram.
+    syncLedger(record, ledger);
+    const alertaTrunc = truncationAlert(
+      { ...record.truncationCounts!, rate: record.truncationRate! },
+      record.finishSignalsByRole,
+    );
     if (alertaTrunc) log(runId, `ALERTA de truncamento: ${alertaTrunc}`);
   } catch (err) {
     // Diagnostico e SUPORTE, nunca derruba a finalizacao.

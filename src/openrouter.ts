@@ -1,8 +1,9 @@
 import { applyReasoning } from './reasoning.js';
 import { classifyPrice, priceTokens, type PriceFieldKind } from './engine/pricing.js';
-import { isTruncated, truncationSignals } from './engine/truncation.js';
+import { finishSignalsOf, isTruncated, truncationSignals } from './engine/truncation.js';
 import type {
   CallCost,
+  CallFinishSignals,
   CostRole,
   CostSink,
   ModelReasoningMeta,
@@ -475,6 +476,16 @@ export function blockFromFinishReason(
 /** Texto de `refusal` (protocolo OpenAI) — so string nao vazia conta. */
 function refusalText(v: unknown): string | undefined {
   return typeof v === 'string' && v.trim().length > 0 ? v : undefined;
+}
+
+/**
+ * `finish_reason`/`native_finish_reason` so contam como string nao vazia. Os
+ * sinais de fim sao calculados ANTES da contabilidade (vao junto no `note`):
+ * um valor malformado de provedor (numero, objeto) nao pode lancar ali e fazer
+ * uma chamada ja cobrada sumir dos livros.
+ */
+function finishText(v: unknown): string | undefined {
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
 
 /**
@@ -1143,11 +1154,17 @@ export class OpenRouterGateway {
     return body;
   }
 
-  /** O PONTO UNICO da contabilidade: precifica e lanca no ledger (role + sink). */
+  /**
+   * O PONTO UNICO da contabilidade: precifica e lanca no ledger (role + sink).
+   * `finish` (IMPL-014): os sinais de fim da chamada que COMPLETOU vao junto —
+   * e assim que TODO papel (juiz e duelo inclusive) tem finish_reason/
+   * native_finish_reason/truncamento no RunRecord (`finishSignalsByRole`).
+   */
   private account(
     params: ChatCompletionParams,
     reservation: ReturnType<CostSink['reserve']> | undefined,
     usage: UsageInfo,
+    finish?: CallFinishSignals,
   ): CallCost {
     const role = params.role ?? 'competitor';
     const cost = priceUsage(usage, this.cachedModel(params.apiKey, params.modelId));
@@ -1158,6 +1175,7 @@ export class OpenRouterGateway {
         cost,
         tokensIn: usage.tokensIn,
         tokensOut: usage.tokensOut,
+        ...(finish ? { finish } : {}),
       });
     }
     return cost;
@@ -1229,22 +1247,14 @@ export class OpenRouterGateway {
       };
 
       const usage = extractUsage(json.usage);
-      // Contabiliza ANTES do throw in-band: uma resposta 200 com corpo de erro
-      // (provider rejeitou um parametro) JA foi cobrada. Sem isto ela sai de
-      // graca nos livros e cara na fatura.
-      const cost = this.account(params, reservation, usage);
-
       const choice = json.choices?.[0];
       const text = choice?.message?.content ?? '';
-      const finishReason = choice?.finish_reason ?? undefined;
-      const nativeFinishReason = choice?.native_finish_reason ?? undefined;
+      const finishReason = finishText(choice?.finish_reason);
+      const nativeFinishReason = finishText(choice?.native_finish_reason);
       const inBandBlock = json.error ? blockFromErrorBody(json.error, undefined, 'in_band') : undefined;
       // OpenRouter as vezes devolve 200 com um corpo de erro (ex.: provider
       // rejeitou um parametro). Sem isto a falha viraria "resposta vazia" muda.
-      if (!text && json.error) {
-        if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
-        throw new Error(`OpenRouter: ${json.error.message ?? JSON.stringify(json.error)}`);
-      }
+      const inBandFailure = !text && Boolean(json.error);
       const blocked = inBandBlock ?? blockFromFinishReason(finishReason, nativeFinishReason);
       const refusal = refusalText(choice?.message?.refusal);
       const trunc = this.truncationOf(
@@ -1255,6 +1265,25 @@ export class OpenRouterGateway {
         nativeFinishReason,
         Boolean(blocked || refusal),
       );
+      // Contabiliza ANTES do throw in-band: uma resposta 200 com corpo de erro
+      // (provider rejeitou um parametro) JA foi cobrada. Sem isto ela sai de
+      // graca nos livros e cara na fatura. Os sinais de fim so vao junto
+      // quando a chamada completou (a falha in-band nao tem fim a medir).
+      const cost = this.account(
+        params,
+        reservation,
+        usage,
+        inBandFailure
+          ? undefined
+          : finishSignalsOf(
+              { text, tokensOut: usage.tokensOut, reasoningTokens: usage.reasoningTokens, finishReason, nativeFinishReason, ...trunc },
+              maxTokens,
+            ),
+      );
+      if (inBandFailure && json.error) {
+        if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
+        throw new Error(`OpenRouter: ${json.error.message ?? JSON.stringify(json.error)}`);
+      }
 
       ok = true;
       return {
@@ -1355,8 +1384,8 @@ export class OpenRouterGateway {
               onDelta?.(delta, fullText);
             }
             if (typeof choice?.delta?.refusal === 'string') refusal += choice.delta.refusal;
-            if (choice?.finish_reason) finishReason = choice.finish_reason;
-            if (choice?.native_finish_reason) nativeFinishReason = choice.native_finish_reason;
+            finishReason = finishText(choice?.finish_reason) ?? finishReason;
+            nativeFinishReason = finishText(choice?.native_finish_reason) ?? nativeFinishReason;
             if (chunk.usage) usageRaw = chunk.usage;
           } catch {
             // chunk JSON invalido, ignora
@@ -1365,17 +1394,11 @@ export class OpenRouterGateway {
       }
 
       const usage = extractUsage(usageRaw);
-      // Contabiliza antes do throw in-band — a chamada ja foi cobrada.
-      const cost = this.account(params, reservation, usage);
 
       // Erro no MEIO do stream chega como chunk `{ error, finish_reason: 'error' }`
       // (o HTTP ja foi 200): moderacao aqui e bloqueio, nao "resposta vazia".
       const inBandBlock = streamError ? blockFromErrorBody(streamError, undefined, 'in_band') : undefined;
-      // Resposta vazia + erro in-band (provider rejeitou parametro etc.): falha alto.
-      if (!fullText && streamError) {
-        if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
-        throw new Error(`OpenRouter: ${streamError.message ?? JSON.stringify(streamError)}`);
-      }
+      const inBandFailure = !fullText && Boolean(streamError);
       const blocked = inBandBlock ?? blockFromFinishReason(finishReason, nativeFinishReason);
       const refusalFinal = refusalText(refusal);
       // No stream o finish_reason chega no penultimo chunk e o usage (com
@@ -1389,6 +1412,31 @@ export class OpenRouterGateway {
         nativeFinishReason,
         Boolean(blocked || refusalFinal),
       );
+      // Contabiliza antes do throw in-band — a chamada ja foi cobrada. Sinais
+      // de fim so quando a chamada completou.
+      const cost = this.account(
+        params,
+        reservation,
+        usage,
+        inBandFailure
+          ? undefined
+          : finishSignalsOf(
+              {
+                text: fullText,
+                tokensOut: usage.tokensOut,
+                reasoningTokens: usage.reasoningTokens,
+                finishReason,
+                nativeFinishReason,
+                ...trunc,
+              },
+              maxTokens,
+            ),
+      );
+      // Resposta vazia + erro in-band (provider rejeitou parametro etc.): falha alto.
+      if (inBandFailure && streamError) {
+        if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
+        throw new Error(`OpenRouter: ${streamError.message ?? JSON.stringify(streamError)}`);
+      }
 
       const latencyMs = Date.now() - startedAt;
       ok = true;

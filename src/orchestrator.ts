@@ -20,10 +20,11 @@ import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { listModels } from './openrouter.js';
 import {
+  describeTruncatedReference,
   describeTruncatedStage,
   truncatedResponses,
   truncationAlert,
-  truncationStats,
+  truncationRecordFields,
 } from './engine/truncation.js';
 import { runAgentStage, aggregateAgentVerdict } from './agent/runAgentStage.js';
 import type {
@@ -362,20 +363,19 @@ async function runLoop(
     return false;
   };
 
-  /** Copia o ledger para o record (chamado nos marcos e no fim). */
+  /**
+   * Copia o ledger para o record (chamado nos marcos e no fim). Inclui os
+   * sinais de fim por papel e a taxa de truncamento da run (IMPL-014): o
+   * gateway os entrega ao ledger no mesmo ponto unico do custo, entao cobrem
+   * 100% das chamadas que completaram — juiz e duelo inclusive.
+   */
   const syncLedger = (): void => {
     const snap = ledger.snapshot();
     record.totalCostUsd = snap.spentUsd;
     record.costByRole = snap.byRole;
     record.costAccuracy = snap.accuracy;
     if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
-  };
-
-  /** Recalcula a taxa de truncamento do record inteiro (IMPL-014; puro e idempotente). */
-  const syncTruncation = (): void => {
-    const t = truncationStats(record.stages);
-    record.truncationRate = t.rate;
-    record.truncationCounts = { calls: t.calls, truncated: t.truncated };
+    Object.assign(record, truncationRecordFields(snap.finishByRole));
   };
 
   await saveRun(record);
@@ -540,10 +540,22 @@ async function runLoop(
   specs.forEach((spec, i) => {
     record.stages[i].spec = spec;
     // O gabarito e UMA chamada por cenario: com repeats, so o 1o clone guarda
-    // os sinais (senao a truncationRate contaria a mesma chamada N vezes).
+    // os sinais (senao a visao por etapa contaria a mesma chamada N vezes).
     const call = i % repeats === 0 ? gabaritoCalls.get(i / repeats) : undefined;
     if (call) record.stages[i].gabaritoCall = call;
-    emitEvent({ type: 'stage.generated', runId, stageIndex: i, spec });
+    // Gabarito que CONTINUOU truncado apos o retry x2 foi descartado: a etapa
+    // segue sem regua (listwise). Aviso VISIVEL — antes so um console.warn. Um aviso
+    // por gabarito: com repeats, no 1o clone (onde a chamada fica persistida).
+    const warning = call?.truncated ? describeTruncatedReference(i, call) : undefined;
+    if (warning) log(runId, warning);
+    emitEvent({
+      type: 'stage.generated',
+      runId,
+      stageIndex: i,
+      spec,
+      ...(call ? { gabaritoCall: call } : {}),
+      ...(warning ? { warning } : {}),
+    });
   });
   for (let i = specs.length; i < record.stages.length; i++) {
     const msg = `Datagen entregou menos cenarios que o alvo apos dedup/falha de lote; etapa descartada.`;
@@ -551,7 +563,7 @@ async function runLoop(
     record.stages[i].finishedAt = nowIso();
     emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
   }
-  syncTruncation();
+  syncLedger();
   scheduleSave();
 
   // Contestants ja sao finais aqui (opts.prepare rodou). Controle = ancora do
@@ -689,7 +701,6 @@ async function runLoop(
             // Bloqueio (defesa do gateway) ≠ recusa do modelo ≠ erro de infra —
             // tres contagens separadas no record (IMPL-010 / R-21:REC-6).
             record.competitorOutcomeCounts = countCompetitorOutcomes(record.stages);
-            syncTruncation();
             // `costByContestant` continua sendo a FATIA dos competidores; o
             // total verdadeiro vem do ledger (juiz/duelo/datagen nao sao
             // atribuiveis a um contestant e nao devem ser espalhados neles).
@@ -1194,9 +1205,13 @@ async function runLoop(
       // Bloqueio NAO e erro de key nem falha do prompt: e a defesa do gateway.
       log(runId, 'desfechos dos competidores (bloqueio ≠ recusa ≠ erro)', { ...desfechos });
     }
-    // IMPL-014: acima de 2% de chamadas truncadas o teto esta baixo p/ estes modelos.
-    syncTruncation();
-    const alertaTrunc = truncationAlert({ ...record.truncationCounts!, rate: record.truncationRate! });
+    // IMPL-014: acima de 2% de chamadas truncadas (TODOS os papeis) o teto
+    // esta baixo p/ estes modelos; o alerta diz quais papeis truncaram.
+    syncLedger();
+    const alertaTrunc = truncationAlert(
+      { ...record.truncationCounts!, rate: record.truncationRate! },
+      record.finishSignalsByRole,
+    );
     if (alertaTrunc) log(runId, `ALERTA de truncamento: ${alertaTrunc}`);
   } catch (err) {
     // Diagnostico e SUPORTE, nunca derruba a finalizacao.

@@ -6,6 +6,7 @@ import type {
   CallFinishSignals,
   CostEntry,
   CostRole,
+  FinishSignalCounts,
   PricingTier,
   StageIncompleteReason,
   TokenPrice,
@@ -29,7 +30,12 @@ export type {
 export { COST_ROLES } from '../../../src/types.js';
 // Sinais de fim / truncamento (IMPL-014): fonte única em src/types.ts — o
 // gateway e o competidor já são shims, os dois motores gravam o MESMO formato.
-export type { CallFinishSignals, StageIncompleteReason, TruncationSignal } from '../../../src/types.js';
+export type {
+  CallFinishSignals,
+  FinishSignalCounts,
+  StageIncompleteReason,
+  TruncationSignal,
+} from '../../../src/types.js';
 
 export interface OpenRouterModelPricing {
   /** USD por token. `null` = desconhecido ("-1"/roteador, ausente, inválido) — ver src/types.ts. */
@@ -350,6 +356,8 @@ export interface CompetitorResponse {
   truncationSignals?: TruncationSignal[];
   /** true = a 1a tentativa truncou; `costUsd` soma as duas tentativas. */
   truncationRetried?: boolean;
+  /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
+  firstAttempt?: CallFinishSignals;
 }
 
 /**
@@ -562,10 +570,12 @@ export interface RunRecord {
   upstreamCostUsd?: number;
   /** Desfechos nao-ok dos competidores, separados (blocked/refused/error) — IMPL-010. */
   competitorOutcomeCounts?: CompetitorOutcomeCounts;
-  /** Fracao de chamadas (competidor + gabarito) truncadas no teto — IMPL-014; alerta > 2%. */
+  /** Fracao das chamadas de LLM da run (TODOS os papeis) truncadas no teto — IMPL-014; alerta > 2%. */
   truncationRate?: number;
   /** Numerador/denominador de `truncationRate`. */
   truncationCounts?: { calls: number; truncated: number };
+  /** Os 4 sinais de fim agregados por papel (100% das chamadas que completaram) — IMPL-014. */
+  finishSignalsByRole?: Partial<Record<CostRole, FinishSignalCounts>>;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -678,7 +688,16 @@ export type RunEvent =
   | { type: 'variants.generating'; runId: string }
   | { type: 'variants.generated'; runId: string; contestants: Contestant[] }
   | { type: 'stage.generating'; runId: string; stageIndex: number }
-  | { type: 'stage.generated'; runId: string; stageIndex: number; spec: StageSpec }
+  | {
+      type: 'stage.generated';
+      runId: string;
+      stageIndex: number;
+      spec: StageSpec;
+      /** Sinais de fim da chamada do gabarito (IMPL-014). */
+      gabaritoCall?: CallFinishSignals;
+      /** Aviso visivel — hoje: gabarito truncado e descartado (etapa julgada sem gabarito). */
+      warning?: string;
+    }
   | { type: 'stage.failed'; runId: string; stageIndex: number; error: string }
   /** Etapa fora do placar e das medias (IMPL-014: truncamento). Sem texto de resposta. */
   | {
