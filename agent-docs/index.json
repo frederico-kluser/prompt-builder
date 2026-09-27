@@ -3,7 +3,7 @@
     "topic": "quickstart",
     "title": "Começo rápido",
     "summary": "o caminho de 6 passos e as 5 regras que evitam erro. COMECE AQUI.",
-    "approxTokens": 750
+    "approxTokens": 850
   },
   {
     "topic": "overview",
@@ -20,8 +20,8 @@
   {
     "topic": "budget",
     "title": "Orçamento e custo",
-    "summary": "como o teto para a run sem corromper o resultado; pré-voo e códigos de saída",
-    "approxTokens": 900
+    "summary": "como o teto para a run sem corromper o resultado; pré-voo em ordem, códigos de recusa e o --dry-run com paridade (wouldRefuse/requires)",
+    "approxTokens": 1350
   },
   {
     "topic": "compare",
@@ -56,8 +56,8 @@
   {
     "topic": "troubleshooting",
     "title": "Problemas comuns",
-    "summary": "400 no esforço, 402 sem crédito, tudo 'parcial', run travada",
-    "approxTokens": 700
+    "summary": "400 no esforço, 402 sem crédito, modelo fora do catálogo, tudo 'parcial', run travada",
+    "approxTokens": 850
   },
   {
     "topic": "config",

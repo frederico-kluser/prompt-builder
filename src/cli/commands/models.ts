@@ -10,7 +10,7 @@ import { filterModels, getLgpdData } from '../../lgpd.js';
 import { REASONING_LEVELS } from '../../reasoning.js';
 import { promises as fs } from 'node:fs';
 import { CliError, EXIT, fmtPerMTok } from '../output.js';
-import { buildNetworkContext, parse, type ParsedArgs } from '../context.js';
+import { buildCatalogContext, parse, type ParsedArgs } from '../context.js';
 import type { OpenRouterModel, ReasoningLevel } from '../../types.js';
 
 const OPTIONS = {
@@ -153,7 +153,9 @@ export async function cmdModels(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
   const rest = sub === argv[0] ? argv.slice(1) : argv;
   const parsed: ParsedArgs = parse(rest, OPTIONS);
-  const ctx = await buildNetworkContext(parsed);
+  // Catalogo e dado PUBLICO (GET /models responde sem Authorization): sem key,
+  // usa o cache em disco ou busca o publico — nunca exit 4 (IMPL-029).
+  const ctx = await buildCatalogContext(parsed);
   const { out, values } = ctx;
 
   // `show <id>` — tudo o que se pode ajustar naquele modelo.
@@ -213,6 +215,7 @@ export async function cmdModels(argv: string[]): Promise<number> {
           format: MODELS_EXPORT_FORMAT,
           fetchedAt: new Date().toISOString(),
           source: ctx.catalogSource,
+          scope: ctx.catalogScope,
           count: rows.length,
           data: rows,
         },

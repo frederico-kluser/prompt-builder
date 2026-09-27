@@ -12,16 +12,25 @@ import { parseArenaConfig } from '../../configFile.js';
 import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
 import { hasGabarito, toStageSpec } from '../../engine/libraryCore.js';
-import { estimateInputFromConfig, estimateRunCost, toPerMTok } from '../../estimate.js';
-import { CliError, EXIT, failAndExit, fmtUsd, renderSpend } from '../output.js';
+import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, type Output } from '../output.js';
 import {
-  buildNetworkContext,
+  buildContext,
   checkKey,
   isAgentContext,
+  loadCatalog,
   parse,
   readJsonFile,
+  tryResolveKey,
+  type CliContext,
   type NetworkContext,
 } from '../context.js';
+import {
+  budgetUsdOf,
+  runPreflight,
+  type BudgetChoice,
+  type PreflightDeps,
+  type PreflightReport,
+} from '../preflight.js';
 import { emitRunEvent, emitSessionEventNdjson } from '../ndjson.js';
 import type {
   RunConfig,
@@ -96,11 +105,14 @@ function effort(v: unknown): ReasoningLevel | undefined {
  * Orcamento. `none` = sem teto. **Ausente e sem TTY = recusa**: um agente
  * autonomo rodando sem teto por omissao e exatamente o risco que se quer
  * evitar; melhor um erro claro antes de gastar do que uma fatura surpresa.
+ * A recusa em si (`usage.budget_required`) e do pre-voo (`../preflight.ts`):
+ * assim o `--dry-run` a reporta com a estimativa em vez de morrer antes dela.
+ * Valor malformado continua erro de uso imediato.
  */
-function resolveBudget(values: Record<string, unknown>, warn: (m: string) => void): number | undefined {
+function resolveBudget(values: Record<string, unknown>, warn: (m: string) => void): BudgetChoice {
   const raw = values.budget;
   if (typeof raw === 'string' && raw.trim()) {
-    if (raw.trim().toLowerCase() === 'none') return undefined;
+    if (raw.trim().toLowerCase() === 'none') return { kind: 'none' };
     const v = Number(raw);
     if (!Number.isFinite(v) || v <= 0) {
       throw new CliError('--budget deve ser um valor em USD maior que zero, ou "none".', EXIT.USAGE, { value: raw }, {
@@ -108,24 +120,11 @@ function resolveBudget(values: Record<string, unknown>, warn: (m: string) => voi
         hint: 'Use `--budget 5` (teto de US$ 5) ou `--budget none` (sem teto, assumindo o custo).',
       });
     }
-    return v;
+    return { kind: 'usd', usd: v };
   }
-  if (isAgentContext()) {
-    throw new CliError(
-      'Faltou definir orçamento. Escolha explicitamente:\n' +
-        '  --budget 5      teto de US$ 5 para esta execução\n' +
-        '  --budget none   sem teto (assumindo o custo)\n' +
-        '(a exigência vale fora de um terminal interativo — nada foi gasto)',
-      EXIT.USAGE,
-      undefined,
-      {
-        code: 'usage.budget_required',
-        hint: 'Repita o comando com `--budget <usd>` (teto) ou `--budget none`; `--dry-run` estima o custo sem gastar.',
-      },
-    );
-  }
+  if (isAgentContext()) return { kind: 'missing' };
   warn('Sem --budget: rodando SEM teto de gasto.');
-  return undefined;
+  return { kind: 'unset' };
 }
 
 async function readConfigFile(file: string): Promise<RunConfig> {
@@ -298,120 +297,38 @@ async function buildFromFlags(
   return parsed.config;
 }
 
-/**
- * Pre-voo: catalogo quente -> key valida -> estimativa -> decisao.
- * Fora de TTY, a faixa duvidosa RECUSA em vez de perguntar — um `--yes`
- * esquecido vira um erro claro em vez de uma conta inesperada.
- */
-async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: number): Promise<void> {
-  const { out, values } = ctx;
-  const est = estimateRunCost(estimateInputFromConfig(config), ctx.models);
+/** I/O real do pre-voo: catalogo (publico sem key), `GET /key`, narracao no stderr. */
+function preflightDeps(ctx: CliContext): PreflightDeps {
+  return {
+    loadCatalog: (apiKey) => loadCatalog(ctx, apiKey),
+    checkKey,
+    info: (m) => ctx.out.info(m),
+    warn: (m) => ctx.out.warn(m),
+  };
+}
 
-  if (est.unpricedModelIds.length > 0) {
-    const msg = `modelos fora do catálogo (custo contado como zero): ${est.unpricedModelIds.join(', ')}`;
-    if (budgetUsd !== undefined) {
-      throw new CliError(
-        `Não dá para respeitar um orçamento com ${msg}. Verifique os ids com \`models list --search ...\`.`,
-        EXIT.CONFIG,
-        { unpricedModelIds: est.unpricedModelIds },
-        {
-          code: 'config.unpriced_models',
-          hint: 'Corrija os ids (`prompt-builder models list --search <nome> --json`) ou rode com `--budget none`.',
-        },
-      );
-    }
-    out.warn(msg);
-  }
-
-  out.info(
-    `Custo estimado: ${fmtUsd(est.low)} – ${fmtUsd(est.high)} ` +
-      `(${est.assumptions.stages} cenários × ${est.assumptions.contestants} participantes` +
-      (est.assumptions.iterations > 1 ? ` × até ${est.assumptions.iterations} iterações` : '') +
-      ')',
+/** Narracao do dry-run em texto (payload no stdout, como antes). */
+function renderDryRun(out: Output, config: RunConfig, rep: PreflightReport): void {
+  if (!out.isText) return;
+  out.line(JSON.stringify(config, null, 2));
+  out.line();
+  out.line(`Custo estimado: ${fmtUsd(rep.estimate.low)} – ${fmtUsd(rep.estimate.high)}`);
+  const c = rep.checks;
+  out.line(
+    'Pré-voo:        ' +
+      (c.catalog ? `catálogo ${c.catalog.models} modelos (${c.catalog.source}, ${c.catalog.scope})` : 'catálogo indisponível') +
+      ` · key ${c.key === 'ok' ? 'ok' : c.key === 'missing' ? 'ausente' : 'inválida'}` +
+      (typeof c.creditRemainingUsd === 'number' ? ` · saldo ${fmtUsd(c.creditRemainingUsd)}` : ''),
   );
-
-  // Teto por requisicao: um valor apertado demais vira 404 "No allowed
-  // providers" em runtime — que NAO e sinal de controle e viraria veredito
-  // 'parcial'. Recusar aqui e o que impede a run corrompida.
-  const cap = config.maxPricePerMTok;
-  if (cap) {
-    const usados = new Set<string>([
-      ...(config.mode === 'compare'
-        ? (config.competitorModelIds ?? config.competitorConfigs?.map((c) => c.modelId) ?? [])
-        : [config.contestantModelId]),
-      ...config.judgeModelIds,
-      config.datagenModelId,
-    ]);
-    for (const id of usados) {
-      const m = ctx.models.find((x) => x.id === id);
-      if (!m) continue;
-      if (cap.prompt !== undefined && toPerMTok(m.pricing.prompt) > cap.prompt) {
-        throw new CliError(
-          `--max-price-in ${cap.prompt} está abaixo do preço de "${id}" ` +
-            `(${toPerMTok(m.pricing.prompt).toFixed(2)} por 1M). Lembre: a flag é USD por MILHÃO de tokens.`,
-          EXIT.CONFIG,
-          { modelId: id, capPerMTok: cap.prompt, pricePerMTok: toPerMTok(m.pricing.prompt) },
-          { code: 'config.price_cap_below_model', hint: 'Suba --max-price-in ou troque o modelo.' },
-        );
-      }
-      if (cap.completion !== undefined && toPerMTok(m.pricing.completion) > cap.completion) {
-        throw new CliError(
-          `--max-price-out ${cap.completion} está abaixo do preço de "${id}" ` +
-            `(${toPerMTok(m.pricing.completion).toFixed(2)} por 1M). A flag é USD por MILHÃO de tokens.`,
-          EXIT.CONFIG,
-          { modelId: id, capPerMTok: cap.completion, pricePerMTok: toPerMTok(m.pricing.completion) },
-          { code: 'config.price_cap_below_model', hint: 'Suba --max-price-out ou troque o modelo.' },
-        );
-      }
-    }
-  }
-
-  const info = await checkKey(ctx.apiKey);
-  const saldo = info.limitRemainingUsd;
-  if (typeof saldo === 'number') {
-    if (saldo < est.low) {
-      throw new CliError(
-        `A key tem ${fmtUsd(saldo)} disponíveis e a run custa pelo menos ${fmtUsd(est.low)}. ` +
-          'Adicione créditos ou reduza --stages/--iterations.',
-        EXIT.NO_CREDIT,
-        { remainingUsd: saldo, estimateLowUsd: est.low, estimateHighUsd: est.high },
-        { code: 'credit.insufficient' },
-      );
-    }
-    if (saldo < est.high) out.warn(`saldo da key (${fmtUsd(saldo)}) pode não cobrir o teto estimado.`);
-    if (budgetUsd !== undefined && budgetUsd > saldo) {
-      out.warn(`orçamento ${fmtUsd(budgetUsd)} maior que o saldo da key — teto real: ${fmtUsd(saldo)}.`);
-    }
-  }
-
-  if (budgetUsd === undefined) return;
-
-  if (est.high <= budgetUsd) return;
-  if (est.low > budgetUsd && values.force !== true) {
-    throw new CliError(
-      `Orçamento ${fmtUsd(budgetUsd)} abaixo do piso estimado ${fmtUsd(est.low)}.\n` +
-        'Reduza --stages, desligue as finais (--no-duels), use menos juízes, ' +
-        'ou passe --force para rodar mesmo assim (as portas de orçamento seguem armadas).',
-      EXIT.USAGE,
-      { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high },
-      {
-        code: 'usage.budget_below_estimate',
-        hint: 'Suba --budget, reduza --stages/--no-duels/juízes, ou passe --force para rodar mesmo assim.',
-      },
+  for (const r of rep.wouldRefuse) out.line(`  RECUSARIA  ${r.code} — ${r.message.split('\n')[0]}`);
+  for (const r of rep.requires) out.line(`  REQUER     ${r.code} — ${r.message}`);
+  if (!rep.wouldRefuse.length) {
+    out.line(
+      rep.requires.length
+        ? 'Nenhuma recusa de configuração; a execução real ainda exige o que está em REQUER.'
+        : 'Pré-voo aprovado: a execução real não recusaria.',
     );
   }
-  if (values.yes !== true && isAgentContext()) {
-    throw new CliError(
-      `Orçamento ${fmtUsd(budgetUsd)} está dentro da faixa estimada (${fmtUsd(est.low)} – ${fmtUsd(est.high)}), ` +
-        'então a run pode parar no meio. Confirme com --yes.',
-      EXIT.USAGE,
-      { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high },
-      { code: 'usage.confirmation_required', hint: 'Repita o mesmo comando com `--yes` (ou suba --budget acima do teto estimado).' },
-    );
-  }
-  out.warn(
-    `orçamento ${fmtUsd(budgetUsd)} pode não cobrir o teto (${fmtUsd(est.high)}) — a run pode parar cedo.`,
-  );
 }
 
 /**
@@ -464,8 +381,10 @@ const COMMAND_BY_MODE: Record<RunMode, string> = {
 
 export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
   const parsed = parse(argv, OPTIONS);
-  const ctx = await buildNetworkContext(parsed);
-  const { out, values } = ctx;
+  // Key OPCIONAL aqui (IMPL-029): o pre-voo checa a config contra o catalogo
+  // publico antes e so exige a key no fim — e o dry-run roda sem ela.
+  const base = buildContext(parsed);
+  const { out, values } = base;
 
   const config =
     typeof values.config === 'string'
@@ -476,23 +395,61 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
     out.warn(`o arquivo declara mode "${config.mode}"; usando o do arquivo.`);
   }
 
-  const budgetUsd = resolveBudget(values, (m) => out.warn(m));
+  const budget = resolveBudget(values, (m) => out.warn(m));
+  const budgetUsd = budgetUsdOf(budget);
   const configComOrcamento: RunConfig = { ...config, ...(budgetUsd !== undefined ? { budgetUsd } : {}) };
+  const apiKey = await tryResolveKey(values);
+  const input = {
+    config: configComOrcamento,
+    budget,
+    apiKey,
+    yes: values.yes === true,
+    force: values.force === true,
+    agentContext: isAgentContext(),
+  };
 
-  // --dry-run: valida, estima e NAO chama nenhuma API. Transforma um erro caro
-  // de 20 minutos num de 200 ms.
+  // --dry-run: o pre-voo INTEIRO, sem gastar (so leituras gratuitas: catalogo
+  // publico e, com key, GET /key). Recusa sai com o MESMO error.code/exit da
+  // execucao real (paridade por construcao — ver ../preflight.ts); sem recusa,
+  // exit 0 com `wouldRefuse: []` e o que falta em `requires`.
   if (values['dry-run'] === true) {
-    const est = estimateRunCost(estimateInputFromConfig(configComOrcamento), ctx.models);
-    if (out.isText) {
-      out.line(JSON.stringify(configComOrcamento, null, 2));
-      out.line();
-      out.line(`Custo estimado: ${fmtUsd(est.low)} – ${fmtUsd(est.high)}`);
+    const rep = await runPreflight(input, preflightDeps(base), 'dry-run');
+    renderDryRun(out, configComOrcamento, rep);
+    const resumo = {
+      dryRun: true,
+      estimate: rep.estimate,
+      wouldRefuse: rep.wouldRefuse,
+      requires: rep.requires,
+      warnings: rep.warnings,
+      checks: rep.checks,
+    };
+    const primeira = rep.wouldRefuse[0];
+    if (primeira) {
+      // Mesmo code/exit/mensagem da recusa real; `details` traz o relatorio
+      // inteiro (todas as recusas, na ordem, + a estimativa).
+      throw new CliError(primeira.message, primeira.exit, resumo, {
+        code: primeira.code,
+        hint:
+          (primeira.hint ?? DEFAULT_HINT[primeira.kind]) +
+          (rep.wouldRefuse.length > 1
+            ? ` (${rep.wouldRefuse.length} recusas no total: veja details.wouldRefuse.)`
+            : ''),
+      });
     }
-    out.result(true, `${mode}.dry-run`, { config: configComOrcamento, estimate: est });
+    out.result(true, `${mode}.dry-run`, { config: configComOrcamento, ...resumo });
     return EXIT.OK;
   }
 
-  await preflight(ctx, configComOrcamento, budgetUsd);
+  // Execucao real: a mesma sequencia; a primeira recusa e lancada.
+  const rep = await runPreflight(input, preflightDeps(base), 'real');
+  const ctx: NetworkContext = {
+    ...base,
+    // Sem key ou sem catalogo o pre-voo real ja lancou (auth.key_missing /
+    // network.catalog_unavailable).
+    apiKey: apiKey as string,
+    models: rep.catalog!.models,
+    catalogSource: rep.catalog!.catalogSource,
+  };
 
   // Ctrl-C: o primeiro aborta com elegancia (a run finaliza, salva e imprime o
   // parcial); o segundo mata na hora.

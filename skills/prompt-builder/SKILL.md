@@ -62,8 +62,9 @@ npx prompt-builder-cli sessions winner <sessionId> --prompt-only > prompt.md
 2. **Nunca chute um think level.** `models show <id> --json` → `thinkLevels.accepted`
    diz o que aquele modelo aceita; `thinkLevels.fit` diz o que realmente vai no
    fio. Chutar dá HTTP 400.
-3. **Sempre `--dry-run` antes de uma run cara.** Valida e estima sem nenhuma
-   chamada de API.
+3. **Sempre `--dry-run` antes de uma run cara, com as mesmas flags.** Roda o
+   pré-voo inteiro sem gastar e sai com o mesmo `error.code`/exit da run real
+   (`details.wouldRefuse`); exit `0` = passaria. Não exige key.
 4. **O juiz não compete.** Nenhum `--judge` pode ser o modelo sob teste nem um
    competidor — o schema rejeita (viés de auto-preferência).
 5. **`--json` ou `--output-format ndjson` em tudo.** Payload vai para o stdout;

@@ -15,6 +15,7 @@ import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../regi
 import { sampleSizeWarning } from '../../engine/judgeCalibration.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import {
+  buildCatalogContext,
   buildContext,
   buildNetworkContext,
   checkKey,
@@ -91,12 +92,16 @@ export async function cmdKey(argv: string[]): Promise<number> {
 
 export async function cmdEstimate(argv: string[]): Promise<number> {
   const parsed = parse(argv, { config: { type: 'string', short: 'c' } });
-  const ctx = await buildNetworkContext(parsed);
-  const { out } = ctx;
   const file = parsed.values.config;
   if (typeof file !== 'string') {
-    throw new CliError('Uso: prompt-builder estimate --config <arquivo.json>', EXIT.USAGE);
+    throw new CliError('Uso: prompt-builder estimate --config <arquivo.json>', EXIT.USAGE, undefined, {
+      code: 'usage.missing_flag',
+      hint: 'Passe `--config <arquivo.json>` (`prompt-builder config example -o arena.json` gera um).',
+    });
   }
+  // Estimar e ler preco do catalogo PUBLICO: nao exige key (IMPL-029).
+  const ctx = await buildCatalogContext(parsed);
+  const { out } = ctx;
 
   const json = await readJsonFile(file);
   const formato = (json as Record<string, unknown>)?.format;
@@ -128,7 +133,10 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
       out.warn(`sem preço no catálogo: ${est.unpricedModelIds.join(', ')}`);
     }
   }
-  out.result(true, 'estimate', { estimate: est });
+  out.result(true, 'estimate', {
+    estimate: est,
+    catalog: { source: ctx.catalogSource, scope: ctx.catalogScope, models: ctx.models.length },
+  });
   return EXIT.OK;
 }
 

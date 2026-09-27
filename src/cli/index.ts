@@ -40,13 +40,13 @@ CONHECIMENTO (comece aqui)
   skill                    imprime o SKILL.md deste pacote
   init --agent <nome>      instala a skill em .claude/skills, .agents/skills, …
 
-MODELOS
+MODELOS (catálogo público: não exigem key)
   models list [filtros]    lista o catálogo do OpenRouter
   models show <id>         o que aquele modelo aceita (think levels, temperatura)
   models export -o <arq>   exporta o catálogo com capacidades de ajuste
 
 CUSTO
-  estimate -c <arquivo>    estima o custo antes de gastar
+  estimate -c <arquivo>    estima o custo antes de gastar (sem key)
   key check                valida a key e mostra o saldo
   key set --stdin          grava a key (leia da entrada padrão, nunca de argv)
 
@@ -55,7 +55,8 @@ RUNS
   vary    --model <id>     testa variações de prompt num modelo
   train   --model <id>     treina um prompt ao longo de iterações
   <cmd> --config <arq>     usa um arena-config@1 (ver: docs config)
-  <cmd> --dry-run          valida e estima SEM chamar nenhuma API
+  <cmd> --dry-run          pré-voo inteiro SEM gastar: recusa com o MESMO
+                           error.code/exit da run real (wouldRefuse/requires)
 
 RESULTADOS
   runs list | show <id> | winner <id> [--prompt-only]

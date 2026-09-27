@@ -1,8 +1,9 @@
 # Modelos e think levels
 
-O catálogo vem do OpenRouter (`GET /models`), é cacheado por 24 h em
-`~/.prompt-builder/cache/` e funciona **offline** depois da primeira busca.
-`--refresh-models` força a atualização.
+O catálogo vem do OpenRouter (`GET /models`, **público: não exige key**), é
+cacheado por 24 h em `~/.prompt-builder/cache/` e funciona **offline** depois da
+primeira busca. `--refresh-models` força a atualização. Sem key, o `--json`
+traz `"scope": "public"`.
 
 ## Exportar
 

@@ -21,8 +21,8 @@ npx prompt-builder-cli docs quickstart
 # descobre o modelo do ambiente e QUAIS níveis de raciocínio ele aceita
 npx prompt-builder-cli models show anthropic/claude-opus-5 --json
 
-# valida e estima o custo SEM gastar nada
-npx prompt-builder-cli train --config arena.json --budget 3 --dry-run
+# pré-voo inteiro SEM gastar nada (e sem key): recusa com o MESMO código da run real
+npx prompt-builder-cli train --config arena.json --budget 3 --dry-run --json
 
 # treina com teto de gasto, emitindo um evento JSON por linha
 npx prompt-builder-cli train --config arena.json --budget 3 --output-format ndjson

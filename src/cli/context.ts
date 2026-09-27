@@ -261,14 +261,21 @@ async function readStoredKey(): Promise<string | null> {
   }
 }
 
-/** `--key` → `$OPENROUTER_API_KEY` → arquivo salvo por `key set`. */
-export async function resolveKey(values: Record<string, unknown>): Promise<string> {
+/**
+ * `--key` → `$OPENROUTER_API_KEY` → arquivo salvo por `key set`; `null` quando
+ * nao ha key em lugar nenhum. So LE (nada de rede): quem precisa da key para
+ * seguir usa `resolveKey`, quem so quer dado publico segue sem ela (IMPL-029).
+ */
+export async function tryResolveKey(values: Record<string, unknown>): Promise<string | null> {
   const flag = values.key;
   if (typeof flag === 'string' && flag.trim()) return flag.trim();
   if (process.env.OPENROUTER_API_KEY?.trim()) return process.env.OPENROUTER_API_KEY.trim();
-  const stored = await readStoredKey();
-  if (stored) return stored;
-  throw new CliError(
+  return readStoredKey();
+}
+
+/** O erro de key ausente — o mesmo em todo comando (e no `requires` do dry-run). */
+export function keyMissingError(): CliError {
+  return new CliError(
     'Key do OpenRouter ausente (procurei em --key, OPENROUTER_API_KEY e no arquivo de `key set`).',
     EXIT.AUTH,
     { searched: ['--key', 'OPENROUTER_API_KEY', keyFilePath()] },
@@ -279,6 +286,13 @@ export async function resolveKey(values: Record<string, unknown>): Promise<strin
         '(lida da entrada padrão — nunca como argumento). Chaves em https://openrouter.ai/keys.',
     },
   );
+}
+
+/** Como `tryResolveKey`, mas key ausente e erro (`auth.key_missing`, exit 4). */
+export async function resolveKey(values: Record<string, unknown>): Promise<string> {
+  const key = await tryResolveKey(values);
+  if (key) return key;
+  throw keyMissingError();
 }
 
 /**
@@ -352,22 +366,25 @@ export function buildContext(parsed: ParsedArgs): CliContext {
   };
 }
 
-export interface NetworkContext extends CliContext {
-  apiKey: string;
+export type CatalogSource = 'disk' | 'network' | 'stale';
+
+export interface LoadedCatalog {
   models: OpenRouterModel[];
-  catalogSource: 'disk' | 'network' | 'stale';
+  catalogSource: CatalogSource;
+  /** `key` = catalogo da key; `public` = sem key (GET /models e publico). */
+  catalogScope: 'key' | 'public';
+  fetchedAt: number;
 }
 
 /**
- * Contexto com key resolvida e CATALOGO QUENTE. O aquecimento e obrigatorio:
- * sem ele o preco de toda chamada sai 0 e o esforco de raciocinio vai sem
- * encaixe na allowlist do modelo.
+ * Aquece o catalogo (memoria + disco) — com a key quando ha, SEM ela quando nao
+ * ha (IMPL-029): o `GET /models` do OpenRouter e publico e gratuito, entao
+ * `models`, `estimate` e `--dry-run` nao travam no humano por falta de key.
+ * Falha vira `network.catalog_unavailable` (exit 8).
  */
-export async function buildNetworkContext(parsed: ParsedArgs): Promise<NetworkContext> {
-  const ctx = buildContext(parsed);
-  const apiKey = await resolveKey(parsed.values);
-  const cat = await ensureCatalog(apiKey, {
-    force: parsed.values['refresh-models'] === true,
+export async function loadCatalog(ctx: CliContext, apiKey: string | null): Promise<LoadedCatalog> {
+  const cat = await ensureCatalog(apiKey ?? '', {
+    force: ctx.values['refresh-models'] === true,
     onWarn: (msg) => ctx.out.warn(msg),
   }).catch((err: unknown) => {
     throw new CliError(
@@ -382,7 +399,36 @@ export async function buildNetworkContext(parsed: ParsedArgs): Promise<NetworkCo
       },
     );
   });
-  return { ...ctx, apiKey, models: cat.models, catalogSource: cat.source };
+  return { models: cat.models, catalogSource: cat.source, catalogScope: cat.scope, fetchedAt: cat.fetchedAt };
+}
+
+/** Contexto com catalogo quente e key OPCIONAL (dado publico: models/estimate). */
+export interface CatalogContext extends CliContext, LoadedCatalog {
+  apiKey: string | null;
+}
+
+export async function buildCatalogContext(parsed: ParsedArgs): Promise<CatalogContext> {
+  const ctx = buildContext(parsed);
+  const apiKey = await tryResolveKey(parsed.values);
+  return { ...ctx, apiKey, ...(await loadCatalog(ctx, apiKey)) };
+}
+
+export interface NetworkContext extends CliContext {
+  apiKey: string;
+  models: OpenRouterModel[];
+  catalogSource: CatalogSource;
+}
+
+/**
+ * Contexto com key OBRIGATORIA e CATALOGO QUENTE. O aquecimento e obrigatorio:
+ * sem ele o preco de toda chamada sai 0 e o esforco de raciocinio vai sem
+ * encaixe na allowlist do modelo.
+ */
+export async function buildNetworkContext(parsed: ParsedArgs): Promise<NetworkContext> {
+  const ctx = buildContext(parsed);
+  const apiKey = await resolveKey(parsed.values);
+  const cat = await loadCatalog(ctx, apiKey);
+  return { ...ctx, apiKey, models: cat.models, catalogSource: cat.catalogSource };
 }
 
 /** Valida a key e devolve saldo/limite (usado no pre-voo das runs). */

@@ -14,12 +14,14 @@
 //   3. VARREDURA DE CÓDIGO: nenhum caminho de erro em src/cli renderiza por fora
 //      do envelope (process.exit, .fail, stderr "Erro", result(false…)).
 //
-// Nenhum teste toca a rede: os casos de processo falham antes do catálogo, com
-// um data-dir temporário vazio e SEM OPENROUTER_API_KEY no ambiente.
+// Nenhum teste toca a rede: o gateway aponta para uma porta local fechada
+// (OPENROUTER_BASE_URL), o data-dir é temporário e não há OPENROUTER_API_KEY.
+// Desde o IMPL-029 o pré-voo confere a config contra o catálogo PÚBLICO antes
+// de exigir a key, então o caso "key ausente" semeia um catálogo em cache.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,10 +56,22 @@ const ENTRY = path.join(ROOT, 'src', 'cli', 'index.ts');
 
 let home = '';
 
+/** Porta local fechada: qualquer ida à rede falharia rápido (exit 8), nunca sai da máquina. */
+const DEAD_BASE = 'http://127.0.0.1:9/api/v1';
+
 beforeAll(() => {
   home = mkdtempSync(path.join(tmpdir(), 'pb-envelope-'));
   writeFileSync(path.join(home, 'quebrado.json'), '{ "mode": "compare", ');
   writeFileSync(path.join(home, 'vazio.json'), '{}');
+  // Catálogo público FRESCO em cache (formato de src/modelsCache.ts), com os
+  // ids usados no caso "key ausente": o pré-voo aprova a config sem rede e só
+  // então exige a key.
+  const modelo = (id: string) => ({ id, name: id, pricing: { prompt: 1e-6, completion: 2e-6 } });
+  mkdirSync(path.join(home, 'cache'), { recursive: true });
+  writeFileSync(
+    path.join(home, 'cache', 'models-public.json'),
+    JSON.stringify({ v: 1, fetchedAt: Date.now(), base: DEAD_BASE, count: 3, data: ['a/x', 'b/y', 'a/j'].map(modelo) }),
+  );
 });
 
 afterAll(() => {
@@ -71,7 +85,7 @@ interface CliRun {
 }
 
 function cli(args: string[]): CliRun {
-  const env: NodeJS.ProcessEnv = { ...process.env, PROMPT_BUILDER_HOME: home };
+  const env: NodeJS.ProcessEnv = { ...process.env, PROMPT_BUILDER_HOME: home, OPENROUTER_BASE_URL: DEAD_BASE };
   // Sem key em lugar nenhum: nenhum caso pode chegar à rede.
   delete env.OPENROUTER_API_KEY;
   const r = spawnSync(TSX, [ENTRY, ...args], { env, encoding: 'utf-8', timeout: 60_000 });
@@ -149,6 +163,9 @@ describe('envelope de erro — processo real (tsx)', { timeout: 90_000 }, () => 
   });
 
   it('key ausente → kind auth, exit 4, dica acionável (antes de qualquer rede)', () => {
+    // Config VÁLIDA contra o catálogo em cache: a key é a última checagem do
+    // pré-voo (IMPL-029) e, com o gateway numa porta fechada, chegar ao exit 4
+    // prova que nada foi à rede.
     const r = cli(['compare', '--theme', 't', '--judge', 'a/j', '--models', 'a/x,b/y', '--budget', '1', '--json']);
     expect(r.status).toBe(EXIT.AUTH);
     const env = parseJsonEnvelope(r);

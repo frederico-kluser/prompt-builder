@@ -60,24 +60,51 @@ Por papel  competidor    $0.9210  52 chamadas
 Precisão   288 exatas · 0 estimadas · 0 SEM PREÇO
 ```
 
-"SEM PREÇO" significa que o modelo não estava no catálogo e a chamada **não pôde
-ser precificada** — nunca confunda com "custou zero". Com `--budget` ligado, um
-modelo fora do catálogo faz o comando recusar no pré-voo.
+"SEM PREÇO" significa que a chamada **não pôde ser precificada** pelo catálogo —
+nunca confunda com "custou zero". O pré-voo recusa id inexistente sempre
+(`config.unknown_model`) e, com `--budget` ligado, modelo sem preço exato
+(variante de roteamento como `:nitro`, preço variável como `openrouter/auto`).
 
 ## Pré-voo
 
-Antes de gastar: o catálogo é aquecido, a key é validada e o custo é estimado.
+Antes de gastar, na ordem (a primeira recusa encerra a execução real):
 
-| Situação | O que acontece |
-|---|---|
-| estimativa toda abaixo do teto | roda direto |
-| teto dentro da faixa estimada | avisa; fora de TTY exige `--yes` |
-| teto abaixo do piso estimado | **recusa** (use `--force` para insistir) |
-| saldo da key menor que o teto | avisa e informa o teto real |
-| saldo menor que o piso | recusa — a run não teria como terminar |
+| # | Checagem | Recusa (`error.code`, exit) |
+|---|---|---|
+| 1 | `--budget` presente fora de TTY | `usage.budget_required` (2) |
+| 2 | catálogo (público; cache em disco 24 h) | `network.catalog_unavailable` (8) |
+| 3 | todo modelo chamado existe no catálogo | `config.unknown_model` (3) |
+| 4 | com `--budget`, todo modelo tem preço exato | `config.unpriced_models` (3) |
+| 5 | `--max-price-in/out` cobre o preço dos modelos | `config.price_cap_below_model` (3) |
+| 6 | teto abaixo do piso estimado (sem `--force`) | `usage.budget_below_estimate` (2) |
+| 6 | teto dentro da faixa, fora de TTY, sem `--yes` | `usage.confirmation_required` (2) |
+| 7 | key presente | `auth.key_missing` (4) |
+| 7 | key aceita pelo OpenRouter (`GET /key`) | `auth.key_invalid` (4) |
+| 8 | saldo da key ≥ piso estimado | `credit.insufficient` (5) |
 
+Teto acima do teto estimado roda direto; saldo menor que o teto só avisa.
 A faixa é larga (~2,2×) de propósito. Leia `assumptions` no `--json` em vez de
 tratar um número como promessa.
+
+### `--dry-run` = o mesmo pré-voo, sem gastar
+
+O dry-run percorre **a mesma sequência** (é o mesmo código) e faz só leituras
+gratuitas e sem efeito: o catálogo público e, com key, `GET /key`. Por isso o
+código de recusa dele é **sempre** o da run real com as mesmas flags:
+
+- recusa → envelope `{ok:false, error:{code, …}}` com o exit da recusa real;
+  `error.details.wouldRefuse` lista **todas** as recusas, na ordem acima, e
+  `error.details.estimate` traz a estimativa (use-a para escolher o `--budget`);
+- sem recusa → exit `0`, `data.wouldRefuse: []`, `data.estimate`,
+  `data.checks` (catálogo, key, saldo) e `data.requires`.
+
+A única diferença é a **key**: sem ela o dry-run não recusa — lista em
+`requires` o que a run exigiria (`auth.key_missing` e, sem key, o saldo mínimo
+como `credit.insufficient` não verificado). Como a key é a última checagem,
+toda recusa de configuração sai igual com ou sem key.
+
+`agents run --dry-run` estima com o catálogo e espelha as recusas da execução
+de agentes (só `usage.budget_required`; a key vai em `requires`).
 
 ## Teto por requisição
 
