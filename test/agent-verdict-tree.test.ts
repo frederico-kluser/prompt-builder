@@ -120,7 +120,8 @@ import { isControlSignal } from '../src/budget.js';
 import { createGateway, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
 import { getDataDir, setDataDir } from '../src/storage.js';
 import { runToCompletion } from '../src/orchestrator.js';
-import { pairedStageScores } from '../src/trainer.js';
+// Pareamento honesto (IMPL-005): fonte única em stats.ts, sobre as ETAPAS.
+import { pairedStageScores } from '../src/stats.js';
 import { pairedSignificance } from '../src/stats.js';
 import { judgeScoreFromVerdicts } from '../src/rank.js';
 import { normalizeRunRecord } from '../src/normalize.js';
@@ -672,7 +673,7 @@ describe('IMPL-032 — pipeline Node: judge-score, resolveRate e significância 
 
       // (3) vetor de significância (o que o treino pareia): 'nao' = 0 nas
       // posições cortadas, NENHUM par excluído.
-      const { controlScores, championScores } = pairedStageScores(rec, 'fake/a', 'fake/b');
+      const { controlScores, championScores } = pairedStageScores(rec.stages, 'fake/a', 'fake/b');
       const bPorOrdem = rec.stages.map((s) => (ordem(s.spec!.question) < 4 ? 0 : 1));
       expect(championScores).toEqual(bPorOrdem);
       expect(controlScores).toEqual([1, 1, 1, 1, 1, 1]);

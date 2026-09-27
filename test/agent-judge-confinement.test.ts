@@ -133,7 +133,8 @@ import {
 import { getDataDir, setDataDir } from '../src/storage.js';
 import { runToCompletion } from '../src/orchestrator.js';
 import { normalizeRunRecord } from '../src/normalize.js';
-import { pairedStageScores } from '../src/trainer.js';
+// Pareamento honesto (IMPL-005): fonte única em stats.ts, sobre as ETAPAS.
+import { pairedStageScores } from '../src/stats.js';
 import { emitRunEvent } from '../src/cli/ndjson.js';
 import type { Output } from '../src/cli/output.js';
 import type { RunConfig, RunEvent, RunRecord, StageSpec, Verdict } from '../src/types.js';
@@ -1020,7 +1021,7 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
       expect(rec.resolveRateByContestant).toEqual({ 'fake/a': 0.5, 'fake/b': 0.5 });
       expect(rec.agentUnscoredRepsByContestant).toEqual({});
       // Vetor da significância: idêntico dos dois lados (nenhuma etapa some de um só).
-      const par = pairedStageScores(rec, 'fake/a', 'fake/b');
+      const par = pairedStageScores(rec.stages, 'fake/a', 'fake/b');
       expect(par.controlScores).toEqual(par.championScores);
       expect(rec.stages[0].referenceJudge!.verdictSourceByContestant).toEqual({ 'fake/a': 'judge', 'fake/b': 'judge' });
     });
@@ -1044,7 +1045,7 @@ describe('IMPL-033 — pipeline Node: nota do oráculo preservada e judgeError c
       // A etapa inválida não soma contagem de rep (ela não vale para ninguém).
       expect(rec.agentUnscoredRepsByContestant).toEqual({});
       expect(rec.agentJudgeErrorCount).toBe(0);
-      const par = pairedStageScores(rec, 'fake/a', 'fake/b');
+      const par = pairedStageScores(rec.stages, 'fake/a', 'fake/b');
       expect(par.controlScores).toEqual(par.championScores);
     });
   });

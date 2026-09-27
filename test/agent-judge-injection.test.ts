@@ -122,7 +122,7 @@ import type { ArenaAgentConfigFile } from '../src/configFile.js';
 import { estimateInputFromConfig, estimateRunCost } from '../src/estimate.js';
 import { judgeContractHash } from '../src/engine/judgeCalibration.js';
 import { subscribe } from '../src/events.js';
-import { createGateway, setDefaultGateway } from '../src/openrouter.js';
+import { createGateway, parseModelsPayload, setDefaultGateway } from '../src/openrouter.js';
 import { runToCompletion } from '../src/orchestrator.js';
 import { getDataDir, setDataDir } from '../src/storage.js';
 import type { AgentTaskSpec } from '../src/agent/types.js';
@@ -951,7 +951,9 @@ describe('IMPL-034 — regras puras, arena-agent-config e estimativa', () => {
   });
 
   it('estimativa: gabarito e duelo LLM só para as etapas sem verify[]', () => {
-    const catalogo = CATALOGO as unknown as Parameters<typeof estimateRunCost>[1];
+    // Catálogo PARSEADO: o item cru traz preço em string, e desde o IMPL-018 preço
+    // que não é número finito ≥ 0 é DESCONHECIDO (fora da soma), não coerção.
+    const catalogo = parseModelsPayload({ data: CATALOGO });
     const todas = estimateRunCost(estimateInputFromConfig(configAgente([{ verify: [PASSA] }, { verify: [PASSA] }])), catalogo);
     expect(todas.byRole.gabarito).toBe(0);
     expect(todas.byRole.duel).toBe(0);
