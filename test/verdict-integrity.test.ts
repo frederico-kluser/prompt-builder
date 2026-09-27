@@ -60,6 +60,24 @@ import { isTerminalRunStatus as isTerminalWeb } from '../web/src/engine/types.js
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter, type FakeRequest } from './fakeOpenRouter.js';
 import { candidateOf, duelReply, listwiseReply, pointwiseReply, questionOf } from './judgeReplies.js';
 
+// IMPL-013 × IMPL-004: a re-avaliação limpa roda num minibatch SORTEADO (semente
+// = sessionId aleatório) e uma re-avaliação `inconclusive` não confirma a
+// promoção. A fixture do treino abaixo derruba o juiz em CEN-0 DE PROPÓSITO (é
+// o veredito ausente que a lição não pode carregar); se o sorteio pusesse CEN-0
+// no minibatch, a re-avaliação perderia o veredito, sairia inconclusiva e o
+// teste viraria loteria. O minibatch real segue, só sem a etapa sabotada.
+vi.mock('../src/engine/trainingPolicy.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/engine/trainingPolicy.js')>();
+  return {
+    ...real,
+    pickReevalMinibatch: <T,>(stages: readonly T[], seed: number): T[] =>
+      real.pickReevalMinibatch(
+        stages.filter((s) => !String((s as { question?: string }).question ?? '').startsWith('CEN-0')),
+        seed,
+      ),
+  };
+});
+
 // O storage do web é IndexedDB — fora do navegador, um no-op em memória.
 vi.mock('../web/src/engine/storage', () => ({
   saveRun: async () => undefined,
