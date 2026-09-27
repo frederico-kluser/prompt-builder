@@ -568,17 +568,24 @@ export interface ReferenceJudgeResult {
    * referenceJudge vem do caminho de AGENTE com `repetitions > 1` (§18.4): cada
    * repeticao e uma observacao independente no denominador do judge-score, e
    * quem quer significancia precisa do vetor plano (cenario x repeticao), nao
-   * so da media ordinal. Reps `incomplete` (veredito null, §18.3) NAO entram no
-   * vetor — sao contadas em {@link ReferenceJudgeResult.repIncomplete}.
+   * so da media ordinal. Reps cortadas por limite (timeout/maxTurns/maxCost/
+   * maxOutput) ENTRAM como 'nao' (IMPL-032); so reps canceladas (veredito null)
+   * ficam fora — contadas em {@link ReferenceJudgeResult.repIncomplete}.
    */
   verdictsByRep?: Record<string, Verdict[]>;
   /**
-   * Quantidade de repeticoes `incomplete` (veredito null, §18.3) por contestant,
-   * so quando o caminho de agente tem reps. Uma rep incompleta nao pontua nem
-   * conta como 'nao' — a culpa foi do nosso teto, nao do agente; registrar a
-   * contagem permite ao leitor saber quantas observacoes foram perdidas.
+   * Quantidade de repeticoes sem veredito (null) por contestant, so quando o
+   * caminho de agente tem reps. Desde o IMPL-032 isso so acontece por
+   * CANCELAMENTO (sinal de controle); corte por limite conta 'nao'.
    */
   repIncomplete?: Record<string, number>;
+  /**
+   * Repeticoes decididas pelo caminho 'limit-cut' da arvore de veredito, por
+   * contestant de agente — ja contadas como 'nao' em `verdictByContestant`/
+   * `verdictsByRep`. So alimenta o diagnostico "sucesso ate o limite"
+   * ({@link RunRecord.censoredResolveRateByContestant}).
+   */
+  limitCutByContestant?: Record<string, number>;
 }
 
 /** Resultado de UM duelo pairwise (2 ordens; desacordo entre ordens = empate). */
@@ -688,8 +695,26 @@ export interface RunRecord {
    * contestants de runner 'agent' (§18.4): e o numero que separa "resolve
    * sempre" de "resolve as vezes" na vida real — repeticoes 1 tornam esta
    * fracao (e qualquer outra estatistica) uma amostra de tamanho 1.
+   * Desde a arvore v2 (IMPL-032) o corte por limite conta como 'nao' aqui.
    */
   resolveRateByContestant?: Record<string, number>;
+  /**
+   * DIAGNOSTICO "sucesso ate o limite" (metrica censurada): 'resolve' / (reps
+   * julgadas − cortes por limite), por contestant de agente. Mostra o quanto o
+   * agente acerta quando termina dentro dos tetos. NUNCA alimenta ranking,
+   * finais nem gate — a metrica principal e `resolveRateByContestant`. Chave
+   * ausente = todas as reps do contestant foram cortadas.
+   */
+  censoredResolveRateByContestant?: Record<string, number>;
+  /** Reps de agente cortadas por limite (contadas como 'nao'), por contestant. */
+  limitCutsByContestant?: Record<string, number>;
+  /**
+   * Versao da arvore de veredito de agente que produziu as notas (ver
+   * `AGENT_VERDICT_TREE_VERSION` em `src/agent/verdictTree.ts`). AUSENTE numa
+   * run com agente = legado v1 (corte por limite fora do denominador); notas
+   * de versoes diferentes nao sao comparaveis.
+   */
+  agentVerdictTreeVersion?: number;
   /** Classificacao final agregada (Copeland dos duelos / pontos do placar). */
   standings?: {
     id: string;

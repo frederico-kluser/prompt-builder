@@ -8,6 +8,7 @@
 
 import type { Output } from './output.js';
 import type { RunEvent, SessionEvent, RunRecord } from '../types.js';
+import { agentVerdictTreeVersionOf, classifyStop } from '../agent/verdictTree.js';
 
 export interface NdjsonMapperOptions {
   /** Com --verbose, inclui config e systemPrompt (que sao grandes). */
@@ -21,14 +22,25 @@ export interface AgentSummary {
   executions: number;
   /** Execuções que morreram em erro de infra/processo (stopReason 'error'). */
   failed: number;
-  /** Execuções cortadas por nossos tetos (maxTurns/maxCost/timeout/maxOutput/cancelled). */
+  /**
+   * Execuções canceladas (sinal de controle) — as ÚNICAS que saem do placar.
+   * Até o IMPL-032 também contava os cortes por limite (agora em `limitCut`).
+   */
   incomplete: number;
+  /** Execuções cortadas por limite (timeout/maxTurns/maxCost/maxOutput) — contam 'nao'. */
+  limitCut: number;
   /** Média de turnos por execução (0 quando não há execuções). */
   avgTurns: number;
   /** Média de custo (USD, do response.costUsd) por execução (0 quando não há). */
   avgCostUsd: number;
   /** Razão passed/(passed+failed) do oráculo, agregada (0 quando não há oráculo). */
   oracleRate: number;
+  /**
+   * Versão da árvore de veredito que produziu as notas (`agentVerdictTreeVersion`
+   * do record; 1 = legado, corte por limite FORA do denominador). Notas de
+   * versões diferentes não se comparam (IMPL-032).
+   */
+  verdictTreeVersion?: number;
 }
 
 /**
@@ -46,6 +58,7 @@ function buildAgentSummary(record: RunRecord): AgentSummary | undefined {
 
   let failed = 0;
   let incomplete = 0;
+  let limitCut = 0;
   let turnsSum = 0;
   let costSum = 0;
   let oraclePassed = 0;
@@ -53,13 +66,12 @@ function buildAgentSummary(record: RunRecord): AgentSummary | undefined {
   for (const r of exes) {
     turnsSum += r.execution.turns;
     costSum += r.costUsd;
-    if (r.execution.stopReason === 'error') {
-      failed += 1;
-    } else if (r.execution.stopReason !== 'completed') {
-      // maxTurns/maxCost/timeout/maxOutput/cancelled: a culpa é do NOSSO teto,
-      // não do agente — conta como incompleta, nunca como erro (§15.2 do plano).
-      incomplete += 1;
-    }
+    // IMPL-032: corte por limite é FALHA no denominador ('nao'), não
+    // incompleta; `incomplete` é só cancelamento (sinal de controle).
+    const cls = classifyStop(r.execution.stopReason);
+    if (cls === 'error') failed += 1;
+    else if (cls === 'limit') limitCut += 1;
+    else if (cls === 'cancelled') incomplete += 1;
     if (r.execution.oracle) {
       oraclePassed += r.execution.oracle.passed;
       oracleTotal += r.execution.oracle.passed + r.execution.oracle.failed;
@@ -70,9 +82,11 @@ function buildAgentSummary(record: RunRecord): AgentSummary | undefined {
     executions: exes.length,
     failed,
     incomplete,
+    limitCut,
     avgTurns: turnsSum / exes.length,
     avgCostUsd: costSum / exes.length,
     oracleRate: oracleTotal > 0 ? oraclePassed / oracleTotal : 0,
+    verdictTreeVersion: agentVerdictTreeVersionOf(record),
   };
 }
 

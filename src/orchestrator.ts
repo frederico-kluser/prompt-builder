@@ -20,6 +20,7 @@ import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { listModels } from './openrouter.js';
 import { runAgentStage, aggregateAgentVerdict } from './agent/runAgentStage.js';
+import { AGENT_VERDICT_TREE_VERSION, agentRateMetrics, stageObservations } from './agent/verdictTree.js';
 import type {
   Contestant,
   ReferenceJudgeResult,
@@ -538,6 +539,11 @@ async function runLoop(
   // Em modo agente, G2 ganha `est.byRole.agent` no mesmo grupo (o plano §20.1/§20.6:
   // execuções de agente + julgamento são ATÔMICOS, de propósito).
   const hasAgent = record.contestants.some((c) => c.runner === 'agent');
+  // Versão da árvore de veredito de agente que produz as notas desta run —
+  // estampada ANTES de qualquer veredito, para valer também em run abortada.
+  // Ausente numa run com agente = legado (v1: corte por limite fora do
+  // denominador); notas de versões diferentes não se comparam (IMPL-032).
+  if (hasAgent) record.agentVerdictTreeVersion = AGENT_VERDICT_TREE_VERSION;
   const custoG2 = est.byRole.competitor + est.byRole.judge + (hasAgent ? est.byRole.agent : 0);
   if (custoG2 > 0 && !gate('competitors', custoG2)) {
     for (const st of record.stages) {
@@ -568,7 +574,8 @@ async function runLoop(
 
       try {
         // Verditios dos contestants de runner 'agent' (agregados por rep) e os
-        // que ficaram 'incomplete' (§18.3 — saem do ranking/judgeScore).
+        // que ficaram sem veredito — SÓ por cancelamento (IMPL-032: corte por
+        // limite conta 'nao' e fica no ranking/judge-score).
         const agentVerdicts: Record<string, Verdict> = {};
         const agentExplanations: Record<string, string> = {};
         const agentIncompleteIds = new Set<string>();
@@ -578,6 +585,9 @@ async function runLoop(
         // judge-score e a significância, não só da média ordinal da etapa.
         const agentVerdictsByRep: Record<string, Verdict[]> = {};
         const agentRepIncomplete: Record<string, number> = {};
+        // Reps decididas pelo caminho 'limit-cut' (já contadas como 'nao'): só
+        // alimentam o diagnóstico "sucesso até o limite" (IMPL-032).
+        const agentLimitCuts: Record<string, number> = {};
         const agentContestants = record.contestants.filter((c) => c.runner === 'agent');
         const chatContestants = record.contestants.filter((c) => c.runner !== 'agent');
 
@@ -608,8 +618,9 @@ async function runLoop(
               const agentRes = agentSemaphore ? await agentSemaphore.run(run) : await run();
               response = agentRes.response;
               // Veredito agregado da etapa = média ordinal dos vereditos das reps.
-              // incomplete (tudo null, ou tudo erro) => contestant sai do ranking
-              // e do judgeScore SEM pontos e SEM 'nao' (§18.3/§15.2).
+              // Sem veredito algum (só cancelamento — que na prática já subiu
+              // como RunCancelled) => fora do ranking. Corte por limite e erro
+              // de execução TÊM veredito ('nao') e ficam no denominador.
               const valid = agentRes.repResults
                 .map((r) => r.verdict)
                 .filter((v): v is Verdict => v !== null);
@@ -621,11 +632,13 @@ async function runLoop(
                   agentRes.repResults.find((r) => r.verdict !== null)?.explanation ??
                   '(sem explicação do juiz)';
               }
+              const cortes = agentRes.repResults.filter((r) => r.path === 'limit-cut').length;
+              if (cortes > 0) agentLimitCuts[contestant.id] = cortes;
               // Expõe POR-REPETIÇÃO quando reps > 1 (§18.4): o vetor plano vira
               // observações independentes no denominador do judge-score e no
               // pareamento (cenário × repetição) do pairedSignificance. Reps
-              // `incomplete` (veredito null) NÃO entram no vetor — são contadas
-              // em repIncomplete.
+              // canceladas (veredito null) NÃO entram no vetor — são contadas
+              // em repIncomplete; reps cortadas por limite ENTRAM como 'nao'.
               const reps = record.config.agent?.repetitions ?? 1;
               if (reps > 1) {
                 agentVerdictsByRep[contestant.id] = valid;
@@ -713,6 +726,9 @@ async function runLoop(
                 ...(Object.keys(agentRepIncomplete).length > 0 && {
                   repIncomplete: agentRepIncomplete,
                 }),
+                ...(Object.keys(agentLimitCuts).length > 0 && {
+                  limitCutByContestant: agentLimitCuts,
+                }),
               };
             } else {
               // Misto: refJudge roda SÓ com as respostas/contestants de chat, e o
@@ -743,6 +759,9 @@ async function runLoop(
                 ...(Object.keys(agentRepIncomplete).length > 0 && {
                   repIncomplete: agentRepIncomplete,
                 }),
+                ...(Object.keys(agentLimitCuts).length > 0 && {
+                  limitCutByContestant: agentLimitCuts,
+                }),
               };
             }
             stageRecord.referenceJudge = refJudge;
@@ -755,8 +774,8 @@ async function runLoop(
             // daria a ele todos os 1os lugares em empate — enviesando medalhas e
             // placar a favor da regua. Usa o shuffle cego semeado pelo conteudo da
             // etapa (mesmo criterio dos duelos): deterministico e neutro.
-            // Agentes incompletos (§18.3) ficam FORA do ranking (sem pontos, sem
-            // 'nao') — por isso o `filter` abaixo.
+            // Agentes sem veredito (só cancelamento) ficam FORA do ranking —
+            // por isso o `filter` abaixo. Corte por limite é 'nao' e é ranqueado.
             const ordemCega = blindRankMap(
               record.contestants.map((c) => c.id),
               seedFromId(stageSpec.question),
@@ -875,77 +894,40 @@ async function runLoop(
   const stagesComRef = record.stages.filter((s) => s.referenceJudge && !s.incomplete);
   if (stagesComRef.length > 0) {
     // judge-score = (resolve + 0.5*parcial) / total * 100, por contestant,
-    // sobre as etapas com juiz de referencia (ausente conta como 'nao').
+    // sobre as etapas com juiz de referencia.
     //
-    // Agentes 'incomplete' (§18.3) NÃO aparecem no verdictByContestant (o
-    // orquestrador só os soma quando tiveram veredito) — para eles o `undefined`
-    // é "sem evidência" e NÃO pode contar como 'nao' (a culpa foi do nosso teto,
-    // não do agente). Filtramos os `undefined`, então o contestant entra no
-    // judge-score só com as etapas em que ele pontuou de verdade. Chat NÃO muda:
-    // vereditos de chat nunca são `undefined` no map.
-    //
-    // §18.4 — REPETIÇÕES: cada rep é uma observação independente. Quando algum
-    // `referenceJudge` guarda `verdictsByRep` (contestant de agente com reps>1),
-    // o score do contestant sai do vetor PLANO (todas as etapas × todas as reps),
-    // não da média ordinal por etapa. `judgeScoreFromVerdicts` não muda uma linha;
-    // mudou só QUEM chama com o quê. Sem `verdictsByRep` (reps=1 / chat) o fluxo
-    // é exatamente o legado.
-    const temVerdictsByRep = stagesComRef.some(
-      (s) => s.referenceJudge!.verdictsByRep && Object.keys(s.referenceJudge!.verdictsByRep!).length > 0,
-    );
+    // Observacoes por etapa (`stageObservations`): o vetor POR REP quando existe
+    // (§18.4 — cada rep de agente e uma observacao independente; vetor PLANO de
+    // todas as etapas x todas as reps), senao o veredito agregado da etapa.
+    // Veredito ausente = nenhuma observacao. Para agentes isso agora so acontece
+    // por cancelamento: corte por limite (timeout/maxTurns/maxCost/maxOutput)
+    // chega aqui como 'nao' e CONTA no denominador (IMPL-032 / R-14a DEC-1 —
+    // antes saia, e um agente que estourava o teto nas tarefas dificeis ficava
+    // com nota perfeita nas faceis: vies de sobrevivencia). Chat numa run mista
+    // com reps>1 usa o agregado da etapa (antes ficava com vetor vazio => 0).
     record.judgeScoreByContestant = Object.fromEntries(
-      record.contestants.map((c) => {
-        if (temVerdictsByRep) {
-          // Vetor PLANO: concatena os vereditos POR REP de todas as etapas.
-          const flat: Verdict[] = [];
-          for (const s of stagesComRef) {
-            const porRep = s.referenceJudge!.verdictsByRep?.[c.id];
-            if (porRep) flat.push(...porRep);
-          }
-          return [c.id, judgeScoreFromVerdicts(flat)];
-        }
-        return [
-          c.id,
-          judgeScoreFromVerdicts(
-            stagesComRef
-              .map((s) => s.referenceJudge!.verdictByContestant[c.id])
-              .filter((v): v is Verdict => v !== undefined),
-          ),
-        ];
-      }),
+      record.contestants.map((c) => [
+        c.id,
+        judgeScoreFromVerdicts(stagesComRef.flatMap((s) => stageObservations(s.referenceJudge!, c.id))),
+      ]),
     );
   }
 
-  // §18.4 — resolveRate por contestant: fração de 'resolve' entre os vereditos
-  // PLANOS (todas as etapas × todas as reps), em 0..1 com 3 casas. Presente só
-  // quando há contestants de agente: é o número que separa "resolve sempre" de
-  // "resolve às vezes". Com reps=1 vira uma amostra de tamanho 1 — o relatório
-  // final já avisa (§18.4). Usa o mesmo vetor plano do judge-score acima.
+  // §18.4 — resolveRate por contestant de agente: fracao de 'resolve' entre os
+  // vereditos PLANOS (todas as etapas x todas as reps), em 0..1 com 3 casas —
+  // o numero que separa "resolve sempre" de "resolve as vezes". Mesmo vetor do
+  // judge-score, corte por limite incluido como 'nao'. Ao lado, SO como
+  // diagnostico (nunca ranking/finais/gate): "sucesso ate o limite" (a metrica
+  // censurada, sem os cortes no denominador) e a contagem de cortes.
   const agentIds = record.contestants.filter((c) => c.runner === 'agent').map((c) => c.id);
   if (agentIds.length > 0 && stagesComRef.length > 0) {
-    record.resolveRateByContestant = Object.fromEntries(
-      agentIds.map((id) => {
-        let resolve = 0;
-        let total = 0;
-        for (const s of stagesComRef) {
-          const porRep = s.referenceJudge?.verdictsByRep?.[id];
-          if (porRep) {
-            for (const v of porRep) {
-              total += 1;
-              if (v === 'resolve') resolve += 1;
-            }
-          } else {
-            // reps=1 / etapa sem verdictsByRep — usa o veredito agregado da etapa.
-            const v = s.referenceJudge?.verdictByContestant[id];
-            if (v !== undefined) {
-              total += 1;
-              if (v === 'resolve') resolve += 1;
-            }
-          }
-        }
-        return [id, total > 0 ? Number((resolve / total).toFixed(3)) : 0];
-      }),
+    const m = agentRateMetrics(
+      stagesComRef.map((s) => s.referenceJudge!),
+      agentIds,
     );
+    record.resolveRateByContestant = m.resolveRateByContestant;
+    record.censoredResolveRateByContestant = m.censoredResolveRateByContestant;
+    record.limitCutsByContestant = m.limitCutsByContestant;
   }
 
   // === FASE 4: FINAIS. So os N melhores por judge-score MEDIO (todos os

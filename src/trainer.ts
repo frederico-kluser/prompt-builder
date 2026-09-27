@@ -137,8 +137,10 @@ function buildLessons(run: RunRecord, championId: string): string {
  * Scores por estagio (escala 0-1 de `VERDICT_SCORE`) de controle e campeao,
  * posicao a posicao, para o bootstrap pareado. Veredito ausente conta como
  * 'nao' (0) — mesma convencao de `judgeScoreFromVerdicts`.
+ * Exportada SÓ para o teste de contrato da árvore de veredito de agente
+ * (IMPL-032: corte por limite chega aqui como 'nao' explícito, não ausente).
  */
-function pairedStageScores(
+export function pairedStageScores(
   run: RunRecord,
   controlId: string,
   championId: string,

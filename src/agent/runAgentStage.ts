@@ -32,6 +32,7 @@ import { execDir, redactEnv, sha256Of, writeExecution } from './store.js';
 import { buildDossier } from './dossier.js';
 import { runOracle } from './oracle.js';
 import { aggregateAgentVerdict, judgeDossier } from './agentJudge.js';
+import { decideRepVerdict, type VerdictPath } from './verdictTree.js';
 import { isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
 import { blindRankMap, seedFromId } from '../duels.js';
@@ -66,8 +67,14 @@ export interface AgentRepResult {
   stopReason: AgentStopReason;
   /** Resultado do oráculo (quando houve). */
   oracle?: AgentOracleResult;
-  /** null = incomplete (§18.3 — fora do placar, sem contar 'nao'). */
+  /**
+   * null = SÓ cancelamento (sinal de controle — a etapa inteira sai do placar).
+   * Corte por limite (timeout/maxTurns/maxCost/maxOutput) NÃO é null: conta
+   * 'nao' (IMPL-032 / R-14a DEC-1 — ver `verdictTree.ts`).
+   */
   verdict: Verdict | null;
+  /** Caminho da árvore de veredito que decidiu esta repetição (1 dos 9). */
+  path: VerdictPath;
   explanation: string;
   /** true quando o juiz LLM rodou de verdade nesta repetição. */
   judgeUsed: boolean;
@@ -100,7 +107,11 @@ export interface RunAgentStageParams {
 export interface RunAgentStageResult {
   response: CompetitorResponse; // text = resumo 1 linha; execution = rep 0
   repResults: AgentRepResult[]; // 1 por repetição
-  /** true = todas as repetições ficaram incomplete (não pontua). */
+  /**
+   * true = nenhuma repetição tem veredito — só acontece por cancelamento (que,
+   * na prática, sobe como RunCancelled antes daqui). Falha de preparação e
+   * corte por limite NÃO são incomplete: pontuam 'nao'.
+   */
   incomplete: boolean;
   errorMsg?: string;
 }
@@ -187,27 +198,23 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
   const gateway = opts.gateway ?? DEFAULT_GATEWAY;
   const task = stage.agentTask;
   const judgeModelIds = opts.judgeModelIds ?? [];
+  const reps = Math.max(1, agentConfig.repetitions ?? 1);
 
+  // Falha ANTES de qualquer execução (sem tarefa / executor não preparou): cada
+  // repetição conta 'nao' pelo caminho 'error' — a MESMA regra de um workspace
+  // que falha no meio da rep. Antes virava `incomplete` e o contestant sumia do
+  // denominador daquela etapa; `incomplete` agora é só controle (IMPL-032). A
+  // taxonomia transient × defect (defect invalida a célula de todos) é IMPL-094.
   if (!task) {
+    const errorMsg = 'Etapa sem agentTask para contestant com runner=agent';
     return {
-      response: {
-        contestantId: contestant.id,
-        modelId: contestant.modelId,
-        text: 'agente: sem tarefa executável nesta etapa',
-        latencyMs: 0,
-        tokensIn: 0,
-        tokensOut: 0,
-        costUsd: 0,
-        status: 'error',
-        errorMsg: 'Etapa sem agentTask para contestant com runner=agent',
-      },
-      repResults: [],
-      incomplete: true,
-      errorMsg: 'Etapa sem agentTask para contestant com runner=agent',
+      response: { ...responseError(contestant, contestant.modelId, errorMsg, 0), text: 'agente: sem tarefa executável nesta etapa' },
+      repResults: failedReps(runId, stageIndex, contestant.id, reps, errorMsg),
+      incomplete: false,
+      errorMsg,
     };
   }
 
-  const reps = Math.max(1, agentConfig.repetitions ?? 1);
   const promptMode = agentConfig.promptMode ?? forcedPromptMode ?? 'append';
   // O executor (pi) lê `config.promptMode` p/ montar o argv (`--system-prompt` vs
   // `--append-system-prompt`). Passamos a config com o modo RESOLVIDO para que o
@@ -234,8 +241,8 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
     const errorMsg = `Falha ao preparar o executor (${agentConfig.executorVersion})`;
     return {
       response: responseError(contestant, modelId, errorMsg, 0),
-      repResults: [],
-      incomplete: true,
+      repResults: failedReps(runId, stageIndex, contestant.id, reps, errorMsg),
+      incomplete: false,
       errorMsg,
     };
   }
@@ -502,8 +509,9 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           parseErrors: outcome.parseErrors ?? trajectory.parseErrors ?? 0,
         };
 
-        // 6) VEREDITO da repetição (§17.1 / §18.3 / §15.2). Só o serve quem NÃO
-        //    ficou incomplete e precisa de juiz LLM (graduação / sem oráculo).
+        // 6) VEREDITO da repetição — árvore de 9 caminhos (`verdictTree.ts`). O
+        //    juiz LLM só roda nos caminhos que graduam (oráculo 100%/parcial ou
+        //    sem oráculo com diff); corte por limite é 'nao' sem juiz.
         const adjudication = await adjudicateRep({
           stopReason,
           oracle,
@@ -522,6 +530,7 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           stopReason,
           oracle,
           verdict: adjudication.verdict,
+          path: adjudication.path,
           explanation: adjudication.explanation,
           judgeUsed: adjudication.judgeUsed,
           costUsd: trajectory.usage.costUsd,
@@ -574,7 +583,8 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
         }
       } catch (err) {
         // Qualquer falha não-controlada numa rep => 'nao' com status error (a rep
-        // inteira foi perdida). Controle (orçamento/cancelamento) SOBE.
+        // inteira foi perdida — caminho 'error', A5 até o IMPL-094). Controle
+        // (orçamento/cancelamento) SOBE: é o único caminho para `incomplete`.
         if (isControlSignal(err)) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         anyError = true;
@@ -583,6 +593,7 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           execution: emptyExecution(relativeDir, rep, 0, 0, 0, 'error'),
           stopReason: 'error',
           verdict: 'nao',
+          path: 'error',
           explanation: msg,
           judgeUsed: false,
           costUsd: 0,
@@ -602,6 +613,7 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
       }
     }
 
+  // Só cancelamento deixa rep sem veredito (e ele sobe antes daqui).
   const incomplete = response === null || repResults.every((r) => r.verdict === null);
 
   if (response === null) {
@@ -625,8 +637,10 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
 }
 
 // ---------------------------------------------------------------------------
-// Veredito da repetição — §17.1 (oráculo MANDA) + §18.3 (erro vs incomplete)
-// + §15.2 (stopReason !== 'completed'). O juiz LLM SÓ roda quando é de fato útil.
+// Veredito da repetição — a ÁRVORE de 9 caminhos vive, pura, em `verdictTree.ts`
+// (IMPL-032: corte por limite conta 'nao'; `incomplete` só p/ cancelamento).
+// Aqui só se chama o juiz LLM nos caminhos que graduam (§17.1: o oráculo MANDA,
+// o juiz só age dentro da faixa dele).
 // ---------------------------------------------------------------------------
 
 async function adjudicateRep(opts: {
@@ -639,65 +653,24 @@ async function adjudicateRep(opts: {
   judgeModelIds: string[];
   apiKey: string;
   ctx: RunCtx;
-}): Promise<{ verdict: Verdict | null; explanation: string; judgeUsed: boolean }> {
+}): Promise<{ verdict: Verdict | null; explanation: string; judgeUsed: boolean; path: VerdictPath }> {
   const { stopReason, oracle, diffEmpty, stage, dossierText, contestantId, judgeModelIds, apiKey, ctx } = opts;
+  const d = decideRepVerdict({ stopReason, oracle, diffEmpty });
 
-  // §18.3: cancelamento é sinal de controle — a fronteira re-lança. Aqui marcamos
-  // incomplete e o ORQUESTRADOR sobe o sinal (o pipeline sabe que foi cancelado).
-  if (stopReason === 'cancelled') {
-    return { verdict: null, explanation: 'execução cancelada (sinal de controle)', judgeUsed: false };
+  // Cancelamento: sem veredito. Quem chama re-lança RunCancelled (§18.3) —
+  // defensivo, porque o laço já sobe o sinal antes de chegar aqui.
+  if (d.kind === 'incomplete') {
+    return { verdict: null, explanation: d.explanation, judgeUsed: false, path: d.path };
   }
-
-  // §18.3: processo morreu => é do contestant => 'nao' com status error.
-  if (stopReason === 'error') {
-    return { verdict: 'nao', explanation: 'a execução do agente falhou (processo morreu)', judgeUsed: false };
+  if (d.kind === 'final') {
+    return { verdict: d.verdict, explanation: d.explanation, judgeUsed: false, path: d.path };
   }
-
-  // §15.2 exceção: stopReason !== 'completed' é incomplete, EXCETO se o oráculo
-  // passou inteiro (score===1) — aí o mundo mudou de forma verificável e segue.
-  const oraclePassing = oracle !== undefined && oracle.violations.length === 0 && oracle.score === 1;
-  if (stopReason !== 'completed' && !oraclePassing) {
-    return { verdict: null, explanation: `execução cortada (${stopReason}) — fora do placar`, judgeUsed: false };
-  }
-
-  // Daqui, o julgamento segue §17.1: o ORÁCULO MANDA; o juiz só gradua.
-  if (oracle) {
-    if (oracle.violations.length > 0) {
-      return { verdict: 'nao', explanation: `arquivos proibidos modificados: ${oracle.violations.join(', ')}`, judgeUsed: false };
-    }
-    if (oracle.score === 1) {
-      // 'resolve' candidato; o juiz roda SÓ para graduar (pode rebaixar a
-      // 'parcial' com justificativa, NUNCA a 'nao' — §17.1).
-      const j = await runJudgeForGraduation({
-        stage, dossierText, contestantId, judgeModelIds, apiKey, ctx,
-        canDowngradeTo: 'parcial',
-        fallback: { verdict: 'resolve' as Verdict, explanation: 'verificação automática passou integralmente (score 1)' },
-      });
-      return j;
-    }
-    if (oracle.score === 0) {
-      return { verdict: 'nao', explanation: 'verificação automática falhou integralmente (score 0)', judgeUsed: false };
-    }
-    // 0 < score < 1 => 'parcial' (candidato); o juiz confirma ou rebaixa a 'nao'.
-    const j = await runJudgeForGraduation({
-      stage, dossierText, contestantId, judgeModelIds, apiKey, ctx,
-      canDowngradeTo: 'nao',
-      fallback: { verdict: 'parcial' as Verdict, explanation: 'verificação automática incompleta (score parcial)' },
-    });
-    return j;
-  }
-
-  // Sem oráculo:
-  if (diffEmpty) {
-    // §18.3: completou e não mudou nada => é uma resposta, e é errada.
-    return { verdict: 'nao', explanation: 'o agente terminou sem alterar nada', judgeUsed: false };
-  }
-  // Sem oráculo com diff => julgamento pleno por dossiê (judgeDossier).
-  return runJudgeForGraduation({
+  const j = await runJudgeForGraduation({
     stage, dossierText, contestantId, judgeModelIds, apiKey, ctx,
-    canDowngradeTo: 'nao',
-    fallback: { verdict: 'parcial' as Verdict, explanation: 'sem oráculo, sem veredito do juiz' },
+    canDowngradeTo: d.floor,
+    fallback: { verdict: d.candidate, explanation: d.explanation },
   });
+  return { ...j, path: d.path };
 }
 
 /**
@@ -810,6 +783,29 @@ function responseError(contestant: Contestant, modelId: string, errorMsg: string
     status: 'error',
     errorMsg,
   };
+}
+
+/**
+ * Repetições perdidas ANTES de executar (sem tarefa / executor não preparou):
+ * uma por rep, todas 'nao' pelo caminho 'error' — nunca `incomplete`.
+ */
+function failedReps(
+  runId: string,
+  stageIndex: number,
+  contestantId: string,
+  reps: number,
+  msg: string,
+): AgentRepResult[] {
+  return Array.from({ length: reps }, (_, rep) => ({
+    repetition: rep,
+    execution: emptyExecution(execDir(runId, stageIndex, contestantId, rep), rep, 0, 0, 0, 'error'),
+    stopReason: 'error' as const,
+    verdict: 'nao' as const,
+    path: 'error' as const,
+    explanation: msg,
+    judgeUsed: false,
+    costUsd: 0,
+  }));
 }
 
 function emptyExecution(
