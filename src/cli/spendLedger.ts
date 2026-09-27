@@ -528,6 +528,41 @@ export function openMachineLedger(opts: OpenMachineLedgerOptions): {
   return { root, machine };
 }
 
+/**
+ * Dias de ledger mantidos no disco (IMPL-031, revisão). O teto só lê o dia
+ * CORRENTE; os anteriores ficam só como histórico para `limits show`/auditoria
+ * — sem GC, `<data-dir>/ledger` crescia um arquivo (+ lock) por dia para sempre.
+ */
+export const LEDGER_KEEP_DAYS = 30;
+
+/**
+ * GC de `<data-dir>/ledger`: apaga `spend-AAAA-MM-DD.json` (e o `.lock` do dia)
+ * de dias UTC mais antigos que `keepDays`. O dia é lido do NOME, nunca do mtime
+ * — um arquivo de hoje nunca sai, mesmo parado. Devolve quantos saíram; nunca lança.
+ */
+export function pruneLedgerDays(dataDir: string, keepDays: number = LEDGER_KEEP_DAYS, now: number = Date.now()): number {
+  let nomes: string[];
+  try {
+    nomes = fs.readdirSync(ledgerDir(dataDir));
+  } catch {
+    return 0;
+  }
+  const corte = utcDay(now - keepDays * 86_400_000);
+  let removidos = 0;
+  for (const nome of nomes) {
+    const m = /^spend-(\d{4}-\d{2}-\d{2})\.json(\.lock)?$/.exec(nome);
+    // Comparação lexicográfica de AAAA-MM-DD == cronológica.
+    if (!m || m[1] >= corte) continue;
+    try {
+      fs.unlinkSync(path.join(ledgerDir(dataDir), nome));
+      removidos += 1;
+    } catch {
+      /* outro processo já apagou */
+    }
+  }
+  return removidos;
+}
+
 /** Situação do dia sem criar lançamento (preflight, doctor, `limits show`). */
 export function readDailySnapshot(dataDir: string, cap?: DailyCapSetting): DailySnapshot {
   return new FileSpendLedger({ dataDir, cap: cap ?? resolveDailyCap(dataDir), label: 'leitura' }).snapshot();

@@ -35,7 +35,7 @@ import { isKnownModel, modelIdsCalledBy, runPreflight, type Refusal } from '../s
 import { createGateway, setDefaultGateway, type FetchLike, type OpenRouterGateway } from '../src/openrouter.js';
 import { catalogPath, ensureCatalog } from '../src/modelsCache.js';
 import { setDataDir } from '../src/storage.js';
-import { acquireRunLock, configHash } from '../src/cli/runLock.js';
+import { acquireRunLock, configHash, type RunLock } from '../src/cli/runLock.js';
 import { FileSpendLedger, writeDailyCap } from '../src/cli/spendLedger.js';
 import { catalogItem, fakeOpenRouter, noSleep } from './fakeOpenRouter.js';
 import type { RunConfig, RunMode } from '../src/types.js';
@@ -147,6 +147,13 @@ async function invoke(world: World, mode: RunMode, argv: string[]): Promise<Outc
 }
 
 // Fora de TTY (agente): a faixa duvidosa recusa e --budget é obrigatório.
+/**
+ * Locks tomados no setup (o "outro processo" é o próprio processo de teste):
+ * soltos no afterAll — senão o heartbeat (unref) e o listener de 'exit'
+ * sobreviviam ao arquivo de teste.
+ */
+const locksDoSetup: RunLock[] = [];
+
 const envSalvo: Record<string, string | undefined> = {};
 beforeAll(() => {
   for (const k of ['CI', 'OPENROUTER_API_KEY', 'PROMPT_BUILDER_HOME']) envSalvo[k] = process.env[k];
@@ -155,6 +162,7 @@ beforeAll(() => {
   delete process.env.PROMPT_BUILDER_HOME;
 });
 afterAll(() => {
+  for (const l of locksDoSetup.splice(0)) l.release();
   for (const [k, v] of Object.entries(envSalvo)) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
@@ -294,7 +302,7 @@ const CASOS: Caso[] = [
     setup: async (dir) => {
       const sonda = await invoke(newWorld(), 'compare', [...COMPARE, '--budget', '100', '--key', VALID_KEY, '--dry-run']);
       const cfg = (JSON.parse(sonda.stdout) as { data: { config: RunConfig } }).data.config;
-      acquireRunLock(dir, { command: 'compare', configHash: configHash(cfg), runId: 'run-de-outro-processo' });
+      locksDoSetup.push(acquireRunLock(dir, { command: 'compare', configHash: configHash(cfg), runId: 'run-de-outro-processo' }));
     },
   },
   {

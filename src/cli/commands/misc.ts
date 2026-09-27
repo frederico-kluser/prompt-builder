@@ -918,8 +918,11 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
   }
 
   // Camadas locais anti-gasto-N× (IMPL-031): teto diário da máquina e runs
-  // ativas (lock por config). Só disco.
+  // ativas (lock por config). Só disco. Teto INVÁLIDO (env ou limits.json) é
+  // falha do doctor (exit 3, o mesmo `config.invalid_daily_cap` com que todo
+  // compare/vary/train sai) — antes ele saía 0 com ok:true e a run quebrava.
   let capLocal: number | null = null;
+  let falhaTeto: CliError | null = null;
   try {
     const cap = resolveDailyCap(dataDir);
     capLocal = cap.capUsd;
@@ -934,7 +937,8 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
       processesToday: dia.processes,
     };
   } catch (err) {
-    checks.dailyCap = `inválido: ${(err as Error).message}`;
+    falhaTeto = toCliError(err);
+    checks.dailyCap = `inválido: ${falhaTeto.message}`;
   }
   checks.activeRuns = listRunLocks(dataDir)
     .filter((l) => !l.stale)
@@ -978,6 +982,9 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     }
     for (const r of recomendacoes) out.warn(r);
   }
+  // Key/rede primeiro (4/8: sem eles nada roda); com a key boa, o teto
+  // inválido ainda impede toda run — o doctor não pode dizer "saudável".
+  if (!falha && falhaTeto) falha = falhaTeto;
   if (falha) {
     // O relatório inteiro vai em details: o agente vê o que passou e o que não.
     throw new CliError(falha.message, falha.code, { checks }, { code: falha.errorCode, hint: falha.hint });
