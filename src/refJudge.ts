@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
+import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { matchExpected } from './engine/groundTruth.js';
 import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
@@ -199,7 +200,8 @@ async function judgeOne(params: {
             { role: 'user', content: withReminder(prompt.user, reminder) },
           ],
           temperature: 0,
-          maxTokens: 1024,
+          // Teto TOTAL com sala p/ raciocinio (IMPL-016): 1024 virava `length` vazio.
+          maxTokens: ROLE_MAX_TOKENS.judge,
           responseFormatJson: true,
           responseSchema: { name: 'veredito_pointwise', schema: REFERENCE_JUDGE_SCHEMA },
           reasoningLevel,

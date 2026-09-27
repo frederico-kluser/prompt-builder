@@ -9,8 +9,15 @@
 //   2. Datagen e em LOTE, nao por etapa. A UI cobrava uma chamada por cenario;
 //      `generateStages` faz `batchCountFor(count)` lotes. Erro de ~4x.
 //   3. `high` era ficticio (`high = point`). Agora sai dos tetos que o codigo
-//      realmente envia: gabarito 1500, refJudge 1024, duelo 512, competidor
-//      `min(maxOutputTokens, stage.maxTokens)`.
+//      realmente envia (`ROLE_MAX_TOKENS` de roleLimits.ts, IMPL-016: gabarito,
+//      juiz pointwise/listwise e duelo com sala p/ raciocinio) e, no
+//      competidor, do MESMO teto que a porta dura reserva: resposta
+//      (`maxOutputTokens`) + folga de raciocinio do degrau EFETIVO
+//      (`competitorMaxTokens`). Sem a folga aqui a porta suave aprovava G2 e a
+//      reserva (resposta + folga, todas em paralelo) estourava no meio da fase
+//      — o cenario que a porta suave existe para impedir (revisao IMPL-016).
+//      E pior caso por construcao; prever os reasoning_tokens reais por
+//      esforco x familia e o R-08:DEC-5.
 //   4. O HOLDOUT do treino nao era contado (uma run extra de N cenarios x 2).
 //
 // A faixa `low..high` e larga de proposito (~2.2x). Quem consome deve olhar
@@ -39,17 +46,19 @@ import {
   type PriceCapPerMTok,
 } from './engine/pricing.js';
 import { selectionMinibatchSize, TECHNIQUES_PER_ITERATION } from './engine/trainingPolicy.js';
-import type { CostRole, OpenRouterModel, RunConfig, RunMode } from './types.js';
+import { competitorModelHint } from './competitor.js';
+import { competitorMaxTokens, ROLE_MAX_TOKENS } from './roleLimits.js';
+import type { CostRole, OpenRouterModel, ReasoningLevel, RunConfig, RunMode } from './types.js';
 
 /** USD por token -> USD por milhao. A conversao 1e6 mora SO aqui e em toPerToken. */
 export const PER_MTOK = 1_000_000;
 export const toPerMTok = (usdPerToken: number): number => usdPerToken * PER_MTOK;
 export const toPerToken = (usdPerMTok: number): number => usdPerMTok / PER_MTOK;
 
-/** Tetos reais que o pipeline envia — base do limite superior da faixa. */
-const MAX_TOKENS_GABARITO = 1500;
-const MAX_TOKENS_REF_JUDGE = 1024;
-const MAX_TOKENS_DUEL = 512;
+/** Tetos reais que o pipeline envia — base do limite superior da faixa (fonte unica: roleLimits.ts). */
+const MAX_TOKENS_GABARITO = ROLE_MAX_TOKENS.gabarito;
+const MAX_TOKENS_REF_JUDGE = ROLE_MAX_TOKENS.judge;
+const MAX_TOKENS_DUEL = ROLE_MAX_TOKENS.duel;
 const MAX_TOKENS_DATAGEN_BATCH = 2000;
 /** Contexto de entrada assumido por cenario (pergunta + productContext). */
 const DEFAULT_CTX_IN = 500;
@@ -57,6 +66,11 @@ const DEFAULT_CTX_IN = 500;
 const CONTRACT_JUDGE_IN = 3600;
 /** Piso empirico da faixa: respostas raramente usam o teto de tokens. */
 const LOW_FACTOR = 0.45;
+/**
+ * Tamanho do gabarito como ENTRADA do juiz/duelo. Nao e o teto do papel: o
+ * teto (IMPL-016) inclui o raciocinio, que nao volta no texto da referencia.
+ */
+const REFERENCE_TEXT_TOKENS = 1500;
 
 export interface EstimateInput {
   mode: RunMode;
@@ -71,6 +85,12 @@ export interface EstimateInput {
   iterations: number;
   /** Um id por contestant (variantes repetem o mesmo modelo). */
   contestantModelIds: string[];
+  /**
+   * Degrau de raciocinio de cada contestant (alinhado a `contestantModelIds`;
+   * ja com a prioridade contestant ?? `reasoning.competitor`). Ausente = padrao
+   * do modelo. Dimensiona a folga do teto do competidor (IMPL-016).
+   */
+  contestantReasoningLevels?: Array<ReasoningLevel | undefined>;
   /** Ausente = nada a gerar (tudo pinado/seed). */
   datagenModelId?: string;
   /** Modelo do gabarito. Ausente = sem julgamento por referencia. */
@@ -301,9 +321,14 @@ export function estimateRunCost(
   }
 
   // --- competidores: cada contestant responde cada cenario ---
-  for (const id of input.contestantModelIds) {
-    byRole.competitor += runStages * price(model(id), ctxIn, maxOut);
-  }
+  // Teto = o que a porta dura RESERVA (resposta + folga do degrau efetivo);
+  // a ENTRADA do juiz segue so `maxOut` (o raciocinio nao volta no texto).
+  const competitorCap = (m: OpenRouterModel | undefined, i: number): number =>
+    competitorMaxTokens(maxOut, input.contestantReasoningLevels?.[i], competitorModelHint(m, ctxIn));
+  input.contestantModelIds.forEach((id, i) => {
+    const m = model(id);
+    byRole.competitor += runStages * price(m, ctxIn, competitorCap(m, i));
+  });
 
   // --- julgamento ---
   if (input.referenceJudging) {
@@ -311,13 +336,14 @@ export function estimateRunCost(
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
       byRole.judge +=
-        runStages * nContestants * price(m, ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE);
+        runStages * nContestants * price(m, ctxIn + maxOut + REFERENCE_TEXT_TOKENS, MAX_TOKENS_REF_JUDGE);
     }
   } else {
     // listwise: uma chamada por (juiz x passe x cenario), com TODAS as respostas
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
-      byRole.judge += runStages * input.judgePasses * price(m, ctxIn + nContestants * maxOut, 800);
+      // Listwise agora envia o teto do juiz (IMPL-016); antes ia sem teto e aqui se supunha 800.
+      byRole.judge += runStages * input.judgePasses * price(m, ctxIn + nContestants * maxOut, MAX_TOKENS_REF_JUDGE);
     }
   }
 
@@ -332,7 +358,7 @@ export function estimateRunCost(
       repeats *
       duelPairs *
       2 *
-      price(m, ctxIn + 2 * maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_DUEL);
+      price(m, ctxIn + 2 * maxOut + REFERENCE_TEXT_TOKENS, MAX_TOKENS_DUEL);
   }
 
   // --- re-avaliacao limpa (IMPL-013, training): 2 contestants x m cenarios ---
@@ -345,12 +371,13 @@ export function estimateRunCost(
     const mComp = model(input.contestantModelIds[0]);
     // `price` (IMPL-018): preço desconhecido vai para unknownPriceModelIds /
     // pior caso, nunca soma null nem "grátis".
-    byRole.competitor += reevalStages * 2 * price(mComp, ctxIn, maxOut);
+    // Mesmo teto do competidor que a porta dura reserva (IMPL-016).
+    byRole.competitor += reevalStages * 2 * price(mComp, ctxIn, competitorCap(mComp, 0));
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
       byRole.judge += input.referenceJudging
-        ? reevalStages * 2 * price(m, ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE)
-        : reevalStages * input.judgePasses * price(m, ctxIn + 2 * maxOut, 800);
+        ? reevalStages * 2 * price(m, ctxIn + maxOut + REFERENCE_TEXT_TOKENS, MAX_TOKENS_REF_JUDGE)
+        : reevalStages * input.judgePasses * price(m, ctxIn + 2 * maxOut, MAX_TOKENS_REF_JUDGE);
     }
   }
 
@@ -373,13 +400,13 @@ export function estimateRunCost(
   const holdoutStages = input.mode === 'training' ? (input.holdoutStages ?? 0) : 0;
   if (holdoutStages > 0) {
     const mComp = model(input.contestantModelIds[0]);
-    const holdoutComp = holdoutStages * 2 * price(mComp, ctxIn, maxOut);
+    const holdoutComp = holdoutStages * 2 * price(mComp, ctxIn, competitorCap(mComp, 0));
     let holdoutJudge = 0;
     for (const jid of input.judgeModelIds) {
       holdoutJudge +=
         holdoutStages *
         2 *
-        price(model(jid), ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE);
+        price(model(jid), ctxIn + maxOut + REFERENCE_TEXT_TOKENS, MAX_TOKENS_REF_JUDGE);
     }
     byRole.competitor += holdoutComp;
     byRole.judge += holdoutJudge;
@@ -418,7 +445,12 @@ export function estimateRunCost(
  */
 export function estimateInputFromConfig(
   config: RunConfig,
-  opts: { contestantIds?: string[]; holdoutStages?: number } = {},
+  opts: {
+    contestantIds?: string[];
+    holdoutStages?: number;
+    /** Degrau efetivo de cada contestant real (alinhado a `contestantIds`). */
+    contestantReasoningLevels?: Array<ReasoningLevel | undefined>;
+  } = {},
 ): EstimateInput {
   const judgeModelIds = config.judgeModelIds ?? [];
   const referenceJudging =
@@ -426,10 +458,16 @@ export function estimateInputFromConfig(
     (config.mode !== 'compare' || Boolean(config.competitorConfigs?.length));
 
   let contestantModelIds: string[];
+  let contestantReasoningLevels: Array<ReasoningLevel | undefined>;
   let variantsPerIteration = 0;
+  // Mesma prioridade do orquestrador: contestant.reasoningLevel ?? reasoning.competitor.
+  const nivelRun = config.reasoning?.competitor;
   if (config.mode === 'compare') {
     contestantModelIds =
       config.competitorConfigs?.map((c) => c.modelId) ?? config.competitorModelIds ?? [];
+    contestantReasoningLevels =
+      config.competitorConfigs?.map((c) => c.reasoningLevel ?? nivelRun) ??
+      contestantModelIds.map(() => nivelRun);
   } else {
     const base = config.basePrompt?.trim() ? 1 : 0;
     const training = config.mode === 'training';
@@ -447,6 +485,7 @@ export function estimateInputFromConfig(
       opts.contestantIds?.length ??
       Math.max(2, (config.promptOptimization !== false ? tecnicas : manuais) + base) + carry;
     contestantModelIds = Array.from({ length: n }, () => config.contestantModelId);
+    contestantReasoningLevels = contestantModelIds.map(() => nivelRun);
     variantsPerIteration = config.promptOptimization !== false ? tecnicas : 0;
   }
 
@@ -482,6 +521,7 @@ export function estimateInputFromConfig(
     ...(config.mode === 'compare' && config.repeats !== undefined ? { repeats: config.repeats } : {}),
     iterations: config.mode === 'training' ? config.iterations : 1,
     contestantModelIds,
+    contestantReasoningLevels: opts.contestantReasoningLevels ?? contestantReasoningLevels,
     datagenModelId: precisaGerar ? config.datagenModelId : undefined,
     referenceModelId: config.referenceModelId ?? judgeModelIds[0],
     judgeModelIds,

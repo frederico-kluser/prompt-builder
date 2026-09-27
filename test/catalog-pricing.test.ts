@@ -40,6 +40,7 @@ import {
   worstCasePricing,
 } from '../src/engine/pricing.js';
 import { estimateRunCost, makeCallEstimator, priceCall, type EstimateInput } from '../src/estimate.js';
+import { competitorMaxTokens } from '../src/roleLimits.js';
 import { MODELS_EXPORT_FORMAT, modelCaps, toExportRow } from '../src/modelCaps.js';
 import { BudgetLedger, isControlSignal } from '../src/budget.js';
 import { catalogPath, ensureCatalog } from '../src/modelsCache.js';
@@ -234,8 +235,12 @@ describe('IMPL-018 (i) — "-1" nunca produz valor negativo em computeCost/estim
     const pior = estimateRunCost(input, models, { unknownPrice: 'worst-case' });
     expect(pior.assumptions.unknownPrice).toBe('worst-case');
     expect(pior.unknownPriceModelIds).toEqual(['openrouter/auto']);
-    // 4 cenários × (500 in × 5e-6 + 800 out × 2e-5) — o modelo mais caro do catálogo.
-    expect(pior.byRole.competitor).toBeCloseTo(4 * (500 * 5e-6 + 800 * 2e-5), 12);
+    // 4 cenários × (500 in × 5e-6 + teto × 2e-5) — o modelo mais caro do catálogo.
+    // Teto = o que a porta dura reserva (IMPL-016): resposta 800 + folga do
+    // degrau padrão (o roteador aceita raciocínio e não declara default_effort).
+    const teto = competitorMaxTokens(800);
+    expect(teto).toBe(800 + 4096);
+    expect(pior.byRole.competitor).toBeCloseTo(4 * (500 * 5e-6 + teto * 2e-5), 12);
     expect(exclude.byRole.competitor).toBe(0);
     expect(pior.point).toBeGreaterThan(exclude.point);
 
@@ -244,7 +249,7 @@ describe('IMPL-018 (i) — "-1" nunca produz valor negativo em computeCost/estim
       models,
       { unknownPrice: 'worst-case' },
     );
-    expect(capped.byRole.competitor).toBeCloseTo(4 * (500 * 1e-6 + 800 * 2e-6), 12);
+    expect(capped.byRole.competitor).toBeCloseTo(4 * (500 * 1e-6 + teto * 2e-6), 12);
     for (const n of todosOsNumeros(capped)) expect(n >= 0).toBe(true);
   });
 

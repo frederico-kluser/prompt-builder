@@ -73,10 +73,17 @@ raciocínio comeu o teto e não sobrou resposta). Cada resposta truncada já foi
 refeita **uma vez** com o teto x2; a que continuou cortada deixa a etapa
 `incomplete` (`incompleteReason: "truncation"`), fora do placar e das médias —
 nunca vira veredito `nao`. A taxa cobre **todos os papéis** e o alerta diz
-quais truncaram (`truncationByRole` no `--json`). Para corrigir: competidor →
-suba `--max-output-tokens` (ou `maxTokens` do cenário) ou baixe
-`--effort-competitor`; juiz, duelo ou gabarito (tetos fixos de 1024/512/1500
-tokens) → baixe `--effort-judge`. Gabarito que continuou truncado é descartado
+quais truncaram (`truncationByRole` no `--json`). Os tetos contam raciocínio +
+resposta. Competidor: envia a resposta (`maxTokens` do cenário, limitada por
+`--max-output-tokens`) **mais** uma folga de raciocínio pelo degrau que de fato
+vai ao modelo (off/minimal 1024, low 2048, medium ou padrão do modelo 4096,
+high 8192, xhigh 12288, max 16384; 0 se o catálogo diz que o modelo não
+raciocina; limitada pelo contexto do modelo). Em modelo `mandatory` o `off` não
+é enviado e ele raciocina no degrau padrão, então baixar `--effort-competitor`
+ali não reduz o raciocínio. Para corrigir → suba `--max-output-tokens` (ou
+`maxTokens` do cenário). Juiz, duelo e gabarito: tetos fixos de 4096/2048/3072
+tokens (`ROLE_MAX_TOKENS`, `src/roleLimits.ts`; o juiz listwise também tem
+teto) → baixe `--effort-judge`. Gabarito que continuou truncado é descartado
 (`stage.generated` traz `warning`) e a etapa é julgada sem gabarito.
 
 ```bash

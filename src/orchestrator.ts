@@ -59,6 +59,7 @@ import type {
   Verdict,
   VerdictError,
   VerdictSource,
+  ReasoningLevel,
 } from './types.js';
 
 function nowIso(): string {
@@ -356,13 +357,25 @@ async function runLoop(
   // dispararia (a run pagava as respostas e parava sem nota, passando do teto).
   // Lista vazia => o estimador conta tecnicas+base; a estimativa e refeita com
   // os contestants reais depois do `prepare` (espelho do web).
-  const estimar = (contestantIds: string[]) =>
+  // Degrau por contestant = o MESMO que o competidor recebe (IMPL-016): o teto
+  // do competidor inclui a folga de raciocinio desse degrau.
+  const estimar = (contestants: ReadonlyArray<{ id: string; reasoningLevel?: ReasoningLevel }>) =>
     estimateRunCost(
-      estimateInputFromConfig(record.config, contestantIds.length > 0 ? { contestantIds } : {}),
+      estimateInputFromConfig(
+        record.config,
+        contestants.length > 0
+          ? {
+              contestantIds: contestants.map((c) => c.id),
+              contestantReasoningLevels: contestants.map(
+                (c) => c.reasoningLevel ?? record.config.reasoning?.competitor,
+              ),
+            }
+          : {},
+      ),
       catalogo,
       { unknownPrice: 'worst-case' },
     );
-  let est = estimar(record.contestants.map((c) => c.id));
+  let est = estimar(record.contestants);
 
   /**
    * Porta suave. A unidade NAO e "uma fase", e um GRUPO que produz resultado
@@ -484,7 +497,7 @@ async function runLoop(
     record.costByContestant = Object.fromEntries(contestants.map((c) => [c.id, 0]));
     captureLifecycle();
     // As portas seguintes (G1, G2 atomica, finais) medem com os contestants REAIS.
-    est = estimar(contestants.map((c) => c.id));
+    est = estimar(contestants);
     await saveRun(record);
     emitEvent({ type: 'variants.generated', runId, contestants });
   }

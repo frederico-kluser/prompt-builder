@@ -9,6 +9,7 @@
 // (IMPL-004).
 
 import { chatCompletion } from './openrouter.js';
+import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { callJudgeWithRetry, withReminder, type JudgeAttempt } from './engine/judgeRetry.js';
 import { buildDuelPrompt, DUEL_HEAD, DUEL_SCHEMA, parseDuelVerdict, type DuelPrompt } from './engine/duelPrompt.js';
 import { formatReminderFor, instructionsBlock, markedBlock, newJudgeGuard } from './engine/judgeGuard.js';
@@ -298,7 +299,8 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
               { role: 'user', content: withReminder(prompt.user, reminder) },
             ],
             temperature: 0,
-            maxTokens: 512,
+            // Teto TOTAL com sala p/ raciocinio (IMPL-016): 512 virava `length` vazio => empate.
+            maxTokens: ROLE_MAX_TOKENS.duel,
             timeoutMs,
             responseFormatJson: true,
             responseSchema: { name: 'veredito_duelo', schema: DUEL_SCHEMA },

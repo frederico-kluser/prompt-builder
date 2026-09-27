@@ -10,6 +10,7 @@
 // `failedDuels`, fora do placar (IMPL-004).
 
 import { chatCompletion } from './openrouter';
+import { ROLE_MAX_TOKENS } from './roleLimits';
 import { callJudgeWithRetry, withReminder, type JudgeAttempt } from '../../../src/engine/judgeRetry.js';
 import { buildDuelPrompt, DUEL_SCHEMA, parseDuelVerdict } from '../../../src/engine/duelPrompt.js';
 import type {
@@ -193,7 +194,8 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
               { role: 'user', content: withReminder(prompt.user, reminder) },
             ],
             temperature: 0,
-            maxTokens: 512,
+            // Teto TOTAL com sala p/ raciocinio (IMPL-016, espelho de src/duels.ts).
+            maxTokens: ROLE_MAX_TOKENS.duel,
             timeoutMs,
             responseFormatJson: true,
             responseSchema: { name: 'veredito_duelo', schema: DUEL_SCHEMA },

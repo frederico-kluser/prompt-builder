@@ -2,6 +2,7 @@ import { chatCompletion } from './openrouter.js';
 import type { ChatCompletionResult, ChatMessage } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { finishSignalsOf, retryMaxTokens } from './engine/truncation.js';
+import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import type { CallFinishSignals, ReasoningLevel, RunCtx, StageSpec } from './types.js';
 
 // Gabaritos (respostas de referência), portados do prompt-arena: UMA chamada
@@ -12,7 +13,8 @@ import type { CallFinishSignals, ReasoningLevel, RunCtx, StageSpec } from './typ
 // vazia NUNCA derruba a run: a etapa segue sem `reference` e o juiz pointwise
 // degrada para 'parcial'.
 
-const MAX_TOKENS_GABARITO = 1500;
+// Teto TOTAL (raciocinio + resposta) do papel — fonte unica em roleLimits.ts (IMPL-016).
+const MAX_TOKENS_GABARITO = ROLE_MAX_TOKENS.gabarito;
 
 export interface GenerateReferencesParams {
   stages: StageSpec[];
@@ -110,7 +112,7 @@ export async function generateReferences(
         ultima = finishSignalsOf(result, maxTokens);
         // Truncamento (IMPL-014 / R-07b:DEC-2): UM retry com teto x2. E o
         // modo de falha tipico do gabarito — juiz/referencia com raciocinio
-        // alto consome os 1500 tokens e devolve `length` com conteudo vazio.
+        // alto consome o teto e devolve `length` com conteudo vazio.
         // Os sinais da 1a tentativa (a truncada) ficam em `firstAttempt`:
         // qual sinal disparou e quanto raciocinio ela gastou calibram o teto.
         if (result.truncated) {

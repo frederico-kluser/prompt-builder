@@ -40,6 +40,7 @@ import type {
   RunRecord,
   StageRecord,
   StageSpec,
+  ReasoningLevel,
 } from './types';
 
 function nowIso(): string {
@@ -417,17 +418,25 @@ async function runLoop(
   // atômica G2 nunca dispararia (a run pagava as respostas e parava sem nota,
   // passando do teto). Lista vazia => deixa o estimador contar técnicas+base,
   // e a estimativa é refeita com os contestants reais depois do `prepare`.
-  const estimar = (contestantIds: string[]) =>
+  // Degrau por contestant = o que o competidor recebe (IMPL-016, espelho do Node).
+  const estimar = (contestants: ReadonlyArray<{ id: string; reasoningLevel?: ReasoningLevel }>) =>
     estimateRunCost(
       estimateInputFromConfig(
         record.config as never,
-        contestantIds.length > 0 ? { contestantIds } : {},
+        contestants.length > 0
+          ? {
+              contestantIds: contestants.map((c) => c.id),
+              contestantReasoningLevels: contestants.map(
+                (c) => c.reasoningLevel ?? record.config.reasoning?.competitor,
+              ),
+            }
+          : {},
       ),
       catalogo,
       // Preço desconhecido (roteador, "-1") pelo PIOR CASO — espelho do Node (IMPL-018).
       { unknownPrice: 'worst-case' },
     );
-  let est = estimar(record.contestants.map((c) => c.id));
+  let est = estimar(record.contestants);
 
   /** Cancelamento: a raiz da run (ou a sessão, via ledger) abortou => controle. */
   const throwIfCancelled = (): void => {
@@ -511,7 +520,7 @@ async function runLoop(
     record.costByContestant = Object.fromEntries(contestants.map((c) => [c.id, 0]));
     captureLifecycle();
     // As portas seguintes (G1, G2 atômica, finais) medem com os contestants REAIS.
-    est = estimar(contestants.map((c) => c.id));
+    est = estimar(contestants);
     await saveRun(record);
     emitEvent({ type: 'variants.generated', runId, contestants });
   }

@@ -43,6 +43,7 @@ import {
   MAX_REASON_KEYS,
   describeTruncatedReference,
 } from '../src/engine/truncation.js';
+import { competitorMaxTokens, ROLE_MAX_TOKENS } from '../src/roleLimits.js';
 import { BudgetLedger } from '../src/budget.js';
 import { normalizeRunRecord } from '../src/normalize.js';
 import { variationConfigFrom } from '../src/trainer.js';
@@ -356,6 +357,16 @@ describe('IMPL-014 (i) — sinais de fim de TODO papel chegam ao ledger (juiz e 
 // ---------------------------------------------------------------------------
 
 const STAGE: StageSpec = { question: 'Explique a política de trocas.', productContext: 'Trocas em 30 dias.', maxTokens: 300 };
+// IMPL-016: o teto enviado é TOTAL — resposta + folga de raciocínio do degrau (aqui o padrão do modelo).
+const C300 = competitorMaxTokens(300);
+const C200 = competitorMaxTokens(200); // maxOutputTokens: 200 limita a RESPOSTA
+/**
+ * Na run inteira o catálogo está QUENTE e o `catalogItem` padrão não lista
+ * parâmetro de raciocínio: nada de `reasoning` vai no fio, então não há folga
+ * a reservar (revisão IMPL-016) — o teto é só a resposta.
+ */
+const C300_SEM_RACIOCINIO = competitorMaxTokens(300, undefined, { deniesReasoning: true });
+const GAB = ROLE_MAX_TOKENS.gabarito;
 
 describe('IMPL-014 — competidor: 1 retry com max_tokens x2', () => {
   let anterior: OpenRouterGateway | undefined;
@@ -382,13 +393,13 @@ describe('IMPL-014 — competidor: 1 retry com max_tokens x2', () => {
     );
     const r = await runCompetitor({ apiKey: KEY, contestantId: 'c', modelId: 'm', stage: STAGE });
     const pedidos = fake.chatRequests();
-    expect(pedidos.map((p) => p.body?.max_tokens)).toEqual([300, 600]);
+    expect(pedidos.map((p) => p.body?.max_tokens)).toEqual([C300, retryMaxTokens(C300)]);
     expect(r).toMatchObject({
       status: 'ok',
       text: 'Resposta inteira.',
       truncated: false,
       truncationRetried: true,
-      maxTokens: 600,
+      maxTokens: retryMaxTokens(C300),
       finishReason: 'stop',
       nativeFinishReason: 'end_turn',
       tokensOut: 350,
@@ -399,7 +410,7 @@ describe('IMPL-014 — competidor: 1 retry com max_tokens x2', () => {
       finishReason: 'length',
       tokensOut: 300,
       contentChars: 'Metade da resp'.length,
-      maxTokens: 300,
+      maxTokens: C300,
       truncated: true,
       truncationSignals: ['finish_length'],
     });
@@ -408,24 +419,24 @@ describe('IMPL-014 — competidor: 1 retry com max_tokens x2', () => {
   it('truncou nas DUAS: truncated=true, exatamente 2 chamadas (sem laço)', async () => {
     const fake = usar(() => ({ text: 'Cortada', finishReason: 'length', nativeFinishReason: 'MAX_TOKENS' }));
     const r = await runCompetitor({ apiKey: KEY, contestantId: 'c', modelId: 'm', stage: STAGE, maxOutputTokens: 200 });
-    expect(fake.chatRequests().map((p) => p.body?.max_tokens)).toEqual([200, 400]);
+    expect(fake.chatRequests().map((p) => p.body?.max_tokens)).toEqual([C200, retryMaxTokens(C200)]);
     expect(r).toMatchObject({
       status: 'ok',
       truncated: true,
       truncationRetried: true,
-      maxTokens: 400,
+      maxTokens: retryMaxTokens(C200),
       finishReason: 'length',
       nativeFinishReason: 'MAX_TOKENS',
       truncationSignals: ['finish_length', 'native_length'],
     });
-    expect(r.firstAttempt).toMatchObject({ truncated: true, maxTokens: 200, nativeFinishReason: 'MAX_TOKENS' });
+    expect(r.firstAttempt).toMatchObject({ truncated: true, maxTokens: C200, nativeFinishReason: 'MAX_TOKENS' });
   });
 
   it('resposta completa: 1 chamada, truncated=false persistido (sinal de fim em 100% das respostas)', async () => {
     const fake = usar(() => ({ text: 'ok', finishReason: 'stop' }));
     const r = await runCompetitor({ apiKey: KEY, contestantId: 'c', modelId: 'm', stage: STAGE });
     expect(fake.chatRequests()).toHaveLength(1);
-    expect(r).toMatchObject({ truncated: false, finishReason: 'stop', maxTokens: 300 });
+    expect(r).toMatchObject({ truncated: false, finishReason: 'stop', maxTokens: C300 });
     expect(r.truncationRetried).toBeUndefined();
     expect(r.firstAttempt).toBeUndefined();
   });
@@ -448,7 +459,7 @@ describe('IMPL-014 — competidor: 1 retry com max_tokens x2', () => {
     expect(r.status).toBe('error');
     expect(r.truncationRetried).toBe(true);
     // O retry falhou, mas os sinais da 1ª (truncada) ficam no record.
-    expect(r.firstAttempt).toMatchObject({ truncated: true, finishReason: 'length', maxTokens: 300, tokensOut: 300 });
+    expect(r.firstAttempt).toMatchObject({ truncated: true, finishReason: 'length', maxTokens: C300, tokensOut: 300 });
     expect(r.costUsd).toBeCloseTo(0.004, 10);
     // Entra na taxa: 1 chamada completou e truncou.
     expect(truncationStats([{ responses: [r] }])).toMatchObject({ calls: 1, truncated: 1 });
@@ -479,14 +490,14 @@ describe('IMPL-014 (i) — gabarito: sinais persistidos, retry x2 e régua corta
       modelId: 'ref',
       onCall: (i, c) => calls.set(i, c),
     });
-    expect(fake.chatRequests().map((p) => p.body?.max_tokens)).toEqual([1500, 3000]);
+    expect(fake.chatRequests().map((p) => p.body?.max_tokens)).toEqual([GAB, retryMaxTokens(GAB)]);
     expect(out[0].reference).toBe('Gabarito completo.');
-    expect(calls.get(0)).toMatchObject({ finishReason: 'stop', truncated: false, truncationRetried: true, maxTokens: 3000 });
+    expect(calls.get(0)).toMatchObject({ finishReason: 'stop', truncated: false, truncationRetried: true, maxTokens: retryMaxTokens(GAB) });
     // A 1ª tentativa (a truncada) fica em `firstAttempt` — antes o retry sobrescrevia.
     expect(calls.get(0)?.firstAttempt).toMatchObject({
       finishReason: 'length',
       truncated: true,
-      maxTokens: 1500,
+      maxTokens: GAB,
       truncationSignals: ['finish_length', 'empty_with_tokens'],
     });
   });
@@ -497,8 +508,8 @@ describe('IMPL-014 (i) — gabarito: sinais persistidos, retry x2 e régua corta
     const calls = new Map<number, CallFinishSignals>();
     const out = await generateReferences({ stages: [STAGE], apiKey: KEY, modelId: 'ref', onCall: (i, c) => calls.set(i, c) });
     expect(out[0].reference).toBeUndefined();
-    expect(calls.get(0)).toMatchObject({ finishReason: 'length', truncated: true, truncationRetried: true, maxTokens: 3000 });
-    expect(calls.get(0)?.firstAttempt).toMatchObject({ finishReason: 'length', truncated: true, maxTokens: 1500 });
+    expect(calls.get(0)).toMatchObject({ finishReason: 'length', truncated: true, truncationRetried: true, maxTokens: retryMaxTokens(GAB) });
+    expect(calls.get(0)?.firstAttempt).toMatchObject({ finishReason: 'length', truncated: true, maxTokens: GAB });
   });
 
   it('finishSignalsOf copia a decisão do gateway (não recalcula); com a 1ª tentativa marca o retry', () => {
@@ -579,7 +590,7 @@ function conferirTruncamento(rec: RunRecord, fake: ReturnType<typeof fakeDaRun>,
   expect(fake.chatRequests().filter((r) => r.model === 'fake/judge' && r.user.includes('Pergunta 1'))).toHaveLength(0);
   // O competidor truncado foi repetido 1x com teto x2 — e só 1x.
   const longP1 = fake.chatRequests().filter((r) => r.model === 'fake/long' && r.user.includes('Pergunta 1'));
-  expect(longP1.map((r) => r.body?.max_tokens)).toEqual([300, 600]);
+  expect(longP1.map((r) => r.body?.max_tokens)).toEqual([C300_SEM_RACIOCINIO, retryMaxTokens(C300_SEM_RACIOCINIO)]);
 
   // Fora do PLACAR: 3 contestants numa só etapa julgada => 2+1+0 = 3 pontos.
   expect(Object.values(rec.scoreboard).reduce((a, b) => a + b, 0)).toBe(3);
@@ -601,7 +612,7 @@ function conferirTruncamento(rec: RunRecord, fake: ReturnType<typeof fakeDaRun>,
     expect(r.maxTokens).toBeGreaterThan(0);
   }
   const truncada = st1.responses.find((r) => r.contestantId === 'fake/long')!;
-  expect(truncada).toMatchObject({ truncated: true, truncationRetried: true, maxTokens: 600, finishReason: 'length' });
+  expect(truncada).toMatchObject({ truncated: true, truncationRetried: true, maxTokens: retryMaxTokens(C300_SEM_RACIOCINIO), finishReason: 'length' });
   // …e de gabarito (1 chamada por cenário).
   for (const st of [st1, st2]) {
     expect(st.gabaritoCall).toMatchObject({ finishReason: 'stop', nativeFinishReason: 'end_turn', truncated: false });
@@ -611,7 +622,7 @@ function conferirTruncamento(rec: RunRecord, fake: ReturnType<typeof fakeDaRun>,
     finishReason: 'length',
     nativeFinishReason: 'max_tokens',
     truncated: true,
-    maxTokens: 300,
+    maxTokens: C300_SEM_RACIOCINIO,
     truncationSignals: ['finish_length', 'native_length'],
   });
   // O custo das DUAS tentativas fica na fatia do contestant (usage.cost default 0.001).
@@ -823,8 +834,8 @@ function conferirJuizEGabarito(rec: RunRecord, fake: ReturnType<typeof fakeJuizE
     nativeFinishReason: 'max_tokens',
     truncated: true,
     truncationRetried: true,
-    maxTokens: 3000,
-    firstAttempt: { finishReason: 'length', truncated: true, maxTokens: 1500 },
+    maxTokens: retryMaxTokens(GAB),
+    firstAttempt: { finishReason: 'length', truncated: true, maxTokens: GAB },
   });
   // A etapa segue (julgada sem régua, listwise) — não é incomplete.
   expect(st2.incomplete).toBeFalsy();
@@ -833,7 +844,7 @@ function conferirJuizEGabarito(rec: RunRecord, fake: ReturnType<typeof fakeJuizE
   // Aviso VISÍVEL no stage.generated (antes: só console.warn) — sem o texto do gabarito.
   const gerados = eventos.filter((e): e is Extract<RunEvent, { type: 'stage.generated' }> => e.type === 'stage.generated');
   const ev2 = gerados.find((e) => e.stageIndex === i2)!;
-  expect(ev2.warning).toMatch(new RegExp(`Gabarito da etapa ${i2 + 1} truncado no teto de 3000 tokens`));
+  expect(ev2.warning).toMatch(new RegExp(`Gabarito da etapa ${i2 + 1} truncado no teto de ${retryMaxTokens(GAB)} tokens`));
   expect(ev2.warning).toMatch(/julgada SEM gabarito/);
   expect(ev2.warning).not.toContain('Gabarito pela met');
   expect(ev2.gabaritoCall).toMatchObject({ truncated: true });

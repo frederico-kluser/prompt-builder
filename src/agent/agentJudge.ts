@@ -40,6 +40,7 @@
 import { z } from 'zod';
 import { chatCompletion } from '../openrouter.js';
 import type { ChatMessage } from '../openrouter.js';
+import { ROLE_MAX_TOKENS } from '../roleLimits.js';
 import { isControlSignal, RunCancelled } from '../budget.js';
 import { aggregateVerdicts } from '../engine/verdictAggregate.js';
 import { AGENT_DATA_TAG, agentDataMarker, dossierMarker, quoteAgentData } from './dossier.js';
@@ -364,7 +365,8 @@ async function judgeOneDossier(opts: {
         modelId: judgeModelId,
         messages: buildAgentJudgeMessages(stage, dossierText, reminder),
         temperature: 0,
-        maxTokens: 1024,
+        // Teto TOTAL do juiz (IMPL-016 / R-07b:REC-1) — o mesmo do pointwise.
+        maxTokens: ROLE_MAX_TOKENS.judge,
         responseFormatJson: true,
         reasoningLevel,
         timeoutMs,
