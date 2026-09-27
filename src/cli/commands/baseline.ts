@@ -295,8 +295,20 @@ export async function cmdBaseline(argv: string[]): Promise<number> {
     for (const w of report.warnings) out.line(`AVISO [${w.kind}] ${w.message}`);
     out.line(report.ok ? 'ok: o contrato de julgamento é o da baseline.' : 'REPROVADO: o julgamento não é comparável com a baseline.');
   }
-  out.result(report.ok, 'baseline.check', { file, report });
   // Gate reprovado = config: a baseline versionada não descreve mais o
-  // julgamento em vigor (mesmo código do drift de `registry validate`).
-  return report.ok ? EXIT.OK : EXIT.CONFIG;
+  // julgamento em vigor (mesmo código do drift de `registry validate`). Falha
+  // sai pelo envelope único de erro (IMPL-028), nunca um `result` ok:false.
+  if (!report.ok) {
+    throw new CliError(
+      `Baseline reprovada: ${report.failures.map((f) => f.message).join('; ') || 'o julgamento não é comparável com a baseline'}.`,
+      EXIT.CONFIG,
+      { file, report },
+      {
+        code: 'config.baseline_drift',
+        hint: 'Rode uma run-ponte e declare a re-baseline com `prompt-builder baseline declare --reason "…"` (ver `docs lifecycle`).',
+      },
+    );
+  }
+  out.result(true, 'baseline.check', { file, report });
+  return EXIT.OK;
 }

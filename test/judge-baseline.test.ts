@@ -261,9 +261,14 @@ describe('(iii) `prompt-builder baseline` — exit code real', () => {
     // Simulação da remoção do juiz: o catálogo do dia não tem mais o modelo.
     const removido = cli('check', '--file', arq, '--catalog', catSemJuiz, '--json');
     expect(removido.status).toBe(3);
-    const payload = JSON.parse(removido.stdout) as { ok: boolean; data: { report: { failures: { kind: string }[] } } };
+    // Reprovação sai pelo envelope único de erro (IMPL-028): `error.details.report`.
+    const payload = JSON.parse(removido.stdout) as {
+      ok: boolean;
+      error: { code: string; details: { report: { failures: { kind: string }[] } } };
+    };
     expect(payload.ok).toBe(false);
-    expect(payload.data.report.failures.map((f) => f.kind)).toContain('model-removed');
+    expect(payload.error.code).toBe('config.baseline_drift');
+    expect(payload.error.details.report.failures.map((f) => f.kind)).toContain('model-removed');
 
     // Config trocando o juiz sem declaração também reprova.
     const cfg = join(tmp, 'arena.json');

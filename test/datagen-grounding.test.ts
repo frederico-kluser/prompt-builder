@@ -33,7 +33,7 @@ import {
 } from '../src/engine/scenarioRules.js';
 import type { ScenarioRules } from '../src/engine/libraryCore.js';
 import { cmdLibrary } from '../src/cli/commands/library.js';
-import { EXIT } from '../src/cli/output.js';
+import { EXIT, resetOutputState } from '../src/cli/output.js';
 import { getDataDir, setDataDir } from '../src/storage.js';
 import { listItems } from '../src/library.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
@@ -298,6 +298,8 @@ describe('IMPL-008 — CLI `library seed --generate` (métrica da R-05: groundin
     dir = mkdtempSync(join(tmpdir(), 'pb-impl008-'));
     dataDirAnterior = getDataDir();
     stdout = [];
+    // Um resultado por processo (IMPL-028): cada comando do teste é uma "invocação" nova.
+    resetOutputState();
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
       stdout.push(String(chunk));
       return true;
@@ -323,6 +325,8 @@ describe('IMPL-008 — CLI `library seed --generate` (métrica da R-05: groundin
 
     instalar(fakeGerador((n) => [cenario(10 * n + 1), cenario(10 * n + 2), cenario(10 * n + 3)]));
     stdout = [];
+    // Um resultado por processo (IMPL-028): cada comando do teste é uma "invocação" nova.
+    resetOutputState();
     const code = await cmdLibrary([
       'seed', '--profile', 'acme', '--generate', '3', '--theme', 'trocas', '--model', 'fake/gen',
       '--budget', 'none', '--key', KEY, '--data-dir', dir, '--json',
@@ -357,6 +361,8 @@ describe('IMPL-008 — CLI `library seed --generate` (métrica da R-05: groundin
       JSON.stringify({ templates: { system: 'Gere cenários da ACME.' }, grounding: { fewShot: 'P: a? R: b.' } }),
     );
     stdout = [];
+    // Um resultado por processo (IMPL-028): cada comando do teste é uma "invocação" nova.
+    resetOutputState();
     expect(await cmdLibrary(['init', '--profile', 'y', '--rules', semUso, '--data-dir', dir, '--json'])).toBe(EXIT.OK);
     const avisos = payload().data.warnings as string[];
     expect(avisos).toHaveLength(1);

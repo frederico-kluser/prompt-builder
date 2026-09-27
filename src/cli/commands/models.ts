@@ -307,9 +307,16 @@ async function cmdAllowlist(parsed: ParsedArgs): Promise<number> {
   for (const l of r.lines) out.line(l);
   const check = values.check === true;
   if (check && !r.ok) for (const f of r.failures) out.warn(`allowlist reprovada: ${f}`);
-  out.result(check ? r.ok : true, 'models.allowlist', r.data);
-  // Sem --check é só relatório; com --check a reprovação é erro de CONFIG (3).
-  return check && !r.ok ? EXIT.CONFIG : EXIT.OK;
+  // Sem --check é só relatório; com --check a reprovação é erro de CONFIG (3),
+  // pelo envelope único de erro (IMPL-028).
+  if (check && !r.ok) {
+    throw new CliError(`Allowlist LGPD reprovada: ${r.failures.join('; ')}.`, EXIT.CONFIG, r.data, {
+      code: 'config.lgpd_allowlist_failed',
+      hint: 'Regenere o snapshot com `npm run lgpd:allowlist` (ou atualize o pacote) e rode `models allowlist --check` de novo.',
+    });
+  }
+  out.result(true, 'models.allowlist', r.data);
+  return EXIT.OK;
 }
 
 export async function cmdModels(argv: string[]): Promise<number> {

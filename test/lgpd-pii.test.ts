@@ -1305,7 +1305,8 @@ describe('IMPL-042 (revisão 2) — `library seed --file` passa pelo MESMO funil
         ]),
       );
       const base = ['seed', '--profile', 'perfil', '--file', arq, '--data-dir', tmp];
-      await expect(cmdLibrary(base)).resolves.toBe(3);
+      // Recusa parcial sai pelo envelope único de erro (IMPL-028): CliError exit 3.
+      await expect(cmdLibrary(base)).rejects.toMatchObject({ code: 3, errorCode: 'library.items_rejected' });
       expect(stderr.join('')).toMatch(/item 2: Importação bloqueada \(LGPD\).*question \(CPF \+ telefone\)/);
       expect((await listItems('perfil')).map((i) => i.id)).toEqual(['ok-1']);
       await expect(cmdLibrary([...base, '--allow-pii'])).resolves.toBe(0);

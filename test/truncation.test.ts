@@ -52,7 +52,7 @@ import { runToCompletion as runNode } from '../src/orchestrator.js';
 import { runToCompletion as runWeb } from '../web/src/engine/orchestrator.js';
 import { subscribeRun } from '../web/src/engine/events.js';
 import { cmdRun } from '../src/cli/commands/run.js';
-import { Output } from '../src/cli/output.js';
+import { Output, resetOutputState } from '../src/cli/output.js';
 import { emitRunEvent, truncationFields } from '../src/cli/ndjson.js';
 import type {
   CallFinishSignals,
@@ -984,6 +984,8 @@ describe('IMPL-014 (iii) — `run --json` emite truncationRate e o alerta acima 
   });
 
   it('NDJSON: stage.incomplete enxuto e run.finished com truncationRate; sem alerta em ≤ 2%', () => {
+    // O stdout fecha no 1º resultado do processo (IMPL-028); o teste anterior já emitiu um.
+    resetOutputState();
     const linhas: string[] = [];
     const spy = vi.spyOn(process.stdout, 'write').mockImplementation((c: unknown) => (linhas.push(String(c)), true));
     try {

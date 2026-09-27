@@ -19,7 +19,7 @@
 // interrompido com o parcial salvo) — ai o `data` traz `stoppedReason`.
 
 import type { CostEntry, CostRole } from '../types.js';
-import { gatewayErrorKind } from '../openrouter.js';
+import { gatewayErrorKind, type GatewayErrorKind } from '../openrouter.js';
 import { isBudgetSignal, isControlSignal } from '../budget.js';
 
 export type OutputFormat = 'text' | 'json' | 'ndjson';
@@ -55,23 +55,21 @@ export const EXIT = {
  * "auth" mandaria o agente trocar uma key que funciona. `undefined` = nao e
  * falha do gateway (o chamador decide).
  */
+/** Exit por tipo de falha do gateway (mapa, nao `return EXIT.X`: o envelope e o unico renderizador). */
+const GATEWAY_EXIT: Readonly<Record<GatewayErrorKind, number>> = {
+  auth: EXIT.AUTH,
+  no_credit: EXIT.NO_CREDIT,
+  rate_limit: EXIT.NETWORK,
+  // `http` depende do status (5xx = rede); o resto e erro generico.
+  http: EXIT.ERROR,
+  blocked: EXIT.ERROR,
+};
+
 export function exitCodeForGatewayError(err: unknown): number | undefined {
   const kind = gatewayErrorKind(err);
   if (!kind) return undefined;
-  switch (kind) {
-    case 'auth':
-      return EXIT.AUTH;
-    case 'no_credit':
-      return EXIT.NO_CREDIT;
-    case 'rate_limit':
-      return EXIT.NETWORK;
-    case 'http': {
-      const status = (err as { httpStatus?: number }).httpStatus ?? 0;
-      return status >= 500 ? EXIT.NETWORK : EXIT.ERROR;
-    }
-    case 'blocked':
-      return EXIT.ERROR;
-  }
+  const status = (err as { httpStatus?: number }).httpStatus ?? 0;
+  return kind === 'http' && status >= 500 ? GATEWAY_EXIT.rate_limit : GATEWAY_EXIT[kind];
 }
 
 /**

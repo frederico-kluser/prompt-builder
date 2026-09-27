@@ -521,9 +521,11 @@ function variablePriceError(ids: string[]): CliError {
       'Passe --max-price-in e --max-price-out (USD por MILHÃO — limitam o pior caso) ou escolha ' +
       'modelos com preço fixo (`models list --max-prompt-price N` já os exclui).',
     EXIT.CONFIG,
-    { variablePriceModelIds: ids },
+    { unpricedModelIds: ids, variablePrice: true },
     {
-      code: 'config.variable_price_uncapped',
+      // Mesma família de `unpricedModelsError` (sem preço exato => sem orçamento
+      // garantido); o `variablePrice` dos details e a dica dizem a saída: teto.
+      code: 'config.unpriced_models',
       hint: 'Repita com `--max-price-in <usd/M> --max-price-out <usd/M>`, troque o modelo ou rode com `--budget none`.',
     },
   );
