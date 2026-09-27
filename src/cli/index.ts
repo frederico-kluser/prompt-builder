@@ -64,7 +64,10 @@ RESULTADOS
   runs export <id> [-o <arq>]
                            artefato auto-contido (config, gabaritos, prompts, juiz)
   sessions list | show <id> | winner <id>
-          [--prompt-only | --apply <arq> [--commit]]   handoff com backup + diff
+          [--prompt-only | --apply <arq> [--commit] [--override "<motivo>"]]
+                           handoff com backup + diff; holdout regredido
+                           BLOQUEIA (exit 10) salvo --override com motivo
+                           (gravado em <data-dir>/handoffs.jsonl + trailer)
 
 BIBLIOTECA (dataset estável de cenários+gabaritos)
   library list | init | show | add | seed | verify | coverage | export | rm | drop
@@ -111,7 +114,8 @@ CÓDIGOS DE SAÍDA (error.kind entre parênteses)
   0 ok · 1 falha inesperada (internal) · 2 uso inválido (usage)
   3 config inválida (config) · 4 auth (auth) · 5 sem crédito (credit)
   6 run inconclusiva (inconclusive) · 7 parcial, orçamento esgotado (control)
-  8 rede (network) · 9 espera esgotada (timeout) · 130 interrompido (control)
+  8 rede (network) · 9 espera esgotada (timeout) · 10 portão recusou (gate)
+  130 interrompido (control)
 `;
 
 /**

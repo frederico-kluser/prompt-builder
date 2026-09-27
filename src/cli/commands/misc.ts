@@ -26,6 +26,19 @@ import {
   writeStoredKey,
 } from '../context.js';
 import { CliError, EXIT, fmtUsd, renderSpend, type Output } from '../output.js';
+import {
+  evaluateHandoffGuards,
+  normalizeOverrideReason,
+  type HandoffGuardReport,
+} from '../../engine/handoffGuards.js';
+import {
+  appendHandoffAudit,
+  buildHandoffAuditEntry,
+  ensureHandoffAuditWritable,
+  handoffAuditPath,
+  overrideTrailers,
+} from '../handoff.js';
+import type { SessionRecord } from '../../types.js';
 
 // --- key ---------------------------------------------------------------------
 
@@ -328,8 +341,12 @@ function gitNoIndexDiff(antes: string, depois: string): GitResult {
   }
 }
 
-/** `git add` + `git commit` SÓ do arquivo aplicado (não arrasta o index alheio). */
-function commitAppliedFile(file: string, sessionId: string, out: Output): boolean {
+/**
+ * `git add` + `git commit` SÓ do arquivo aplicado (não arrasta o index alheio).
+ * `trailers` (ex.: `Override-Reason:`) viram o último parágrafo da mensagem —
+ * o formato que `git interpret-trailers --parse` lê.
+ */
+function commitAppliedFile(file: string, sessionId: string, out: Output, trailers: string[] = []): boolean {
   const dir = path.dirname(file);
   const base = path.basename(file);
   const top = git(['-C', dir, 'rev-parse', '--show-toplevel']);
@@ -342,7 +359,9 @@ function commitAppliedFile(file: string, sessionId: string, out: Output): boolea
     out.warn(`git add falhou (${add.error}) — commit pulado.`);
     return false;
   }
-  const commit = git(['-C', dir, 'commit', '-m', `prompt: atualiza ${base} (sessão ${sessionId})`, '--', base]);
+  const assunto = `prompt: atualiza ${base} (sessão ${sessionId})`;
+  const mensagem = trailers.length > 0 ? `${assunto}\n\n${trailers.join('\n')}` : assunto;
+  const commit = git(['-C', dir, 'commit', '-m', mensagem, '--', base]);
   if (!commit.ok) {
     out.warn(`git commit falhou (${commit.error}) — o prompt já está aplicado em ${file}.`);
     return false;
@@ -351,16 +370,51 @@ function commitAppliedFile(file: string, sessionId: string, out: Output): boolea
 }
 
 /**
+ * Erro do gate do handoff (IMPL-027): exit GATE_BLOCKED, `error.code`
+ * específico do bloqueio e a evidência inteira em `details`.
+ */
+function handoffBlockedError(record: SessionRecord, file: string, guards: HandoffGuardReport): CliError {
+  const code =
+    guards.blocks.length === 1 ? `handoff.${guards.blocks[0].code.replace(/\./g, '_')}` : 'handoff.blocked';
+  return new CliError(
+    `Handoff bloqueado: ${guards.blocks.map((b) => b.message).join(' ')} Nada foi gravado em ${file}.`,
+    EXIT.GATE_BLOCKED,
+    {
+      sessionId: record.id,
+      file,
+      applied: false,
+      blocks: guards.blocks,
+      warnings: guards.warnings,
+      holdout: record.holdout ?? null,
+      significance: record.significance ?? null,
+      judgeDrift: Boolean(record.judgeDrift),
+      auditLog: handoffAuditPath(),
+    },
+    {
+      code,
+      hint:
+        'Não promova este campeão: treine de novo (mais --stages, outro --holdout-ratio) ou mantenha o prompt atual. ' +
+        `Se uma pessoa decidiu promover mesmo assim, repita com --override "<motivo>" — o motivo fica gravado em ${handoffAuditPath()}.`,
+    },
+  );
+}
+
+/**
  * Aplica o prompt campeão em `destino`: backup `<destino>.bak-<ISO-ts>` quando o
  * arquivo existe, escrita com `\n` final, diff do que mudou e commit opcional.
+ *
+ * Exige o laudo do gate e RECUSA antes de qualquer efeito (nem o diretório é
+ * criado) quando ele está bloqueado: é o único escritor do handoff, então
+ * nenhum caminho futuro aplica um campeão regredido sem passar por aqui.
  */
 async function applyPromptFile(
   destino: string,
   prompt: string,
-  opts: { commit: boolean; sessionId: string; out: Output },
+  opts: { commit: boolean; record: SessionRecord; guards: HandoffGuardReport; out: Output },
 ): Promise<ApplyReport> {
   const { out } = opts;
   const file = path.resolve(destino);
+  if (opts.guards.blocked) throw handoffBlockedError(opts.record, file, opts.guards);
   await fs.mkdir(path.dirname(file), { recursive: true });
 
   let backup: string | null = null;
@@ -389,7 +443,9 @@ async function applyPromptFile(
     out.line('(arquivo criado)');
   }
 
-  const committed = opts.commit ? commitAppliedFile(file, opts.sessionId, out) : false;
+  const committed = opts.commit
+    ? commitAppliedFile(file, opts.record.id, out, overrideTrailers(opts.guards.override))
+    : false;
   return { applied: true, file, backup, committed };
 }
 
@@ -400,6 +456,7 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     limit: { type: 'string' },
     apply: { type: 'string' },
     commit: { type: 'boolean' },
+    override: { type: 'string' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -425,10 +482,14 @@ export async function cmdSessions(argv: string[]): Promise<number> {
 
   if (sub === 'winner') {
     // Handoff versionado: --apply leva o campeão para um arquivo de produção,
-    // com backup + diff + commit opcional (ver applyPromptFile acima).
+    // com backup + diff + commit opcional (ver applyPromptFile acima) — e,
+    // desde o IMPL-027, atrás de um GATE: holdout regredido bloqueia (exit
+    // GATE_BLOCKED, destino intocado) salvo --override "<motivo>", que fica
+    // gravado na trilha de auditoria e no trailer do commit.
     const applyRaw = parsed.values.apply;
     const applyTo = typeof applyRaw === 'string' ? applyRaw.trim() : undefined;
     const wantCommit = parsed.values.commit === true;
+    const overrideRaw = parsed.values.override;
     if (typeof applyRaw === 'string' && !applyTo) {
       throw new CliError('--apply exige um caminho de arquivo.', EXIT.USAGE);
     }
@@ -438,7 +499,31 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     if (wantCommit && !applyTo) {
       throw new CliError('--commit só faz sentido junto de --apply <arquivo>.', EXIT.USAGE);
     }
+    if (typeof overrideRaw === 'string' && !applyTo) {
+      throw new CliError('--override só faz sentido junto de --apply <arquivo>.', EXIT.USAGE, undefined, {
+        code: 'usage.override_without_apply',
+        hint: 'Use `sessions winner <id> --apply <arquivo> --override "<motivo>"`.',
+      });
+    }
+    const overrideReason = normalizeOverrideReason(typeof overrideRaw === 'string' ? overrideRaw : null);
+    if (typeof overrideRaw === 'string' && !overrideReason) {
+      // Motivo vazio não é override: sem isto `--override ""` sobreporia o
+      // bloqueio sem justificativa nenhuma.
+      throw new CliError('--override exige um motivo não vazio.', EXIT.USAGE, undefined, {
+        code: 'usage.override_reason_required',
+        hint: 'Diga por que promover mesmo assim: --override "<motivo>" (fica gravado na auditoria e no commit).',
+      });
+    }
+    // O laudo é o mesmo para ver, imprimir e aplicar — só o --apply bloqueia.
+    const guards = evaluateHandoffGuards(record, { overrideReason });
     if (parsed.values['prompt-only'] === true) {
+      // Payload cru no stdout (costuma ir para `> arquivo`): bloquear aqui
+      // truncaria o destino do redirecionamento. Só avisa — o handoff com
+      // gate é o --apply.
+      for (const i of [...guards.blocks, ...guards.warnings]) out.warn(i.message);
+      if (guards.blocks.length > 0) {
+        out.warn('--prompt-only não passa pelo gate do handoff: use --apply <arquivo> para promover.');
+      }
       out.raw(campeao?.systemPrompt ?? '');
       return EXIT.OK;
     }
@@ -447,14 +532,46 @@ export async function cmdSessions(argv: string[]): Promise<number> {
       if (!campeao || !prompt || !prompt.trim()) {
         throw new CliError(`A sessão "${id}" não tem prompt campeão para aplicar.`, EXIT.ERROR);
       }
-      if (record.holdoutSkipped) {
-        out.warn('campeão NÃO validado em holdout — pode estar sobreajustado.');
+      const destino = path.resolve(applyTo);
+      if (guards.blocked) {
+        // A tentativa bloqueada também fica na trilha (o destino não é tocado).
+        await appendHandoffAudit(
+          buildHandoffAuditEntry(record, guards, {
+            outcome: 'blocked',
+            file: destino,
+            backup: null,
+            committed: false,
+            prompt,
+          }),
+          out,
+        );
+        throw handoffBlockedError(record, destino, guards);
+      }
+      // Override sem registro não passa: a trilha precisa ser gravável ANTES
+      // de o destino ser tocado.
+      if (guards.override) await ensureHandoffAuditWritable();
+      for (const w of guards.warnings) {
+        // O override é parte do RESULTADO (quem lê só o stdout tem de vê-lo);
+        // o resto é narração no stderr. Sob --json/ndjson ele vai no payload.
+        if (w.code.startsWith('override.') && out.isText) out.line(`! ${w.message}`);
+        else out.warn(w.message);
       }
       const report = await applyPromptFile(applyTo, prompt, {
         commit: wantCommit,
-        sessionId: record.id,
+        record,
+        guards,
         out,
       });
+      const auditLog = await appendHandoffAudit(
+        buildHandoffAuditEntry(record, guards, {
+          outcome: 'applied',
+          file: report.file,
+          backup: report.backup,
+          committed: report.committed,
+          prompt,
+        }),
+        out,
+      );
       out.info(
         `prompt aplicado em ${report.file}${report.backup ? ` (backup: ${report.backup})` : ''}`,
       );
@@ -464,14 +581,18 @@ export async function cmdSessions(argv: string[]): Promise<number> {
         file: report.file,
         backup: report.backup,
         committed: report.committed,
+        sessionId: record.id,
+        override: guards.override,
+        blocks: guards.blocks,
+        warnings: guards.warnings,
+        auditLog,
       });
       return EXIT.OK;
     }
     if (out.isText && campeao) {
       out.line(`campeão da iteração ${campeao.iteration + 1}: ${campeao.winnerContestantId}`);
-      if (record.holdoutSkipped) {
-        out.warn('campeão NÃO validado em holdout — pode estar sobreajustado.');
-      }
+      for (const i of [...guards.blocks, ...guards.warnings]) out.warn(i.message);
+      if (guards.blocked) out.warn('--apply será BLOQUEADO para esta sessão (só passa com --override "<motivo>").');
       out.line();
       out.line(campeao.systemPrompt);
     }
@@ -481,6 +602,9 @@ export async function cmdSessions(argv: string[]): Promise<number> {
       holdoutSkipped: Boolean(record.holdoutSkipped),
       holdout: record.holdout,
       significance: record.significance,
+      judgeDrift: Boolean(record.judgeDrift),
+      // Laudo do gate SEM aplicar: um agente decide antes de tentar o --apply.
+      handoff: { wouldBlock: guards.blocked, blocks: guards.blocks, warnings: guards.warnings },
     });
     return EXIT.OK;
   }

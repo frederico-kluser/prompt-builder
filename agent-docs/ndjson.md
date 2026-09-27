@@ -25,7 +25,8 @@ Erro é a linha `result` com `ok: false` e o **mesmo** objeto `error` do
 - `kind` decide o próximo passo: `usage` (corrija a chamada) · `config`
   (corrija o arquivo) · `auth` (key) · `credit` (saldo) · `network` (tente de
   novo) · `control` (parou por orçamento/interrupção) · `inconclusive` ·
-  `timeout` · `internal`.
+  `timeout` · `gate` (um portão de qualidade recusou promover — exit `10`; não
+  sobreponha sem decisão humana) · `internal`.
 - `code` é estável (`usage.unknown_flag`, `auth.key_missing`,
   `config.invalid_json`, …); `hint` traz o comando que resolve.
 - `ok: true` com código de saída `7`/`130` é **resultado parcial**, não erro: o

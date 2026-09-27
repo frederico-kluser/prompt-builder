@@ -231,6 +231,8 @@ describe('exit code → kind', () => {
       [EXIT.BUDGET]: 'control',
       [EXIT.NETWORK]: 'network',
       [EXIT.WAIT_TIMEOUT]: 'timeout',
+      // IMPL-027: portão de qualidade (handoff com holdout regredido).
+      [EXIT.GATE_BLOCKED]: 'gate',
       [EXIT.SIGINT]: 'control',
     };
     for (const code of Object.values(EXIT)) {

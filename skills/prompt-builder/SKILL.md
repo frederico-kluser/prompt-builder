@@ -51,8 +51,8 @@ npx prompt-builder-cli train --config arena.json --budget 3 --dry-run
 # 5. rode
 npx prompt-builder-cli train --config arena.json --budget 3 --output-format ndjson
 
-# 6. pegue o prompt vencedor
-npx prompt-builder-cli sessions winner <sessionId> --prompt-only > prompt.md
+# 6. promova o vencedor (backup + diff; holdout regredido BLOQUEIA com exit 10)
+npx prompt-builder-cli sessions winner <sessionId> --apply prompt.md
 ```
 
 ## Regras (não improvise em cima delas)
@@ -94,7 +94,8 @@ npx prompt-builder-cli docs quickstart
 
 `0` ok · `1` inesperado · `2` uso inválido · `3` config inválida · `4` auth ·
 `5` sem crédito · `6` inconclusiva · `7` parcial (orçamento esgotado) · `8` rede ·
-`9` espera esgotada · `130` interrompido. Erro sob `--json`/ndjson:
+`9` espera esgotada · `10` portão recusou (handoff com holdout regredido) ·
+`130` interrompido. Erro sob `--json`/ndjson:
 `{ok:false, command, error:{code, kind, message, hint, details}}` no stdout.
 
 ## Agentes desta máquina (configuração local do autor)
@@ -145,5 +146,5 @@ agente (Agent Arena), o executor do motor é o `pi`; os demais entram como
 - **arena-config@1**: `scenarios: {"from":"library","profile","ids"}` · `prompt.contracts`
   (never-break) · `prompt.group`+`promptId` (multi-prompt coordinate ascent) · `training.reflection`
   (`deterministic|llm|off`) · `training.paretoPool` (população Pareto) · `repeats` (compare, 1–3).
-- **Reprodutibilidade**: `runs reproduce` · `runs export` · `sessions winner --apply [--commit]` ·
+- **Reprodutibilidade**: `runs reproduce` · `runs export` · `sessions winner --apply [--commit] [--override "<motivo>"]` ·
   `registry validate` (drift do prompt em código).

@@ -27,8 +27,9 @@ npx prompt-builder-cli train --config arena.json --budget 3 --dry-run --json
 # 5. Rode. Com --output-format ndjson você acompanha evento a evento.
 npx prompt-builder-cli train --config arena.json --budget 3 --output-format ndjson
 
-# 6. Pegue o prompt vencedor, cru, para gravar num arquivo.
-npx prompt-builder-cli sessions winner <sessionId> --prompt-only > prompt.md
+# 6. Promova o vencedor para o arquivo: backup + diff, e BLOQUEIA (exit 10)
+#    se o campeão regrediu no holdout. `--prompt-only` imprime cru, SEM o gate.
+npx prompt-builder-cli sessions winner <sessionId> --apply prompt.md
 ```
 
 ## Regras que evitam os erros mais comuns
@@ -52,7 +53,7 @@ npx prompt-builder-cli sessions winner <sessionId> --prompt-only > prompt.md
 5. **Leia o código de saída.** `0` ok · `1` falha inesperada · `2` uso inválido ·
    `3` config inválida · `4` auth · `5` sem crédito · `6` run inconclusiva ·
    `7` **parcial, orçamento esgotado** · `8` rede · `9` espera esgotada ·
-   `130` interrompido. O `7` não é erro: há resultado válido, só incompleto.
+   `10` portão recusou (ex.: handoff com holdout regredido) · `130` interrompido. O `7` não é erro: há resultado válido, só incompleto.
    Sob `--json`/`ndjson`, **todo** erro sai no stdout como
    `{ok:false, command, error:{code, kind, message, hint, details}}` — decida
    pelo `error.kind` e rode o que `error.hint` sugere (`docs ndjson`).

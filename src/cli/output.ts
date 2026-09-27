@@ -39,6 +39,12 @@ export const EXIT = {
   NETWORK: 8,
   /** `runs wait --timeout` esgotou antes de a run chegar a um estado terminal. */
   WAIT_TIMEOUT: 9,
+  /**
+   * Um PORTAO de qualidade recusou a promocao (IMPL-027): ex. `sessions winner
+   * --apply` com holdout regredido e sem `--override`. Nao e erro de uso nem
+   * run inconclusiva — e evidencia CONTRARIA; nada foi gravado.
+   */
+  GATE_BLOCKED: 10,
   SIGINT: 130,
 } as const;
 
@@ -47,7 +53,8 @@ export const EXIT = {
  * mensagem: `usage` (corrija a chamada), `config` (corrija o arquivo), `auth`
  * (key), `credit` (saldo), `network` (tente de novo), `control` (parou por
  * orcamento/interrupcao), `inconclusive`, `timeout` (a espera acabou, nao a
- * run) e `internal` (bug ou falha inesperada).
+ * run), `gate` (um portao de qualidade recusou promover — nao sobreponha sem
+ * decisao humana) e `internal` (bug ou falha inesperada).
  */
 export type ErrorKind =
   | 'usage'
@@ -58,6 +65,7 @@ export type ErrorKind =
   | 'control'
   | 'inconclusive'
   | 'timeout'
+  | 'gate'
   | 'internal';
 
 /** Exit code -> kind. Cobre toda a tabela EXIT (menos OK); fora dela = `internal`. */
@@ -71,6 +79,7 @@ export const EXIT_KIND: Readonly<Record<number, ErrorKind>> = {
   [EXIT.BUDGET]: 'control',
   [EXIT.NETWORK]: 'network',
   [EXIT.WAIT_TIMEOUT]: 'timeout',
+  [EXIT.GATE_BLOCKED]: 'gate',
   [EXIT.SIGINT]: 'control',
 };
 
@@ -88,6 +97,7 @@ const DEFAULT_CODE: Record<ErrorKind, string> = {
   control: 'control.stopped',
   inconclusive: 'run.inconclusive',
   timeout: 'wait.timeout',
+  gate: 'gate.blocked',
   internal: 'internal.error',
 };
 
@@ -112,6 +122,9 @@ export const DEFAULT_HINT: Readonly<Record<ErrorKind, string>> = {
     '`prompt-builder runs list` / `prompt-builder sessions list`.',
   inconclusive: 'O resultado não sustenta conclusão; leia o record com `prompt-builder runs show <id> --json`.',
   timeout: 'A espera acabou, não a run: ela segue rodando — consulte o estado de novo mais tarde.',
+  gate:
+    'Um portão de qualidade recusou a promoção e nada foi gravado: leia error.details (o que ' +
+    'bloqueou e a evidência). Só sobreponha por decisão humana, com o override do comando e o motivo.',
   internal: 'Rode de novo com --verbose; se persistir, abra uma issue com a saída do stderr.',
 };
 
