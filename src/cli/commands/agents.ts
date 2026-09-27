@@ -24,6 +24,7 @@ import { parseArenaAgentConfig } from '../../configFile.js';
 import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { runPreflight } from '../../agent/doctor.js';
+import { agentVerdictTreeVersionOf, classifyStop } from '../../agent/verdictTree.js';
 import {
   agentRunsRoot,
   execDir,
@@ -123,10 +124,19 @@ function applyAgentOverrides(
 export interface AgentRunSummary {
   executions: number;
   failed: number;
+  /** Só canceladas (sinal de controle) — as únicas fora do placar (IMPL-032). */
   incomplete: number;
+  /** Cortadas por limite (timeout/maxTurns/maxCost/maxOutput) — contam 'nao'. */
+  limitCut: number;
   avgTurns: number;
   avgCostUsd: number;
   oracleRate: number;
+  /** Versão da árvore de veredito (1 = legado: corte por limite fora do denominador). */
+  verdictTreeVersion?: number;
+  /** IMPL-033: reps com falha do juiz após 2 retentativas (nota ficou com o oráculo). */
+  judgeErrors?: number;
+  /** IMPL-033: reps sem veredito (execução inválida / juiz falho sem oráculo). */
+  unscoredReps?: number;
 }
 
 function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
@@ -139,6 +149,7 @@ function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
   if (exes.length === 0) return undefined;
   let failed = 0;
   let incomplete = 0;
+  let limitCut = 0;
   let turnsSum = 0;
   let costSum = 0;
   let oraclePassed = 0;
@@ -146,11 +157,10 @@ function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
   for (const r of exes) {
     turnsSum += r.execution.turns;
     costSum += r.costUsd;
-    if (r.execution.stopReason === 'error') {
-      failed += 1;
-    } else if (r.execution.stopReason !== 'completed') {
-      incomplete += 1;
-    }
+    const cls = classifyStop(r.execution.stopReason);
+    if (cls === 'error') failed += 1;
+    else if (cls === 'limit') limitCut += 1;
+    else if (cls === 'cancelled') incomplete += 1;
     if (r.execution.oracle) {
       oraclePassed += r.execution.oracle.passed;
       oracleTotal += r.execution.oracle.passed + r.execution.oracle.failed;
@@ -160,9 +170,15 @@ function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
     executions: exes.length,
     failed,
     incomplete,
+    limitCut,
     avgTurns: turnsSum / exes.length,
     avgCostUsd: costSum / exes.length,
     oracleRate: oracleTotal > 0 ? oraclePassed / oracleTotal : 0,
+    verdictTreeVersion: agentVerdictTreeVersionOf(record),
+    ...(record.agentJudgeErrorCount !== undefined ? { judgeErrors: record.agentJudgeErrorCount } : {}),
+    ...(record.agentUnscoredRepsByContestant
+      ? { unscoredReps: Object.values(record.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0) }
+      : {}),
   };
 }
 
@@ -439,8 +455,11 @@ async function cmdRun(argv: string[]): Promise<number> {
     if (record.budgetExhausted) out.line(`Parou em   ${record.stoppedAtPhase ?? '?'} — orçamento esgotado`);
     if (summary) {
       out.line(
-        `Agentes    ${summary.executions} execuções · ${summary.failed} falhas · ${summary.incomplete} incompletas · ` +
-          `média ${summary.avgTurns.toFixed(1)} turnos · ${fmtUsd(summary.avgCostUsd)} · oráculo ${(summary.oracleRate * 100).toFixed(0)}%`,
+        `Agentes    ${summary.executions} execuções · ${summary.failed} falhas · ` +
+          `${summary.limitCut} cortadas por limite (contam 'nao') · ${summary.incomplete} canceladas · ` +
+          `média ${summary.avgTurns.toFixed(1)} turnos · ${fmtUsd(summary.avgCostUsd)} · oráculo ${(summary.oracleRate * 100).toFixed(0)}%` +
+          (summary.judgeErrors ? ` · ${summary.judgeErrors} falha(s) do juiz (nota do oráculo)` : '') +
+          (summary.unscoredReps ? ` · ${summary.unscoredReps} sem veredito (fora do placar)` : ''),
       );
     }
   }

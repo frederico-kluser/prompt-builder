@@ -239,23 +239,40 @@ Mapeamento do oráculo para veredito:
 | Situação | Veredito | Juiz LLM |
 |---|---|---|
 | `forbiddenPaths` violado | **`nao`** | não roda (indiscutível) |
+| check que **pendura ou morre** (passa do `timeoutMs` do check / morto por sinal) | o check conta como **falho** no `score` (sem re-verificação: é o código sob teste) | conforme o `score` resultante — nunca promove |
+| check cujo comando **nem começa** (ausente / sem permissão) | re-verifica **só esse check** 2×; persistindo, conta como **falho** — se ele rodou em alguma outra execução da etapa (o agente quebrou o verificador) | conforme o `score` |
+| … e não rodou em **nenhuma** execução da etapa | **etapa inválida para TODOS** os contestants (`stage.error`, fora do placar de todos) — defeito da tarefa | não conta |
 | `score === 1` | **`resolve`** (candidato) | roda só para graduar qualidade; **não pode rebaixar para `nao`** |
-| `0 < score < 1` | **`parcial`** (candidato) | roda; pode confirmar ou rebaixar para `nao` |
+| `0 < score < 1` | **`parcial`** (candidato) | roda; pode confirmar ou rebaixar para `nao` — **nunca promover a `resolve`** |
 | `score === 0` | **`nao`** | não roda |
+
+Falha do juiz (exceção, timeout ou resposta que não é o JSON pedido — recusa
+e texto livre incluídos —, mesmo após 2 retentativas) **não mexe na nota**: fica
+o candidato do oráculo, com a flag `judgeError` contada por run
+(`agentJudgeErrorCount`). Sem oráculo não há candidato — a execução fica sem nota
+em vez de ganhar um `parcial` inventado.
+
+Dica de autoria: prefira chamar a suíte por um programa que sempre existe no
+ambiente (`sh run_tests.sh`, `npm test`) a executar o script direto
+(`./run_tests.sh`): o comando sempre começa, e um script apagado pelo agente vira
+falha limpa do check. A invalidação da etapa fica para o que não começa em
+execução nenhuma (binário que falta na imagem/ambiente da tarefa).
 
 ## `judging`
 
 | Campo | Tipo | Obr. | Default | Descrição |
 |---|---|---|---|---|
-| `reference` | bool | não | true | Julgamento por referência (gabarito). |
+| `reference` | bool | não | true (**false automático** quando toda etapa tem `verify[]`) | Julgamento por referência (gabarito). Etapa com `verify[]` **nunca** gera gabarito, mesmo com `true` explícito: o oráculo decide. |
 | `passes` | int | não | 1 | Passadas do juiz. |
 | `dossierTokens` | int | não | 12000 | Teto de tokens do **dossiê** — o que o juiz realmente lê (não a trajetória crua, que tem megabytes). É **config**, não constante: é ele que liga o custo do juiz ao tamanho da evidência. |
 
 O gabarito de agente tem três encarnações, em ordem de preferência: **(a)** se a
-tarefa tem `verify[]`, ela já tem gabarito ("os testes passam") — não pague uma
-execução de referência; **(b)** gabarito importado via `reference` do scenario;
-**(c)** uma execução de referência (modelo forte, mesmos limites) cujo dossiê vira
-o gabarito.
+tarefa tem `verify[]`, ela já tem gabarito ("os testes passam") — o gabarito
+textual **não é gerado** (0 tokens; antes custava ~64% de uma run trivial sem
+ninguém lê-lo) e as **finais dessa etapa são decididas pelo oráculo** (maior score
+vence; score igual = empate, sem juiz LLM); **(b)** gabarito importado via
+`reference` do scenario; **(c)** uma execução de referência (modelo forte, mesmos
+limites) cujo dossiê vira o gabarito.
 
 ## `duels` / `finalists` — as finais
 

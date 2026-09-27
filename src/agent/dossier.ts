@@ -12,6 +12,29 @@
 // sobre arrays. O sha256 do rodapé é um self-hash: é o hash do texto em que a
 // linha `sha256` carrega o marcador fixo `{SHA}`, preenchido depois — a mesma
 // saída com a mesma entrada sempre, e verificável recomputando sobre o marcador.
+//
+// DELIMITAÇÃO ANTI-INJEÇÃO (IMPL-034 / R-14a DEC-7, REC-7/REC-8). Todo texto
+// que o AGENTE (ou o código dele) produziu — diff, lista de arquivos, comandos e
+// saídas dos passos, mensagem final, saída dos checks do verificador, caminhos
+// proibidos tocados — entra SÓ dentro de um bloco
+//   <<<DADOS-DO-AGENTE secao="…" marca="M">>>
+//   │ …cada linha com a calha "│ "…
+//   <<<FIM-DADOS-DO-AGENTE marca="M">>>
+// com três travas, para o bloco não poder ser fechado por dentro:
+//   1. a MARCA é derivada do sha256 de TODO o conteúdo não confiável — o agente
+//      não a conhece ao escrever (embuti-la mudaria o hash: ponto fixo);
+//   2. toda linha do conteúdo leva a calha "│ ": nenhuma linha do agente começa
+//      na coluna 0, então ele não forja marcador, cabeçalho de seção ("### 2.")
+//      nem a linha `marca-dos-dados:` do rodapé;
+//   3. o token do marcador (e variantes: `dados_do_agente`, travessões Unicode,
+//      caracteres invisíveis no meio) é NEUTRALIZADO dentro do conteúdo e
+//      contado no rodapé (`neutralizacoes`). CR/U+2028/NEL/VT/FF viram '\n'
+//      antes da calha (trava 2 vale para qualquer quebra de linha).
+// Fora dos blocos, só texto produzido por CÓDIGO: cabeçalho, veredito dos checks,
+// contagens e os FATOS em JSON de campos fechados (extração em 2 estágios:
+// parsing determinístico de arquivos/hunks/checks → JSON fechado, `dossierFacts`).
+// Evidência: delimitação 89,7% vs 60,7% sem ela; spotlighting (Hines
+// 2403.14720) leva o ASR de >50% a <2%; JudgeDeceiver passa de 90% sem defesa.
 // ----------------------------------------------------------------------------
 import { createHash } from 'node:crypto';
 
@@ -35,6 +58,8 @@ export interface DossierInput {
       exitCode: number;
       expected: number;
       tail: string;
+      /** O check não terminou com exit normal (conta FALHOU) — motivo p/ o juiz. */
+      notRun?: 'spawn' | 'timeout' | 'signal';
     }[];
     score: number;
     violations: string[];
@@ -63,12 +88,182 @@ export interface DossierResult {
   complete: boolean;
   redactions: number;
   tokensApprox: number;
+  /** Marca dos blocos DADOS-DO-AGENTE deste dossiê (12 hex, derivada do conteúdo). */
+  marker: string;
+  /** Tokens estruturais neutralizados dentro do conteúdo do agente (tentativa de forjar bloco/placeholder). */
+  neutralized: number;
+  /** Os fatos de campos fechados que o dossiê carrega (2º estágio da extração). */
+  facts: DossierFacts;
 }
 
 /** Marcador de sha no rodapé; é o que permite o self-hash determinístico. */
 const SHA_PLACEHOLDER = '{SHA}';
 /** Marcador do contador de redações; preenchido APÓS o passe de redação. */
 const REDACTIONS_PLACEHOLDER = '{REDACTIONS}';
+
+// ---------------------------------------------------------------------------
+// Blocos de dados NÃO confiáveis (IMPL-034) — ver cabeçalho do módulo.
+// ---------------------------------------------------------------------------
+
+/** Nome do bloco de conteúdo produzido pelo agente. */
+export const AGENT_DATA_TAG = 'DADOS-DO-AGENTE';
+/** Calha de toda linha de conteúdo do agente: nada dele começa na coluna 0. */
+export const AGENT_DATA_GUTTER = '│ ';
+/** Linha do rodapé que carrega a marca (sempre na coluna 0 — só código a escreve). */
+const MARKER_LINE_PREFIX = 'marca-dos-dados: ';
+
+/** Token do marcador e variantes (sublinhado, espaço, travessões Unicode), sem caixa. */
+const MARKER_TOKEN_RE = /dados[\s_\-‐-―−]*do[\s_\-‐-―−]*agente/gi;
+
+/**
+ * Caracteres INVISÍVEIS (formato Cf + default-ignorable: U+200B/U+200D/U+2060/
+ * U+FEFF, soft hyphen, seletores de variação…). São removidos do conteúdo do
+ * agente ANTES da neutralização: senão `DADOS\u200B-DO-AGENTE` escaparia do
+ * `MARKER_TOKEN_RE` e seria lido pelo juiz como o marcador. Não são contados
+ * um a um (emoji legítimo usa ZWJ/VS16); o que conta é o token que eles
+ * escondiam, que passa a casar e é neutralizado+contado normalmente.
+ */
+const INVISIBLE_RE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
+
+/**
+ * Terminadores de linha que NÃO são '\n' (CR solto, CRLF, U+2028/U+2029, NEL,
+ * VT, FF): um modelo os lê como quebra de linha, então viram '\n' antes da
+ * calha — senão o texto depois deles "começaria na coluna 0" sem o "│ ".
+ */
+const LINE_BREAK_RE = /\r\n|[\r\u2028\u2029\u0085\v\f]/g;
+
+/** Abertura de bloco (coluna 0) — o formato é contrato com o prompt do juiz. */
+export function agentDataOpen(section: string, marker: string): string {
+  return `<<<${AGENT_DATA_TAG} secao="${section}" marca="${marker}">>>`;
+}
+
+/** Fechamento de bloco (coluna 0). */
+export function agentDataClose(marker: string): string {
+  return `<<<FIM-${AGENT_DATA_TAG} marca="${marker}">>>`;
+}
+
+/**
+ * Neutraliza, DENTRO do conteúdo do agente, o que poderia se passar por
+ * estrutura do dossiê: o token do marcador (qualquer variante) e os
+ * placeholders internos do self-hash/contador. Determinístico e contado.
+ */
+function neutralizeAgentText(raw: string): { text: string; count: number } {
+  const text = raw.replace(INVISIBLE_RE, '');
+  let count = 0;
+  const out = text
+    .replace(MARKER_TOKEN_RE, () => {
+      count++;
+      return 'dados-citados';
+    })
+    .split(SHA_PLACEHOLDER)
+    .join('{sha-citado}')
+    .split(REDACTIONS_PLACEHOLDER)
+    .join('{redactions-citado}');
+  count += text.split(SHA_PLACEHOLDER).length - 1 + (text.split(REDACTIONS_PLACEHOLDER).length - 1);
+  return { text: out, count };
+}
+
+/**
+ * Envolve conteúdo do agente num bloco delimitado com calha. Conteúdo vazio
+ * ainda gera o bloco (o juiz vê que a seção existe e está vazia).
+ */
+export function quoteAgentData(content: string, section: string, marker: string): { text: string; neutralized: number } {
+  const { text, count } = neutralizeAgentText(content.replace(LINE_BREAK_RE, '\n'));
+  const body = text.split('\n').map((l) => AGENT_DATA_GUTTER + l);
+  return { text: [agentDataOpen(section, marker), ...body, agentDataClose(marker)].join('\n'), neutralized: count };
+}
+
+/**
+ * Marca derivada do conteúdo NÃO confiável (12 hex). Determinística (a mesma
+ * entrada ⇒ o mesmo dossiê byte a byte) e imprevisível para quem escreve o
+ * conteúdo: embutir a marca no próprio texto mudaria o hash.
+ */
+export function agentDataMarker(untrusted: unknown): string {
+  return createHash('sha256').update('dossie-marca@1\0').update(JSON.stringify(untrusted)).digest('hex').slice(0, 12);
+}
+
+/**
+ * Marca de um dossiê já montado: a ÚLTIMA linha `marca-dos-dados: <12 hex>` que
+ * começa na coluna 0 (o rodapé). Conteúdo do agente nunca começa na coluna 0,
+ * então não forja esta linha. `null` = texto sem selo (não veio de `buildDossier`).
+ */
+export function dossierMarker(text: string): string | null {
+  const re = /^marca-dos-dados: ([0-9a-f]{12})$/gm;
+  let last: string | null = null;
+  for (let m = re.exec(text); m; m = re.exec(text)) last = m[1];
+  return last;
+}
+
+// ---------------------------------------------------------------------------
+// FATOS de campos fechados (extração em 2 estágios, R-14a DEC-7).
+// Estágio 1 — parsing determinístico do patch (arquivos/hunks) e dos checks;
+// estágio 2 — um JSON só com números, enums e rótulos da TAREFA (nunca texto do
+// agente: caminhos de arquivo são escolha do agente e ficam nos blocos).
+// ---------------------------------------------------------------------------
+export interface DossierFacts {
+  encerramento: string;
+  turnos: number;
+  ferramentas: number;
+  errosDeFerramenta: number;
+  oraculo: null | {
+    score: number;
+    checks: {
+      rotulo: string;
+      status: 'PASSOU' | 'FALHOU';
+      exit: number;
+      esperado: number;
+      naoTerminou?: 'spawn' | 'timeout' | 'signal';
+    }[];
+    violacoes: number;
+  };
+  mudancas: {
+    arquivos: number;
+    adicionadas: number;
+    removidas: number;
+    hunks: number;
+    porTipo: { codigo: number; config: number; teste: number; doc: number };
+    ruidoOuBinario: number;
+    testesAlterados: boolean;
+  };
+}
+
+export function dossierFacts(input: DossierInput): DossierFacts {
+  const porTipo = { codigo: 0, config: 0, teste: 0, doc: 0 };
+  const nomes: Record<RelevanceRank, keyof typeof porTipo> = { 0: 'codigo', 1: 'config', 2: 'teste', 3: 'doc' };
+  for (const f of input.filesChanged) porTipo[nomes[relevanceRank(f.path)]] += 1;
+  const chunks = splitDiff(input.diff);
+  const hunks = chunks.reduce((n, c) => n + (c.content.match(/^@@ /gm)?.length ?? 0), 0);
+  const ruidoOuBinario = chunks.filter((c) => isNoisePath(c.path) || isBinaryPatch(c.content)).length;
+  const o = input.oracle;
+  return {
+    encerramento: input.header.stopReason || '-',
+    turnos: input.header.turns,
+    ferramentas: input.header.toolCalls,
+    errosDeFerramenta: input.steps.filter((s) => !s.ok).length,
+    oraculo: o
+      ? {
+          score: Number(o.score.toFixed(4)),
+          checks: o.checks.map((c) => ({
+            rotulo: c.label,
+            status: c.ok ? ('PASSOU' as const) : ('FALHOU' as const),
+            exit: c.exitCode,
+            esperado: c.expected,
+            ...(c.notRun ? { naoTerminou: c.notRun } : {}),
+          })),
+          violacoes: o.violations.length,
+        }
+      : null,
+    mudancas: {
+      arquivos: input.diffStat.files,
+      adicionadas: input.diffStat.added,
+      removidas: input.diffStat.removed,
+      hunks,
+      porTipo,
+      ruidoOuBinario,
+      testesAlterados: porTipo.teste > 0,
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Estimativa de tokens (regra 1, §16.4): caracteres/4. Coerente com o plano.
@@ -361,26 +556,38 @@ function buildHeader(input: DossierInput, complete: boolean): string {
   return lines.join('\n');
 }
 
-function buildVerify(input: DossierInput): string {
+/** Envolve conteúdo do agente num bloco (a marca e o contador vêm do montador). */
+type Quote = (content: string, section: string) => string;
+
+function buildVerify(input: DossierInput, q: Quote): string {
   const oracle = input.oracle;
   const lines: string[] = ['### 2. VERIFICAÇÃO AUTOMÁTICA'];
   if (!oracle || oracle.checks.length === 0) {
     lines.push('(sem oráculo automático)');
     return lines.join('\n');
   }
+  const naoTerminou: Record<'spawn' | 'timeout' | 'signal', string> = {
+    spawn: 'o comando nem começou (ausente ou sem permissão)',
+    timeout: 'passou do tempo limite do check',
+    signal: 'o processo foi morto por sinal',
+  };
   for (const check of oracle.checks) {
     const status = check.ok ? 'PASSOU' : 'FALHOU';
     lines.push(
-      `[${status}]  ${check.label}       exit ${check.exitCode} (esperado ${check.expected})`,
+      `[${status}]  ${check.label}       exit ${check.exitCode} (esperado ${check.expected})` +
+        (check.notRun ? ` — não terminou: ${naoTerminou[check.notRun]}` : ''),
     );
+    // A saída do check é produzida pelo CÓDIGO SOB TESTE (o agente o escreveu):
+    // pode imprimir "todos os testes passaram" à vontade — é dado, nunca veredito.
     if (!check.ok && check.tail) {
-      lines.push('    últimas linhas:');
-      const tailLines = String(check.tail).split('\n');
-      for (const tl of tailLines) lines.push(`    ${tl}`);
+      lines.push('    últimas linhas (saída do código sob teste):');
+      lines.push(q(String(check.tail), '2-saida-do-check'));
     }
   }
   if (oracle.violations.length > 0) {
-    lines.push(`Caminhos proibidos ... ${oracle.violations.join(', ')}`);
+    // Os caminhos são nomes escolhidos pelo agente: a contagem é fato, a lista é dado.
+    lines.push(`Caminhos proibidos ... ${oracle.violations.length} tocado(s):`);
+    lines.push(q(oracle.violations.join('\n'), '2-caminhos-proibidos'));
   } else {
     lines.push('Caminhos proibidos ... nenhum');
   }
@@ -388,20 +595,23 @@ function buildVerify(input: DossierInput): string {
   return lines.join('\n');
 }
 
-function buildSummary(input: DossierInput): string {
+function buildSummary(input: DossierInput, facts: DossierFacts, q: Quote): string {
   const stat = input.diffStat;
   const lines: string[] = ['### 3. RESUMO DAS MUDANÇAS'];
   lines.push(`${stat.files} arquivo${stat.files === 1 ? '' : 's'}, +${stat.added} −${stat.removed}`);
+  // 2º estágio da extração: campos FECHADOS (números, enums, rótulos da tarefa).
+  lines.push(`Fatos (JSON de campos fechados, medidos por código): ${JSON.stringify(facts)}`);
   const statuses = input.filesChanged
     .map((f) => `[${f.status.toUpperCase().slice(0, 1)}] ${f.path}`)
     .sort(); // determinismo
   if (statuses.length > 0) {
-    lines.push(statuses.join('    '));
+    lines.push('Arquivos alterados (nomes escolhidos pelo agente):');
+    lines.push(q(statuses.join('\n'), '3-arquivos'));
   }
   return lines.join('\n');
 }
 
-function buildDiff(input: DossierInput, budgetChars: number): { text: string; truncated: boolean } {
+function buildDiff(input: DossierInput, budgetChars: number, q: Quote): { text: string; truncated: boolean } {
   const lines: string[] = ['### 4. DIFF'];
   const files = splitDiff(input.diff)
     .filter((f) => !isNoisePath(f.path) && !isBinaryPatch(f.content))
@@ -417,50 +627,57 @@ function buildDiff(input: DossierInput, budgetChars: number): { text: string; tr
   // (mais relevantes, já ordenados) preservam mais sinal.
   const perFile = Math.max(4, Math.floor(budgetChars / files.length));
   let truncatedAny = false;
+  const body: string[] = [];
   for (const f of files) {
     const t = truncateMid(f.content, perFile, FILE_OMIT);
     if (t.truncated) truncatedAny = true;
-    lines.push(t.text);
-    lines.push('');
+    body.push(t.text);
+    body.push('');
   }
+  // O patch INTEIRO é conteúdo do agente (inclusive comentários com "instruções").
+  lines.push(q(body.join('\n').replace(/\n+$/, ''), '4-diff'));
   return { text: lines.join('\n'), truncated: truncatedAny };
 }
 
-function buildSteps(input: DossierInput, budgetChars: number): { text: string; truncated: boolean } {
+function buildSteps(input: DossierInput, budgetChars: number, q: Quote): { text: string; truncated: boolean } {
   const lines: string[] = ['### 5. O QUE O AGENTE FEZ'];
   if (input.steps.length === 0) {
     lines.push('(nenhum passo registrado)');
     return { text: lines.join('\n'), truncated: false };
   }
+  const body: string[] = [];
   for (const s of input.steps) {
     const status = s.ok ? 'ok' : 'ERRO';
     const exitPart = s.exitCode === undefined ? '' : ` (exit ${s.exitCode})`;
-    let line = ` ${s.turn}. t${s.turn} · ${s.tool}  ${s.arg}`;
+    const line = ` ${s.turn}. t${s.turn} · ${s.tool}  ${s.arg}`;
     const pad = Math.max(1, 60 - line.length);
-    lines.push(line + ' '.repeat(pad) + status + exitPart);
+    body.push(line + ' '.repeat(pad) + status + exitPart);
     if (!s.ok && s.outputTail) {
-      for (const tl of String(s.outputTail).split('\n')) lines.push(`    ${tl}`);
+      for (const tl of String(s.outputTail).split('\n')) body.push(`    ${tl}`);
     }
   }
-  const body = lines.join('\n');
-  const t = truncateMid(body, budgetChars, omitMarkMid);
-  return { text: t.text, truncated: t.truncated };
+  // Comandos e saídas vêm do agente: truncados (visível) e DENTRO do bloco.
+  const t = truncateMid(body.join('\n'), budgetChars, omitMarkMid);
+  lines.push(q(t.text, '5-passos'));
+  return { text: lines.join('\n'), truncated: t.truncated };
 }
 
-function buildFinalMessage(input: DossierInput, budgetChars: number): string {
+function buildFinalMessage(input: DossierInput, budgetChars: number, q: Quote): { text: string; truncated: boolean } {
   const msg = (input.finalMessage ?? '').trim();
   const head = '### 6. MENSAGEM FINAL DO AGENTE';
-  if (!msg) return head + '\n(sem mensagem final)';
-  const t = truncateEnd(head + '\n' + msg, budgetChars);
-  return t.text;
+  if (!msg) return { text: head + '\n(sem mensagem final)', truncated: false };
+  // Alegações da despedida ("todos os testes passaram") são dado, não evidência.
+  const t = truncateEnd(msg, budgetChars);
+  return { text: head + '\n' + q(t.text, '6-mensagem-final'), truncated: t.truncated };
 }
 
-function buildFooter(input: DossierInput, truncatedSections: string[], complete: boolean): string {
+function buildFooter(input: DossierInput, truncatedSections: string[], complete: boolean, marker: string, neutralized: number): string {
   const sec = truncatedSections.length > 0 ? `[${truncatedSections.join(',')}]` : '[]';
   const parseErrors = input.parseErrors ?? 0;
   return [
     '### 7. RODAPÉ DE INTEGRIDADE',
-    `dossierComplete: ${complete} · seções truncadas: ${sec} · parseErrors: ${parseErrors} · redactions: ${REDACTIONS_PLACEHOLDER}`,
+    `dossierComplete: ${complete} · seções truncadas: ${sec} · parseErrors: ${parseErrors} · redactions: ${REDACTIONS_PLACEHOLDER} · neutralizacoes: ${neutralized}`,
+    `${MARKER_LINE_PREFIX}${marker}`,
     `sha256: ${SHA_PLACEHOLDER}`,
   ].join('\n');
 }
@@ -482,14 +699,29 @@ export function buildDossier(input: DossierInput): DossierResult {
   const cap5 = compact ? Math.floor(effBudget * 0.2) : Math.floor(effBudget * 0.25);
   const cap6 = compact ? 0 : 2000; // ~500 tokens, "metade" cheia (full)
 
-  // Seções 1/2/3/7 (nunca truncadas): monta e mede.
-  const s1 = buildHeader(input, true);
-  const s2 = buildVerify(input);
-  const s3 = buildSummary(input);
-  const s7 = buildFooter(input, [], true);
+  // Marca dos blocos: derivada de TODO o conteúdo não confiável (ver cabeçalho).
+  const marker = agentDataMarker([
+    input.diff,
+    input.filesChanged,
+    input.steps,
+    input.finalMessage ?? '',
+    input.oracle?.checks.map((c) => c.tail) ?? [],
+    input.oracle?.violations ?? [],
+  ]);
+  let neutralized = 0;
+  const q: Quote = (content, section) => {
+    const r = quoteAgentData(content, section, marker);
+    neutralized += r.neutralized;
+    return r.text;
+  };
+  const facts = dossierFacts(input);
 
-  const mandated = [s1, s2, s3, s7];
-  const mandatedTokens = estimateTokens(mandated.join('\n'));
+  // Seções 1/2/3/7 (nunca truncadas): monta e mede.
+  const s2 = buildVerify(input, q);
+  const s3 = buildSummary(input, facts, q);
+  const mandatedTokens = estimateTokens(
+    [buildHeader(input, true), s2, s3, buildFooter(input, [], true, marker, 0)].join('\n'),
+  );
 
   // Se o que não pode ser cortado já estourar o teto, é config incorreta.
   const truncatedSections: string[] = [];
@@ -502,22 +734,28 @@ export function buildDossier(input: DossierInput): DossierResult {
   // Seções 4/5/6. A 4 só entra quando as seções mandatórias cabem no orçamento.
   let s4 = '';
   if (mandatedTokens <= budgetTokens) {
-    const diffRes = buildDiff(input, cap4);
+    const diffRes = buildDiff(input, cap4, q);
     s4 = diffRes.text;
     if (diffRes.truncated) truncatedSections.push('4');
   }
 
-  const stepRes = buildSteps(input, cap5);
+  const stepRes = buildSteps(input, cap5, q);
   if (stepRes.truncated) truncatedSections.push('5');
 
   let s6 = '';
   if (!compact) {
-    s6 = buildFinalMessage(input, cap6);
-    // A mensagem final truncada no fim também é truncamento visível do dossiê.
-    if (s6.includes('linhas omitidas') && (input.finalMessage ?? '').trim().length > 0) {
-      truncatedSections.push('6');
-    }
+    const finalRes = buildFinalMessage(input, cap6, q);
+    s6 = finalRes.text;
+    // Pelo flag do truncamento — nunca por busca de texto (o agente pode
+    // escrever "linhas omitidas" na despedida e fingir um corte).
+    if (finalRes.truncated) truncatedSections.push('6');
   }
+
+  // Cabeçalho e rodapé com o estado REAL (antes saíam sempre "COMPLETO"/"[]",
+  // mesmo com seção truncada — e o juiz é instruído a considerar o truncamento).
+  const secoes = [...new Set(truncatedSections)]; // dedupe, mantém ordem
+  const s1 = buildHeader(input, complete);
+  const s7 = buildFooter(input, secoes, complete, marker, neutralized);
 
   // Montagem da folha: seções na ordem fixa (§16.3).
   const sectionOrder = compact ? [s1, s2, s3, s4, stepRes.text, s7] : [s1, s2, s3, s4, stepRes.text, s6, s7];
@@ -533,9 +771,12 @@ export function buildDossier(input: DossierInput): DossierResult {
 
   return {
     text,
-    truncatedSections: [...new Set(truncatedSections)], // dedupe, mantém ordem
+    truncatedSections: secoes,
     complete,
     redactions: count,
     tokensApprox: estimateTokens(text),
+    marker,
+    neutralized,
+    facts,
   };
 }

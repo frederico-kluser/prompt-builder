@@ -23,17 +23,25 @@
 //    da lista — o oráculo precisa ser reproduzível entre execuções, e a ordem
 //    dos checks faz parte do contrato.
 //
-// 3. **`inconclusive` = o oráculo NÃO decidiu.** Comando ausente (spawn error)
-//    ou timeout do próprio check significam "o critério de sucesso não pôde ser
-//    aferido" — e o plano §17.1 é explícito: nesse caso o veredito cai para o
-//    caminho SEM oráculo, com o dossiê marcando isso. Fingir `ok:false` aqui
-//    seria punir a tarefa (não o agente) por um oráculo mal escrito.
+// 3. **Check que não terminou = `ok:false` + o MOTIVO (`notRun`).** O check
+//    fica no denominador do `score` e o motivo segue junto, porque ele decide
+//    de quem é a culpa (IMPL-033, R-14a DEC-1/DEC-2):
+//    - `timeout`/`signal` — o comando RODOU e o código sob teste pendurou ou
+//      morreu. Isso é desfecho do agente sob um teto da tarefa, igual para
+//      todos (mesma lógica do corte por limite): conta como check falho.
+//      Tirar a execução do denominador aqui premiaria quem quebra a suíte.
+//    - `spawn` — o comando nem começou (ausente, sem permissão). Pode ser
+//      defeito do AMBIENTE (igual para todos) ou obra do agente (apagou o
+//      script). Quem separa é a CÉLULA, não este módulo: se o check rodou em
+//      alguma execução da etapa, o ambiente serve e a falha é do agente; se
+//      não rodou em nenhuma, a etapa é inválida para TODOS (`oracleCellDefect`).
+//    `inconclusive` continua sendo o resumo "algum check não terminou".
 //
 // ⚠️ ESPELHO CLIENT-SIDE: NÃO existe. O navegador não tem `child_process` —
 // rodar oráculo na SPA é impossível por construção (ver nota em `types.ts`).
 // ----------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
-import type { OracleResult } from './types.js';
+import type { OracleNotRun, OracleResult } from './types.js';
 
 // Timeout default dos checks quando a tarefa não informa (§contrato no JSDoc).
 const DEFAULT_CHECK_TIMEOUT_MS = 60_000;
@@ -58,6 +66,8 @@ interface CheckOutcome {
   exitCode: number;
   ok: boolean;
   inconclusive: boolean;
+  /** Por que não houve exit normal (ausente = houve). */
+  notRun?: OracleNotRun;
   durationMs: number;
   tail: string;
 }
@@ -221,12 +231,22 @@ async function runCheck(opts: {
         }
       }
       const durationMs = Date.now() - started;
-      const inconclusive = timedOut || spawnFailed || code === null;
-      const exitCode = code ?? NO_EXIT;
+      // Ordem importa: spawn que falha não chega a pendurar; o nosso timeout
+      // mata por sinal, então `timeout` vem antes de `signal`.
+      const notRun: OracleNotRun | undefined = spawnFailed
+        ? 'spawn'
+        : timedOut
+          ? 'timeout'
+          : code === null
+            ? 'signal'
+            : undefined;
+      const inconclusive = notRun !== undefined;
+      // Spawn que falha fecha com o errno negativo (ex.: -2); normaliza.
+      const exitCode = inconclusive ? NO_EXIT : (code ?? NO_EXIT);
       const ok = !inconclusive && exitCode === opts.expected;
       const text = tail.text();
       const tailText = lastLines(text, ok ? TAIL_LINES_PASS : TAIL_LINES_FAIL);
-      resolve({ exitCode, ok, inconclusive, durationMs, tail: tailText });
+      resolve({ exitCode, ok, inconclusive, ...(notRun ? { notRun } : {}), durationMs, tail: tailText });
     });
   });
 }
@@ -275,7 +295,8 @@ function matchesForbidden(filePath: string, pattern: string): boolean {
  *    `defaultTimeoutMs` (60_000).
  *  - `score = Σ(ok·weight) / Σ(weight)`; sem checks, `0`.
  *  - `violations` = caminhos de `diffFiles` que casam algum `forbiddenPath`.
- *  - `inconclusive` = algum check não rodou (timeout ou spawn error).
+ *  - `inconclusive` = algum check não terminou (`checks[].notRun`: spawn,
+ *    timeout ou sinal) — e esse check conta como `ok:false` no `score`.
  *  - `onCheck` é chamado ao fim de cada check, na ordem, com o exit code real.
  */
 export async function runOracle(opts: {
@@ -325,6 +346,7 @@ export async function runOracle(opts: {
       weight,
       durationMs: out.durationMs,
       tail: out.tail,
+      ...(out.notRun ? { notRun: out.notRun } : {}),
     });
 
     opts.onCheck?.({ label, ok: out.ok, exitCode: out.exitCode });

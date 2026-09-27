@@ -131,18 +131,21 @@ function messageBlocks(msg: unknown): RawEvent[] {
   return [];
 }
 
-/** Texto + pensamento de uma mensagem, do ÚLTIMO bloco text/thinking. */
+/**
+ * Texto + pensamento de uma mensagem: TODOS os blocos text (em ordem, unidos por
+ * '\n') e o ÚLTIMO bloco thinking legível.
+ */
 function messageTextAndThinking(
   msg: unknown,
 ): { text?: string; thinking?: string; thinkingOpaque: boolean } {
-  let text: string | undefined;
+  const texts: string[] = [];
   let thinking: string | undefined;
   let thinkingOpaque = false;
   for (const b of messageBlocks(msg)) {
     const type = asStr(b.type);
     if (type === 'text') {
       const t = asStr(b.text) ?? asStr(b.content);
-      if (t !== undefined) text = t;
+      if (t !== undefined && t.length > 0) texts.push(t);
     } else if (type === 'thinking') {
       const t = asStr(b.text) ?? asStr(b.thinking) ?? asStr(b.content);
       // O pi/Google pode expor o raciocínio como conteúdo OPACO
@@ -159,8 +162,44 @@ function messageTextAndThinking(
     thinkingOpaque = true;
   }
   if (thinkingOpaque) thinking = undefined;
-  return { text, thinking, thinkingOpaque };
+  return { text: texts.length > 0 ? texts.join('\n') : undefined, thinking, thinkingOpaque };
 }
+
+/**
+ * A mensagem é do ASSISTENTE? No pi, `message_end` sai para TODA mensagem do
+ * turno: o prompt do usuário (1º turno), a do assistente e cada `toolResult`.
+ * Só a do assistente tem texto/pensamento/toolCalls do agente — ler as outras
+ * poria a TAREFA e as SAÍDAS das ferramentas na "mensagem final" do dossiê.
+ * Sem `role` (executor que não o expõe): tratada como do assistente.
+ */
+function isAssistantMessage(msg: unknown): boolean {
+  const role = asStr(asObj(msg).role);
+  return role === undefined || role === 'assistant';
+}
+
+/**
+ * Texto da saída de uma ferramenta. O pi devolve `{ content: [{type:'text',
+ * text}], details }`: o que o agente leu é o texto dos blocos, não o JSON do
+ * envelope. String crua passa como está; o resto vira JSON (nunca some).
+ */
+function toolResultText(result: unknown): string {
+  if (typeof result === 'string') return result;
+  const content = asObj(result).content;
+  if (Array.isArray(content)) {
+    const texts = content
+      .map((b) => asObj(b))
+      .filter((b) => asStr(b.type) === 'text' && typeof b.text === 'string')
+      .map((b) => b.text as string);
+    if (texts.length > 0) return texts.join('\n');
+  }
+  return JSON.stringify(result) ?? '';
+}
+
+/**
+ * O `bash` do pi não expõe exit code em campo: comando com exit ≠ 0 vira
+ * `isError` com o texto terminando em "Command exited with code N".
+ */
+const BASH_EXIT_RE = /Command exited with code (-?\d+)\s*$/;
 
 // ---------------------------------------------------------------------------
 // Uso (tokens/custo). O pi calcula por tabela própria ⇒ `costSource: 'agent-derived'`.
@@ -308,8 +347,13 @@ function buildTurn(t: TurnBuilder, index: number): { turn: AgentTurn; usage: Usa
   const execStarts = new Map<string, ExecStart>();
   const execEnds = new Map<string, ExecEnd>();
   let messageStopReason: string | undefined;
+  let sawAssistantMessage = false;
 
   const pushMessage = (msg: unknown): void => {
+    // Prompt do usuário e `toolResult` também passam por message_end: não são
+    // do agente (ver `isAssistantMessage`).
+    if (!isAssistantMessage(msg)) return;
+    sawAssistantMessage = true;
     const tt = messageTextAndThinking(msg);
     if (tt.text !== undefined) textParts.push(tt.text);
     if (tt.thinking !== undefined) thinking = tt.thinking;
@@ -319,7 +363,7 @@ function buildTurn(t: TurnBuilder, index: number): { turn: AgentTurn; usage: Usa
       if (asStr(b.type) !== 'toolCall') continue;
       const id = asStr(b.id) ?? asStr(b.toolCallId);
       const name = asStr(b.name) ?? asStr(b['tool']);
-      if (!id) continue;
+      if (!id || toolCalls.some((tc) => tc.id === id)) continue;
       toolCalls.push({ id, name: name ?? 'unknown', arguments: b.arguments ?? b.args ?? b.input });
     }
     const sr = asStr(asObj(msg).stopReason);
@@ -350,13 +394,15 @@ function buildTurn(t: TurnBuilder, index: number): { turn: AgentTurn; usage: Usa
     // `message_update` é DELTA-only: intencionalmente ignorado aqui.
   }
 
-  // turn_end traz também a mensagem final (message + toolResults completos).
-  // O stopReason do turno vem do message_end (autoridade, §15); o do turn_end
-  // só é usado se nenhum message_end expôs um.
+  // turn_end traz a MESMA mensagem do assistente que o message_end do turno já
+  // entregou (+ toolResults). Relê-la duplicaria o texto e cada passo; ela só é
+  // lida quando o turno não teve message_end do assistente (stream cortado ou
+  // executor que só emite turn_end). O stopReason do turno vem do message_end
+  // (autoridade, §15); o do turn_end só é usado se nenhum message_end expôs um.
   if (t.end) {
     const m = asObj(t.end).message ?? asObj(t.end);
-    pushMessage(m);
-    const sr = asStr(asObj(t.end).stopReason);
+    if (!sawAssistantMessage) pushMessage(m);
+    const sr = asStr(asObj(t.end).stopReason) ?? (isAssistantMessage(m) ? asStr(asObj(m).stopReason) : undefined);
     if (messageStopReason === undefined && sr !== undefined && sr !== 'pending') messageStopReason = sr;
   }
 
@@ -367,12 +413,13 @@ function buildTurn(t: TurnBuilder, index: number): { turn: AgentTurn; usage: Usa
     let output: string | undefined;
     let outputTruncated = false;
     if (end && end.result !== undefined) {
-      const rawOut = typeof end.result === 'string' ? end.result : JSON.stringify(end.result);
+      const rawOut = toolResultText(end.result);
       outputTruncated = rawOut.length > OUTPUT_CAP;
       output = trunc(rawOut, OUTPUT_CAP);
     }
     const ok = end ? !end.isError : true;
-    const exitCode = end?.exitCode;
+    const bashExit = end?.isError && output !== undefined ? BASH_EXIT_RE.exec(output) : null;
+    const exitCode = end?.exitCode ?? (bashExit ? Number(bashExit[1]) : undefined);
     const durationMs =
       start?.ts !== undefined && end?.ts !== undefined
         ? (() => {

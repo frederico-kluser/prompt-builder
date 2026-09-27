@@ -16,12 +16,12 @@
 //   `<workDir>/system-prompt.txt`; o modelo pelo env `PI_MODEL_ID`. O 2º
 //   parâmetro (`PiRunOptions`) leva signal + priceTokensIn/Out do catálogo.
 // - O executor NÃO expõe os events crus do stream `--mode json` (consome-os
-//   internamente) e devolve a `trajectory` já normalizada no `outcome`. Por isso
+//   internamente) e devolve a `trajectory` já normalizada (`fromPi`) no `outcome`. Por isso
 //   este módulo usa `outcome.trajectory` direto (§10 passo 9). Um gateway
 //   injetado (fake no smoke) devolve a MESMA forma.
 // - A `CompetitorResponse.execution` é um `ExecutionRef` RELATIVO a getDataDir().
 // ----------------------------------------------------------------------------
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AgentRunOpts, PrepareOpts } from './executor.js';
@@ -31,7 +31,18 @@ import { createWorkspaceManager, type CollectResult } from './workspace.js';
 import { execDir, redactEnv, sha256Of, writeExecution } from './store.js';
 import { buildDossier } from './dossier.js';
 import { runOracle } from './oracle.js';
-import { aggregateAgentVerdict, judgeDossier } from './agentJudge.js';
+import { aggregateAgentVerdict, judgeDossier, type AgentJudgeRubric } from './agentJudge.js';
+import {
+  AGENT_VERDICT_TREE_VERSION,
+  decideRepVerdict,
+  mergeOracleRecheck,
+  recheckIndices,
+  settleRepVerdict,
+  shouldRecheckOracle,
+  type JudgeOutcome,
+  type SettledRepVerdict,
+  type VerdictPath,
+} from './verdictTree.js';
 import { isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
 import { blindRankMap, seedFromId } from '../duels.js';
@@ -52,6 +63,8 @@ import type {
   RunCtx,
   StageSpec,
   Verdict,
+  VerdictError,
+  VerdictSource,
 } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -67,11 +80,34 @@ export interface AgentRepResult {
   stopReason: AgentStopReason;
   /** Resultado do oráculo (quando houve). */
   oracle?: AgentOracleResult;
-  /** null = incomplete (§18.3 — fora do placar, sem contar 'nao'). */
+  /**
+   * null = sem observação: cancelamento (controle — a etapa inteira sai) OU
+   * rep SEM oráculo cujo juiz falhou/não foi chamado (IMPL-033). Corte por
+   * limite (timeout/maxTurns/maxCost/maxOutput) NÃO é null: conta 'nao'
+   * (IMPL-032); check do oráculo que não terminou também não: conta como check
+   * falho (ou a ETAPA inteira sai para todos, se o comando não rodou em
+   * nenhuma execução — `oracleCellDefect` no orquestrador).
+   */
   verdict: Verdict | null;
+  /** Caminho da árvore de veredito que decidiu esta repetição (1 dos 9). */
+  path: VerdictPath;
   explanation: string;
-  /** true quando o juiz LLM rodou de verdade nesta repetição. */
+  /** true quando o veredito do juiz LLM foi usado (dentro da faixa do oráculo). */
   judgeUsed: boolean;
+  /** Origem do veredito presente (nomes do CONVENTIONS). */
+  source?: VerdictSource;
+  /**
+   * Flag `judgeError` (IMPL-033 / R-14a DEC-3): o juiz falhou (exceção,
+   * timeout, saída sem veredito) mesmo após as 2 retentativas. O veredito é o
+   * do oráculo (preservado) ou nenhum — nunca 'parcial' imputado.
+   */
+  judgeError?: VerdictError;
+  /** Veredito CRU do juiz quando a faixa do oráculo o confinou (auditoria). */
+  judgeVerdictBeforeClamp?: Verdict;
+  /** Rubrica de processo do juiz (IMPL-034): resultado/escopo/burla/manipulação. */
+  judgeRubric?: AgentJudgeRubric;
+  /** Vezes que o oráculo rodou (> 1 = re-verificação cega de check que nem começou). */
+  oracleAttempts?: number;
   costUsd: number;
 }
 
@@ -101,7 +137,12 @@ export interface RunAgentStageParams {
 export interface RunAgentStageResult {
   response: CompetitorResponse; // text = resumo 1 linha; execution = rep 0
   repResults: AgentRepResult[]; // 1 por repetição
-  /** true = todas as repetições ficaram incomplete (não pontua). */
+  /**
+   * true = TODAS as repetições foram canceladas (que, na prática, sobe como
+   * RunCancelled antes daqui). Falha de preparação e corte por limite NÃO são
+   * incomplete (pontuam 'nao'); rep sem veredito por execução inválida ou juiz
+   * sem oráculo também não (é "sem observação", não controle — IMPL-033).
+   */
   incomplete: boolean;
   errorMsg?: string;
 }
@@ -134,6 +175,19 @@ const DEFAULT_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_DIFF_BYTES = 512 * 1024;
 const DEFAULT_DOSSIER_TOKENS = 12_000;
+/**
+ * Re-verificações CEGAS de check que nem começou (`notRun: 'spawn'` — comando
+ * ausente/sem permissão; cobre o soluço do ambiente, ex.: EAGAIN sob carga).
+ * Só esses checks rodam de novo, no mesmo workspace, sem LLM — e só quando o
+ * oráculo ainda pode mudar a nota (`shouldRecheckOracle`). Timeout/sinal do
+ * check NÃO são re-verificados: é desfecho do código sob teste (conta falho).
+ * Persistindo, o check fica FALHO na rep e a célula decide se o ambiente é que
+ * está quebrado (`oracleCellDefect` → etapa inválida para TODOS). Reexecutar a
+ * rep INTEIRA (novo agente) não ajuda aqui: defeito do ambiente é determinístico,
+ * e repetir a execução de quem quebrou o verificador seria retry dependente de
+ * resultado; a reexecução por infra transitória é da taxonomia do IMPL-094.
+ */
+const ORACLE_RETRIES = 2;
 
 /** Precedência dos limites: tarefa > config do agente > defaults. */
 function resolveLimits(
@@ -191,27 +245,23 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
   const gateway = opts.gateway ?? DEFAULT_GATEWAY;
   const task = stage.agentTask;
   const judgeModelIds = opts.judgeModelIds ?? [];
+  const reps = Math.max(1, agentConfig.repetitions ?? 1);
 
+  // Falha ANTES de qualquer execução (sem tarefa / executor não preparou): cada
+  // repetição conta 'nao' pelo caminho 'error' — a MESMA regra de um workspace
+  // que falha no meio da rep. Antes virava `incomplete` e o contestant sumia do
+  // denominador daquela etapa; `incomplete` agora é só controle (IMPL-032). A
+  // taxonomia transient × defect (defect invalida a célula de todos) é IMPL-094.
   if (!task) {
+    const errorMsg = 'Etapa sem agentTask para contestant com runner=agent';
     return {
-      response: {
-        contestantId: contestant.id,
-        modelId: contestant.modelId,
-        text: 'agente: sem tarefa executável nesta etapa',
-        latencyMs: 0,
-        tokensIn: 0,
-        tokensOut: 0,
-        costUsd: 0,
-        status: 'error',
-        errorMsg: 'Etapa sem agentTask para contestant com runner=agent',
-      },
-      repResults: [],
-      incomplete: true,
-      errorMsg: 'Etapa sem agentTask para contestant com runner=agent',
+      response: { ...responseError(contestant, contestant.modelId, errorMsg, 0), text: 'agente: sem tarefa executável nesta etapa' },
+      repResults: failedReps(runId, stageIndex, contestant.id, reps, errorMsg),
+      incomplete: false,
+      errorMsg,
     };
   }
 
-  const reps = Math.max(1, agentConfig.repetitions ?? 1);
   const promptMode = agentConfig.promptMode ?? forcedPromptMode ?? 'append';
   // O executor (pi) lê `config.promptMode` p/ montar o argv (`--system-prompt` vs
   // `--append-system-prompt`). Passamos a config com o modo RESOLVIDO para que o
@@ -238,8 +288,8 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
     const errorMsg = `Falha ao preparar o executor (${agentConfig.executorVersion})`;
     return {
       response: responseError(contestant, modelId, errorMsg, 0),
-      repResults: [],
-      incomplete: true,
+      repResults: failedReps(runId, stageIndex, contestant.id, reps, errorMsg),
+      incomplete: false,
       errorMsg,
     };
   }
@@ -329,10 +379,13 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
         const collect = await workspaceMgr.collect(workspaceDir, seedCommit, limits.maxDiffBytes);
 
         let oracle: AgentOracleResult | undefined;
+        let oracleAttempts = 0;
         if (task.verify?.length || task.forbiddenPaths?.length) {
+          const verify = task.verify ?? [];
+          oracleAttempts = 1;
           oracle = await runOracle({
             workspaceDir,
-            verify: task.verify ?? [],
+            verify,
             forbiddenPaths: task.forbiddenPaths,
             diffFiles: collect.nameStatus,
             onCheck: (c) =>
@@ -345,6 +398,34 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
                 results: [c],
               }),
           });
+          // Re-verificação CEGA só do check que nem começou (spawn), e só se o
+          // oráculo ainda muda a nota. O evento marca a tentativa: o consumidor
+          // não vê dois resultados "da mesma" verificação sem saber qual vale.
+          while (
+            oracleAttempts <= ORACLE_RETRIES &&
+            !ctx.signal?.aborted &&
+            shouldRecheckOracle(outcome.stopReason, oracle)
+          ) {
+            oracleAttempts += 1;
+            const attempt = oracleAttempts;
+            const indices = recheckIndices(oracle);
+            const recheck = await runOracle({
+              workspaceDir,
+              verify: indices.map((i) => ({ ...verify[i], label: oracle!.checks[i].label })),
+              onCheck: (c) =>
+                emitEvent({
+                  type: 'agent.verified',
+                  runId,
+                  stageIndex,
+                  contestantId: contestant.id,
+                  execId,
+                  results: [c],
+                  attempt,
+                }),
+            });
+            oracle = mergeOracleRecheck(oracle, indices, recheck);
+          }
+          if (ctx.signal?.aborted) throw new RunCancelled(ctx.signal.reason);
         }
 
         const trajectory: AgentTrajectory = outcome.trajectory;
@@ -379,6 +460,7 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
                   exitCode: c.exitCode,
                   expected: c.expected,
                   tail: c.tail,
+                  ...(c.notRun ? { notRun: c.notRun } : {}),
                 })),
                 score: oracle.score,
                 violations: oracle.violations,
@@ -464,6 +546,8 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
               complete: dossier.complete,
               redactions: dossier.redactions,
               mode: 'full',
+              marker: dossier.marker,
+              neutralized: dossier.neutralized,
             },
             digests: {},
           },
@@ -506,8 +590,10 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           parseErrors: outcome.parseErrors ?? trajectory.parseErrors ?? 0,
         };
 
-        // 6) VEREDITO da repetição (§17.1 / §18.3 / §15.2). Só o serve quem NÃO
-        //    ficou incomplete e precisa de juiz LLM (graduação / sem oráculo).
+        // 6) VEREDITO da repetição — árvore de 9 caminhos (`verdictTree.ts`). O
+        //    juiz LLM só roda nos caminhos que graduam (oráculo 100%/parcial ou
+        //    sem oráculo com diff), CONFINADO à faixa do oráculo; corte por
+        //    limite é 'nao' sem juiz; check que não terminou já é falho no score.
         const adjudication = await adjudicateRep({
           stopReason,
           oracle,
@@ -520,16 +606,29 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
           ctx,
         });
 
-        repResults.push({
+        const repResult: AgentRepResult = {
           repetition: rep,
           execution,
           stopReason,
           oracle,
           verdict: adjudication.verdict,
+          path: adjudication.path,
           explanation: adjudication.explanation,
           judgeUsed: adjudication.judgeUsed,
+          ...(adjudication.source ? { source: adjudication.source } : {}),
+          ...(adjudication.judgeError ? { judgeError: adjudication.judgeError } : {}),
+          ...(adjudication.judgeVerdictBeforeClamp
+            ? { judgeVerdictBeforeClamp: adjudication.judgeVerdictBeforeClamp }
+            : {}),
+          ...(adjudication.judgeRubric ? { judgeRubric: adjudication.judgeRubric } : {}),
+          ...(oracleAttempts > 0 ? { oracleAttempts } : {}),
           costUsd: trajectory.usage.costUsd,
-        });
+        };
+        repResults.push(repResult);
+        // Auditoria POR REP depois da run: o exec.json é gravado ANTES da
+        // adjudicação e o RunRecord só guarda contagens — sem isto não dá para
+        // saber qual execução teve o juiz falho ou confinado.
+        writeVerdictArtifact(repAbs, repResult);
         anyError = anyError || stopReason === 'error';
 
         // 7) Ledger: UMA nota por rep (§20.3) — custo derivado, nunca 'unknown'.
@@ -578,19 +677,24 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
         }
       } catch (err) {
         // Qualquer falha não-controlada numa rep => 'nao' com status error (a rep
-        // inteira foi perdida). Controle (orçamento/cancelamento) SOBE.
+        // inteira foi perdida — caminho 'error', A5 até o IMPL-094). Controle
+        // (orçamento/cancelamento) SOBE: é o único caminho para `incomplete`.
         if (isControlSignal(err)) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         anyError = true;
-        repResults.push({
+        const perdida: AgentRepResult = {
           repetition: rep,
           execution: emptyExecution(relativeDir, rep, 0, 0, 0, 'error'),
           stopReason: 'error',
           verdict: 'nao',
+          path: 'error',
           explanation: msg,
           judgeUsed: false,
+          source: 'auto',
           costUsd: 0,
-        });
+        };
+        repResults.push(perdida);
+        writeVerdictArtifact(repAbs, perdida);
         if (rep === 0) {
           response = responseError(contestant, modelId, msg, 0);
         }
@@ -606,7 +710,9 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
       }
     }
 
-  const incomplete = response === null || repResults.every((r) => r.verdict === null);
+  // `incomplete` é SÓ cancelamento (e ele sobe antes daqui). Rep sem veredito
+  // (sem oráculo, juiz falho/não chamado) é "sem observação", não controle.
+  const incomplete = response === null || repResults.every((r) => r.path === 'cancelled');
 
   if (response === null) {
     response = {
@@ -629,8 +735,10 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
 }
 
 // ---------------------------------------------------------------------------
-// Veredito da repetição — §17.1 (oráculo MANDA) + §18.3 (erro vs incomplete)
-// + §15.2 (stopReason !== 'completed'). O juiz LLM SÓ roda quando é de fato útil.
+// Veredito da repetição — a ÁRVORE de 9 caminhos e o fechamento dentro da
+// faixa do oráculo vivem, puros, em `verdictTree.ts` (IMPL-032: corte por limite
+// conta 'nao'; IMPL-033: juiz confinado ao oráculo, falha do juiz cai no
+// oráculo + judgeError). Aqui só se CHAMA o juiz LLM nos caminhos que graduam.
 // ---------------------------------------------------------------------------
 
 async function adjudicateRep(opts: {
@@ -643,112 +751,60 @@ async function adjudicateRep(opts: {
   judgeModelIds: string[];
   apiKey: string;
   ctx: RunCtx;
-}): Promise<{ verdict: Verdict | null; explanation: string; judgeUsed: boolean }> {
+}): Promise<SettledRepVerdict & { path: VerdictPath }> {
   const { stopReason, oracle, diffEmpty, stage, dossierText, contestantId, judgeModelIds, apiKey, ctx } = opts;
+  const d = decideRepVerdict({ stopReason, oracle, diffEmpty });
 
-  // §18.3: cancelamento é sinal de controle — a fronteira re-lança. Aqui marcamos
-  // incomplete e o ORQUESTRADOR sobe o sinal (o pipeline sabe que foi cancelado).
-  if (stopReason === 'cancelled') {
-    return { verdict: null, explanation: 'execução cancelada (sinal de controle)', judgeUsed: false };
-  }
+  // Cancelamento (quem chama re-lança RunCancelled — §18.3; defensivo, o laço
+  // já sobe o sinal antes daqui) e veredito final: sem juiz.
+  if (d.kind !== 'judge') return { ...settleRepVerdict(d), path: d.path };
 
-  // §18.3: processo morreu => é do contestant => 'nao' com status error.
-  if (stopReason === 'error') {
-    return { verdict: 'nao', explanation: 'a execução do agente falhou (processo morreu)', judgeUsed: false };
-  }
-
-  // §15.2 exceção: stopReason !== 'completed' é incomplete, EXCETO se o oráculo
-  // passou inteiro (score===1) — aí o mundo mudou de forma verificável e segue.
-  const oraclePassing = oracle !== undefined && oracle.violations.length === 0 && oracle.score === 1;
-  if (stopReason !== 'completed' && !oraclePassing) {
-    return { verdict: null, explanation: `execução cortada (${stopReason}) — fora do placar`, judgeUsed: false };
-  }
-
-  // Daqui, o julgamento segue §17.1: o ORÁCULO MANDA; o juiz só gradua.
-  if (oracle) {
-    if (oracle.violations.length > 0) {
-      return { verdict: 'nao', explanation: `arquivos proibidos modificados: ${oracle.violations.join(', ')}`, judgeUsed: false };
-    }
-    if (oracle.score === 1) {
-      // 'resolve' candidato; o juiz roda SÓ para graduar (pode rebaixar a
-      // 'parcial' com justificativa, NUNCA a 'nao' — §17.1).
-      const j = await runJudgeForGraduation({
-        stage, dossierText, contestantId, judgeModelIds, apiKey, ctx,
-        canDowngradeTo: 'parcial',
-        fallback: { verdict: 'resolve' as Verdict, explanation: 'verificação automática passou integralmente (score 1)' },
-      });
-      return j;
-    }
-    if (oracle.score === 0) {
-      return { verdict: 'nao', explanation: 'verificação automática falhou integralmente (score 0)', judgeUsed: false };
-    }
-    // 0 < score < 1 => 'parcial' (candidato); o juiz confirma ou rebaixa a 'nao'.
-    const j = await runJudgeForGraduation({
-      stage, dossierText, contestantId, judgeModelIds, apiKey, ctx,
-      canDowngradeTo: 'nao',
-      fallback: { verdict: 'parcial' as Verdict, explanation: 'verificação automática incompleta (score parcial)' },
-    });
-    return j;
-  }
-
-  // Sem oráculo:
-  if (diffEmpty) {
-    // §18.3: completou e não mudou nada => é uma resposta, e é errada.
-    return { verdict: 'nao', explanation: 'o agente terminou sem alterar nada', judgeUsed: false };
-  }
-  // Sem oráculo com diff => julgamento pleno por dossiê (judgeDossier).
-  return runJudgeForGraduation({
-    stage, dossierText, contestantId, judgeModelIds, apiKey, ctx,
-    canDowngradeTo: 'nao',
-    fallback: { verdict: 'parcial' as Verdict, explanation: 'sem oráculo, sem veredito do juiz' },
-  });
+  const outcome = await callJudge({ stage, dossierText, contestantId, judgeModelIds, apiKey, ctx });
+  return { ...settleRepVerdict(d, outcome), path: d.path };
 }
 
 /**
- * Juiz LLM com clampeamento: `canDowngradeTo` limita até onde o juiz pode
- * rebaixar o veredito candidato (§17.1). Falha de chamada => 'parcial' (motivo).
+ * Chama o juiz de dossiê e traduz o resultado em `JudgeOutcome`. Nunca lança
+ * erro comum: `judgeDossier` já re-tenta 2× e devolve a falha estruturada; um
+ * erro inesperado aqui também vira falha (`judgeError`), nunca 'parcial'.
+ * Controle (orçamento/cancelamento) sobe na fronteira.
  */
-async function runJudgeForGraduation(opts: {
+async function callJudge(opts: {
   stage: StageSpec;
   dossierText: string;
   contestantId: string;
   judgeModelIds: string[];
   apiKey: string;
   ctx: RunCtx;
-  canDowngradeTo: 'parcial' | 'nao';
-  fallback: { verdict: Verdict; explanation: string };
-}): Promise<{ verdict: Verdict | null; explanation: string; judgeUsed: boolean }> {
-  const { stage, dossierText, contestantId, judgeModelIds, apiKey, ctx, canDowngradeTo, fallback } = opts;
-  // Sem juiz configurado não há rebaixamento: o veredito candidato (do oráculo)
-  // permanece. Evita punir quem o oráculo aprovou por falta de modelo de juiz.
-  if (judgeModelIds.length === 0) {
-    return { verdict: fallback.verdict, explanation: fallback.explanation, judgeUsed: false };
-  }
+}): Promise<JudgeOutcome> {
+  const { stage, dossierText, contestantId, judgeModelIds, apiKey, ctx } = opts;
+  // Sem juiz configurado — ou dossiê vazio, sem nada a ler — não há graduação:
+  // o veredito do oráculo permanece (sem oráculo, nenhum). O juiz nem foi
+  // chamado: não é falha do juiz e não levanta `judgeError`.
+  if (judgeModelIds.length === 0) return { status: 'skipped', reason: 'sem juiz configurado' };
+  if (!dossierText.trim()) return { status: 'skipped', reason: 'dossiê vazio (nada para o juiz ler)' };
   try {
-    const j = await judgeDossier({
-      stage,
-      dossierText,
-      contestantId,
-      judgeModelIds,
-      apiKey,
-      ctx,
-    });
-    // Clampeia o veredito do juiz ao piso permitido (§17.1: score 1 nunca vira
-    // 'nao' — o juiz só pode rebaixar a 'parcial' com justificativa).
-    let verdict = j.verdict;
-    if (canDowngradeTo === 'parcial' && verdict === 'nao') {
-      verdict = 'parcial';
+    const j = await judgeDossier({ stage, dossierText, contestantId, judgeModelIds, apiKey, ctx });
+    if (j.verdict === null && j.skipped) return { status: 'skipped', reason: j.explanation };
+    if (j.verdict === null) {
       return {
-        verdict,
-        explanation: j.explanation,
-        judgeUsed: true,
+        status: 'failed',
+        error: j.judgeError ?? { kind: 'judge_failed', message: j.explanation },
+        attempts: j.attempts,
       };
     }
-    return { verdict, explanation: j.explanation, judgeUsed: true };
+    return {
+      status: 'ok',
+      verdict: j.verdict,
+      explanation: j.explanation,
+      degraded: j.degraded,
+      ...(j.rubric ? { rubric: j.rubric } : {}),
+    };
   } catch (err) {
-    // Controle sobe na fronteira.
     if (isControlSignal(err)) throw err;
-    return { verdict: 'parcial', explanation: `juiz falhou: ${(err as Error).message}`, judgeUsed: false };
+    if (ctx.signal?.aborted) throw new RunCancelled(ctx.signal.reason);
+    const message = (err instanceof Error ? err.message : String(err)).slice(0, 160);
+    return { status: 'failed', error: { kind: 'judge_failed', message }, attempts: 1 };
   }
 }
 
@@ -802,6 +858,53 @@ function summarizeArgs(args?: Record<string, unknown>): string {
   return entries.join(' ');
 }
 
+/**
+ * `verdict.json` no diretório da execução: o veredito da REP, a origem, o
+ * caminho da árvore, a flag `judgeError`, o veredito cru do juiz quando a
+ * faixa o confinou e as tentativas do oráculo. Escrita atômica (tmp+rename) e
+ * melhor esforço: falha de disco aqui não derruba a rep nem muda a nota.
+ * O `exec.json`/`digests.json` fecham ANTES (são a coleta); este arquivo é a
+ * adjudicação. A invalidação da etapa inteira (defeito do ambiente) é decidida
+ * depois, na célula, e fica no `StageRecord.error` do RunRecord.
+ */
+function writeVerdictArtifact(absDir: string, rep: AgentRepResult): void {
+  const payload = {
+    format: 'agent-verdict@1',
+    verdictTreeVersion: AGENT_VERDICT_TREE_VERSION,
+    execId: rep.execution.execId,
+    repetition: rep.repetition,
+    stopReason: rep.stopReason,
+    path: rep.path,
+    verdict: rep.verdict,
+    ...(rep.source ? { source: rep.source } : {}),
+    judgeUsed: rep.judgeUsed,
+    ...(rep.judgeError ? { judgeError: rep.judgeError } : {}),
+    ...(rep.judgeVerdictBeforeClamp ? { judgeVerdictBeforeClamp: rep.judgeVerdictBeforeClamp } : {}),
+    ...(rep.judgeRubric ? { judgeRubric: rep.judgeRubric } : {}),
+    ...(rep.oracle
+      ? {
+          oracle: {
+            score: rep.oracle.score,
+            violations: rep.oracle.violations,
+            attempts: rep.oracleAttempts ?? 1,
+            notRun: rep.oracle.checks
+              .filter((c) => c.notRun !== undefined)
+              .map((c) => ({ label: c.label, cause: c.notRun })),
+          },
+        }
+      : {}),
+    explanation: rep.explanation,
+  };
+  const target = path.join(absDir, 'verdict.json');
+  const tmp = `${target}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+    renameSync(tmp, target);
+  } catch {
+    /* melhor esforço — a nota já está no AgentRepResult */
+  }
+}
+
 function responseError(contestant: Contestant, modelId: string, errorMsg: string, costUsd: number): CompetitorResponse {
   return {
     contestantId: contestant.id,
@@ -814,6 +917,30 @@ function responseError(contestant: Contestant, modelId: string, errorMsg: string
     status: 'error',
     errorMsg,
   };
+}
+
+/**
+ * Repetições perdidas ANTES de executar (sem tarefa / executor não preparou):
+ * uma por rep, todas 'nao' pelo caminho 'error' — nunca `incomplete`.
+ */
+function failedReps(
+  runId: string,
+  stageIndex: number,
+  contestantId: string,
+  reps: number,
+  msg: string,
+): AgentRepResult[] {
+  return Array.from({ length: reps }, (_, rep) => ({
+    repetition: rep,
+    execution: emptyExecution(execDir(runId, stageIndex, contestantId, rep), rep, 0, 0, 0, 'error'),
+    stopReason: 'error' as const,
+    verdict: 'nao' as const,
+    path: 'error' as const,
+    explanation: msg,
+    judgeUsed: false,
+    source: 'auto' as const,
+    costUsd: 0,
+  }));
 }
 
 function emptyExecution(

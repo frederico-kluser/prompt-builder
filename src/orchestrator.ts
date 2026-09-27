@@ -30,6 +30,20 @@ import {
 } from './engine/truncation.js';
 import { enforceRunCompliance } from './lgpd.js';
 import { runAgentStage, aggregateAgentVerdict } from './agent/runAgentStage.js';
+import { AGENT_JUDGE_SYSTEM_PROMPT } from './agent/agentJudge.js';
+import {
+  AGENT_VERDICT_TREE_VERSION,
+  agentOracleDuelScores,
+  agentRateMetrics,
+  agentStageProvenance,
+  needsTextReference,
+  oracleCellDefect,
+  stageHasVerify,
+  stageObservations,
+  tallyReps,
+  type RepCounts,
+} from './agent/verdictTree.js';
+import type { AgentRepResult } from './agent/runAgentStage.js';
 import type {
   CallFinishSignals,
   Contestant,
@@ -41,6 +55,8 @@ import type {
   StageRecord,
   StageSpec,
   Verdict,
+  VerdictError,
+  VerdictSource,
 } from './types.js';
 
 function nowIso(): string {
@@ -559,9 +575,18 @@ async function runLoop(
   // Sinais de fim de cada gabarito (IMPL-014), por posicao em `specs` ANTES
   // da expansao de repeats — vao para o StageRecord na materializacao.
   const gabaritoCalls = new Map<number, CallFinishSignals>();
-  if (referenceJudging) {
-    specs = await generateReferences({
-      stages: specs,
+  // IMPL-034 (R-14a DEC-7): etapa com `verify[]` numa run só de agentes NÃO
+  // gera gabarito — o veredito vem do oráculo (+ juiz de dossiê, que não lê a
+  // referência) e as finais são decididas pelo oráculo. Antes o gabarito saía
+  // igual e era 64% do custo de uma run trivial, sem leitor (0 tokens agora).
+  const hasChatContestant = record.contestants.some((c) => c.runner !== 'agent');
+  const precisamGabarito = specs
+    .map((spec, idx) => ({ spec, idx }))
+    .filter(({ spec }) => needsTextReference(spec, { hasChatContestant }));
+  if (referenceJudging && precisamGabarito.length > 0) {
+    const preenchidas = await generateReferences({
+      stages: precisamGabarito.map((p) => p.spec),
+      stageNumbers: precisamGabarito.map((p) => p.idx + 1),
       apiKey,
       modelId: record.config.referenceModelId ?? record.config.judgeModelIds[0],
       reasoningLevel: record.config.reasoning?.judge,
@@ -572,7 +597,13 @@ async function runLoop(
       // concluidos), nao de uma etapa especifica.
       onProgress: (done, total) =>
         emitEvent({ type: 'stage.gabarito', runId, stageIndex: -1, done, total }),
-      onCall: (idx, call) => gabaritoCalls.set(idx, call),
+      // `k` indexa o SUBCONJUNTO que precisou de gabarito (IMPL-034) — volta
+      // para a posicao em `specs`.
+      onCall: (k, call) => gabaritoCalls.set(precisamGabarito[k].idx, call),
+    });
+    specs = specs.slice();
+    precisamGabarito.forEach((p, k) => {
+      specs[p.idx] = preenchidas[k];
     });
   }
 
@@ -627,6 +658,19 @@ async function runLoop(
   // Em modo agente, G2 ganha `est.byRole.agent` no mesmo grupo (o plano §20.1/§20.6:
   // execuções de agente + julgamento são ATÔMICOS, de propósito).
   const hasAgent = record.contestants.some((c) => c.runner === 'agent');
+  // Versão da árvore de veredito de agente que produz as notas desta run —
+  // estampada ANTES de qualquer veredito, para valer também em run abortada.
+  // Ausente numa run com agente = legado (v1: corte por limite fora do
+  // denominador); notas de versões diferentes não se comparam (IMPL-032).
+  if (hasAgent) record.agentVerdictTreeVersion = AGENT_VERDICT_TREE_VERSION;
+  // IMPL-033: contagem de `judgeError` (juiz de agente que falhou mesmo após as
+  // 2 retentativas) e de reps sem veredito por motivo não-controle, POR RUN —
+  // presentes desde já (0) para valerem também em run abortada.
+  if (hasAgent) {
+    record.agentJudgeErrorCount = 0;
+    record.agentJudgeErrorsByContestant = {};
+    record.agentUnscoredRepsByContestant = {};
+  }
   const custoG2 = est.byRole.competitor + est.byRole.judge + (hasAgent ? est.byRole.agent : 0);
   if (custoG2 > 0 && !gate('competitors', custoG2)) {
     for (const st of record.stages) {
@@ -651,6 +695,9 @@ async function runLoop(
   // Governador de processos de agente COMPARTILHADO entre todas as etapas: se
   // cada etapa tivesse o próprio, N etapas em paralelo = N×maxParallel processos.
   const agentSemaphore = hasAgent ? new AgentSemaphore(agentMaxParallel) : undefined;
+  // IMPL-034: nota de ORÁCULO por contestant das etapas decididas pelo oráculo
+  // (verify[] + só agentes) — as finais dessas etapas saem daqui, sem LLM.
+  const oracleDuelScoresByStage = new Map<number, Record<string, number>>();
 
   const etapasSettled = await Promise.allSettled(
     record.stages.map(async (stageRecord) => {
@@ -660,7 +707,9 @@ async function runLoop(
 
       try {
         // Verditios dos contestants de runner 'agent' (agregados por rep) e os
-        // que ficaram 'incomplete' (§18.3 — saem do ranking/judgeScore).
+        // que ficaram sem veredito — cancelamento, ou (IMPL-033) toda rep sem
+        // observação: sem oráculo e juiz falho/não chamado. Corte por limite e
+        // check que não terminou contam como falha e ficam no ranking/judge-score.
         const agentVerdicts: Record<string, Verdict> = {};
         const agentExplanations: Record<string, string> = {};
         const agentIncompleteIds = new Set<string>();
@@ -670,6 +719,24 @@ async function runLoop(
         // judge-score e a significância, não só da média ordinal da etapa.
         const agentVerdictsByRep: Record<string, Verdict[]> = {};
         const agentRepIncomplete: Record<string, number> = {};
+        // Reps decididas pelo caminho 'limit-cut' (já contadas como 'nao'): só
+        // alimentam o diagnóstico "sucesso até o limite" (IMPL-032).
+        const agentLimitCuts: Record<string, number> = {};
+        // IMPL-033: reps com juiz falho (flag judgeError) e reps sem veredito por
+        // motivo NÃO-controle (sem oráculo: juiz falhou ou não foi chamado).
+        const agentJudgeErrors: Record<string, number> = {};
+        const agentUnscored: Record<string, number> = {};
+        // Procedência do veredito agregado de cada agente, nos nomes FIXOS do
+        // CONVENTIONS §2 (os consumidores do IMPL-004 leem esses dois mapas).
+        // Sai das reps (`agentStageProvenance`): o motivo da ausência é o real
+        // (juiz falhou / sem régua), não um 'competitor_error' genérico — no
+        // merge com o IMPL-004, este mapa prevalece para os agentes.
+        const agentVerdictSources: Record<string, VerdictSource> = {};
+        const agentVerdictErrors: Record<string, VerdictError> = {};
+        // Reps e contagens de cada agente — a regra da CÉLULA (defeito do
+        // ambiente) só pode ser aplicada depois que TODOS terminaram.
+        const agentRepsById: Record<string, AgentRepResult[]> = {};
+        const agentTallies: Record<string, RepCounts> = {};
         const agentContestants = record.contestants.filter((c) => c.runner === 'agent');
         const chatContestants = record.contestants.filter((c) => c.runner !== 'agent');
 
@@ -700,11 +767,18 @@ async function runLoop(
               const agentRes = agentSemaphore ? await agentSemaphore.run(run) : await run();
               response = agentRes.response;
               // Veredito agregado da etapa = média ordinal dos vereditos das reps.
-              // incomplete (tudo null, ou tudo erro) => contestant sai do ranking
-              // e do judgeScore SEM pontos e SEM 'nao' (§18.3/§15.2).
-              const valid = agentRes.repResults
-                .map((r) => r.verdict)
-                .filter((v): v is Verdict => v !== null);
+              // Sem veredito algum (só cancelamento — que na prática já subiu
+              // como RunCancelled) => fora do ranking. Corte por limite e erro
+              // de execução TÊM veredito ('nao') e ficam no denominador.
+              const tally = tallyReps(agentRes.repResults);
+              const valid = tally.verdicts;
+              agentRepsById[contestant.id] = agentRes.repResults;
+              agentTallies[contestant.id] = tally;
+              if (tally.judgeErrors > 0) agentJudgeErrors[contestant.id] = tally.judgeErrors;
+              if (tally.unscored > 0) agentUnscored[contestant.id] = tally.unscored;
+              const proc = agentStageProvenance(agentRes.repResults);
+              if (proc.source) agentVerdictSources[contestant.id] = proc.source;
+              if (proc.error) agentVerdictErrors[contestant.id] = proc.error;
               if (valid.length === 0) {
                 agentIncompleteIds.add(contestant.id);
               } else {
@@ -713,16 +787,17 @@ async function runLoop(
                   agentRes.repResults.find((r) => r.verdict !== null)?.explanation ??
                   '(sem explicação do juiz)';
               }
+              if (tally.limitCuts > 0) agentLimitCuts[contestant.id] = tally.limitCuts;
               // Expõe POR-REPETIÇÃO quando reps > 1 (§18.4): o vetor plano vira
               // observações independentes no denominador do judge-score e no
               // pareamento (cenário × repetição) do pairedSignificance. Reps
-              // `incomplete` (veredito null) NÃO entram no vetor — são contadas
-              // em repIncomplete.
+              // sem veredito NÃO entram no vetor — canceladas contam em
+              // repIncomplete, juiz-sem-oráculo em unscoredRepsByContestant;
+              // reps cortadas por limite ENTRAM como 'nao'.
               const reps = record.config.agent?.repetitions ?? 1;
               if (reps > 1) {
                 agentVerdictsByRep[contestant.id] = valid;
-                const incompletas = agentRes.repResults.filter((r) => r.verdict === null).length;
-                if (incompletas > 0) agentRepIncomplete[contestant.id] = incompletas;
+                if (tally.cancelled > 0) agentRepIncomplete[contestant.id] = tally.cancelled;
               }
             } else {
               response = await runCompetitor({
@@ -764,6 +839,28 @@ async function runLoop(
           if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
         }
 
+        // IMPL-033 (revisão) — DEFEITO DO AMBIENTE invalida a CÉLULA para TODOS
+        // (R-14a DEC-2). Check que nem começou (comando ausente/sem permissão)
+        // já entra no score de cada rep como FALHO; aqui se decide se isso era
+        // o agente (o check rodou em alguma outra execução da etapa: o ambiente
+        // serve) ou a tarefa (não rodou em NENHUMA: o ambiente não serve).
+        // No 2º caso a etapa sai do placar para todos — agentes E chat —, com
+        // `error` explícito; tirar só de quem falhou recriaria o viés de
+        // sobrevivência (quem quebra o verificador escaparia do denominador).
+        const defeito =
+          agentContestants.length > 0 ? oracleCellDefect(Object.values(agentRepsById).flat()) : null;
+        if (defeito) {
+          const msg =
+            `etapa inválida para TODOS os contestants: o verificador (${defeito.labels.join(', ')}) ` +
+            `nem começou em nenhuma das ${defeito.executions} execução(ões) — comando ausente ou sem ` +
+            `permissão no ambiente da tarefa (defeito da tarefa, não desempenho; R-14a DEC-2)`;
+          stageRecord.error = msg;
+          stageRecord.finishedAt = nowIso();
+          scheduleSave();
+          emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
+          log(runId, `stage ${i + 1} ${msg}`);
+          return;
+        }
         // IMPL-014 (R-07b:DEC-2): resposta que CONTINUOU truncada depois do
         // retry x2 torna a etapa `incomplete` — fora do placar e das medias.
         // Nao julga: comparar uma resposta cortada com respostas inteiras mede
@@ -789,12 +886,33 @@ async function runLoop(
           return;
         }
 
+        // Contagens POR RUN só das etapas que valem (a inválida acima não soma).
+        for (const [id, t] of Object.entries(agentTallies)) {
+          if (t.judgeErrors > 0) {
+            record.agentJudgeErrorCount = (record.agentJudgeErrorCount ?? 0) + t.judgeErrors;
+            const porContestant = (record.agentJudgeErrorsByContestant ??= {});
+            porContestant[id] = (porContestant[id] ?? 0) + t.judgeErrors;
+          }
+          if (t.unscored > 0) {
+            const porContestant = (record.agentUnscoredRepsByContestant ??= {});
+            porContestant[id] = (porContestant[id] ?? 0) + t.unscored;
+          }
+        }
+
+        // IMPL-034: etapa com verify[] numa run só de agentes é DECIDIDA PELO
+        // ORÁCULO — sem gabarito textual (fase 1.5 pulada): o veredito vem da
+        // árvore de cada execução e as finais, das notas do oráculo.
+        const decididaPeloOraculo =
+          agentContestants.length > 0 && chatContestants.length === 0 && stageHasVerify(stageSpec);
+        if (decididaPeloOraculo) oracleDuelScoresByStage.set(i, agentOracleDuelScores(agentRepsById));
+
         // === FASE 3: julgamento POINTWISE. Com gabarito: cada resposta contra
         // a referencia (os duelos sairam daqui — viraram a fase 4 de finais).
+        // Etapa decidida pelo oráculo: os vereditos da árvore de agente.
         // Sem gabarito: juiz LISTWISE classico (compare antigo / fallback). ===
         emitEvent({ type: 'stage.judging', runId, stageIndex: i });
         try {
-          if (stageSpec.reference?.trim()) {
+          if (stageSpec.reference?.trim() || decididaPeloOraculo) {
             // Pointwise: cada resposta classificada isoladamente contra o
             // gabarito (resolve/parcial/nao) — base do judge-score.
             //
@@ -823,6 +941,8 @@ async function runLoop(
               refJudge = {
                 verdictByContestant: { ...agentVerdicts },
                 explanationByContestant: { ...agentExplanations },
+                verdictSourceByContestant: { ...agentVerdictSources },
+                ...(Object.keys(agentVerdictErrors).length > 0 && { verdictErrorByContestant: { ...agentVerdictErrors } }),
                 judgeModelId: record.config.judgeModelIds.join('+'),
                 // §18.4: quando a etapa tem reps>1, guarda o vetor plano por rep
                 // para o orquestrador montar o judge-score/vetor plano e a
@@ -832,6 +952,15 @@ async function runLoop(
                 }),
                 ...(Object.keys(agentRepIncomplete).length > 0 && {
                   repIncomplete: agentRepIncomplete,
+                }),
+                ...(Object.keys(agentLimitCuts).length > 0 && {
+                  limitCutByContestant: agentLimitCuts,
+                }),
+                ...(Object.keys(agentJudgeErrors).length > 0 && {
+                  judgeErrorByContestant: agentJudgeErrors,
+                }),
+                ...(Object.keys(agentUnscored).length > 0 && {
+                  unscoredRepsByContestant: agentUnscored,
                 }),
               };
             } else {
@@ -851,10 +980,13 @@ async function runLoop(
                 ctx,
                 maxPricePerMTok,
               });
+              const erros = { ...(base.verdictErrorByContestant ?? {}), ...agentVerdictErrors };
               refJudge = {
                 ...base,
                 verdictByContestant: { ...base.verdictByContestant, ...agentVerdicts },
                 explanationByContestant: { ...base.explanationByContestant, ...agentExplanations },
+                verdictSourceByContestant: { ...(base.verdictSourceByContestant ?? {}), ...agentVerdictSources },
+                ...(Object.keys(erros).length > 0 && { verdictErrorByContestant: erros }),
                 // §18.4: reps>1 — anexa o vetor plano por rep e o count de
                 // incomplete dos agentes (chat não tem reps, fica de fora).
                 ...(Object.keys(agentVerdictsByRep).length > 0 && {
@@ -862,6 +994,15 @@ async function runLoop(
                 }),
                 ...(Object.keys(agentRepIncomplete).length > 0 && {
                   repIncomplete: agentRepIncomplete,
+                }),
+                ...(Object.keys(agentLimitCuts).length > 0 && {
+                  limitCutByContestant: agentLimitCuts,
+                }),
+                ...(Object.keys(agentJudgeErrors).length > 0 && {
+                  judgeErrorByContestant: agentJudgeErrors,
+                }),
+                ...(Object.keys(agentUnscored).length > 0 && {
+                  unscoredRepsByContestant: agentUnscored,
                 }),
               };
             }
@@ -875,8 +1016,8 @@ async function runLoop(
             // daria a ele todos os 1os lugares em empate — enviesando medalhas e
             // placar a favor da regua. Usa o shuffle cego semeado pelo conteudo da
             // etapa (mesmo criterio dos duelos): deterministico e neutro.
-            // Agentes incompletos (§18.3) ficam FORA do ranking (sem pontos, sem
-            // 'nao') — por isso o `filter` abaixo.
+            // Agentes sem veredito (só cancelamento) ficam FORA do ranking —
+            // por isso o `filter` abaixo. Corte por limite é 'nao' e é ranqueado.
             const ordemCega = blindRankMap(
               record.contestants.map((c) => c.id),
               seedFromId(stageSpec.question),
@@ -898,7 +1039,10 @@ async function runLoop(
               verdictByContestant: { ...refJudge.verdictByContestant },
               judges: [],
               blindMap: {},
-              rawJudgeText: 'Juiz de referência (gabarito)',
+              rawJudgeText:
+                chatContestants.length === 0
+                  ? 'Árvore de veredito do agente (oráculo + juiz de dossiê)'
+                  : 'Juiz de referência (gabarito)',
               inconclusive: refJudge.inconclusive,
             };
           } else {
@@ -996,77 +1140,42 @@ async function runLoop(
   const stagesComRef = record.stages.filter((s) => s.referenceJudge && !s.incomplete);
   if (stagesComRef.length > 0) {
     // judge-score = (resolve + 0.5*parcial) / total * 100, por contestant,
-    // sobre as etapas com juiz de referencia (ausente conta como 'nao').
+    // sobre as etapas com juiz de referencia.
     //
-    // Agentes 'incomplete' (§18.3) NÃO aparecem no verdictByContestant (o
-    // orquestrador só os soma quando tiveram veredito) — para eles o `undefined`
-    // é "sem evidência" e NÃO pode contar como 'nao' (a culpa foi do nosso teto,
-    // não do agente). Filtramos os `undefined`, então o contestant entra no
-    // judge-score só com as etapas em que ele pontuou de verdade. Chat NÃO muda:
-    // vereditos de chat nunca são `undefined` no map.
-    //
-    // §18.4 — REPETIÇÕES: cada rep é uma observação independente. Quando algum
-    // `referenceJudge` guarda `verdictsByRep` (contestant de agente com reps>1),
-    // o score do contestant sai do vetor PLANO (todas as etapas × todas as reps),
-    // não da média ordinal por etapa. `judgeScoreFromVerdicts` não muda uma linha;
-    // mudou só QUEM chama com o quê. Sem `verdictsByRep` (reps=1 / chat) o fluxo
-    // é exatamente o legado.
-    const temVerdictsByRep = stagesComRef.some(
-      (s) => s.referenceJudge!.verdictsByRep && Object.keys(s.referenceJudge!.verdictsByRep!).length > 0,
-    );
+    // Observacoes por etapa (`stageObservations`): o vetor POR REP quando existe
+    // (§18.4 — cada rep de agente e uma observacao independente; vetor PLANO de
+    // todas as etapas x todas as reps), senao o veredito agregado da etapa.
+    // Veredito ausente = nenhuma observacao. Para agentes isso so acontece por
+    // cancelamento ou rep sem veredito legitimo (IMPL-033: sem oraculo e juiz
+    // falho/nao chamado); etapa com defeito do ambiente sai para TODOS (error,
+    // sem referenceJudge). Corte por limite (timeout/maxTurns/maxCost/maxOutput)
+    // chega aqui como 'nao' e CONTA no denominador (IMPL-032 / R-14a DEC-1 —
+    // antes saia, e um agente que estourava o teto nas tarefas dificeis ficava
+    // com nota perfeita nas faceis: vies de sobrevivencia). Chat numa run mista
+    // com reps>1 usa o agregado da etapa (antes ficava com vetor vazio => 0).
     record.judgeScoreByContestant = Object.fromEntries(
-      record.contestants.map((c) => {
-        if (temVerdictsByRep) {
-          // Vetor PLANO: concatena os vereditos POR REP de todas as etapas.
-          const flat: Verdict[] = [];
-          for (const s of stagesComRef) {
-            const porRep = s.referenceJudge!.verdictsByRep?.[c.id];
-            if (porRep) flat.push(...porRep);
-          }
-          return [c.id, judgeScoreFromVerdicts(flat)];
-        }
-        return [
-          c.id,
-          judgeScoreFromVerdicts(
-            stagesComRef
-              .map((s) => s.referenceJudge!.verdictByContestant[c.id])
-              .filter((v): v is Verdict => v !== undefined),
-          ),
-        ];
-      }),
+      record.contestants.map((c) => [
+        c.id,
+        judgeScoreFromVerdicts(stagesComRef.flatMap((s) => stageObservations(s.referenceJudge!, c.id))),
+      ]),
     );
   }
 
-  // §18.4 — resolveRate por contestant: fração de 'resolve' entre os vereditos
-  // PLANOS (todas as etapas × todas as reps), em 0..1 com 3 casas. Presente só
-  // quando há contestants de agente: é o número que separa "resolve sempre" de
-  // "resolve às vezes". Com reps=1 vira uma amostra de tamanho 1 — o relatório
-  // final já avisa (§18.4). Usa o mesmo vetor plano do judge-score acima.
+  // §18.4 — resolveRate por contestant de agente: fracao de 'resolve' entre os
+  // vereditos PLANOS (todas as etapas x todas as reps), em 0..1 com 3 casas —
+  // o numero que separa "resolve sempre" de "resolve as vezes". Mesmo vetor do
+  // judge-score, corte por limite incluido como 'nao'. Ao lado, SO como
+  // diagnostico (nunca ranking/finais/gate): "sucesso ate o limite" (a metrica
+  // censurada, sem os cortes no denominador) e a contagem de cortes.
   const agentIds = record.contestants.filter((c) => c.runner === 'agent').map((c) => c.id);
   if (agentIds.length > 0 && stagesComRef.length > 0) {
-    record.resolveRateByContestant = Object.fromEntries(
-      agentIds.map((id) => {
-        let resolve = 0;
-        let total = 0;
-        for (const s of stagesComRef) {
-          const porRep = s.referenceJudge?.verdictsByRep?.[id];
-          if (porRep) {
-            for (const v of porRep) {
-              total += 1;
-              if (v === 'resolve') resolve += 1;
-            }
-          } else {
-            // reps=1 / etapa sem verdictsByRep — usa o veredito agregado da etapa.
-            const v = s.referenceJudge?.verdictByContestant[id];
-            if (v !== undefined) {
-              total += 1;
-              if (v === 'resolve') resolve += 1;
-            }
-          }
-        }
-        return [id, total > 0 ? Number((resolve / total).toFixed(3)) : 0];
-      }),
+    const m = agentRateMetrics(
+      stagesComRef.map((s) => s.referenceJudge!),
+      agentIds,
     );
+    record.resolveRateByContestant = m.resolveRateByContestant;
+    record.censoredResolveRateByContestant = m.censoredResolveRateByContestant;
+    record.limitCutsByContestant = m.limitCutsByContestant;
   }
 
   // === FASE 4: FINAIS. So os N melhores por judge-score MEDIO (todos os
@@ -1075,8 +1184,12 @@ async function runLoop(
   // conjunto de finalistas em todas as etapas). ===
   const finalsOn = record.config.duels !== false;
   const finalistCount = record.config.finalists ?? 3;
+  // Etapa decidida pelo oráculo (IMPL-034) entra nas finais SEM gabarito: o
+  // par é decidido pela nota do oráculo e empate de oráculo é empate — o juiz
+  // LLM não duela ali (não há régua textual, nem deve haver).
   const stagesParaDuelo = record.stages.filter(
-    (s) => s.spec?.reference?.trim() && !s.error && !s.incomplete,
+    (s) =>
+      (s.spec?.reference?.trim() || oracleDuelScoresByStage.has(s.index)) && !s.error && !s.incomplete,
   );
   const podeFinais = est.byRole.duel === 0 || gate('finals', est.byRole.duel);
   if (
@@ -1115,8 +1228,13 @@ async function runLoop(
       const dueloSettled = await Promise.allSettled(
         stagesParaDuelo.map(async (st) => {
           try {
+            const notasDoOraculo = oracleDuelScoresByStage.get(st.index);
+            // Sem `reference`, `runStageDuels` só decide pelo oráculo (par com
+            // notas iguais empata) — é o que torna a final "do oráculo" mesmo
+            // quando a etapa trazia um gabarito importado.
+            const { reference: _semGabarito, ...specSemGabarito } = st.spec!;
             st.duels = await runStageDuels({
-              stage: st.spec!,
+              stage: notasDoOraculo ? specSemGabarito : st.spec!,
               responses: st.responses,
               contestants: record.contestants,
               judgeModelId: record.config.judgeModelIds[0],
@@ -1125,10 +1243,12 @@ async function runLoop(
               verdictByContestant: st.referenceJudge?.verdictByContestant,
               // Etapa ground-truth (F1.4): vereditos determinísticos viram
               // scores de oráculo — os duelos decidem sem LLM (§19.1).
+              // Etapa com verify[] (IMPL-034): notas do oráculo por execução.
               oracleScoresByContestant:
-                st.spec?.expected !== undefined
+                notasDoOraculo ??
+                (st.spec?.expected !== undefined
                   ? oracleScoresFromVerdicts(st.referenceJudge?.verdictByContestant)
-                  : undefined,
+                  : undefined),
               apiKey,
               reasoningLevel: record.config.reasoning?.judge,
               timeoutMs: record.config.timeoutMs,
@@ -1244,7 +1364,16 @@ async function runLoop(
       }
     }
     record.judgeDiagnostics = {
-      contract: pinJudgeContract(record.config.judgeModelIds, JUDGE_CONTRACT_TEXT),
+      // IMPL-034: numa run com agente quem dá as notas é o juiz de DOSSIÊ — o
+      // pin precisa mudar quando o prompt DELE muda (senão o drift some).
+      contract: pinJudgeContract(
+        record.config.judgeModelIds,
+        !hasAgent
+          ? JUDGE_CONTRACT_TEXT
+          : record.contestants.every((c) => c.runner === 'agent')
+            ? AGENT_JUDGE_SYSTEM_PROMPT
+            : `${JUDGE_CONTRACT_TEXT}\n\n${AGENT_JUDGE_SYSTEM_PROMPT}`,
+      ),
       verbosity: verbosityReport(samples),
     };
     if (record.judgeDiagnostics.verbosity.warning) {

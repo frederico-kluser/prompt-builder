@@ -268,7 +268,15 @@ export function arenaAgentConfigToRunConfig(
   // em si usa `agent.thinking`). Sem ajuste por papel aqui — defaults do pipeline.
   const reasoning: ReasoningConfig = {};
 
-  const referenceJudging = file.judging?.reference ?? true;
+  // IMPL-034 (R-14a DEC-7): com `verify[]` o oráculo decide (veredito e finais)
+  // e o juiz de agente NÃO lê o gabarito textual — gerá-lo era custo sem leitor
+  // (64% de uma run trivial medida). Todas as etapas com verify[] ⇒ `false`
+  // automático, mesmo com `judging.reference: true` explícito (não há quem leia
+  // a referência). Com alguma etapa sem verify[], o default segue ligado e o
+  // orquestrador pula o gabarito POR ETAPA (`needsTextReference`).
+  const todasComVerify =
+    stageSpecs.length > 0 && stageSpecs.every((s) => (s.agentTask?.verify?.length ?? 0) > 0);
+  const referenceJudging = todasComVerify ? false : (file.judging?.reference ?? true);
 
   const common = {
     theme: file.theme.trim(),

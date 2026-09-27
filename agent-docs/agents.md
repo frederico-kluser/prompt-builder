@@ -65,23 +65,78 @@ cobrada. Configurar `maxCostUsd: 0.05` e ver `0.061` **é o teto funcionando**.
 
 | `stopReason` | O que acontece | Efeito na nota |
 |---|---|---|
-| `completed` | o agente terminou sozinho | julgado normalmente |
-| `maxTurns` | bateu o teto de turnos | `incomplete` — **fora do placar** |
-| `maxCost` | bateu o teto de custo da execução | `incomplete` — **fora do placar** |
-| `timeout` | bateu a parede de tempo | `incomplete` — **fora do placar** |
-| `maxOutput` | emitiu bytes demais | `incomplete` — **fora do placar** |
+| `completed` | o agente terminou sozinho | julgado normalmente (oráculo → juiz) |
+| `maxTurns` | bateu o teto de turnos | `nao` — **conta no denominador** |
+| `maxCost` | bateu o teto de custo da execução | `nao` — **conta no denominador** |
+| `timeout` | bateu a parede de tempo | `nao` — **conta no denominador** |
+| `maxOutput` | emitiu bytes demais | `nao` — **conta no denominador** |
 | `error` | o processo morreu / executor falhou | `nao`, falha de execução |
-| `cancelled` | sinal de controle (Ctrl-C, orçamento da run) | `incomplete` — **fora do placar** |
+| `cancelled` | sinal de controle (Ctrl-C) | etapa `incomplete` — **fora do placar** |
 
-A regra é dura: **`stopReason !== 'completed'` ⇒ a resposta é `incomplete` e a
-etapa não entra no placar daquele contestant.** Um agente cortado no turno 30
-não "resolveu parcialmente" — ele não terminou. Contá-lo como `parcial`
-inventaria um resultado; contá-lo como `nao` puniria o contestant pelo **nosso**
-teto.
+A regra é dura: **corte por limite é falha.** O limite faz parte da tarefa e é
+igual para todos os contestants; um agente cortado no turno 30 não terminou, e
+isso conta `nao` no judge-score, no `resolveRateByContestant` e no vetor da
+significância. Tirar o corte do denominador (a regra antiga, árvore v1) dava a
+quem entra em laço nas tarefas difíceis uma nota perfeita nas fáceis — viés de
+sobrevivência. Nenhum harness de referência (SWE-bench, Inspect AI,
+Terminal-Bench) exclui por limite.
 
-**Exceção única:** quando **existe oráculo e ele passa**, `stopReason` de teto
-(`maxTurns`/`maxCost`/`timeout`/`maxOutput`) ainda pode valer `resolve` — porque
-o mundo mudou de forma verificável, e o critério de sucesso é o teste, não a
-educação do agente ao se despedir. Sem oráculo, todo corte é `incomplete`.
+`incomplete` fica reservado aos **sinais de controle** — cancelamento e
+orçamento da run —, que não dependem do comportamento do agente: a etapa sai
+inteira do placar, para todos.
+
+**Exceção única:** quando **existe oráculo e ele passa 100%, sem violar
+`forbiddenPaths`**, o corte por teto ainda pode valer `resolve` — o mundo mudou
+de forma verificável, e o critério de sucesso é o teste, não a educação do
+agente ao se despedir. Oráculo parcial, zerado ou violado + corte = `nao`.
+
+## Oráculo × juiz — o juiz só age DENTRO da faixa do oráculo
+
+Teste passando não prova correção (e o juiz LLM erra), então o juiz **audita**
+— só rebaixa —, **nunca promove** acima do que o oráculo mediu:
+
+| Oráculo (`verify[]`) | Faixa do juiz | Se o juiz falhar |
+|---|---|---|
+| score 1, sem violação | `resolve` ou rebaixa a `parcial` | fica `resolve` (do oráculo) + `judgeError` |
+| score entre 0 e 1 | confirma `parcial` ou rebaixa a `nao` — **nunca `resolve`** | fica `parcial` (do oráculo) + `judgeError` |
+| score 0 / `forbiddenPaths` violado | `nao` direto, sem juiz | — |
+| check que não terminou (timeout/sinal do check; comando ausente que rodou em outra execução) | conta como check **falho** no score — a execução nunca sai do denominador por isso | — |
+| comando do check ausente em **todas** as execuções da etapa | etapa **inválida para TODOS** (`stage.error`) — defeito da tarefa, não desempenho | — |
+| sem oráculo | juiz pleno pelo dossiê | **sem nota** (nunca um `parcial` inventado) + `judgeError` |
+
+"Falhar" = exceção, timeout ou resposta fora do schema estrito
+`{"rubrica": {resultado, escopo, burla, manipulacao}, "verdict", "explanation"}`
+(JSON puro, sem campo extra, veredito nunca mais favorável que a própria rubrica)
+— recusa, texto livre e JSON no meio de prosa incluídos, nunca lidos "por
+palavra" — **mesmo após 2 retentativas** (3 chamadas). Orçamento/cancelamento não
+são falha do juiz: sobem como controle.
+
+**Anti-injeção.** No `dossier.md`, tudo o que o agente escreveu (diff, nomes de
+arquivo, comandos, saídas, mensagem final, saída dos checks) fica dentro de blocos
+`<<<DADOS-DO-AGENTE secao="…" marca="M">>>` … `<<<FIM-DADOS-DO-AGENTE marca="M">>>`
+com toda linha prefixada por `│ `; a marca `M` sai do hash do conteúdo (linha
+`marca-dos-dados` do rodapé) e marcadores forjados são neutralizados
+(`neutralizacoes` no rodapé e em `exec.json`). Fora dos blocos só há texto de
+código: cabeçalho, checks, score e os **Fatos** (JSON de campos fechados). O
+system prompt do juiz é fixo e manda tratar o conteúdo dos blocos como evidência,
+nunca como instrução; a rubrica do juiz (inclusive `manipulacao: "detectada"`)
+fica no `verdict.json`.
+
+### Métricas de agente no `RunRecord`
+
+| Campo | O que é |
+|---|---|
+| `resolveRateByContestant` | **métrica principal**: fração de `resolve` sobre TODAS as execuções (etapas × repetições), cortes incluídos como `nao` |
+| `censoredResolveRateByContestant` | **só diagnóstico** ("sucesso até o limite"): a mesma fração sem os cortes no denominador. Nunca entra em placar, finais ou gate |
+| `limitCutsByContestant` | quantas execuções foram cortadas por limite (já contadas como `nao`) |
+| `agentVerdictTreeVersion` | versão da árvore de veredito que produziu as notas. **Ausente numa run com agente = v1 (legado)**, em que o corte saía do denominador; **v3** = juiz confinado ao oráculo e falha do juiz sem `parcial` inventado — notas de versões diferentes não se comparam |
+| `agentJudgeErrorCount` / `agentJudgeErrorsByContestant` | execuções em que o juiz falhou após as retentativas (`judgeError`) — a nota ficou com o oráculo, ou sem nota se não havia oráculo. Presente (0) em toda run com agente |
+| `agentUnscoredRepsByContestant` | execuções **sem nota** por motivo que não é controle nem comportamento do agente (sem oráculo: juiz falhou ou não foi chamado) — fora de judge-score/resolveRate |
+
+O `agentSummary` (NDJSON `run.finished`, `result` do `agents run`, MCP) separa
+`limitCut` (cortes, contam `nao`) de `incomplete` (só cancelamento) e traz
+`verdictTreeVersion`, `judgeErrors` e `unscoredReps`. Taxa de `judgeErrors`
+alta = o juiz está instável (modelo, timeout curto, dossiê grande): as notas
+ainda são do oráculo, mas a auditoria do juiz não aconteceu.
 
 Detalhes do contrato: `prompt-builder docs agent-task`.

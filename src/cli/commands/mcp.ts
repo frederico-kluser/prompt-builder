@@ -24,6 +24,7 @@ import { parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
 import { arenaConfigToRunConfig, arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { runToCompletion } from '../../orchestrator.js';
 import { readArtifact } from '../../agent/store.js';
+import { agentVerdictTreeVersionOf, classifyStop } from '../../agent/verdictTree.js';
 import { prepareOptsFor } from '../../prepareRun.js';
 import { trainToCompletion } from '../../trainer.js';
 import { resolveHome, resolveKey, parse } from '../context.js';
@@ -82,15 +83,22 @@ function parseAgentConfigRaw(config: unknown): RunConfig {
 }
 
 // Derivado do record, nao inferido: conta so respostas de agente (com execution).
-// "cut" = a execucao parou pela parede/teto (nao e um veredito 'nao').
-const AGENT_CUT_REASONS = new Set(['maxTurns', 'maxCost', 'timeout', 'maxOutput', 'cancelled']);
+// IMPL-032: corte por limite (timeout/maxTurns/maxCost/maxOutput) e FALHA — conta
+// 'nao' no placar (`limitCut`); `incomplete` e so cancelamento (controle).
 
-function agentSummary(rec: { stages: { responses: { costUsd: number; execution?: { turns: number; stopReason: string; oracle?: { score: number } } }[] }[] }) {
+function agentSummary(rec: {
+  agentVerdictTreeVersion?: number;
+  agentJudgeErrorCount?: number;
+  agentUnscoredRepsByContestant?: Record<string, number>;
+  contestants: { runner?: 'chat' | 'agent' }[];
+  stages: { responses: { costUsd: number; execution?: { turns: number; stopReason: string; oracle?: { score: number } } }[] }[];
+}) {
   const execs = rec.stages.flatMap((s) => s.responses.filter((r) => r.execution));
   if (execs.length === 0) return undefined;
   const executions = execs.length;
-  const failed = execs.filter((r) => r.execution!.stopReason === 'error').length;
-  const incomplete = execs.filter((r) => AGENT_CUT_REASONS.has(r.execution!.stopReason)).length;
+  const failed = execs.filter((r) => classifyStop(r.execution!.stopReason) === 'error').length;
+  const incomplete = execs.filter((r) => classifyStop(r.execution!.stopReason) === 'cancelled').length;
+  const limitCut = execs.filter((r) => classifyStop(r.execution!.stopReason) === 'limit').length;
   const avgTurns = execs.reduce((a, r) => a + r.execution!.turns, 0) / executions;
   const avgCostUsd = execs.reduce((a, r) => a + r.costUsd, 0) / executions;
   const withOracle = execs.filter((r) => r.execution!.oracle !== undefined);
@@ -98,7 +106,14 @@ function agentSummary(rec: { stages: { responses: { costUsd: number; execution?:
     withOracle.length > 0
       ? withOracle.reduce((a, r) => a + (r.execution!.oracle!.score ?? 0), 0) / withOracle.length
       : undefined;
-  return { executions, failed, incomplete, avgTurns, avgCostUsd, oracleRate };
+  // Versão da árvore que produziu as notas (1 = legado, corte fora do denominador).
+  const verdictTreeVersion = agentVerdictTreeVersionOf(rec);
+  // IMPL-033: falhas do juiz (nota ficou com o oráculo) e reps sem veredito.
+  const judgeErrors = rec.agentJudgeErrorCount;
+  const unscoredReps = rec.agentUnscoredRepsByContestant
+    ? Object.values(rec.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0)
+    : undefined;
+  return { executions, failed, incomplete, limitCut, avgTurns, avgCostUsd, oracleRate, verdictTreeVersion, judgeErrors, unscoredReps };
 }
 
 const TOOLS: Tool[] = [
