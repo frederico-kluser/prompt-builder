@@ -27,7 +27,8 @@ import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { getDataDir, listRuns, loadRun } from './storage.js';
+import { ensurePrivateDataDir, getDataDir, listRuns, loadRun } from './storage.js';
+import { isValidRecordId } from './pathSafety.js';
 import { normalizeRunRecord } from './normalize.js';
 import { subscribe } from './events.js';
 import { startRun } from './orchestrator.js';
@@ -159,6 +160,16 @@ function buildExecRef(
 // aplicado ANTES de qualquer handler.
 router.use(requireAgentsToken);
 
+// IMPL-024: `:id` decodificado pelo Express (`..%2F`, `%2e%2e`, `..%5C`) nunca
+// chega ao disco — mesma guarda de /v1/benchmark, sem ecoar o valor.
+router.param('id', (_req, res, next, id: unknown) => {
+  if (!isValidRecordId(id)) {
+    res.status(400).json({ error: 'id inválido: use o runId (UUID) devolvido ao criar a run.' });
+    return;
+  }
+  next();
+});
+
 /**
  * GET /doctor — pré-voo do executor (§21.4). Executor presente? versão certa?
  * git? disco? `?deep=1` roda o canário de sala limpa (gasta a key do
@@ -168,6 +179,8 @@ router.get('/doctor', async (req, res) => {
   try {
     const deep = req.query.deep === '1' || req.query.deep === 'true';
     const runDir = path.join(getDataDir(), 'tmp', 'doctor-' + randomUUID());
+    // IMPL-024: a sala envenenada do canário nasce dentro de tmp/ 0700.
+    await ensurePrivateDataDir(runDir);
     const apiKeyHeader = req.headers['x-openrouter-key'];
     const apiKey =
       typeof apiKeyHeader === 'string' && apiKeyHeader.trim().length > 0

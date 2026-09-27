@@ -68,9 +68,14 @@ RUNS
                            o resultado dela) em vez de gastar de novo
   <cmd> --allow-concurrent réplica intencional: sem o lock da config
                            (2º processo com a mesma config → run.locked)
+  <cmd> --detach           roda num processo destacado (NDJSON em arquivo) e sai
 
 RESULTADOS
   runs list | show <id> | winner <id> [--prompt-only]
+  runs status <id>         estado de um job (--detach), run ou sessão
+  runs wait <id> [--timeout <s>]
+                           espera o fim (padrão 600 s; exit 9 se esgotar)
+  runs cancel <id>         parada graciosa: record 'aborted' com o parcial
   runs reproduce <id>      config reconstruído + comando p/ re-rodar a run
   runs export <id> [-o <arq>]
                            artefato auto-contido (config, gabaritos, prompts, juiz)
@@ -135,8 +140,9 @@ CÓDIGOS DE SAÍDA (error.kind entre parênteses)
   0 ok · 1 falha inesperada (internal) · 2 uso inválido (usage)
   3 config inválida (config) · 4 auth (auth) · 5 sem crédito (credit)
   6 run inconclusiva (inconclusive: vereditos perdidos > 10% ou < 5 cenários julgados)
-  7 parcial, orçamento esgotado (control) · 8 rede (network) · 9 espera esgotada (timeout)
-  10 portão recusou (gate) · 130 interrompido (control)
+  7 parcial, orçamento esgotado (control) · 8 rede (network)
+  9 espera esgotada — \`runs wait --timeout\` (timeout) · 10 portão recusou (gate)
+  130 interrompido — Ctrl-C, SIGTERM, \`runs cancel\` (control)
 `;
 
 /**

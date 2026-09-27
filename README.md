@@ -37,6 +37,19 @@ Também expõe um **servidor MCP** no mesmo binário:
 claude mcp add --transport stdio arena -- npx -y prompt-builder-cli mcp
 ```
 
+Runs levam minutos e os clientes MCP cortam uma chamada em ~60 s, então o caminho é por
+**job**: `start_run` devolve o `jobId` na hora (a run roda em segundo plano, uma por processo,
+as demais em fila), `run_status` acompanha e `cancel_run` interrompe. `idempotencyKey` é
+obrigatória no `start_run`: um retry com a MESMA chave — até de outro processo — devolve o mesmo
+job em vez de pagar uma segunda run. `run_benchmark`/`train_prompt`/`run_agent_benchmark`
+continuam, mas esperam no máximo ~25 s e então devolvem o `jobId`. Cliente que declara a
+extensão `io.modelcontextprotocol/tasks` recebe uma task (`tasks/get`, `tasks/cancel`).
+
+Cancelar (`cancel_run`, `tasks/cancel` ou `notifications/cancelled` da chamada) interrompe a run
+na hora: nenhuma chamada paga nova sai, o parcial fica gravado como `aborted`
+(`stoppedReason: "cancelled"`) e é lido por `get_result`. Fechar o stdin ou mandar `SIGTERM` faz
+o mesmo com até ~10 s de graça; um job que passa do prazo (`ttlSeconds`, padrão 2 h) também.
+
 Três coisas que o CLI garante e a UI não garantia:
 
 - **Custo real.** O gasto sai de `usage.cost` (o valor cobrado), quebrado por papel — juiz,
@@ -486,6 +499,8 @@ Variáveis **opcionais** (veja `.env.example`):
 | `OPENROUTER_APP_URL` | `http://localhost:3000` | Header `HTTP-Referer` de atribuição |
 | `OPENROUTER_APP_TITLE` | `Prompt Builder` | Header `X-Title` de atribuição |
 | `BENCHMARK_PORT` | `3001` | Porta do backend |
+| `PB_HOST` (ou `--host`) | `127.0.0.1` | Interface de bind do backend. Fora de localhost é pedido explícito (aviso no log); com `PROMPT_BUILDER_AGENTS=1` o servidor **recusa** subir fora de localhost. `HOST` **não** vale para o bind (containers/CI exportam o hostname nele): se estiver definido fora de localhost, só gera um aviso — e, no modo agente, a recusa |
+| `PB_ALLOWED_HOSTS` | — | Nomes extras aceitos no header `Host`/`Origin`, separados por vírgula (ex.: túnel ou proxy). Sem isso, só `localhost`/`127.0.0.1`/`::1` — o resto leva 400/403 (proteção contra DNS rebinding) |
 | `OPENROUTER_MAX_CONCURRENCY` | `32` | Teto do limitador global adaptativo de chamadas ao OpenRouter |
 
 Parâmetros da **run** (na tela de Nova Run, validados no backend):

@@ -10,9 +10,9 @@
 // `src/engine/libraryCore.ts` (fonte única dos dois motores); aqui é só disco.
 
 import { promises as fs } from 'node:fs';
-import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { getDataDir } from './storage.js';
+import { getDataDir, writePrivateDataFile } from './storage.js';
+import { isSafePathSegment, resolveInside, UnsafePathError } from './pathSafety.js';
 import {
   coverageReport,
   hasGabarito,
@@ -34,8 +34,18 @@ function libraryDir(): string {
   return path.join(getDataDir(), 'library');
 }
 
+// IMPL-024: perfil e item viram SEGMENTO de caminho — validados e contidos.
+// Sem isto, `library drop --profile ../..` virava `rm -rf` do diretório PAI do
+// data dir, e um item importado com id `../../x` era gravado fora da biblioteca.
+function segmento(valor: string, oque: 'perfil' | 'item'): string {
+  if (!isSafePathSegment(valor)) {
+    throw new UnsafePathError(`Id de ${oque} inválido: sem "/", "\\", ":", ".." nem espaço nas pontas.`);
+  }
+  return valor;
+}
+
 function profileDir(profileId: string): string {
-  return path.join(libraryDir(), profileId);
+  return resolveInside(libraryDir(), segmento(profileId, 'perfil'));
 }
 
 function itemsDir(profileId: string): string {
@@ -47,19 +57,14 @@ function profileFile(profileId: string): string {
 }
 
 function itemFile(profileId: string, itemId: string): string {
-  return path.join(itemsDir(profileId), `${itemId}.json`);
+  return resolveInside(itemsDir(profileId), `${segmento(itemId, 'item')}.json`);
 }
 
+// IMPL-024: a biblioteca mora no data dir (ao lado da key) e guarda cenários e
+// gabaritos — diretórios 0700 (raiz, library/, perfil, items/) e arquivos
+// 0600, com chmod explícito que corrige uma biblioteca antiga 0755/0644.
 async function writeAtomic(target: string, data: string): Promise<void> {
-  const tmp = `${target}.${randomUUID()}.tmp`;
-  try {
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(tmp, data, 'utf-8');
-    await fs.rename(tmp, target);
-  } catch (err) {
-    await fs.rm(tmp, { force: true }).catch(() => undefined);
-    throw err;
-  }
+  await writePrivateDataFile(target, data);
 }
 
 async function readJson<T>(file: string): Promise<T | undefined> {
@@ -87,6 +92,7 @@ export async function listProfiles(): Promise<LibraryProfile[]> {
   }
   const perfis: LibraryProfile[] = [];
   for (const nome of entradas.sort()) {
+    if (!isSafePathSegment(nome)) continue; // entrada estranha no disco não derruba a listagem
     const p = await readJson<LibraryProfile>(profileFile(nome));
     if (p?.id) perfis.push(p);
   }
@@ -120,8 +126,9 @@ export async function saveProfile(input: {
 }
 
 export async function deleteProfile(profileId: string): Promise<boolean> {
+  const dir = profileDir(profileId); // FORA do try: id inválido lança, não vira "false"
   try {
-    await fs.rm(profileDir(profileId), { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true });
     return true;
   } catch {
     return false;
@@ -168,8 +175,9 @@ export async function saveItems(
 }
 
 export async function deleteItem(profileId: string, itemId: string): Promise<boolean> {
+  const file = itemFile(profileId, itemId);
   try {
-    await fs.rm(itemFile(profileId, itemId), { force: true });
+    await fs.rm(file, { force: true });
     return true;
   } catch {
     return false;
@@ -211,6 +219,11 @@ export function prepareImportItems(
     });
     if (!r.ok) {
       errors.push(`item ${i + 1}: ${r.error}`);
+      return;
+    }
+    // IMPL-024: o id vira nome de arquivo — nada de separador nem `..`.
+    if (!isSafePathSegment(r.item.id)) {
+      errors.push(`item ${i + 1}: id inválido (sem "/", "\\", ":" ou "..")`);
       return;
     }
     const pii = opts.allowPii ? null : checkImportPii(r.item);

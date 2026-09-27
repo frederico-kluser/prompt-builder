@@ -47,6 +47,62 @@ async function readIndex(): Promise<DocIndexEntry[]> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Tópicos por ALLOWLIST (IMPL-024, R-09:REC-10)
+// ---------------------------------------------------------------------------
+// Antes: `path.join(PKG_DOCS_DIR, `${topic}.md`)` com o tópico do usuário/agente
+// — `docs ../../etc/passwd` (CLI) e `read_docs {topic:'../README'}` (MCP) liam
+// fora de agent-docs/. Agora o tópico é só uma CHAVE: o caminho sai de um mapa
+// montado a partir do index.json embarcado (+ `config`), e o input nunca entra
+// num path.join. CLI e MCP usam a MESMA função.
+
+/** Formato de tópico: slug minúsculo. Serve também para decidir se é seguro ecoar. */
+export const DOC_TOPIC_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/** Mapa tópico → arquivo, só com o que o pacote embarca. */
+export async function docTopicFiles(): Promise<Map<string, string>> {
+  const mapa = new Map<string, string>();
+  for (const e of await readIndex()) {
+    // o index.json é do pacote, mas passa pela mesma régua (defesa em profundidade)
+    if (typeof e?.topic === 'string' && DOC_TOPIC_RE.test(e.topic)) {
+      mapa.set(e.topic, path.join(PKG_DOCS_DIR, `${e.topic}.md`));
+    }
+  }
+  // `docs config` lê o ARENA-CONFIG.md da raiz do pacote — uma cópia a menos
+  // para derivar do contrato real.
+  mapa.set('config', path.join(PKG_ROOT, 'ARENA-CONFIG.md'));
+  return mapa;
+}
+
+export type DocTopicRead =
+  | { ok: true; topic: string; content: string }
+  | { ok: false; reason: 'invalid' | 'unknown' | 'unavailable'; message: string };
+
+/**
+ * Lê um tópico da documentação embarcada. As mensagens de erro NÃO carregam
+ * caminho: tópico malformado não é ecoado (poderia ser `/etc/passwd`); tópico
+ * bem-formado desconhecido é (é só um slug).
+ */
+export async function readDocTopic(topic: unknown): Promise<DocTopicRead> {
+  if (typeof topic !== 'string' || !DOC_TOPIC_RE.test(topic)) {
+    return { ok: false, reason: 'invalid', message: 'Tópico inválido: use um dos tópicos listados (ex.: "quickstart").' };
+  }
+  const mapa = await docTopicFiles();
+  const file = mapa.get(topic);
+  if (!file) {
+    return {
+      ok: false,
+      reason: 'unknown',
+      message: `Tópico "${topic}" não existe. Tópicos: ${[...mapa.keys()].join(', ')}.`,
+    };
+  }
+  try {
+    return { ok: true, topic, content: await fs.readFile(file, 'utf-8') };
+  } catch {
+    return { ok: false, reason: 'unavailable', message: `Tópico "${topic}" indisponível nesta instalação.` };
+  }
+}
+
 export async function cmdDocs(argv: string[]): Promise<number> {
   const parsed = parse(argv, { list: { type: 'boolean' }, all: { type: 'boolean' } });
   const ctx = buildContext(parsed);
@@ -71,26 +127,18 @@ export async function cmdDocs(argv: string[]): Promise<number> {
   if (parsed.values.all === true) {
     const partes: string[] = [];
     for (const e of index) {
-      partes.push(await fs.readFile(path.join(PKG_DOCS_DIR, `${e.topic}.md`), 'utf-8'));
+      const lido = await readDocTopic(e.topic);
+      if (lido.ok) partes.push(lido.content);
     }
     out.raw(`${partes.join('\n\n---\n\n')}\n`);
     return EXIT.OK;
   }
 
-  // `docs config` le o ARENA-CONFIG.md da raiz do pacote — uma copia a menos
-  // para derivar do contrato real.
-  const file =
-    topic === 'config'
-      ? path.join(PKG_ROOT, 'ARENA-CONFIG.md')
-      : path.join(PKG_DOCS_DIR, `${topic}.md`);
-  try {
-    out.raw(await fs.readFile(file, 'utf-8'));
-  } catch {
-    throw new CliError(
-      `Tópico "${topic}" não existe. Veja \`prompt-builder docs --list\`.`,
-      EXIT.USAGE,
-    );
+  const lido = await readDocTopic(topic);
+  if (!lido.ok) {
+    throw new CliError(`${lido.message} Veja \`prompt-builder docs --list\`.`, EXIT.USAGE);
   }
+  out.raw(lido.content);
   return EXIT.OK;
 }
 

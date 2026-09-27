@@ -39,7 +39,8 @@ import {
   readArtifact,
   readExecutionRef,
 } from '../../agent/store.js';
-import { loadRun, getDataDir } from '../../storage.js';
+import { ensurePrivateDataDir, loadRun, getDataDir } from '../../storage.js';
+import { isValidRecordId } from '../../pathSafety.js';
 import { subscribe } from '../../events.js';
 import {
   buildContext,
@@ -47,6 +48,7 @@ import {
   loadCatalog,
   parse,
   readJsonFile,
+  resolveHome,
   resolveKey,
   tryResolveKey,
   type LoadedCatalog,
@@ -55,6 +57,8 @@ import { budgetRequiredError, budgetUsdOf, keyRequirement, toRefusal, type Budge
 import { CliError, EXIT, failAndExit, fmtUsd, isCliError, renderSpend } from '../output.js';
 import { emitRunEvent } from '../ndjson.js';
 import { openSpendGuards, spendGuardRefusals, type SpendGuards } from '../spendGuards.js';
+import { forceExitNow, installGracefulStop } from '../runControl.js';
+import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
 import type { RunRecord, RunConfig, OpenRouterModel } from '../../types.js';
 import type { AgentRunnerConfig, ExecutionRef } from '../../agent/types.js';
 
@@ -233,6 +237,23 @@ function refFor(
   };
 }
 
+/**
+ * IMPL-024: o runId vira segmento de caminho (`runs/<id>.json`,
+ * `agent-runs/<id>/…`) — regex estrita ANTES de tocar o disco, exit 2 (uso) e
+ * sem ecoar o valor recebido. A contenção de `resolveUnderAgentRuns` continua
+ * valendo para o resto do caminho (etapa/contestante/rep).
+ */
+function assertRunIdArg(runId: string): void {
+  if (!isValidRecordId(runId)) {
+    throw new CliError('Id de run inválido: use o id listado em `prompt-builder agents list`.', EXIT.USAGE);
+  }
+}
+
+/** Onde procurar, SEM caminho absoluto (IMPL-024): relativo ao data dir. */
+function noDataDir(rel: string): string {
+  return `${rel.split(path.sep).join('/')} (relativo ao diretório de dados)`;
+}
+
 /** Resolve um dir relativo sob agentRunsRoot() e valida que não escapa (path traversal, §21.6). */
 function resolveUnderAgentRuns(refDir: string): string {
   const root = path.resolve(agentRunsRoot());
@@ -291,6 +312,8 @@ async function cmdDoctor(argv: string[]): Promise<number> {
   } catch {
     // se o /tmp não deixar, cai no dataDir — só para o `dfGb` ter um caminho
     runDir = path.join(getDataDir(), 'doctor-tmp');
+    // IMPL-024: dentro do data dir, 0700 (best-effort: o dfGb tolera falha)
+    await ensurePrivateDataDir(runDir).catch(() => undefined);
   }
 
   // key só entra no canário REAL (--deep), via ambiente; nunca por flag. Sem
@@ -362,17 +385,30 @@ async function cmdDoctor(argv: string[]): Promise<number> {
 // run
 // ---------------------------------------------------------------------------
 
+const AGENTS_RUN_OPTIONS = {
+  config: { type: 'string', short: 'c' },
+  budget: { type: 'string' },
+  'dry-run': { type: 'boolean' },
+  detach: { type: 'boolean' },
+  repetitions: { type: 'string' },
+  'max-parallel': { type: 'string' },
+  'keep-workspace': { type: 'boolean' },
+  // IMPL-031 (revisão): réplica intencional da mesma config, sem o lock.
+  'allow-concurrent': { type: 'boolean' },
+} as const;
+
 async function cmdRun(argv: string[]): Promise<number> {
-  const parsed = parse(argv, {
-    config: { type: 'string', short: 'c' },
-    budget: { type: 'string' },
-    'dry-run': { type: 'boolean' },
-    repetitions: { type: 'string' },
-    'max-parallel': { type: 'string' },
-    'keep-workspace': { type: 'boolean' },
-    // IMPL-031 (revisão): réplica intencional da mesma config, sem o lock.
-    'allow-concurrent': { type: 'boolean' },
-  });
+  // IMPL-030: filho de um `--detach` — adota o job e roda o comando de sempre.
+  const jobId = takeDetachedJobId();
+  if (jobId) {
+    const home = resolveHome(parse(argv, AGENTS_RUN_OPTIONS).values);
+    return runAsDetachedChild(jobId, 'agent', home, (hooks) => runAgents(argv, hooks));
+  }
+  return runAgents(argv);
+}
+
+async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<number> {
+  const parsed = parse(argv, AGENTS_RUN_OPTIONS);
   const ctx = buildContext(parsed);
   const { out, values } = ctx;
 
@@ -461,6 +497,18 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   const runConfigComFlags = applyAgentOverrides(configComOrcamento, values);
 
+  // IMPL-030: `--detach` — validado (config, orçamento, key); o FILHO
+  // destacado abre as guardas (lock, teto diário) e roda a run.
+  if (values.detach === true && !detached) {
+    return launchDetached(ctx, {
+      command: 'agents.run',
+      kind: 'agent',
+      argv,
+      budgetUsd,
+      commandPrefix: ['agents', 'run'],
+    });
+  }
+
   // Catálogo para a reserva otimista do ledger da máquina (sem ele a reserva
   // por chamada vale 0 e o teto diário só pega DEPOIS do gasto).
   let modelos: OpenRouterModel[] = [];
@@ -489,6 +537,14 @@ async function cmdRun(argv: string[]): Promise<number> {
     warn: (m) => out.warn(m),
   });
 
+  const sairInterrompido = (code: number): void =>
+    failAndExit(
+      out,
+      'agents.run',
+      new CliError('Interrompido: saída imediata, sem esperar a run fechar.', code, undefined, {
+        code: 'control.interrupted',
+      }),
+    );
   let interrupts = 0;
   const onSigint = (): void => {
     interrupts += 1;
@@ -497,21 +553,20 @@ async function cmdRun(argv: string[]): Promise<number> {
       ac.abort('SIGINT');
       return;
     }
-    failAndExit(
-      out,
-      'agents.run',
-      new CliError('Interrompido (2º Ctrl-C): saída imediata, sem esperar a run fechar.', EXIT.SIGINT, undefined, {
-        code: 'control.interrupted',
-      }),
-    );
+    // Saida imediata: grava o parcial do que ja esta em disco (IMPL-030) e
+    // termina no envelope — o NDJSON nao fica sem `result` (IMPL-028).
+    void forceExitNow(EXIT.SIGINT, sairInterrompido);
   };
   process.on('SIGINT', onSigint);
+  // IMPL-030: SIGTERM = parada graciosa (graça ~10 s, parcial gravado).
+  const stopGraceful = installGracefulStop(ac, { warn: (m) => out.warn(m), exit: sairInterrompido });
 
   let record: RunRecord;
   try {
     const runId = randomUUID();
     const unsub = subscribe(runId, (e) => emitRunEvent(out, e, { verbose: ctx.verbose }));
     out.info(`agents run ${runId} — ${runConfigComFlags.mode}`);
+    detached?.onRunId(runId);
     try {
       guards.lock?.update({ runId });
       guards.machine.setLabel(`agents run ${runId}`);
@@ -524,6 +579,7 @@ async function cmdRun(argv: string[]): Promise<number> {
     }
   } finally {
     process.off('SIGINT', onSigint);
+    stopGraceful();
     guards.close();
   }
 
@@ -603,8 +659,14 @@ async function cmdShow(argv: string[]): Promise<number> {
   const { out } = ctx;
   const id = parsed.positionals[0];
   if (!id) throw new CliError('Uso: prompt-builder agents show <runId> [--json]', EXIT.USAGE);
+  assertRunIdArg(id);
   const record = await loadRun(id);
-  if (!record) throw new CliError(`Run de agente "${id}" não encontrada em ${getDataDir()}.`, EXIT.USAGE);
+  if (!record) {
+    throw new CliError(
+      `Run de agente "${id}" não encontrada no diretório de dados (confira \`prompt-builder agents list\` e --data-dir).`,
+      EXIT.USAGE,
+    );
+  }
 
   const execs = record.stages
     .flatMap((s) =>
@@ -768,6 +830,7 @@ async function cmdLogs(argv: string[]): Promise<number> {
   const stageIndex = n(parsed.values.stage, '--stage');
   const contestantId = parsed.values.contestant;
   if (!runId) throw new CliError('Uso: prompt-builder agents logs <runId> --stage N --contestant <id> [--what …]', EXIT.USAGE);
+  assertRunIdArg(runId);
   if (stageIndex === undefined) throw new CliError('--stage N é obrigatório.', EXIT.USAGE);
   if (typeof contestantId !== 'string' || !contestantId.trim()) {
     throw new CliError('--contestant <id> é obrigatório.', EXIT.USAGE);
@@ -785,12 +848,12 @@ async function cmdLogs(argv: string[]): Promise<number> {
       names = (await fs.readdir(abs)).filter((f) => f.endsWith('.jsonl')).sort();
     } catch {
       throw new CliError(
-        `Sessão não encontrada para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} (esperava ${abs}).`,
+        `Sessão não encontrada para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} (esperava ${noDataDir(path.join(ref.dir, 'session'))}).`,
         EXIT.ERROR,
       );
     }
     if (names.length === 0) {
-      throw new CliError(`Nenhum arquivo de sessão sob ${abs}.`, EXIT.ERROR);
+      throw new CliError(`Nenhum arquivo de sessão sob ${noDataDir(path.join(ref.dir, 'session'))}.`, EXIT.ERROR);
     }
     for (const name of names) {
       out.raw(`\n===== session/${name} =====\n`);
@@ -811,7 +874,7 @@ async function cmdLogs(argv: string[]): Promise<number> {
   const content = await readArtifact(ref, artifact);
   if (content === null) {
     throw new CliError(
-      `Artefato "${what}" não encontrado para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} em ${path.join(getDataDir(), ref.dir)}.`,
+      `Artefato "${what}" não encontrado para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} em ${noDataDir(ref.dir)}.`,
       EXIT.ERROR,
     );
   }
@@ -843,11 +906,12 @@ async function cmdReplay(argv: string[]): Promise<number> {
       EXIT.USAGE,
     );
   }
+  assertRunIdArg(runId);
   const ref = refFor(runId, stageIndex, contestantId.trim(), rep);
   const exec = await readExecutionRef(ref);
   if (!exec) {
     throw new CliError(
-      `exec.json não encontrado para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} em ${path.join(getDataDir(), ref.dir)}.`,
+      `exec.json não encontrado para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} em ${noDataDir(ref.dir)}.`,
       EXIT.ERROR,
     );
   }
@@ -907,9 +971,13 @@ async function cmdReconcile(argv: string[]): Promise<number> {
   if (!runId) {
     throw new CliError('Uso: prompt-builder agents reconcile <runId> [--generations] [--json]', EXIT.USAGE);
   }
+  assertRunIdArg(runId);
   const record = await loadRun(runId);
   if (!record) {
-    throw new CliError(`Run de agente "${runId}" não encontrada em ${getDataDir()}.`, EXIT.USAGE);
+    throw new CliError(
+      `Run de agente "${runId}" não encontrada no diretório de dados (confira \`prompt-builder agents list\` e --data-dir).`,
+      EXIT.USAGE,
+    );
   }
 
   // Soma o custo registrado por execução (resposta de cada contestant de agente).

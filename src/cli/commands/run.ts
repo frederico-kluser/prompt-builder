@@ -24,6 +24,7 @@ import {
   loadCatalog,
   parse,
   readJsonFile,
+  resolveHome,
   tryResolveKey,
   type CliContext,
   type NetworkContext,
@@ -63,6 +64,8 @@ import {
 import { pruneSpendState } from '../spendGuards.js';
 import { emitRunEvent, emitSessionEventNdjson, truncationFields } from '../ndjson.js';
 import { ROLE_LABEL } from '../../budget.js';
+import { forceExitNow, installGracefulStop } from '../runControl.js';
+import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
 import type {
   CostRole,
   RunConfig,
@@ -119,6 +122,8 @@ const OPTIONS = {
   // = revisei o dado apontado e pode seguir pseudonimizado (modo 'redact').
   'pii-mode': { type: 'string' },
   'allow-pii': { type: 'boolean' },
+  // IMPL-030: roda num processo destacado; acompanhe por `runs status/wait/cancel`.
+  detach: { type: 'boolean' },
 } as const;
 
 /** `--pii-mode` validado (uso errado = exit 2, nada gasto). */
@@ -822,6 +827,18 @@ interface SpendGuards {
 }
 
 export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
+  // IMPL-030: filho de um `--detach` — adota o job e roda o comando de sempre.
+  const jobId = takeDetachedJobId();
+  if (jobId) {
+    const home = resolveHome(parse(argv, OPTIONS).values);
+    return runAsDetachedChild(jobId, mode === 'training' ? 'training' : 'benchmark', home, (hooks) =>
+      runCommand(mode, argv, hooks),
+    );
+  }
+  return runCommand(mode, argv);
+}
+
+async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBodyHooks): Promise<number> {
   const parsed = parse(argv, OPTIONS);
   // Key OPCIONAL aqui (IMPL-029): o pre-voo checa a config contra o catalogo
   // publico antes e so exige a key no fim — e o dry-run roda sem ela.
@@ -910,7 +927,10 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
     config: configComOrcamento,
     budget,
     apiKey,
-    yes: values.yes === true,
+    // Filho do `--detach` (IMPL-030): o pai já fez o pré-voo e, num TTY, o
+    // humano aceitou a confirmação que o filho (sem TTY) transformaria em
+    // recusa. As demais checagens (lock, teto diário, catálogo) rodam de novo.
+    yes: values.yes === true || detached !== undefined,
     force: values.force === true,
     agentContext: isAgentContext(),
   };
@@ -952,6 +972,18 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
 
   // Execucao real: a mesma sequencia; a primeira recusa e lancada.
   const rep = await runPreflight(input, deps, 'real');
+
+  // IMPL-030: `--detach` — pré-voo feito (mesmos códigos do foreground, nada
+  // gasto); o FILHO destacado registra a key, toma o lock e roda a run.
+  if (values.detach === true && !detached) {
+    return launchDetached(base, {
+      command,
+      kind: efetivo === 'training' ? 'training' : 'benchmark',
+      argv,
+      budgetUsd,
+      commandPrefix: [command],
+    });
+  }
   const ctx: NetworkContext = {
     ...base,
     // Sem key ou sem catalogo o pre-voo real ja lancou (auth.key_missing /
@@ -1000,6 +1032,14 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
   // Ctrl-C: o primeiro aborta com elegancia (a run finaliza, salva e imprime o
   // parcial); o segundo mata na hora.
   const ac = new AbortController();
+  const sairInterrompido = (code: number): void =>
+    failAndExit(
+      out,
+      command,
+      new CliError('Interrompido: saída imediata, sem esperar a run fechar.', code, undefined, {
+        code: 'control.interrupted',
+      }),
+    );
   let interrupts = 0;
   const onSigint = (): void => {
     interrupts += 1;
@@ -1008,16 +1048,14 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
       ac.abort('SIGINT');
       return;
     }
-    // Saida imediata ainda termina no envelope: o NDJSON nao fica sem `result`.
-    failAndExit(
-      out,
-      command,
-      new CliError('Interrompido (2º Ctrl-C): saída imediata, sem esperar a run fechar.', EXIT.SIGINT, undefined, {
-        code: 'control.interrupted',
-      }),
-    );
+    // Saida imediata: grava o parcial do que ja esta em disco (IMPL-030) e
+    // termina no envelope — o NDJSON nao fica sem `result` (IMPL-028).
+    void forceExitNow(EXIT.SIGINT, sairInterrompido);
   };
   process.on('SIGINT', onSigint);
+  // IMPL-030: SIGTERM (host cortando o shell, `kill`, `runs cancel`) = parada
+  // graciosa com graça de ~10 s; o record nunca fica 'running'.
+  const stopGraceful = installGracefulStop(ac, { warn: (m) => out.warn(m), exit: sairInterrompido });
 
   // Raiz do ledger da run que TAMBEM reserva no ledger em arquivo da maquina
   // (teto diario somando processos). Vai como `parentLedger`: o teto da run
@@ -1037,10 +1075,11 @@ export async function cmdRun(mode: RunMode, argv: string[]): Promise<number> {
 
   try {
     // `runId` nulo <=> mode efetivo 'training' (sessao: o id nasce no onSession).
-    if (runId === null) return await runTraining(ctx, configComOrcamento, ac.signal, guards);
-    return await runSingle(ctx, configComOrcamento, ac.signal, runId, guards);
+    if (runId === null) return await runTraining(ctx, configComOrcamento, ac.signal, guards, detached);
+    return await runSingle(ctx, configComOrcamento, ac.signal, runId, guards, detached);
   } finally {
     process.off('SIGINT', onSigint);
+    stopGraceful();
     stopClaimHeartbeat();
     lock?.release();
     machine.close();
@@ -1053,6 +1092,7 @@ async function runSingle(
   signal: AbortSignal,
   runId: string,
   guards: SpendGuards,
+  detached?: DetachedBodyHooks,
 ): Promise<number> {
   const { out } = ctx;
   // Id proprio + assinatura ANTES de comecar: sem isso ha corrida com o
@@ -1064,6 +1104,7 @@ async function runSingle(
     ...(guards.claim ? { idempotencyKey: guards.claim.key } : {}),
   });
   out.info(`run ${runId} — ${config.mode}`);
+  detached?.onRunId(runId);
 
   let record: RunRecord;
   try {
@@ -1087,6 +1128,7 @@ async function runTraining(
   config: RunConfig,
   signal: AbortSignal,
   guards: SpendGuards,
+  detached?: DetachedBodyHooks,
 ): Promise<number> {
   const { out } = ctx;
   const cfg = config as TrainingConfig;
@@ -1099,6 +1141,7 @@ async function runTraining(
     parentLedger: guards.root,
     onSession: (id) => {
       sessionId = id;
+      detached?.onSessionId(id);
       // O id da sessao so nasce aqui: grava no lock e no registro da key
       // (quem se anexar le a sessao por ele).
       guards.lock?.update({ sessionId: id });

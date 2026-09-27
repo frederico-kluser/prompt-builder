@@ -16,7 +16,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { getGateway, listModels, primeModelsCache } from './openrouter.js';
 import { isKnownPrice } from './engine/pricing.js';
-import { getDataDir } from './storage.js';
+import { ensurePrivateDataDir, getDataDir } from './storage.js';
 import type { OpenRouterModel, OpenRouterModelPricing } from './types.js';
 
 /**
@@ -120,7 +120,9 @@ async function writeCatalog(apiKey: string, data: OpenRouterModel[]): Promise<vo
   const target = catalogPath(apiKey);
   const dir = path.dirname(target);
   try {
-    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    // IMPL-024: raiz + cache/ em 0700 com chmod explícito (mkdir({mode}) só vale
+    // na criação — um cache/ antigo 0755 seguiria aberto).
+    await ensurePrivateDataDir(dir);
     // `raw` e o payload cru do OpenRouter e nada em src/ o le — manter
     // persistiria megabytes por invocacao.
     const enxuto = data.map(({ raw: _raw, ...rest }) => rest);

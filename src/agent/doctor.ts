@@ -49,6 +49,7 @@ import { piProviderError, writePiInferenceConfig } from './pi.js';
 import { spawnAgent } from './spawn.js';
 import { getDataDir } from '../storage.js';
 import { getGateway } from '../openrouter.js';
+import { ensurePrivateDirSync } from '../pathSafety.js';
 
 // ----------------------------------------------------------------------------
 // API pública
@@ -708,8 +709,12 @@ async function cachedOrRunCanary(opts: PreflightOpts): Promise<CleanRoomReport> 
   if (cacheKey && report.ok) {
     try {
       const dir = path.join(getDataDir(), 'agent-doctor-cache');
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(path.join(dir, `${createHash('sha256').update(cacheKey).digest('hex')}.json`), JSON.stringify(report), 'utf8');
+      // IMPL-024: cache no data dir = 0700/0600 (chmod explícito no diretório).
+      ensurePrivateDirSync(dir);
+      writeFileSync(path.join(dir, `${createHash('sha256').update(cacheKey).digest('hex')}.json`), JSON.stringify(report), {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
     } catch {
       /* falha de cache não derruba o pré-voo — relatório já está em mãos */
     }

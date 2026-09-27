@@ -228,12 +228,23 @@ const SAVE_INTERVAL_MS = 800;
 interface Saver {
   schedule(): void;
   flush(): Promise<void>;
+  /**
+   * Liga o ledger da run: `flush` copia o custo para o record ANTES de gravar.
+   * Sem isto uma run cortada por cancelamento/orçamento no meio de uma fase
+   * era gravada com o gasto do ÚLTIMO marco (ou zero, antes das respostas) —
+   * o parcial mentia sobre o dinheiro já cobrado (IMPL-025).
+   */
+  bindLedger(sync: () => void): void;
 }
 
 function createSaver(record: RunRecord): Saver {
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let lastSave = 0;
+  let syncLedger: (() => void) | undefined;
   return {
+    bindLedger(sync: () => void): void {
+      syncLedger = sync;
+    },
     schedule(): void {
       if (saveTimer) return;
       const delay = Math.max(0, SAVE_INTERVAL_MS - (Date.now() - lastSave));
@@ -249,6 +260,7 @@ function createSaver(record: RunRecord): Saver {
         clearTimeout(saveTimer);
         saveTimer = null;
       }
+      syncLedger?.();
       lastSave = Date.now();
       await saveRun(record).catch(() => undefined);
     },
@@ -419,6 +431,7 @@ async function runLoop(
     if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
     Object.assign(record, truncationRecordFields(snap.finishByRole));
   };
+  saver.bindLedger(syncLedger);
 
   /**
    * IMPL-019 (R-07b:REC-8) — ciclo de vida de TODO modelo da run, do catálogo
