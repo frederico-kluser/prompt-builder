@@ -7,6 +7,7 @@ import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/s
 import { SkeletonResolveList, SkeletonResolveRow, Skeleton } from '@/components/motion-ui/skeleton';
 import { Input } from '@/components/ui/input';
 import { Banner, EmptyState, PageHeader, Screen, StatusPill, Tag } from '../components/primitives';
+import { StorageNotice } from '../components/StorageNotice';
 
 const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 
@@ -142,6 +143,9 @@ export function RunsList() {
   return (
     <Screen wide>
       <PageHeader title="Histórico" subtitle="Runs e treinos executados, mais recentes primeiro." />
+      {/* IMPL-022: o Histórico lê do IndexedDB — o que não foi salvo não aparece
+          na lista, então o aviso (e a persistência negada) aparece aqui. */}
+      <StorageNotice className="mb-4" targets="all" />
 
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <SegmentedToggle

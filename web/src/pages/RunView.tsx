@@ -14,6 +14,7 @@ import {
   runMode,
 } from '../api';
 import { CancelHoldButton, StopBanner } from '../components/RunControls';
+import { StorageNotice } from '../components/StorageNotice';
 import {
   Accordion,
   AccordionItem,
@@ -375,6 +376,9 @@ export function RunView() {
         info={record}
         legacyText="Run interrompida — o servidor reiniciou enquanto ela rodava."
       />
+      {/* IMPL-022: gravação local que falhou (run só na memória da aba) ou
+          persistência negada pelo navegador — visível, nunca só no console. */}
+      <StorageNotice className="mt-4" targets={[{ subject: 'run', id: record.id }]} />
 
       <SectionHead>Resultados</SectionHead>
       <ScoreHeatmap record={record} ranked={!isRunning} onStageClick={openStageFromHeatmap} />

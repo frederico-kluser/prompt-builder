@@ -205,7 +205,7 @@ async function executeRun(
       if (state.ledger) syncLedger(record, state.ledger);
       record.status = record.stoppedReason ? 'aborted' : 'finished';
       record.finishedAt = nowIso();
-      await saveRun(record).catch(() => undefined);
+      await saveRun(record);
       emitEvent({ type: 'run.finished', runId: record.id, record });
       log(record.id, `run encerrada cedo (${record.stoppedReason ?? 'sem fase executavel'})`, {
         totalCostUsd: record.totalCostUsd,
@@ -232,14 +232,14 @@ async function executeRun(
       log(record.id, `run interrompida (${record.stoppedReason})`, {
         totalCostUsd: record.totalCostUsd,
       });
-      await saveRun(record).catch(() => undefined);
+      await saveRun(record);
       emitEvent({ type: 'run.finished', runId: record.id, record });
     } else {
       console.error(`[bench ${record.id}] run.error:`, err);
       record.status = 'error';
       record.error = err instanceof Error ? err.message : String(err);
       record.finishedAt = nowIso();
-      await saveRun(record).catch(() => undefined);
+      await saveRun(record);
       emitEvent({ type: 'run.error', runId: record.id, error: record.error });
     }
   } finally {
@@ -278,7 +278,12 @@ async function runLoop(
   // --- Persistencia com THROTTLE: as etapas paralelas geram MUITAS escritas;
   // coalescemos em no max. 1x/SAVE_INTERVAL_MS (trailing) e damos flush nos
   // marcos. O estado ao vivo ja vai por SSE, entao o disco nao precisa de cada
-  // delta. storage.saveRun continua serializando por run (escrita atomica). ---
+  // delta. O IndexedDB serializa as transacoes de escrita da mesma store na
+  // ordem de criacao (record + resumo numa transacao so — storage.ts).
+  // IMPL-022: saveRun NUNCA rejeita — falha de gravacao vira evento
+  // `storage.*` + aviso na UI (nada de `.catch(() => undefined)` aqui). A batida
+  // periodica e 'relaxed' (a proxima a sobrescreve); marcos e fechamento sao
+  // checkpoint 'strict' (default do saveRun). ---
   const SAVE_INTERVAL_MS = 800;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let lastSave = 0;
@@ -288,7 +293,7 @@ async function runLoop(
     saveTimer = setTimeout(() => {
       saveTimer = null;
       lastSave = Date.now();
-      void saveRun(record).catch(() => undefined);
+      void saveRun(record, { durability: 'relaxed' });
     }, delay);
   };
   const flushSave = async (): Promise<void> => {

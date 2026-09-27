@@ -1,4 +1,4 @@
-import { idbGet, idbGetAll, idbPut, idbPutMany } from './idb';
+import { requestPersistentStorage, type StorageSubject } from './storageHealth';
 import type { ExpectedSpec } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
@@ -31,7 +31,14 @@ import {
   getSessionRecord,
   cacheSessionRecord,
 } from './engine/events';
-import { loadRun, loadSession, listRuns as engineListRuns, listSessions as engineListSessions } from './engine/storage';
+import {
+  loadRun,
+  loadSession,
+  listRuns as engineListRuns,
+  listSessions as engineListSessions,
+  saveRun as engineSaveRun,
+  saveSession as engineSaveSession,
+} from './engine/storage';
 import {
   savePrompt as engineSavePrompt,
   updatePrompt as engineUpdatePrompt,
@@ -522,6 +529,10 @@ export function canCancelSession(id: string): boolean {
 }
 
 export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Promise<string> {
+  // IMPL-022: persist() na PRIMEIRA run, ANTES de qualquer await — ainda dentro
+  // da ativação do clique em Iniciar (o Firefox pergunta ao usuário). Memoizado
+  // por página; o estado (negado inclusive) aparece na UI via storageHealth.
+  void requestPersistentStorage();
   await assertCostConfirmed(config, launch);
   // Client-side: o run roda na própria aba (engine). Para variação, as variantes
   // são geradas via "optimizer" antes do loop (igual ao prepare do backend).
@@ -691,6 +702,7 @@ export interface ScenarioPack {
 }
 
 export async function createSession(config: RunConfig, launch: LaunchOpts = {}): Promise<string> {
+  void requestPersistentStorage(); // IMPL-022: ver createRun
   await assertCostConfirmed(config, launch);
   // Client-side: a sessão de treino roda na própria aba (engine trainer).
   const { sessionId, record } = await startTraining(config as never, getStoredKey());
@@ -946,48 +958,61 @@ export async function readImportFile(
 
 // -------------- Cache local (IndexedDB) --------------
 
-function summaryFromRecord(r: RunRecord): RunSummary {
-  const n = r.contestants?.length ?? r.config?.competitorModelIds?.length ?? 0;
-  return {
-    id: r.id,
-    status: r.status,
-    mode: r.mode ?? r.config?.mode ?? 'compare',
-    theme: r.config?.theme ?? '',
-    stages: r.config?.stages ?? r.stages?.length ?? 0,
-    contestants: n,
-    competitors: n,
-    totalCostUsd: r.totalCostUsd ?? 0,
-    startedAt: r.startedAt,
-    finishedAt: r.finishedAt,
-    sessionId: r.sessionId,
-    iteration: r.iteration,
-  };
-}
-
-function summaryFromSession(s: SessionRecord): SessionSummary {
-  return {
-    id: s.id,
-    status: s.status,
-    theme: s.config?.theme ?? '',
-    iterationsPlanned: s.config?.iterations ?? 0,
-    iterationsDone: s.bestPromptByIteration?.length ?? 0,
-    totalCostUsd: s.totalCostUsd ?? 0,
-    startedAt: s.startedAt,
-    finishedAt: s.finishedAt,
-  };
-}
+// IMPL-022: a UI grava pelo MESMO caminho do motor (engine/storage.ts): record +
+// resumo numa transação só e falha de gravação vira evento/aviso — antes eram
+// dois idbPut soltos num Promise.all, com a falha engolida dentro do idbPut.
+// 'relaxed': é re-gravação de cache (o motor já fez o checkpoint 'strict').
 
 /** Persiste uma run completa no cache local (chamado ao carregar/finalizar). */
 export async function cacheRun(r: RunRecord): Promise<void> {
   if (!r?.id) return;
-  await Promise.all([idbPut('runs', r), idbPut('runSummaries', summaryFromRecord(r))]);
+  await engineSaveRun(r as never, { durability: 'relaxed' });
 }
 
 /** Persiste uma sessão completa no cache local. */
 export async function cacheSession(s: SessionRecord): Promise<void> {
   if (!s?.id) return;
-  await Promise.all([idbPut('sessions', s), idbPut('sessionSummaries', summaryFromSession(s))]);
+  await engineSaveSession(s as never, { durability: 'relaxed' });
 }
+
+/**
+ * "Tentar salvar de novo" do aviso de gravação: regrava o record VIVO (em
+ * memória nesta aba) como checkpoint. true = salvou (o aviso some sozinho).
+ */
+export async function retrySave(subject: StorageSubject, id: string): Promise<boolean> {
+  if (subject === 'run') {
+    const live = getRunRecord(id);
+    return live ? engineSaveRun(live) : false;
+  }
+  const live = getSessionRecord(id);
+  return live ? engineSaveSession(live) : false;
+}
+
+/** Record VIVO (memória desta aba) de um item não salvo — o "Baixar JSON" do aviso. */
+export function liveStorageRecord(subject: StorageSubject, id: string): RunRecord | SessionRecord | undefined {
+  return (subject === 'run' ? getRunRecord(id) : getSessionRecord(id)) as unknown as
+    | RunRecord
+    | SessionRecord
+    | undefined;
+}
+
+// Estado do armazenamento local (persistência + gravações que falharam) — a UI
+// consome pela porta única; a regra mora em storageHealth.ts.
+export type {
+  PersistState,
+  StorageHealth,
+  StorageIssue,
+  StorageNotice,
+  StorageSubject,
+} from './storageHealth';
+export {
+  estimateStorage,
+  getStorageHealth,
+  refreshPersistState,
+  requestPersistentStorage,
+  storageNoticeContent,
+  subscribeStorageHealth,
+} from './storageHealth';
 
 export async function fetchRuns(): Promise<RunSummary[]> {
   return await engineListRuns<RunSummary>();

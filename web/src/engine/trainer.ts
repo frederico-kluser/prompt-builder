@@ -243,7 +243,8 @@ export async function startTraining(
       record.status = 'error';
       record.error = err instanceof Error ? err.message : String(err);
       record.finishedAt = nowIso();
-      await saveSession(record).catch(() => undefined);
+      // saveSession nunca rejeita: falha de gravacao vira evento storage.* (IMPL-022).
+      await saveSession(record);
       emitSessionEvent({ type: 'session.error', sessionId, error: record.error });
     })
     .finally(liberar);

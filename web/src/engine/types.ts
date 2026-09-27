@@ -701,7 +701,21 @@ export type RunEvent =
       decision: 'go' | 'stop';
     }
   | { type: 'run.finished'; runId: string; record: RunRecord }
-  | { type: 'run.error'; runId: string; error: string };
+  | { type: 'run.error'; runId: string; error: string }
+  /**
+   * IMPL-022: a gravação no IndexedDB falhou — SÓ a SPA emite (o Node grava em
+   * disco e lança). A run segue viva na memória da aba; o aviso na UI oferece
+   * baixar o JSON. Um evento por episódio (a batida periódica não repete).
+   */
+  | StorageEvent<{ runId: string }>;
+
+/** Tipo da falha de gravação local (espelha `IdbFailureKind` de web/src/idb.ts). */
+export type StorageFailureKind = 'quota' | 'unavailable' | 'failed';
+
+/** Falha de gravação local, no barramento da run OU da sessão. */
+export type StorageEvent<Scope> =
+  | ({ type: 'storage.quota_exceeded'; kind: 'quota'; error: string } & Scope)
+  | ({ type: 'storage.write_failed'; kind: Exclude<StorageFailureKind, 'quota'>; error: string } & Scope);
 
 export type SessionEvent =
   | { type: 'session.started'; sessionId: string; record: SessionRecord }
@@ -717,4 +731,6 @@ export type SessionEvent =
   | { type: 'session.holdout'; sessionId: string; holdout: SessionRecord['holdout'] }
   | { type: 'session.converged'; sessionId: string; iteration: number }
   | { type: 'session.finished'; sessionId: string; record: SessionRecord }
-  | { type: 'session.error'; sessionId: string; error: string };
+  | { type: 'session.error'; sessionId: string; error: string }
+  /** IMPL-022: gravação da sessão no IndexedDB falhou (só a SPA emite). */
+  | StorageEvent<{ sessionId: string }>;

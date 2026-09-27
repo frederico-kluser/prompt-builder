@@ -43,6 +43,7 @@ import {
 } from '../components/primitives';
 import { useToasts } from '../components/AppShell';
 import { CancelHoldButton, StopBanner } from '../components/RunControls';
+import { StorageNotice } from '../components/StorageNotice';
 import { cn } from '@/lib/utils';
 
 // ---------------------------------------------------------------------------
@@ -273,8 +274,10 @@ function BestPromptStudio({
       setSaved(true);
       setSaveOpen(false);
       notify('Prompt salvo na biblioteca.');
-    } catch {
-      notify('Não foi possível salvar na biblioteca.', 'error');
+    } catch (err) {
+      // IMPL-022: agora a falha do IndexedDB chega aqui (antes o idbPut a engolia
+      // e este aviso nunca aparecia) — com a causa (ex.: sem espaço).
+      notify(`Não foi possível salvar na biblioteca: ${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setSaving(false);
     }
@@ -695,6 +698,14 @@ export function TrainingView() {
         subject="treino"
         info={session}
         legacyText="Treino interrompido — o servidor reiniciou enquanto ele rodava."
+      />
+      {/* IMPL-022: a sessão e as runs das rodadas gravam no IndexedDB. */}
+      <StorageNotice
+        className="mt-4"
+        targets={[
+          { subject: 'session', id: session.id },
+          ...session.runIds.map((id) => ({ subject: 'run' as const, id })),
+        ]}
       />
       {session.holdoutSkipped && (
         <Banner tone="warn" className="mt-4">
