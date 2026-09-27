@@ -213,7 +213,7 @@ export interface CopyTreeResult {
  * Copia `src` → `dst` lendo SÓ bytes: `lstat` por entrada; arquivo regular vira
  * cópia (reflink quando o FS deixa) com os bits rwx e SEM setuid/setgid;
  * symlink é recriado como symlink (`'recreate'`) ou descartado (`'skip'`) —
- * NUNCA seguido, então um link para `~/.ssh` não traz um byte de lá. Diretório
+ * NUNCA seguido, então um link para as chaves SSH da home não traz um byte. Diretório
  * `.git` (ou arquivo `.git` de worktree) é excluído em QUALQUER profundidade: o
  * `.git` do agente é código dele (hooks, fsmonitor, filtros) e um `.git`
  * aninhado viraria submódulo que o git do host inspecionaria.

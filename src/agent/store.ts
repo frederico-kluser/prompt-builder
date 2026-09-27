@@ -162,9 +162,11 @@ export interface WriteExecutionOpts {
 const DIGEST_SKIP_DIRS = new Set(['pi-home']);
 /**
  * Arquivos da RAIZ do dir de execução gravados DEPOIS do digests.json e que não
- * são auditoria: `.workspace-kept` (ponteiro de debug do `keepWorkspace`).
+ * são auditoria da COLETA: `.workspace-kept` (ponteiro de debug do
+ * `keepWorkspace`) e `verdict.json` (a adjudicação da rep, IMPL-033 — derivada
+ * dos artefatos selados, gravada depois deles por construção).
  */
-const DIGEST_SKIP_FILES = new Set(['.workspace-kept']);
+const DIGEST_SKIP_FILES = new Set(['.workspace-kept', 'verdict.json']);
 
 /** Arquivos regulares sob `abs` (relativos, `/`), sem seguir symlink. */
 async function listRegularFiles(abs: string, rel = ''): Promise<string[]> {
