@@ -381,9 +381,15 @@ async function preflight(ctx: NetworkContext, config: RunConfig, budgetUsd?: num
  * tratar diferente: terminou (0), parou por orcamento com resultado parcial (7)
  * e foi interrompido pelo usuario (130).
  */
-function exitFor(stoppedReason: 'budget' | 'cancelled' | undefined, budgetExhausted?: boolean): number {
+export function exitFor(
+  stoppedReason: 'budget' | 'cancelled' | undefined,
+  budgetExhausted?: boolean,
+  status?: string,
+): number {
   if (stoppedReason === 'cancelled') return EXIT.SIGINT;
   if (budgetExhausted || stoppedReason === 'budget') return EXIT.BUDGET;
+  // IMPL-004: terminou, mas a evidencia nao sustenta conclusao.
+  if (status === 'inconclusive') return EXIT.INCONCLUSIVE;
   return EXIT.OK;
 }
 
@@ -396,6 +402,11 @@ function relatorioFinal(ctx: NetworkContext, record: RunRecord): void {
   }
   if (record.budgetExhausted) {
     out.line(`Parou em   ${record.stoppedAtPhase ?? '?'} — orçamento esgotado`);
+  }
+  if (record.status === 'inconclusive') {
+    // IMPL-004: o resultado existe, mas nao sustenta conclusao — dizer o porque.
+    out.warn('run INCONCLUSIVA — o resultado não sustenta conclusão:');
+    for (const motivo of record.verdictIntegrity?.reasons ?? []) out.warn(`  ${motivo}`);
   }
 
   // Qual REGUA foi usada precisa ficar explicito: standings (finais) e
@@ -507,10 +518,12 @@ async function runSingle(
     stoppedAtPhase: record.stoppedAtPhase,
     standings: record.standings,
     judgeScoreByContestant: record.judgeScoreByContestant,
+    failureCountByRole: record.failureCountByRole,
+    inconclusiveReasons: record.verdictIntegrity?.reasons,
   });
 
   if (record.status === 'error') throw new CliError(record.error ?? 'run falhou', EXIT.ERROR);
-  return exitFor(record.stoppedReason, record.budgetExhausted);
+  return exitFor(record.stoppedReason, record.budgetExhausted, record.status);
 }
 
 async function runTraining(

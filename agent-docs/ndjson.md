@@ -21,12 +21,12 @@ O stream **sempre** abre em `start` e **sempre** termina em `result`.
 | `stage.generating` / `stage.generated` | cenários | `stageIndex`, `question`, `hasReference` |
 | `progress` | lotes agregados | `phase` (`gabarito` \| `duels`), `done`, `total` |
 | `competitor.finished` | uma resposta pronta | `contestantId`, `status`, `tokensIn/Out`, `costUsd`, `chars` |
-| `stage.judging` / `stage.judged` | julgamento | `verdicts`, `ranked`, `scoreboard`, `totalCostUsd` |
+| `stage.judging` / `stage.judged` | julgamento | `verdicts`, `missing` (id → motivo do veredito **ausente**), `ranked`, `scoreboard`, `totalCostUsd` |
 | `finals.started` | finais | `finalists[]` |
-| `stage.dueled` | duelos de um cenário | `pairs[]` |
+| `stage.dueled` | duelos de um cenário | `pairs[]`, `failedPairs[]` (sem resultado — não pontuam) |
 | `budget` | gasto acumulado | `spentUsd`, `budgetUsd`, `byRole` |
 | `budget.gate` | uma porta decidiu | `phase`, `projectedUsd`, `remainingUsd`, `decision` |
-| `run.finished` | run terminou | `status`, `totalCostUsd`, `standings` |
+| `run.finished` | run terminou | `status` (`finished` \| `inconclusive` \| …), `totalCostUsd`, `standings`, `failureCountByRole`, `inconclusiveReasons` |
 | `iteration.started` / `iteration.finished` / `iteration.promoted` | treino | `iteration`, `runId`, `gain` |
 | `session.holdout` / `session.converged` / `session.finished` | treino | ver `docs train` |
 | `result` | última linha | `ok`, `status`, `totalCostUsd`, `budgetExhausted`, … |

@@ -3,7 +3,23 @@ import type { ExpectedSpec } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
 import type { CostEntry, CostRole, RunCtx } from '../../src/types.js';
+import type {
+  DuelFailure,
+  VerdictError,
+  VerdictIntegrity,
+  VerdictSource,
+} from '../../src/types.js';
+import { isTerminalRunStatus } from '../../src/types.js';
 export type { CostEntry, CostRole } from '../../src/types.js';
+// Integridade do veredito (IMPL-004): fonte única em src/types.ts.
+export type {
+  DuelFailure,
+  VerdictError,
+  VerdictErrorKind,
+  VerdictIntegrity,
+  VerdictSource,
+} from '../../src/types.js';
+export { isTerminalRunStatus } from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
 import type { LgpdData } from './lgpd';
@@ -162,7 +178,8 @@ export interface CompetitorResponse {
   tokensIn: number;
   tokensOut: number;
   costUsd: number;
-  status: 'ok' | 'error';
+  /** Union FIXO do CONVENTIONS (dono `gw`) — espelho de src/types.ts. */
+  status: 'ok' | 'error' | 'blocked' | 'refused';
   errorMsg?: string;
 }
 
@@ -208,6 +225,10 @@ export interface JudgeResult {
   acceptableByContestant: Record<string, boolean>;
   /** Veredito ternario agregado por contestant (consenso). Ausente em records antigos. */
   verdictByContestant?: Record<string, Verdict>;
+  /** Origem de cada veredito presente (IMPL-004). */
+  verdictSourceByContestant?: Record<string, VerdictSource>;
+  /** Motivo de cada veredito AUSENTE (IMPL-004) — sem chave em verdictByContestant. */
+  verdictErrorByContestant?: Record<string, VerdictError>;
   /** Resultado individual de cada juiz. */
   judges: SingleJudgeResult[];
   blindMap: Record<string, string>;
@@ -221,6 +242,10 @@ export interface ReferenceJudgeResult {
   verdictByContestant: Record<string, Verdict>;
   /** Explicacao curta (1 frase) por contestant. */
   explanationByContestant: Record<string, string>;
+  /** Origem de cada veredito presente (IMPL-004). */
+  verdictSourceByContestant?: Record<string, VerdictSource>;
+  /** Motivo de cada veredito AUSENTE (IMPL-004) — sem chave em verdictByContestant. */
+  verdictErrorByContestant?: Record<string, VerdictError>;
   judgeModelId: string;
   inconclusive?: boolean;
 }
@@ -233,6 +258,8 @@ export interface DuelOutcome {
   order2: { winner: 'a' | 'b' | 'tie'; explanation: string };
   /** Resultado combinado das 2 ordens. */
   outcome: 'a' | 'b' | 'tie';
+  /** Quem decidiu (IMPL-004): juiz LLM ou oráculo. */
+  source?: VerdictSource;
 }
 
 /** Duelos round-robin da etapa (bracket top-K): placar Copeland, placements fracionarios em empate. */
@@ -244,6 +271,8 @@ export interface StageDuels {
   /** Pontos Copeland por contestant (vitoria 1, empate 0.5). */
   points: Record<string, number>;
   duels: DuelOutcome[];
+  /** Duelos SEM resultado (IMPL-004) — fora do placar. */
+  failedDuels?: DuelFailure[];
   /** Tamanho do bracket usado (0 = round-robin completo). */
   topK: number;
 }
@@ -296,7 +325,7 @@ export interface CompetitorLiveState {
 
 export interface RunRecord {
   id: string;
-  status: 'running' | 'finished' | 'error' | 'aborted';
+  status: 'running' | 'finished' | 'inconclusive' | 'error' | 'aborted';
   config: RunConfig;
   mode?: RunMode;
   contestants?: Contestant[];
@@ -326,6 +355,10 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
+  /** Vereditos PERDIDOS por papel (IMPL-004). */
+  failureCountByRole?: Partial<Record<CostRole, number>>;
+  /** A conta que decidiu `inconclusive` (IMPL-004). */
+  verdictIntegrity?: VerdictIntegrity;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -519,6 +552,8 @@ export interface SessionRecord {
   bestPromptByIteration: SessionIterationSummary[];
   totalCostUsd: number;
   costByRole?: Record<CostRole, CostEntry>;
+  /** Soma do `failureCountByRole` de todas as runs da sessão (IMPL-004). */
+  failureCountByRole?: Partial<Record<CostRole, number>>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   upstreamCostUsd?: number;
   startedAt: string;
@@ -616,7 +651,7 @@ export function openSessionStream(
   const live = getSessionRecord(id);
   if (live) {
     onEvent({ type: 'snapshot', record: live });
-    if (['finished', 'error', 'aborted'].includes(live.status)) return () => undefined;
+    if (isTerminalRunStatus(live.status)) return () => undefined;
     return subscribeSession(id, onEvent);
   }
   let active = true;
@@ -887,8 +922,6 @@ export async function fetchRun(id: string): Promise<RunRecord> {
   throw new Error('Run nao encontrada');
 }
 
-const TERMINAL_RUN_STATUSES = ['finished', 'error', 'aborted'];
-
 export function openRunStream(
   id: string,
   onEvent: (e: any) => void,
@@ -900,7 +933,7 @@ export function openRunStream(
   const live = getRunRecord(id);
   if (live) {
     onEvent({ type: 'snapshot', record: live });
-    if (TERMINAL_RUN_STATUSES.includes(live.status)) return () => undefined;
+    if (isTerminalRunStatus(live.status)) return () => undefined;
     return subscribeRun(id, onEvent);
   }
   let active = true;
@@ -909,7 +942,7 @@ export function openRunStream(
     onEvent({ type: 'snapshot', record: rec });
     if (rec.status === 'error') {
       onEvent({ type: 'run.error', runId: id, error: rec.error ?? 'Run terminou com erro.' });
-    } else if (TERMINAL_RUN_STATUSES.includes(rec.status)) {
+    } else if (isTerminalRunStatus(rec.status)) {
       onEvent({ type: 'run.finished', runId: id, record: rec });
     }
   });

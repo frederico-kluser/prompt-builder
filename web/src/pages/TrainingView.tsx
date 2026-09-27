@@ -692,7 +692,7 @@ export function TrainingView() {
           </SectionHead>
           <ScoreHeatmap
             record={roundShown}
-            ranked={roundShown.status === 'finished'}
+            ranked={roundShown.status === 'finished' || roundShown.status === 'inconclusive'}
             onStageClick={() => navigate(`/runs/${roundShown.id}`)}
           />
 

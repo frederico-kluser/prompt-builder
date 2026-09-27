@@ -69,7 +69,9 @@ npx prompt-builder-cli sessions winner <sessionId> --prompt-only > prompt.md
 5. **`--json` ou `--output-format ndjson` em tudo.** Payload vai para o stdout;
    progresso e avisos vão para o stderr.
 6. **Leia o código de saída.** `7` significa **resultado parcial por orçamento**,
-   não erro: há resultado válido, só incompleto.
+   não erro: há resultado válido, só incompleto. `6` significa **run
+   inconclusiva**: o juiz perdeu vereditos demais (> 10% num papel) ou algum
+   contestant tem < 5 cenários julgados — não promova com base nela.
 
 ## Documentação embarcada (casada com a versão instalada)
 
@@ -87,11 +89,12 @@ npx prompt-builder-cli docs quickstart
 | `results` | interpretar judge-score, standings, holdout, significância |
 | `ndjson` | consumir o stream de progresso |
 | `config` | o contrato completo do `arena-config@1` |
-| `troubleshooting` | 400 no esforço, 402, tudo `parcial`, run travada |
+| `troubleshooting` | 400 no esforço, 402, run inconclusiva (código 6), run travada |
 
 ## Códigos de saída
 
 `0` ok · `2` uso inválido · `3` config inválida · `4` auth · `5` sem crédito ·
+`6` inconclusiva (vereditos perdidos > 10% ou < 5 cenários julgados) ·
 `7` parcial (orçamento esgotado) · `8` rede · `130` interrompido
 
 ## Agentes desta máquina (configuração local do autor)

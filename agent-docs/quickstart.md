@@ -46,8 +46,11 @@ npx prompt-builder-cli sessions winner <sessionId> --prompt-only > prompt.md
 4. **O juiz não pode competir.** Nenhum modelo em `judges` pode ser o modelo sob
    teste nem um competidor — o schema rejeita (viés de auto-preferência).
 5. **Leia o código de saída.** `0` ok · `2` uso inválido · `3` config inválida ·
-   `4` auth · `5` sem crédito · `7` **parcial, orçamento esgotado** · `8` rede ·
-   `130` interrompido. O `7` não é erro: há resultado válido, só incompleto.
+   `4` auth · `5` sem crédito · `6` **inconclusiva** · `7` **parcial, orçamento
+   esgotado** · `8` rede · `130` interrompido. O `7` não é erro: há resultado
+   válido, só incompleto. O `6` também traz resultado, mas ele **não sustenta
+   conclusão** (vereditos perdidos > 10% num papel ou < 5 cenários julgados por
+   contestant) — não promova um prompt com base nele.
 
 ## Os três modos
 

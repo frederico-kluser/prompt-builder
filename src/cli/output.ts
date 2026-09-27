@@ -22,6 +22,12 @@ export const EXIT = {
   CONFIG: 3,
   AUTH: 4,
   NO_CREDIT: 5,
+  /**
+   * Run INCONCLUSIVA (IMPL-004): terminou, mas vereditos perdidos/degradados
+   * > 10% em algum papel ou n efetivo < 5 cenarios julgados por contestant.
+   * Ha resultado, so que ele nao sustenta conclusao — nao promova com base nele.
+   */
+  INCONCLUSIVE: 6,
   /** Resultado PARCIAL por orcamento esgotado — nao e erro. */
   BUDGET: 7,
   NETWORK: 8,

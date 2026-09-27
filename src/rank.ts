@@ -7,18 +7,25 @@ import type { Verdict } from './types.js';
 
 /**
  * Judge-score em [0,100] a partir dos vereditos pointwise de um contestant.
- * `undefined` conta como 'nao' (resposta com erro/ausente não pontua);
- * lista vazia → 0 (sem evidência, sem score).
+ * `undefined` = veredito AUSENTE (juiz falhou, competidor com erro de infra,
+ * bloqueio do gateway — IMPL-004/IMPL-005): é "sem observação" e sai do
+ * NUMERADOR e do DENOMINADOR. Antes contava como 'nao' — um veredito imputado
+ * que movia o score mais que o `minGain` (R-03b:REC-4, R-04:REC-2). Sem
+ * nenhuma observação → 0 (sem evidência, sem score); a run que chega aí já é
+ * `inconclusive` pelo piso de n efetivo (`engine/verdictIntegrity.ts`).
  */
 export function judgeScoreFromVerdicts(verdicts: (Verdict | undefined)[]): number {
-  if (verdicts.length === 0) return 0;
   let resolve = 0;
   let parcial = 0;
+  let n = 0;
   for (const v of verdicts) {
+    if (v === undefined) continue;
+    n++;
     if (v === 'resolve') resolve++;
     else if (v === 'parcial') parcial++;
   }
-  return ((resolve + 0.5 * parcial) / verdicts.length) * 100;
+  if (n === 0) return 0;
+  return ((resolve + 0.5 * parcial) / n) * 100;
 }
 
 /** Uma entrada do ranking de seleção (variante ou controle) de uma run. */

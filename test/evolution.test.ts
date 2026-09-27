@@ -35,8 +35,14 @@ describe('rank.ts — judge-score e promoção com margem', () => {
     expect(judgeScoreFromVerdicts([])).toBe(0);
   });
 
-  it('veredito ausente conta como nao (resposta com erro não pontua)', () => {
-    expect(judgeScoreFromVerdicts(['resolve', undefined])).toBe(50);
+  // IMPL-004/IMPL-005 (R-03b:REC-4): o contrato MUDOU de propósito. Antes o
+  // ausente contava como 'nao' — um veredito imputado que movia o score mais
+  // que o minGain. Agora ausente = sem observação: fora do numerador E do
+  // denominador.
+  it('veredito ausente é EXCLUÍDO (nem numerador nem denominador), nunca vira nao', () => {
+    expect(judgeScoreFromVerdicts(['resolve', undefined])).toBe(100);
+    expect(judgeScoreFromVerdicts(['resolve', 'nao', undefined, undefined])).toBe(50);
+    expect(judgeScoreFromVerdicts([undefined, undefined])).toBe(0);
   });
 
   it('rankEntries: judgeScore desc → placement asc → menos erros → prompt mais curto', () => {

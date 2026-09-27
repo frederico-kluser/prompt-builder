@@ -337,6 +337,19 @@ export function RunView() {
       {record.status === 'aborted' && (
         <Banner className="mt-4">Run interrompida — o servidor reiniciou enquanto ela rodava.</Banner>
       )}
+      {record.status === 'inconclusive' && (
+        <Banner tone="warn" className="mt-4">
+          <strong>Run inconclusiva:</strong> o resultado não sustenta conclusão — falha do juiz não
+          vira nota, então vereditos perdidos ficam fora da média.
+          {record.verdictIntegrity?.reasons?.length ? (
+            <ul className="mt-1.5 list-disc pl-5 text-muted-foreground">
+              {record.verdictIntegrity.reasons.map((motivo) => (
+                <li key={motivo}>{motivo}</li>
+              ))}
+            </ul>
+          ) : null}
+        </Banner>
+      )}
 
       <SectionHead>Resultados</SectionHead>
       <ScoreHeatmap record={record} ranked={!isRunning} onStageClick={openStageFromHeatmap} />

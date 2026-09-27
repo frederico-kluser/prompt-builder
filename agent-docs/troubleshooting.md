@@ -22,15 +22,19 @@ obrigatório neles.
 `prompt-builder key check` mostra uso, limite e saldo. O pré-voo recusa antes de
 gastar quando o saldo não cobre nem o piso da estimativa.
 
-## Todos os vereditos vieram `parcial`
+## Run `inconclusive` (código `6`) / vereditos faltando
 
-Significa que o juiz não teve gabarito para comparar. Causas, em ordem de
-frequência:
+Falha de juiz **não vira mais `parcial`**: o contestant fica sem veredito na
+etapa e o motivo vai em `verdictErrorByContestant`. Leia
+`verdictIntegrity.reasons` e `failureCountByRole`:
 
-1. o modelo de referência falhou (sem crédito, id errado, timeout) — os cenários
-   ficam sem `reference` e o juiz pointwise degrada;
-2. `referenceJudging` está desligado (padrão do `compare` clássico);
-3. os cenários vieram de um pacote sem gabarito.
+1. `papel judge` alto — o juiz caiu, estourou o tempo duas vezes ou devolveu
+   saída fora do JSON mesmo com o lembrete de formato: troque o modelo juiz ou
+   aumente `timeoutMs`;
+2. `papel gabarito` alto — o modelo de referência falhou (sem crédito, id
+   errado, timeout); os cenários ficam sem `reference` e caem no juiz listwise;
+3. `papel competitor` alto — o provedor do competidor falhou por infraestrutura;
+4. `n efetivo < 5` — cenários de menos: rode com `--stages 5` ou mais.
 
 Rode com `--output-format ndjson` e procure `progress` com `phase: "gabarito"`.
 

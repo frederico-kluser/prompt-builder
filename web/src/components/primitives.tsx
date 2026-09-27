@@ -145,6 +145,9 @@ export function EmptyState({ children }: { children: ReactNode }) {
 const STATUS_TONE: Record<string, string> = {
   running: 'border-primary/30 bg-primary/10 text-primary',
   finished: 'border-resolve/30 bg-resolve-soft/60 text-resolve',
+  // IMPL-004: terminou, mas a evidência não sustenta conclusão — mesmo token
+  // do pill de veredito 'parcial' (contraste já medido nos dois temas).
+  inconclusive: 'border-parcial/30 bg-parcial-soft/60 text-parcial',
   error: 'border-destructive/30 bg-destructive/10 text-destructive',
   aborted: 'border-border bg-muted text-muted-foreground',
 };

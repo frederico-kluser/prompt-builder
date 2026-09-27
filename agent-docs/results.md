@@ -9,8 +9,9 @@ prompt-builder sessions list | show | winner
 
 ## Duas réguas, não intercambiáveis
 
-- **`judgeScoreByContestant`** — `(resolve + 0,5 × parcial) / total × 100` sobre
-  os cenários com gabarito. Comparável **entre runs** com o mesmo juiz.
+- **`judgeScoreByContestant`** — `(resolve + 0,5 × parcial) / julgados × 100`
+  sobre os cenários com gabarito (veredito ausente fica fora da conta).
+  Comparável **entre runs** com o mesmo juiz.
 - **`standings`** — pontos Copeland dos duelos das finais (vitória 1, empate
   0,5). Só existe se as finais rodaram, e mede apenas os **finalistas** entre si.
 
@@ -21,7 +22,9 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 
 | Campo | O que é |
 |---|---|
-| `status` | `finished` \| `error` \| `aborted` |
+| `status` | `finished` \| `inconclusive` \| `error` \| `aborted` |
+| `failureCountByRole` | vereditos **perdidos** por papel (juiz que falhou, duelo sem resultado, competidor com erro de infra, cenário sem gabarito) — `0` = medido e sem falha |
+| `verdictIntegrity` | a conta por trás do `inconclusive`: esperados/degradados por papel, cenários julgados por contestant, limiares e `reasons` |
 | `stoppedReason` | `budget` \| `cancelled` — discrimina o `aborted` |
 | `budgetExhausted` / `stoppedAtPhase` | parou cedo, e onde |
 | `totalCostUsd` | gasto **total**, todos os papéis |
@@ -37,6 +40,25 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 
 Uma etapa `incomplete` é o que separa "parou cedo, honesto" de "terminou,
 mentindo": ela não vira veredito `parcial` nem entra na média.
+
+## Veredito ausente e run `inconclusive`
+
+Falha **não é veredito**. Quando o juiz cai, devolve saída fora do formato
+mesmo depois de um lembrete, estoura o tempo duas vezes, ou o competidor falha
+por infraestrutura/é bloqueado pelo gateway, o contestant fica **sem chave** em
+`verdictByContestant` naquela etapa — nunca um `parcial` inventado. O motivo
+está em `verdictErrorByContestant[id]` (`judge_failed`, `invalid_output`,
+`timeout`, `blocked`, `competitor_error`, `no_reference`, …) e a origem de todo
+veredito presente em `verdictSourceByContestant[id]` (`judge`, `auto`,
+`ground-truth`, `degraded` = painel de juízes reduzido). Veredito ausente sai do
+judge-score (numerador **e** denominador), do placar e das lições do treino.
+Duelo sem resultado vai para `stages[].duels.failedDuels` e não pontua.
+
+A run termina `inconclusive` (código de saída `6`) quando, em algum papel,
+falhas + vereditos degradados passam de **10%** dos esperados, ou quando algum
+contestant tem **menos de 5 cenários julgados**. O motivo está em
+`verdictIntegrity.reasons`. Rode com mais cenários (`--stages 5` ou mais) ou
+investigue o papel que falhou antes de confiar no ranking.
 
 ## `SessionRecord` (treino)
 

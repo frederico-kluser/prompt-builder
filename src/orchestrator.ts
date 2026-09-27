@@ -7,6 +7,7 @@ import { generateReferences } from './gabarito.js';
 import { judgeStageReference } from './refJudge.js';
 import { blindRankMap, pickFinalists, runStageDuels, seedFromId, VERDICT_SCORE } from './duels.js';
 import { oracleScoresFromVerdicts } from './engine/duelCore.js';
+import { assessVerdictIntegrity } from './engine/verdictIntegrity.js';
 import { fairnessWarningsForModels } from './llmVariants.js';
 import { JUDGE_CONTRACT_TEXT } from './refJudge.js';
 import { pinJudgeContract, verbosityReport } from './engine/judgeCalibration.js';
@@ -30,6 +31,7 @@ import type {
   StageRecord,
   StageSpec,
   Verdict,
+  VerdictError,
 } from './types.js';
 
 function nowIso(): string {
@@ -668,6 +670,15 @@ async function runLoop(
         for (const r of respSettled) {
           if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
         }
+        // IMPL-004: agente 'incomplete' (§18.3) não tem veredito — o motivo fica
+        // registrado (conta em failureCountByRole.agent), nunca um 'nao'.
+        const agentErrors: Record<string, VerdictError> = {};
+        for (const id of agentIncompleteIds) {
+          agentErrors[id] = {
+            kind: 'competitor_error',
+            message: 'Execução de agente incompleta (nenhuma repetição com veredito).',
+          };
+        }
 
         // === FASE 3: julgamento POINTWISE. Com gabarito: cada resposta contra
         // a referencia (os duelos sairam daqui — viraram a fase 4 de finais).
@@ -703,6 +714,8 @@ async function runLoop(
               refJudge = {
                 verdictByContestant: { ...agentVerdicts },
                 explanationByContestant: { ...agentExplanations },
+                // IMPL-004: agente 'incomplete' fica SEM veredito, com o motivo.
+                verdictErrorByContestant: { ...agentErrors },
                 judgeModelId: record.config.judgeModelIds.join('+'),
                 // §18.4: quando a etapa tem reps>1, guarda o vetor plano por rep
                 // para o orquestrador montar o judge-score/vetor plano e a
@@ -735,6 +748,7 @@ async function runLoop(
                 ...base,
                 verdictByContestant: { ...base.verdictByContestant, ...agentVerdicts },
                 explanationByContestant: { ...base.explanationByContestant, ...agentExplanations },
+                verdictErrorByContestant: { ...base.verdictErrorByContestant, ...agentErrors },
                 // §18.4: reps>1 — anexa o vetor plano por rep e o count de
                 // incomplete dos agentes (chat não tem reps, fica de fora).
                 ...(Object.keys(agentVerdictsByRep).length > 0 && {
@@ -755,18 +769,19 @@ async function runLoop(
             // daria a ele todos os 1os lugares em empate — enviesando medalhas e
             // placar a favor da regua. Usa o shuffle cego semeado pelo conteudo da
             // etapa (mesmo criterio dos duelos): deterministico e neutro.
-            // Agentes incompletos (§18.3) ficam FORA do ranking (sem pontos, sem
-            // 'nao') — por isso o `filter` abaixo.
+            // Contestant SEM veredito (agente incompleto §18.3, juiz que falhou,
+            // competidor com erro de infra/bloqueado — IMPL-004) fica FORA do
+            // ranking: sem pontos e sem 'nao' imputado — por isso o `filter`.
             const ordemCega = blindRankMap(
               record.contestants.map((c) => c.id),
               seedFromId(stageSpec.question),
             );
             const ranked = [...record.contestants]
-              .filter((c) => !agentIncompleteIds.has(c.id))
+              .filter((c) => refJudge.verdictByContestant[c.id] !== undefined)
               .sort(
                 (a, b) =>
-                  VERDICT_SCORE[refJudge.verdictByContestant[b.id] ?? 'nao'] -
-                    VERDICT_SCORE[refJudge.verdictByContestant[a.id] ?? 'nao'] ||
+                  VERDICT_SCORE[refJudge.verdictByContestant[b.id]] -
+                    VERDICT_SCORE[refJudge.verdictByContestant[a.id]] ||
                   (ordemCega.get(a.id) ?? 0) - (ordemCega.get(b.id) ?? 0),
               )
               .map((c) => c.id);
@@ -776,6 +791,8 @@ async function runLoop(
                 Object.entries(refJudge.verdictByContestant).map(([id, v]) => [id, v !== 'nao']),
               ),
               verdictByContestant: { ...refJudge.verdictByContestant },
+              verdictSourceByContestant: { ...refJudge.verdictSourceByContestant },
+              verdictErrorByContestant: { ...refJudge.verdictErrorByContestant },
               judges: [],
               blindMap: {},
               rawJudgeText: 'Juiz de referência (gabarito)',
@@ -806,12 +823,22 @@ async function runLoop(
           // Sem isto, orcamento estourado viraria "juiz inconclusivo" e a etapa
           // entraria no placar como se tivesse sido avaliada.
           if (isControlSignal(judgeErr)) throw judgeErr;
+          const motivo = judgeErr instanceof Error ? judgeErr.message : String(judgeErr);
+          // IMPL-004: a etapa fica SEM veredito para todos — com o motivo, para
+          // a falha entrar em failureCountByRole (nunca passa por run íntegra).
           stageRecord.judge = {
             rankedContestantIds: [],
             acceptableByContestant: {},
+            verdictByContestant: {},
+            verdictErrorByContestant: Object.fromEntries(
+              record.contestants.map((c) => [
+                c.id,
+                { kind: 'judge_failed' as const, message: motivo.slice(0, 200) },
+              ]),
+            ),
             judges: [],
             blindMap: {},
-            rawJudgeText: judgeErr instanceof Error ? judgeErr.message : String(judgeErr),
+            rawJudgeText: motivo,
             inconclusive: true,
           };
           log(runId, `stage ${i + 1} juiz falhou: ${stageRecord.judge.rawJudgeText}`);
@@ -874,15 +901,11 @@ async function runLoop(
   // etapa sem julgamento como 'nao' rebaixaria todo mundo por falta de dinheiro.
   const stagesComRef = record.stages.filter((s) => s.referenceJudge && !s.incomplete);
   if (stagesComRef.length > 0) {
-    // judge-score = (resolve + 0.5*parcial) / total * 100, por contestant,
-    // sobre as etapas com juiz de referencia (ausente conta como 'nao').
-    //
-    // Agentes 'incomplete' (§18.3) NÃO aparecem no verdictByContestant (o
-    // orquestrador só os soma quando tiveram veredito) — para eles o `undefined`
-    // é "sem evidência" e NÃO pode contar como 'nao' (a culpa foi do nosso teto,
-    // não do agente). Filtramos os `undefined`, então o contestant entra no
-    // judge-score só com as etapas em que ele pontuou de verdade. Chat NÃO muda:
-    // vereditos de chat nunca são `undefined` no map.
+    // judge-score = (resolve + 0.5*parcial) / julgados * 100, por contestant,
+    // sobre as etapas com juiz de referencia. Veredito AUSENTE (IMPL-004: juiz
+    // que falhou, competidor com erro de infra/bloqueado, agente 'incomplete'
+    // §18.3) é "sem evidência" e NÃO conta como 'nao' — sai do numerador e do
+    // denominador (`judgeScoreFromVerdicts` ignora `undefined`).
     //
     // §18.4 — REPETIÇÕES: cada rep é uma observação independente. Quando algum
     // `referenceJudge` guarda `verdictsByRep` (contestant de agente com reps>1),
@@ -1130,9 +1153,21 @@ async function runLoop(
     log(runId, `diagnostico do juiz falhou (ignorado): ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  record.status = 'finished';
+  // IMPL-004 (R-03b:REC-4): a run terminou o pipeline, mas só é `finished` se
+  // a evidência sustenta conclusão — senão `inconclusive` (terminal), com a
+  // conta gravada no record para auditoria.
+  const integridade = assessVerdictIntegrity({
+    stages: record.stages,
+    contestants: record.contestants,
+    referenceJudging,
+  });
+  record.failureCountByRole = integridade.failureCountByRole;
+  record.verdictIntegrity = integridade.integrity;
+  for (const motivo of integridade.integrity.reasons) log(runId, `inconclusiva: ${motivo}`);
+
+  record.status = integridade.inconclusive ? 'inconclusive' : 'finished';
   record.finishedAt = nowIso();
   await saver.flush();
   emitEvent({ type: 'run.finished', runId, record });
-  log(runId, 'finished', { totalCostUsd: record.totalCostUsd });
+  log(runId, record.status, { totalCostUsd: record.totalCostUsd });
 }

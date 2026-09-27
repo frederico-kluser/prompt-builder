@@ -101,6 +101,17 @@ export interface HeatRow {
   score: number | null;
 }
 
+/**
+ * Motivo do veredito AUSENTE de um contestant numa etapa (IMPL-004): juiz que
+ * falhou, saída inválida, competidor bloqueado… `undefined` = sem registro.
+ */
+export function verdictErrorInStage(stage: StageRecord, contestantId: string): string | undefined {
+  const e =
+    stage.referenceJudge?.verdictErrorByContestant?.[contestantId] ??
+    stage.judge?.verdictErrorByContestant?.[contestantId];
+  return e ? e.message : undefined;
+}
+
 /** Veredito de um contestant numa etapa (gabarito > juiz > avaliador antigo). */
 function verdictInStage(stage: StageRecord, contestantId: string): Verdict | undefined {
   const ref = stage.referenceJudge?.verdictByContestant?.[contestantId];
@@ -208,7 +219,7 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
   return (
     <div className="rounded-xl bg-card ring-1 ring-foreground/10">
       <div className="border-b border-border px-4 py-2 text-[12px] text-muted-foreground">
-        ✓ resolve · ◐ parcial · ✕ não resolve · ⏳ aguardando julgamento · ! erro · · pendente
+        ✓ resolve · ◐ parcial · ✕ não resolve · ? sem veredito · ⏳ aguardando julgamento · ! erro · · pendente
       </div>
       <div className="scroll-slim overflow-x-auto p-3">
         <div className="min-w-fit">
@@ -250,9 +261,14 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
                 // com erro à parte. É o que faz a run longa não parecer travada.
                 const v = row.verdicts[i];
                 const resp = (s.responses ?? []).find((r) => r.contestantId === row.contestantId);
+                // IMPL-004: juiz que falhou NÃO vira nota — a célula diz "sem
+                // veredito" e o motivo, e o score da linha ignora a etapa.
+                const semVeredito = v ? undefined : verdictErrorInStage(s, row.contestantId);
                 const estado = v
                   ? { glyph: VERDICT_GLYPH[v], cls: VERDICT_META[v].cell, label: VERDICT_META[v].label }
-                  : resp?.status === 'error'
+                  : semVeredito && resp?.status !== 'error'
+                    ? { glyph: '?', cls: 'bg-muted text-muted-foreground', label: `sem veredito — ${semVeredito}` }
+                    : resp?.status === 'error'
                     ? { glyph: '!', cls: 'bg-nao/20 text-nao', label: 'resposta com erro' }
                     : resp
                       ? {

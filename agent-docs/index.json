@@ -56,7 +56,7 @@
   {
     "topic": "troubleshooting",
     "title": "Problemas comuns",
-    "summary": "400 no esforço, 402 sem crédito, tudo 'parcial', run travada",
+    "summary": "400 no esforço, 402 sem crédito, run inconclusiva (código 6), run travada",
     "approxTokens": 650
   },
   {

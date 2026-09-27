@@ -105,6 +105,7 @@ PARA AGENTES
 
 CÓDIGOS DE SAÍDA
   0 ok · 2 uso inválido · 3 config inválida · 4 auth · 5 sem crédito
+  6 inconclusiva (vereditos perdidos > 10% ou < 5 cenários julgados)
   7 parcial (orçamento esgotado) · 8 rede · 130 interrompido
 `;
 

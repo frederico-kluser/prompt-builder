@@ -21,7 +21,9 @@ type Group = 'running' | 'finished' | 'error';
 
 function groupOf(status: RunSummary['status']): Group {
   if (status === 'running') return 'running';
-  if (status === 'finished') return 'finished';
+  // `inconclusive` (IMPL-004) terminou o pipeline: fica em "Concluídas" e a
+  // pílula de status diz que o resultado não sustenta conclusão.
+  if (status === 'finished' || status === 'inconclusive') return 'finished';
   return 'error'; // error + aborted
 }
 

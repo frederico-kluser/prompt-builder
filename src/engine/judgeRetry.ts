@@ -1,0 +1,108 @@
+// Re-tentativa SELETIVA das chamadas de juiz (IMPL-004, R-03b:REC-4).
+//
+// Fonte única para os 3 prompts de juiz (pointwise `refJudge`, listwise
+// `judge`, duelos `duels` + espelho web): mesma política, mesma classificação
+// de erro, nos dois motores. Puro (sem Node): o web importa direto daqui.
+//
+// A política, e por quê:
+//   • transientes (429/5xx/rede) — JÁ re-tentados pelo gateway (até 6× com
+//     backoff) e preservam a validade: nada a fazer aqui;
+//   • timeout — re-tenta UMA vez. Timeout pode ser informativo (resposta longa
+//     → juiz lento), então insistir mais viesaria a amostra contra respostas
+//     longas; uma segunda chance cobre o soluço de rede;
+//   • saída inválida (JSON/schema) — UM novo pedido com lembrete de formato.
+//     Antes caía num parse heurístico e o lixo virava 'parcial': uma nota
+//     inventada que entrava nas médias e nas lições do reescritor;
+//   • o resto — falha. Quem chama registra `VerdictError`, NUNCA um veredito.
+//
+// `BudgetExceeded`/`RunCancelled` sobem intactos (controle, não erro), e um
+// abort externo no meio da chamada vira `RunCancelled`: cancelamento não é
+// falha do juiz e não pode inflar `failureCountByRole`.
+
+import { isControlSignal, RunCancelled } from '../budget.js';
+import type { VerdictError } from '../types.js';
+
+export type JudgeAttempt<T> =
+  | { ok: true; value: T; calls: number }
+  | { ok: false; error: VerdictError; calls: number };
+
+export interface JudgeRetryOptions<T> {
+  /** UMA chamada ao juiz. `reminder` presente = o novo pedido com lembrete de formato. */
+  call: (reminder: string | undefined) => Promise<string>;
+  /** Parse ESTRITO: `null` = saída inválida (nunca um veredito inventado). */
+  parse: (text: string) => T | null;
+  /** Lembrete anexado ao pedido depois de uma saída inválida. */
+  formatReminder: string;
+  /** Sinal da run: abortado => cancelamento, não falha do juiz. */
+  signal?: AbortSignal;
+}
+
+/** Máximo de chamadas por veredito: original + 1 timeout + 1 lembrete de formato. */
+export const MAX_JUDGE_CALLS = 3;
+
+/** Timeout do gateway (`abort(new Error('timeout'))`) ou `TimeoutError` do runtime. */
+export function isTimeoutError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const e = err as { name?: unknown; message?: unknown };
+  if (e.name === 'TimeoutError') return true;
+  return typeof e.message === 'string' && /\btime-?out\b|\btimed out\b/i.test(e.message);
+}
+
+/** Converte a exceção de uma chamada de juiz no motivo do veredito ausente. */
+export function describeJudgeError(err: unknown): VerdictError {
+  const message = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
+  return { kind: isTimeoutError(err) ? 'timeout' : 'judge_failed', message: message.slice(0, 200) };
+}
+
+function snippet(text: string): string {
+  const t = text.replace(/\s+/g, ' ').trim();
+  return t ? `"${t.slice(0, 80)}${t.length > 80 ? '…' : ''}"` : '(vazia)';
+}
+
+/**
+ * Executa a chamada de juiz com a política seletiva acima. Nunca lança erro
+ * comum: devolve `{ ok: false, error }` para quem registra o veredito ausente.
+ */
+export async function callJudgeWithRetry<T>(opts: JudgeRetryOptions<T>): Promise<JudgeAttempt<T>> {
+  let calls = 0;
+  let timeoutRetried = false;
+  let reminder: string | undefined;
+  for (;;) {
+    let text: string;
+    try {
+      calls += 1;
+      text = await opts.call(reminder);
+    } catch (err) {
+      if (isControlSignal(err)) throw err;
+      if (opts.signal?.aborted) throw new RunCancelled(opts.signal.reason);
+      const error = describeJudgeError(err);
+      if (error.kind === 'timeout' && !timeoutRetried) {
+        timeoutRetried = true;
+        continue;
+      }
+      return { ok: false, error, calls };
+    }
+    const parsed = opts.parse(text);
+    if (parsed !== null) return { ok: true, value: parsed, calls };
+    if (reminder === undefined) {
+      reminder = opts.formatReminder;
+      continue;
+    }
+    return {
+      ok: false,
+      error: {
+        kind: 'invalid_output',
+        message: `saída fora do formato mesmo após o lembrete: ${snippet(text)}`,
+      },
+      calls,
+    };
+  }
+}
+
+/**
+ * Anexa o lembrete ao conteúdo do usuário (sem mensagem `assistant` com a saída
+ * inválida: ela pode conter texto do candidato e reabrir a injeção).
+ */
+export function withReminder(userContent: string, reminder: string | undefined): string {
+  return reminder ? `${userContent}\n\n${reminder}` : userContent;
+}

@@ -176,7 +176,7 @@ function firstAgentError(record: RunRecord): string | undefined {
   return record.error;
 }
 
-/** Código de saída do desfecho — 130/7/1/0, sem inventar código novo (§22). */
+/** Código de saída do desfecho — 130/7/1/6/0 (o 6 é o INCONCLUSIVE do IMPL-004). */
 function exitFor(record: RunRecord, summary: AgentRunSummary | undefined): number {
   if (record.stoppedReason === 'cancelled') return EXIT.SIGINT;
   if (record.budgetExhausted || record.stoppedReason === 'budget') return EXIT.BUDGET;
@@ -186,6 +186,8 @@ function exitFor(record: RunRecord, summary: AgentRunSummary | undefined): numbe
     return EXIT.ERROR;
   }
   if (record.status === 'error') return EXIT.ERROR;
+  // IMPL-004: terminou, mas a evidencia nao sustenta conclusao.
+  if (record.status === 'inconclusive') return EXIT.INCONCLUSIVE;
   return EXIT.OK;
 }
 
