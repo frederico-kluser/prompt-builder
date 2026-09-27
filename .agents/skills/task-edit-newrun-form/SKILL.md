@@ -89,12 +89,12 @@ CoALA (`search "code style tokens"`). Componha de `components/primitives.tsx` an
 O rodapé é `fixed bottom-0`, e é o `pb-32` do `<Screen>` que impede o último campo de ficar embaixo
 dele: se aumentar a altura do rodapé, aumente o padding também.
 
-## <evolution>
+## registo de aprendizado (memória CoALA local)
 Ao concluir:
 1. Só persista aprendizados se o type-check passou e o formulário funcionou de ponta a ponta nos
    três modos (smoke manual — inclusive com um JSON importado e no Avançado aberto).
 2. Registre gotchas (layout de grid, elemento sempre renderizado, validação de campo escondido,
    deps órfãs de `useMemo`) em `LEARNINGS.md` com data + fonte.
 3. Padrão estável → destile no corpo + incremente `version`.
-4. Nova área (ex.: persistência de rascunho do formulário) → `meta-skill-evolution`.
+4. Nova área (ex.: persistência de rascunho do formulário) → a memória CoALA local (`coala.py add`).
 5. Não faça merge sozinho: diff git para revisão humana.

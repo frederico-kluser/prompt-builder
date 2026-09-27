@@ -12,9 +12,9 @@
   "git_policy": "ignore",
   "installer": "coala-agent-skill/scripts/coala-install.py",
   "installed_at": "2026-09-26T23:31:03+00:00",
-  "updated_at": "2026-09-26T23:31:03+00:00",
+  "updated_at": "2026-09-27T09:24:45+00:00",
   "managed": {
-    "SKILL.md": "e2291b0309afa7a572bb144f6b61a319440e63f91bd0547f9ac63401dd335ab5",
+    "SKILL.md": "61128df1fe08f755ef8cec0dee733914db27c143657b2365c7a45ac593fcb08c",
     "memory/.gitignore": "5941079484623004d0493eda784610b14f22d89d4a7473df50f514a8a3b044d4",
     "references/schema.md": "468411fae3448fbb030e704e87d6d22405404bcc222daf623628c2550eac2d42",
     "scripts/coala.py": "1bd03ed27ff09ea0cfa9f9fd9a8e10197089cce332b62ae96fd615998ec1dd8a"

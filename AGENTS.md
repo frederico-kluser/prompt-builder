@@ -133,10 +133,10 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
 O conhecimento do projeto vive na **memória CoALA** (`.agents/prompt-builder-coala-memory-agent-skill/` —
 bloco abaixo): dê `recall` no início de cada tarefa e `search` para dúvidas pontuais. As skills
 `knowledge-*` e o `project-router` foram **consolidadas na memória** (chaves `skill:<nome>:<tema>`) e
-apagadas em 2026-09-27. Sobram as skills de tarefa (`task-*`, com passo `<evolution>` + `LEARNINGS.md`),
+apagadas em 2026-09-27. Sobram as skills de tarefa (`task-*`, com registo de aprendizado na memória CoALA local + `LEARNINGS.md`),
 as meta-skills (`meta-skill-*`) e o índice `.agents/skills/catalog.md`. Fonte única em
 `.agents/skills/`; `.claude/skills` é symlink. Skills são rascunhos curados gerados por LLM — trate
-como tal e revise por `git diff` (ver `meta-skill-evolution`).
+como tal e revise por `git diff` (ver a memória CoALA local (`coala.py add`)).
 
 ## Segurança
 - Nunca leia/commite: `.env`, secrets. A key do OpenRouter é do usuário (vai por header `x-openrouter-key` / `localStorage`) — não hardcode keys.
