@@ -93,7 +93,8 @@ export function openSpendGuards(opts: SpendGuardOptions): SpendGuards {
       label: opts.command,
       budgetUsd: opts.config.budgetUsd,
       signal: opts.signal,
-      estimateCall: makeCallEstimator(opts.models ?? []),
+      // Preço variável reserva pelo pior caso limitado pelo teto da run (IMPL-018).
+      estimateCall: makeCallEstimator(opts.models ?? [], { maxPricePerMTok: opts.config.maxPricePerMTok }),
       warn: opts.warn,
       cap,
     });
