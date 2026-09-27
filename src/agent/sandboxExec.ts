@@ -404,3 +404,58 @@ export function writeFileNoFollow(root: string, rel: string, content: string): v
   // O que não era arquivo regular já foi removido; arquivo regular é sobrescrito.
   writeFileSync(target, content, 'utf8');
 }
+
+/**
+ * Apaga `dir` (recursivo) SEM NUNCA LANÇAR — limpeza de diretório que código
+ * não confiável pôde escrever (workspace do agente, cópia do verificador).
+ * Um `verify` (teste benigno de permissão ou agente hostil) pode deixar
+ * diretório 0555/0000 com arquivos dentro: o `rmSync` puro lançaria EACCES
+ * num `finally` e derrubaria a etapa inteira (revisão IMPL-038). Por isso, se
+ * a 1ª tentativa falhar, devolve u+rwx aos DIRETÓRIOS (`lstat`: symlink nunca
+ * é seguido nem alterado) e tenta de novo. Devolve `true` se o caminho sumiu.
+ */
+export function removeTreeBestEffort(dir: string): boolean {
+  const gone = (): boolean => {
+    try {
+      lstatSync(dir);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  try {
+    rmSync(dir, { recursive: true, force: true });
+    return gone();
+  } catch {
+    /* segue: devolve a permissão e tenta de novo */
+  }
+  const fix = (p: string): void => {
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(p);
+    } catch {
+      return;
+    }
+    if (!st.isDirectory()) return; // arquivo/symlink: apagar depende só do dir pai
+    try {
+      // O sandbox já terminou (docker run --rm); o chmod é no NOSSO uid.
+      chmodSync(p, (st.mode & 0o777) | 0o700);
+    } catch {
+      /* não é nosso — o rm abaixo dirá */
+    }
+    let names: string[] = [];
+    try {
+      names = readdirSync(p);
+    } catch {
+      return;
+    }
+    for (const n of names) fix(path.join(p, n));
+  };
+  fix(dir);
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* melhor esforço */
+  }
+  return gone();
+}

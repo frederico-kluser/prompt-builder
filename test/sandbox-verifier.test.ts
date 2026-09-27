@@ -212,10 +212,24 @@ describe('copyTreeBytes — só bytes, symlink nunca seguido, sem .git', () => {
     expect(JSON.stringify(env)).not.toContain(OTHER_SECRET);
   });
 
-  it('dockerRunDidNotStart: 125 e OCI 126/127 são "o check não rodou"; exit 127 do próprio script não', () => {
-    expect(dockerRunDidNotStart(125, '')).toBe(true);
-    expect(dockerRunDidNotStart(127, 'docker: Error response from daemon: failed to create task: exec: "nope": executable file not found in $PATH')).toBe(true);
+  it('dockerRunDidNotStart: 125 e OCI 126/127 COM a assinatura do CLI do docker são "o check não rodou"; o exit do próprio check não', () => {
+    // Saídas reais do docker 29 (daemon/imagem ausente e binário ausente na imagem).
+    expect(dockerRunDidNotStart(125, "docker: Error response from daemon: No such image: x:y\n\nRun 'docker run --help' for more information\n")).toBe(true);
+    expect(dockerRunDidNotStart(125, "Unable to find image 'sha256:abc' locally\ndocker: Error response from daemon: pull access denied\n")).toBe(true);
+    expect(
+      dockerRunDidNotStart(
+        127,
+        'docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: ' +
+          'exec: "nope": executable file not found in $PATH\n',
+      ),
+    ).toBe(true);
+    // Revisão IMPL-038: com --entrypoint '' o docker repassa o exit do check.
+    expect(dockerRunDidNotStart(125, '')).toBe(false); // `git bisect run` skip: exit 125 do próprio check
+    expect(dockerRunDidNotStart(125, 'bisect: skip deste commit\n')).toBe(false);
     expect(dockerRunDidNotStart(127, 'sh: 1: foo: not found')).toBe(false);
+    // Assinatura OCI sem o prefixo do CLI (texto que o check imprimiu) não basta.
+    expect(dockerRunDidNotStart(127, 'meu teste: executable file not found (OCI runtime)')).toBe(false);
+    expect(dockerRunDidNotStart(126, 'log do check: "docker: Error response from daemon" OCI runtime')).toBe(false);
     expect(dockerRunDidNotStart(1, 'OCI runtime')).toBe(false);
   });
 });

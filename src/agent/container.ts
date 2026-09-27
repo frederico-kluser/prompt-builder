@@ -1116,12 +1116,22 @@ export const VERIFIER_NAME_PREFIX = 'pb-verify-';
  * comando da tarefa nem rodou. 126/127 com a assinatura do runtime OCI = o
  * binário do check não existe na imagem. Os dois casos são "o oráculo não
  * rodou" (inconclusivo), exatamente como o `spawn` ENOENT do modo host.
+ *
+ * Revisão IMPL-038: com `--entrypoint ''` o docker REPASSA o exit do comando —
+ * um check que sai 125 de propósito (convenção do `git bisect run`) ou 126/127
+ * por conta própria é resultado do check, não falha do docker. Por isso o
+ * código só não basta: exige-se a assinatura do CLI do docker em INÍCIO de
+ * linha (a saída do check é do agente; casar em qualquer posição deixaria o
+ * texto dele virar "inconclusivo" por acaso).
  */
+const DOCKER_CLI_ERROR = /^(?:docker: )?Error response from daemon\b/m;
+const DOCKER_CLI_125 =
+  /^(?:(?:docker: )?Error response from daemon\b|Unable to find image '|docker: invalid reference format|(?:See|Run) 'docker run --help')/m;
+const OCI_START_FAILURE = /OCI runtime|executable file not found|failed to create task|exec format error/i;
+
 export function dockerRunDidNotStart(code: number | null, output: string): boolean {
-  if (code === 125) return true;
-  if (code === 126 || code === 127) {
-    return /OCI runtime|executable file not found|failed to create task|exec format error/i.test(output);
-  }
+  if (code === 125) return DOCKER_CLI_125.test(output);
+  if (code === 126 || code === 127) return DOCKER_CLI_ERROR.test(output) && OCI_START_FAILURE.test(output);
   return false;
 }
 

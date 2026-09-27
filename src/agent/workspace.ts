@@ -29,13 +29,14 @@
 // ----------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AgentLimits, AgentTaskSpec } from './types.js';
 import {
   copyTreeBytes,
   hostCommandRunner,
+  removeTreeBestEffort,
   safeGit,
   safeGitOrThrow,
   writeFileNoFollow,
@@ -164,6 +165,7 @@ export function createWorkspaceManager(opts: {
       // clone duas vezes na mesma run.
       let cacheRepoDir = cacheDir;
       let repoRooted = false; // true quando o workspace é um worktree linkado
+      let refCommit = '';
       const repo = task.repo;
       if (repo) {
         const source = repo.url ?? repo.path;
@@ -199,6 +201,15 @@ export function createWorkspaceManager(opts: {
       }
 
       try {
+        // O commit de referência (o que o checkout RASTREIA): resolvido no cache
+        // do PRODUTO, antes de qualquer código da tarefa rodar. Os snapshots o
+        // usam para manter rastreado o que era rastreado (revisão IMPL-038).
+        // (ref com '-' inicial nunca é ref git válida e viraria flag aqui.)
+        if (repo && repoRooted) {
+          if (repo.ref.startsWith('-')) throw new Error(`ref inválida no repo-semente: ${repo.ref}`);
+          refCommit = await safeGitOrThrow(['--git-dir', cacheRepoDir, 'rev-parse', '--verify', `${repo.ref}^{commit}`]);
+        }
+
         // --- 3. setup[] — ANTES do seedCommit (regra 3 / §10.1).
         // Rodar setup antes do commit faz o `node_modules` do npm ci etc. NÃO
         // aparecer no diff do agente — o diff mede O QUE O AGENTE FEZ, não o que
@@ -208,6 +219,22 @@ export function createWorkspaceManager(opts: {
         // container isso acontece no sandbox, nunca no host.
         if (task.setup?.length) {
           const runner = prepareOpts?.setupRunner?.(workspaceDir) ?? hostCommandRunner();
+          // No sandbox, o gitfile do worktree aponta para um caminho do HOST que
+          // não existe em `/ws`: `git` no setup (husky no `npm ci`, `git diff`)
+          // quebraria. Troca-o, ANTES do docker run, por um `.git` próprio com
+          // HEAD = árvore da ref (sem histórico nem submódulos — limitação
+          // documentada em agent-task.md). No modo host o gitfile segue válido.
+          if (repoRooted && runner.where === 'sandbox') {
+            auditGitDir = await initAuditRepo();
+            const base = await snapshotCommit(auditGitDir, workspaceDir, {
+              parent: null,
+              message: 'pre-setup',
+              limits,
+              tracked: { gitDir: cacheRepoDir, commit: refCommit },
+            });
+            await safeGitOrThrow(['--git-dir', auditGitDir, 'update-ref', 'refs/heads/main', base]);
+            await giveAgentFreshGit(auditGitDir, workspaceDir);
+          }
           for (const step of task.setup) {
             const argv = splitCommandLine(step.cmd);
             if (argv.length === 0) continue;
@@ -241,10 +268,15 @@ export function createWorkspaceManager(opts: {
         // O setup acima pode ter escrito no `.git` do workspace (hooks, config
         // com filtro): o seed sai de uma CÓPIA da árvore, commitada num
         // `--git-dir` que só o produto escreveu. `add -A` respeita o .gitignore
-        // da árvore, como antes.
-        auditGitDir = mkdtempSync(path.join(tmpdir(), 'pb-audit-git-'));
-        await safeGitOrThrow(['init', '--bare', '-q', '--initial-branch=main', auditGitDir]);
-        const seedCommit = await snapshotCommit(auditGitDir, workspaceDir, null, 'seed', limits);
+        // para o que NÃO era rastreado, como antes; o rastreado na ref segue
+        // rastreado mesmo se ignorado (`git add -f` no repo-semente).
+        if (!auditGitDir) auditGitDir = await initAuditRepo();
+        const seedCommit = await snapshotCommit(auditGitDir, workspaceDir, {
+          parent: null,
+          message: 'seed',
+          limits,
+          ...(refCommit ? { tracked: { gitDir: cacheRepoDir, commit: refCommit } } : {}),
+        });
         await safeGitOrThrow(['--git-dir', auditGitDir, 'update-ref', 'refs/heads/main', seedCommit]);
 
         // --- 5. o `.git` do AGENTE: clone limpo do repo de auditoria (HEAD =
@@ -257,7 +289,7 @@ export function createWorkspaceManager(opts: {
       } catch (err) {
         // Se a preparação falhou, não deixe worktree (ou init parcial) órfão.
         await teardownWorkspace(cacheRepoDir, workspaceDir, repoRooted).catch(() => {});
-        if (auditGitDir) rmSync(auditGitDir, { recursive: true, force: true });
+        if (auditGitDir) removeTreeBestEffort(auditGitDir);
         throw err;
       }
     },
@@ -281,7 +313,15 @@ export function createWorkspaceManager(opts: {
         const safeSeed = /^[0-9a-f]{40}$/i.test(seedCommit)
           ? seedCommit
           : await safeGitOrThrow(['--git-dir', auditGitDir, 'rev-parse', `${seedCommit}^{commit}`]);
-        const commitSha = await snapshotCommit(auditGitDir, workspaceDir, safeSeed, 'agent-result', undefined, snapshotDir);
+        // Rastreado no seed segue rastreado no resultado, mesmo que o agente o
+        // tenha posto no .gitignore — senão a alteração dele sumiria do diff
+        // (ou viraria 'D') e escaparia do `forbiddenPaths`.
+        const commitSha = await snapshotCommit(auditGitDir, workspaceDir, {
+          parent: safeSeed,
+          message: 'agent-result',
+          intoDir: snapshotDir,
+          tracked: { gitDir: auditGitDir, commit: safeSeed },
+        });
         await safeGitOrThrow(['--git-dir', auditGitDir, 'update-ref', 'refs/heads/agent-result', commitSha]);
 
         const range = [safeSeed, commitSha];
@@ -317,17 +357,24 @@ export function createWorkspaceManager(opts: {
           ...(keep ? { snapshotDir } : {}),
         };
       } finally {
-        if (!keep) rmSync(snapshotDir, { recursive: true, force: true });
+        if (!keep) removeTreeBestEffort(snapshotDir);
       }
     },
 
     async dispose(cacheRepoDir, workspaceDir) {
       const audit = auditByWorkspace.get(workspaceDir);
       auditByWorkspace.delete(workspaceDir);
-      if (audit) rmSync(audit, { recursive: true, force: true });
+      if (audit) removeTreeBestEffort(audit);
       await teardownWorkspace(cacheRepoDir, workspaceDir, true);
     },
   };
+}
+
+/** Repo bare de AUDITORIA, novo, fora do workspace e de qualquer mount. */
+async function initAuditRepo(): Promise<string> {
+  const dir = mkdtempSync(path.join(tmpdir(), 'pb-audit-git-'));
+  await safeGitOrThrow(['init', '--bare', '-q', '--initial-branch=main', dir]);
+  return dir;
 }
 
 /**
@@ -336,31 +383,108 @@ export function createWorkspaceManager(opts: {
  * monta um índice próprio com `add -A` e fecha o commit por PLUMBING
  * (`write-tree` + `commit-tree`) — nenhum hook existe nem dispara. O `.git` de
  * `srcDir` nunca é lido.
+ *
+ * `tracked` (revisão IMPL-038): o índice temporário nasce VAZIO, então o
+ * `.gitignore` passaria a valer também para o que a referência RASTREIA
+ * (arquivo commitado com `git add -f`; ou o agente pondo `src/` no
+ * .gitignore) — a alteração sumiria do diff/dossiê/`forbiddenPaths`. Por isso
+ * os caminhos rastreados em `tracked.commit` que o `.gitignore` da cópia
+ * ignora entram à força (`update-index --add`, que não consulta ignore), como
+ * o `add -A` sobre o índice do checkout fazia antes.
  */
 async function snapshotCommit(
   auditGitDir: string,
   srcDir: string,
-  parent: string | null,
-  message: string,
-  limits?: AgentLimits,
-  intoDir?: string,
+  o: {
+    parent: string | null;
+    message: string;
+    limits?: AgentLimits;
+    intoDir?: string;
+    /** Commit de referência (git do PRODUTO) cujos caminhos rastreados seguem rastreados. */
+    tracked?: { gitDir: string; commit: string };
+  },
 ): Promise<string> {
-  const copyDir = intoDir ?? mkdtempSync(path.join(tmpdir(), 'pb-snap-'));
+  const copyDir = o.intoDir ?? mkdtempSync(path.join(tmpdir(), 'pb-snap-'));
   const indexFile = path.join(mkdtempSync(path.join(tmpdir(), 'pb-snap-idx-')), 'index');
   try {
     copyTreeBytes(srcDir, copyDir, { symlinks: 'recreate', excludeGit: true });
     const env = { GIT_INDEX_FILE: indexFile };
-    const t = limits?.timeoutMs;
-    await safeGitOrThrow(['--git-dir', auditGitDir, '--work-tree', copyDir, 'add', '-A'], { env, timeoutMs: t });
+    const t = o.limits?.timeoutMs;
+    const wt = ['--git-dir', auditGitDir, '--work-tree', copyDir];
+    await safeGitOrThrow([...wt, 'add', '-A'], { env, timeoutMs: t });
+    if (o.tracked) {
+      const forced = await trackedButIgnored(o.tracked, wt, copyDir, env, t);
+      // argv em lotes: `update-index` recebe CAMINHOS (sem pathspec/glob).
+      for (let k = 0; k < forced.length; k += 256) {
+        await safeGitOrThrow([...wt, 'update-index', '--add', '--', ...forced.slice(k, k + 256)], {
+          env,
+          timeoutMs: t,
+          cwd: copyDir,
+        });
+      }
+    }
     const tree = await safeGitOrThrow(['--git-dir', auditGitDir, 'write-tree'], { env, timeoutMs: t });
     return await safeGitOrThrow(
-      ['--git-dir', auditGitDir, 'commit-tree', tree, ...(parent ? ['-p', parent] : []), '-m', message],
+      ['--git-dir', auditGitDir, 'commit-tree', tree, ...(o.parent ? ['-p', o.parent] : []), '-m', o.message],
       { env, timeoutMs: t },
     );
   } finally {
-    rmSync(path.dirname(indexFile), { recursive: true, force: true });
-    if (!intoDir) rmSync(copyDir, { recursive: true, force: true });
+    removeTreeBestEffort(path.dirname(indexFile));
+    if (!o.intoDir) removeTreeBestEffort(copyDir);
   }
+}
+
+/**
+ * Caminhos rastreados em `ref` que o `.gitignore` da cópia ignora e que ainda
+ * existem nela como arquivo/symlink — sem nenhum componente intermediário
+ * symlink (o git recusaria "beyond a symbolic link" e o host não segue link
+ * do agente). `ls-files -o -i --directory` colapsa diretório ignorado em
+ * `dir/`: um rastreado é ignorado se ele OU um ancestral aparece na lista.
+ */
+async function trackedButIgnored(
+  ref: { gitDir: string; commit: string },
+  wt: string[],
+  copyDir: string,
+  env: Record<string, string>,
+  timeoutMs: number | undefined,
+): Promise<string[]> {
+  const [trackedOut, ignoredOut] = await Promise.all([
+    safeGitOrThrow(['--git-dir', ref.gitDir, 'ls-tree', '-r', '-z', '--name-only', ref.commit], { timeoutMs }),
+    safeGitOrThrow([...wt, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], {
+      env,
+      timeoutMs,
+      cwd: copyDir,
+    }),
+  ]);
+  const ignored = new Set(ignoredOut.split('\0').filter(Boolean));
+  if (ignored.size === 0) return [];
+  const out: string[] = [];
+  for (const rel of trackedOut.split('\0')) {
+    if (!rel) continue;
+    const parts = rel.split('/');
+    let hit = ignored.has(rel);
+    for (let k = 1; !hit && k < parts.length; k++) hit = ignored.has(`${parts.slice(0, k).join('/')}/`);
+    if (hit && isPlainLeaf(copyDir, parts)) out.push(rel);
+  }
+  return out;
+}
+
+/** `root/parts…` existe como arquivo/symlink e todo ancestral é diretório REAL (lstat). */
+function isPlainLeaf(root: string, parts: string[]): boolean {
+  let cur = root;
+  for (let k = 0; k < parts.length; k++) {
+    cur = path.join(cur, parts[k]);
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(cur);
+    } catch {
+      return false;
+    }
+    const last = k === parts.length - 1;
+    if (!last && !st.isDirectory()) return false;
+    if (last) return st.isFile() || st.isSymbolicLink();
+  }
+  return false;
 }
 
 /**
@@ -375,14 +499,15 @@ async function giveAgentFreshGit(auditGitDir: string, workspaceDir: string): Pro
     const clone = path.join(tmp, 'r');
     await safeGitOrThrow(['clone', '-q', '--no-checkout', '--no-hardlinks', auditGitDir, clone]);
     const gitDir = path.join(workspaceDir, '.git');
-    rmSync(gitDir, { recursive: true, force: true });
+    // O setup (sandbox) pode ter deixado o `.git` read-only.
+    if (!removeTreeBestEffort(gitDir)) throw new Error(`não consegui trocar o .git do workspace (${gitDir})`);
     cpSync(path.join(clone, '.git'), gitDir, { recursive: true });
     await safeGitOrThrow(['--git-dir', gitDir, 'remote', 'remove', 'origin']);
     await safeGitOrThrow(['--git-dir', gitDir, '--work-tree', workspaceDir, 'read-tree', 'HEAD']);
     await safeGitOrThrow(['--git-dir', gitDir, 'config', 'user.name', GIT_IDENTITY.name]);
     await safeGitOrThrow(['--git-dir', gitDir, 'config', 'user.email', GIT_IDENTITY.email]);
   } finally {
-    rmSync(tmp, { recursive: true, force: true });
+    removeTreeBestEffort(tmp);
   }
 }
 
@@ -402,7 +527,10 @@ async function teardownWorkspace(
   // sido reescrito pelo agente: NENHUM git roda nele. Apaga o diretório primeiro
   // e só então faz `worktree prune` NO CACHE (repo do produto) — o registro do
   // worktree some porque o caminho deixou de existir.
-  rmSync(workspaceDir, { recursive: true, force: true });
+  // O agente/setup pode ter deixado diretório 0555/0000 no workspace.
+  if (!removeTreeBestEffort(workspaceDir)) {
+    console.error(`[agent] ⚠️ workspace não pôde ser apagado: ${workspaceDir}`);
+  }
   // Só num cache BARE de verdade: `git -C <dir>` num diretório que não é repo
   // subiria até um repo que o contenha (o `./data` dentro de um checkout).
   if (repoRooted && cacheRepoDir && pathExists(path.join(cacheRepoDir, 'HEAD'))) {

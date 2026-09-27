@@ -21,7 +21,7 @@
 //   injetado (fake no smoke) devolve a MESMA forma.
 // - A `CompetitorResponse.execution` é um `ExecutionRef` RELATIVO a getDataDir().
 // ----------------------------------------------------------------------------
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AgentRunOpts, PrepareOpts } from './executor.js';
@@ -34,7 +34,7 @@ import { runOracle } from './oracle.js';
 import { aggregateAgentVerdict, judgeDossier } from './agentJudge.js';
 import { decideInfraError } from './infraError.js';
 import { acquireRunInferenceProxy, type InferenceProxyLease } from './inferenceProxy.js';
-import { hostCommandRunner, writeFileNoFollow, type CommandRunner } from './sandboxExec.js';
+import { hostCommandRunner, removeTreeBestEffort, writeFileNoFollow, type CommandRunner } from './sandboxExec.js';
 import { isDigestRef, sandboxCommandRunner, sandboxProfile } from './container.js';
 import { isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
@@ -374,6 +374,12 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
       proxy: proxyLease.proxy,
       runners,
     });
+  } catch (err) {
+    // Falha fora de uma rep (bug do produto): o contestant NÃO pode sumir da
+    // etapa em silêncio (o orquestrador descarta rejeição que não é controle).
+    if (isControlSignal(err)) throw err;
+    const errorMsg = `Falha inesperada na etapa do agente: ${(err as Error)?.message ?? String(err)}`;
+    return { response: responseError(contestant, modelId, errorMsg, 0), repResults: [], incomplete: true, errorMsg };
   } finally {
     await proxyLease.release();
   }
@@ -424,6 +430,7 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
       let workspaceDir = '';
       let seedCommit = '';
       let cacheRepoDir = '';
+      let auditGitDir = '';
       let verifierDir: string | undefined;
       let credential: ReturnType<typeof proxy.issueCredential> | undefined;
 
@@ -442,6 +449,7 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         workspaceDir = ws.workspaceDir;
         seedCommit = ws.seedCommit;
         cacheRepoDir = ws.cacheRepoDir;
+        auditGitDir = ws.auditGitDir;
 
         // 2) task.txt + system-prompt.txt no repetitionDir (§12.5).
         writeFileSync(path.join(repAbs, 'task.txt'), stage.question, 'utf8');
@@ -804,13 +812,27 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
           response = responseError(contestant, modelId, msg, 0);
         }
       } finally {
-        credential?.revoke();
-        if (verifierDir) rmSync(verifierDir, { recursive: true, force: true });
+        // NADA aqui pode lançar (revisão IMPL-038): o `verify` roda código do
+        // agente na cópia e pode deixar diretório 0555/0000 lá dentro — um
+        // EACCES neste `finally` derrubaria as reps seguintes, pularia o
+        // dispose e sumiria com o contestant da etapa (sem resposta, sem 'nao').
+        try {
+          credential?.revoke();
+        } catch {
+          /* melhor esforço */
+        }
+        if (verifierDir && !removeTreeBestEffort(verifierDir)) {
+          console.error(`[agent] ⚠️ cópia do verificador não pôde ser apagada: ${verifierDir}`);
+        }
         // 9) dispose do workspace (preserva com isolation.keepWorkspace).
         const keep = agentConfig.isolation?.keepWorkspace === true;
         try {
           if (!keep && workspaceDir) await workspaceMgr.dispose(cacheRepoDir, workspaceDir);
-          else if (keep && workspaceDir) writeFileSync(path.join(repAbs, '.workspace-kept'), workspaceDir, 'utf8');
+          else if (keep && workspaceDir) {
+            // 1ª linha = workspace (formato antigo); 2ª = repo de AUDITORIA
+            // (seed/agent-result), que também fica para o debug.
+            writeFileSync(path.join(repAbs, '.workspace-kept'), `${workspaceDir}\n${auditGitDir}\n`, 'utf8');
+          }
         } catch {
           /* melhor esforço */
         }

@@ -163,6 +163,11 @@ export interface WriteExecutionOpts {
 
 /** Subdiretórios do dir de execução que NÃO são auditoria (estado do executor). */
 const DIGEST_SKIP_DIRS = new Set(['pi-home']);
+/**
+ * Arquivos da RAIZ do dir de execução gravados DEPOIS do digests.json e que não
+ * são auditoria: `.workspace-kept` (ponteiro de debug do `keepWorkspace`).
+ */
+const DIGEST_SKIP_FILES = new Set(['.workspace-kept']);
 
 /** Arquivos regulares sob `abs` (relativos, `/`), sem seguir symlink. */
 async function listRegularFiles(abs: string, rel = ''): Promise<string[]> {
@@ -180,6 +185,7 @@ async function listRegularFiles(abs: string, rel = ''): Promise<string[]> {
       out.push(...(await listRegularFiles(abs, childRel)));
     } else if (e.isFile()) {
       if (e.name.endsWith('.tmp')) continue; // escrita atômica em andamento
+      if (!rel && DIGEST_SKIP_FILES.has(e.name)) continue;
       out.push(childRel);
     }
   }

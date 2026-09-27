@@ -101,16 +101,16 @@ duas coisas ao mesmo tempo. `agent.limits` é o **default** de todo
 
 | Campo | Tipo | Obr. | Default | Descrição |
 |---|---|---|---|---|
-| `kind` | string | não | `worktree` | `'worktree'` (default) \| `'clone'` \| `'container'`. **`worktree`** = `git worktree` raiz de mundo, artefatos no workspace local, nada de Docker. **`clone`** = clone descartável por execução (o executor o clona/descarta ao fim). **`container`** = cada execução do `pi` roda num **container Docker efêmero** (ver `#### Modo container` abaixo) — o agente fica isolado do host além da parede de processo; `setup[]`/`verify[]` (oráculo) seguem no **host** (ver nota). |
-| `keepWorkspace` | bool | não | `false` | Guardar o workspace ao fim ocupa disco rápido; o default é **não guardar** (descarta quando o modo permitir) — só ligue para debug. |
+| `kind` | string | não | `worktree` | `'worktree'` (default) \| `'clone'` \| `'container'`. **`worktree`** = `git worktree` raiz de mundo, artefatos no workspace local, nada de Docker. **`clone`** = clone descartável por execução (o executor o clona/descarta ao fim). **`container`** = cada execução do `pi` roda num **container Docker efêmero** (ver `#### Modo container` abaixo) — o agente fica isolado do host além da parede de processo; `setup[]`/`verify[]` (oráculo) também rodam em sandbox (ver nota). |
+| `keepWorkspace` | bool | não | `false` | Guardar o workspace ao fim ocupa disco rápido; o default é **não guardar** (descarta quando o modo permitir) — só ligue para debug. O `.workspace-kept` no dir da execução guarda o caminho do workspace (1ª linha) e do repo de auditoria com `seed`/`agent-result` (2ª linha). |
 | `image` | string | não | `prompt-builder-pi:<executorVersion>` | Só tem efeito quando `kind === 'container'`. **Sobrescreve a tag** da imagem do `pi` (default `prompt-builder-pi:<executorVersion>`). Aceita tag **ou** referência por digest (`repo@sha256:…`/`sha256:…`). A tag só serve para achar a imagem: a preparação a resolve para o **digest sha256** e **todo `docker run` usa o digest** (gravado no `argv.json`). Digest ausente no daemon = erro pedindo `docker pull` (nada é puxado em silêncio). |
 | `runtime` | string | não | — (runc) | Só em `kind === 'container'`. Runtime OCI **opt-in** do Docker, ex. `"runsc"` (gVisor) — opção de **alto risco operacional**, fora do default (~2× em syscalls, muito pior em I/O de arquivos pequenos como `npm ci`). Validado no daemon **antes** da run. |
 
 #### `Modo container` (`kind: "container"`)
 
-Quando `isolation.kind` é `'container'`, a **execução** do agente (e só ela — `setup[]`
-e `verify[]`/oráculo continuam no host) roda num container Docker **efêmero** por
-repetição:
+Quando `isolation.kind` é `'container'`, a **execução** do agente roda num container
+Docker **efêmero** por repetição (e `setup[]`/`verify[]` em sandboxes próprios — ver a
+nota no fim da seção):
 
 - **Imagem default:** `prompt-builder-pi:<executorVersion>` (ex. `prompt-builder-pi:0.84.2`),
   derivada da versão pinada do executor. Ela é **criada na primeira preparação de run
@@ -167,9 +167,16 @@ repetição:
   usaria; com `--config`, mede a `image`/`runtime` do arquivo — sem ele, a imagem
   default em runc).
 
-**Nota de escopo (TODO de fase futura):** hoje só a **execução** do agente é isolada
-pelo container. `setup[]` e `verify[]` (oráculo) rodam no HOST. Isolar esses também via
-`dockerExec` está no roadmap de uma fase futura.
+**Sandbox de `setup[]`/`verify[]`:** em `kind: "container"` cada comando roda num
+`docker run` endurecido NOVO, na **mesma imagem do executor** (pinada por digest:
+`node` + `git` + `bash` — toolchain que não seja node precisa estar na `isolation.image`).
+`setup[]` roda no workspace com rede `bridge` e um `.git` **próprio** (HEAD = árvore da
+`ref`, **sem histórico nem submódulos**); `verify[]` roda numa **cópia** do estado final
+do agente, **sem `.git`** e com os `files[]` prístinos reescritos — check que dependa de
+`git` (ex. `git diff`) não funciona ali. O diff sai de um repo de auditoria do produto
+(o `.git` do agente nunca é lido); arquivo rastreado na `ref` continua rastreado mesmo se
+o `.gitignore` o ignorar. Fora de `container` (modo host), `setup[]`/`verify[]` rodam
+**sem isolamento** e o `exec.json` registra `sandbox.isolated: false`.
 
 ### `agent.limits`
 
