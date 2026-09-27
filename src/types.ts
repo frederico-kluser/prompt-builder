@@ -760,6 +760,49 @@ export interface SessionIterationSummary {
   bronzes?: number;
 }
 
+/** Como um p-valor/IC de troca de sinais foi calculado. */
+export type SignificanceMethod = 'exact' | 'monte-carlo';
+
+/**
+ * Teste pareado campeão − controle (`pairedSignificance`, src/stats.ts — IMPL-001,
+ * R-04:REC-1). Tudo em PONTOS de judge-score. `pValue` é UNILATERAL (H1: campeão >
+ * controle, o do gate); o relatório mostra `pValueTwoSided`.
+ */
+export interface PairedSignificance {
+  /** Pares nominais oferecidos ao teste (inclui os excluídos por observação ausente). */
+  n: number;
+  meanDiffPp: number;
+  /** IC95% bilateral por inversão do teste; [-100, 100] = n sem resolução p/ excluir nada. */
+  ci95Pp: [number, number];
+  /** p unilateral (H1: campeão > controle). */
+  pValue: number;
+  /** p bilateral — o que o relatório exibe. */
+  pValueTwoSided: number;
+  /** Pares com observação nos DOIS lados (n − excludedPairs): os que entraram no teste. */
+  nEfetivo: number;
+  /** n′: pares com diferença ≠ 0 — os únicos que informam o teste. */
+  nNonZero: number;
+  /** Menor p unilateral atingível (2^−n′): com n′ = 5 nem o bilateral alcança 0,05. */
+  pMinUnilateral: number;
+  /** Pares excluídos por observação ausente em algum lado (nunca imputados). */
+  excludedPairs: number;
+  /** nEfetivo / n. */
+  completeness: number;
+  /** Método do p-valor: enumeração exata ou Monte Carlo semeado (B = 10.000). */
+  method: SignificanceMethod;
+  /** Método do IC (pode ser Monte Carlo com p exato quando há muitos valores distintos). */
+  ciMethod: SignificanceMethod;
+  /** Teste do sinal exato (sensibilidade): positivos/negativos entre os não nulos. */
+  signTest: { positive: number; negative: number; pValue: number; pValueTwoSided: number };
+}
+
+/**
+ * `PairedSignificance` como fica gravado na sessão: sessões anteriores ao
+ * IMPL-001 (bootstrap) só têm os 4 campos de base — os demais são opcionais.
+ */
+export type StoredSignificance = Pick<PairedSignificance, 'n' | 'meanDiffPp' | 'ci95Pp' | 'pValue'> &
+  Partial<Omit<PairedSignificance, 'n' | 'meanDiffPp' | 'ci95Pp' | 'pValue'>>;
+
 export interface SessionRecord {
   id: string;
   status: RunStatus;
@@ -779,13 +822,11 @@ export interface SessionRecord {
     gain: number;
     regressed: boolean;
   };
-  /** Significancia estatistica (bootstrap pareado). null = amostra insuficiente. */
-  significance?: {
-    n: number;
-    meanDiffPp: number;
-    ci95Pp: [number, number];
-    pValue: number;
-  } | null;
+  /**
+   * Significancia estatistica: teste pareado EXATO por troca de sinais + IC por
+   * inversao (IMPL-001; antes era bootstrap percentil). null = < 5 pares.
+   */
+  significance?: StoredSignificance | null;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
   /** Pool Pareto final (F4.1): prompts não-dominados por fatia que sobreviveram. */

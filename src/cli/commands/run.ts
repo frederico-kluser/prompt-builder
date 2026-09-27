@@ -13,6 +13,7 @@ import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
 import { hasGabarito, toStageSpec } from '../../engine/libraryCore.js';
 import { estimateInputFromConfig, estimateRunCost, toPerMTok } from '../../estimate.js';
+import { formatSignificance } from '../../stats.js';
 import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
 import { buildNetworkContext, checkKey, isAgentContext, parse, type NetworkContext } from '../context.js';
 import { emitRunEvent, emitSessionEventNdjson } from '../ndjson.js';
@@ -571,10 +572,8 @@ async function runTraining(
       );
     }
     if (record.significance) {
-      out.line(
-        `Significância  p=${record.significance.pValue.toFixed(3)} · ` +
-          `IC95 [${record.significance.ci95Pp[0].toFixed(1)}, ${record.significance.ci95Pp[1].toFixed(1)}]pp`,
-      );
+      // IMPL-001: relatório mostra o p BILATERAL (o unilateral é o do gate).
+      out.line(`Significância  ${formatSignificance(record.significance)}`);
     }
     if (record.holdoutSkipped) {
       out.line();

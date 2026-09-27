@@ -2,8 +2,10 @@ import { idbGet, idbGetAll, idbPut, idbPutMany } from './idb';
 import type { ExpectedSpec } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
-import type { CostEntry, CostRole, RunCtx } from '../../src/types.js';
+import type { CostEntry, CostRole, RunCtx, StoredSignificance } from '../../src/types.js';
 export type { CostEntry, CostRole } from '../../src/types.js';
+// Significância pareada: fonte única em src/types.ts (IMPL-001), como os tipos de custo.
+export type { PairedSignificance, SignificanceMethod, StoredSignificance } from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
 import type { LgpdData } from './lgpd';
@@ -532,13 +534,12 @@ export interface SessionRecord {
     gain: number;
     regressed: boolean;
   };
-  /** Significancia estatistica (bootstrap pareado). null = amostra insuficiente. */
-  significance?: {
-    n: number;
-    meanDiffPp: number;
-    ci95Pp: [number, number];
-    pValue: number;
-  } | null;
+  /**
+   * Significancia estatistica: teste pareado EXATO por troca de sinais + IC por
+   * inversao (IMPL-001; antes era bootstrap percentil). null = < 5 pares. Tipo
+   * canonico em src/types.ts (fonte unica, sessoes antigas so tem os 4 campos base).
+   */
+  significance?: StoredSignificance | null;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
 }

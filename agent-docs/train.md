@@ -49,8 +49,12 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
 
 - `holdout` — campeão vs. base nos cenários **reservados**. É a evidência de que
   a melhora generaliza.
-- `significance` — bootstrap pareado: `pValue` e o intervalo de confiança de 95 %
-  em pontos percentuais. `null` = amostra pequena demais.
+- `significance` — teste pareado EXATO por troca de sinais (campeão − base por
+  cenário). `pValue` é unilateral (o do gate); reporte `pValueTwoSided`. `ci95Pp`
+  é o IC95 por inversão do teste, em pontos percentuais — com n ≤ 5 ele é
+  `[-100, 100]` (o teste não tem resolução). `pMinUnilateral` = 2^−n′ é o menor p
+  possível: com 5 cenários nem o bilateral chega a 0,05. `nEfetivo` conta só os
+  pares com observação nos dois lados. `null` = menos de 5 pares.
 - `holdoutSkipped: true` — **o campeão não passou pelo gate**. Trate o ganho como
   não verificado.
 - `convergedAtIteration` — o treino parou por falta de ganho, não por falta de

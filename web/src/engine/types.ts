@@ -2,7 +2,7 @@
 import type { ExpectedSpec } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
-import type { CostEntry, CostRole, PricingTier } from '../../../src/types.js';
+import type { CostEntry, CostRole, PricingTier, StoredSignificance } from '../../../src/types.js';
 
 // Contabilidade de custo: FONTE ÚNICA em src/types.ts (IMPL-021). Desde que os
 // módulos de papel e o gateway viraram shims, o web usa o MESMO ledger
@@ -18,6 +18,14 @@ export type {
   RunCtx,
 } from '../../../src/types.js';
 export { COST_ROLES } from '../../../src/types.js';
+
+// Significância pareada: FONTE ÚNICA em src/types.ts (IMPL-001). O cálculo já é
+// shim (src/stats.ts), então o shape que ele devolve também não se duplica.
+export type {
+  PairedSignificance,
+  SignificanceMethod,
+  StoredSignificance,
+} from '../../../src/types.js';
 
 export interface OpenRouterModelPricing {
   prompt: number; // USD per token
@@ -563,13 +571,12 @@ export interface SessionRecord {
     gain: number;
     regressed: boolean;
   };
-  /** Significancia estatistica (bootstrap pareado). null = amostra insuficiente. */
-  significance?: {
-    n: number;
-    meanDiffPp: number;
-    ci95Pp: [number, number];
-    pValue: number;
-  } | null;
+  /**
+   * Significancia estatistica: teste pareado EXATO por troca de sinais + IC por
+   * inversao (IMPL-001; antes era bootstrap percentil). null = < 5 pares. Tipo
+   * canonico em src/types.ts (fonte unica, sessoes antigas so tem os 4 campos base).
+   */
+  significance?: StoredSignificance | null;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
   /** Pool Pareto final (F4.1): prompts não-dominados por fatia que sobreviveram. */

@@ -17,6 +17,7 @@ import { useTheme } from '../theme';
 import { applyEvent, denseStages, rankColor, ScoreHeatmap, FinalsPanel } from './runShared';
 import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
 import { diffLines } from '../diff';
+import { formatPValue, reportPValue } from '../engine/stats';
 import {
   SmoothTabs,
   SmoothTabsList,
@@ -607,7 +608,13 @@ export function TrainingView() {
   }
   if (session.significance !== undefined) {
     const sig = session.significance;
-    gates.push(sig === null ? 'amostra insuficiente p/ significância' : sig.pValue < 0.001 ? 'p<0.001' : `p=${sig.pValue.toFixed(3)}`);
+    // IMPL-001: relatório mostra o p BILATERAL do teste exato (o unilateral é o do gate).
+    const rep = sig === null ? null : reportPValue(sig);
+    gates.push(
+      rep === null
+        ? 'amostra insuficiente p/ significância'
+        : `${formatPValue(rep.p)} ${rep.kind === 'two-sided' ? 'bilateral' : '(bootstrap, legado)'}`,
+    );
   }
 
   function downloadPack() {

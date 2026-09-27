@@ -45,7 +45,7 @@ mentindo": ela não vira veredito `parcial` nem entra na média.
 | `bestPromptByIteration[]` | o campeão pós-gate de cada iteração, com o prompt |
 | `convergedAtIteration` | parou por falta de ganho (bom sinal) |
 | `holdout` | `{ n, controlScore, championScore, gain, regressed }` |
-| `significance` | `{ n, meanDiffPp, ci95Pp, pValue }` ou `null` |
+| `significance` | teste pareado exato (troca de sinais): `pValue` (unilateral, o do gate), `pValueTwoSided` (o do relatório), `ci95Pp` (IC95 por inversão), `n`/`nEfetivo`/`excludedPairs`, `pMinUnilateral`, `signTest` — ou `null` (< 5 pares) |
 | `holdoutSkipped` | **campeão não validado** contra sobreajuste |
 | `stoppedAtIteration` | onde o orçamento interrompeu |
 | `pool` | front Pareto final (com `paretoPool` > 1) |

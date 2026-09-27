@@ -133,8 +133,10 @@ function buildLessons(run: RunRecord, championId: string): string {
 
 /**
  * Scores por estagio (escala 0-1 de `VERDICT_SCORE`) de controle e campeao,
- * posicao a posicao, para o bootstrap pareado. Veredito ausente conta como
- * 'nao' (0) — mesma convencao de `judgeScoreFromVerdicts`.
+ * posicao a posicao, para o teste pareado exato (`pairedSignificance`, troca de
+ * sinais). Veredito ausente AINDA conta como 'nao' (0) — mesma convencao de
+ * `judgeScoreFromVerdicts`. `pairedSignificance` ja aceita `null` (par excluido
+ * dos DOIS lados); a troca aqui e o pareamento honesto do IMPL-005.
  */
 function pairedStageScores(
   run: RunRecord,
@@ -614,9 +616,10 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
 /**
  * Gate final do treino (port do evolve.mjs): re-score do campeao contra o
  * controle (base) nos cenarios de HOLDOUT — que ficaram fora da selecao — mais
- * significancia estatistica (bootstrap pareado). E SUPORTE A DECISAO (a UI
- * mostra ganho/regressao/p-valor); nao bloqueia a promocao nem derruba a
- * sessao (o chamador envolve em try/catch).
+ * significancia estatistica (teste pareado exato por troca de sinais + IC por
+ * inversao, IMPL-001). E SUPORTE A DECISAO (a UI mostra ganho/regressao/
+ * p-valor); nao bloqueia a promocao nem derruba a sessao (o chamador envolve
+ * em try/catch).
  */
 async function finalizeHoldout(
   record: SessionRecord,

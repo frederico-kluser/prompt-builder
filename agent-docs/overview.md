@@ -40,8 +40,8 @@ HTTP 429) — não existe cap por comando.
 - **Iterações seguintes** — o campeão vira a nova base, é re-testado *verbatim*
   como controle, e as variantes recebem as **lições** das falhas dele.
 - **Gate final** — campeão e base disputam nos cenários de holdout, com
-  significância estatística (bootstrap pareado). É o que separa "melhorou" de
-  "sobreajustou aos cenários de treino".
+  significância estatística (teste pareado exato por troca de sinais). É o que
+  separa "melhorou" de "sobreajustou aos cenários de treino".
 
 Se o holdout for pulado (orçamento), o resultado traz `holdoutSkipped: true` e
 um aviso: **o campeão não está validado contra sobreajuste**.
