@@ -3,6 +3,7 @@ import { chatCompletion } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { getTechnique } from './techniques.js';
 import { stripFences, verifyRewrite } from './engine/contracts.js';
+import { MAX_TOKENS_REWRITER } from './engine/callCaps.js';
 import { composePrompt, siblingsContext, targetFragment } from './engine/promptGroup.js';
 import type { PromptGroup } from './engine/promptGroup.js';
 import type { PromptContracts } from './engine/contracts.js';
@@ -134,8 +135,9 @@ Reescreva o prompt agora, aplicando a tecnica.`;
       ],
       temperature: 0.4,
       timeoutMs: p.timeoutMs ?? 90_000,
-      // IMPL-017: teto explicito — sem ele a saida era ilimitada.
-      maxTokens: 8192,
+      // IMPL-017: teto explicito — sem ele a saida era ilimitada. Constante
+      // unica: a porta suave (estimate.ts) projeta com o MESMO teto.
+      maxTokens: MAX_TOKENS_REWRITER,
       reasoningLevel: p.reasoningLevel,
       role: 'rewriter',
       signal: p.ctx?.signal,
@@ -168,7 +170,7 @@ Reescreva o prompt agora, aplicando a tecnica.`;
         ],
         temperature: 0.3,
         timeoutMs: p.timeoutMs ?? 90_000,
-        maxTokens: 8192, // IMPL-017
+        maxTokens: MAX_TOKENS_REWRITER, // IMPL-017
         reasoningLevel: p.reasoningLevel,
         role: 'rewriter',
         signal: p.ctx?.signal,
@@ -330,7 +332,7 @@ export async function generateBasePrompt(p: GenerateBasePromptParams): Promise<s
     ],
     temperature: 0.4,
     timeoutMs: p.timeoutMs ?? 90_000,
-    maxTokens: 8192, // IMPL-017
+    maxTokens: MAX_TOKENS_REWRITER, // IMPL-017
     responseFormatJson: true,
     role: 'rewriter',
     signal: p.ctx?.signal,
@@ -399,7 +401,7 @@ Produza o bloco de licoes para a proxima rodada de reescrita.`;
     ],
     temperature: 0.3,
     timeoutMs: p.timeoutMs ?? 90_000,
-    maxTokens: 8192, // IMPL-017
+    maxTokens: MAX_TOKENS_REWRITER, // IMPL-017
     reasoningLevel: p.reasoningLevel,
     role: 'rewriter',
     signal: p.ctx?.signal,

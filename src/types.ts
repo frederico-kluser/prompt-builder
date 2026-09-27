@@ -89,6 +89,12 @@ export interface CallCost {
   source: CostSource;
   /** BYOK: cobrado direto pelo provedor upstream, fora dos creditos. */
   upstreamUsd?: number;
+  /**
+   * Chamada despachada sem custo medido e com id de geracao (IMPL-017): a
+   * reserva ficou PENDENTE no ledger — fora de `usd`/`totalCostUsd` ate a
+   * conciliacao. `usd: 0` com este campo NAO e "custou zero".
+   */
+  pendingUsd?: number;
 }
 
 export interface CostEntry {
@@ -121,6 +127,20 @@ export type ReservationStatus =
 /** Por que uma chamada despachada ficou sem custo medido. */
 export type PendingReason = 'timeout' | 'aborted' | 'no_usage';
 
+/**
+ * Chamada DESPACHADA que terminou sem custo medido e tem id de geracao
+ * (IMPL-017). A reserva fica mantida ate `BudgetLedger.settlePending`
+ * (IMPL-074 concilia via GET /api/v1/generation?id=…).
+ */
+export interface PendingCall {
+  generationId: string;
+  role: CostRole;
+  modelId: string;
+  /** Valor reservado, mantido no `committedUsd`/`pendingUsd`. */
+  usd: number;
+  reason: PendingReason;
+}
+
 /** Reserva otimista devolvida por `CostSink.reserve`. */
 export interface Reservation {
   release(): void;
@@ -144,6 +164,13 @@ export interface CostLedgerSummary {
   /** Reservas sem id recuperavel lancadas INTEIRAS como gasto (limite superior). */
   conservativeUsd: number;
   conservativeCalls: number;
+  /**
+   * As pendentes em si (id, papel, modelo, reserva, motivo), presente so
+   * quando ha alguma. Persistidas no record para que a conciliacao (IMPL-074,
+   * GET /generation) possa rodar DEPOIS que o processo terminou — so as
+   * contagens deixavam o `pendingUsd` preso no record para sempre.
+   */
+  pendingEntries?: PendingCall[];
 }
 
 /**
@@ -172,6 +199,8 @@ export interface CostSink {
     promptTokensGuess: number,
     maxTokens: number,
     fallbackUsd?: number,
+    /** Sinal da PROPRIA chamada: abortar solta a espera pela vaga do papel. */
+    signal?: AbortSignal,
   ): Promise<Reservation>;
   /**
    * Chamada DESPACHADA que terminou sem custo medido (abort/timeout/sem

@@ -2,6 +2,7 @@ import { chatCompletion } from './openrouter.js';
 import type { ChatCompletionResult, ChatMessage } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { finishSignalsOf, retryMaxTokens } from './engine/truncation.js';
+import { MAX_TOKENS_GABARITO } from './engine/callCaps.js';
 import type { CallFinishSignals, ReasoningLevel, RunCtx, StageSpec } from './types.js';
 
 // Gabaritos (respostas de referência), portados do prompt-arena: UMA chamada
@@ -12,7 +13,7 @@ import type { CallFinishSignals, ReasoningLevel, RunCtx, StageSpec } from './typ
 // vazia NUNCA derruba a run: a etapa segue sem `reference` e o juiz pointwise
 // degrada para 'parcial'.
 
-const MAX_TOKENS_GABARITO = 1500;
+// Teto: `MAX_TOKENS_GABARITO` (src/engine/callCaps.ts), o mesmo da porta suave.
 
 export interface GenerateReferencesParams {
   stages: StageSpec[];

@@ -433,7 +433,7 @@ function relatorioFinal(ctx: NetworkContext, record: RunRecord): void {
   const { out } = ctx;
   if (!out.isText) return;
   out.line();
-  for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy)) {
+  for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) {
     out.line(l);
   }
   if (record.budgetExhausted) {
@@ -634,7 +634,7 @@ async function runTraining(
 
   if (out.isText) {
     out.line();
-    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy)) {
+    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) {
       out.line(l);
     }
     if (record.budgetExhausted) {

@@ -244,6 +244,7 @@ export async function cmdRuns(argv: string[]): Promise<number> {
       record.totalCostUsd,
       record.budgetUsd,
       record.costAccuracy,
+      record.costLedger,
     )) {
       out.line(l);
     }
@@ -476,7 +477,7 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     out.line(`tema: ${record.config.theme}`);
     out.line(`iterações: ${record.bestPromptByIteration.length}/${record.config.iterations}`);
     out.line();
-    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd)) out.line(l);
+    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) out.line(l);
   }
   out.result(true, 'sessions.show', { session: record });
   return EXIT.OK;

@@ -9,7 +9,7 @@
 // Regra 3 — `--output-format ndjson` imprime um objeto por linha, com flush por
 // linha, abrindo em `start` e terminando SEMPRE em `result`.
 
-import type { CostEntry, CostRole } from '../types.js';
+import type { CostEntry, CostLedgerSummary, CostRole } from '../types.js';
 import { gatewayErrorKind } from '../openrouter.js';
 
 export type OutputFormat = 'text' | 'json' | 'ndjson';
@@ -167,12 +167,18 @@ const ROLE_LABEL_PT: Record<CostRole, string> = {
   agent: 'agente de execução',
 };
 
-/** Bloco de gasto por papel, ordenado do mais caro para o mais barato. */
+/**
+ * Bloco de gasto por papel, ordenado do mais caro para o mais barato.
+ * `ledger` (IMPL-017): sem ele a narracao mostrava so `totalCostUsd`, que
+ * EXCLUI o pendente — uma run cancelada com streams cortados aparecia mais
+ * barata do que o comprometido, sem aviso nenhum.
+ */
 export function renderSpend(
   byRole: Record<CostRole, CostEntry> | undefined,
   total: number,
   budgetUsd?: number,
   accuracy?: { exact: number; estimated: number; unknown: number },
+  ledger?: CostLedgerSummary,
 ): string[] {
   const linhas: string[] = [];
   const pct = budgetUsd ? ` (${Math.round((total / budgetUsd) * 100)}%)` : '';
@@ -186,10 +192,28 @@ export function renderSpend(
       .map(([role, e]) => `${ROLE_LABEL_PT[role].padEnd(11)} ${fmtUsd(e.usd).padStart(9)}  ${e.calls} chamadas`);
     linhasPapel.forEach((l, i) => linhas.push(`${i === 0 ? 'Por papel  ' : '           '}${l}`));
   }
+  const pendentes = ledger?.pendingCalls ?? 0;
+  if (ledger && pendentes > 0) {
+    // Fora do "Gasto" ate conciliar, mas provavelmente cobrado: o humano
+    // precisa ver o teto do que pode ter saido (gasto + pendente).
+    linhas.push(
+      `Pendente   ${fmtUsd(ledger.pendingUsd)}  ${pendentes} chamada(s) sem custo medido ` +
+        `(abort/timeout/sem usage) — o gasto real pode chegar a ${fmtUsd(total + ledger.pendingUsd)}`,
+    );
+  }
+  if (ledger && ledger.conservativeCalls > 0) {
+    linhas.push(
+      `Conservador ${fmtUsd(ledger.conservativeUsd)} de ${ledger.conservativeCalls} chamada(s) sem id ` +
+        `lançadas pela reserva inteira (limite superior, já no gasto)`,
+    );
+  }
   if (accuracy) {
     const partes = [`${accuracy.exact} exatas`];
     if (accuracy.estimated) partes.push(`${accuracy.estimated} estimadas`);
     if (accuracy.unknown) partes.push(`${accuracy.unknown} SEM PREÇO`);
+    // Pendente nao passa pelo `accuracy` (nao ha custo lancado): sem isto
+    // sumia da contagem de chamadas sem preco.
+    if (pendentes > 0) partes.push(`${pendentes} PENDENTES`);
     linhas.push(`Precisão   ${partes.join(' · ')}`);
   }
   return linhas;

@@ -175,6 +175,8 @@ const TOOLS: Tool[] = [
         status: rec.status,
         totalCostUsd: rec.totalCostUsd,
         costByRole: rec.costByRole,
+        // IMPL-017: totalCostUsd EXCLUI o pendente (abort/timeout sem custo medido).
+        ...(rec.costLedger ? { costLedger: rec.costLedger } : {}),
         budgetExhausted: Boolean(rec.budgetExhausted),
         stoppedAtPhase: rec.stoppedAtPhase,
         standings: rec.standings,
@@ -210,6 +212,7 @@ const TOOLS: Tool[] = [
         status: rec.status,
         totalCostUsd: rec.totalCostUsd,
         costByRole: rec.costByRole,
+        ...(rec.costLedger ? { costLedger: rec.costLedger } : {}), // IMPL-017
         iterationsDone: rec.bestPromptByIteration.length,
         championPrompt: campeao?.systemPrompt,
         holdout: rec.holdout,
@@ -270,7 +273,13 @@ const TOOLS: Tool[] = [
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
-      return { ok: true, runId: rec.id, totalCostUsd: rec.totalCostUsd, agentSummary: agentSummary(rec) };
+      return {
+        ok: true,
+        runId: rec.id,
+        totalCostUsd: rec.totalCostUsd,
+        ...(rec.costLedger ? { costLedger: rec.costLedger } : {}), // IMPL-017
+        agentSummary: agentSummary(rec),
+      };
     },
   },
   {

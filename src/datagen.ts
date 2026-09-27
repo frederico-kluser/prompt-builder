@@ -3,6 +3,7 @@ import { chatCompletion } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { dedupeAdvanced } from './dedup.js';
 import { renderScenarioRules } from './engine/scenarioRules.js';
+import { MAX_TOKENS_DATAGEN_BATCH, MAX_TOKENS_DATAGEN_STAGE } from './engine/callCaps.js';
 import type { ScenarioRules } from './engine/libraryCore.js';
 import type { ReasoningLevel, StageSpec, RunCtx } from './types.js';
 
@@ -69,7 +70,8 @@ Gere o cenario desta etapa em JSON conforme as regras.`;
     temperature: 0,
     timeoutMs: timeoutMs ?? 90_000,
     // IMPL-017: sem teto a saida era ilimitada e a reserva assumia 1024.
-    maxTokens: 4096,
+    // Constante unica: a porta suave (estimate.ts) projeta com o MESMO teto.
+    maxTokens: MAX_TOKENS_DATAGEN_STAGE,
     responseFormatJson: true,
     role: 'datagen',
     signal: ctx?.signal,
@@ -222,7 +224,7 @@ Gere os ${count} cenarios em JSON conforme as regras.`;
     temperature: 0.8,
     timeoutMs: timeoutMs ?? 120_000,
     // IMPL-017: teto explicito (lote de cenarios; o IMPL-016 afina por papel).
-    maxTokens: 8192,
+    maxTokens: MAX_TOKENS_DATAGEN_BATCH,
     responseFormatJson: true,
     reasoningLevel,
     role: 'datagen',

@@ -22,6 +22,7 @@ import type {
   CostRole,
   CostSink,
   FinishSignalCounts,
+  PendingCall,
   PendingReason,
   Reservation,
   ReservationStatus,
@@ -80,25 +81,19 @@ export function isBudgetSignal(e: unknown): e is BudgetExceeded {
 // Ledger
 // ---------------------------------------------------------------------------
 
+/** Motivo de abort de um sinal como erro (o que o `fetch` rejeitaria). */
+function abortReasonOf(signal: AbortSignal): unknown {
+  return signal.reason ?? new Error('Chamada abortada antes do envio.');
+}
+
 function emptyByRole(): Record<CostRole, CostEntry> {
   const out = {} as Record<CostRole, CostEntry>;
   for (const r of COST_ROLES) out[r] = { calls: 0, usd: 0, tokensIn: 0, tokensOut: 0 };
   return out;
 }
 
-/**
- * Chamada DESPACHADA que terminou sem custo medido e tem id de geracao
- * (IMPL-017). A reserva fica mantida ate `settlePending` (IMPL-074 concilia
- * via GET /api/v1/generation).
- */
-export interface PendingCall {
-  generationId: string;
-  role: CostRole;
-  modelId: string;
-  /** Valor reservado, mantido no `committedUsd`/`pendingUsd`. */
-  usd: number;
-  reason: PendingReason;
-}
+/** Pendente conciliavel (IMPL-017) — o tipo mora em types.ts (vai no record). */
+export type { PendingCall };
 
 /** Estado interno de uma reserva; a `Reservation` publica e so a alca. */
 interface ReservationState {
@@ -187,6 +182,16 @@ export class BudgetLedger implements CostSink {
   /** So na raiz: chamadas sem estimativa em voo por papel + quem espera vaga. */
   private readonly unboundedInFlight: Partial<Record<CostRole, number>> = {};
   private readonly unboundedWaiters: Partial<Record<CostRole, Array<() => void>>> = {};
+  /**
+   * So na raiz: chamadas SEM preco que terminaram sem custo medido
+   * (abort/timeout/sem usage), por papel. A reserva delas vale 0, entao o
+   * gasto real (cobrado pelo provedor) nao pesa em lugar nenhum; liberar a
+   * vaga e deixar a proxima entrar repetiria isso sem limite. Com teto e
+   * contador > 0, nova chamada sem preco daquele papel e RECUSADA
+   * (BudgetExceeded) — o que mantem o estouro <= 1 chamada por papel.
+   * Conciliar a pendente (`settlePending` com custo) devolve a vaga.
+   */
+  private readonly unboundedUnmeasured: Partial<Record<CostRole, number>> = {};
 
   constructor(opts: BudgetLedgerOptions = {}) {
     this.budgetUsd = opts.budgetUsd;
@@ -273,6 +278,11 @@ export class BudgetLedger implements CostSink {
     if (root.budgetUsd !== undefined && root.committedUsd + est > root.budgetUsd) {
       throw new BudgetExceeded(root.spentUsd, root.budgetUsd, role);
     }
+    // Sem preco e com uma chamada sem preco deste papel ja perdida sem custo
+    // medido: o teto nao e mais garantivel — recusa em vez de gastar as cegas.
+    if (root.budgetUsd !== undefined && !known && (root.unboundedUnmeasured[role] ?? 0) > 0) {
+      throw new BudgetExceeded(root.spentUsd, root.budgetUsd, role);
+    }
 
     // Reserva sobe a cadeia inteira: o teto e da raiz, mas cada nivel precisa
     // enxergar o que esta em voo abaixo dele. Sem teto a reserva existe do
@@ -311,6 +321,7 @@ export class BudgetLedger implements CostSink {
     promptTokensGuess: number,
     maxTokens: number,
     fallbackUsd?: number,
+    signal?: AbortSignal,
   ): Promise<Reservation> {
     const root = this.root();
     for (;;) {
@@ -320,23 +331,49 @@ export class BudgetLedger implements CostSink {
       if (!unbounded || !root.unboundedInFlight[role]) {
         return this.reserve(role, modelId, promptTokensGuess, maxTokens, fallbackUsd);
       }
-      await root.waitUnboundedSlot(role);
+      await root.waitUnboundedSlot(role, signal);
     }
   }
 
-  private waitUnboundedSlot(role: CostRole): Promise<void> {
-    const signal = this.signal;
+  /**
+   * Espera a vaga sem preco do papel. Solta com o sinal da RUN (RunCancelled)
+   * ou com o da PROPRIA chamada (rejeita com o motivo do abort, como o fetch
+   * faria) — antes so o sinal da raiz era observado e uma chamada abortada
+   * individualmente ficava presa na fila (IMPL-017, revisao).
+   */
+  private waitUnboundedSlot(role: CostRole, callSignal?: AbortSignal): Promise<void> {
+    const runSignal = this.signal;
     return new Promise<void>((resolve, reject) => {
-      if (signal?.aborted) {
-        reject(new RunCancelled(signal.reason));
+      if (runSignal?.aborted) {
+        reject(new RunCancelled(runSignal.reason));
         return;
       }
-      const onAbort = () => reject(new RunCancelled(signal?.reason));
-      signal?.addEventListener('abort', onAbort, { once: true });
-      (this.unboundedWaiters[role] ??= []).push(() => {
-        signal?.removeEventListener('abort', onAbort);
+      if (callSignal?.aborted) {
+        reject(abortReasonOf(callSignal));
+        return;
+      }
+      const cleanup = () => {
+        runSignal?.removeEventListener('abort', onRunAbort);
+        callSignal?.removeEventListener('abort', onCallAbort);
+        const fila = this.unboundedWaiters[role];
+        const i = fila ? fila.indexOf(wake) : -1;
+        if (i >= 0) fila!.splice(i, 1);
+      };
+      const onRunAbort = () => {
+        cleanup();
+        reject(new RunCancelled(runSignal?.reason));
+      };
+      const onCallAbort = () => {
+        cleanup();
+        reject(abortReasonOf(callSignal!));
+      };
+      const wake = () => {
+        cleanup();
         resolve();
-      });
+      };
+      runSignal?.addEventListener('abort', onRunAbort, { once: true });
+      callSignal?.addEventListener('abort', onCallAbort, { once: true });
+      (this.unboundedWaiters[role] ??= []).push(wake);
     });
   }
 
@@ -346,6 +383,11 @@ export class BudgetLedger implements CostSink {
     state.status = status;
     if (state.unbounded) {
       const root = state.owner.root();
+      // Sem preco E sem custo medido: marca o papel ANTES de acordar a fila,
+      // para a proxima da fila ser recusada em vez de entrar (ver reserve).
+      if (status === 'pending' || status === 'conservative') {
+        root.unboundedUnmeasured[state.role] = (root.unboundedUnmeasured[state.role] ?? 0) + 1;
+      }
       root.unboundedInFlight[state.role] = Math.max(0, (root.unboundedInFlight[state.role] ?? 1) - 1);
       const waiters = root.unboundedWaiters[state.role] ?? [];
       root.unboundedWaiters[state.role] = [];
@@ -482,6 +524,11 @@ export class BudgetLedger implements CostSink {
     }
     if (cost) {
       item.state.status = 'reconciled';
+      // Custo agora conhecido: a vaga sem preco do papel volta a valer.
+      if (item.state.unbounded) {
+        const root = owner.root();
+        root.unboundedUnmeasured[item.role] = Math.max(0, (root.unboundedUnmeasured[item.role] ?? 1) - 1);
+      }
       BudgetLedger.book(owner, {
         role: item.role,
         cost,
@@ -501,15 +548,21 @@ export class BudgetLedger implements CostSink {
 
   // --- Leitura --------------------------------------------------------------
 
-  /** O que vai para o resultado da run/sessao (IMPL-017). */
+  /**
+   * O que vai para o resultado da run/sessao (IMPL-017). Com pendentes, leva
+   * as entradas (id/papel/modelo/reserva/motivo): o record sobrevive ao
+   * processo e e ele que a conciliacao posterior (IMPL-074) le.
+   */
   summary(): CostLedgerSummary {
+    const pendentes = this.pendingEntries();
     return {
       spentUsd: this.spentUsd,
       committedUsd: this.committedUsd,
       pendingUsd: this.pendingUsd,
-      pendingCalls: this.pendingSet.size,
+      pendingCalls: pendentes.length,
       conservativeUsd: this.conservativeUsd,
       conservativeCalls: this.conservativeCalls,
+      ...(pendentes.length > 0 ? { pendingEntries: pendentes } : {}),
     };
   }
 

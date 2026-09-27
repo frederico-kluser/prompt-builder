@@ -7,8 +7,18 @@
 // enxuto; o record completo fica no disco, acessivel por `runs show`.
 
 import type { Output } from './output.js';
-import type { CostRole, RunEvent, SessionEvent, RunRecord } from '../types.js';
+import type { CostLedgerSummary, CostRole, RunEvent, SessionEvent, RunRecord } from '../types.js';
 import { truncationAlert } from '../engine/truncation.js';
+
+/**
+ * Ledger SEM a lista de pendentes: no stream vao so os 6 numeros (um run com
+ * centenas de timeouts nao pode inflar uma linha de NDJSON). A lista completa
+ * fica no RunRecord e no `--json` (IMPL-017).
+ */
+function leanLedger(l: CostLedgerSummary): CostLedgerSummary {
+  const { pendingEntries: _omit, ...enxuto } = l;
+  return enxuto;
+}
 
 export interface NdjsonMapperOptions {
   /** Com --verbose, inclui config e systemPrompt (que sao grandes). */
@@ -241,7 +251,7 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         status: e.record.status,
         totalCostUsd: e.record.totalCostUsd,
         // IMPL-017: spent/committed/pending (6 números, cabem no stream).
-        ...(e.record.costLedger ? { costLedger: e.record.costLedger } : {}),
+        ...(e.record.costLedger ? { costLedger: leanLedger(e.record.costLedger) } : {}),
         stages: e.record.stages.length,
         ...(agentSummary ? { agentSummary } : {}),
         ...(e.record.budgetExhausted ? { budgetExhausted: true } : {}),
@@ -363,7 +373,7 @@ export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {
         ...base,
         status: e.record.status,
         totalCostUsd: e.record.totalCostUsd,
-        ...(e.record.costLedger ? { costLedger: e.record.costLedger } : {}), // IMPL-017
+        ...(e.record.costLedger ? { costLedger: leanLedger(e.record.costLedger) } : {}), // IMPL-017
         iterationsDone: e.record.bestPromptByIteration.length,
         ...(e.record.significance ? { significance: e.record.significance } : {}),
         ...(e.record.holdoutSkipped ? { holdoutSkipped: true } : {}),

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { isControlSignal } from './budget.js';
+import { MAX_TOKENS_JUDGE_LISTWISE } from './engine/callCaps.js';
 import type {
   CompetitorResponse,
   JudgeResult,
@@ -179,7 +180,7 @@ Em "verdicts", de para CADA rotulo: "acceptable" (bool) e "motivo" (<= 1 frase).
       ],
       temperature: 0,
       timeoutMs,
-      maxTokens: 4096, // IMPL-017: max_tokens em todo papel (listwise: N vereditos)
+      maxTokens: MAX_TOKENS_JUDGE_LISTWISE, // IMPL-017: max_tokens em todo papel (listwise: N vereditos)
       responseFormatJson: true,
       reasoningLevel: extra.reasoningLevel,
       role: 'judge',

@@ -921,6 +921,15 @@ export interface ChatCompletionParams {
   sink?: CostSink;
   /** Teto por requisicao (USD por MILHAO de tokens). Ver applyMaxPrice. */
   maxPricePerMTok?: { prompt?: number; completion?: number };
+  /**
+   * Chamado quando o custo desta chamada e LANCADO no ledger — inclusive
+   * quando ela termina em erro depois de despachada (timeout, corpo de erro
+   * in-band). Sem isto o chamador so via o custo no retorno, e um competidor
+   * que estourava o timeout ficava com `costUsd` 0 enquanto o ledger ja tinha
+   * lancado o gasto conservador (IMPL-017, revisao). Nao e chamado quando a
+   * reserva volta inteira (HTTP de erro/nada despachado: nao houve custo).
+   */
+  onCost?: (cost: CallCost) => void;
 }
 
 export interface ChatStreamParams extends ChatCompletionParams {
@@ -1229,6 +1238,7 @@ export class OpenRouterGateway {
         ...(finish ? { finish } : {}),
       });
     }
+    params.onCost?.(cost);
     return cost;
   }
 
@@ -1250,7 +1260,7 @@ export class OpenRouterGateway {
     const fallback = computeCost(promptGuess, cap, this.cachedModel(params.apiKey, params.modelId));
     const fb = fallback === null ? undefined : fallback;
     return sink.admit
-      ? sink.admit(role, params.modelId, promptGuess, cap, fb)
+      ? sink.admit(role, params.modelId, promptGuess, cap, fb, params.signal)
       : sink.reserve(role, params.modelId, promptGuess, cap, fb);
   }
 
@@ -1258,8 +1268,11 @@ export class OpenRouterGateway {
    * Chamada DESPACHADA sem custo medido (IMPL-017 / R-07a:REC-2): abort,
    * timeout, corpo ilegivel ou resposta sem bloco `usage`. A reserva e mantida
    * (pendente, conciliavel pelo `generationId`) ou lancada inteira como gasto
-   * conservador — nunca devolvida, nunca zero. O custo devolvido ao chamador e
-   * a mesma reserva, `source: 'unknown'`.
+   * conservador — nunca devolvida, nunca zero. O custo devolvido ao chamador
+   * segue a MESMA regra do ledger (IMPL-017, revisao): conservador => `usd` =
+   * reserva (ja esta no gasto); pendente => `usd: 0` + `pendingUsd` = reserva
+   * (fora do gasto ate conciliar). Antes o pendente voltava como `usd` cheio e
+   * `soma(costByContestant)` passava de `totalCostUsd`.
    */
   private accountUnmeasured(
     params: ChatCompletionParams,
@@ -1277,7 +1290,11 @@ export class OpenRouterGateway {
         ...(finish ? { finish } : {}),
       });
     }
-    return { usd: reservation?.usd ?? 0, source: 'unknown' };
+    const usd = reservation?.usd ?? 0;
+    const cost: CallCost =
+      reservation?.status === 'pending' ? { usd: 0, source: 'unknown', pendingUsd: usd } : { usd, source: 'unknown' };
+    params.onCost?.(cost);
+    return cost;
   }
 
   /**

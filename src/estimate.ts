@@ -9,8 +9,12 @@
 //   2. Datagen e em LOTE, nao por etapa. A UI cobrava uma chamada por cenario;
 //      `generateStages` faz `batchCountFor(count)` lotes. Erro de ~4x.
 //   3. `high` era ficticio (`high = point`). Agora sai dos tetos que o codigo
-//      realmente envia: gabarito 1500, refJudge 1024, duelo 512, competidor
-//      `min(maxOutputTokens, stage.maxTokens)`.
+//      realmente envia — importados de `engine/callCaps.ts`, a MESMA constante
+//      que vai no corpo e na reserva da porta dura (gabarito, juiz pointwise e
+//      listwise, duelo, reescritor, datagen); competidor
+//      `min(maxOutputTokens, stage.maxTokens)`. Numero copiado aqui fazia a
+//      porta suave aprovar uma fase que a porta dura cortava no meio
+//      (IMPL-017, revisao: reescritor 8192 x projecao 1200).
 //   4. O HOLDOUT do treino nao era contado (uma run extra de N cenarios x 2).
 //
 // A faixa `low..high` e larga de proposito (~2.2x). Quem consome deve olhar
@@ -32,6 +36,16 @@
 
 import { batchCountFor } from './datagen.js';
 import {
+  DATAGEN_PROMPT_TOKENS,
+  MAX_TOKENS_DATAGEN_BATCH,
+  MAX_TOKENS_DUEL,
+  MAX_TOKENS_GABARITO,
+  MAX_TOKENS_JUDGE_LISTWISE,
+  MAX_TOKENS_REF_JUDGE,
+  MAX_TOKENS_REWRITER,
+  REWRITER_PROMPT_TOKENS,
+} from './engine/callCaps.js';
+import {
   priceTokens,
   priceTokensOrWorst,
   worstCasePricing,
@@ -44,11 +58,7 @@ export const PER_MTOK = 1_000_000;
 export const toPerMTok = (usdPerToken: number): number => usdPerToken * PER_MTOK;
 export const toPerToken = (usdPerMTok: number): number => usdPerMTok / PER_MTOK;
 
-/** Tetos reais que o pipeline envia — base do limite superior da faixa. */
-const MAX_TOKENS_GABARITO = 1500;
-const MAX_TOKENS_REF_JUDGE = 1024;
-const MAX_TOKENS_DUEL = 512;
-const MAX_TOKENS_DATAGEN_BATCH = 2000;
+// Tetos reais que o pipeline envia: `engine/callCaps.ts` (fonte unica).
 /** Contexto de entrada assumido por cenario (pergunta + productContext). */
 const DEFAULT_CTX_IN = 500;
 /** Piso empirico da faixa: respostas raramente usam o teto de tokens. */
@@ -212,7 +222,7 @@ export function estimateRunCost(
   const datagenBatches = input.datagenModelId && stages > 0 ? batchCountFor(stages) : 0;
   if (datagenBatches > 0) {
     const m = model(input.datagenModelId);
-    byRole.datagen += datagenBatches * price(m, 400, MAX_TOKENS_DATAGEN_BATCH);
+    byRole.datagen += datagenBatches * price(m, DATAGEN_PROMPT_TOKENS, MAX_TOKENS_DATAGEN_BATCH);
   }
 
   // --- gabaritos: um por cenario ---
@@ -225,7 +235,7 @@ export function estimateRunCost(
   const variantes = input.variantsPerIteration ?? 0;
   if (variantes > 0 && input.optimizerModelId) {
     const m = model(input.optimizerModelId);
-    byRole.rewriter += variantes * price(m, 1200, 1200);
+    byRole.rewriter += variantes * price(m, REWRITER_PROMPT_TOKENS, MAX_TOKENS_REWRITER);
   }
 
   // --- competidores: cada contestant responde cada cenario ---
@@ -245,7 +255,8 @@ export function estimateRunCost(
     // listwise: uma chamada por (juiz x passe x cenario), com TODAS as respostas
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
-      byRole.judge += stages * input.judgePasses * price(m, ctxIn + nContestants * maxOut, 800);
+      byRole.judge +=
+        stages * input.judgePasses * price(m, ctxIn + nContestants * maxOut, MAX_TOKENS_JUDGE_LISTWISE);
     }
   }
 
