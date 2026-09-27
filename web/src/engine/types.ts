@@ -26,6 +26,19 @@ export type {
   SignificanceMethod,
   StoredSignificance,
 } from '../../../src/types.js';
+// Pareamento honesto (IMPL-005): FONTE ÚNICA em src/types.ts, como a significância.
+import type { IterationGate, RunCompleteness, SessionPairing } from '../../../src/types.js';
+export type {
+  GateConclusion,
+  IterationGate,
+  ObservationCoverage,
+  PairCoverage,
+  PairSensitivity,
+  RunCompleteness,
+  SensitivityCase,
+  SessionPairing,
+  SignificanceConclusion,
+} from '../../../src/types.js';
 
 export interface OpenRouterModelPricing {
   prompt: number; // USD per token
@@ -488,6 +501,8 @@ export interface RunRecord {
   costByContestant?: Record<string, number>;
   /** Judge-score agregado por contestant: (resolve + 0.5*parcial) / total * 100. */
   judgeScoreByContestant?: Record<string, number>;
+  /** n nominal × efetivo por contestant e pares com a regua (IMPL-005). */
+  completeness?: RunCompleteness;
   /** Ids dos finalistas (top-N por judge-score) que disputaram os duelos. */
   finalists?: string[];
   /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
@@ -546,6 +561,8 @@ export interface SessionIterationSummary {
   golds?: number;
   silvers?: number;
   bronzes?: number;
+  /** Gate da iteracao com o pareamento honesto (IMPL-005). */
+  gate?: IterationGate;
 }
 
 export interface SessionRecord {
@@ -570,6 +587,10 @@ export interface SessionRecord {
     championScore: number;
     gain: number;
     regressed: boolean;
+    /** IMPL-005: pares com veredito nos DOIS lados (scores sao medias SO sobre eles). */
+    nEfetivo?: number;
+    excludedPairs?: number;
+    completeness?: number;
   };
   /**
    * Significancia estatistica: teste pareado EXATO por troca de sinais + IC por
@@ -577,6 +598,8 @@ export interface SessionRecord {
    * canonico em src/types.ts (fonte unica, sessoes antigas so tem os 4 campos base).
    */
   significance?: StoredSignificance | null;
+  /** Pareamento final (IMPL-005): n nominal × efetivo, mesmo com significance null. */
+  pairing?: SessionPairing;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
   /** Pool Pareto final (F4.1): prompts não-dominados por fatia que sobreviveram. */

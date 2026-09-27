@@ -307,6 +307,8 @@ export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {
         totalCostUsd: e.record.totalCostUsd,
         iterationsDone: e.record.bestPromptByIteration.length,
         ...(e.record.significance ? { significance: e.record.significance } : {}),
+        // IMPL-005: n nominal × efetivo do pareamento final (mesmo sem significância).
+        ...(e.record.pairing ? { pairing: e.record.pairing } : {}),
         ...(e.record.holdoutSkipped ? { holdoutSkipped: true } : {}),
         ...(e.record.budgetExhausted ? { budgetExhausted: true } : {}),
       });

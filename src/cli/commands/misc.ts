@@ -13,6 +13,7 @@ import { arenaConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
 import { sampleSizeWarning } from '../../engine/judgeCalibration.js';
+import { formatPairCoverage, formatRunCompleteness, formatSignificance, runCompleteness } from '../../stats.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import { buildContext, buildNetworkContext, checkKey, keyFilePath, parse, removeStoredKey, writeStoredKey } from '../context.js';
 import { CliError, EXIT, fmtUsd, renderSpend, type Output } from '../output.js';
@@ -231,10 +232,14 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   }
 
   // show
+  // IMPL-005: n nominal × efetivo SEMPRE visível (runs antigas: recalculado das etapas).
+  const completeness = record.completeness ?? runCompleteness(record);
   if (out.isText) {
     out.line(`${record.id}  ${record.status}  ${record.mode}`);
     out.line(`tema: ${record.config.theme}`);
     out.line(`etapas: ${record.stages.length} · participantes: ${record.contestants.length}`);
+    const labelOf = (cid: string): string => record.contestants.find((c) => c.id === cid)?.label ?? cid;
+    for (const l of formatRunCompleteness(completeness, labelOf)) out.line(l);
     out.line();
     for (const l of renderSpend(
       record.costByRole,
@@ -258,6 +263,7 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   }
   out.result(true, 'runs.show', {
     run: record,
+    completeness,
     judgeDiagnostics: record.judgeDiagnostics ?? null,
     fairnessWarnings: record.fairnessWarnings ?? [],
     sampleWarnings: [sampleSizeWarning(record.stages.length, 'etapas')].filter(Boolean),
@@ -472,6 +478,11 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     out.line(`${record.id}  ${record.status}`);
     out.line(`tema: ${record.config.theme}`);
     out.line(`iterações: ${record.bestPromptByIteration.length}/${record.config.iterations}`);
+    // IMPL-005: pareamento final (n nominal × efetivo) e significância.
+    if (record.pairing) {
+      out.line(`pareamento (${record.pairing.source}): ${formatPairCoverage(record.pairing)}`);
+    }
+    if (record.significance) out.line(`significância: ${formatSignificance(record.significance)}`);
     out.line();
     for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd)) out.line(l);
   }

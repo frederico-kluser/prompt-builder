@@ -55,6 +55,15 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
   `[-100, 100]` (o teste não tem resolução). `pMinUnilateral` = 2^−n′ é o menor p
   possível: com 5 cenários nem o bilateral chega a 0,05. `nEfetivo` conta só os
   pares com observação nos dois lados. `null` = menos de 5 pares.
+- `pairing` — n nominal × efetivo do pareamento final (existe mesmo com
+  `significance: null`). Par sem veredito sai dos DOIS lados, nunca vira `nao`.
+  Com mais de 10% de pares excluídos vem a **sensibilidade** (`significance.sensitivity`,
+  `pairing.worstMeanDiffPp`/`bestMeanDiffPp`): Δ com os ausentes no pior caso
+  (campeão perde todos) e no melhor. `sensitivity.inconclusive: true` = a
+  conclusão depende dos ausentes — reporte **inconclusivo**.
+- `bestPromptByIteration[].gate.decision: "inconclusive"` — a promoção dependeria
+  dos vereditos ausentes (> 10% dos pares); o gate não promove e o treino para.
+  Investigue as falhas do juiz antes de rodar de novo.
 - `holdoutSkipped: true` — **o campeão não passou pelo gate**. Trate o ganho como
   não verificado.
 - `convergedAtIteration` — o treino parou por falta de ganho, não por falta de

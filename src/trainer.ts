@@ -10,6 +10,7 @@ import { saveSession } from './storage.js';
 import { computeMedals } from './medals.js';
 import { judgeScoreFromVerdicts, pickWinner, type RankEntry } from './rank.js';
 import { MIN_HOLDOUT_SCENARIOS, splitHoldout } from './holdout.js';
+import { pairCoverage, pairedStageScores, stageScoresByContestant } from './stats.js';
 import { pairedSignificance, VERDICT_SCORE } from './stats.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
@@ -131,33 +132,6 @@ function buildLessons(run: RunRecord, championId: string): string {
   }
   if (!items.length) return '';
   return (LESSONS_PREFIX + items.join('\n')).slice(0, 4000);
-}
-
-/**
- * Scores por estagio (escala 0-1 de `VERDICT_SCORE`) de controle e campeao,
- * posicao a posicao, para o teste pareado exato (`pairedSignificance`, troca de
- * sinais). Veredito ausente AINDA conta como 'nao' (0) — mesma convencao de
- * `judgeScoreFromVerdicts`. `pairedSignificance` ja aceita `null` (par excluido
- * dos DOIS lados); a troca aqui e o pareamento honesto do IMPL-005.
- */
-function pairedStageScores(
-  run: RunRecord,
-  controlId: string,
-  championId: string,
-): { controlScores: number[]; championScores: number[] } {
-  const controlScores: number[] = [];
-  const championScores: number[] = [];
-  for (const s of run.stages) {
-    const vc =
-      s.referenceJudge?.verdictByContestant?.[controlId] ??
-      s.judge?.verdictByContestant?.[controlId];
-    const vh =
-      s.referenceJudge?.verdictByContestant?.[championId] ??
-      s.judge?.verdictByContestant?.[championId];
-    controlScores.push(VERDICT_SCORE[vc ?? 'nao']);
-    championScores.push(VERDICT_SCORE[vh ?? 'nao']);
-  }
-  return { controlScores, championScores };
 }
 
 
@@ -592,7 +566,16 @@ async function trainingLoop(
       //    pontos de judge-score. A regua e o 'original' (base) na iteracao 0 e
       //    o 'carry' (campeao anterior re-testado verbatim) nas demais.
       const controlId = i === 0 ? 'original' : 'carry';
-      const pick = pickWinner(buildRankEntries(runRec, controlId), { minGain });
+      // IMPL-005: o ganho e o Δ PAREADO (so etapas com veredito nos DOIS
+      // lados; ausente nunca vira 'nao') e, com >10% de pares excluidos, a
+      // promocao so vale se sobreviver ao pior/melhor caso (ver pickWinner).
+      const pick = pickWinner(buildRankEntries(runRec, controlId), {
+        minGain,
+        scoresById: stageScoresByContestant(
+          runRec.stages,
+          runRec.contestants.map((c) => c.id),
+        ),
+      });
       let promoted = false;
       if (pick.isWinner && pick.best) {
         const wc = runRec.contestants.find((c) => c.id === pick.best!.id);
@@ -632,6 +615,7 @@ async function trainingLoop(
         golds: medalRow?.golds ?? 0,
         silvers: medalRow?.silvers ?? 0,
         bronzes: medalRow?.bronzes ?? 0,
+        ...(pick.gate ? { gate: pick.gate } : {}),
       });
 
       // F4.1: promocao entra no POOL (nunca derruba o campeao unico — o pool
@@ -675,7 +659,12 @@ async function trainingLoop(
         // proxima geracao; continuar so queimaria custo re-testando a regua.
         record.convergedAtIteration = i;
         emitSessionEvent({ type: 'session.converged', sessionId, iteration: i });
-        log(sessionId, `convergiu na iteracao ${i + 1} (ganho ${pick.gain.toFixed(1)}pp < minGain ${minGain})`);
+        log(
+          sessionId,
+          pick.gate?.decision === 'inconclusive'
+            ? `parou sem promocao na iteracao ${i + 1}: gate INCONCLUSIVO (${pick.gate.pairing.excludedPairs} de ${pick.gate.pairing.n} pares sem veredito; a decisao muda no pior/melhor caso)`
+            : `convergiu na iteracao ${i + 1} (ganho ${pick.gain.toFixed(1)}pp < minGain ${minGain})`,
+        );
         await saveSession(record);
         break;
       }
@@ -843,21 +832,33 @@ async function finalizeHoldout(
   }
 
   if (holdoutRun) {
-    const controlScore = judgeScoreOf(holdoutRun, 'holdout-control');
-    const championScore = judgeScoreOf(holdoutRun, 'holdout-champion');
+    // IMPL-005: medias, ganho e teste sobre OS MESMOS pares — so etapas com
+    // veredito nos DOIS lados (ausente sai dos dois, nunca vira 'nao').
+    const { controlScores, championScores } = pairedStageScores(
+      holdoutRun.stages,
+      'holdout-control',
+      'holdout-champion',
+    );
+    const coverage = pairCoverage(controlScores, championScores);
+    const controlScore = coverage.controlMeanPp ?? 0;
+    const championScore = coverage.championMeanPp ?? 0;
     record.holdout = {
       n: holdoutStages.length,
       controlScore,
       championScore,
-      gain: championScore - controlScore,
+      gain: coverage.meanDiffPp ?? 0,
       regressed: championScore < controlScore,
+      nEfetivo: coverage.nEfetivo,
+      excludedPairs: coverage.excludedPairs,
+      completeness: coverage.completeness,
+    };
+    record.pairing = {
+      source: 'holdout',
+      controlId: 'holdout-control',
+      championId: 'holdout-champion',
+      ...coverage,
     };
     emitSessionEvent({ type: 'session.holdout', sessionId, holdout: record.holdout });
-    const { controlScores, championScores } = pairedStageScores(
-      holdoutRun,
-      'holdout-control',
-      'holdout-champion',
-    );
     record.significance = pairedSignificance(controlScores, championScores);
   } else if (lastRun && champion) {
     // Sem run de holdout (split invalido, campeao == base ou run falhou): a
@@ -875,10 +876,16 @@ async function finalizeHoldout(
       lastRun.contestants.some((c) => c.id === championIdInLastRun);
     if (pairable) {
       const { controlScores, championScores } = pairedStageScores(
-        lastRun,
+        lastRun.stages,
         pairingControl,
         championIdInLastRun,
       );
+      record.pairing = {
+        source: 'training',
+        controlId: pairingControl,
+        championId: championIdInLastRun,
+        ...pairCoverage(controlScores, championScores),
+      };
       record.significance = pairedSignificance(controlScores, championScores);
     } else {
       // Campeao == controle (convergiu sem ganho) ou ids ausentes na run:

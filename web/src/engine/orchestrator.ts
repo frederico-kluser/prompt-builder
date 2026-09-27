@@ -12,6 +12,7 @@ import { pinJudgeContract, verbosityReport } from '../../../src/engine/judgeCali
 import { mergeScenarios } from './scenarioPack';
 import { sanitizeLlmVariants, variantsToContestants } from './llmVariants';
 import { judgeScoreFromVerdicts } from './rank';
+import { runCompleteness } from './stats';
 import { emitEvent } from './events';
 import { saveRun } from './storage';
 import { contestantsFromConfig } from './normalize';
@@ -667,6 +668,11 @@ async function runLoop(
       // Estavel: empate de pontos E winRate mantem a ordem dos contestants.
       .sort((a, b) => b.points - a.points || b.winRate - a.winRate);
   }
+
+  // IMPL-005 (R-04:REC-2): n nominal × efetivo por contestant, motivo de cada
+  // veredito ausente e pares com a regua — a diferenca fica NO RECORD, visivel
+  // em `runs show`/UI, em vez de sumir numa media com ausente contado como 'nao'.
+  record.completeness = runCompleteness(record);
 
   // F3.6 + F4.2 (PLANO-PARIDADE): avisos de imparcialidade + diagnostico do
   // juiz ficam NO RECORD — zero LLM, tudo derivado do que ja rodou. O pin do

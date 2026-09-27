@@ -3,7 +3,8 @@
 // Uma variante só é promovida se superar o judge-score do controle por uma
 // margem mínima (`minGain`); sem ganho, o controle se mantém (convergência).
 
-import type { Verdict } from './types.js';
+import type { GateConclusion, IterationGate, SensitivityCase, Verdict } from './types.js';
+import { pairCoverage, pairDiffs, sensitivityAnalysis, type PairScore } from './stats.js';
 
 /**
  * Judge-score em [0,100] a partir dos vereditos pointwise de um contestant.
@@ -53,16 +54,43 @@ export function rankEntries(entries: RankEntry[]): RankEntry[] {
   );
 }
 
+/** Resultado do gate de promoção de uma iteração. */
+export interface PickResult {
+  best: RankEntry | undefined;
+  control: RankEntry | undefined;
+  /** Vantagem do `best` sobre o controle em p.p. (pareada quando há `scoresById`). */
+  gain: number;
+  isWinner: boolean;
+  /**
+   * Pareamento honesto best × controle (IMPL-005) — presente quando
+   * `scoresById` cobre os dois. É o registro auditável da decisão.
+   */
+  gate?: IterationGate;
+}
+
+const round2 = (x: number): number => Number(x.toFixed(2)) + 0;
+const meanPp = (diffs: readonly number[]): number =>
+  diffs.length ? (diffs.reduce((s, d) => s + d, 0) / diffs.length) * 100 : 0;
+
 /**
  * Escolhe o vencedor entre as entradas. `best` é a melhor variante (controle
  * excluído — ele é a régua, não um candidato); `gain` é a vantagem do `best`
  * sobre o controle em pontos de judge-score; `isWinner` exige `gain >= minGain`
  * (default 1.0 — promoção só com margem real, senão o treino convergiu).
+ *
+ * **Pareamento honesto (IMPL-005, R-04:REC-2).** Com `scoresById` (score por
+ * etapa na escala 0–1, `null` = sem veredito — ver `stageScoresByContestant`),
+ * o ganho é o Δ PAREADO: média de (best − controle) só nas etapas com veredito
+ * nos DOIS lados. Antes eram dois judge-scores sobre conjuntos de etapas
+ * diferentes (e o ausente contava 'nao'). Com exclusões > 10% dos pares, a
+ * decisão é refeita no pior caso (best perde todo ausente, controle ganha) e no
+ * melhor; se ela muda, o gate é INCONCLUSIVO e não promove — margem que só
+ * existe com imputação favorável não é margem real.
  */
 export function pickWinner(
   entries: RankEntry[],
-  opts?: { minGain?: number },
-): { best: RankEntry | undefined; control: RankEntry | undefined; gain: number; isWinner: boolean } {
+  opts?: { minGain?: number; scoresById?: Readonly<Record<string, readonly PairScore[]>> },
+): PickResult {
   const minGain = opts?.minGain ?? 1.0;
   const control = entries.find((e) => e.isControl);
   const best = rankEntries(entries.filter((e) => !e.isControl))[0];
@@ -73,6 +101,32 @@ export function pickWinner(
     // ausência de um baseline que a run nunca teve.
     return { best, control: undefined, gain: 0, isWinner: true };
   }
-  const gain = best.judgeScore - control.judgeScore;
-  return { best, control, gain, isWinner: gain >= minGain };
+  const controlScores = opts?.scoresById?.[control.id];
+  const bestScores = opts?.scoresById?.[best.id];
+  if (!controlScores || !bestScores) {
+    const gain = best.judgeScore - control.judgeScore;
+    return { best, control, gain, isWinner: gain >= minGain };
+  }
+
+  const { diffs } = pairDiffs(controlScores, bestScores);
+  const gain = meanPp(diffs);
+  // Sem nenhum par completo não há evidência de ganho: nunca promove.
+  const decide = (d: readonly number[]): SensitivityCase<GateConclusion> => {
+    const g = meanPp(d);
+    return { meanDiffPp: round2(g), conclusion: d.length > 0 && g >= minGain ? 'promote' : 'hold' };
+  };
+  const passes = decide(diffs).conclusion === 'promote';
+  const sensitivity = sensitivityAnalysis(controlScores, bestScores, decide);
+  const inconclusive = sensitivity?.inconclusive === true;
+  const isWinner = passes && !inconclusive;
+  const gate: IterationGate = {
+    controlId: control.id,
+    bestId: best.id,
+    minGain,
+    gainPp: round2(gain),
+    pairing: pairCoverage(controlScores, bestScores),
+    ...(sensitivity ? { sensitivity } : {}),
+    decision: inconclusive ? 'inconclusive' : isWinner ? 'promoted' : 'held',
+  };
+  return { best, control, gain, isWinner, gate };
 }

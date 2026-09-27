@@ -11,9 +11,20 @@
 // sinais dá a distribuição nula exata — para qualquer n, com empates e zeros.
 // IC95% por INVERSÃO do mesmo teste e teste do sinal exato como sensibilidade.
 // É SUPORTE À DECISÃO; o gate da melhor de K (max-T) é outro item.
+//
+// IMPL-005 (R-04:REC-2): pareamento HONESTO. Par sem veredito sai dos DOIS
+// lados — antes o trainer imputava 'nao' (0/0), inflando n e misturando falha
+// de infraestrutura com métrica. n nominal × efetivo e completude vão para o
+// record, e exclusões > 10% disparam a sensibilidade pior/melhor caso.
 
 import type {
+  ObservationCoverage,
+  PairCoverage,
   PairedSignificance,
+  PairSensitivity,
+  RunCompleteness,
+  SensitivityCase,
+  SignificanceConclusion,
   SignificanceMethod,
   StoredSignificance,
   Verdict,
@@ -83,27 +94,46 @@ export function pairDiffs(
   championScores: readonly PairScore[],
   pairKeys?: readonly string[],
 ): { diffs: number[]; nominal: number; excluded: number } {
-  const diffs: number[] = [];
-  let nominal = 0;
+  const pairs = alignPairs(controlScores, championScores, pairKeys);
+  const diffs = completeDiffs(pairs);
+  return { diffs, nominal: pairs.length, excluded: pairs.length - diffs.length };
+}
+
+/** Um par nominal (controle, campeão) — qualquer lado pode estar ausente. */
+interface AlignedPair {
+  control: PairScore;
+  champion: PairScore;
+}
+
+/** Alinha os pares nominais (posicional ou por chave — ver {@link pairDiffs}). */
+function alignPairs(
+  controlScores: readonly PairScore[],
+  championScores: readonly PairScore[],
+  pairKeys?: readonly string[],
+): AlignedPair[] {
+  const pairs: AlignedPair[] = [];
   if (pairKeys) {
     const champByKey = new Map<string, PairScore>();
     const nChamp = Math.min(championScores.length, pairKeys.length);
     for (let i = 0; i < nChamp; i += 1) champByKey.set(pairKeys[i], championScores[i]);
-    nominal = Math.min(controlScores.length, pairKeys.length);
+    const nominal = Math.min(controlScores.length, pairKeys.length);
     for (let i = 0; i < nominal; i += 1) {
-      const c = controlScores[i];
-      const h = champByKey.get(pairKeys[i]);
-      if (isObs(c) && isObs(h)) diffs.push(h - c);
+      pairs.push({ control: controlScores[i], champion: champByKey.get(pairKeys[i]) });
     }
   } else {
-    nominal = Math.min(controlScores.length, championScores.length);
+    const nominal = Math.min(controlScores.length, championScores.length);
     for (let i = 0; i < nominal; i += 1) {
-      const c = controlScores[i];
-      const h = championScores[i];
-      if (isObs(c) && isObs(h)) diffs.push(h - c);
+      pairs.push({ control: controlScores[i], champion: championScores[i] });
     }
   }
-  return { diffs, nominal, excluded: nominal - diffs.length };
+  return pairs;
+}
+
+/** Δ (campeão − controle) SÓ dos pares com observação nos dois lados. */
+function completeDiffs(pairs: readonly AlignedPair[]): number[] {
+  const diffs: number[] = [];
+  for (const { control: c, champion: h } of pairs) if (isObs(c) && isObs(h)) diffs.push(h - c);
+  return diffs;
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +490,11 @@ const clampPp = (x: number): number => Math.min(100, Math.max(-100, x));
  * pela chave (ver {@link pairDiffs}). Observação ausente (`null`/`undefined`/
  * não-finito) em qualquer lado exclui o par dos DOIS lados (`excludedPairs`,
  * `completeness`) — nunca vira 0.
+ *
+ * **Sensibilidade (IMPL-005).** Com exclusões > 10% de `n`, `sensitivity`
+ * refaz o teste imputando os ausentes no pior caso (campeão 0, controle 1) e no
+ * melhor (o inverso), com a conclusão bilateral a 5% de cada um
+ * ({@link significanceConclusion}); se ela muda, `sensitivity.inconclusive`.
  */
 export function pairedSignificance(
   controlScores: readonly PairScore[],
@@ -471,6 +506,12 @@ export function pairedSignificance(
   if (nEfetivo < MIN_PAIRS) return null;
 
   const mc = { iterations: opts?.iterations, seed: opts?.seed };
+  const sensitivity = sensitivityAnalysis(
+    controlScores,
+    championScores,
+    (d) => significanceCase(d, mc),
+    { pairKeys: opts?.pairKeys },
+  );
   const test = signFlipTest(diffs, mc);
   const ci = signFlipConfidenceInterval(diffs, mc);
   let positive = 0;
@@ -497,7 +538,295 @@ export function pairedSignificance(
     method: test.method,
     ciMethod: ci.method,
     signTest: exactSignTest(positive, negative),
+    ...(sensitivity ? { sensitivity } : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// IMPL-005 (R-04:REC-2) — pareamento honesto, n efetivo e sensibilidade
+// ---------------------------------------------------------------------------
+
+/**
+ * Exclusões ACIMA desta fração dos pares tornam obrigatória a análise de
+ * sensibilidade (R-04:REC-2: "quando exclusões > 10%"). Limiar da pesquisa,
+ * gravado em `PairSensitivity.threshold` para a decisão ser reproduzível.
+ */
+export const SENSITIVITY_EXCLUSION_THRESHOLD = 0.1;
+/** α da CONCLUSÃO do relatório — bilateral, como o p que ele exibe (R-04 DEC-1). */
+export const REPORT_ALPHA = 0.05;
+/** Extremos da escala de {@link VERDICT_SCORE}: pior caso = 'nao', melhor = 'resolve'. */
+const SCORE_FLOOR = VERDICT_SCORE.nao;
+const SCORE_CEIL = VERDICT_SCORE.resolve;
+
+const round2 = (x: number): number => Number(x.toFixed(2)) + 0;
+const round4 = (x: number): number => Number(x.toFixed(4)) + 0;
+const meanOf = (xs: readonly number[]): number => {
+  if (xs.length === 0) return 0;
+  let s = 0;
+  for (const x of xs) s += x;
+  return s / xs.length;
+};
+const exceeds = (excluded: number, nominal: number, threshold: number): boolean =>
+  nominal > 0 && excluded / nominal > threshold;
+
+/**
+ * Δ de TODOS os pares nominais com os ausentes imputados no extremo — só para
+ * a sensibilidade, NUNCA para o Δ/teste reportados. `worst`: o campeão perde
+ * todo ausente (0) e o controle ganha todo ausente (1); `best`: o inverso.
+ */
+function extremeDiffs(pairs: readonly AlignedPair[], scenario: 'worst' | 'best'): number[] {
+  const controlMissing = scenario === 'worst' ? SCORE_CEIL : SCORE_FLOOR;
+  const championMissing = scenario === 'worst' ? SCORE_FLOOR : SCORE_CEIL;
+  return pairs.map(
+    ({ control: c, champion: h }) =>
+      (isObs(h) ? h : championMissing) - (isObs(c) ? c : controlMissing),
+  );
+}
+
+/**
+ * Cobertura do pareamento campeão × controle: n nominal, n efetivo, pares
+ * excluídos (dos DOIS lados), completude e as médias SÓ sobre os pares
+ * completos — é o Δ honesto que o gate e o holdout usam. Com exclusões > 10%
+ * acrescenta o Δ nos extremos (`worstMeanDiffPp`/`bestMeanDiffPp`).
+ */
+export function pairCoverage(
+  controlScores: readonly PairScore[],
+  championScores: readonly PairScore[],
+  opts?: { pairKeys?: readonly string[]; threshold?: number },
+): PairCoverage {
+  const pairs = alignPairs(controlScores, championScores, opts?.pairKeys);
+  const n = pairs.length;
+  let nEfetivo = 0;
+  let sumControl = 0;
+  let sumChampion = 0;
+  for (const { control: c, champion: h } of pairs) {
+    if (!isObs(c) || !isObs(h)) continue;
+    nEfetivo += 1;
+    sumControl += c;
+    sumChampion += h;
+  }
+  const excludedPairs = n - nEfetivo;
+  const cov: PairCoverage = {
+    n,
+    nEfetivo,
+    excludedPairs,
+    completeness: n > 0 ? round4(nEfetivo / n) : 1,
+    controlMeanPp: nEfetivo > 0 ? round2((sumControl / nEfetivo) * 100) : null,
+    championMeanPp: nEfetivo > 0 ? round2((sumChampion / nEfetivo) * 100) : null,
+    meanDiffPp: nEfetivo > 0 ? round2(((sumChampion - sumControl) / nEfetivo) * 100) : null,
+  };
+  if (exceeds(excludedPairs, n, opts?.threshold ?? SENSITIVITY_EXCLUSION_THRESHOLD)) {
+    cov.worstMeanDiffPp = round2(meanOf(extremeDiffs(pairs, 'worst')) * 100);
+    cov.bestMeanDiffPp = round2(meanOf(extremeDiffs(pairs, 'best')) * 100);
+  }
+  return cov;
+}
+
+/**
+ * Análise de sensibilidade pior/melhor caso (R-04:REC-2). `undefined` enquanto
+ * as exclusões não passam do limiar (10%). Senão aplica `conclude` a três
+ * vetores de Δ — os pares completos (observado) e TODOS os pares com os
+ * ausentes nos extremos — e marca `inconclusive` se a conclusão de algum
+ * extremo difere da observada. Genérica na conclusão: o relatório usa
+ * {@link significanceConclusion}; o gate de promoção usa Δ ≥ minGain.
+ */
+export function sensitivityAnalysis<C extends string>(
+  controlScores: readonly PairScore[],
+  championScores: readonly PairScore[],
+  conclude: (diffs: readonly number[]) => SensitivityCase<C>,
+  opts?: { pairKeys?: readonly string[]; threshold?: number },
+): PairSensitivity<C> | undefined {
+  const threshold = opts?.threshold ?? SENSITIVITY_EXCLUSION_THRESHOLD;
+  const pairs = alignPairs(controlScores, championScores, opts?.pairKeys);
+  const observedDiffs = completeDiffs(pairs);
+  const excluded = pairs.length - observedDiffs.length;
+  if (!exceeds(excluded, pairs.length, threshold)) return undefined;
+  const observed = conclude(observedDiffs);
+  const worst = conclude(extremeDiffs(pairs, 'worst'));
+  const best = conclude(extremeDiffs(pairs, 'best'));
+  return {
+    excludedFraction: round4(excluded / pairs.length),
+    threshold,
+    observed,
+    worst,
+    best,
+    inconclusive: worst.conclusion !== observed.conclusion || best.conclusion !== observed.conclusion,
+  };
+}
+
+/**
+ * Conclusão do RELATÓRIO: bilateral a {@link REPORT_ALPHA} (o relatório mostra
+ * o p bilateral — R-04 DEC-1), com a direção dada pelo sinal do Δ.
+ */
+export function significanceConclusion(
+  meanDiff: number,
+  pValueTwoSided: number,
+  alpha = REPORT_ALPHA,
+): SignificanceConclusion {
+  if (!(pValueTwoSided < alpha) || meanDiff === 0) return 'no-difference';
+  return meanDiff > 0 ? 'better' : 'worse';
+}
+
+function significanceCase(
+  diffs: readonly number[],
+  mc: { iterations?: number; seed?: number },
+): SensitivityCase<SignificanceConclusion> {
+  const test = signFlipTest(diffs, mc);
+  const mean = meanOf(diffs);
+  return {
+    meanDiffPp: round2(mean * 100),
+    pValue: test.pGreater,
+    pValueTwoSided: test.pTwoSided,
+    conclusion: significanceConclusion(mean, test.pTwoSided),
+  };
+}
+
+// --- Extração dos vereditos por etapa (o que o pareamento lê do record) -----
+
+/** Veredito(s) de UM juiz de etapa, no mínimo que o pareamento lê. */
+interface StageVerdictMapLike {
+  verdictByContestant?: Readonly<Record<string, Verdict>>;
+  /**
+   * Motivo do veredito AUSENTE (IMPL-004, cluster `judge`): lido só para o
+   * relatório de completude. Tipado estruturalmente para aceitar o
+   * `VerdictError` sem acoplar este módulo ao union de motivos.
+   */
+  verdictErrorByContestant?: Readonly<Record<string, { kind: string }>>;
+}
+
+/**
+ * O mínimo de uma etapa que o pareamento lê. Estrutural de propósito: o
+ * `StageRecord` do Node e o do web (mirror de tipos) passam sem conversão.
+ */
+export interface StageVerdictsLike {
+  error?: string;
+  incomplete?: boolean;
+  referenceJudge?: StageVerdictMapLike;
+  judge?: StageVerdictMapLike;
+}
+
+/**
+ * Régua PRIMÁRIA da run: com julgamento por referência em alguma etapa válida,
+ * o judge-score só usa vereditos pointwise (é o que o orchestrator agrega em
+ * `judgeScoreByContestant`); sem nenhum, a régua é o listwise legado. O
+ * pareamento mede na MESMA régua do judge-score — misturar as duas daria um Δ
+ * de uma escala e um gate de outra.
+ */
+export function primaryRuler(stages: readonly StageVerdictsLike[]): 'reference' | 'listwise' {
+  return stages.some((s) => !s.incomplete && s.referenceJudge) ? 'reference' : 'listwise';
+}
+
+const isVerdict = (v: unknown): v is Verdict => v === 'resolve' || v === 'parcial' || v === 'nao';
+
+/** Observação de um contestant numa etapa: o veredito, ou o motivo de não haver. */
+function stageObservation(
+  stage: StageVerdictsLike,
+  contestantId: string,
+  ruler: 'reference' | 'listwise',
+): { verdict: Verdict } | { reason: string } {
+  // Etapa cortada (orçamento/cancelamento) está fora do placar e das médias.
+  if (stage.incomplete) return { reason: 'stage_incomplete' };
+  const bearer = ruler === 'reference' ? stage.referenceJudge : stage.judge;
+  const v = bearer?.verdictByContestant?.[contestantId];
+  if (isVerdict(v)) return { verdict: v };
+  const kind = bearer?.verdictErrorByContestant?.[contestantId]?.kind;
+  if (kind) return { reason: kind };
+  if (stage.error) return { reason: 'stage_error' };
+  if (ruler === 'reference' && !stage.referenceJudge) return { reason: 'no_reference' };
+  return { reason: 'no_verdict' };
+}
+
+/**
+ * Score por etapa (escala 0–1 de {@link VERDICT_SCORE}) de cada contestant, na
+ * régua primária da run. Etapa sem veredito vira `null` — "sem observação",
+ * NUNCA 'nao' (IMPL-005: antes `VERDICT_SCORE[v ?? 'nao']` imputava 0).
+ */
+export function stageScoresByContestant(
+  stages: readonly StageVerdictsLike[],
+  contestantIds: readonly string[],
+): Record<string, PairScore[]> {
+  const ruler = primaryRuler(stages);
+  const out: Record<string, PairScore[]> = {};
+  for (const id of contestantIds) {
+    out[id] = stages.map((s) => {
+      const obs = stageObservation(s, id, ruler);
+      return 'verdict' in obs ? VERDICT_SCORE[obs.verdict] : null;
+    });
+  }
+  return out;
+}
+
+/**
+ * Scores por etapa de controle e campeão, posição a posição, para o teste
+ * pareado. Veredito ausente em qualquer lado vira `null` e o par sai dos DOIS
+ * lados em {@link pairedSignificance}/{@link pairCoverage} — antes era imputado
+ * como 'nao' (0/0), inflando n e misturando falha de infra com métrica.
+ */
+export function pairedStageScores(
+  stages: readonly StageVerdictsLike[],
+  controlId: string,
+  championId: string,
+): { controlScores: PairScore[]; championScores: PairScore[] } {
+  const m = stageScoresByContestant(stages, [controlId, championId]);
+  return { controlScores: m[controlId], championScores: m[championId] };
+}
+
+/** Réguas de uma run, em ordem de precedência (holdout > iteração > base). */
+export const CONTROL_IDS = ['holdout-control', 'carry', 'original'] as const;
+
+/** A régua da run (quem é o controle do pareamento), se existir. */
+export function controlIdOf(contestantIds: readonly string[]): string | undefined {
+  return CONTROL_IDS.find((id) => contestantIds.includes(id));
+}
+
+/**
+ * Completude da run (IMPL-005): por contestant, n nominal (todas as etapas,
+ * inclusive puladas/cortadas) × n efetivo (etapas com veredito na régua
+ * primária) e o motivo de cada ausência; com régua na run, o pareamento de cada
+ * contestant com ela. Puro: o orchestrator grava no record e `runs show`
+ * recalcula para runs antigas.
+ */
+export function runCompleteness(run: {
+  stages: readonly StageVerdictsLike[];
+  contestants: readonly { id: string }[];
+}): RunCompleteness {
+  const ruler = primaryRuler(run.stages);
+  const ids = run.contestants.map((c) => c.id);
+  const n = run.stages.length;
+  const byContestant: Record<string, ObservationCoverage> = {};
+  const scores: Record<string, PairScore[]> = {};
+  for (const id of ids) {
+    const reasons: Record<string, number> = {};
+    const sc: PairScore[] = [];
+    let nEfetivo = 0;
+    for (const s of run.stages) {
+      const obs = stageObservation(s, id, ruler);
+      if ('verdict' in obs) {
+        nEfetivo += 1;
+        sc.push(VERDICT_SCORE[obs.verdict]);
+      } else {
+        reasons[obs.reason] = (reasons[obs.reason] ?? 0) + 1;
+        sc.push(null);
+      }
+    }
+    byContestant[id] = {
+      n,
+      nEfetivo,
+      missing: n - nEfetivo,
+      completeness: n > 0 ? round4(nEfetivo / n) : 1,
+      ...(n - nEfetivo > 0 ? { missingByReason: reasons } : {}),
+    };
+    scores[id] = sc;
+  }
+  const out: RunCompleteness = { n, ruler, byContestant };
+  const controlId = controlIdOf(ids);
+  if (controlId) {
+    out.controlId = controlId;
+    out.vsControl = Object.fromEntries(
+      ids.filter((id) => id !== controlId).map((id) => [id, pairCoverage(scores[controlId], scores[id])]),
+    );
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -535,5 +864,60 @@ export function formatSignificance(sig: StoredSignificance): string {
       ? `n=${nEf} de ${sig.n} (${sig.excludedPairs} sem observação)`
       : `n=${nEf}`;
   const method = sig.method === 'monte-carlo' ? 'Monte Carlo' : 'exato';
-  return `${formatPValue(p)} bilateral (gate unilateral ${formatPValue(sig.pValue)}) · ${ci} · ${nTxt} · ${method}`;
+  const base = `${formatPValue(p)} bilateral (gate unilateral ${formatPValue(sig.pValue)}) · ${ci} · ${nTxt} · ${method}`;
+  const s = sig.sensitivity;
+  if (!s) return base;
+  // IMPL-005: exclusões > 10% — a conclusão só vale se sobreviver aos extremos.
+  return (
+    `${base} · sensibilidade (${fmtPct(s.excludedFraction)} excluídos): ` +
+    `pior Δ ${fmtSignedPp(s.worst.meanDiffPp)}, melhor Δ ${fmtSignedPp(s.best.meanDiffPp)} → ` +
+    (s.inconclusive ? 'INCONCLUSIVO' : 'conclusão robusta')
+  );
+}
+
+/** `80%` / `62.5%` — completude e frações no relatório. */
+const fmtPct = (x: number): string => `${(x * 100).toFixed(1).replace(/\.0$/, '')}%`;
+/** `+12.5pp` / `-7.5pp`. */
+const fmtSignedPp = (x: number): string => `${x >= 0 ? '+' : ''}${x.toFixed(1)}pp`;
+
+/**
+ * Linha de relatório de um pareamento (IMPL-005): a diferença entre n nominal
+ * e n efetivo SEMPRE visível — mesmo sem exclusão ("n efetivo 10 de 10").
+ * Ex.: `n efetivo 8 de 10 (2 pares excluídos, completude 80%) · Δ +12.5pp ·
+ * sensibilidade: pior -7.5pp, melhor +22.5pp`.
+ */
+export function formatPairCoverage(
+  c: Pick<PairCoverage, 'n' | 'nEfetivo' | 'excludedPairs' | 'completeness'> & Partial<PairCoverage>,
+): string {
+  const excl = c.excludedPairs === 1 ? '1 par excluído' : `${c.excludedPairs} pares excluídos`;
+  let s = `n efetivo ${c.nEfetivo} de ${c.n} (${excl}, completude ${fmtPct(c.completeness)})`;
+  if (c.meanDiffPp !== undefined && c.meanDiffPp !== null) s += ` · Δ ${fmtSignedPp(c.meanDiffPp)}`;
+  if (c.worstMeanDiffPp !== undefined && c.bestMeanDiffPp !== undefined) {
+    s += ` · sensibilidade: pior ${fmtSignedPp(c.worstMeanDiffPp)}, melhor ${fmtSignedPp(c.bestMeanDiffPp)}`;
+  }
+  return s;
+}
+
+/**
+ * Linhas de texto da completude de uma run (`runs show`): n nominal × efetivo
+ * por contestant (com os motivos das ausências) e o pareamento com a régua.
+ */
+export function formatRunCompleteness(
+  c: RunCompleteness,
+  labelOf: (id: string) => string = (id) => id,
+): string[] {
+  const lines = [`observações (régua ${c.ruler === 'reference' ? 'por referência' : 'listwise'}): n nominal ${c.n}`];
+  for (const [id, o] of Object.entries(c.byContestant)) {
+    const motivos = o.missingByReason
+      ? ` — sem veredito: ${Object.entries(o.missingByReason)
+          .map(([k, v]) => `${k} ${v}`)
+          .join(', ')}`
+      : '';
+    lines.push(`  ${labelOf(id)}: n efetivo ${o.nEfetivo} de ${o.n} (completude ${fmtPct(o.completeness)})${motivos}`);
+  }
+  if (c.controlId && c.vsControl) {
+    lines.push(`pares com a régua (${labelOf(c.controlId)}):`);
+    for (const [id, p] of Object.entries(c.vsControl)) lines.push(`  ${labelOf(id)}: ${formatPairCoverage(p)}`);
+  }
+  return lines;
 }
