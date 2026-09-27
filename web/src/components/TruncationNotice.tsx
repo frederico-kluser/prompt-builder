@@ -4,7 +4,7 @@
 // fora do placar por isso; acima de 2% vira alerta (mesmo texto do CLI — a
 // regra e o limiar vêm do módulo puro `src/engine/truncation.ts`, fonte única).
 import type { CostRole, RunRecord } from '../api';
-import { truncationAlert } from '../../../src/engine/truncation.js';
+import { truncationAlert, truncationByRoleEffort, truncationCellAlert } from '../../../src/engine/truncation.js';
 import { ROLE_LABEL } from '../../../src/budget.js';
 import { Banner } from './primitives';
 
@@ -17,13 +17,16 @@ export function TruncationNotice({ record }: { record: RunRecord }) {
   const gabaritos = record.stages.filter((s) => s.gabaritoCall?.truncated).length;
   const porPapel = record.finishSignalsByRole;
   const alerta = truncationAlert({ ...counts, rate }, porPapel);
+  // IMPL-015: taxa por papel × esforço — só as células que truncaram; alerta > 1%.
+  const celulas = truncationByRoleEffort(porPapel).filter((c) => c.truncated > 0);
+  const alertaCelula = truncationCellAlert(celulas);
   const pct = (rate * 100).toFixed(1).replace('.', ',');
   const papeis = Object.entries(porPapel ?? {})
     .filter(([, c]) => c && c.truncated > 0)
     .map(([role, c]) => `${ROLE_LABEL[role as CostRole] ?? role} ${c!.truncated} de ${c!.calls}`)
     .join(', ');
   return (
-    <Banner tone={alerta ? 'warn' : 'neutral'}>
+    <Banner tone={alerta || alertaCelula ? 'warn' : 'neutral'}>
       {alerta ?? (
         <>
           {counts.truncated} de {counts.calls} chamadas ({pct}%) saíram truncadas no teto de tokens
@@ -33,6 +36,19 @@ export function TruncationNotice({ record }: { record: RunRecord }) {
         </>
       )}
       {gabaritos > 0 && ` ${gabaritos} gabarito(s) truncado(s) foram descartados — esses cenários foram julgados sem gabarito.`}
+      {celulas.length > 0 && (
+        <span className="mt-1 block text-muted-foreground">
+          Por papel × esforço:{' '}
+          {celulas
+            .map(
+              (c) =>
+                `${ROLE_LABEL[c.role] ?? c.role} @ ${c.effort} ${c.truncated} de ${c.calls} ` +
+                `(${(c.rate * 100).toFixed(1).replace('.', ',')}%)${c.alert ? ' — acima de 1%' : ''}`,
+            )
+            .join(' · ')}
+          . Veredito de juiz/duelo truncado é descartado (nunca vira parcial nem empate).
+        </span>
+      )}
     </Banner>
   );
 }

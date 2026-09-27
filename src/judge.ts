@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
+import { isJudgeCutKind } from './engine/truncation.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
 import { aggregateVerdicts } from './engine/verdictAggregate.js';
 import {
@@ -250,28 +251,27 @@ async function rankOnePass(
   // sem isso a etapa sairia sem ranking — incompleta com cara de completa.
   const attempt = await callJudgeWithRetry({
     call: async (reminder) =>
-      (
-        await chatCompletion({
-          apiKey,
-          modelId: judgeModelId,
-          messages: [
-            { role: 'system', content: prompt.system },
-            { role: 'user', content: withReminder(prompt.user, reminder) },
-          ],
-          temperature: 0,
-          // Antes SEM teto nenhum (IMPL-016): o ledger reservava 1024 as cegas e o
-          // raciocinio nao tinha limite. Teto TOTAL do juiz, o mesmo do pointwise.
-          maxTokens: ROLE_MAX_TOKENS.judge,
-          timeoutMs,
-          responseFormatJson: true,
-          responseSchema: { name: 'veredito_listwise', schema: listwiseSchema(labels) },
-          reasoningLevel: extra.reasoningLevel,
-          role: 'judge',
-          signal: extra.ctx?.signal,
-          sink: extra.ctx?.sink,
-          maxPricePerMTok: extra.maxPricePerMTok,
-        })
-      ).text,
+      // Resultado INTEIRO (texto + finish_reason): o truncamento e checado antes do parse (IMPL-015).
+      await chatCompletion({
+        apiKey,
+        modelId: judgeModelId,
+        messages: [
+          { role: 'system', content: prompt.system },
+          { role: 'user', content: withReminder(prompt.user, reminder) },
+        ],
+        temperature: 0,
+        // Antes SEM teto nenhum (IMPL-016): o ledger reservava 1024 as cegas e o
+        // raciocinio nao tinha limite. Teto TOTAL do juiz, o mesmo do pointwise.
+        maxTokens: ROLE_MAX_TOKENS.judge,
+        timeoutMs,
+        responseFormatJson: true,
+        responseSchema: { name: 'veredito_listwise', schema: listwiseSchema(labels) },
+        reasoningLevel: extra.reasoningLevel,
+        role: 'judge',
+        signal: extra.ctx?.signal,
+        sink: extra.ctx?.sink,
+        maxPricePerMTok: extra.maxPricePerMTok,
+      }),
     parse: (text) => parsePass(text, labels, prompt.guard.canary),
     formatReminder: prompt.formatReminder,
     signal: extra.ctx?.signal,
@@ -333,7 +333,9 @@ async function runOneJudge(
   );
   const valid = passResults.flatMap((p) => (p.ok ? [p.pass] : []));
   if (valid.length === 0) {
-    const falha = passResults.find((p): p is Extract<PassAttempt, { ok: false }> => !p.ok);
+    // Saida CORTADA tem precedencia no motivo (IMPL-015).
+    const falhasPass = passResults.filter((p): p is Extract<PassAttempt, { ok: false }> => !p.ok);
+    const falha = falhasPass.find((p) => isJudgeCutKind(p.error.kind)) ?? falhasPass[0];
     return {
       ok: false,
       judgeModelId,
@@ -413,7 +415,7 @@ export async function judgeStage(params: JudgeStageParams): Promise<JudgeResult>
   const falhas = results.flatMap((j) => (j.ok ? [] : [j]));
 
   if (judges.length === 0) {
-    const f = falhas[0];
+    const f = falhas.find((x) => isJudgeCutKind(x.error.kind)) ?? falhas[0];
     const error: VerdictError =
       judgeIds.length > 1 ? { ...f.error, message: `${f.judgeModelId}: ${f.error.message}` } : f.error;
     return semJuiz('Nenhum juiz retornou saída válida.', error);

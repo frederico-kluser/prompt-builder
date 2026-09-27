@@ -8,6 +8,7 @@ import type {
   CostEntry,
   CostRole,
   FinishSignalCounts,
+  JudgeCutKind,
   PricingTier,
   RunPhase,
   StageIncompleteReason,
@@ -51,6 +52,7 @@ export { COST_ROLES } from '../../../src/types.js';
 export type {
   CallFinishSignals,
   FinishSignalCounts,
+  JudgeCutKind,
   StageIncompleteReason,
   TruncationSignal,
 } from '../../../src/types.js';
@@ -936,6 +938,16 @@ export type RunEvent =
       contestantIds?: string[];
     }
   | { type: 'competitor.finished'; runId: string; stageIndex: number; response: CompetitorResponse }
+  /** Veredito invalidado por saida de juiz cortada (IMPL-015, espelho de src/types.ts). */
+  | {
+      type: 'judge.truncated';
+      runId: string;
+      stageIndex: number;
+      phase: 'judge' | 'duel';
+      contestantIds: string[];
+      kinds: JudgeCutKind[];
+      detail: string;
+    }
   | { type: 'stage.judging'; runId: string; stageIndex: number }
   | {
       type: 'stage.judged';

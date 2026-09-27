@@ -25,10 +25,15 @@ import { BudgetLedger, isControlSignal, RunCancelled, toControlSignal } from './
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
 import { acquireLock } from './runLocks';
 import {
+  cutDuels,
+  cutVerdicts,
+  describeJudgeCut,
   describeTruncatedReference,
   describeTruncatedStage,
   truncatedResponses,
   truncationAlert,
+  truncationByRoleEffort,
+  truncationCellAlert,
   truncationRecordFields,
 } from '../../../src/engine/truncation.js';
 import type {
@@ -879,6 +884,28 @@ async function runLoop(
           };
           log(runId, `stage ${i + 1} juiz falhou: ${stageRecord.judge.rawJudgeText}`);
         }
+        // IMPL-015 (R-08:REC-11): saida do juiz CORTADA (finish_reason
+        // length/timeout) => veredito INVALIDO — ja chega AUSENTE (fora do
+        // placar sintetizado, das medias e do pareamento; conta em
+        // failureCountByRole.judge). Aqui so o torna VISIVEL.
+        const cortados = cutVerdicts(stageRecord.referenceJudge, stageRecord.judge);
+        if (cortados.length > 0) {
+          const detail = describeJudgeCut(
+            i,
+            'judge',
+            cortados.map((c) => ({ label: labelOf(c.contestantId), kind: c.kind })),
+          );
+          log(runId, detail);
+          emitEvent({
+            type: 'judge.truncated',
+            runId,
+            stageIndex: i,
+            phase: 'judge',
+            contestantIds: cortados.map((c) => c.contestantId),
+            kinds: cortados.map((c) => c.kind),
+            detail,
+          });
+        }
         // Placar ADITIVO (ordem-independente). Listwise: POR JUIZ (cada juiz
         // pontua seu ranking). Referencia: 1x pelo ranking por veredito —
         // judges vem vazio de proposito.
@@ -1018,6 +1045,26 @@ async function runLoop(
               timeoutMs: record.config.timeoutMs,
               ctx,
             });
+            // IMPL-015: duelo com saida do juiz cortada fica SEM resultado
+            // (failedDuels, nunca empate) — e o evento o torna visivel.
+            const duelosCortados = cutDuels(st.duels);
+            if (duelosCortados.length > 0) {
+              const detail = describeJudgeCut(
+                st.index,
+                'duel',
+                duelosCortados.map((d) => ({ label: `${labelOf(d.a)} × ${labelOf(d.b)}`, kind: d.kind })),
+              );
+              log(runId, detail);
+              emitEvent({
+                type: 'judge.truncated',
+                runId,
+                stageIndex: st.index,
+                phase: 'duel',
+                contestantIds: [...new Set(duelosCortados.flatMap((d) => [d.a, d.b]))],
+                kinds: duelosCortados.map((d) => d.kind),
+                detail,
+              });
+            }
             emitEvent({ type: 'stage.dueled', runId, stageIndex: st.index, duels: st.duels });
           } catch (duelErr) {
             if (isControlSignal(duelErr)) throw duelErr;
@@ -1131,6 +1178,9 @@ async function runLoop(
       record.finishSignalsByRole,
     );
     if (alertaTrunc) log(runId, `ALERTA de truncamento: ${alertaTrunc}`);
+    // IMPL-015: taxa por papel x esforco, alerta por celula > 1%.
+    const alertaCelula = truncationCellAlert(truncationByRoleEffort(record.finishSignalsByRole));
+    if (alertaCelula) log(runId, `ALERTA de truncamento: ${alertaCelula}`);
   } catch (err) {
     // Diagnostico e SUPORTE, nunca derruba a finalizacao.
     log(runId, `diagnostico do juiz falhou (ignorado): ${err instanceof Error ? err.message : String(err)}`);

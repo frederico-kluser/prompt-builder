@@ -497,6 +497,15 @@ function relatorioFinal(out: Output, record: RunRecord): void {
         `${etapasTruncadas} etapa(s) fora do placar` +
         (gabaritosTruncados > 0 ? ` · ${gabaritosTruncados} gabarito(s) descartado(s)` : ''),
     );
+    // IMPL-015: papel x esforco — a celula concreta a ajustar (! = acima de 1%).
+    const celulas = (trunc.truncationByRoleEffort ?? [])
+      .filter((c) => c.truncated > 0)
+      .map(
+        (c) =>
+          `${ROLE_LABEL[c.role] ?? c.role}@${c.effort} ${c.truncated}/${c.calls} ` +
+          `(${(c.rate * 100).toFixed(1)}%)${c.alert ? ' !' : ''}`,
+      );
+    if (celulas.length > 0) out.line(`Por esforço  ${celulas.join(', ')}`);
   }
 
   // Qual REGUA foi usada precisa ficar explicito: standings (finais) e
@@ -558,8 +567,10 @@ function extrasData(x: OutcomeExtras): Record<string, unknown> {
 function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
   // IMPL-014: o alerta de truncamento (> 2% das chamadas) vai SEMPRE para o
   // stderr (narração), em qualquer formato; no payload ele sai em `truncationAlert`.
-  const alertaTrunc = truncationFields(record).truncationAlert;
-  if (alertaTrunc) out.warn(alertaTrunc);
+  const camposTrunc = truncationFields(record);
+  if (camposTrunc.truncationAlert) out.warn(camposTrunc.truncationAlert);
+  // IMPL-015: alerta por celula papel x esforco (> 1%) — payload em `truncationCellAlert`.
+  if (camposTrunc.truncationCellAlert) out.warn(camposTrunc.truncationCellAlert);
   // Falha vira o envelope de erro (com o resumo em `details`), nunca um
   // `result` ok:false seguido de um segundo objeto — dois JSONs no stdout.
   if (record.status === 'error') {

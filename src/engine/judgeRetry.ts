@@ -13,6 +13,9 @@
 //   • saída inválida (JSON/schema) — UM novo pedido com lembrete de formato.
 //     Antes caía num parse heurístico e o lixo virava 'parcial': uma nota
 //     inventada que entrava nas médias e nas lições do reescritor;
+//   • saída CORTADA (IMPL-015: `finish_reason` length/timeout) — checada
+//     ANTES do parse: veredito inválido (`truncated`/`timeout`), nunca lido
+//     do pedaço truncado; truncamento não repete nem ganha lembrete;
 //   • o resto — falha. Quem chama registra `VerdictError`, NUNCA um veredito.
 //
 // `BudgetExceeded`/`RunCancelled` sobem intactos (controle, não erro), e um
@@ -20,6 +23,7 @@
 // falha do juiz e não pode inflar `failureCountByRole`.
 
 import { isControlSignal, RunCancelled } from '../budget.js';
+import { judgeReplyCut, type JudgeReplyFinish } from './truncation.js';
 import type { VerdictError } from '../types.js';
 
 export type JudgeAttempt<T> =
@@ -27,8 +31,13 @@ export type JudgeAttempt<T> =
   | { ok: false; error: VerdictError; calls: number };
 
 export interface JudgeRetryOptions<T> {
-  /** UMA chamada ao juiz. `reminder` presente = o novo pedido com lembrete de formato. */
-  call: (reminder: string | undefined) => Promise<string>;
+  /**
+   * UMA chamada ao juiz. `reminder` presente = o novo pedido com lembrete de
+   * formato. Devolva o RESULTADO do gateway (texto + sinais de fim), nao so o
+   * `.text`: e dele que sai a checagem de truncamento ANTES do parse
+   * (IMPL-015). Texto puro segue aceito (sem sinal de fim = nada a checar).
+   */
+  call: (reminder: string | undefined) => Promise<string | JudgeReplyFinish>;
   /** Parse ESTRITO: `null` = saída inválida (nunca um veredito inventado). */
   parse: (text: string) => T | null;
   /** Lembrete anexado ao pedido depois de uma saída inválida. */
@@ -68,10 +77,11 @@ export async function callJudgeWithRetry<T>(opts: JudgeRetryOptions<T>): Promise
   let timeoutRetried = false;
   let reminder: string | undefined;
   for (;;) {
-    let text: string;
+    let reply: JudgeReplyFinish;
     try {
       calls += 1;
-      text = await opts.call(reminder);
+      const raw = await opts.call(reminder);
+      reply = typeof raw === 'string' ? { text: raw } : raw;
     } catch (err) {
       if (isControlSignal(err)) throw err;
       if (opts.signal?.aborted) throw new RunCancelled(opts.signal.reason);
@@ -82,6 +92,21 @@ export async function callJudgeWithRetry<T>(opts: JudgeRetryOptions<T>): Promise
       }
       return { ok: false, error, calls };
     }
+    // IMPL-015 (R-08:REC-11): saida CORTADA (finish_reason length/timeout)
+    // e checada ANTES do parse — conteudo truncado nunca vira veredito, nem
+    // quando o pedaco por acaso parseia. Truncamento nao repete (mesmo teto,
+    // mesma temperatura 0 => mesmo corte; so gastaria) e NAO ganha lembrete de
+    // formato (o formato nao e o problema). O timeout declarado no fim segue a
+    // politica do timeout por excecao: 1 nova chance.
+    const cut = judgeReplyCut(reply);
+    if (cut) {
+      if (cut.kind === 'timeout' && !timeoutRetried) {
+        timeoutRetried = true;
+        continue;
+      }
+      return { ok: false, error: cut, calls };
+    }
+    const text = reply.text;
     const parsed = opts.parse(text);
     if (parsed !== null) return { ok: true, value: parsed, calls };
     if (reminder === undefined) {

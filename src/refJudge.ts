@@ -4,6 +4,7 @@ import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { matchExpected } from './engine/groundTruth.js';
 import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
+import { isJudgeCutKind } from './engine/truncation.js';
 import { aggregateVerdicts, tieLabel } from './engine/verdictAggregate.js';
 import {
   DATA_BLOCKS_NOTICE,
@@ -191,27 +192,26 @@ async function judgeOne(params: {
   const prompt = buildReferenceJudgePrompt(stage, reference, response.text);
   const attempt = await callJudgeWithRetry({
     call: async (reminder) =>
-      (
-        await chatCompletion({
-          apiKey,
-          modelId: judgeModelId,
-          messages: [
-            { role: 'system', content: prompt.system },
-            { role: 'user', content: withReminder(prompt.user, reminder) },
-          ],
-          temperature: 0,
-          // Teto TOTAL com sala p/ raciocinio (IMPL-016): 1024 virava `length` vazio.
-          maxTokens: ROLE_MAX_TOKENS.judge,
-          responseFormatJson: true,
-          responseSchema: { name: 'veredito_pointwise', schema: REFERENCE_JUDGE_SCHEMA },
-          reasoningLevel,
-          timeoutMs,
-          role: 'judge',
-          signal: ctx?.signal,
-          sink: ctx?.sink,
-          maxPricePerMTok,
-        })
-      ).text,
+      // Resultado INTEIRO (texto + finish_reason): o truncamento e checado antes do parse (IMPL-015).
+      await chatCompletion({
+        apiKey,
+        modelId: judgeModelId,
+        messages: [
+          { role: 'system', content: prompt.system },
+          { role: 'user', content: withReminder(prompt.user, reminder) },
+        ],
+        temperature: 0,
+        // Teto TOTAL com sala p/ raciocinio (IMPL-016): 1024 virava `length` vazio.
+        maxTokens: ROLE_MAX_TOKENS.judge,
+        responseFormatJson: true,
+        responseSchema: { name: 'veredito_pointwise', schema: REFERENCE_JUDGE_SCHEMA },
+        reasoningLevel,
+        timeoutMs,
+        role: 'judge',
+        signal: ctx?.signal,
+        sink: ctx?.sink,
+        maxPricePerMTok,
+      }),
     parse: (text) => parseJudgeReply(text, prompt.guard.canary),
     formatReminder: prompt.formatReminder,
     signal: ctx?.signal,
@@ -343,7 +343,10 @@ export async function judgeStageReference(
     const vs = singles.filter((s) => s.contestantId === r.contestantId);
     const oks = vs.filter((s): s is Extract<SingleVerdict, { ok: true }> => s.ok);
     if (oks.length === 0) {
-      const falha = vs.find((s): s is Extract<SingleVerdict, { ok: false }> => !s.ok);
+      // Saida CORTADA tem precedencia no motivo (IMPL-015): e ela que o evento
+      // `judge.truncated` e a taxa papel x esforco precisam enxergar.
+      const falhas = vs.filter((s): s is Extract<SingleVerdict, { ok: false }> => !s.ok);
+      const falha = falhas.find((s) => isJudgeCutKind(s.error.kind)) ?? falhas[0];
       const error = falha?.error ?? { kind: 'judge_failed' as const, message: 'Juiz sem resposta.' };
       verdictErrorByContestant[r.contestantId] =
         judgeIds.length > 1 ? { ...error, message: `${falha?.judgeModelId}: ${error.message}` } : error;

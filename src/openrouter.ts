@@ -2,7 +2,7 @@ import { applyReasoning } from './reasoning.js';
 import { parseLifecycleMeta } from './engine/modelLifecycle.js';
 import { isControlSignal, toControlSignal } from './budget.js';
 import { classifyPrice, priceTokens, type PriceFieldKind } from './engine/pricing.js';
-import { finishSignalsOf, isTruncated, truncationSignals } from './engine/truncation.js';
+import { effortLabelOf, finishSignalsOf, isTruncated, truncationSignals } from './engine/truncation.js';
 import { createPiiGuard, type PiiGuardStats } from './engine/pii.js';
 import { applySensitiveRouting } from './engine/sensitiveRouting.js';
 import type {
@@ -1090,6 +1090,16 @@ function cacheKey(apiKey: string): string {
  * daqui, e e DENTRO delas que a contabilidade acontece (role + sink): um ponto
  * so, igual para Node e navegador.
  */
+/**
+ * Anexa aos sinais de fim o esforco EFETIVO do corpo enviado (IMPL-015): e a
+ * 2a dimensao da taxa de truncamento por papel x esforco no ledger. So nos
+ * sinais que vao ao ledger — o `ChatCompletionResult` nao muda.
+ */
+function withEffort(fim: CallFinishSignals, body: Record<string, unknown>): CallFinishSignals {
+  const effort = effortLabelOf(body);
+  return effort ? { ...fim, effort } : fim;
+}
+
 export class OpenRouterGateway {
   private cfg: GatewayConfig;
   readonly limiter: AimdLimiter;
@@ -1586,9 +1596,12 @@ export class OpenRouterGateway {
       // quando a chamada completou (a falha in-band nao tem fim a medir).
       const fim = inBandFailure
         ? undefined
-        : finishSignalsOf(
-            { text, tokensOut: usage.tokensOut, reasoningTokens: usage.reasoningTokens, finishReason, nativeFinishReason, ...trunc },
-            maxTokens,
+        : withEffort(
+            finishSignalsOf(
+              { text, tokensOut: usage.tokensOut, reasoningTokens: usage.reasoningTokens, finishReason, nativeFinishReason, ...trunc },
+              maxTokens,
+            ),
+            body,
           );
       // Sem bloco `usage` nao ha custo medido: pendente pelo id (IMPL-017).
       const cost = hasUsage(json.usage)
@@ -1749,16 +1762,19 @@ export class OpenRouterGateway {
       // de fim so quando a chamada completou.
       const fim = inBandFailure
         ? undefined
-        : finishSignalsOf(
-            {
-              text: fullText,
-              tokensOut: usage.tokensOut,
-              reasoningTokens: usage.reasoningTokens,
-              finishReason,
-              nativeFinishReason,
-              ...trunc,
-            },
-            maxTokens,
+        : withEffort(
+            finishSignalsOf(
+              {
+                text: fullText,
+                tokensOut: usage.tokensOut,
+                reasoningTokens: usage.reasoningTokens,
+                finishReason,
+                nativeFinishReason,
+                ...trunc,
+              },
+              maxTokens,
+            ),
+            body,
           );
       // Stream sem frame de usage: pendente pelo id dos chunks (IMPL-017).
       const cost = hasUsage(usageRaw)

@@ -12,6 +12,7 @@
 import { chatCompletion } from './openrouter';
 import { ROLE_MAX_TOKENS } from './roleLimits';
 import { callJudgeWithRetry, withReminder, type JudgeAttempt } from '../../../src/engine/judgeRetry.js';
+import { isJudgeCutKind } from '../../../src/engine/truncation.js';
 import { buildDuelPrompt, DUEL_SCHEMA, parseDuelVerdict } from '../../../src/engine/duelPrompt.js';
 import type {
   CompetitorResponse,
@@ -185,29 +186,28 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
     );
     return callJudgeWithRetry({
       call: async (reminder) =>
-        (
-          await chatCompletion({
-            apiKey,
-            modelId: judgeModelId,
-            messages: [
-              { role: 'system', content: prompt.system },
-              { role: 'user', content: withReminder(prompt.user, reminder) },
-            ],
-            temperature: 0,
-            // Teto TOTAL com sala p/ raciocinio (IMPL-016, espelho de src/duels.ts).
-            maxTokens: ROLE_MAX_TOKENS.duel,
-            timeoutMs,
-            responseFormatJson: true,
-            responseSchema: { name: 'veredito_duelo', schema: DUEL_SCHEMA },
-            reasoningLevel,
-            // Papel 'duel' no ledger (IMPL-021): sem isto o gateway contaria o
-            // duelo como 'competitor' (o default de role).
-            role: 'duel',
-            signal: ctx?.signal,
-            sink: ctx?.sink,
-            maxPricePerMTok,
-          })
-        ).text,
+        // Resultado INTEIRO (texto + finish_reason): o truncamento e checado antes do parse (IMPL-015).
+        await chatCompletion({
+          apiKey,
+          modelId: judgeModelId,
+          messages: [
+            { role: 'system', content: prompt.system },
+            { role: 'user', content: withReminder(prompt.user, reminder) },
+          ],
+          temperature: 0,
+          // Teto TOTAL com sala p/ raciocinio (IMPL-016, espelho de src/duels.ts).
+          maxTokens: ROLE_MAX_TOKENS.duel,
+          timeoutMs,
+          responseFormatJson: true,
+          responseSchema: { name: 'veredito_duelo', schema: DUEL_SCHEMA },
+          reasoningLevel,
+          // Papel 'duel' no ledger (IMPL-021): sem isto o gateway contaria o
+          // duelo como 'competitor' (o default de role).
+          role: 'duel',
+          signal: ctx?.signal,
+          sink: ctx?.sink,
+          maxPricePerMTok,
+        }),
       parse: (text) => parseDuelVerdict(text, prompt.guard.canary),
       formatReminder: prompt.formatReminder,
       signal: ctx?.signal,
@@ -270,7 +270,10 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
       const o1 = v1.ok ? (v1.value.winner === 'A' ? 'a' : v1.value.winner === 'B' ? 'b' : 'tie') : undefined;
       const o2 = v2.ok ? (v2.value.winner === 'A' ? 'b' : v2.value.winner === 'B' ? 'a' : 'tie') : undefined;
       if (!v1.ok || !v2.ok || !o1 || !o2) {
-        const falha = !v1.ok ? v1.error : !v2.ok ? v2.error : undefined;
+        // Ordem com saida CORTADA (IMPL-015) tem precedencia no motivo: o duelo
+        // fica SEM resultado (nunca empate) e o evento `judge.truncated` a ve.
+        const erros = [v1, v2].flatMap((v) => (v.ok ? [] : [v.error]));
+        const falha = erros.find((e) => isJudgeCutKind(e.kind)) ?? erros[0];
         return {
           ok: false,
           failure: {

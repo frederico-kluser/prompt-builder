@@ -726,6 +726,13 @@ export interface CallFinishSignals {
    * Presente so quando `truncationRetried`.
    */
   firstAttempt?: CallFinishSignals;
+  /**
+   * Esforco de raciocinio EFETIVAMENTE enviado nesta chamada (IMPL-015): o
+   * degrau ja encaixado na allowlist (`low`…`max`) ou `off`. Ausente = o
+   * pedido nao levou `reasoning` (padrao do provedor). E a 2a dimensao da
+   * taxa de truncamento por papel x esforco.
+   */
+  effort?: string;
 }
 
 /**
@@ -746,7 +753,16 @@ export interface FinishSignalCounts {
   nativeFinishReasons: Record<string, number>;
   /** Quantas chamadas mostraram cada sinal (inclusive os auxiliares que sozinhos nao decidem). */
   signals: Partial<Record<TruncationSignal, number>>;
+  /**
+   * Quebra POR ESFORCO enviado (IMPL-015) — so as chamadas que levaram
+   * `reasoning`; o resto (`calls - soma`) e o padrao do provedor. Ausente =
+   * nenhuma chamada com esforco explicito (ou record anterior ao IMPL-015).
+   */
+  byEffort?: Record<string, { calls: number; truncated: number }>;
 }
+
+/** Motivo de uma saida de juiz CORTADA (IMPL-015) — subconjunto de `VerdictErrorKind`. */
+export type JudgeCutKind = 'truncated' | 'timeout';
 
 /** Por que uma etapa ficou `incomplete` (fora do placar e das medias). */
 export type StageIncompleteReason = 'budget' | 'cancelled' | 'truncation';
@@ -1771,6 +1787,22 @@ export type RunEvent =
       contestantIds?: string[];
     }
   | { type: 'competitor.finished'; runId: string; stageIndex: number; response: CompetitorResponse }
+  /**
+   * Veredito INVALIDADO porque a saida do juiz foi cortada (IMPL-015):
+   * `finish_reason: length` (teto de tokens) ou timeout. Nenhum veredito sai
+   * de conteudo truncado — o contestant fica SEM veredito (`phase: 'judge'`,
+   * pointwise/listwise) ou o duelo fica SEM resultado (`phase: 'duel'`, nunca
+   * empate). `contestantIds` = quem ficou sem observacao; sem texto de resposta.
+   */
+  | {
+      type: 'judge.truncated';
+      runId: string;
+      stageIndex: number;
+      phase: 'judge' | 'duel';
+      contestantIds: string[];
+      kinds: JudgeCutKind[];
+      detail: string;
+    }
   | { type: 'stage.judging'; runId: string; stageIndex: number }
   | {
       type: 'stage.judged';

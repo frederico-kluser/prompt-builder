@@ -8,7 +8,12 @@
 
 import type { Output } from './output.js';
 import type { CostLedgerSummary, CostRole, RunEvent, SessionEvent, RunRecord } from '../types.js';
-import { truncationAlert } from '../engine/truncation.js';
+import {
+  truncationAlert,
+  truncationByRoleEffort,
+  truncationCellAlert,
+  type TruncationCell,
+} from '../engine/truncation.js';
 import { agentVerdictTreeVersionOf, classifyStop } from '../agent/verdictTree.js';
 
 /**
@@ -126,6 +131,10 @@ export function truncationFields(record: RunRecord): {
   truncationCounts?: { calls: number; truncated: number };
   truncationByRole?: Partial<Record<CostRole, { calls: number; truncated: number }>>;
   truncationAlert?: string;
+  /** IMPL-015: taxa por papel x esforco (celulas com chamada). */
+  truncationByRoleEffort?: TruncationCell[];
+  /** IMPL-015: alerta das celulas papel x esforco acima de 1%. */
+  truncationCellAlert?: string;
 } {
   if (typeof record.truncationRate !== 'number') return {};
   const counts = record.truncationCounts ?? { calls: 0, truncated: 0 };
@@ -135,11 +144,15 @@ export function truncationFields(record: RunRecord): {
       .map(([role, c]) => [role, { calls: c!.calls, truncated: c!.truncated }]),
   ) as Partial<Record<CostRole, { calls: number; truncated: number }>>;
   const alerta = truncationAlert({ ...counts, rate: record.truncationRate }, porPapel);
+  const celulas = truncationByRoleEffort(record.finishSignalsByRole);
+  const alertaCelula = truncationCellAlert(celulas);
   return {
     truncationRate: record.truncationRate,
     truncationCounts: counts,
     ...(Object.keys(porPapel).length ? { truncationByRole: porPapel } : {}),
     ...(alerta ? { truncationAlert: alerta } : {}),
+    ...(celulas.length ? { truncationByRoleEffort: celulas } : {}),
+    ...(alertaCelula ? { truncationCellAlert: alertaCelula } : {}),
   };
 }
 
@@ -219,6 +232,18 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         // IMPL-014: cortada no teto (mesmo apos o retry x2) / precisou do retry.
         ...(e.response.truncated ? { truncated: true } : {}),
         ...(e.response.truncationRetried ? { truncationRetried: true } : {}),
+      });
+      break;
+    case 'judge.truncated':
+      // IMPL-015: veredito invalidado por saida do juiz cortada. Ids + motivo,
+      // nunca o texto da resposta nem a saida do juiz.
+      out.event('judge.truncated', {
+        ...base,
+        stageIndex: e.stageIndex,
+        phase: e.phase,
+        contestantIds: e.contestantIds,
+        kinds: e.kinds,
+        detail: e.detail,
       });
       break;
     case 'stage.judging':
