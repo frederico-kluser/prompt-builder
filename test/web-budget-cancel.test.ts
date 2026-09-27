@@ -11,7 +11,10 @@
 //   (iii) estimativa > US$ 1 exige confirmação com faixa e drivers;
 //   (iv)  o ledger é o de src/budget.ts (ver também test/engine-sync.test.ts).
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   createGateway,
   setDefaultGateway,
@@ -21,9 +24,14 @@ import {
 import { isControlSignal, RunCancelled, toControlSignal, BudgetExceeded } from '../src/budget.js';
 import {
   COST_CONFIRM_THRESHOLD_USD,
+  costConfirmationReason,
   estimateLaunchCost,
   requiresCostConfirmation,
 } from '../src/engine/costConfirmation.js';
+import { runToCompletion as runNode } from '../src/orchestrator.js';
+import { prepareOptsFor } from '../src/prepareRun.js';
+import { subscribe as subscribeNodeRun } from '../src/events.js';
+import { getDataDir, setDataDir } from '../src/storage.js';
 import { runToCompletion as runWeb, cancelRun, isRunCancellable } from '../web/src/engine/orchestrator.js';
 import {
   startTraining as startWebTraining,
@@ -138,6 +146,71 @@ const TRAINING = {
   timeoutMs: 60_000,
 } as const;
 
+// Variation standalone: as variantes nascem no `prepare` (reescritor), DEPOIS
+// de o motor montar a estimativa inicial — é o caso que a revisão pegou.
+const VARIATION = {
+  mode: 'variation',
+  theme: 'suporte ao cliente',
+  stages: 2,
+  datagenModelId: 'fake/gen',
+  judgeModelIds: ['fake/judge'],
+  referenceModelId: 'fake/ref',
+  referenceJudging: true,
+  contestantModelId: 'fake/a',
+  basePrompt: 'Voce e um atendente de suporte. Responda com base no contexto do produto.',
+  techniqueIds: ['persona', 'constraints'],
+  promptOptimization: true,
+  optimizerModelId: 'fake/opt',
+  finalists: 3,
+  timeoutMs: 60_000,
+} as const;
+
+/**
+ * Catálogo da sonda da revisão: competidor e juiz caros na ESTIMATIVA
+ * (G2 ≈ US$ 3,3 para 3 variantes × 2 cenários), o resto ~grátis; na FATURA
+ * cada resposta de competidor custa US$ 0,20 — 6 delas passam do teto de 1.
+ */
+function fakeVariationCara(): FakeOpenRouter {
+  return fakePipeline({
+    price: (id) => (id === 'fake/a' || id === 'fake/judge' ? 1e-4 : 1e-9),
+    cost: (m) => (m === 'fake/a' ? 0.2 : 0.0001),
+  });
+}
+
+/** O que a porta atômica G2 garante numa variation cortada antes das respostas. */
+function conferirVariationCortadaNoG2(rec: RunRecord, fake: FakeOpenRouter, eventos: RunEvent[]): void {
+  expect(rec.status, rec.error).toBe('aborted');
+  expect(rec.stoppedReason).toBe('budget');
+  expect(rec.budgetExhausted).toBe(true);
+  expect(rec.stoppedAtPhase).toBe('competitors');
+  // As variantes existiam (original + 2 técnicas) e a porta mediu com ELAS.
+  expect(rec.contestants).toHaveLength(3);
+  const papeis = fake.chatRequests().map(papel);
+  expect(papeis.filter((p) => p === 'rewriter')).toHaveLength(2);
+  // Nenhuma resposta paga sem poder pagar o julgamento — nem juiz, nem duelo.
+  expect(papeis.filter((p) => p === 'competitor')).toHaveLength(0);
+  expect(papeis.filter((p) => p === 'judge')).toHaveLength(0);
+  expect(papeis.filter((p) => p === 'duel')).toHaveLength(0);
+  const porta = eventos.find((e) => e.type === 'run.budget');
+  expect(porta, 'a porta G2 não emitiu run.budget').toMatchObject({
+    type: 'run.budget',
+    phase: 'competitors',
+    decision: 'stop',
+  });
+  expect((porta as { projectedUsd: number }).projectedUsd).toBeGreaterThan(1);
+  for (const st of rec.stages) {
+    expect(st.incomplete).toBe(true);
+    expect(st.incompleteReason).toBe('budget');
+    expect(st.responses).toHaveLength(0);
+    expect(st.judge).toBeUndefined();
+    expect(st.referenceJudge).toBeUndefined();
+  }
+  expect(rec.judgeScoreByContestant).toBeUndefined();
+  // Antes da correção: US$ 1,2005 gastos com teto de US$ 1,00.
+  expect(rec.totalCostUsd).toBeLessThanOrEqual(1);
+  expect(rec.totalCostUsd).toBeCloseTo(fake.billedUsd(), 10);
+}
+
 /** Papel de uma chamada de chat do fake, pelo que ela pede. */
 function papel(req: { model: string; stream: boolean; system: string }): string {
   if (req.model === 'fake/gen') return 'datagen';
@@ -245,6 +318,23 @@ describe('IMPL-020 (iii) — confirmação de custo com faixa e drivers', () => 
     expect(requiresCostConfirmation(1)).toBe(false);
     expect(requiresCostConfirmation(1.0001)).toBe(true);
     expect(requiresCostConfirmation(0.2, ['modelo/sem-preco'])).toBe(true);
+  });
+
+  it('o MOTIVO da confirmação separa "caro" de "sem preço" (o texto do diálogo depende dele)', () => {
+    const base = { thresholdUsd: 1, unpricedModelIds: [] as string[] };
+    expect(costConfirmationReason({ ...base, high: 0.5 })).toBeNull();
+    expect(costConfirmationReason({ ...base, high: 1.5 })).toBe('threshold');
+    // Só preço desconhecido, faixa ≤ US$ 1: dizer "pode custar mais de US$ 1" seria falso.
+    expect(costConfirmationReason({ ...base, high: 0.2, unpricedModelIds: ['x/sem-preco'] })).toBe('unpriced');
+    expect(costConfirmationReason({ ...base, high: 3, unpricedModelIds: ['x/sem-preco'] })).toBe('both');
+    // Coerente com o portão: motivo presente <=> exige confirmação.
+    for (const e of [
+      { ...base, high: 0.5 },
+      { ...base, high: 1.5 },
+      { ...base, high: 0.2, unpricedModelIds: ['x/y'] },
+    ]) {
+      expect(costConfirmationReason(e) !== null).toBe(requiresCostConfirmation(e.high, e.unpricedModelIds));
+    }
   });
 
   it('drivers por papel somam a ponta alta, com chamadas e fatia, do mais caro ao mais barato', () => {
@@ -405,6 +495,34 @@ describe('IMPL-020 (i) — teto menor que a estimativa para a run com parcial ho
     expect(fake.chatRequests().map(papel).filter((p) => p === 'duel')).toHaveLength(0);
   });
 
+  it('variation standalone (createRun → prepare): a porta G2 mede com as variantes geradas', async () => {
+    // Revisão IMPL-020: a estimativa era montada ANTES do `prepare`, com
+    // `contestantIds: []` => ZERO competidores estimados, G2 nunca disparava e a
+    // run pagava 6 respostas sem nota, passando do teto (US$ 1,20 de 1,00).
+    vi.stubGlobal('localStorage', { getItem: () => KEY, setItem: () => undefined, removeItem: () => undefined });
+    const fake = fakeVariationCara();
+    usarGateway(fake.fetch);
+    const cfg = { ...VARIATION, budgetUsd: 1 };
+    const api = await import('../web/src/api.js');
+    const eventos: RunEvent[] = [];
+    // A faixa de lançamento (até ~US$ 8,7) já exige o "sim" do diálogo.
+    const runId = await api.createRun(cfg as never, { costConfirmed: true });
+    const rec = await new Promise<RunRecord>((resolve) => {
+      const unsub = subscribeRun(runId, (e) => {
+        eventos.push(e);
+        if (e.type === 'run.finished') {
+          unsub();
+          resolve(e.record as RunRecord);
+        } else if (e.type === 'run.error') {
+          unsub();
+          resolve({ status: 'error', error: e.error } as unknown as RunRecord);
+        }
+      });
+    });
+    conferirVariationCortadaNoG2(rec, fake, eventos);
+    expect(rec.budgetUsd).toBe(1);
+  });
+
   it('sem teto nada muda: a run termina `finished`, sem stoppedReason', async () => {
     const fake = fakePipeline();
     usarGateway(fake.fetch);
@@ -487,6 +605,58 @@ describe('IMPL-020 (i) — teto menor que a estimativa para a run com parcial ho
       stoppedReason: 'budget',
     });
     expect(rec.stages[0]).toMatchObject({ incomplete: true, incompleteReason: 'budget' });
+  });
+});
+
+// ===========================================================================
+// Mirror Node (src/orchestrator.ts): a mesma porta, pelo caminho do CLI/servidor
+// ===========================================================================
+
+describe('IMPL-020 — mirror Node: variation (prepareOptsFor) respeita a porta G2', () => {
+  let tmp: string;
+  let dirAnterior: string;
+
+  beforeAll(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'pb-impl020-'));
+    dirAnterior = getDataDir();
+    setDataDir(tmp);
+  });
+
+  afterAll(() => {
+    setDataDir(dirAnterior);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('teto abaixo de G2: nenhuma resposta paga, run.budget emitido, etapas com motivo', async () => {
+    const fake = fakeVariationCara();
+    usarGateway(fake.fetch);
+    const cfg = { ...VARIATION, budgetUsd: 1 } as unknown as RunConfig;
+    const runId = 'node-variation-g2';
+    const eventos: RunEvent[] = [];
+    const unsub = subscribeNodeRun(runId, (e) => eventos.push(e as unknown as RunEvent));
+    const rec = (await runNode(cfg, KEY, prepareOptsFor(cfg, KEY, { runId }))) as unknown as RunRecord;
+    unsub();
+    conferirVariationCortadaNoG2(rec, fake, eventos);
+  });
+
+  it('cancelar no meio do julgamento marca a etapa com incompleteReason "cancelled"', async () => {
+    const lento = transporteLento(fakePipeline(), (p) => p === 'judge');
+    usarGateway(lento.fetch);
+    const ac = new AbortController();
+    const fim = runNode(COMPARE as unknown as RunConfig, KEY, { ctx: { signal: ac.signal } });
+    await esperar(() => lento.st.lentasEmVoo === 4);
+    const noClique = lento.st.chegaram;
+    ac.abort(new RunCancelled('clique'));
+    const rec = (await fim) as unknown as RunRecord;
+    expect(lento.st.chegaram).toBe(noClique);
+    expect(rec.status).toBe('aborted');
+    expect(rec.stoppedReason).toBe('cancelled');
+    for (const st of rec.stages) {
+      expect(st.incomplete).toBe(true);
+      expect(st.incompleteReason).toBe('cancelled');
+      expect(st.referenceJudge).toBeUndefined();
+    }
+    for (const t of lento.st.timers) clearTimeout(t);
   });
 });
 
@@ -618,6 +788,79 @@ describe('IMPL-020 — gateway: abort é controle, na fila, no envio e no meio d
     const ea = await pa;
     expect(isControlSignal(ea)).toBe(true);
     expect(gw.currentConcurrency()).toMatchObject({ active: 0, queued: 0 });
+  });
+
+  it('Cancelar durante o BACKOFF de retry (429) fecha na hora, sem esperar o sono', async () => {
+    // Revisão IMPL-020: o sono do backoff (até ~8 s) não era abortável — nenhuma
+    // chamada nova saía, mas a run só fechava quando ele acabava (sonda: 3014 ms).
+    let chamadas = 0;
+    const fetch: FetchLike = async (url) => {
+      if (!new URL(url).pathname.endsWith('/chat/completions')) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      }
+      chamadas += 1;
+      return new Response('{"error":{"message":"rate limited"}}', { status: 429 });
+    };
+    // Espera de 3 s que IGNORA o sinal: o gateway tem de correr contra o abort
+    // por fora, qualquer que seja a espera injetada. O sinal chega como dica.
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const dicas: Array<AbortSignal | undefined> = [];
+    const sleep = (_ms: number, sig?: AbortSignal): Promise<void> =>
+      new Promise((resolve) => {
+        dicas.push(sig);
+        timers.add(setTimeout(resolve, 3_000));
+      });
+    const gw = createGateway({ fetch, sleep });
+    const ac = new AbortController();
+    const p = gw
+      .chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs, signal: ac.signal })
+      .catch((e: unknown) => e);
+    await esperar(() => dicas.length === 1);
+    const t0 = Date.now();
+    ac.abort(new RunCancelled('clique durante o backoff'));
+    const err = await p;
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(isControlSignal(err)).toBe(true);
+    expect(chamadas).toBe(1); // o retry nunca saiu
+    expect(dicas[0]).toBe(ac.signal);
+    expect(gw.currentConcurrency()).toMatchObject({ active: 0, queued: 0 });
+    for (const t of timers) clearTimeout(t);
+  });
+
+  it('backoff com a espera PADRÃO também solta no abort (e sem sinal segue dormindo normal)', async () => {
+    let chamadas = 0;
+    const fetch: FetchLike = async (url) => {
+      if (!new URL(url).pathname.endsWith('/chat/completions')) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      }
+      chamadas += 1;
+      // 1ª tentativa: 503 (backoff de 250–500 ms); a seguinte responde OK.
+      if (chamadas === 1) return new Response('indisponivel', { status: 503 });
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 1, completion_tokens: 1, cost: 0 } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+    const gw = createGateway({ fetch }); // sem `sleep` => espera padrão
+    const ac = new AbortController();
+    const p = gw
+      .chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs, signal: ac.signal })
+      .catch((e: unknown) => e);
+    await esperar(() => chamadas === 1);
+    const t0 = Date.now();
+    ac.abort(new RunCancelled('clique'));
+    const err = await p;
+    // O backoff da 1ª tentativa dura ≥ 250 ms: sair antes disso prova que o
+    // abort cortou o sono (e não o `acquire` da tentativa seguinte).
+    expect(Date.now() - t0).toBeLessThan(200);
+    expect(isControlSignal(err)).toBe(true);
+    await new Promise((r) => setTimeout(r, 600)); // passou o backoff: nada saiu
+    expect(chamadas).toBe(1);
+    // Sem sinal, o retry acontece depois do sono (comportamento de sempre).
+    chamadas = 0;
+    const ok = await gw.chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs });
+    expect(chamadas).toBe(2);
+    expect(ok.text).toBe('ok');
   });
 
   it('abort no MEIO do stream (resposta chegando) sai como controle, não como erro comum', async () => {

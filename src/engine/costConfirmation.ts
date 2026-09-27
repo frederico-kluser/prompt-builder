@@ -70,6 +70,25 @@ export function requiresCostConfirmation(
 }
 
 /**
+ * POR QUE a confirmação foi pedida — o texto do diálogo depende disso. Com só
+ * preço desconhecido a faixa pode caber no limiar, e dizer "pode custar mais de
+ * US$ 1" seria falso: o que falta é poder LIMITAR o custo, não um custo alto.
+ * `null` = não precisa confirmar.
+ */
+export type CostConfirmationReason = 'threshold' | 'unpriced' | 'both';
+
+export function costConfirmationReason(
+  e: Pick<LaunchCostEstimate, 'high' | 'thresholdUsd' | 'unpricedModelIds'>,
+): CostConfirmationReason | null {
+  const acima = e.high > e.thresholdUsd;
+  const semPreco = e.unpricedModelIds.length > 0;
+  if (acima && semPreco) return 'both';
+  if (acima) return 'threshold';
+  if (semPreco) return 'unpriced';
+  return null;
+}
+
+/**
  * Cenários que o treino reserva para o holdout (mesmo split do trainer). Zero
  * fora de training, com `holdoutRatio: 0` ou quando a fatia ficaria abaixo do
  * piso (o trainer descarta o holdout inteiro nesse caso).

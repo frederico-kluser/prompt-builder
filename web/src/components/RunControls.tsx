@@ -45,6 +45,8 @@ interface StopInfo {
   budgetUsd?: number;
   totalCostUsd: number;
   stoppedAtIteration?: number;
+  /** Run de rodada de treino: o teto (`budgetUsd`) é o da SESSÃO, não o desta run. */
+  sessionId?: string;
 }
 
 /**
@@ -70,11 +72,13 @@ export function StopBanner({
     const iter =
       info.stoppedAtIteration !== undefined ? ` (rodada ${info.stoppedAtIteration + 1})` : '';
     const teto = info.budgetUsd !== undefined ? ` de ${usd(info.budgetUsd)}` : '';
+    const daSessao = subject === 'run' && info.sessionId !== undefined;
     return (
       <Banner tone="warn" className={className}>
         <strong>Orçamento esgotado{iter}:</strong> {aRun.toLowerCase()} parou{onde} para não passar do
-        teto{teto} (gasto: {usd(info.totalCostUsd)}). O resultado é parcial: cenários cortados ficam fora do
-        placar e das médias — nenhuma nota foi inventada para completá-los.
+        teto{daSessao ? ' da sessão de treino' : ''}
+        {teto} (gasto{daSessao ? ' desta rodada' : ''}: {usd(info.totalCostUsd)}). O resultado é parcial:
+        cenários cortados ficam fora do placar e das médias — nenhuma nota foi inventada para completá-los.
       </Banner>
     );
   }

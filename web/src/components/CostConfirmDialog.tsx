@@ -2,12 +2,16 @@ import { useRef } from 'react';
 import { Modal } from './Modal';
 import { Banner } from './primitives';
 import { Button } from '@/components/ui/button';
-import type { LaunchCostEstimate } from '../api';
+import { costConfirmationReason, type LaunchCostEstimate } from '../api';
 
 // Confirmação de custo ANTES de rodar (IMPL-020, R-10:REC-3 Q5c): acima de
 // US$ 1 (faixa alta) — ou com preço desconhecido — a run só começa com um "sim"
 // explícito, depois de o usuário ver a FAIXA low–high e os DRIVERS do custo.
 // A faixa é a mesma conta que as portas de orçamento do motor usam.
+//
+// O foco inicial vai para "Voltar", a ação SEGURA: quem envia o formulário com
+// Enter e segura a tecla não pode confirmar o gasto pelo auto-repeat do teclado
+// antes de ler a faixa.
 
 function usd(v: number): string {
   if (!v) return 'US$ 0';
@@ -27,18 +31,29 @@ export function CostConfirmDialog({
   onConfirm: () => void;
   onClose: () => void;
 }) {
-  const confirmRef = useRef<HTMLButtonElement>(null);
+  const backRef = useRef<HTMLButtonElement>(null);
   const a = estimate?.assumptions;
+  const motivo = estimate ? costConfirmationReason(estimate) : null;
+  const alvo = mode === 'training' ? 'sessão de treino' : 'run';
   return (
-    <Modal open={estimate !== null} onClose={onClose} label="Confirmar custo estimado" initialFocus={confirmRef}>
+    <Modal open={estimate !== null} onClose={onClose} label="Confirmar custo estimado" initialFocus={backRef}>
       {estimate && a && (
         <div className="flex flex-col gap-4 overflow-y-auto p-5">
           <div className="pr-8">
             <h2 className="font-heading text-lg font-medium tracking-tight">Confirmar custo estimado</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Esta {mode === 'training' ? 'sessão de treino' : 'run'} pode custar mais de{' '}
-              {usd(estimate.thresholdUsd)}. A faixa é larga de propósito: não dá para saber quantos tokens cada
-              resposta vai usar.
+              {motivo === 'unpriced' ? (
+                <>
+                  Esta {alvo} usa modelo sem preço no catálogo: a faixa abaixo o conta como zero, então o custo
+                  real pode passar dela sem aviso.
+                </>
+              ) : (
+                <>
+                  Esta {alvo} pode custar mais de {usd(estimate.thresholdUsd)}
+                  {motivo === 'both' ? ' — e usa modelo sem preço no catálogo, contado como zero' : ''}.
+                </>
+              )}{' '}
+              A faixa é larga de propósito: não dá para saber quantos tokens cada resposta vai usar.
             </p>
           </div>
 
@@ -97,10 +112,10 @@ export function CostConfirmDialog({
           )}
 
           <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
-            <Button type="button" variant="ghost" size="sm" onClick={onClose}>
+            <Button ref={backRef} type="button" variant="ghost" size="sm" onClick={onClose}>
               Voltar
             </Button>
-            <Button ref={confirmRef} type="button" size="sm" onClick={onConfirm}>
+            <Button type="button" size="sm" onClick={onConfirm}>
               Confirmar e iniciar
             </Button>
           </div>

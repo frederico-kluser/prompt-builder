@@ -297,7 +297,17 @@ export function RunView() {
             <Stat label="cenários">
               {doneStages}/{totalStages}
             </Stat>
-            <Stat label={record.budgetUsd !== undefined ? 'custo / teto' : 'custo'}>
+            {/* Em run de rodada de treino o teto é o da SESSÃO (ledger da sessão):
+                sem o rótulo, "custo desta run / teto" leria como folga que não existe. */}
+            <Stat
+              label={
+                record.budgetUsd === undefined
+                  ? 'custo'
+                  : record.sessionId
+                    ? 'custo / teto da sessão'
+                    : 'custo / teto'
+              }
+            >
               {formatUsd(record.totalCostUsd)}
               {record.budgetUsd !== undefined && (
                 <span className="text-sm text-muted-foreground"> / {formatUsd(record.budgetUsd)}</span>

@@ -8,8 +8,12 @@ import {
   estimateLaunchCost,
   type LaunchCostEstimate,
 } from '../../src/engine/costConfirmation.js';
-export type { CostDriver, LaunchCostEstimate } from '../../src/engine/costConfirmation.js';
-export { COST_CONFIRM_THRESHOLD_USD } from '../../src/engine/costConfirmation.js';
+export type {
+  CostConfirmationReason,
+  CostDriver,
+  LaunchCostEstimate,
+} from '../../src/engine/costConfirmation.js';
+export { COST_CONFIRM_THRESHOLD_USD, costConfirmationReason } from '../../src/engine/costConfirmation.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
 import type { LgpdData } from './lgpd';
@@ -341,7 +345,10 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
-  /** Teto de gasto configurado (ausente = sem limite). */
+  /**
+   * Teto de gasto configurado (ausente = sem limite). Em run de rodada de treino
+   * (`sessionId`) é o teto da SESSÃO — a tela precisa rotulá-lo assim.
+   */
   budgetUsd?: number;
   /** true = a run parou porque o orçamento acabou. */
   budgetExhausted?: boolean;

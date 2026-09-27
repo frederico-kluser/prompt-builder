@@ -331,15 +331,25 @@ async function runLoop(
   // cada chamada no ledger com o papel certo e repassa o sinal RAIZ da run ao
   // fetch e à fila do limitador — um ponto só, o mesmo do Node.
   const ctx: RunCtx = { signal, sink: ledger };
+  // Com `parentLedger` (rodada de treino) este é o teto da SESSÃO — é ele que
+  // governa a run; a tela o rotula como tal pelo `sessionId` (RunView).
   record.budgetUsd = ledger.snapshot().budgetUsd;
 
   // Estimativa por papel — base das PORTAS SUAVES (espelho do Node).
-  const est = estimateRunCost(
-    estimateInputFromConfig(record.config as never, {
-      contestantIds: record.contestants.map((c) => c.id),
-    }),
-    catalogo,
-  );
+  // ⚠️ Em variation standalone (`opts.prepare`) os contestants ainda NÃO
+  // existem aqui: `contestantIds: []` estimaria ZERO competidores e a porta
+  // atômica G2 nunca dispararia (a run pagava as respostas e parava sem nota,
+  // passando do teto). Lista vazia => deixa o estimador contar técnicas+base,
+  // e a estimativa é refeita com os contestants reais depois do `prepare`.
+  const estimar = (contestantIds: string[]) =>
+    estimateRunCost(
+      estimateInputFromConfig(
+        record.config as never,
+        contestantIds.length > 0 ? { contestantIds } : {},
+      ),
+      catalogo,
+    );
+  let est = estimar(record.contestants.map((c) => c.id));
 
   /** Cancelamento: a raiz da run (ou a sessão, via ledger) abortou => controle. */
   const throwIfCancelled = (): void => {
@@ -406,6 +416,8 @@ async function runLoop(
     record.contestants = contestants;
     record.scoreboard = Object.fromEntries(contestants.map((c) => [c.id, 0]));
     record.costByContestant = Object.fromEntries(contestants.map((c) => [c.id, 0]));
+    // As portas seguintes (G1, G2 atômica, finais) medem com os contestants REAIS.
+    est = estimar(contestants.map((c) => c.id));
     await saveRun(record);
     emitEvent({ type: 'variants.generated', runId, contestants });
   }

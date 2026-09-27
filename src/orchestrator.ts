@@ -312,12 +312,17 @@ async function runLoop(
   record.budgetUsd = ledger.remainingUsd() !== undefined ? ledger.snapshot().budgetUsd : undefined;
 
   // Estimativa por papel — base das PORTAS SUAVES de orcamento.
-  const est = estimateRunCost(
-    estimateInputFromConfig(record.config, {
-      contestantIds: record.contestants.map((c) => c.id),
-    }),
-    catalogo,
-  );
+  // ⚠️ Em variation (`opts.prepare`) os contestants ainda NAO existem aqui:
+  // `contestantIds: []` estimaria ZERO competidores e a porta atomica G2 nunca
+  // dispararia (a run pagava as respostas e parava sem nota, passando do teto).
+  // Lista vazia => o estimador conta tecnicas+base; a estimativa e refeita com
+  // os contestants reais depois do `prepare` (espelho do web).
+  const estimar = (contestantIds: string[]) =>
+    estimateRunCost(
+      estimateInputFromConfig(record.config, contestantIds.length > 0 ? { contestantIds } : {}),
+      catalogo,
+    );
+  let est = estimar(record.contestants.map((c) => c.id));
 
   /**
    * Porta suave. A unidade NAO e "uma fase", e um GRUPO que produz resultado
@@ -393,6 +398,8 @@ async function runLoop(
     record.contestants = contestants;
     record.scoreboard = Object.fromEntries(contestants.map((c) => [c.id, 0]));
     record.costByContestant = Object.fromEntries(contestants.map((c) => [c.id, 0]));
+    // As portas seguintes (G1, G2 atomica, finais) medem com os contestants REAIS.
+    est = estimar(contestants.map((c) => c.id));
     await saveRun(record);
     emitEvent({ type: 'variants.generated', runId, contestants });
   }
@@ -541,7 +548,10 @@ async function runLoop(
   const custoG2 = est.byRole.competitor + est.byRole.judge + (hasAgent ? est.byRole.agent : 0);
   if (custoG2 > 0 && !gate('competitors', custoG2)) {
     for (const st of record.stages) {
-      if (st.spec && !st.error) st.incomplete = true;
+      if (st.spec && !st.error) {
+        st.incomplete = true;
+        st.incompleteReason = 'budget';
+      }
     }
     syncLedger();
     return;
@@ -853,6 +863,7 @@ async function runLoop(
         // MENOS orcamento/cancelamento, que sao decisao, nao acidente.
         if (isControlSignal(stageErr)) {
           stageRecord.incomplete = true;
+          stageRecord.incompleteReason = stageErr.benchControl === 'budget' ? 'budget' : 'cancelled';
           stageRecord.finishedAt = nowIso();
           throw stageErr;
         }
