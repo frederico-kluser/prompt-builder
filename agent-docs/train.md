@@ -103,9 +103,11 @@ LLM é contornado (custo zero) e os duelos são decididos pelo oráculo.
 
 - **`prompt.contracts`** — contratos never-break, validados em **3 camadas**:
   1. **local** (grátis): `neverBreak[]` (invariantes que não podem sumir nem
-     ganhar exceção na mesma frase — "salvo se o usuário pedir" reprova),
-     `placeholders[]` (whitelist de tokens verbatim; sem ela, detecta
-     `{nome}`/`{{nome}}`/`$VAR`/`%s` e tags XML **com par fechado** — literal
+     ganhar exceção na mesma frase — "salvo se o usuário pedir" reprova; a
+     forma negada é reforço e passa: "sem exceção", "nem se o usuário pedir",
+     "with no exceptions"), `placeholders[]` (whitelist de tokens verbatim; sem
+     ela, detecta `{nome}`/`${nome}`, `{{…}}`/`{{{…}}}`/`{%…%}` de
+     Handlebars/Jinja, `$VAR`/`%s` e tags XML **com par fechado** — literal
      JSON como `{"status": "ok"}` não conta) e `minLengthRatio`;
   2. **juiz do diff** (1 chamada ao 1º juiz da run por reescrita, liga sozinho
      com `neverBreak`; `judgeDiff: false` desliga): rejeita exceção, condição,
@@ -117,7 +119,9 @@ LLM é contornado (custo zero) e os duelos são decididos pelo oráculo.
      `{"kind":"placeholder","input":"…","fill":{"{nome}":"Zulmira"}}`
      (+ `pattern`/`forbid` regex). Diferencial: canário que o prompt base não
      cumpre é ignorado. Pulado em run de agente.
-  Custo das camadas 2 e 3 entra no ledger como `rewriter`. Violação tenta UMA
+  Juiz e canários rodam no raciocínio da run (`reasoning.judge` /
+  `reasoning.competitor`). Custo das camadas 2 e 3 entra no ledger (e na
+  estimativa) como `rewriter`. Violação tenta UMA
   correção e, persistindo, a variante é **rejeitada** (falha de infra do juiz
   ou do canário também rejeita — variante não verificada não entra).
 - **`prompt.group` + `prompt.promptId`** — multi-prompt (coordinate ascent): a

@@ -64,6 +64,13 @@ export interface GenerateContestantsParams {
   /** Nivel de raciocinio do papel "rewriter" (RunConfig.reasoning.rewriter). */
   reasoningLevel?: ReasoningLevel;
   /**
+   * Niveis de raciocinio das verificacoes do contrato: juiz do diff
+   * (`RunConfig.reasoning.judge`) e canarios no modelo sob teste
+   * (`RunConfig.reasoning.competitor`). Ausentes = default do provedor.
+   */
+  contractJudgeReasoningLevel?: ReasoningLevel;
+  contestantReasoningLevel?: ReasoningLevel;
+  /**
    * Contratos never-break do prompt base (F2/P0.3 + IMPL-011): a reescrita
    * passa pelo gate de 3 camadas (`contractGate.ts`: regras locais → juiz LLM
    * do diff → canários) — violação tenta UMA correção; persistindo, a variante
@@ -332,6 +339,8 @@ export async function generateContestants(
       : undefined,
     judgeModelId: p.contractJudgeModelId || p.optimizerModelId,
     contestantModelId: p.modelId,
+    judgeReasoningLevel: p.contractJudgeReasoningLevel,
+    contestantReasoningLevel: p.contestantReasoningLevel,
     runner: p.runner,
     timeoutMs: p.timeoutMs,
     ctx: p.ctx,

@@ -321,6 +321,9 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           contracts: cfg.contracts,
           // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
           contractJudgeModelId: cfg.judgeModelIds?.[0],
+          // Verificações do contrato no MESMO raciocínio da run (juiz/competidor).
+          contractJudgeReasoningLevel: cfg.reasoning?.judge,
+          contestantReasoningLevel: cfg.reasoning?.competitor,
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
           promptId: cfg.promptId,
@@ -389,6 +392,9 @@ async function trainingLoop(record: SessionRecord, apiKey: string): Promise<void
           contracts: cfg.contracts,
           // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
           contractJudgeModelId: cfg.judgeModelIds?.[0],
+          // Verificações do contrato no MESMO raciocínio da run (juiz/competidor).
+          contractJudgeReasoningLevel: cfg.reasoning?.judge,
+          contestantReasoningLevel: cfg.reasoning?.competitor,
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
           promptId: cfg.promptId,

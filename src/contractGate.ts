@@ -19,7 +19,7 @@
 // próprio (`judgeError`/`canaryError`) para o log separar infra de violação
 // real. `BudgetExceeded`/`RunCancelled` sempre sobem (isControlSignal).
 
-import { chatCompletion } from './openrouter.js';
+import { chatCompletion, peekModelsCache } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { layerOf, verifyRewrite } from './engine/contracts.js';
 import type { ContractCanary, ContractLayer, ContractViolation, PromptContracts } from './engine/contracts.js';
@@ -30,7 +30,7 @@ import {
   fillPlaceholders,
   parseDiffJudgeReply,
 } from './engine/contractLayers.js';
-import type { RunCtx } from './types.js';
+import type { ReasoningLevel, RunCtx } from './types.js';
 
 export interface ContractGateOptions {
   apiKey: string;
@@ -45,6 +45,17 @@ export interface ContractGateOptions {
   judgeModelId: string;
   /** Modelo sob teste — quem responde aos canários (camada 3). */
   contestantModelId: string;
+  /**
+   * Nível de raciocínio do juiz do diff (`RunConfig.reasoning.judge`) — o mesmo
+   * que o refJudge recebe. Sem isto o juiz rodava no default do provedor.
+   */
+  judgeReasoningLevel?: ReasoningLevel;
+  /**
+   * Nível de raciocínio do modelo sob teste nos canários
+   * (`RunConfig.reasoning.competitor`): o canário mede o modelo NAS MESMAS
+   * condições da competição, não num nível diferente.
+   */
+  contestantReasoningLevel?: ReasoningLevel;
   /** Canário é teste de CHAT: com runner 'agent' a camada 3 é pulada (com aviso). */
   runner?: 'chat' | 'agent';
   timeoutMs?: number;
@@ -67,6 +78,41 @@ export interface ContractGate {
 
 /** Tentativas do juiz do diff quando a saída não é o JSON pedido. */
 const JUDGE_ATTEMPTS = 2;
+/** Teto de saída do juiz do diff (o JSON de vereditos é curto). */
+export const JUDGE_MAX_TOKENS = 1024;
+/** Teto default da resposta de um canário. */
+export const CANARY_MAX_TOKENS = 400;
+/**
+ * Folga somada ao teto quando o modelo vai RACIOCINAR: em muitos provedores os
+ * tokens de raciocínio contam no `max_tokens`, e um teto de 1024 consumido
+ * inteiro pelo raciocínio devolve texto vazio — o juiz daria `judgeError` 2x e
+ * o variator descartaria TODA variante sem pedir correção (a run ficaria só
+ * com o 'original').
+ */
+export const REASONING_HEADROOM_TOKENS = 3072;
+
+/**
+ * O modelo vai raciocinar nesta chamada? Nível pedido ≠ 'off' → sim. Sem nível
+ * (ou 'off' num modelo `mandatory`, onde o 'off' nem é enviado — ver
+ * applyReasoning), decide o catálogo EM CACHE (sem rede): raciocínio
+ * obrigatório, ou ligado por default quando nada foi pedido.
+ */
+export function reasoningLikely(apiKey: string, modelId: string, level?: ReasoningLevel): boolean {
+  if (level && level !== 'off') return true;
+  const meta = peekModelsCache(apiKey)?.data.find((m) => m.id === modelId)?.reasoning;
+  if (meta?.mandatory) return true;
+  return level === undefined && meta?.defaultEnabled === true;
+}
+
+/** Teto de saída de uma chamada de verificação, com folga se o modelo raciocina. */
+export function verificationMaxTokens(
+  apiKey: string,
+  modelId: string,
+  level: ReasoningLevel | undefined,
+  base: number,
+): number {
+  return base + (reasoningLikely(apiKey, modelId, level) ? REASONING_HEADROOM_TOKENS : 0);
+}
 
 function errMsg(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).slice(0, 200);
@@ -99,7 +145,8 @@ export async function judgeNeverBreakDiff(
         modelId: o.judgeModelId,
         messages,
         temperature: 0,
-        maxTokens: 1024,
+        maxTokens: verificationMaxTokens(o.apiKey, o.judgeModelId, o.judgeReasoningLevel, JUDGE_MAX_TOKENS),
+        reasoningLevel: o.judgeReasoningLevel,
         responseFormatJson: true,
         timeoutMs: o.timeoutMs ?? 90_000,
         role: 'rewriter',
@@ -149,7 +196,13 @@ async function askCanary(o: ContractGateOptions, fragment: string, c: ContractCa
       { role: 'user', content: c.input },
     ],
     temperature: 0,
-    maxTokens: c.maxTokens ?? 400,
+    maxTokens: verificationMaxTokens(
+      o.apiKey,
+      o.contestantModelId,
+      o.contestantReasoningLevel,
+      c.maxTokens ?? CANARY_MAX_TOKENS,
+    ),
+    reasoningLevel: o.contestantReasoningLevel,
     timeoutMs: o.timeoutMs ?? 90_000,
     role: 'rewriter',
     signal: o.ctx?.signal,

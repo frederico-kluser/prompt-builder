@@ -133,19 +133,29 @@ const DEFAULT_MIN_LENGTH_RATIO = 0.3;
 /** Identificador de template: `nome`, `user_id`, `user.name` (Jinja/Handlebars). */
 const IDENT = '[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*';
 
+/** Conteúdo de tag de template: qualquer coisa sem chave, com ao menos 1 caractere visível. */
+const TEMPLATE_BODY = '[^{}]*[^{}\\s][^{}]*';
+
 /**
  * Placeholders de texto. A ordem da alternância importa: `{{{…}}}` e `{{…}}`
  * vêm ANTES de `{…}` para o token duplo não ser fatiado no meio, e `${…}`
- * antes de `$VAR`. Chaves só contam com IDENTIFICADOR dentro — o extrator
- * antigo aceitava `{…}` qualquer, e um literal JSON como `{"status": "ok"}`
- * virava "placeholder" que precisava sobreviver verbatim (o caso medido do
- * repositório na R-20: reprovava reescritas legítimas). `$VAR` só maiúsculas
- * (como no contrato) e `%s` (printf) seguem como antes.
+ * antes de `$VAR`.
+ *  - Chave SIMPLES só conta com IDENTIFICADOR dentro — o extrator antigo
+ *    aceitava `{…}` qualquer, e um literal JSON como `{"status": "ok"}` virava
+ *    "placeholder" que precisava sobreviver verbatim (o caso medido do
+ *    repositório na R-20: reprovava reescritas legítimas).
+ *  - Chave DUPLA/TRIPLA (`{{…}}`, `{{{…}}}`) e tags Jinja (`{%…%}`, `{#…#}`)
+ *    aceitam QUALQUER conteúdo sem chave: `{{` nunca abre JSON válido, e
+ *    restringir a identificador deixava passar reescrita que apaga
+ *    `{{#if premium}}…{{/if}}` ou `{{ produto | upper }}` (falso negativo).
+ *  - `$VAR` só maiúsculas (como no contrato) e `%s` (printf) seguem como antes.
  */
 const PLACEHOLDER_RE = new RegExp(
   [
-    `\\{\\{\\{\\s*${IDENT}\\s*\\}\\}\\}`,
-    `\\{\\{\\s*${IDENT}\\s*\\}\\}`,
+    `\\{\\{\\{${TEMPLATE_BODY}\\}\\}\\}`,
+    `\\{\\{${TEMPLATE_BODY}\\}\\}`,
+    `\\{%${TEMPLATE_BODY}%\\}`,
+    `\\{#${TEMPLATE_BODY}#\\}`,
     `\\$\\{${IDENT}\\}`,
     `\\{${IDENT}\\}`,
     '\\$[A-Z_][A-Z0-9_]*',
@@ -158,6 +168,26 @@ const PLACEHOLDER_RE = new RegExp(
 const TAG_OPEN_RE = /<([A-Za-z_][\w.:-]*)(?:\s[^<>]*)?>/g;
 const TAG_CLOSE_RE = /<\/([A-Za-z_][\w.:-]*)\s*>/g;
 const TAG_SELF_RE = /<([A-Za-z_][\w.:-]*)(?:\s[^<>]*)?\/>/g;
+
+/** Tag SEM atributos (`<ctx>`, `</ctx >`, `<image />`): o espaço interno não é conteúdo. */
+const BARE_TAG_RE = /^<(\/?)([A-Za-z_][\w.:-]*)\s*(\/?)>$/;
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * O token sobreviveu na reescrita? Substring EXATA; para tag sem atributos,
+ * tolera espaço antes do `>` nos dois sentidos (`</ctx >` ↔ `</ctx>`,
+ * `<image/>` ↔ `<image />`) — reformatar a tag não é perder o delimitador.
+ */
+function tokenPresent(out: string, token: string): boolean {
+  if (out.includes(token)) return true;
+  const m = BARE_TAG_RE.exec(token);
+  if (!m) return false;
+  const [, close, name, self] = m;
+  return new RegExp(`<${close}${escapeRegExp(name)}\\s*${self ? '/' : ''}>`).test(out);
+}
 
 /** Normaliza para comparação tolerante: colapsa espaços/quebras de linha e minúsculas. */
 function normalizeForCompare(text: string): string {
@@ -181,12 +211,15 @@ function asText(value: unknown): string {
 /**
  * Detecta os placeholders do prompt base — o contrato implícito quando o
  * chamador não informa `placeholders`:
- *  - `{nome}`, `{{nome}}`, `{{{nome}}}`, `${nome}` — só com IDENTIFICADOR
- *    (literal JSON como `{"status": "ok"}` NÃO conta);
+ *  - `{nome}` e `${nome}` — só com IDENTIFICADOR (literal JSON como
+ *    `{"status": "ok"}` NÃO conta);
+ *  - `{{…}}`, `{{{…}}}`, `{%…%}`, `{#…#}` — qualquer conteúdo sem chave
+ *    (`{{count}}`, `{{#if premium}}`, `{{/if}}`, `{{ produto | upper }}`);
  *  - `$VAR` (maiúsculas) e `%s`;
- *  - tags XML SÓ com par fechado (`<ctx>…</ctx>` → `<ctx>` e `</ctx>`) ou
- *    auto-fechadas (`<image/>`). Tag de abertura solta (`<instrucoes>` sem
- *    `</instrucoes>`, `"<id>"` num exemplo de JSON) não é placeholder.
+ *  - tags XML SÓ com par fechado (`<ctx>…</ctx>` → `<ctx>` e `</ctx>`,
+ *    verbatim) ou auto-fechadas (`<image/>`). Tag de abertura solta
+ *    (`<instrucoes>` sem `</instrucoes>`, `"<id>"` num exemplo de JSON) não
+ *    é placeholder.
  * Devolve tokens únicos na ordem de primeira aparição (repetição não gera
  * violação duplicada no gate).
  */
@@ -207,7 +240,9 @@ export function extractPlaceholders(text: string): string[] {
     const open = openings.get(m[1]);
     const at = m.index ?? 0;
     if (open && open.at < at && !pairedClose.has(m[1])) {
-      pairedClose.set(m[1], { token: `</${m[1]}>`, at });
+      // Token VERBATIM (`</ctx >` fica `</ctx >`): normalizado, ele não
+      // existiria no base e o gate reprovaria até a reescrita idêntica.
+      pairedClose.set(m[1], { token: m[0], at });
     }
   }
   for (const [name, close] of pairedClose) {
@@ -232,6 +267,44 @@ export function extractPlaceholders(text: string): string[] {
 // ---------------------------------------------------------------------------
 
 /**
+ * Forma NEGADA do substantivo "exceção"/"exception" é REFORÇO, não exceção:
+ * "sem exceção", "(sem exceções)", "sem nenhuma exceção", "nenhuma exceção",
+ * "não abra exceções", "jamais faça exceção", "with no exceptions", "without
+ * exception", "make no exceptions", "not even in exceptional cases". Testado
+ * no texto IMEDIATAMENTE antes do marcador (negação + verbo opcional + até 3
+ * determinantes). Antes, o marcador casava na forma negada e a camada 1
+ * reprovava justamente quem REFORÇAVA a invariante — o viés que o item queria
+ * corrigir (o gate premiando quem apaga texto defensivo), e o próprio
+ * `contractBlock` pede "a MESMA força", o que empurra o LLM a escrever "sem
+ * exceção". Só vale para o substantivo: "exceto", "salvo", "a menos que",
+ * "unless", "except" introduzem exceção sempre, e "com (uma) exceção",
+ * "as seguintes exceções", "abra exceção" continuam reprovando.
+ */
+const NOUN_NEGATED = new RegExp(
+  [
+    "\\b(?:sem|nem|nenhuma|nenhum|zero|nao|nunca|jamais|no|not|never|without|nor|even|don't|doesn't)",
+    '(?:\\s+(?:ha|havera|existe|existem|cabe|cabem|admite|admitem|admita|admitir|aceita|aceite|aceitar|abra|abre|abrir|faca|faz|fazer|conceda|concede|conceder|permita|permite|permitir|make|makes|allow|allows|grant|grants|accept|accepts|permit|permits))?',
+    '(?:\\s+(?:nenhuma|nenhum|qualquer|alguma|uma|um|unica|sequer|tipo|de|any|a|one|single|kind|of|in))*',
+    '\\s+$',
+  ].join(''),
+);
+
+/**
+ * Condição de ESCAPE ("se o usuário pedir") precedida de "mesmo/até/nem/
+ * inclusive/independente" é reforço: "nem se o usuário pedir", "nem mesmo se
+ * o cliente insistir", "even if the user asks", "regardless if the user asks".
+ */
+const CONDITION_NEGATED =
+  /\b(?:mesmo|ate|nem|inclusive|independente(?:mente)?|even|nor|regardless|no matter)\s+$/;
+
+interface ExceptionMarker {
+  /** Sempre com flag `g`: cada ocorrência é checada contra a forma negada. */
+  re: RegExp;
+  /** Presente = o marcador admite forma negada/de reforço, que NÃO conta. */
+  negatedBy?: RegExp;
+}
+
+/**
  * Marcadores de EXCEÇÃO/ATENUAÇÃO (texto já sem acento e minúsculo). Só são
  * procurados na FRASE da invariante (e na frase seguinte quando ela COMEÇA
  * com um deles) e só contam se não estavam na frase correspondente do base:
@@ -239,39 +312,45 @@ export function extractPlaceholders(text: string): string[] {
  * gastar o juiz. O que escapa disto (exceção em outra frase, prioridade
  * invertida) é trabalho da camada 2.
  */
-const EXCEPTION_MARKERS: RegExp[] = [
-  /\bsalvo\b/,
-  /\bexceto\b/,
-  /\bexcetuad\w*/,
-  /\bexcec(?:ao|oes)\b/,
-  /\bcom excecao\b/,
-  /\ba menos que\b/,
-  /\ba nao ser que\b/,
-  /\bressalvad\w*/,
-  /\bunless\b/,
-  /\bexcept\b/,
-  /\bexception\w*/,
-  /\bse possivel\b/,
-  /\bquando possivel\b/,
-  /\bsempre que possivel\b/,
-  /\bna medida do possivel\b/,
-  /\bpreferencialmente\b/,
-  /\bde preferencia\b/,
-  /\bidealmente\b/,
-  /\bquando apropriado\b/,
-  /\bif possible\b/,
-  /\bwhen(?:ever)? possible\b/,
-  /\bwhere possible\b/,
-  /\bideally\b/,
-  /\bpreferably\b/,
-  /\bif appropriate\b/,
+const EXCEPTION_MARKERS: ExceptionMarker[] = [
+  { re: /\bsalvo\b/g },
+  { re: /\bexceto\b/g },
+  { re: /\bexcetuad\w*/g },
+  { re: /\bexcec(?:ao|oes)\b/g, negatedBy: NOUN_NEGATED },
+  { re: /\bcom excecao\b/g },
+  { re: /\ba menos que\b/g },
+  { re: /\ba nao ser que\b/g },
+  { re: /\bressalvad\w*/g },
+  { re: /\bunless\b/g },
+  { re: /\bexcept\b/g },
+  { re: /\bexception\w*/g, negatedBy: NOUN_NEGATED },
+  { re: /\bse possivel\b/g },
+  { re: /\bquando possivel\b/g },
+  { re: /\bsempre que possivel\b/g },
+  { re: /\bna medida do possivel\b/g },
+  { re: /\bpreferencialmente\b/g },
+  { re: /\bde preferencia\b/g },
+  { re: /\bidealmente\b/g },
+  { re: /\bquando apropriado\b/g },
+  { re: /\bif possible\b/g },
+  { re: /\bwhen(?:ever)? possible\b/g },
+  { re: /\bwhere possible\b/g },
+  { re: /\bideally\b/g },
+  { re: /\bpreferably\b/g },
+  { re: /\bif appropriate\b/g },
   // "geralmente/normalmente/usually" ficam FORA de propósito: aparecem em
   // justificativas legítimas na mesma frase ("…, que é o idioma que os clientes
   // normalmente usam") — falso positivo aqui; a camada 2 julga o sentido.
-  // "se o usuário pedir" é exceção; "MESMO se o usuário pedir" é reforço.
-  /(?<!\bmesmo )(?<!\bate )\bse o (?:usuario|cliente) (?:pedir|solicitar|insistir|quiser|preferir|autorizar)\b/,
-  /\bcaso o (?:usuario|cliente) (?:peca|solicite|insista|queira|prefira|autorize)\b/,
-  /(?<!\beven )\bif the user (?:asks|requests|insists|wants|prefers)\b/,
+  // "se o usuário pedir" é exceção; "MESMO/NEM se o usuário pedir" é reforço.
+  {
+    re: /\bse o (?:usuario|cliente) (?:pedir|solicitar|insistir|quiser|preferir|autorizar)\b/g,
+    negatedBy: CONDITION_NEGATED,
+  },
+  {
+    re: /\bcaso o (?:usuario|cliente) (?:peca|solicite|insista|queira|prefira|autorize)\b/g,
+    negatedBy: CONDITION_NEGATED,
+  },
+  { re: /\bif the user (?:asks|requests|insists|wants|prefers)\b/g, negatedBy: CONDITION_NEGATED },
 ];
 
 /** Frase que COMEÇA com exceção ("Exceto se…") ainda qualifica a anterior. */
@@ -353,12 +432,20 @@ function invariantWindows(seg: SegmentedText, needle: string): string[] {
   return windows;
 }
 
+/** Janela de texto antes do marcador em que se procura a negação. */
+const NEGATION_LOOKBACK = 60;
+
 function markersIn(windows: string[]): Set<string> {
   const out = new Set<string>();
   for (const w of windows) {
-    for (const re of EXCEPTION_MARKERS) {
-      const m = re.exec(w);
-      if (m) out.add(m[0]);
+    for (const { re, negatedBy } of EXCEPTION_MARKERS) {
+      for (const m of w.matchAll(re)) {
+        const at = m.index ?? 0;
+        // Forma negada ("sem exceção", "nem se o usuário pedir") é reforço.
+        if (negatedBy?.test(w.slice(Math.max(0, at - NEGATION_LOOKBACK), at))) continue;
+        out.add(m[0]);
+        break;
+      }
     }
   }
   return out;
@@ -390,12 +477,15 @@ export function addedExceptionMarkers(base: string, rewritten: string, invariant
  *    (quando base tem conteúdo; sem base, o piso é só 40 chars) — violation 'length';
  *  - placeholders: quando `contracts.placeholders` vier, usa a lista (whitelist
  *    explícita); senão usa `extractPlaceholders(base)`. Cada token precisa
- *    aparecer VERBATIM (substring exato) — violation 'placeholder' por token ausente;
+ *    aparecer VERBATIM (substring exato; tag sem atributos tolera espaço antes
+ *    do `>`) — violation 'placeholder' por token ausente;
  *  - neverBreak: cada invariante precisa aparecer na reescrita após
  *    normalização de espaços + minúsculas + ênfase de markdown (tolera quebra
  *    de linha/negrito, NÃO tolera remoção) — violation 'neverBreak';
  *  - presente mas com EXCEÇÃO/ATENUAÇÃO nova na mesma frase ("salvo se o
- *    usuario pedir", "sempre que possível") — violation 'exception'.
+ *    usuario pedir", "sempre que possível") — violation 'exception'. Forma
+ *    negada é reforço e não conta ("sem exceção", "nem se o usuário pedir",
+ *    "with no exceptions").
  * Nunca lança exceção.
  */
 export function verifyRewrite(
@@ -443,7 +533,7 @@ export function verifyRewrite(
     : extractPlaceholders(baseText);
   for (const token of placeholders) {
     if (typeof token !== 'string' || token.length === 0) continue;
-    if (!out.includes(token)) {
+    if (!tokenPresent(out, token)) {
       violations.push({
         kind: 'placeholder',
         detail: `Placeholder "${token}" sumiu da reescrita (precisa sobreviver verbatim).`,
