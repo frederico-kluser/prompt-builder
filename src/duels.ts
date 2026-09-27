@@ -8,6 +8,7 @@
 // de duelos — NUNCA derruba a run.
 
 import { chatCompletion } from './openrouter.js';
+import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { isControlSignal } from './budget.js';
 import { readArtifact } from './agent/store.js';
 import type {
@@ -275,7 +276,8 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
           },
         ],
         temperature: 0,
-        maxTokens: 512,
+        // Teto TOTAL com sala p/ raciocinio (IMPL-016): 512 virava `length` vazio => empate.
+        maxTokens: ROLE_MAX_TOKENS.duel,
         timeoutMs,
         responseFormatJson: true,
         reasoningLevel,

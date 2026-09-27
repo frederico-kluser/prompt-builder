@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { isControlSignal } from './budget.js';
+import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import type {
   CompetitorResponse,
   JudgeResult,
@@ -178,6 +179,9 @@ Em "verdicts", de para CADA rotulo: "acceptable" (bool) e "motivo" (<= 1 frase).
         { role: 'user', content: userPrompt },
       ],
       temperature: 0,
+      // Antes SEM teto nenhum (IMPL-016): o ledger reservava 1024 as cegas e o
+      // raciocinio nao tinha limite. Teto TOTAL do juiz, o mesmo do pointwise.
+      maxTokens: ROLE_MAX_TOKENS.judge,
       timeoutMs,
       responseFormatJson: true,
       reasoningLevel: extra.reasoningLevel,

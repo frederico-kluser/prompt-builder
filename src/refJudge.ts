@@ -1,4 +1,5 @@
 import { chatCompletion } from './openrouter.js';
+import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { isControlSignal } from './budget.js';
 import { matchExpected } from './engine/groundTruth.js';
 import type {
@@ -143,7 +144,8 @@ async function judgeOne(params: {
         { role: 'user', content: buildUserPrompt(stage, reference, response.text) },
       ],
       temperature: 0,
-      maxTokens: 1024,
+      // Teto TOTAL com sala p/ raciocinio (IMPL-016): 1024 virava `length` vazio => 'nao'.
+      maxTokens: ROLE_MAX_TOKENS.judge,
       responseFormatJson: true,
       reasoningLevel,
       timeoutMs,

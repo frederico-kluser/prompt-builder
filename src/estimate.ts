@@ -9,8 +9,11 @@
 //   2. Datagen e em LOTE, nao por etapa. A UI cobrava uma chamada por cenario;
 //      `generateStages` faz `batchCountFor(count)` lotes. Erro de ~4x.
 //   3. `high` era ficticio (`high = point`). Agora sai dos tetos que o codigo
-//      realmente envia: gabarito 1500, refJudge 1024, duelo 512, competidor
-//      `min(maxOutputTokens, stage.maxTokens)`.
+//      realmente envia (`ROLE_MAX_TOKENS` de roleLimits.ts, IMPL-016: gabarito,
+//      juiz pointwise/listwise e duelo com sala p/ raciocinio) e, no
+//      competidor, da RESPOSTA `min(maxOutputTokens, stage.maxTokens)` — a
+//      folga de raciocinio do competidor NAO e precificada aqui (previsao de
+//      reasoning_tokens por esforco x familia e o R-08:DEC-5).
 //   4. O HOLDOUT do treino nao era contado (uma run extra de N cenarios x 2).
 //
 // A faixa `low..high` e larga de proposito (~2.2x). Quem consome deve olhar
@@ -37,6 +40,7 @@ import {
   worstCasePricing,
   type PriceCapPerMTok,
 } from './engine/pricing.js';
+import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import type { CostRole, OpenRouterModel, RunConfig, RunMode } from './types.js';
 
 /** USD por token -> USD por milhao. A conversao 1e6 mora SO aqui e em toPerToken. */
@@ -44,15 +48,20 @@ export const PER_MTOK = 1_000_000;
 export const toPerMTok = (usdPerToken: number): number => usdPerToken * PER_MTOK;
 export const toPerToken = (usdPerMTok: number): number => usdPerMTok / PER_MTOK;
 
-/** Tetos reais que o pipeline envia — base do limite superior da faixa. */
-const MAX_TOKENS_GABARITO = 1500;
-const MAX_TOKENS_REF_JUDGE = 1024;
-const MAX_TOKENS_DUEL = 512;
+/** Tetos reais que o pipeline envia — base do limite superior da faixa (fonte unica: roleLimits.ts). */
+const MAX_TOKENS_GABARITO = ROLE_MAX_TOKENS.gabarito;
+const MAX_TOKENS_REF_JUDGE = ROLE_MAX_TOKENS.judge;
+const MAX_TOKENS_DUEL = ROLE_MAX_TOKENS.duel;
 const MAX_TOKENS_DATAGEN_BATCH = 2000;
 /** Contexto de entrada assumido por cenario (pergunta + productContext). */
 const DEFAULT_CTX_IN = 500;
 /** Piso empirico da faixa: respostas raramente usam o teto de tokens. */
 const LOW_FACTOR = 0.45;
+/**
+ * Tamanho do gabarito como ENTRADA do juiz/duelo. Nao e o teto do papel: o
+ * teto (IMPL-016) inclui o raciocinio, que nao volta no texto da referencia.
+ */
+const REFERENCE_TEXT_TOKENS = 1500;
 
 export interface EstimateInput {
   mode: RunMode;
@@ -239,13 +248,14 @@ export function estimateRunCost(
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
       byRole.judge +=
-        stages * nContestants * price(m, ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE);
+        stages * nContestants * price(m, ctxIn + maxOut + REFERENCE_TEXT_TOKENS, MAX_TOKENS_REF_JUDGE);
     }
   } else {
     // listwise: uma chamada por (juiz x passe x cenario), com TODAS as respostas
     for (const jid of input.judgeModelIds) {
       const m = model(jid);
-      byRole.judge += stages * input.judgePasses * price(m, ctxIn + nContestants * maxOut, 800);
+      // Listwise agora envia o teto do juiz (IMPL-016); antes ia sem teto e aqui se supunha 800.
+      byRole.judge += stages * input.judgePasses * price(m, ctxIn + nContestants * maxOut, MAX_TOKENS_REF_JUDGE);
     }
   }
 
@@ -258,7 +268,7 @@ export function estimateRunCost(
       stages *
       duelPairs *
       2 *
-      price(m, ctxIn + 2 * maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_DUEL);
+      price(m, ctxIn + 2 * maxOut + REFERENCE_TEXT_TOKENS, MAX_TOKENS_DUEL);
   }
 
   // --- agente: custo declarado por construção (§20.1) ---
@@ -286,7 +296,7 @@ export function estimateRunCost(
       holdoutJudge +=
         holdoutStages *
         2 *
-        price(model(jid), ctxIn + maxOut + MAX_TOKENS_GABARITO, MAX_TOKENS_REF_JUDGE);
+        price(model(jid), ctxIn + maxOut + REFERENCE_TEXT_TOKENS, MAX_TOKENS_REF_JUDGE);
     }
     byRole.competitor += holdoutComp;
     byRole.judge += holdoutJudge;

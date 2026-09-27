@@ -47,6 +47,8 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   judge: 'shim',
   refJudge: 'shim',
   variator: 'shim',
+  // IMPL-016 (R-07b:REC-1): tetos de max_tokens por papel — o duelo (mirror) lê daqui.
+  roleLimits: 'shim',
   // Pares mantidos à mão (seams diferentes). Ao mudar UM lado, mude o outro.
   configFile: 'mirror',
   duels: 'mirror', // a MATEMÁTICA é compartilhada via src/engine/duelCore.ts (src lê dossiê de agente do disco)

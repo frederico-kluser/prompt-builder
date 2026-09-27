@@ -1,6 +1,7 @@
 import { chatCompletionStream, isGatewayBlocked } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { finishSignalsOf, retryMaxTokens } from './engine/truncation.js';
+import { competitorMaxTokens } from './roleLimits.js';
 import type {
   CallFinishSignals,
   CompetitorOutcomeCounts,
@@ -55,10 +56,15 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
     onProgress,
   } = params;
 
-  const effectiveMaxTokens =
+  // Teto TOTAL (IMPL-016 / R-07b:REC-1): a RESPOSTA (stage.maxTokens, limitada
+  // por maxOutputTokens) + folga de raciocinio do degrau pedido. Raciocinio
+  // conta contra max_tokens: sem a folga, um modelo que pensa comia o teto da
+  // resposta inteiro e saia `length` com conteudo vazio.
+  const answerTokens =
     typeof maxOutputTokens === 'number' && maxOutputTokens > 0
       ? Math.min(maxOutputTokens, stage.maxTokens)
       : stage.maxTokens;
+  const effectiveMaxTokens = competitorMaxTokens(answerTokens, reasoningLevel);
 
   // Truncamento (IMPL-014 / R-07b:DEC-2): UM retry com teto x2, fora da conta
   // dos retries de erro (truncar nao e falha de infra). O teto dobrado passa

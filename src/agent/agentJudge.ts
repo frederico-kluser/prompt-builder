@@ -17,6 +17,7 @@
 // ⚠️ ESPELHO CLIENT-SIDE: NÃO existe — o navegador não executa agente (§7.3).
 // ----------------------------------------------------------------------------
 import { chatCompletion } from '../openrouter.js';
+import { ROLE_MAX_TOKENS } from '../roleLimits.js';
 import { isControlSignal } from '../budget.js';
 import type { ReasoningLevel, RunCtx, StageSpec, Verdict } from '../types.js';
 
@@ -171,7 +172,8 @@ async function judgeOneDossier(opts: {
         { role: 'user', content: buildUserPrompt(stage, dossierText) },
       ],
       temperature: 0,
-      maxTokens: 1024,
+      // Teto TOTAL do juiz (IMPL-016 / R-07b:REC-1) — o mesmo do pointwise.
+      maxTokens: ROLE_MAX_TOKENS.judge,
       responseFormatJson: true,
       reasoningLevel,
       timeoutMs,
