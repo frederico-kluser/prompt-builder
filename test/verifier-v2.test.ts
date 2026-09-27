@@ -32,6 +32,8 @@ import {
 } from '../src/agent/guard.js';
 import { captureSeedGuard, DEFAULT_REBUILD_CMD, protectedPatternsFor, runOracle } from '../src/agent/oracle.js';
 import { decideInfraError } from '../src/agent/infraError.js';
+import { decideRepVerdict, mergeOracleRecheck } from '../src/agent/verdictTree.js';
+import type { OracleResult } from '../src/agent/types.js';
 import { parseNameStatus } from '../src/agent/workspace.js';
 import { runAgentStage, type AgentGateway, type RunAgentStageParams } from '../src/agent/runAgentStage.js';
 import type { AgentTaskSpec } from '../src/agent/types.js';
@@ -807,7 +809,9 @@ describe('runAgentStage — correções da revisão (IMPL-039)', () => {
     });
   });
 
-  it('P2P não aferido + execução cortada (timeout) ⇒ fora do placar, não `resolve` pela exceção §15.2', async () => {
+  // IMPL-032: corte por limite sem oráculo 100% conta 'nao' (no denominador);
+  // P2P não aferido não é 100%, então não salva o corte pela exceção §15.2.
+  it("P2P não aferido + execução cortada (timeout) ⇒ 'nao' (corte por limite), não `resolve` pela exceção §15.2", async () => {
     await comJuiz(async () => {
       const task: AgentTaskSpec = {
         verify: [
@@ -816,7 +820,8 @@ describe('runAgentStage — correções da revisão (IMPL-039)', () => {
         ],
       };
       const res = await runAgentStage(params(task, agente((ws) => writeFileSync(path.join(ws, 'done.txt'), 'ok\n'), 'timeout')));
-      expect(res.repResults[0].verdict).toBeNull();
+      expect(res.repResults[0].verdict).toBe('nao');
+      expect(res.repResults[0].path).toBe('limit-cut');
     });
   });
 
@@ -838,7 +843,8 @@ describe('runAgentStage — correções da revisão (IMPL-039)', () => {
       expect(rep.oracle?.inconclusive).toBe(true);
       expect(rep.verdict).toBeNull();
       expect(rep.explanation).toMatch(/rebuild/);
-      expect(res.incomplete).toBe(true);
+      // Infra (IMPL-036): rep sem veredito; `incomplete` é só controle (IMPL-032).
+      expect(res.incomplete).toBe(false);
       expect(f.chatRequests()).toHaveLength(0);
     });
   });
@@ -885,6 +891,56 @@ describe('runAgentStage — correções da revisão (IMPL-039)', () => {
 // ===========================================================================
 // 4. Config: os campos novos atravessam os schemas (nada engolido em silêncio)
 // ===========================================================================
+
+describe('integração IMPL-033 × IMPL-039 — árvore e re-verificação respeitam F2P×P2P', () => {
+  const check = (over: Partial<OracleResult['checks'][number]>): OracleResult['checks'][number] => ({
+    label: 'c',
+    cmd: 'x',
+    exitCode: 0,
+    expected: 0,
+    ok: true,
+    weight: 1,
+    durationMs: 1,
+    tail: '',
+    ...over,
+  });
+
+  it('mergeOracleRecheck recalcula com scoreChecks: P2P quebrado continua zerando a nota', () => {
+    const prev: OracleResult = {
+      checks: [
+        check({ label: 'f2p', ok: false, exitCode: -1, notRun: 'spawn' }),
+        check({ label: 'p2p', ok: false, exitCode: -1, notRun: 'timeout', kind: 'pass_to_pass' }),
+      ],
+      score: 0,
+      violations: [],
+      inconclusive: true,
+      rawScore: 0,
+      f2p: { passed: 0, total: 1 },
+      p2p: { passed: 0, total: 1, broken: true, unverified: 0 },
+    };
+    const recheck: OracleResult = { checks: [check({ label: 'f2p' })], score: 1, violations: [], inconclusive: false };
+    const merged = mergeOracleRecheck(prev, [0], recheck);
+    // Antes: Σ(ok·peso)/Σ(peso) crua = 0,5 — desfazia a penalidade do P2P travado.
+    expect(merged.score).toBe(0);
+    expect(merged.p2p?.broken).toBe(true);
+    expect(merged.rawScore).toBe(1);
+  });
+
+  it("decideRepVerdict: nota cheia com P2P não aferido cai na faixa 'parcial' e não salva corte por limite", () => {
+    const oracle = { score: 1, violations: [], p2p: { broken: false, unverified: 1 } };
+    expect(decideRepVerdict({ stopReason: 'completed', oracle, diffEmpty: false })).toMatchObject({
+      kind: 'judge',
+      path: 'oracle-partial',
+      candidate: 'parcial',
+      ceiling: 'parcial',
+    });
+    expect(decideRepVerdict({ stopReason: 'timeout', oracle, diffEmpty: false })).toMatchObject({
+      kind: 'final',
+      path: 'limit-cut',
+      verdict: 'nao',
+    });
+  });
+});
 
 describe('config — kind/rebuild/detectors sobrevivem ao parse', () => {
   const agentTask = {
