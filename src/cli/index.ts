@@ -7,8 +7,8 @@
 
 import { pkgVersion } from '../paths.js';
 import { configureGatewayFromEnv } from '../gatewayEnv.js';
-import { CliError, EXIT, exitCodeForGatewayError, Output } from './output.js';
-import { buildContext, parse } from './context.js';
+import { CliError, EXIT, Output, failAndExit } from './output.js';
+import { closestMatch, commandLabel, sniffOutputFormat } from './context.js';
 import { cmdModels } from './commands/models.js';
 import { cmdRun } from './commands/run.js';
 import { cmdDocs, cmdInit, cmdSkill } from './commands/knowledge.js';
@@ -27,6 +27,7 @@ import {
 } from './commands/misc.js';
 import { cmdLibrary } from './commands/library.js';
 import { cmdBaseline } from './commands/baseline.js';
+import { cmdLimits } from './commands/limits.js';
 
 const VERSION = pkgVersion();
 
@@ -41,23 +42,32 @@ CONHECIMENTO (comece aqui)
   skill                    imprime o SKILL.md deste pacote
   init --agent <nome>      instala a skill em .claude/skills, .agents/skills, …
 
-MODELOS
+MODELOS (catálogo público: não exigem key)
   models list [filtros]    lista o catálogo do OpenRouter
   models show <id>         o que aquele modelo aceita (think levels, temperatura)
   models export -o <arq>   exporta o catálogo com capacidades de ajuste
   models allowlist --check idade/contagem da allowlist LGPD por endpoint (sem key)
 
 CUSTO
-  estimate -c <arquivo>    estima o custo antes de gastar
+  estimate -c <arquivo>    estima o custo antes de gastar (sem key)
   key check                valida a key e mostra o saldo
   key set --stdin          grava a key (leia da entrada padrão, nunca de argv)
+  limits show              teto diário da máquina (UTC) e quem gastou hoje
+  limits set --daily <usd|none>
+                           teto diário somando TODOS os processos (padrão US$ 20)
 
 RUNS
   compare --models a,b     compara modelos no mesmo desafio
   vary    --model <id>     testa variações de prompt num modelo
   train   --model <id>     treina um prompt ao longo de iterações
   <cmd> --config <arq>     usa um arena-config@1 (ver: docs config)
-  <cmd> --dry-run          valida e estima SEM chamar nenhuma API
+  <cmd> --dry-run          pré-voo inteiro SEM gastar: recusa com o MESMO
+                           error.code/exit da run real (wouldRefuse/requires)
+  <cmd> --idempotency-key <k>
+                           repetir a MESMA key reusa a run (espera ou devolve
+                           o resultado dela) em vez de gastar de novo
+  <cmd> --allow-concurrent réplica intencional: sem o lock da config
+                           (2º processo com a mesma config → run.locked)
 
 RESULTADOS
   runs list | show <id> | winner <id> [--prompt-only]
@@ -65,14 +75,19 @@ RESULTADOS
   runs export <id> [-o <arq>]
                            artefato auto-contido (config, gabaritos, prompts, juiz)
   sessions list | show <id> | winner <id>
-          [--prompt-only | --apply <arq> [--commit]]   handoff com backup + diff
+          [--prompt-only | --apply <arq> [--commit] [--override "<motivo>"]]
+                           handoff com backup + diff; holdout regredido
+                           BLOQUEIA (exit 10) salvo --override com motivo
+                           (gravado em <data-dir>/handoffs.jsonl + trailer)
 
 BIBLIOTECA (dataset estável de cenários+gabaritos)
   library list | init | show | add | seed | verify | coverage | export | rm | drop
           veja \`prompt-builder library --help\`
 
 OUTROS
-  techniques · lgpd · config validate <arq> · config example · doctor
+  techniques · lgpd · config validate <arq> · config example
+  doctor                   key (exit 4 se ausente/recusada), limite da key,
+                           teto diário e runs ativas
   registry validate [--file <arq>]   guarda de drift dos prompts de produção
   registry init [-o <arq>]           grava um registro-exemplo comentado
   baseline pin <runId> [-o <arq>]    pina juiz/gabarito/contrato de uma run (judge-baseline@1)
@@ -106,13 +121,19 @@ OPÇÕES GLOBAIS
 
 PARA AGENTES
   Toda saída estruturada vai para o STDOUT; progresso e avisos vão para o STDERR.
+  Erro sob --json/ndjson: {ok:false, command, error:{code, kind, message, hint,
+  details}} no STDOUT (em ndjson, a última linha: type "result"). Decida pelo
+  error.kind; error.hint traz o próximo comando.
   Nunca chute um think level: \`models show <id> --json\` diz exatamente quais
   níveis o modelo aceita e o que vai no fio para cada um pedido.
   Comece por: prompt-builder docs quickstart
 
-CÓDIGOS DE SAÍDA
-  0 ok · 2 uso inválido · 3 config inválida · 4 auth · 5 sem crédito
-  7 parcial (orçamento esgotado) · 8 rede · 130 interrompido
+CÓDIGOS DE SAÍDA (error.kind entre parênteses)
+  0 ok · 1 falha inesperada (internal) · 2 uso inválido (usage)
+  3 config inválida (config) · 4 auth (auth) · 5 sem crédito (credit)
+  6 run inconclusiva (inconclusive) · 7 parcial, orçamento esgotado (control)
+  8 rede (network) · 9 espera esgotada (timeout) · 10 portão recusou (gate)
+  130 interrompido (control)
 `;
 
 /**
@@ -128,6 +149,31 @@ function emitClaudeHint(): void {
     );
   }
 }
+
+/** Comandos do `dispatch` — base do "você quis dizer" (mantenha em par com o switch). */
+const COMMANDS = [
+  'docs',
+  'skill',
+  'init',
+  'models',
+  'estimate',
+  'key',
+  'compare',
+  'vary',
+  'train',
+  'runs',
+  'sessions',
+  'library',
+  'techniques',
+  'lgpd',
+  'config',
+  'registry',
+  'baseline',
+  'doctor',
+  'limits',
+  'mcp',
+  'agents',
+] as const;
 
 async function dispatch(cmd: string | undefined, argv: string[]): Promise<number> {
   switch (cmd) {
@@ -167,56 +213,68 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdBaseline(argv);
     case 'doctor':
       return cmdDoctor(argv);
+    case 'limits':
+      return cmdLimits(argv);
     case 'mcp':
       return cmdMcp(argv);
     case 'agents':
       return cmdAgents(argv);
-    default:
+    default: {
+      const sugestao = cmd ? closestMatch(cmd, COMMANDS) : undefined;
       throw new CliError(
-        `Comando desconhecido: "${cmd}". Veja \`prompt-builder --help\`.`,
+        `Comando desconhecido: "${cmd}".`,
         EXIT.USAGE,
+        { command: cmd ?? null, suggestion: sugestao ?? null, commands: COMMANDS },
+        {
+          code: 'usage.unknown_command',
+          hint:
+            (sugestao ? `Você quis dizer \`prompt-builder ${sugestao}\`? ` : '') +
+            'A lista de comandos está em `prompt-builder --help` (e em details.commands).',
+        },
       );
+    }
   }
 }
 
 async function main(): Promise<void> {
-  // Gateway de LLM a partir do ambiente (OPENROUTER_*), antes de qualquer
-  // comando tocar a rede — o gateway em si nao le o processo (IMPL-021).
-  configureGatewayFromEnv();
   const argv = process.argv.slice(2);
   const cmd = argv[0] && !argv[0].startsWith('-') ? argv[0] : undefined;
   const rest = cmd ? argv.slice(1) : argv;
 
-  // `--version` ANTES do help: sem comando, `!cmd` e verdadeiro e um
-  // `prompt-builder --version` cairia no help.
-  if (argv.includes('--version')) {
-    process.stdout.write(`${VERSION}\n`);
-    process.exit(EXIT.OK);
-  }
-  if (!cmd || argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write(HELP);
-    emitClaudeHint();
-    process.exit(EXIT.OK);
-  }
+  // IMPL-028: o formato de saida e fixado AQUI, por varredura do argv, ANTES de
+  // qualquer outra coisa. Antes ele so era descoberto depois do parse — e um
+  // erro DE parse (flag desconhecida) caia no texto: sob --json o stdout saia
+  // com 0 bytes e o consumidor-maquina nao via nada (Furo 1, R-12).
+  const out = new Output({ format: sniffOutputFormat(argv) });
+  const label = commandLabel(argv);
+  // Excecao sem dono (callback, rejeicao solta) tambem termina no envelope —
+  // o NDJSON nunca fica sem a linha `result`.
+  process.on('uncaughtException', (err) => failAndExit(out, label, err));
+  process.on('unhandledRejection', (err) => failAndExit(out, label, err));
 
   try {
+    // Gateway de LLM a partir do ambiente (OPENROUTER_*), antes de qualquer
+    // comando tocar a rede — o gateway em si nao le o processo (IMPL-021).
+    // Dentro do try: nem a configuracao escapa do envelope.
+    configureGatewayFromEnv();
+
+    // `--version` ANTES do help: sem comando, `!cmd` e verdadeiro e um
+    // `prompt-builder --version` cairia no help.
+    if (argv.includes('--version')) {
+      process.stdout.write(`${VERSION}\n`);
+      process.exit(EXIT.OK);
+    }
+    if (!cmd || argv.includes('--help') || argv.includes('-h')) {
+      process.stdout.write(HELP);
+      emitClaudeHint();
+      process.exit(EXIT.OK);
+    }
+
     process.exitCode = await dispatch(cmd, rest);
   } catch (err) {
-    // O formato de saida so e conhecido depois do parse; num erro de parse
-    // caimos no texto simples, que e o que um humano e um agente conseguem ler.
-    let out: Output;
-    try {
-      out = buildContext(parse(rest, {})).out;
-    } catch {
-      out = new Output({ format: 'text' });
-    }
-    // Falha do gateway que escapou do comando: 401 => auth (4), sem credito =>
-    // 5, 403 de moderacao => 1 (bloqueio, NUNCA auth) — IMPL-010.
-    const cliErr =
-      err instanceof CliError
-        ? err
-        : new CliError((err as Error).message, exitCodeForGatewayError(err) ?? EXIT.ERROR);
-    out.fail(cmd ?? '?', cliErr);
+    // O UNICO ponto de renderizacao de erro do CLI: qualquer coisa lancada vira
+    // o envelope {ok:false, command, error:{code,kind,message,hint,details}}.
+    const cliErr = out.fail(label, err);
     if (cliErr.code === EXIT.USAGE) emitClaudeHint();
     process.exitCode = cliErr.code;
   }

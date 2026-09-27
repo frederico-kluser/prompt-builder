@@ -32,8 +32,18 @@ import {
 } from '../../agent/store.js';
 import { loadRun, getDataDir } from '../../storage.js';
 import { subscribe } from '../../events.js';
-import { buildContext, isAgentContext, parse, resolveKey } from '../context.js';
-import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
+import {
+  buildContext,
+  isAgentContext,
+  loadCatalog,
+  parse,
+  readJsonFile,
+  resolveKey,
+  tryResolveKey,
+  type LoadedCatalog,
+} from '../context.js';
+import { budgetRequiredError, budgetUsdOf, keyRequirement, toRefusal, type BudgetChoice } from '../preflight.js';
+import { CliError, EXIT, failAndExit, fmtUsd, isCliError, renderSpend } from '../output.js';
 import { emitRunEvent } from '../ndjson.js';
 import type { RunRecord, RunConfig } from '../../types.js';
 import type { AgentRunnerConfig, ExecutionRef } from '../../agent/types.js';
@@ -56,43 +66,32 @@ function n(v: unknown, campo: string): number | undefined {
   return x;
 }
 
-/** `--budget <usd|none>`; ausente e sem TTY => EXIT.USAGE sem gastar (mesma regra do chat). */
-function resolveBudget(value: unknown, warn: (m: string) => void): number | undefined {
+/**
+ * `--budget <usd|none>`; ausente e sem TTY => recusa `usage.budget_required`
+ * (mesma regra, mesma mensagem e mesmo código do chat — `../preflight.ts`). A
+ * recusa em si fica para o chamador: o `--dry-run` a reporta com a estimativa.
+ */
+function resolveBudget(value: unknown, warn: (m: string) => void): BudgetChoice {
   if (typeof value === 'string' && value.trim()) {
-    if (value.trim().toLowerCase() === 'none') return undefined;
+    if (value.trim().toLowerCase() === 'none') return { kind: 'none' };
     const v = Number(value);
     if (!Number.isFinite(v) || v <= 0) {
-      throw new CliError('--budget deve ser um valor em USD maior que zero, ou "none".', EXIT.USAGE);
+      throw new CliError('--budget deve ser um valor em USD maior que zero, ou "none".', EXIT.USAGE, { value }, {
+        code: 'usage.invalid_budget',
+        hint: 'Use `--budget 5` (teto de US$ 5) ou `--budget none` (sem teto, assumindo o custo).',
+      });
     }
-    return v;
+    return { kind: 'usd', usd: v };
   }
-  if (isAgentContext()) {
-    throw new CliError(
-      'Faltou definir orçamento. Escolha explicitamente:\n' +
-        '  --budget 5      teto de US$ 5 para esta execução\n' +
-        '  --budget none   sem teto (assumindo o custo)\n' +
-        '(a exigência vale fora de um terminal interativo — nada foi gasto)',
-      EXIT.USAGE,
-    );
-  }
+  if (isAgentContext()) return { kind: 'missing' };
   warn('Sem --budget: rodando SEM teto de gasto.');
-  return undefined;
+  return { kind: 'unset' };
 }
 
 /** Lê e valida um `arena-agent-config@1` -> RunConfig (nunca lança por config). */
 async function readAgentConfigFile(file: string): Promise<RunConfig> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(file, 'utf-8');
-  } catch {
-    throw new CliError(`Não consegui ler o arquivo "${file}".`, EXIT.USAGE);
-  }
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch (err) {
-    throw new CliError(`"${file}" não é um JSON válido: ${(err as Error).message}`, EXIT.CONFIG);
-  }
+  // Leitor comum do CLI: caminho errado = uso (2), JSON quebrado = config (3).
+  const json = await readJsonFile(file);
   const parsed = parseArenaAgentConfig(json);
   if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG);
   const conv = arenaAgentConfigToRunConfig(parsed.config);
@@ -252,6 +251,8 @@ async function cmdDoctor(argv: string[]): Promise<number> {
       throw new CliError(
         `--deep exige a key do OpenRouter no ambiente (OPENROUTER_API_KEY): ${(err as Error).message}`,
         EXIT.AUTH,
+        isCliError(err) ? err.details : undefined,
+        { code: 'auth.key_missing', hint: isCliError(err) ? err.hint : undefined },
       );
     }
   }
@@ -319,25 +320,61 @@ async function cmdRun(argv: string[]): Promise<number> {
     throw new CliError('Uso: prompt-builder agents run --config <arena-agent-config.json>', EXIT.USAGE);
   }
   const config = await readAgentConfigFile(file);
-  const budgetUsd = resolveBudget(values.budget, (m) => out.warn(m));
+  const budget = resolveBudget(values.budget, (m) => out.warn(m));
+  const budgetUsd = budgetUsdOf(budget);
   const configComOrcamento: RunConfig = {
     ...config,
     ...(budgetUsd !== undefined ? { budgetUsd } : {}),
   };
 
-  // --dry-run: valida, estima e NÃO chama NENHUMA API (nem o catálogo). Sem
-  // catálogo o preço sai 0 — é o preço de "não gastar nada para estimar".
+  // --dry-run: valida, estima COM o catálogo (público sem key — IMPL-029; antes
+  // saía sem catálogo e a estimativa dava $0) e espelha as recusas da execução
+  // real de agentes, que são só estas duas: orçamento ausente fora de TTY
+  // (recusa) e key ausente (pré-condição em `requires`). Nada é gasto.
   if (values['dry-run'] === true) {
-    const est = estimateRunCost(estimateInputFromConfig(configComOrcamento), []);
+    const apiKey = await tryResolveKey(values);
+    let catalog: LoadedCatalog | null = null;
+    try {
+      catalog = await loadCatalog(ctx, apiKey);
+    } catch (err) {
+      if (!isCliError(err)) throw err;
+      // A execução de agentes não recusa por catálogo — aqui é só aviso.
+      out.warn(`sem catálogo (${err.message}) — preços dos papéis de LLM saem 0 na estimativa.`);
+    }
+    const est = estimateRunCost(estimateInputFromConfig(configComOrcamento), catalog?.models ?? []);
+    const wouldRefuse = budget.kind === 'missing' ? [toRefusal(budgetRequiredError())] : [];
+    const requires = apiKey ? [] : [keyRequirement()];
+    const resumo = {
+      dryRun: true,
+      estimate: est,
+      wouldRefuse,
+      requires,
+      checks: {
+        catalog: catalog
+          ? { source: catalog.catalogSource, scope: catalog.catalogScope, models: catalog.models.length }
+          : null,
+        key: apiKey ? 'present' : 'missing',
+      },
+    };
     if (out.isText) {
       out.line(JSON.stringify(configComOrcamento, null, 2));
       out.line();
       out.line(`Custo estimado: ${fmtUsd(est.low)} – ${fmtUsd(est.high)}`);
-      out.line('(sem catálogo no dry-run — preços saem 0; use estimate para números com o catálogo)');
+      for (const r of wouldRefuse) out.line(`  RECUSARIA  ${r.code} — ${r.message.split('\n')[0]}`);
+      for (const r of requires) out.line(`  REQUER     ${r.code} — ${r.message}`);
     }
-    out.result(true, 'agents.run.dry-run', { config: configComOrcamento, estimate: est });
+    const primeira = wouldRefuse[0];
+    if (primeira) {
+      throw new CliError(primeira.message, primeira.exit, resumo, {
+        code: primeira.code,
+        hint: primeira.hint ?? undefined,
+      });
+    }
+    out.result(true, 'agents.run.dry-run', { config: configComOrcamento, ...resumo });
     return EXIT.OK;
   }
+
+  if (budget.kind === 'missing') throw budgetRequiredError();
 
   // execução real: precisa da key (EXIT.AUTH quando ausente).
   let apiKey = '';
@@ -347,6 +384,8 @@ async function cmdRun(argv: string[]): Promise<number> {
     throw new CliError(
       `Exige a key do OpenRouter (OPENROUTER_API_KEY ou \`key set\`): ${(err as Error).message}`,
       EXIT.AUTH,
+      isCliError(err) ? err.details : undefined,
+      { code: 'auth.key_missing', hint: isCliError(err) ? err.hint : undefined },
     );
   }
 
@@ -363,7 +402,13 @@ async function cmdRun(argv: string[]): Promise<number> {
       ac.abort('SIGINT');
       return;
     }
-    process.exit(EXIT.SIGINT);
+    failAndExit(
+      out,
+      'agents.run',
+      new CliError('Interrompido (2º Ctrl-C): saída imediata, sem esperar a run fechar.', EXIT.SIGINT, undefined, {
+        code: 'control.interrupted',
+      }),
+    );
   };
   process.on('SIGINT', onSigint);
 
@@ -399,25 +444,37 @@ async function cmdRun(argv: string[]): Promise<number> {
       );
     }
   }
-  out.result(record.status !== 'error', 'agents.run', {
+  const resumo = {
     runId: record.id,
     status: record.status,
     totalCostUsd: record.totalCostUsd,
     budgetExhausted: Boolean(record.budgetExhausted),
+    // ok:true com exit 7/130 = parcial; o motivo explicito evita ler o exit code.
+    stoppedReason: record.stoppedReason ?? null,
     stoppedAtPhase: record.stoppedAtPhase,
     standings: record.standings,
     judgeScoreByContestant: record.judgeScoreByContestant,
     ...(summary ? { agentSummary: summary } : {}),
-  });
-
+  };
   const code = exitFor(record, summary);
+  // Falha sai SÓ pelo envelope de erro (resumo em `details`) — antes saía um
+  // `result` ok:false E depois o erro: dois objetos no stdout (IMPL-028).
   if (code === EXIT.ERROR) {
+    const todasFalharam = summary && summary.executions > 0 && summary.failed === summary.executions;
     throw new CliError(
-      `A run terminou mas TODAS as execuções de agente falharam: ${firstAgentError(record) ?? 'sem detalhes'}. ` +
-        'É problema de infra/credencial, não de qualidade — corrija e rode de novo.',
+      todasFalharam
+        ? `A run terminou mas TODAS as execuções de agente falharam: ${firstAgentError(record) ?? 'sem detalhes'}. ` +
+            'É problema de infra/credencial, não de qualidade — corrija e rode de novo.'
+        : (record.error ?? 'run de agentes falhou'),
       EXIT.ERROR,
+      resumo,
+      {
+        code: todasFalharam ? 'agents.all_executions_failed' : 'run.failed',
+        hint: `Rode \`prompt-builder agents doctor --deep\` e veja \`prompt-builder agents show ${record.id} --json\`.`,
+      },
     );
   }
+  out.result(true, 'agents.run', resumo);
   return code;
 }
 

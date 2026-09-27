@@ -21,8 +21,36 @@ import {
   runCompleteness,
 } from '../../stats.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
-import { buildContext, buildNetworkContext, checkKey, keyFilePath, parse, removeStoredKey, writeStoredKey } from '../context.js';
-import { CliError, EXIT, fmtUsd, renderSpend, type Output } from '../output.js';
+import {
+  buildCatalogContext,
+  buildContext,
+  buildNetworkContext,
+  checkKey,
+  keyFilePath,
+  loadCatalog,
+  parse,
+  readJsonFile,
+  removeStoredKey,
+  resolveKey,
+  writeStoredKey,
+} from '../context.js';
+import { CliError, EXIT, fmtUsd, renderSpend, toCliError, type Output } from '../output.js';
+import type { KeyInfo } from '../../openrouter.js';
+import { DEFAULT_DAILY_CAP_USD, readDailySnapshot, resolveDailyCap } from '../spendLedger.js';
+import { listRunLocks } from '../runLock.js';
+import {
+  evaluateHandoffGuards,
+  normalizeOverrideReason,
+  type HandoffGuardReport,
+} from '../../engine/handoffGuards.js';
+import {
+  appendHandoffAudit,
+  buildHandoffAuditEntry,
+  ensureHandoffAuditWritable,
+  handoffAuditPath,
+  overrideTrailers,
+} from '../handoff.js';
+import type { SessionRecord } from '../../types.js';
 
 // --- key ---------------------------------------------------------------------
 
@@ -89,14 +117,18 @@ export async function cmdKey(argv: string[]): Promise<number> {
 
 export async function cmdEstimate(argv: string[]): Promise<number> {
   const parsed = parse(argv, { config: { type: 'string', short: 'c' } });
-  const ctx = await buildNetworkContext(parsed);
-  const { out } = ctx;
   const file = parsed.values.config;
   if (typeof file !== 'string') {
-    throw new CliError('Uso: prompt-builder estimate --config <arquivo.json>', EXIT.USAGE);
+    throw new CliError('Uso: prompt-builder estimate --config <arquivo.json>', EXIT.USAGE, undefined, {
+      code: 'usage.missing_flag',
+      hint: 'Passe `--config <arquivo.json>` (`prompt-builder config example -o arena.json` gera um).',
+    });
   }
+  // Estimar e ler preco do catalogo PUBLICO: nao exige key (IMPL-029).
+  const ctx = await buildCatalogContext(parsed);
+  const { out } = ctx;
 
-  const json = JSON.parse(await fs.readFile(file, 'utf-8')) as unknown;
+  const json = await readJsonFile(file);
   const formato = (json as Record<string, unknown>)?.format;
   let config;
   if (typeof formato === 'string') {
@@ -130,7 +162,10 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
       out.warn(`preço variável (fora da estimativa): ${est.unknownPriceModelIds.join(', ')}`);
     }
   }
-  out.result(true, 'estimate', { estimate: est });
+  out.result(true, 'estimate', {
+    estimate: est,
+    catalog: { source: ctx.catalogSource, scope: ctx.catalogScope, models: ctx.models.length },
+  });
   return EXIT.OK;
 }
 
@@ -333,8 +368,12 @@ function gitNoIndexDiff(antes: string, depois: string): GitResult {
   }
 }
 
-/** `git add` + `git commit` SÓ do arquivo aplicado (não arrasta o index alheio). */
-function commitAppliedFile(file: string, sessionId: string, out: Output): boolean {
+/**
+ * `git add` + `git commit` SÓ do arquivo aplicado (não arrasta o index alheio).
+ * `trailers` (ex.: `Override-Reason:`) viram o último parágrafo da mensagem —
+ * o formato que `git interpret-trailers --parse` lê.
+ */
+function commitAppliedFile(file: string, sessionId: string, out: Output, trailers: string[] = []): boolean {
   const dir = path.dirname(file);
   const base = path.basename(file);
   const top = git(['-C', dir, 'rev-parse', '--show-toplevel']);
@@ -347,7 +386,9 @@ function commitAppliedFile(file: string, sessionId: string, out: Output): boolea
     out.warn(`git add falhou (${add.error}) — commit pulado.`);
     return false;
   }
-  const commit = git(['-C', dir, 'commit', '-m', `prompt: atualiza ${base} (sessão ${sessionId})`, '--', base]);
+  const assunto = `prompt: atualiza ${base} (sessão ${sessionId})`;
+  const mensagem = trailers.length > 0 ? `${assunto}\n\n${trailers.join('\n')}` : assunto;
+  const commit = git(['-C', dir, 'commit', '-m', mensagem, '--', base]);
   if (!commit.ok) {
     out.warn(`git commit falhou (${commit.error}) — o prompt já está aplicado em ${file}.`);
     return false;
@@ -356,16 +397,51 @@ function commitAppliedFile(file: string, sessionId: string, out: Output): boolea
 }
 
 /**
+ * Erro do gate do handoff (IMPL-027): exit GATE_BLOCKED, `error.code`
+ * específico do bloqueio e a evidência inteira em `details`.
+ */
+function handoffBlockedError(record: SessionRecord, file: string, guards: HandoffGuardReport): CliError {
+  const code =
+    guards.blocks.length === 1 ? `handoff.${guards.blocks[0].code.replace(/\./g, '_')}` : 'handoff.blocked';
+  return new CliError(
+    `Handoff bloqueado: ${guards.blocks.map((b) => b.message).join(' ')} Nada foi gravado em ${file}.`,
+    EXIT.GATE_BLOCKED,
+    {
+      sessionId: record.id,
+      file,
+      applied: false,
+      blocks: guards.blocks,
+      warnings: guards.warnings,
+      holdout: record.holdout ?? null,
+      significance: record.significance ?? null,
+      judgeDrift: Boolean(record.judgeDrift),
+      auditLog: handoffAuditPath(),
+    },
+    {
+      code,
+      hint:
+        'Não promova este campeão: treine de novo (mais --stages, outro --holdout-ratio) ou mantenha o prompt atual. ' +
+        `Se uma pessoa decidiu promover mesmo assim, repita com --override "<motivo>" — o motivo fica gravado em ${handoffAuditPath()}.`,
+    },
+  );
+}
+
+/**
  * Aplica o prompt campeão em `destino`: backup `<destino>.bak-<ISO-ts>` quando o
  * arquivo existe, escrita com `\n` final, diff do que mudou e commit opcional.
+ *
+ * Exige o laudo do gate e RECUSA antes de qualquer efeito (nem o diretório é
+ * criado) quando ele está bloqueado: é o único escritor do handoff, então
+ * nenhum caminho futuro aplica um campeão regredido sem passar por aqui.
  */
 async function applyPromptFile(
   destino: string,
   prompt: string,
-  opts: { commit: boolean; sessionId: string; out: Output },
+  opts: { commit: boolean; record: SessionRecord; guards: HandoffGuardReport; out: Output },
 ): Promise<ApplyReport> {
   const { out } = opts;
   const file = path.resolve(destino);
+  if (opts.guards.blocked) throw handoffBlockedError(opts.record, file, opts.guards);
   await fs.mkdir(path.dirname(file), { recursive: true });
 
   let backup: string | null = null;
@@ -394,7 +470,9 @@ async function applyPromptFile(
     out.line('(arquivo criado)');
   }
 
-  const committed = opts.commit ? commitAppliedFile(file, opts.sessionId, out) : false;
+  const committed = opts.commit
+    ? commitAppliedFile(file, opts.record.id, out, overrideTrailers(opts.guards.override))
+    : false;
   return { applied: true, file, backup, committed };
 }
 
@@ -405,6 +483,7 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     limit: { type: 'string' },
     apply: { type: 'string' },
     commit: { type: 'boolean' },
+    override: { type: 'string' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -430,10 +509,14 @@ export async function cmdSessions(argv: string[]): Promise<number> {
 
   if (sub === 'winner') {
     // Handoff versionado: --apply leva o campeão para um arquivo de produção,
-    // com backup + diff + commit opcional (ver applyPromptFile acima).
+    // com backup + diff + commit opcional (ver applyPromptFile acima) — e,
+    // desde o IMPL-027, atrás de um GATE: holdout regredido bloqueia (exit
+    // GATE_BLOCKED, destino intocado) salvo --override "<motivo>", que fica
+    // gravado na trilha de auditoria e no trailer do commit.
     const applyRaw = parsed.values.apply;
     const applyTo = typeof applyRaw === 'string' ? applyRaw.trim() : undefined;
     const wantCommit = parsed.values.commit === true;
+    const overrideRaw = parsed.values.override;
     if (typeof applyRaw === 'string' && !applyTo) {
       throw new CliError('--apply exige um caminho de arquivo.', EXIT.USAGE);
     }
@@ -443,7 +526,31 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     if (wantCommit && !applyTo) {
       throw new CliError('--commit só faz sentido junto de --apply <arquivo>.', EXIT.USAGE);
     }
+    if (typeof overrideRaw === 'string' && !applyTo) {
+      throw new CliError('--override só faz sentido junto de --apply <arquivo>.', EXIT.USAGE, undefined, {
+        code: 'usage.override_without_apply',
+        hint: 'Use `sessions winner <id> --apply <arquivo> --override "<motivo>"`.',
+      });
+    }
+    const overrideReason = normalizeOverrideReason(typeof overrideRaw === 'string' ? overrideRaw : null);
+    if (typeof overrideRaw === 'string' && !overrideReason) {
+      // Motivo vazio não é override: sem isto `--override ""` sobreporia o
+      // bloqueio sem justificativa nenhuma.
+      throw new CliError('--override exige um motivo não vazio.', EXIT.USAGE, undefined, {
+        code: 'usage.override_reason_required',
+        hint: 'Diga por que promover mesmo assim: --override "<motivo>" (fica gravado na auditoria e no commit).',
+      });
+    }
+    // O laudo é o mesmo para ver, imprimir e aplicar — só o --apply bloqueia.
+    const guards = evaluateHandoffGuards(record, { overrideReason });
     if (parsed.values['prompt-only'] === true) {
+      // Payload cru no stdout (costuma ir para `> arquivo`): bloquear aqui
+      // truncaria o destino do redirecionamento. Só avisa — o handoff com
+      // gate é o --apply.
+      for (const i of [...guards.blocks, ...guards.warnings]) out.warn(i.message);
+      if (guards.blocks.length > 0) {
+        out.warn('--prompt-only não passa pelo gate do handoff: use --apply <arquivo> para promover.');
+      }
       out.raw(campeao?.systemPrompt ?? '');
       return EXIT.OK;
     }
@@ -452,14 +559,46 @@ export async function cmdSessions(argv: string[]): Promise<number> {
       if (!campeao || !prompt || !prompt.trim()) {
         throw new CliError(`A sessão "${id}" não tem prompt campeão para aplicar.`, EXIT.ERROR);
       }
-      if (record.holdoutSkipped) {
-        out.warn('campeão NÃO validado em holdout — pode estar sobreajustado.');
+      const destino = path.resolve(applyTo);
+      if (guards.blocked) {
+        // A tentativa bloqueada também fica na trilha (o destino não é tocado).
+        await appendHandoffAudit(
+          buildHandoffAuditEntry(record, guards, {
+            outcome: 'blocked',
+            file: destino,
+            backup: null,
+            committed: false,
+            prompt,
+          }),
+          out,
+        );
+        throw handoffBlockedError(record, destino, guards);
+      }
+      // Override sem registro não passa: a trilha precisa ser gravável ANTES
+      // de o destino ser tocado.
+      if (guards.override) await ensureHandoffAuditWritable();
+      for (const w of guards.warnings) {
+        // O override é parte do RESULTADO (quem lê só o stdout tem de vê-lo);
+        // o resto é narração no stderr. Sob --json/ndjson ele vai no payload.
+        if (w.code.startsWith('override.') && out.isText) out.line(`! ${w.message}`);
+        else out.warn(w.message);
       }
       const report = await applyPromptFile(applyTo, prompt, {
         commit: wantCommit,
-        sessionId: record.id,
+        record,
+        guards,
         out,
       });
+      const auditLog = await appendHandoffAudit(
+        buildHandoffAuditEntry(record, guards, {
+          outcome: 'applied',
+          file: report.file,
+          backup: report.backup,
+          committed: report.committed,
+          prompt,
+        }),
+        out,
+      );
       out.info(
         `prompt aplicado em ${report.file}${report.backup ? ` (backup: ${report.backup})` : ''}`,
       );
@@ -469,14 +608,18 @@ export async function cmdSessions(argv: string[]): Promise<number> {
         file: report.file,
         backup: report.backup,
         committed: report.committed,
+        sessionId: record.id,
+        override: guards.override,
+        blocks: guards.blocks,
+        warnings: guards.warnings,
+        auditLog,
       });
       return EXIT.OK;
     }
     if (out.isText && campeao) {
       out.line(`campeão da iteração ${campeao.iteration + 1}: ${campeao.winnerContestantId}`);
-      if (record.holdoutSkipped) {
-        out.warn('campeão NÃO validado em holdout — pode estar sobreajustado.');
-      }
+      for (const i of [...guards.blocks, ...guards.warnings]) out.warn(i.message);
+      if (guards.blocked) out.warn('--apply será BLOQUEADO para esta sessão (só passa com --override "<motivo>").');
       out.line();
       out.line(campeao.systemPrompt);
     }
@@ -486,6 +629,9 @@ export async function cmdSessions(argv: string[]): Promise<number> {
       holdoutSkipped: Boolean(record.holdoutSkipped),
       holdout: record.holdout,
       significance: record.significance,
+      judgeDrift: Boolean(record.judgeDrift),
+      // Laudo do gate SEM aplicar: um agente decide antes de tentar o --apply.
+      handoff: { wouldBlock: guards.blocked, blocks: guards.blocks, warnings: guards.warnings },
     });
     return EXIT.OK;
   }
@@ -593,7 +739,7 @@ export async function cmdConfig(argv: string[]): Promise<number> {
 
   const file = parsed.positionals[0];
   if (!file) throw new CliError('Uso: prompt-builder config validate <arquivo.json>', EXIT.USAGE);
-  const json = JSON.parse(await fs.readFile(file, 'utf-8')) as unknown;
+  const json = await readJsonFile(file);
   const formato = (json as Record<string, unknown>)?.format;
 
   if (typeof formato === 'string') {
@@ -702,15 +848,62 @@ export async function cmdRegistry(argv: string[]): Promise<number> {
       for (const d of report.drifted) out.line(`  ${d.id} — ${d.reason}`);
     }
   }
-  out.result(report.drifted.length === 0, 'registry.validate', { file, report });
   // Drift = config: o registro não descreve mais o fonte de produção (exit 3).
-  return report.drifted.length === 0 ? EXIT.OK : EXIT.CONFIG;
+  // Sai pelo envelope de erro (o relatório vai em `details`), não por um
+  // `result` ok:false sem `error` (IMPL-028).
+  if (report.drifted.length > 0) {
+    throw new CliError(
+      `${report.drifted.length} de ${report.total} prompt(s) com drift em ${file}.`,
+      EXIT.CONFIG,
+      { file, report },
+      {
+        code: 'registry.drift',
+        hint: 'O fonte de produção mudou: reverta o prompt ou atualize o registro; o motivo de cada um está em details.report.drifted.',
+      },
+    );
+  }
+  out.result(true, 'registry.validate', { file, report });
+  return EXIT.OK;
+}
+
+/**
+ * Recomendações sobre o LIMITE DA KEY no OpenRouter (IMPL-031, R-12:DEC-5): é
+ * a única camada anti-gasto que vale ENTRE MÁQUINAS e contra agente
+ * desgovernado — o teto diário local só vê esta máquina. O OpenRouter aplica o
+ * limite no servidor (`limit` em USD + `limit_reset`, o TIPO da janela:
+ * daily/weekly/monthly; o diário zera às 00:00 UTC). Pura: testável sem rede.
+ */
+export function keyLimitAdvice(info: KeyInfo | null, localDailyCapUsd: number | null): string[] {
+  if (!info) return [];
+  const sugestao = localDailyCapUsd ?? DEFAULT_DAILY_CAP_USD;
+  const onde = 'em https://openrouter.ai/settings/keys';
+  if (info.limitUsd === null || info.limitUsd === undefined) {
+    return [
+      `A key NÃO tem limite de crédito: defina limit + limit_reset=daily ${onde} (ex.: US$ ${sugestao}/dia; ` +
+        'o reset diário é 00:00 UTC). É a única camada que vale entre máquinas e contra um agente desgovernado — ' +
+        'o teto diário local (`prompt-builder limits`) só enxerga esta máquina.',
+    ];
+  }
+  const reset = info.limitReset ?? null;
+  if (reset === null) {
+    return [
+      `A key tem limite de ${fmtUsd(info.limitUsd)} SEM reset (teto vitalício): esgotado, tudo para até alguém ` +
+        `subir o limite. Prefira limit_reset=daily ${onde} — contém um estrago em 24 h e volta sozinho às 00:00 UTC.`,
+    ];
+  }
+  if (reset !== 'daily') {
+    return [
+      `O limite da key reseta "${reset}": um agente desgovernado pode gastar a janela inteira num dia. ` +
+        `limit_reset=daily ${onde} limita o estrago a 24 h (reset 00:00 UTC).`,
+    ];
+  }
+  return [];
 }
 
 export async function cmdDoctor(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
   const ctx = buildContext(parsed);
-  const { out } = ctx;
+  const { out, dataDir } = ctx;
   const checks: Record<string, unknown> = {
     node: process.version,
     dataDir: getDataDir(),
@@ -724,19 +917,70 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     checks.dataDirError = (err as Error).message;
   }
 
+  // Camadas locais anti-gasto-N× (IMPL-031): teto diário da máquina e runs
+  // ativas (lock por config). Só disco.
+  let capLocal: number | null = null;
   try {
-    const net = await buildNetworkContext(parsed);
-    const info = await checkKey(net.apiKey);
-    checks.key = 'ok';
-    checks.models = net.models.length;
-    checks.catalogSource = net.catalogSource;
-    checks.creditRemaining = info.limitRemainingUsd ?? null;
+    const cap = resolveDailyCap(dataDir);
+    capLocal = cap.capUsd;
+    const dia = readDailySnapshot(dataDir, cap);
+    checks.dailyCap = {
+      capUsd: cap.capUsd,
+      source: cap.source,
+      spentTodayUsd: dia.spentUsd,
+      pendingUsd: dia.pendingUsd,
+      remainingUsd: dia.remainingUsd,
+      resetsAt: dia.resetsAt,
+      processesToday: dia.processes,
+    };
   } catch (err) {
-    checks.key = `falhou: ${(err as Error).message}`;
+    checks.dailyCap = `inválido: ${(err as Error).message}`;
+  }
+  checks.activeRuns = listRunLocks(dataDir)
+    .filter((l) => !l.stale)
+    .map((l) => ({ pid: l.holder?.pid ?? null, command: l.holder?.command ?? null, runId: l.holder?.runId ?? l.holder?.sessionId ?? null }));
+
+  // Key: ausente ou recusada = o doctor FALHA (exit 4); rede = exit 8. Antes
+  // ele saía 0 com `ok:true` e "key: falhou: …" — um agente lia "saudável".
+  let falha: CliError | null = null;
+  let info: KeyInfo | null = null;
+  try {
+    const apiKey = await resolveKey(ctx.values);
+    info = await checkKey(apiKey);
+    checks.key = 'ok';
+    checks.creditRemaining = info.limitRemainingUsd ?? null;
+    checks.keyLimit = {
+      limitUsd: info.limitUsd ?? null,
+      limitRemainingUsd: info.limitRemainingUsd ?? null,
+      limitReset: info.limitReset ?? null,
+      usageDailyUsd: info.usageDailyUsd ?? null,
+    };
+    try {
+      const cat = await loadCatalog(ctx, apiKey);
+      checks.models = cat.models.length;
+      checks.catalogSource = cat.catalogSource;
+    } catch (err) {
+      falha = toCliError(err);
+      checks.models = `falhou: ${falha.message}`;
+    }
+  } catch (err) {
+    falha = toCliError(err);
+    checks.key = `falhou: ${falha.message}`;
   }
 
+  const recomendacoes = keyLimitAdvice(info, capLocal);
+  checks.recommendations = recomendacoes;
+
   if (out.isText) {
-    for (const [k, v] of Object.entries(checks)) out.line(`${k.padEnd(18)} ${String(v)}`);
+    for (const [k, v] of Object.entries(checks)) {
+      if (k === 'recommendations') continue;
+      out.line(`${k.padEnd(18)} ${typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)}`);
+    }
+    for (const r of recomendacoes) out.warn(r);
+  }
+  if (falha) {
+    // O relatório inteiro vai em details: o agente vê o que passou e o que não.
+    throw new CliError(falha.message, falha.code, { checks }, { code: falha.errorCode, hint: falha.hint });
   }
   out.result(true, 'doctor', checks);
   return EXIT.OK;

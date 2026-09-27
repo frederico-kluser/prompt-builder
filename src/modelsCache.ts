@@ -55,6 +55,9 @@ interface CatalogFile {
   data: OpenRouterModel[];
 }
 
+/** Cache do catalogo PUBLICO (sem key — IMPL-029). */
+const PUBLIC_FILE = 'models-public.json';
+
 /** Base em vigor NO GATEWAY (configurado pelo ponto de entrada a partir do ambiente). */
 function baseUrl(): string {
   return getGateway().config.baseUrl;
@@ -66,13 +69,16 @@ function baseUrl(): string {
  * qualquer `ls` — ou qualquer processo da maquina — consegue ler.
  */
 export function catalogPath(apiKey: string): string {
+  // Sem key (IMPL-029): o catalogo PUBLICO (`GET /models` responde sem
+  // Authorization) mora num arquivo proprio, legivel por nome.
+  if (!apiKey) return path.join(getDataDir(), 'cache', PUBLIC_FILE);
   const h = createHash('sha256').update(apiKey).digest('hex').slice(0, 16);
   return path.join(getDataDir(), 'cache', `models-${h}.json`);
 }
 
-async function readCatalog(apiKey: string): Promise<CatalogFile | null> {
+async function readCatalogFile(file: string): Promise<CatalogFile | null> {
   try {
-    const raw = await fs.readFile(catalogPath(apiKey), 'utf-8');
+    const raw = await fs.readFile(file, 'utf-8');
     const parsed = JSON.parse(raw) as CatalogFile;
     if (!READABLE_VERSIONS.has(parsed.v)) return null;
     if (parsed.base !== baseUrl()) return null;
@@ -81,6 +87,33 @@ async function readCatalog(apiKey: string): Promise<CatalogFile | null> {
   } catch {
     return null;
   }
+}
+
+function readCatalog(apiKey: string): Promise<CatalogFile | null> {
+  return readCatalogFile(catalogPath(apiKey));
+}
+
+/**
+ * Sem key: o catalogo em disco MAIS RECENTE de qualquer escopo (o publico ou o
+ * de uma key usada antes). O `/models` nao depende da conta, entao o arquivo
+ * de outra key serve para listar/estimar — e evita rede quando ha cache fresco
+ * ("catalogo do cache em disco", R-12:REC-4). Com key, cada key segue no seu.
+ */
+async function readFreshestCatalog(): Promise<CatalogFile | null> {
+  const dir = path.join(getDataDir(), 'cache');
+  let nomes: string[];
+  try {
+    nomes = await fs.readdir(dir);
+  } catch {
+    return null;
+  }
+  let melhor: CatalogFile | null = null;
+  for (const n of nomes) {
+    if (!/^models-[\w-]+\.json$/.test(n)) continue;
+    const c = await readCatalogFile(path.join(dir, n));
+    if (c && (!melhor || c.fetchedAt > melhor.fetchedAt)) melhor = c;
+  }
+  return melhor;
 }
 
 async function writeCatalog(apiKey: string, data: OpenRouterModel[]): Promise<void> {
@@ -110,6 +143,8 @@ export interface EnsureCatalogResult {
   models: OpenRouterModel[];
   fetchedAt: number;
   source: 'disk' | 'network' | 'stale';
+  /** `key` = catalogo da key informada; `public` = sem key (GET /models publico). */
+  scope: 'key' | 'public';
 }
 
 /**
@@ -122,12 +157,16 @@ export async function ensureCatalog(
   opts: { force?: boolean; ttlMs?: number; onWarn?: (msg: string) => void } = {},
 ): Promise<EnsureCatalogResult> {
   const ttl = opts.ttlMs ?? DEFAULT_TTL_MS;
-  const disk = await readCatalog(apiKey);
+  // Key vazia = catalogo PUBLICO (IMPL-029): `models`/`estimate`/`--dry-run`
+  // nao exigem key. O `GET /models` e publico e gratuito, entao sem cache em
+  // disco ele e buscado sem credencial.
+  const scope: EnsureCatalogResult['scope'] = apiKey ? 'key' : 'public';
+  const disk = apiKey ? await readCatalog(apiKey) : await readFreshestCatalog();
   const fresco = disk && Date.now() - disk.fetchedAt < ttl;
 
   if (!opts.force && disk && fresco) {
     primeModelsCache(apiKey, disk.data, disk.fetchedAt);
-    return { models: disk.data, fetchedAt: disk.fetchedAt, source: 'disk' };
+    return { models: disk.data, fetchedAt: disk.fetchedAt, source: 'disk', scope };
   }
 
   try {
@@ -147,7 +186,7 @@ export async function ensureCatalog(
         `catálogo: ${graves.length} campo(s) contratual(is) malformado(s) — tratados em fail-closed (${amostra}${graves.length > 3 ? '; …' : ''}).`,
       );
     }
-    return { models: data, fetchedAt: Date.now(), source: 'network' };
+    return { models: data, fetchedAt: Date.now(), source: 'network', scope };
   } catch (err) {
     if (disk) {
       primeModelsCache(apiKey, disk.data, disk.fetchedAt);
@@ -155,7 +194,7 @@ export async function ensureCatalog(
       opts.onWarn?.(
         `catálogo offline (${(err as Error).message}); usando cache de ${horas}h atrás.`,
       );
-      return { models: disk.data, fetchedAt: disk.fetchedAt, source: 'stale' };
+      return { models: disk.data, fetchedAt: disk.fetchedAt, source: 'stale', scope };
     }
     throw err;
   }

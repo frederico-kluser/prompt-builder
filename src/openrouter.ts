@@ -963,9 +963,20 @@ export interface KeyInfo {
   limitRemainingUsd?: number | null;
   /** Se a key esta no tier gratuito. */
   isFreeTier?: boolean;
+  /**
+   * Janela do limite da key (`daily`/`weekly`/`monthly`; null = sem reset, o
+   * limite e vitalicio). E o TIPO de janela, nao um timestamp; o reset diario
+   * e 00:00 UTC. O `doctor` recomenda limite + reset diario (IMPL-031).
+   */
+  limitReset?: string | null;
+  /** Gasto da key no dia corrente (UTC), em USD. */
+  usageDailyUsd?: number;
 }
 
-export type ValidateKeyResult = ({ ok: true } & KeyInfo) | { ok: false; error: string };
+export type ValidateKeyResult =
+  | ({ ok: true } & KeyInfo)
+  /** `network` = nem chegou ao OpenRouter (a key pode estar boa). */
+  | { ok: false; error: string; network?: boolean };
 
 function asNumberOrNull(v: unknown): number | null | undefined {
   if (v === null) return null;
@@ -1628,7 +1639,7 @@ export class OpenRouterGateway {
         headers: this.headers(key),
       });
     } catch (err) {
-      return { ok: false, error: `Falha de rede ao validar a key: ${(err as Error).message}` };
+      return { ok: false, network: true, error: `Falha de rede ao validar a key: ${(err as Error).message}` };
     }
 
     // Aqui (e SO aqui) 403 ainda e problema de credencial: `GET /key` nao tem
@@ -1655,6 +1666,8 @@ export class OpenRouterGateway {
       limitUsd: asNumberOrNull(d.limit),
       limitRemainingUsd: asNumberOrNull(d.limit_remaining),
       isFreeTier: typeof d.is_free_tier === 'boolean' ? d.is_free_tier : undefined,
+      limitReset: typeof d.limit_reset === 'string' ? d.limit_reset : d.limit_reset === null ? null : undefined,
+      usageDailyUsd: typeof d.usage_daily === 'number' ? d.usage_daily : undefined,
     };
   }
 }

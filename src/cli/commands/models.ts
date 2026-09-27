@@ -26,7 +26,7 @@ import {
   type MaxPriceFilterResult,
 } from '../../engine/pricing.js';
 import { CliError, EXIT } from '../output.js';
-import { buildContext, buildNetworkContext, parse, type ParsedArgs } from '../context.js';
+import { buildCatalogContext, buildContext, parse, type ParsedArgs } from '../context.js';
 import { daysUntil, describeSuccessor, lifecycleAlertFor } from '../../engine/modelLifecycle.js';
 import type { OpenRouterModel, ReasoningLevel } from '../../types.js';
 
@@ -318,7 +318,9 @@ export async function cmdModels(argv: string[]): Promise<number> {
   const parsed: ParsedArgs = parse(rest, OPTIONS);
   // `allowlist` lê o snapshot do pacote: sem key, sem rede.
   if (sub === 'allowlist') return cmdAllowlist(parsed);
-  const ctx = await buildNetworkContext(parsed);
+  // Catalogo e dado PUBLICO (GET /models responde sem Authorization): sem key,
+  // usa o cache em disco ou busca o publico — nunca exit 4 (IMPL-029).
+  const ctx = await buildCatalogContext(parsed);
   const { out, values } = ctx;
 
   // `show <id>` — tudo o que se pode ajustar naquele modelo.
@@ -409,6 +411,7 @@ export async function cmdModels(argv: string[]): Promise<number> {
           format: MODELS_EXPORT_FORMAT,
           fetchedAt: new Date().toISOString(),
           source: ctx.catalogSource,
+          scope: ctx.catalogScope,
           count: rows.length,
           data: rows,
         },

@@ -60,8 +60,10 @@ import {
 // ----------------------------------------------------------------------------
 // Constantes da receita (SPIKE v0.84.2)
 // ----------------------------------------------------------------------------
-/** Caminho do node que hospeda o `pi` (receita do SPIKE — bin do node primeiro). */
-const NODE_BIN_DIR = '/home/ondokai/.nvm/versions/node/v24.19.0/bin';
+/** Caminho do node que hospeda o `pi` (receita do SPIKE — bin do node primeiro).
+ *  Derivado de `process.execPath` (como `cleanPath()` do doctor): o caminho cravado
+ *  da máquina do autor viajava no tarball npm (IMPL-044, defeito B7). */
+const NODE_BIN_DIR = path.dirname(process.execPath);
 
 /** PATH da sala limpa — o node do `pi` primeiro, depois os `bin` usuais. */
 const CLEAN_PATH = `${NODE_BIN_DIR}:/usr/bin:/bin:/usr/local/bin`;

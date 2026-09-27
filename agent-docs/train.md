@@ -75,6 +75,10 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
   Investigue as falhas do juiz antes de rodar de novo.
 - `holdoutSkipped: true` — **o campeão não passou pelo gate**. Trate o ganho como
   não verificado.
+- `holdout.regressed: true` — o campeão foi **pior** que a base nos cenários
+  reservados. `sessions winner <id> --apply <arq>` **recusa** (exit `10`,
+  destino intocado); só passa com `--override "<motivo>"`, que fica gravado
+  (`docs results`).
 - `convergedAtIteration` — o treino parou por falta de ganho, não por falta de
   iterações. Isso é um bom sinal, não uma falha.
 

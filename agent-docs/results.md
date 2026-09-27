@@ -64,7 +64,8 @@ nunca `nao`: o par sai **dos dois lados** das médias e do teste. Compare sempre
 | `judgeDrift` | `true` = o **contrato do juiz mudou** no meio da sessão (calibration drift — deltas podem ser do juiz) |
 
 `regressed: true` significa que o campeão foi **pior** que a base no holdout —
-o ganho do treino era ruído ou sobreajuste. Não promova esse prompt.
+o ganho do treino era ruído ou sobreajuste. Não promova esse prompt: o
+`sessions winner --apply` **bloqueia** (ver abaixo).
 
 
 ## Reprodutibilidade e handoff
@@ -72,7 +73,7 @@ o ganho do treino era ruído ou sobreajuste. Não promova esse prompt.
 ```bash
 prompt-builder runs reproduce <id>          # config + comando exato para re-rodar
 prompt-builder runs export <id> -o run.json # artefato auto-contido (gabaritos, prompts, vereditos)
-prompt-builder sessions winner <sid> --apply prompt.md [--commit]  # backup + diff + commit opcional
+prompt-builder sessions winner <sid> --apply prompt.md [--commit] [--override "<motivo>"]
 prompt-builder registry validate            # guarda de drift: o needle do prompt ainda existe no fonte?
 ```
 
@@ -80,3 +81,21 @@ O `runs reproduce` devolve o RunConfig **lossless** (passa em `config validate`)
 e a vista `arena-config@1`; o `runs export` produz `prompt-builder-run@1` —
 auditoria completa sem o disco original. O `--apply` nunca perde o prompt de
 produção: backup `<destino>.bak-<ts>` antes de sobrescrever, diff sempre.
+
+### Gate do handoff (`--apply`)
+
+| Sinal na sessão | Efeito |
+|---|---|
+| `holdout.regressed` | **BLOQUEIA**: exit `10`, `error.kind: "gate"`, `error.code: "handoff.holdout_regressed"`; o destino não é tocado (nem backup, nem commit) |
+| `holdoutSkipped` / sem `holdout` | aviso — campeão não validado contra sobreajuste |
+| IC95% contendo 0 (ou abaixo de 0, ou sem IC) | aviso — ganho indistinguível de ruído |
+| `judgeDrift` | aviso — parte do ganho pode ser do juiz |
+
+O bloqueio só cede com `--override "<motivo>"` (decisão **humana**; motivo
+vazio é exit `2`). O motivo aparece no stdout, no payload (`data.override`,
+aviso `override.applied`) e no trailer `Override-Reason:` do commit
+(`--commit`). Toda tentativa — aplicada ou bloqueada — vira uma linha em
+`<data-dir>/handoffs.jsonl` (`handoff-audit@1`). Sem `--apply`,
+`sessions winner <sid> --json` já traz o laudo em `data.handoff`
+(`wouldBlock`, `blocks`, `warnings`). `--prompt-only` imprime o prompt cru e
+**não** passa pelo gate (só avisa no stderr).
