@@ -58,12 +58,13 @@ import {
 } from './costProxy.js';
 import { hostCommandRunner, removeTreeBestEffort, writeFileNoFollow, type CommandRunner } from './sandboxExec.js';
 import { isDigestRef, sandboxCommandRunner, sandboxProfile } from './container.js';
-import { isControlSignal, RunCancelled } from '../budget.js';
+import { BudgetExceeded, isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
 import { blindRankMap, seedFromId } from '../duels.js';
 import { getGateway, tierFor } from '../openrouter.js';
 import { isKnownPrice } from '../engine/pricing.js';
 import type {
+  AgentCostSource,
   AgentLimits,
   AgentRunnerConfig,
   AgentStopReason,
@@ -74,6 +75,7 @@ import type {
 import type {
   CompetitorResponse,
   Contestant,
+  CostSource,
   OpenRouterModel,
   RunCtx,
   StageSpec,
@@ -308,6 +310,19 @@ function priceFns(catalog: OpenRouterModel[], modelId: string): {
     priceTokensIn: (n) => rate(n, 'prompt'),
     priceTokensOut: (n) => rate(n, 'completion'),
   };
+}
+
+/**
+ * Fonte do custo no LEDGER (IMPL-096): o que o executor reportou vira
+ * 'agent-derived' (nunca 'catalog' — tabela é outra coisa); o que foi medido
+ * no gateway (ou conciliado com o /generation) vira 'usage', a única fonte
+ * exata; estimativa por tabela do /models continua 'catalog'. Nada cai em
+ * 'unknown' por aqui: nestas anotações o valor é sempre conhecido.
+ */
+function ledgerCostSource(src: AgentCostSource): CostSource {
+  if (src === 'usage' || src === 'reconciled') return 'usage';
+  if (src === 'catalog') return 'catalog';
+  return 'agent-derived';
 }
 
 /** Resumo de 1 linha da etapa (padrão §29.12). */
@@ -992,18 +1007,36 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         // 7) Ledger. Com chamadas pelo proxy, CADA uma já foi anotada lá (papel
         //    'agent', `usage.cost` medido) — anotar de novo aqui contaria em
         //    dobro. Só um executor que NÃO passou pelo proxy (fake, adaptador sem
-        //    base URL configurável) cai no custo DERIVADO dele, como antes —
-        //    source 'catalog' (tabela), nunca 'unknown'.
+        //    base URL configurável) cai no custo DERIVADO dele, anotado aqui
+        //    com a fonte real (IMPL-096).
         if (measured.calls === 0 && trajectory.usage.costUsd > 0) {
           try {
-            const reservation = ctx.sink?.reserve('agent', modelId, 0, 0) ?? { release: () => undefined };
-            ctx.sink?.note(reservation, {
-              role: 'agent',
-              modelId,
-              cost: { usd: trajectory.usage.costUsd, source: 'catalog' },
-              tokensIn: trajectory.usage.tokensIn,
-              tokensOut: trajectory.usage.tokensOut,
-            });
+            // IMPL-096: reserva NULA (o gasto já aconteceu — a reserva de 0
+            // tokens só poluía o ledger) e fonte HONESTA: 'agent-derived' para o
+            // que o executor calculou, 'usage' para medido/reconciliado no
+            // gateway, 'catalog' só para estimativa por tabela — nunca
+            // 'unknown', nunca 'catalog' para valor reportado pelo executor.
+            ctx.sink?.note(
+              { release: () => undefined },
+              {
+                role: 'agent',
+                modelId,
+                cost: { usd: trajectory.usage.costUsd, source: ledgerCostSource(trajectory.usage.costSource) },
+                tokensIn: trajectory.usage.tokensIn,
+                tokensOut: trajectory.usage.tokensOut,
+              },
+            );
+            // O teto da RUN vira sinal de controle DEPOIS do registo — antes era
+            // o `reserve(0,0)` que disparava e ele PERDIA o gasto da rep que
+            // estourava (contava em menos o que já saiu do bolso). O snapshot é
+            // acessado de forma estrutural: `CostSink` não o declara, mas todo
+            // ledger real tem (um sink-espelho sem ele só não tem porta dura).
+            const snap = (
+              ctx.sink as { snapshot?: () => { budgetUsd?: number; committedUsd: number; spentUsd: number } } | undefined
+            )?.snapshot?.();
+            if (snap && snap.budgetUsd !== undefined && snap.committedUsd > snap.budgetUsd) {
+              throw new BudgetExceeded(snap.spentUsd, snap.budgetUsd, 'agent');
+            }
           } catch (err) {
             if (isControlSignal(err)) throw err; // fronteira de controle
           }

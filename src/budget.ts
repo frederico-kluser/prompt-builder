@@ -454,8 +454,11 @@ export class BudgetLedger implements CostSink {
       n.spentUsd += entry.cost.usd;
       n.committedUsd += entry.cost.usd;
       n.upstreamUsd += entry.cost.upstreamUsd ?? 0;
+      // `usage` continua a ÚNICA fonte exata (IMPL-096). `agent-derived` (o que
+      // o executor calculou) e `catalog` (tabela do /models) são PRECIFICADOS
+      // mas não medidos no gateway: contam como estimados.
       if (entry.cost.source === 'usage') n.accuracy.exact += 1;
-      else if (entry.cost.source === 'catalog') n.accuracy.estimated += 1;
+      else if (entry.cost.source === 'catalog' || entry.cost.source === 'agent-derived') n.accuracy.estimated += 1;
       else n.accuracy.unknown += 1;
       if (entry.finish) {
         tallyFinish((n.finishByRole[entry.role] ??= emptyFinishCounts()), entry.finish);

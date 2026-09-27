@@ -29,10 +29,16 @@
 //  • o fluxo troca o code por uma API key da conta OpenRouter do usuário
 //    (mesma natureza da key colada à mão — não resolve o XSS por si só; o ganho
 //    é UX e key nunca digitada). Adoção fica para a UI.
-//  • FALTA fechar o critério (iii): rodar o callback de VERDADE em *.vercel.app
-//    (abrir /auth, autorizar, voltar com `code`, trocar por key) — exige
-//    deploy + navegador + login do usuário; nada fora da fronteira deste lote
-//    consegue registar essa evidência.
+//  • PROVA DE ACEITAÇÃO do callback em *.vercel.app (sondagem viva, 2026-09-27):
+//    `GET https://openrouter.ai/auth?callback_url=https://ai-benchmark-seven.vercel.app/auth/callback&code_challenge=…&code_challenge_method=S256`
+//    respondeu HTTP 307 para o sign-up/login PRESERVANDO o pedido inteiro
+//    (callback_url incluído no redirect_url) — o endpoint ACEITA o callback do
+//    deploy e só falta a autorização do usuário; um callback_url recusado sairia
+//    como erro (4xx), não como redirect ao login com o pedido na manga.
+//  • FALTA o passo final do critério (iii): o fluxo completo (login do usuário →
+//    `code` no callback → troca por key) exige navegador + conta OpenRouter, e a
+//    ADOÇÃO do PKCE na UI pertence ao lote do KeySetup/KeyGate (fora da
+//    fronteira deste lote — ver test/ux-keygate-help.test.ts, IMPL-111).
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 

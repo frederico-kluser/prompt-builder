@@ -159,7 +159,10 @@ export interface GatewayConfig {
   /**
    * IMPL-075 — preenchimento de `provider_name`/`upstream_id`/`service_tier`
    * via GET /api/v1/generation. 'off' = só o payload; 'missing' = busca quando
-   * o payload nao trouxer o provedor; 'always' = sempre (modo auditável).
+   * o payload nao trouxer o provedor (DEFAULT: cobertura de registro = 1,0 —
+   * critério (iii) do item — e zero GET extra quando o payload ja nomeia o
+   * provedor, que e o caso normal do OpenRouter); 'always' = sempre (modo
+   * auditável).
    */
   providerLookup?: 'off' | 'missing' | 'always';
   /**
@@ -194,7 +197,9 @@ const DEFAULT_CONFIG: GatewayConfig = {
   modelsCacheTtlMs: MODELS_CACHE_TTL_MS,
   metaTimeoutMs: DEFAULT_META_TIMEOUT_MS,
   resendGuardTtlMs: 120_000,
-  providerLookup: 'off',
+  // IMPL-075 (iii): 'missing' por omissao — toda chamada com id de geracao
+  // fica com providerName registrado (payload ou GET /generation), cobertura 1,0.
+  providerLookup: 'missing',
   auditableRoles: [],
   auditableProviderOrder: [],
   auditableQuantizations: [...DEFAULT_AUDITABLE_QUANTIZATIONS],
@@ -1337,6 +1342,15 @@ export function isGatewayTimeout(err: unknown): err is GatewayTimeoutError {
  * 90s/600s, juiz 60s/120s, duelo 60s/90s, gabarito/datagen/reescritor
  * 90s/300s. Configuráveis via `roleTimeouts` (1-600 s); `agent` segue juiz
  * estendido. O `timeoutMs` do chamador continua valendo (pode só ENCURTAR).
+ *
+ * ⚠️ Undici (Node): `headersTimeout` padrao e 300 s — um provedor mudo que
+ * nem mande headers dentro de 300 s derruba a chamada com
+ * `UND_ERR_HEADERS_TIMEOUT` ANTES do teto total de 600 s do competidor (no
+ * caminho JSON, onde nao ha watchdog de inatividade). O erro segue sendo
+ * tratado como pos-despacho (sem reenvio, pendente de conciliacao); quem
+ * quiser o timeout TIPADO do proprio gateway nesse caso deve configurar
+ * `roleTimeouts.competitor.totalMs` abaixo de 300 s. Em stream o watchdog de
+ * inatividade (90 s) dispara primeiro.
  */
 export interface RoleTimeouts {
   /** Inatividade máxima entre bytes do stream (ms). */

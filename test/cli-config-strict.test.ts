@@ -193,3 +193,37 @@ describe('fail-closed não é over-strict', { timeout: 120_000 }, () => {
     expect(cli(['config', 'validate', alvo]).status).toBe(EXIT.OK);
   });
 });
+
+describe('config schema: JSON Schema publicado com $schema versionado (IMPL-093)', { timeout: 120_000 }, () => {
+  it('arena-config@1 sai com $schema (draft 2020-12) e $id versionado, compacto por padrão', () => {
+    const r = cli(['config', 'schema', '--json']);
+    expect(r.status, r.stderr).toBe(EXIT.OK);
+    const doc = JSON.parse(r.stdout) as Record<string, unknown>;
+    expect(doc.$schema).toBe('https://json-schema.org/draft/2020-12/schema');
+    expect(String(doc.$id)).toContain('arena-config@1');
+    // As chaves que `config validate` exige estão no schema publicado.
+    const props = doc.properties as Record<string, unknown>;
+    for (const chave of ['format', 'mode', 'theme', 'stages', 'prompt', 'models']) {
+      expect(props, chave).toHaveProperty(chave);
+    }
+    // Compacto por padrão (IMPL-092): UMA linha de payload.
+    expect(r.stdout.trim().split('\n')).toHaveLength(1);
+  });
+
+  it('--dialect run publica o schema do RunConfig cru; --pretty formata', () => {
+    const r = cli(['config', 'schema', '--dialect', 'run', '--pretty']);
+    expect(r.status, r.stderr).toBe(EXIT.OK);
+    const doc = JSON.parse(r.stdout) as Record<string, unknown>;
+    expect(doc.$schema).toBe('https://json-schema.org/draft/2020-12/schema');
+    expect(String(doc.$id)).toContain('run-config@1');
+    expect(r.stdout.trim().split('\n').length).toBeGreaterThan(1);
+  });
+
+  it('--dialect desconhecido é uso (exit 2) citando os aceitos', () => {
+    const r = cli(['config', 'schema', '--dialect', 'xpto', '--json']);
+    expect(r.status).toBe(EXIT.USAGE);
+    const env = JSON.parse(r.stdout) as { error: { code: string; details: { accepted: string[] } } };
+    expect(env.error.code).toBe('usage.invalid_flag_value');
+    expect(env.error.details.accepted).toEqual(['arena', 'run']);
+  });
+});

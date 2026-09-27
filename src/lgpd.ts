@@ -135,19 +135,23 @@ export async function enforceRunCompliance(
 // `<data-dir>` e não havia comando para removê-las. Agora:
 //
 //  • TTL por default (90 dias, `src/data/lgpd-retention.json`; `PB_RETENTION_DAYS`
-//    sobrescreve) com prune automático (`autoPrune` — chamado no boot do
-//    CLI/servidor e antes de cada run);
-//  • `runs delete` (CLI) chama `eraseRuns` — apagamento TOTAL de uma run:
-//    record, sobras `.tmp` da escrita atômica, dono, job (registro, log,
-//    NDJSON, cancel, chave de idempotência) e o diretório de artefatos/cache
-//    do agente (`agent-runs/<id>/`, que inclui o `repo-cache`). Zero resíduo.
+//    sobrescreve) com prune (`pruneExpiredRuns`) e a versão limitada a uma
+//    varredura por hora (`autoPrune`) — 0 exceções: um item preso não derruba
+//    a varredura;
+//  • apagamento TOTAL de uma run (`eraseRuns`/`eraseRunFiles`): record, sobras
+//    `.tmp` da escrita atômica, dono, job (registro, log, NDJSON, cancel,
+//    chave de idempotência) e o diretório de artefatos/cache do agente
+//    (`agent-runs/<id>/`, que inclui o `repo-cache`). Zero resíduo.
 //
-// O que fica POR FORA por enquanto: sessões de treino (o critério fala em
-// runs) e cifragem em repouso (keyring) — ambos pendentes. O chamamento de
-// `eraseRuns` pelo `runs delete` do CLI e o botão "apagar banco" da tela de
-// Configurações vivem nos módulos de CLI/UI (fora deste ficheiro); o critério
-// (3) do IMPL-100 (Playwright `launch_persistent_context`, deleteDatabase +
-// estimate ≈ 0) é o `test/lgpd-wipe-e2e.test.ts`.
+// ⚠️ PENDENTE (fora deste ficheiro, IMPL-100 por fechar): nada chama
+// `autoPrune`/`eraseRuns` ainda — falta o comando `runs delete` do CLI
+// (`src/cli/commands/`), o botão "apagar banco" da tela de Configurações
+// (`web/src/pages/Settings.tsx` → `wipeLocalData`) e a ligação do `autoPrune`
+// no boot do CLI/servidor e no pré-voo de cada run. Também ficam POR FORA:
+// sessões de treino (o critério fala em runs) e cifragem em repouso (keyring).
+// Os critérios (1)–(3) estão cobertos por `test/lgpd-retention.test.ts` e
+// `test/lgpd-wipe-e2e.test.ts` (este é o Playwright `launch_persistent_context`
+// com deleteDatabase + estimate ≈ 0).
 //
 // A SPA tem o par em `web/src/lgpd.ts` (apagamento do IndexedDB inteiro +
 // `navigator.storage.estimate` + instrução de "limpar dados do site").

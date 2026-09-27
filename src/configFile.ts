@@ -323,7 +323,12 @@ const modelsSchema = z.object(
   'models deve ser um objeto com { datagen, judges }',
 );
 
-const arenaConfigSchema = z
+/**
+ * Schema zod do `arena-config@1`. Exportado para o `config schema` publicar o
+ * JSON Schema correspondente (IMPL-093): o validador real é este, não uma
+ * reimpressão que pudesse divergir.
+ */
+export const arenaConfigSchema = z
   .object(
     {
       format: z.literal(ARENA_CONFIG_FORMAT),

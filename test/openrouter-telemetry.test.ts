@@ -145,14 +145,45 @@ describe('IMPL-075 (i) — provider_name em 100% das chamadas (payload e/ou GET 
     usage: USAGE_COMPLETO,
   };
 
-  it('payload já traz o provedor: registrado sem chamar /generation (modo off)', async () => {
+  it('payload já traz o provedor: registrado sem chamar /generation (modo off explícito)', async () => {
     const cont = { generation: 0, chats: 0 };
-    const gw = createGateway({ fetch: roteador(cont, chatComProvider, {}), sleep: noSleep });
+    const gw = createGateway({ fetch: roteador(cont, chatComProvider, {}), sleep: noSleep, providerLookup: 'off' });
     const { sink, notes } = sinkCapturador();
     const r = await gw.chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs, role: 'judge', sink });
     expect(r.provider).toEqual({ name: 'Azure' });
     expect((notes[0].provider as CallProviderInfo).name).toBe('Azure');
     expect(cont.generation).toBe(0);
+  });
+
+  it('default = missing: cobertura de registro (chamadas com providerName / total) = 1,0 em TODOS os papéis', async () => {
+    // Payload SEM provedor e COM id de geração: o default busca no /generation
+    // (mock) e toda chamada fica com providerName — critério (iii) do item.
+    const cont = { generation: 0, chats: 0 };
+    const semProvider = {
+      id: 'gen-cobertura',
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      usage: USAGE_COMPLETO,
+    };
+    const gw = createGateway({
+      fetch: roteador(cont, semProvider, {
+        provider_name: 'OpenAI',
+        upstream_id: 'up-cob',
+        service_tier: 'standard',
+      }),
+      sleep: noSleep,
+    });
+    const { sink, notes } = sinkCapturador();
+    for (const role of COST_ROLES) {
+      await gw.chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs, role, sink });
+    }
+    expect(notes).toHaveLength(COST_ROLES.length);
+    const comProvider = notes.filter((n) => (n.provider as CallProviderInfo | undefined)?.name).length;
+    expect(comProvider / notes.length).toBe(1); // cobertura de registro = 1,0
+    for (const [i, entry] of notes.entries()) {
+      expect((entry.provider as CallProviderInfo).name, `papel ${COST_ROLES[i]}`).toBe('OpenAI');
+    }
+    // Cada chamada sem provedor no payload custou exatamente UM GET /generation.
+    expect(cont.generation).toBe(COST_ROLES.length);
   });
 
   it("modo 'missing' busca no /generation quando o payload não traz nome (cobertura 1,0)", async () => {

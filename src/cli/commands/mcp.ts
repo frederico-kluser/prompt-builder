@@ -765,7 +765,16 @@ function validateToolArgs(schema: z.ZodType, args: Record<string, unknown>): Rec
       continue;
     }
     if (issue.code === 'invalid_type') {
-      partes.push(`campo "${caminho}" com tipo errado (esperado ${(issue as { expected?: string }).expected ?? 'outro'})`);
+      // Mensagem CUSTOM do schema (ex.: "idempotencyKey é obrigatória…") tem
+      // prioridade sobre o texto genérico: era engolida aqui e o cliente via
+      // "com tipo errado" para um campo que faltou por completo (IMPL-093).
+      // O default do zod é sempre "Invalid input: …" (locale en) — fora disso,
+      // a mensagem é do schema e vai para o erro.
+      const custom = issue.message && !/^Invalid input:/i.test(issue.message) ? issue.message : undefined;
+      partes.push(
+        custom ??
+          `campo "${caminho}" com tipo errado (esperado ${(issue as { expected?: string }).expected ?? 'outro'})`,
+      );
       continue;
     }
     if (issue.code === 'invalid_union') {

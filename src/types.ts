@@ -91,11 +91,14 @@ export const COST_ROLES: readonly CostRole[] = [
 
 /**
  * De onde veio o numero. `usage` = o OpenRouter cobrou exatamente isso (inclui
- * cache, tokens de raciocinio e faixas de preco). `catalog` = derivado dos
- * precos do /models. `unknown` = modelo fora do catalogo, NAO conseguimos
- * precificar — nunca confundir com "custou zero".
+ * cache, tokens de raciocinio e faixas de preco) — a ÚNICA fonte "exata".
+ * `agent-derived` = o EXECUTOR do agente calculou o custo (tabela própria ou o
+ * relatório dele); nunca rotular isto de `catalog` (IMPL-096). `catalog` =
+ * derivado dos precos do /models (estimativa por tabela NOSSA). `unknown` =
+ * modelo fora do catalogo, NAO conseguimos precificar — nunca confundir com
+ * "custou zero".
  */
-export type CostSource = 'usage' | 'catalog' | 'unknown';
+export type CostSource = 'usage' | 'catalog' | 'agent-derived' | 'unknown';
 
 export interface CallCost {
   usd: number;

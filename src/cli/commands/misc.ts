@@ -18,10 +18,11 @@ import {
 import { LOCKLESS_ORPHAN_AFTER_MS } from '../../jobs.js';
 import { runsCancel, runsStatus, runsWait } from './runsJobs.js';
 import { isValidRecordId } from '../../pathSafety.js';
+import { z } from 'zod';
 import { listTechniques } from '../../techniques.js';
 import { allowlistHealth, getLgpdData, isSensitiveArea, PII_COVERAGE, PII_MODES } from '../../lgpd.js';
-import { parseRunConfig } from '../../runConfigSchema.js';
-import { parseArenaConfig, arenaConfigSummary } from '../../configFile.js';
+import { parseRunConfig, runConfigSchema } from '../../runConfigSchema.js';
+import { parseArenaConfig, arenaConfigSummary, arenaConfigSchema, ARENA_CONFIG_FORMAT } from '../../configFile.js';
 import { arenaConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
@@ -876,10 +877,45 @@ export async function cmdConfig(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'validate';
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     mode: { type: 'string' },
+    dialect: { type: 'string' },
     out: { type: 'string', short: 'o' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
+
+  if (sub === 'schema') {
+    // IMPL-093: o JSON Schema PUBLICADO sai do MESMO zod que valida
+    // (`toJSONSchema` do zod v4) — nunca uma reimpressão que pudesse divergir —
+    // com `$schema` versionado (draft 2020-12) e `$id` carregando a versão do
+    // formato. O consumidor valida o arquivo sem depender do binário.
+    const DIALECTOS: Record<string, string> = {
+      arena: `urn:prompt-builder:schema:${ARENA_CONFIG_FORMAT}`,
+      run: 'urn:prompt-builder:schema:run-config@1',
+    };
+    const pedido = typeof parsed.values.dialect === 'string' ? parsed.values.dialect.trim() : 'arena';
+    const id = DIALECTOS[pedido];
+    if (!id) {
+      throw new CliError(
+        `--dialect deve ser arena ou run (recebi "${pedido}").`,
+        EXIT.USAGE,
+        { flag: '--dialect', value: pedido, accepted: ['arena', 'run'] },
+        { code: 'usage.invalid_flag_value', hint: 'Use `config schema` (arena-config@1) ou `config schema --dialect run` (RunConfig cru).' },
+      );
+    }
+    const alvo = pedido === 'run' ? runConfigSchema : arenaConfigSchema;
+    const gerado = z.toJSONSchema(alvo, { io: 'input', unrepresentable: 'any' }) as Record<string, unknown>;
+    const rascunho = typeof gerado.$schema === 'string' ? gerado.$schema : 'https://json-schema.org/draft/2020-12/schema';
+    const { $schema: _omitido, ...corpo } = gerado;
+    const doc = { $schema: rascunho, $id: id, ...corpo };
+    const texto = out.json(doc); // compacto por padrão; --pretty formata (IMPL-092)
+    if (typeof parsed.values.out === 'string' && parsed.values.out.trim()) {
+      await fs.writeFile(parsed.values.out.trim(), `${texto}\n`, 'utf-8');
+      out.info(`schema gravado em ${parsed.values.out.trim()}`);
+    } else {
+      out.raw(`${texto}\n`);
+    }
+    return EXIT.OK;
+  }
 
   if (sub === 'example') {
     // IMPL-093 (R-12:REC-2): o exemplo tem de passar em `config validate` para
