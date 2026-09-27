@@ -111,8 +111,10 @@ describe('guarda de sincronia src/ × web/src/engine/', () => {
         ['chatCompletion', 'chatCompletionStream', 'listModels', 'validateKey', 'getGateway']],
       ['competitor', await import('../src/competitor.js'), await import('../web/src/engine/competitor.js'),
         ['runCompetitor']],
+      // IMPL-008: a montagem das mensagens do lote também é fonte única — o
+      // bug E5 nasceu de dois arquivos montando o system de jeitos diferentes.
       ['datagen', await import('../src/datagen.js'), await import('../web/src/engine/datagen.js'),
-        ['generateStages']],
+        ['generateStages', 'buildBatchMessages']],
       ['gabarito', await import('../src/gabarito.js'), await import('../web/src/engine/gabarito.js'),
         ['generateReferences']],
       ['judge', await import('../src/judge.js'), await import('../web/src/engine/judge.js'), ['judgeStage']],

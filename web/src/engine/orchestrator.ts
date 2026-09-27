@@ -9,6 +9,7 @@ import { oracleScoresFromVerdicts } from '../../../src/engine/duelCore.js';
 import { fairnessWarningsForModels } from './llmVariants';
 import { JUDGE_CONTRACT_TEXT } from './refJudge';
 import { pinJudgeContract, verbosityReport } from '../../../src/engine/judgeCalibration.js';
+import { modelRolesForRun, snapshotModelLifecycle } from '../../../src/engine/modelLifecycle.js';
 import { mergeScenarios } from './scenarioPack';
 import { sanitizeLlmVariants, variantsToContestants } from './llmVariants';
 import { judgeScoreFromVerdicts } from './rank';
@@ -217,10 +218,29 @@ async function runLoop(
   // preço quando falta `usage.cost` e a allowlist de esforço/amostragem por
   // modelo. Antes só o competidor esquentava — depois de o datagen já ter ido.
   // Vem DEPOIS do run.started para a tela da run abrir sem esperar a rede.
-  await listModels(apiKey).catch((err: unknown) => {
+  const catalogo = await listModels(apiKey).catch((err: unknown) => {
     console.warn(`[bench ${runId}] catalogo indisponivel: ${(err as Error).message}`);
     return [];
   });
+
+  // IMPL-019 (espelho do Node) — ciclo de vida de TODO modelo da run, do
+  // catálogo já carregado: canonicalSlug/expirationDate/aliasTarget por papel +
+  // alertas 30/14/7 dias. Nunca migra sozinho: só grava e avisa. Recapturado
+  // quando o `prepare` troca os contestants.
+  const avisados = new Set<string>();
+  const captureLifecycle = (): void => {
+    record.modelLifecycle = snapshotModelLifecycle(
+      modelRolesForRun(record.config, record.contestants),
+      catalogo,
+      new Date(),
+    );
+    for (const a of record.modelLifecycle.alerts) {
+      if (avisados.has(a.modelId)) continue;
+      avisados.add(a.modelId);
+      console.warn(`[bench ${runId}] ciclo de vida: ${a.message}`);
+    }
+  };
+  captureLifecycle();
 
   // compare-llms: falha a run CEDO (antes de qualquer chamada de LLM) se as
   // variantes forem invalidas. buildRecord nao pode lancar (e sincrono e a
@@ -246,6 +266,7 @@ async function runLoop(
     record.contestants = contestants;
     record.scoreboard = Object.fromEntries(contestants.map((c) => [c.id, 0]));
     record.costByContestant = Object.fromEntries(contestants.map((c) => [c.id, 0]));
+    captureLifecycle();
     await saveRun(record);
     emitEvent({ type: 'variants.generated', runId, contestants });
   }

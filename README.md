@@ -63,6 +63,9 @@ prompt-arena):
 - **Reprodutibilidade**: `runs reproduce` (config + comando exato), `runs export` (artefato
   auto-contido), `sessions winner --apply` (handoff com backup+diff+commit) e `registry validate`
   (guarda de drift do prompt em código).
+- **Ciclo de vida dos modelos**: toda run grava `canonicalSlug`/`expirationDate`/`aliasTarget`
+  do catálogo e alerta 30/14/7 dias antes da expiração; `baseline check` é o gate de CI que
+  reprova quando juiz/gabarito mudam ou somem sem re-baseline declarada (`docs lifecycle`).
 
 Documentação completa: `npx prompt-builder-cli docs --list`.
 

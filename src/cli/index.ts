@@ -26,6 +26,7 @@ import {
   cmdTechniques,
 } from './commands/misc.js';
 import { cmdLibrary } from './commands/library.js';
+import { cmdBaseline } from './commands/baseline.js';
 
 const VERSION = pkgVersion();
 
@@ -73,6 +74,11 @@ OUTROS
   techniques · lgpd · config validate <arq> · config example · doctor
   registry validate [--file <arq>]   guarda de drift dos prompts de produção
   registry init [-o <arq>]           grava um registro-exemplo comentado
+  baseline pin <runId> [-o <arq>]    pina juiz/gabarito/contrato de uma run (judge-baseline@1)
+  baseline check [--file <arq>] [--config <arq>] [--catalog <models.json>]
+                           gate de CI: sai 3 se juiz/gabarito mudou ou sumiu
+                           sem re-baseline declarada (ver: docs lifecycle)
+  baseline declare --reason "…" [--judge a,b] [--reference x]
   mcp                      servidor MCP por stdio (mesmo binário)
 
 AGENTES (modo agente — mesmo motor, executor pi)
@@ -156,6 +162,8 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdConfig(argv);
     case 'registry':
       return cmdRegistry(argv);
+    case 'baseline':
+      return cmdBaseline(argv);
     case 'doctor':
       return cmdDoctor(argv);
     case 'mcp':

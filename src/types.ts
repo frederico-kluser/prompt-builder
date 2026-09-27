@@ -22,6 +22,17 @@ import type {
 import type { ExpectedSpec } from './engine/groundTruth.js';
 import type { PromptContracts } from './engine/contracts.js';
 import type { PromptGroup } from './engine/promptGroup.js';
+import type { ModelLifecycleSnapshot } from './engine/modelLifecycle.js';
+
+// Ciclo de vida de modelos (IMPL-019): fonte única em src/engine/modelLifecycle.ts.
+export type {
+  ModelLifecycleAlert,
+  ModelLifecycleEntry,
+  ModelLifecycleSnapshot,
+  ModelUsageRole,
+  RemovalAction,
+  SuccessorSuggestion,
+} from './engine/modelLifecycle.js';
 
 export interface OpenRouterModelPricing {
   prompt: number; // USD per token
@@ -156,6 +167,16 @@ export interface OpenRouterModel {
   supportedParameters?: string[];
   /** Metadados de raciocinio declarados pelo modelo (campo `reasoning` de /models). */
   reasoning?: ModelReasoningMeta;
+  /**
+   * Ciclo de vida (IMPL-019, campos `canonical_slug`/`expiration_date`/
+   * `alias_target`/`created` de /models): o snapshot datado por tras do id, a
+   * data de deprecacao do endpoint (AAAA-MM-DD; null = catalogo diz "sem data")
+   * e, para aliases `~…-latest`, o id para o qual apontam HOJE.
+   */
+  canonicalSlug?: string;
+  expirationDate?: string | null;
+  aliasTarget?: string;
+  created?: number;
   raw?: unknown;
 }
 
@@ -710,6 +731,14 @@ export interface RunRecord {
     contract: { hash: string; modelIds: string[]; pinnedAt: string };
     verbosity: { n: number; r: number; biased: boolean; warning: string };
   };
+  /**
+   * Ciclo de vida de TODO modelo da run (IMPL-019): canonicalSlug/
+   * expirationDate/aliasTarget do catalogo no inicio da run, por papel, + os
+   * alertas 30/14/7 dias / expirado / ausente. E o que permite, meses depois,
+   * saber se o id de hoje ainda e o snapshot que foi medido (alias movido =
+   * outro modelo com o mesmo nome). Ausente em records antigos.
+   */
+  modelLifecycle?: ModelLifecycleSnapshot;
 
   /**
    * Custo TOTAL da run — todos os papeis, nao so os competidores. Antes contava

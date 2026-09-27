@@ -2,7 +2,7 @@
 
 ```bash
 prompt-builder compare \
-  --models openai/gpt-5-mini,google/gemini-3-flash,deepseek/deepseek-v4 \
+  --models openai/gpt-5-mini,google/gemini-3.8-flash,deepseek/deepseek-v4-pro \
   --judge anthropic/claude-sonnet-5 \
   --datagen openai/gpt-5-mini \
   --theme "Extração de dados de notas fiscais brasileiras" \

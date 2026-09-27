@@ -11,6 +11,7 @@ import { REASONING_LEVELS } from '../../reasoning.js';
 import { promises as fs } from 'node:fs';
 import { CliError, EXIT, fmtPerMTok } from '../output.js';
 import { buildNetworkContext, parse, type ParsedArgs } from '../context.js';
+import { daysUntil, describeSuccessor, lifecycleAlertFor } from '../../engine/modelLifecycle.js';
 import type { OpenRouterModel, ReasoningLevel } from '../../types.js';
 
 const OPTIONS = {
@@ -27,6 +28,7 @@ const OPTIONS = {
   'lgpd-area': { type: 'string' },
   'include-ressalvas': { type: 'boolean' },
   limit: { type: 'string' },
+  expiring: { type: 'string' },
   format: { type: 'string' },
   out: { type: 'string', short: 'o' },
 } as const;
@@ -85,6 +87,18 @@ function applyFilters(models: OpenRouterModel[], v: Record<string, unknown>): Op
 
   if (v.free === true) {
     out = out.filter((m) => m.pricing.prompt === 0 && m.pricing.completion === 0);
+  }
+
+  // `--expiring <dias>` (IMPL-019): só modelos com expiration_date em até N
+  // dias (inclui os já expirados que o catálogo ainda lista).
+  const expiring = num(v.expiring, '--expiring');
+  if (expiring !== undefined) {
+    const agora = new Date();
+    out = out.filter((m) => {
+      if (!m.expirationDate) return false;
+      const d = daysUntil(m.expirationDate, agora);
+      return d !== null && d <= expiring;
+    });
   }
 
   const area = typeof v['lgpd-area'] === 'string' ? v['lgpd-area'].trim() : '';
@@ -184,8 +198,24 @@ export async function cmdModels(argv: string[]): Promise<number> {
       for (const [pedido, real] of Object.entries(row.thinkLevels.fit)) {
         out.line(`    ${pedido.padEnd(8)} -> ${real}`);
       }
+      // IMPL-019: ciclo de vida — o snapshot por trás do id e quando ele sai.
+      if (row.lifecycle.canonicalSlug) out.line(`  snapshot        ${row.lifecycle.canonicalSlug}`);
+      if (row.lifecycle.aliasTarget) out.line(`  alias ->        ${row.lifecycle.aliasTarget} (muda sem aviso: não use como juiz de baseline)`);
+      out.line(`  expira          ${row.lifecycle.expirationDate ?? 'sem data anunciada'}`);
     }
-    out.result(true, 'models.show', { model: row });
+    // Alerta 30/14/7 dias (stderr) com sucedâneo — o agente vê antes de treinar.
+    const alerta = lifecycleAlertFor(model.id, [], model, ctx.models, new Date());
+    if (alerta) {
+      const quando =
+        alerta.kind === 'expired'
+          ? `expirou em ${alerta.expirationDate}`
+          : `expira em ${alerta.expirationDate} (${alerta.daysLeft} dias; janela de ${alerta.window})`;
+      out.warn(
+        `${model.id} ${quando} — ${describeSuccessor(alerta.successor)}. Numa baseline, rode uma ` +
+          'run-ponte com o sucessor antes da data e declare a re-baseline (`docs lifecycle`).',
+      );
+    }
+    out.result(true, 'models.show', { model: row, lifecycleAlert: alerta });
     return EXIT.OK;
   }
 

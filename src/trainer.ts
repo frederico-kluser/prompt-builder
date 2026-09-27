@@ -5,6 +5,12 @@ import { composePrompt } from './engine/promptGroup.js';
 import { addToPool, pickParent, sliceScores, type ParetoEntry } from './engine/pareto.js';
 import { planHalving, survivorsOf } from './engine/halving.js';
 import { seedFromId } from './engine/duelCore.js';
+import {
+  judgeIdentity,
+  judgeIdentityChanged,
+  mergeJudgeIdentity,
+  type JudgeIdentity,
+} from './engine/modelLifecycle.js';
 import { emitSessionEvent } from './events.js';
 import { saveSession } from './storage.js';
 import { computeMedals } from './medals.js';
@@ -357,7 +363,7 @@ async function trainingLoop(
   let pool: PoolMember[] = [];
   const usoPai: Record<string, number> = {};
   // F4.2: 1o hash do contrato do juiz visto na sessao (detecta drift).
-  let primeiroHashJuiz: string | undefined;
+  let primeiroIdJuiz: JudgeIdentity | undefined;
   let champion: Champion | undefined;
   // Id que o campeao teve na run MAIS RECENTE (promovido: o id da variante;
   // convergido: a regua, que segurou o titulo). Usado na linhagem e no
@@ -400,6 +406,11 @@ async function trainingLoop(
           maxPricePerMTok: cfg.maxPricePerMTok,
           // Contratos never-break (F2/P0.3): valem em toda iteracao.
           contracts: cfg.contracts,
+          // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
+          contractJudgeModelId: cfg.judgeModelIds?.[0],
+          // Verificações do contrato no MESMO raciocínio da run (juiz/competidor).
+          contractJudgeReasoningLevel: cfg.reasoning?.judge,
+          contestantReasoningLevel: cfg.reasoning?.competitor,
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
           promptId: cfg.promptId,
@@ -469,6 +480,11 @@ async function trainingLoop(
           maxPricePerMTok: cfg.maxPricePerMTok,
           // Contratos never-break (F2/P0.3): valem em toda iteracao.
           contracts: cfg.contracts,
+          // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
+          contractJudgeModelId: cfg.judgeModelIds?.[0],
+          // Verificações do contrato no MESMO raciocínio da run (juiz/competidor).
+          contractJudgeReasoningLevel: cfg.reasoning?.judge,
+          contestantReasoningLevel: cfg.reasoning?.competitor,
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
           promptId: cfg.promptId,
@@ -546,10 +562,13 @@ async function trainingLoop(
       
       // F4.2: calibration drift — contrato do juiz diferente no meio da sessao
       // significa que o delta entre iteracoes pode ser do JUIZ, nao do prompt.
-      const hashJuiz = runRec.judgeDiagnostics?.contract.hash;
-      if (hashJuiz) {
-        if (primeiroHashJuiz && hashJuiz !== primeiroHashJuiz) record.judgeDrift = true;
-        primeiroHashJuiz ??= hashJuiz;
+      // IMPL-019: a identidade inclui o snapshot (canonicalSlug/aliasTarget) do
+      // juiz e do gabarito — alias `~…-latest` movido no meio da sessao e outro
+      // modelo com o MESMO id, e o hash sozinho nao veria.
+      const idJuiz = judgeIdentity(runRec);
+      if (idJuiz) {
+        if (primeiroIdJuiz && judgeIdentityChanged(primeiroIdJuiz, idJuiz)) record.judgeDrift = true;
+        primeiroIdJuiz = primeiroIdJuiz ? mergeJudgeIdentity(primeiroIdJuiz, idJuiz) : idJuiz;
       }
       // O ledger e a fonte de verdade do gasto (soma todos os papeis de todas
       // as runs); somar `runRec.totalCostUsd` aqui contaria duas vezes.

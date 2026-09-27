@@ -2,7 +2,9 @@ import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { getTechnique } from './techniques.js';
-import { stripFences, verifyRewrite } from './engine/contracts.js';
+import { extractPlaceholders, isInfraViolation, stripFences } from './engine/contracts.js';
+import { createContractGate } from './contractGate.js';
+import type { ContractGate } from './contractGate.js';
 import { composePrompt, siblingsContext, targetFragment } from './engine/promptGroup.js';
 import type { PromptGroup } from './engine/promptGroup.js';
 import type { PromptContracts } from './engine/contracts.js';
@@ -62,12 +64,25 @@ export interface GenerateContestantsParams {
   /** Nivel de raciocinio do papel "rewriter" (RunConfig.reasoning.rewriter). */
   reasoningLevel?: ReasoningLevel;
   /**
-   * Contratos never-break do prompt base (F2/P0.3): a reescrita é validada por
-   * `engine/contracts.ts` (placeholders verbatim, invariantes, piso de
-   * comprimento) — violação tenta UMA correção; persistindo, a variante é
-   * rejeitada.
+   * Niveis de raciocinio das verificacoes do contrato: juiz do diff
+   * (`RunConfig.reasoning.judge`) e canarios no modelo sob teste
+   * (`RunConfig.reasoning.competitor`). Ausentes = default do provedor.
+   */
+  contractJudgeReasoningLevel?: ReasoningLevel;
+  contestantReasoningLevel?: ReasoningLevel;
+  /**
+   * Contratos never-break do prompt base (F2/P0.3 + IMPL-011): a reescrita
+   * passa pelo gate de 3 camadas (`contractGate.ts`: regras locais → juiz LLM
+   * do diff → canários) — violação tenta UMA correção; persistindo, a variante
+   * é rejeitada.
    */
   contracts?: PromptContracts;
+  /**
+   * Juiz do diff (camada 2 do contrato). Os chamadores passam o 1º juiz da run
+   * (`judgeModelIds[0]`): o reescritor julgando a própria reescrita tende a se
+   * aprovar. Ausente = `optimizerModelId`.
+   */
+  contractJudgeModelId?: string;
   /**
    * Multi-prompt (F2/P0.4, coordinate ascent): grupo de fragmentos + qual deles
    * esta sendo evoluido. Com grupo, a variante gerada e o FRAGMENTO; o
@@ -88,19 +103,52 @@ export interface GenerateContestantsParams {
   maxPricePerMTok?: { prompt?: number; completion?: number };
 }
 
+/** Texto-sentinela do base quando a variante nasce só do tema. */
+const NO_BASE_TEXT = 'Não há prompt base — escreva um prompt completo do zero sobre o tema.';
+
+/** Base de derivação: o base do usuário ou (multi-prompt) o texto atual do fragmento-alvo. */
+function derivationBase(p: GenerateContestantsParams): string {
+  return (
+    p.basePrompt?.trim() ||
+    (p.promptGroup ? (targetFragment(p.promptGroup, p.promptId)?.text ?? '') : '')
+  );
+}
+
+/**
+ * Bloco do contrato para o REESCRITOR (antes ele só descobria o contrato
+ * depois de violá-lo, na correção): invariantes e placeholders que o gate vai
+ * cobrar. Vazio quando não há nada a preservar.
+ */
+function contractBlock(p: GenerateContestantsParams, baseText: string): string {
+  const invariantes = (p.contracts?.neverBreak ?? []).filter((s) => typeof s === 'string' && s.trim());
+  const placeholders = Array.isArray(p.contracts?.placeholders)
+    ? p.contracts.placeholders.filter((s) => typeof s === 'string' && s)
+    : extractPlaceholders(baseText);
+  if (!invariantes.length && !placeholders.length) return '';
+  const linhas: string[] = [];
+  if (invariantes.length) {
+    linhas.push(
+      'Invariantes (mantenha cada uma LITERALMENTE e com a MESMA forca — sem acrescentar excecao, condicao, atenuante ou regra que a anule):',
+      ...invariantes.map((s) => `- ${s}`),
+    );
+  }
+  if (placeholders.length) {
+    linhas.push(`Placeholders (copie exatamente como estao): ${placeholders.join(' ')}`);
+  }
+  return `\n<contrato_never_break>\n${linhas.join('\n')}\n</contrato_never_break>\n`;
+}
+
 async function generateOneVariant(
   p: GenerateContestantsParams,
   technique: PromptTechnique,
+  gate: ContractGate,
 ): Promise<string | null> {
   const lessonsBlock = p.analysisHint?.trim()
     ? `\n<licoes_da_iteracao_anterior>\n${p.analysisHint.trim()}\n</licoes_da_iteracao_anterior>\n`
     : '';
   // Multi-prompt: o ALVO da reescrita e o fragmento (nunca o composto); sem
   // basePrompt, o texto atual do fragmento no grupo vira base.
-  const baseText =
-    p.basePrompt?.trim() ||
-    (p.promptGroup ? (targetFragment(p.promptGroup, p.promptId)?.text ?? '') : '') ||
-    'Não há prompt base — escreva um prompt completo do zero sobre o tema.';
+  const baseText = derivationBase(p) || NO_BASE_TEXT;
 
   const irmaosBlock = p.promptGroup
     ? (() => {
@@ -117,7 +165,7 @@ ${irmaosBlock}
 <cuidado>${technique.bad}</cuidado>
 <instrucao>${technique.metaInstruction}</instrucao>
 </tecnica>
-${lessonsBlock}
+${lessonsBlock}${contractBlock(p, baseText)}
 <prompt_base>
 ${baseText}
 </prompt_base>
@@ -141,16 +189,24 @@ Reescreva o prompt agora, aplicando a tecnica.`;
       maxPricePerMTok: p.maxPricePerMTok,
     });
     let texto = stripFences(result.text);
-    // Gate de CONTRATO (F2/P0.3, portado do rewriter do prompt-arena): a
-    // reescrita precisa sobreviver ao contrato do prompt base — placeholders
-    // verbatim, invariantes (neverBreak) e piso de comprimento (≥ max(40, 30%
-    // do base)). Antes só o comprimento era checado, e uma reescrita que
-    // REMOVIA uma regra crítica pontuava como qualquer outra.
-    let check = verifyRewrite(baseText, texto, p.contracts);
+    // Gate de CONTRATO em 3 camadas (F2/P0.3 + IMPL-011): regras locais →
+    // juiz LLM do diff (neverBreak) → canários no modelo sob teste. Antes era
+    // só a camada local, e substring aprovava "… salvo se o usuario pedir".
+    let check = await gate.check(texto);
+    if (!check.ok && check.violations.every((v) => isInfraViolation(v.kind))) {
+      // Juiz/canário fora do ar: outra reescrita não resolve (e custaria o
+      // reescritor + a verificação de novo). Variante não verificada não entra.
+      console.warn(
+        `[variator] tecnica ${technique.id}: variante REJEITADA — contrato nao verificavel (camada ${check.layer}):\n${check.violations
+          .map((v) => `- ${v.detail}`)
+          .join('\n')}`,
+      );
+      return null;
+    }
     if (!check.ok) {
       const detalhes = check.violations.map((v) => `- ${v.detail}`).join('\n');
       console.warn(
-        `[variator] tecnica ${technique.id}: reescrita violou o contrato; pedindo UMA correcao:\n${detalhes}`,
+        `[variator] tecnica ${technique.id}: reescrita violou o contrato (camada ${check.layer}); pedindo UMA correcao:\n${detalhes}`,
       );
       const retry = await chatCompletion({
         apiKey: p.apiKey,
@@ -161,7 +217,7 @@ Reescreva o prompt agora, aplicando a tecnica.`;
           { role: 'assistant', content: texto },
           {
             role: 'user',
-            content: `Sua reescrita violou o contrato do prompt base:\n${detalhes}\n\nReescreva de novo, preservando o contrato (placeholders exatamente como estão e invariantes intactas). Responda APENAS com o prompt reescrito.`,
+            content: `Sua reescrita violou o contrato do prompt base:\n${detalhes}\n\nReescreva de novo, preservando o contrato (placeholders exatamente como estão, invariantes intactas e com a mesma força — sem acrescentar exceções ou condições — e o comportamento do base preservado). Responda APENAS com o prompt reescrito.`,
           },
         ],
         temperature: 0.3,
@@ -173,10 +229,10 @@ Reescreva o prompt agora, aplicando a tecnica.`;
         maxPricePerMTok: p.maxPricePerMTok,
       });
       texto = stripFences(retry.text);
-      check = verifyRewrite(baseText, texto, p.contracts);
+      check = await gate.check(texto);
       if (!check.ok) {
         console.warn(
-          `[variator] tecnica ${technique.id}: variante REJEITADA — contrato quebrado mesmo apos correcao (${check.violations
+          `[variator] tecnica ${technique.id}: variante REJEITADA — contrato quebrado mesmo apos correcao (camada ${check.layer}: ${check.violations
             .map((v) => v.kind)
             .join(', ')})`,
         );
@@ -270,7 +326,27 @@ export async function generateContestants(
     .map((id) => getTechnique(id))
     .filter((t): t is PromptTechnique => Boolean(t));
 
-  const results = await Promise.all(techniques.map((t) => generateOneVariant(p, t)));
+  // UM gate por lote: a baseline dos canários no base roda uma vez só e vale
+  // para todas as técnicas (e para a correção de cada uma).
+  const baseRef = derivationBase(p);
+  const gate = createContractGate({
+    apiKey: p.apiKey,
+    contracts: p.contracts,
+    baseText: baseRef || NO_BASE_TEXT,
+    hasBase: Boolean(baseRef),
+    compose: p.promptGroup
+      ? (fragmento) => composePrompt(p.promptGroup!, p.promptId, fragmento)
+      : undefined,
+    judgeModelId: p.contractJudgeModelId || p.optimizerModelId,
+    contestantModelId: p.modelId,
+    judgeReasoningLevel: p.contractJudgeReasoningLevel,
+    contestantReasoningLevel: p.contestantReasoningLevel,
+    runner: p.runner,
+    timeoutMs: p.timeoutMs,
+    ctx: p.ctx,
+    maxPricePerMTok: p.maxPricePerMTok,
+  });
+  const results = await Promise.all(techniques.map((t) => generateOneVariant(p, t, gate)));
   results.forEach((systemPrompt, i) => {
     if (!systemPrompt) return;
     const t = techniques[i];

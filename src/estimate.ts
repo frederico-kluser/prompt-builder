@@ -18,6 +18,7 @@
 
 import { batchCountFor } from './datagen.js';
 import { tierFor } from './openrouter.js';
+import { CANARY_MAX_TOKENS, JUDGE_MAX_TOKENS } from './contractGate.js';
 import type { CostRole, OpenRouterModel, RunConfig, RunMode } from './types.js';
 
 /** USD por token -> USD por milhao. A conversao 1e6 mora SO aqui e em toPerToken. */
@@ -32,6 +33,8 @@ const MAX_TOKENS_DUEL = 512;
 const MAX_TOKENS_DATAGEN_BATCH = 2000;
 /** Contexto de entrada assumido por cenario (pergunta + productContext). */
 const DEFAULT_CTX_IN = 500;
+/** Entrada do juiz do contrato: instrucoes + invariantes + base + reescrita + diff. */
+const CONTRACT_JUDGE_IN = 3600;
 /** Piso empirico da faixa: respostas raramente usam o teto de tokens. */
 const LOW_FACTOR = 0.45;
 
@@ -58,6 +61,19 @@ export interface EstimateInput {
   variantsPerIteration?: number;
   /** Cenarios reservados para o holdout (training). */
   holdoutStages?: number;
+  /**
+   * Contrato never-break (IMPL-011): verificar cada variante custa chamadas
+   * alem da reescrita — correcao, juiz do diff e canarios, todas lancadas no
+   * papel `rewriter` do ledger (`contractGate.ts`). Ausente = sem contrato.
+   */
+  contract?: {
+    /** Camada 2 ligada (ha `neverBreak` e `judgeDiff !== false`). */
+    judgeDiff: boolean;
+    /** Juiz do diff. Ausente = o reescritor. */
+    judgeModelId?: string;
+    /** Teto de saida de cada canario ativo (vazio = sem camada 3). */
+    canaryMaxTokens: number[];
+  };
   ctxInTokens?: number;
   /**
    * Modo agente — numero de execucoes de agente planejadas
@@ -157,6 +173,26 @@ export function estimateRunCost(input: EstimateInput, models: OpenRouterModel[])
   if (variantes > 0 && input.optimizerModelId) {
     const m = model(input.optimizerModelId);
     byRole.rewriter += variantes * priceCall(m, 1200, 1200);
+  }
+
+  // --- contrato never-break: verificar cada variante (IMPL-011) ---
+  // Pior caso por variante: 1 correcao do reescritor + 2 checagens (a 1a e a
+  // pos-correcao), cada uma com o juiz do diff (ate 2 tentativas) e cada
+  // canario (ate 2 confirmacoes); + a baseline dos canarios no base, 1x por
+  // lote. Tetos de saida SEM a folga de raciocinio (como o refJudge acima).
+  const contrato = input.contract;
+  if (contrato && variantes > 0 && input.optimizerModelId) {
+    const checagens = 2;
+    byRole.rewriter += variantes * priceCall(model(input.optimizerModelId), 2600, 1200);
+    if (contrato.judgeDiff) {
+      const mJuiz = model(contrato.judgeModelId ?? input.optimizerModelId);
+      byRole.rewriter +=
+        variantes * checagens * 2 * priceCall(mJuiz, CONTRACT_JUDGE_IN, JUDGE_MAX_TOKENS);
+    }
+    const mAlvo = model(input.contestantModelIds[0]);
+    for (const teto of contrato.canaryMaxTokens) {
+      byRole.rewriter += (variantes * checagens * 2 + 1) * priceCall(mAlvo, 1300, teto);
+    }
   }
 
   // --- competidores: cada contestant responde cada cenario ---
@@ -305,7 +341,27 @@ export function estimateInputFromConfig(
     optimizerModelId: config.optimizerModelId ?? config.datagenModelId,
     variantsPerIteration,
     holdoutStages: opts.holdoutStages,
+    contract: contractEstimateFrom(config, variantsPerIteration),
     ...(config.agent ? { agentRuns, agentMaxCostUsd } : {}),
+  };
+}
+
+/** O que o contrato never-break vai cobrar de cada variante (ver `EstimateInput.contract`). */
+function contractEstimateFrom(config: RunConfig, variants: number): EstimateInput['contract'] {
+  const c = config.contracts;
+  if (!c || variants === 0 || config.mode === 'compare') return undefined;
+  const temInvariante = (c.neverBreak ?? []).some((s) => typeof s === 'string' && s.trim());
+  // Canario e teste de chat: run de agente pula a camada 3 (contractGate.ts).
+  const canarios = config.agent ? [] : (c.canaries ?? []);
+  const judgeDiff = temInvariante && c.judgeDiff !== false;
+  if (!judgeDiff && canarios.length === 0) {
+    // So a camada 1 (local, gratis) — mas a correcao do reescritor ainda pode rodar.
+    return { judgeDiff: false, canaryMaxTokens: [] };
+  }
+  return {
+    judgeDiff,
+    judgeModelId: config.judgeModelIds?.[0],
+    canaryMaxTokens: canarios.map((k) => k.maxTokens ?? CANARY_MAX_TOKENS),
   };
 }
 

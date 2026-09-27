@@ -17,7 +17,7 @@ import {
   type LibraryItem,
   type ScenarioRules,
 } from '../../engine/libraryCore.js';
-import { coverageInstruction, renderScenarioRules } from '../../engine/scenarioRules.js';
+import { coverageInstruction, parseScenarioRules } from '../../engine/scenarioRules.js';
 import {
   deleteItem,
   deleteProfile,
@@ -42,7 +42,9 @@ const HELP = `prompt-builder library — banco persistente de cenários+gabarito
 USO
   library list [--profile <id>]          perfis (ou itens de um perfil)
   library init --profile <id> [--name <n>] [--description <d>]
-                                         cria/atualiza o perfil
+               [--rules <arq.json>] [--targets <arq.json>]
+                                         cria/atualiza o perfil (regras de geração
+                                         com grounding e matriz de cobertura)
   library show <itemId> --profile <id>   item completo (JSON)
   library add --profile <id> --file <arq> [--origin official|ai|manual|import]
                                          importa itens (lista, {items:[…]} ou pacote)
@@ -57,6 +59,10 @@ USO
   library drop --profile <id>            remove o perfil inteiro
 
 A biblioteca mora em <data-dir>/library/<profileId>/ (um JSON por item).
+Regras de geração (--rules): { templates: { system, user? }, grounding?: { context?,
+  fewShot?, setupKeys?[] } } — placeholders {{context}}, {{fewShot}}, {{setupKeys}},
+  {{theme}}, {{count}}. O system renderizado abre o prompt do gerador; grounding que
+  nenhum template usa NÃO chega ao gerador (o init e o seed avisam).
 Item da biblioteca aceita os campos enriquecidos do prompt-arena:
   title, tier (mft|invariance|adversarial|edge), persona, context,
   successCriteria[], rationale, dimensionTags[], question, productContext,
@@ -147,12 +153,14 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
       // Regras de geração (F1.3) e matriz de cobertura (F1.5) vêm de arquivos
       // JSON versionados junto do prompt — validação mínima, erro em PT-BR.
       let rules: ScenarioRules | undefined;
+      let warnings: string[] = [];
       if (typeof parsed.values.rules === 'string') {
-        const cru = await lerArquivoJson(parsed.values.rules) as { templates?: unknown };
-        if (!cru || typeof cru !== 'object' || !cru.templates || typeof cru.templates !== 'object') {
-          throw new CliError('Arquivo de regras precisa ter { templates: { system } }.', EXIT.CONFIG);
-        }
-        rules = cru as ScenarioRules;
+        const r = parseScenarioRules(await lerArquivoJson(parsed.values.rules));
+        if (!r.ok) throw new CliError(`Arquivo de regras inválido: ${r.error}`, EXIT.CONFIG);
+        rules = r.rules;
+        // Grounding que não chegaria ao gerador (IMPL-008): avisa, não recusa.
+        warnings = r.warnings;
+        for (const w of warnings) out.warn(`regras: ${w}`);
       }
       let targets: CoverageTargets | undefined;
       if (typeof parsed.values.targets === 'string') {
@@ -166,7 +174,7 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
         coverageTargets: targets,
       });
       out.info(`perfil "${perfil.id}" pronto em ${ctx.dataDir}/library/${perfil.id}/`);
-      out.result(true, 'library.init', { profile: perfil });
+      out.result(true, 'library.init', { profile: perfil, warnings });
       return EXIT.OK;
     }
 
@@ -219,7 +227,7 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
         });
         for (const e of errors) out.warn(e);
         const res = await seedItems(profileId, itens);
-        out.info(`seed: +${res.added} novos · ${res.skipped} já existentes (pulados) · ${errors.length} recusados`);
+        out.info(`seed: +${res.added.length} novos · ${res.skipped.length} já existentes (pulados) · ${errors.length} recusados`);
         out.result(errors.length === 0, 'library.seed', {
           added: res.added,
           skipped: res.skipped,
@@ -243,17 +251,32 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
           EXIT.USAGE,
         );
       }
-      const net = await buildNetworkContext(parsed);
       const perfil = await getProfile(profileId);
+      // Regras do perfil (grounding) quando existirem — F1.3. Validadas ANTES
+      // de gastar: regra quebrada (salva por versão antiga, editada à mão)
+      // derrubaria cada lote por dentro e o seed sairia com zero cenários.
+      let rules: ScenarioRules | undefined;
+      let warnings: string[] = [];
+      if (perfil?.scenarioRules !== undefined) {
+        const r = parseScenarioRules(perfil.scenarioRules);
+        if (!r.ok) {
+          throw new CliError(
+            `Regras de geração do perfil "${profileId}" inválidas: ${r.error} Corrija com \`library init --rules <arq>\`.`,
+            EXIT.CONFIG,
+          );
+        }
+        rules = r.rules;
+        warnings = r.warnings;
+        for (const w of warnings) out.warn(`regras: ${w}`);
+      }
+      const net = await buildNetworkContext(parsed);
       const budgetUsd = parsed.values.budget === 'none' ? undefined : Number(parsed.values.budget ?? NaN);
       const ledger = new BudgetLedger({
         budgetUsd: Number.isFinite(budgetUsd) ? budgetUsd : undefined,
       });
       try {
-        // Regras do perfil (grounding) quando existirem — F1.3.
         const existentes = await listItems(profileId);
         const exclude = existentes.map((i) => i.question);
-        const rules = perfil?.scenarioRules;
         const gaps = coverageReport(existentes, perfil?.coverageTargets);
         const stages = await generateStages({
           apiKey: net.apiKey,
@@ -294,13 +317,14 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
         await seedItems(profileId, itens);
         const snap = ledger.snapshot();
         out.info(
-          `seed: +${res.added} novos · ${res.skipped} já existentes (pulados) · custo $${snap.spentUsd.toFixed(4)}`,
+          `seed: +${res.added.length} novos · ${res.skipped.length} já existentes (pulados) · custo $${snap.spentUsd.toFixed(4)}`,
         );
         out.result(true, 'library.seed', {
           added: res.added,
           skipped: res.skipped,
           totalCostUsd: snap.spentUsd,
           byRole: snap.byRole,
+          warnings,
         });
         return EXIT.OK;
       } catch (err) {
