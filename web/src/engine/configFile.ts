@@ -211,7 +211,9 @@ const modelsSchema = z.object(
   'models deve ser um objeto com { datagen, judges }',
 );
 
-const arenaConfigSchema = z
+// Exportado para a guarda de paridade schema × formulário (web/src/arenaForm.ts,
+// IMPL-045): a lista de campos sai do PRÓPRIO schema, não de uma cópia à mão.
+export const arenaConfigSchema = z
   .object(
     {
       format: z.literal(ARENA_CONFIG_FORMAT),
