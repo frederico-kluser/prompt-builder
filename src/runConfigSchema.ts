@@ -76,11 +76,24 @@ const agentTaskSchema = z.object({
         timeoutMs: z.number().int().positive().optional(),
         weight: z.number().positive().optional(),
         label: z.string().optional(),
+        // IMPL-039: F2P (default) x P2P (regressao: quebrar = falha).
+        kind: z.enum(['fail_to_pass', 'pass_to_pass']).optional(),
       }),
     )
     .optional(),
-  // Caminhos que o agente NAO pode tocar (reward-hacking). Globs simples.
+  // Caminhos que o agente NAO pode tocar (reward-hacking). Semantica gitignore.
   forbiddenPaths: z.array(z.string()).optional(),
+  // IMPL-039: rebuild de dependencias (lockfile do seed) antes do verify[].
+  rebuild: z
+    .object({
+      cmd: z.string().min(1).optional(),
+      lockfiles: z.array(z.string()).optional(),
+      protect: z.array(z.string()).optional(),
+      timeoutMs: z.number().int().positive().optional(),
+    })
+    .optional(),
+  // IMPL-039: detectores estaticos (skip/xfail/exit0/teste apagado/config de runner).
+  detectors: z.enum(['off', 'warn', 'fail']).optional(),
   // default false: ver aviso §12.2 do plano (`--no-context-files`).
   contextFiles: z.boolean().default(false),
   // Limites POR EXECUCAO (contrato de custo da tarefa). Default = config.agent.limits.

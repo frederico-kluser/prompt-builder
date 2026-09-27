@@ -30,7 +30,7 @@ import type { PiRunOptions, PiRunOutcome } from './pi.js';
 import { createWorkspaceManager, type CollectResult } from './workspace.js';
 import { execDir, redactEnv, sha256Of, writeExecution } from './store.js';
 import { buildDossier } from './dossier.js';
-import { runOracle } from './oracle.js';
+import { captureSeedGuard, runOracle } from './oracle.js';
 import { aggregateAgentVerdict, judgeDossier } from './agentJudge.js';
 import { decideInfraError } from './infraError.js';
 import { acquireRunInferenceProxy, type InferenceProxyLease } from './inferenceProxy.js';
@@ -347,6 +347,9 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         workspaceDir = ws.workspaceDir;
         seedCommit = ws.seedCommit;
         cacheRepoDir = ws.cacheRepoDir;
+        // SHA-256 dos protegidos NO SEED, antes do agente acordar (IMPL-039):
+        // pelo filesystem, não pelo git — pega arquivo ignorado e rename.
+        const seedGuard = captureSeedGuard(workspaceDir, task);
 
         // 2) task.txt + system-prompt.txt no repetitionDir (§12.5).
         writeFileSync(path.join(repAbs, 'task.txt'), stage.question, 'utf8');
@@ -404,12 +407,16 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         const collect = await workspaceMgr.collect(workspaceDir, seedCommit, limits.maxDiffBytes);
 
         let oracle: AgentOracleResult | undefined;
-        if (task.verify?.length || task.forbiddenPaths?.length) {
+        if (task.verify?.length || task.forbiddenPaths?.length || task.rebuild) {
           oracle = await runOracle({
             workspaceDir,
             verify: task.verify ?? [],
             forbiddenPaths: task.forbiddenPaths,
             diffFiles: collect.nameStatus,
+            seedSnapshot: seedGuard,
+            rebuild: task.rebuild,
+            detectors: task.detectors,
+            diff: collect.diff,
             onCheck: (c) =>
               emitEvent({
                 type: 'agent.verified',
@@ -741,6 +748,13 @@ async function adjudicateRep(opts: {
     return { verdict: null, explanation: 'execução cancelada (sinal de controle)', judgeUsed: false };
   }
 
+  // IMPL-039: tocar caminho protegido é reward hacking — `nao` SEM juiz, qualquer
+  // que seja o motivo do fim (um agente cortado por timeout depois de editar o
+  // teste não escapa como "incompleto, fora do placar").
+  if (oracle && oracle.violations.length > 0) {
+    return { verdict: 'nao', explanation: `arquivos proibidos modificados: ${oracle.violations.join(', ')}`, judgeUsed: false };
+  }
+
   // §18.3: processo morreu => é do contestant => 'nao' com status error.
   if (stopReason === 'error') {
     return { verdict: 'nao', explanation: 'a execução do agente falhou (processo morreu)', judgeUsed: false };
@@ -755,8 +769,9 @@ async function adjudicateRep(opts: {
 
   // Daqui, o julgamento segue §17.1: o ORÁCULO MANDA; o juiz só gradua.
   if (oracle) {
-    if (oracle.violations.length > 0) {
-      return { verdict: 'nao', explanation: `arquivos proibidos modificados: ${oracle.violations.join(', ')}`, judgeUsed: false };
+    if (oracle.p2p?.broken) {
+      // IMPL-039: regressão (PASS_TO_PASS quebrado) = a execução FALHOU.
+      return { verdict: 'nao', explanation: 'regressão: teste(s) PASS_TO_PASS quebrado(s)', judgeUsed: false };
     }
     if (oracle.score === 1) {
       // 'resolve' candidato; o juiz roda SÓ para graduar (pode rebaixar a

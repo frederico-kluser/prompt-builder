@@ -60,8 +60,11 @@ export interface CollectResult {
   diffTruncated: boolean;
   /** Saída crua de `git diff --numstat seed..HEAD`. */
   statText: string;
-  /** `git diff --name-status` parseado. Renames viram 'R' com o caminho novo. */
-  nameStatus: { path: string; status: 'A' | 'M' | 'D' | 'R' }[];
+  /**
+   * `git diff --name-status` parseado. Renames viram 'R' com o caminho novo e a
+   * ORIGEM em `oldPath` (IMPL-039: renomear o arquivo protegido é tocá-lo).
+   */
+  nameStatus: { path: string; status: 'A' | 'M' | 'D' | 'R'; oldPath?: string }[];
   /** Derivado do `--numstat`: total de linhas adicionadas. */
   added: number;
   /** Derivado do `--numstat`: total de linhas removidas. */
@@ -488,16 +491,16 @@ function parseNumstat(stat: string): { added: number; removed: number; files: nu
   return { added, removed, files };
 }
 
-/** Parse do `--name-status` em {path, status}. Renames viram 'R' com o path novo. */
-function parseNameStatus(output: string): { path: string; status: 'A' | 'M' | 'D' | 'R' }[] {
-  const out: { path: string; status: 'A' | 'M' | 'D' | 'R' }[] = [];
+/** Parse do `--name-status` em {path, status, oldPath?}. Renames viram 'R' com o path novo e a origem em `oldPath`. */
+export function parseNameStatus(output: string): { path: string; status: 'A' | 'M' | 'D' | 'R'; oldPath?: string }[] {
+  const out: { path: string; status: 'A' | 'M' | 'D' | 'R'; oldPath?: string }[] = [];
   for (const line of output.split('\n')) {
     if (line.trim().length === 0) continue;
     const parts = line.split('\t');
     const code = parts[0];
     if (code.length === 0) continue;
     if (code.startsWith('R') && parts.length >= 3) {
-      out.push({ path: parts[2], status: 'R' });
+      out.push({ path: parts[2], status: 'R', oldPath: parts[1] });
       continue;
     }
     if (code.startsWith('C') && parts.length >= 3) {

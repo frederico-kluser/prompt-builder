@@ -238,7 +238,9 @@ tarefa com agentes diferentes.
 | `setup` | não | Comandos rodados **antes** do agente acordar (`npm ci`, `pip install`, build). **Não contam como trabalho do agente e não entram na trajetória julgada.** Falha aqui = etapa `error` para todos. |
 | `files` | não | Fixtures escritos no workspace depois do setup (entrada, casos de teste, mocks): `{path, content}[]`. |
 | `verify` | não | **Oráculo determinístico** (ver abaixo). |
-| `forbiddenPaths` | não | Caminhos que o agente **não pode tocar**. Violação ⇒ veredito `nao` automático, sem gastar juiz. Globs simples (prefixo + `*`). É a barreira determinística contra editable o teste. |
+| `forbiddenPaths` | não | Caminhos que o agente **não pode tocar**. Violação ⇒ veredito `nao` automático (score 0), sem gastar juiz, qualquer que seja o motivo do fim. **Semântica gitignore**: `*.test.ts` casa em qualquer nível, `/test/` ancora na raiz, `test/` casa um diretório `test` em qualquer nível, `**` cruza diretórios, `!padrão` reinclui. Checado pelo diff (inclusive a **origem** de um rename) **e** por SHA-256 de cada arquivo protegido contra o seed no filesystem — pega arquivo ignorado pelo `.gitignore`. É a barreira determinística contra editar o teste. |
+| `rebuild` | não | Rebuild de dependências **antes** do `verify[]`: `lockfiles` (default `["package-lock.json"]`) voltam aos bytes do seed e `cmd` (default `npm ci`) reconstrói. Com rebuild, `lockfiles` e `protect` (default `["node_modules/"]`) entram no hash de protegidos: dependência adulterada é violação — e os checks rodam contra as deps limpas. Rebuild falho ⇒ checks não rodam, oráculo inconclusivo. `timeoutMs` default 600000. |
+| `detectors` | não | Detectores estáticos sobre o diff (`skip`/`only`/`todo`, `xfail`, `exit(0)`/`\|\| true`, teste apagado, config de runner editada). `warn` (default) só registra em `oracle.json`; `fail` transforma em violação; `off` desliga. |
 | `contextFiles` | não | Autoriza o agente a ler `AGENTS.md`/`CLAUDE.md` do repo-semente. Default desligado (segurança contra prompt injection); quando ligado, o dossiê **destaca** que o repo instruiu o agente. |
 | `limits` | não | Limites **por execução**; herda de `agent.limits`. Default: obrigatório (ver `maxCostUsd`). |
 
@@ -265,6 +267,7 @@ do julgamento que não depende de um LLM ter um bom dia.
 | `expectExit` | não | 0 | Exit code esperado. |
 | `timeoutMs` | não | — | Tempo máximo do próprio check. |
 | `weight` | não | 1 | Ponderação quando há vários. |
+| `kind` | não | `fail_to_pass` | `fail_to_pass` = o que a tarefa pede; `pass_to_pass` = **regressão** (passava no seed, tem de continuar passando). A nota é a dos F2P; **P2P quebrado zera a nota** (a execução falhou). |
 
 **Por que lista, não um "script de teste":** o veredito precisa ser *decomponível*
 — "typecheck ✓ · testes ✗ (3 falhas) · lint ✓" em vez de 4000 linhas de test runner.
@@ -273,7 +276,8 @@ Mapeamento do oráculo para veredito:
 
 | Situação | Veredito | Juiz LLM |
 |---|---|---|
-| `forbiddenPaths` violado | **`nao`** | não roda (indiscutível) |
+| `forbiddenPaths` violado (diff, rename, hash, deps do rebuild) | **`nao`** (score 0) | não roda (indiscutível) |
+| `pass_to_pass` quebrado | **`nao`** (score 0) | não roda |
 | `score === 1` | **`resolve`** (candidato) | roda só para graduar qualidade; **não pode rebaixar para `nao`** |
 | `0 < score < 1` | **`parcial`** (candidato) | roda; pode confirmar ou rebaixar para `nao` |
 | `score === 0` | **`nao`** | não roda |

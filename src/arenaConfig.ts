@@ -247,6 +247,8 @@ export function arenaAgentConfigToRunConfig(
         ...(s.agentTask.files ? { files: s.agentTask.files } : {}),
         ...(s.agentTask.verify ? { verify: s.agentTask.verify } : {}),
         ...(s.agentTask.forbiddenPaths ? { forbiddenPaths: s.agentTask.forbiddenPaths } : {}),
+        ...(s.agentTask.rebuild ? { rebuild: s.agentTask.rebuild } : {}),
+        ...(s.agentTask.detectors ? { detectors: s.agentTask.detectors } : {}),
         ...(s.agentTask.contextFiles ? { contextFiles: s.agentTask.contextFiles } : {}),
         limits: taskLimits,
       },

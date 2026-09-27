@@ -33,7 +33,18 @@
 // rodar oráculo na SPA é impossível por construção (ver nota em `types.ts`).
 // ----------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
-import type { OracleResult } from './types.js';
+import type { AgentTaskSpec, OracleResult } from './types.js';
+import {
+  detectSuspicious,
+  diffProtected,
+  diffViolations,
+  restoreFiles,
+  scoreChecks,
+  snapshotProtected,
+  type ProtectedSnapshot,
+  type ScoredCheck,
+  type VerifyKind,
+} from './guard.js';
 
 // Timeout default dos checks quando a tarefa não informa (§contrato no JSDoc).
 const DEFAULT_CHECK_TIMEOUT_MS = 60_000;
@@ -231,39 +242,47 @@ async function runCheck(opts: {
   });
 }
 
+// ---------------------------------------------------------------------------
+// VERIFICADOR v2 (IMPL-039). A lógica de checagem/pontuação/hash é PURA e mora
+// em `guard.ts`; aqui só se orquestra: snapshot do seed → (agente) → snapshot
+// pós → rebuild → checks → nota. O glob v1 (`*` só no fim, `*.test.ts`
+// literal) foi trocado pela semântica gitignore de `guard.ts`.
+// ---------------------------------------------------------------------------
+
+/** Lockfile restaurado ao seed antes do rebuild, quando a tarefa não diz. */
+const DEFAULT_REBUILD_LOCKFILES = ['package-lock.json'];
+/** O que o rebuild reconstrói (e por isso entra no hash de protegidos). */
+const DEFAULT_REBUILD_PROTECT = ['node_modules/'];
+const DEFAULT_REBUILD_CMD = 'npm ci';
+const DEFAULT_REBUILD_TIMEOUT_MS = 600_000;
+
+type GuardTask = Pick<AgentTaskSpec, 'forbiddenPaths' | 'rebuild'>;
+
+/** Padrões cujo SHA-256 é comparado com o seed: `forbiddenPaths` + o que o rebuild cobre. */
+export function protectedPatternsFor(task: GuardTask): string[] {
+  const out = [...(task.forbiddenPaths ?? [])];
+  if (task.rebuild) {
+    out.push(...(task.rebuild.lockfiles ?? DEFAULT_REBUILD_LOCKFILES));
+    out.push(...(task.rebuild.protect ?? DEFAULT_REBUILD_PROTECT));
+  }
+  return out;
+}
+
 /**
- * `forbiddenPath` casa com um caminho normalizado.
- *
- * A regra de match é um "glob simples", deliberadamente pequeno (§6.1 do plano;
- * os padrões vêm do autor da tarefa e precisam ser previsíveis para quem lê o
- * diff):
- *  - padrão que termina em `*` => casa por PREFIXO (o `*` é removido e testamos
- *    `path.startsWith(prefix)`) — ex.: `test/*` casa `test/a.ts`;
- *  - padrão que termina em `/` => também casa por PREFIXO (é um diretório) —
- *    ex.: `test/` casa `test/a.ts`;
- *  - caso contrário => igualdade EXATA, com `*` no meio tratado como LITERAL.
- * Separadores são normalizados para `/` dos dois lados antes de comparar.
- *
- * ⚠️ Note a consequência da regra "`*` no meio = literal": um padrão como
- * `*.test.ts` (estrela no INÍCIO) NÃO faz wildcard — só casaria um arquivo
- * literalmente chamado `*.test.ts`. Padrões assim devem ser escritos com o
- * prefixo explícito (`test/`, `src/` etc.), não como glob de sufixo.
+ * Snapshot dos protegidos NO SEED — chame depois do `prepare()` e ANTES do
+ * agente acordar. `undefined` quando a tarefa não protege nada. Guarda os bytes
+ * dos lockfiles para o rebuild restaurá-los ("npm ci do lockfile do seed").
  */
-function matchesForbidden(filePath: string, pattern: string): boolean {
-  const p = filePath.replace(/\\/g, '/');
-  const pat = pattern.replace(/\\/g, '/');
-  if (pat.endsWith('*')) {
-    return p.startsWith(pat.slice(0, -1));
-  }
-  if (pat.endsWith('/')) {
-    return p.startsWith(pat);
-  }
-  return p === pat;
+export function captureSeedGuard(workspaceDir: string, task: GuardTask): ProtectedSnapshot | undefined {
+  const patterns = protectedPatternsFor(task);
+  if (patterns.length === 0) return undefined;
+  const keepContent = task.rebuild ? task.rebuild.lockfiles ?? DEFAULT_REBUILD_LOCKFILES : [];
+  return snapshotProtected(workspaceDir, patterns, { keepContent });
 }
 
 /**
  * Roda todo o oráculo: monta `OracleResult` a partir de `verify[]`,
- * `forbiddenPaths` e `diffFiles`.
+ * `forbiddenPaths`, `diffFiles` e (v2) do snapshot do seed.
  *
  * Qualquer ausência de AÇÚCAR ou de invariante aqui vira veredito errado nas
  * duas pontas: "agente ruim disfarçado de bom" (cheque que não rodou contado
@@ -272,10 +291,17 @@ function matchesForbidden(filePath: string, pattern: string): boolean {
  * Contrato das regras (ver JSDoc do arquivo):
  *  - ordem dos checks SEMPRE a da lista; `label` default `verify #<i>`.
  *  - `expectExit` default 0; `weight` default 1; `timeoutMs` por check, senão
- *    `defaultTimeoutMs` (60_000).
- *  - `score = Σ(ok·weight) / Σ(weight)`; sem checks, `0`.
- *  - `violations` = caminhos de `diffFiles` que casam algum `forbiddenPath`.
- *  - `inconclusive` = algum check não rodou (timeout ou spawn error).
+ *    `defaultTimeoutMs` (60_000); `kind` default `fail_to_pass`.
+ *  - `score` = `scoreChecks` (F2P×P2P): Σ(ok·weight)/Σ(weight) dos F2P; P2P
+ *    quebrado ⇒ 0; sem checks, `0`. Violação ⇒ `score` 0 (reward 0).
+ *  - `violations` = caminhos do diff (novo OU origem de rename) que casam
+ *    `forbiddenPaths` + protegidos cujo SHA-256 mudou vs o seed (inclui
+ *    arquivos ignorados pelo git) + achados dos detectores em modo `fail`.
+ *  - o snapshot pós é tirado ANTES do rebuild e dos checks (os checks podem
+ *    escrever arquivos; o que conta é o estado que o AGENTE deixou).
+ *  - `rebuild`: lockfiles voltam ao seed, `cmd` roda; falhou ⇒ checks NÃO
+ *    rodam (nunca contra dependências sujas) e o oráculo é `inconclusive`.
+ *  - `inconclusive` = algum check não rodou (timeout, spawn error, rebuild).
  *  - `onCheck` é chamado ao fim de cada check, na ordem, com o exit code real.
  */
 export async function runOracle(opts: {
@@ -286,17 +312,56 @@ export async function runOracle(opts: {
     expectExit?: number;
     timeoutMs?: number;
     weight?: number;
+    kind?: VerifyKind;
   }[];
   forbiddenPaths?: string[];
-  diffFiles?: { path: string }[];
+  diffFiles?: { path: string; oldPath?: string; status?: string }[];
+  /** Snapshot dos protegidos no seed (`captureSeedGuard`). Sem ele, só o diff é checado. */
+  seedSnapshot?: ProtectedSnapshot;
+  rebuild?: AgentTaskSpec['rebuild'];
+  /** Default `'warn'`. */
+  detectors?: AgentTaskSpec['detectors'];
+  /** Diff unificado do agente (para os detectores estáticos). */
+  diff?: string;
   defaultTimeoutMs?: number;
   onCheck?: (c: { label: string; ok: boolean; exitCode: number }) => void;
 }): Promise<OracleResult> {
   const defaultTimeout = opts.defaultTimeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS;
+  const diffFiles = opts.diffFiles ?? [];
+
+  // --- 1. Barreiras determinísticas, sobre o estado que o AGENTE deixou.
+  const violations = new Set(diffViolations(diffFiles, opts.forbiddenPaths ?? []));
+  let protectedChanges: OracleResult['protectedChanges'];
+  if (opts.seedSnapshot) {
+    const post = snapshotProtected(opts.workspaceDir, opts.seedSnapshot.patterns);
+    protectedChanges = diffProtected(opts.seedSnapshot, post, diffFiles);
+    for (const c of protectedChanges) violations.add(c.path);
+  }
+  const detectorMode = opts.detectors ?? 'warn';
+  const findings = detectorMode === 'off' ? [] : detectSuspicious({ diff: opts.diff, nameStatus: diffFiles });
+  if (detectorMode === 'fail') for (const f of findings) violations.add(f.path);
+
+  // --- 2. Rebuild de dependências a partir do lockfile do seed.
+  let rebuild: OracleResult['rebuild'];
+  if (opts.rebuild) {
+    const restored = opts.seedSnapshot
+      ? restoreFiles(opts.workspaceDir, opts.seedSnapshot, opts.rebuild.lockfiles ?? DEFAULT_REBUILD_LOCKFILES)
+      : [];
+    const cmd = opts.rebuild.cmd ?? DEFAULT_REBUILD_CMD;
+    const out = await runCheck({
+      cmd,
+      cwd: opts.workspaceDir,
+      expected: 0,
+      timeoutMs: opts.rebuild.timeoutMs ?? DEFAULT_REBUILD_TIMEOUT_MS,
+    });
+    rebuild = { cmd, exitCode: out.exitCode, ok: out.ok, durationMs: out.durationMs, tail: out.tail, restored };
+  }
+  const rebuildFailed = rebuild !== undefined && !rebuild.ok;
+
+  // --- 3. Checks, na ordem da lista.
   const checks: OracleResult['checks'] = [];
-  let sumOk = 0;
-  let sumWeight = 0;
-  let inconclusive = false;
+  const scored: ScoredCheck[] = [];
+  let inconclusive = rebuildFailed;
 
   for (let i = 0; i < opts.verify.length; i += 1) {
     const v = opts.verify[i];
@@ -304,17 +369,14 @@ export async function runOracle(opts: {
     const expected = v.expectExit ?? 0;
     const weight = v.weight ?? 1;
     const timeoutMs = v.timeoutMs ?? defaultTimeout;
+    const kind = v.kind;
 
-    const out = await runCheck({
-      cmd: v.cmd,
-      cwd: opts.workspaceDir,
-      expected,
-      timeoutMs,
-    });
+    const out: CheckOutcome = rebuildFailed
+      ? { exitCode: NO_EXIT, ok: false, inconclusive: true, durationMs: 0, tail: '' }
+      : await runCheck({ cmd: v.cmd, cwd: opts.workspaceDir, expected, timeoutMs });
 
     if (out.inconclusive) inconclusive = true;
-    if (out.ok) sumOk += weight;
-    sumWeight += weight;
+    scored.push({ ok: out.ok, weight, kind, inconclusive: out.inconclusive });
 
     checks.push({
       label,
@@ -325,17 +387,28 @@ export async function runOracle(opts: {
       weight,
       durationMs: out.durationMs,
       tail: out.tail,
+      ...(kind ? { kind } : {}),
+      ...(rebuildFailed ? { skipped: true } : {}),
     });
 
-    opts.onCheck?.({ label, ok: out.ok, exitCode: out.exitCode });
+    if (!rebuildFailed) opts.onCheck?.({ label, ok: out.ok, exitCode: out.exitCode });
   }
 
-  const score = sumWeight > 0 ? sumOk / sumWeight : 0;
+  // --- 4. Nota: F2P×P2P; tocar protegido = reward 0.
+  const s = scoreChecks(scored);
+  const violationList = [...violations];
+  const score = violationList.length > 0 ? 0 : s.score;
 
-  const forbidden = opts.forbiddenPaths ?? [];
-  const violations = (opts.diffFiles ?? [])
-    .map((f) => f.path)
-    .filter((p) => forbidden.some((pat) => matchesForbidden(p, pat)));
-
-  return { checks, score, violations, inconclusive };
+  return {
+    checks,
+    score,
+    violations: violationList,
+    inconclusive,
+    rawScore: s.rawScore,
+    f2p: s.f2p,
+    p2p: s.p2p,
+    ...(protectedChanges ? { protectedChanges } : {}),
+    ...(findings.length > 0 ? { findings } : {}),
+    ...(rebuild ? { rebuild } : {}),
+  };
 }

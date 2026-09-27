@@ -75,6 +75,12 @@ export interface AgentTaskSpec {
     weight?: number;
     /** Rótulo curto p/ o dossiê e o CSV ("testes unitários", "typecheck", "lint"). */
     label?: string;
+    /**
+     * IMPL-039 — papel do check. `fail_to_pass` (default) = o que a tarefa pede
+     * (falha no seed, tem de passar); `pass_to_pass` = REGRESSÃO (passava no seed
+     * e tem de continuar passando). Quebrar um P2P zera a nota: a execução FALHOU.
+     */
+    kind?: 'fail_to_pass' | 'pass_to_pass';
   }[];
 
   /**
@@ -82,9 +88,37 @@ export interface AgentTaskSpec {
    * sem gastar juiz. Existe porque a forma mais barata de "passar no teste" é
    * editar o teste — é o reward hacking clássico deste domínio, e ele precisa de
    * uma barreira determinística, não de um pedido educado no prompt.
-   * Globs simples (prefixo de caminho + `*`).
+   * Semântica GITIGNORE (IMPL-039, `guard.ts`): `*.test.ts` casa em qualquer
+   * nível, `/test/` ancora na raiz, `dir/` casa tudo dentro, `**`, `!` reinclui.
+   * Checado pelo diff (inclusive a ORIGEM de renames) E por SHA-256 do arquivo
+   * contra o seed no filesystem (pega arquivo ignorado pelo `.gitignore`).
    */
   forbiddenPaths?: string[];
+
+  /**
+   * IMPL-039 — rebuild de dependências ANTES do `verify[]`: os `lockfiles` voltam
+   * aos bytes do seed e `cmd` reconstrói (default `npm ci`). Com rebuild ligado,
+   * `lockfiles` e `protect` (default `node_modules/`) entram no hash de
+   * protegidos: dependência adulterada pelo agente é VIOLAÇÃO — e o rebuild a
+   * neutraliza para os checks rodarem contra dependências limpas. Falha do
+   * rebuild = oráculo inconclusivo, checks não rodam (nunca contra deps sujas).
+   */
+  rebuild?: {
+    cmd?: string;
+    /** Default `['package-lock.json']`. */
+    lockfiles?: string[];
+    /** Padrões (gitignore) do que o rebuild reconstrói. Default `['node_modules/']`. */
+    protect?: string[];
+    timeoutMs?: number;
+  };
+
+  /**
+   * IMPL-039 — detectores estáticos sobre o diff (skip/only/todo, xfail,
+   * exit(0)/`|| true`, teste apagado, config de runner editada). Heurística:
+   * `'warn'` (default) só registra em `oracle.json`; `'fail'` vira violação
+   * (veredito `nao` sem LLM); `'off'` desliga.
+   */
+  detectors?: 'off' | 'warn' | 'fail';
 
   /**
    * default false — ver o aviso em §12.2 do plano. `--no-context-files` (default)
@@ -397,11 +431,27 @@ export interface OracleResult {
     durationMs: number;
     /** Últimas N linhas, guardadas inteiras em oracle.json. */
     tail: string;
+    /** IMPL-039: papel do check (ausente = `fail_to_pass`). */
+    kind?: 'fail_to_pass' | 'pass_to_pass';
+    /** IMPL-039: não rodou por falha do rebuild de dependências. */
+    skipped?: boolean;
   }[];
   /** Soma ponderada dos ok / soma dos pesos, em [0,1]. */
   score: number;
-  /** Caminhos proibidos que foram modificados. Não-vazio ⇒ veredito 'nao'. */
+  /** Caminhos proibidos que foram modificados. Não-vazio ⇒ veredito 'nao' (e `score` 0). */
   violations: string[];
-  /** true = algum check não pôde rodar (comando ausente, timeout do próprio check). */
+  /** true = algum check não pôde rodar (comando ausente, timeout do próprio check, rebuild falho). */
   inconclusive: boolean;
+  // --- IMPL-039 (opcionais: `oracle.json` antigos não têm) ---------------------
+  /** Nota antes das penalidades (violação / P2P quebrado). */
+  rawScore?: number;
+  f2p?: { passed: number; total: number };
+  /** `broken` ⇒ regressão: a execução falhou (score 0). */
+  p2p?: { passed: number; total: number; broken: boolean };
+  /** Mudanças nos arquivos protegidos por SHA-256 vs o seed (filesystem). */
+  protectedChanges?: { path: string; change: 'modified' | 'deleted' | 'added' | 'renamed'; to?: string }[];
+  /** Achados dos detectores estáticos (`detectors`). */
+  findings?: { kind: 'skip' | 'xfail' | 'exit0' | 'test-deleted' | 'runner-config'; path: string; detail: string }[];
+  /** Rebuild de dependências rodado antes dos checks. */
+  rebuild?: { cmd: string; exitCode: number; ok: boolean; durationMs: number; tail: string; restored: string[] };
 }
