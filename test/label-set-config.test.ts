@@ -105,6 +105,19 @@ describe('IMPL-003 — parseRunConfig reprova rótulo curto sem labelSet', () =>
     expect(parseRunConfig({ ...variationBase, customStages: [etapa({ expected: 'negativo', labelSet: [] })] }).ok).toBe(false);
   });
 
+  // Revisão IMPL-003: labelSet = [expected] satisfazia a regra e DESLIGAVA a
+  // detecção de lista — o motivo de o labelSet existir.
+  it('labelSet com um só rótulo categórico reprova; rótulo numérico aceita [expected]', () => {
+    const um = parseRunConfig({ ...variationBase, customStages: [etapa({ expected: 'negativo', labelSet: ['negativo'] })] });
+    expect(um.ok).toBe(false);
+    if (!um.ok) expect(um.error).toContain('pelo menos 2 rótulos distintos');
+    // duplicata só de caixa/acento também é UM rótulo
+    expect(
+      parseRunConfig({ ...variationBase, customStages: [etapa({ expected: 'negativo', labelSet: ['Negativo', 'negativo'] })] }).ok,
+    ).toBe(false);
+    expect(parseRunConfig({ ...variationBase, customStages: [etapa({ expected: '42', labelSet: ['42'] })] }).ok).toBe(true);
+  });
+
   it('rótulo longo (6+ palavras) e objeto campo→valor NÃO exigem labelSet', () => {
     const longo = parseRunConfig({
       ...variationBase,

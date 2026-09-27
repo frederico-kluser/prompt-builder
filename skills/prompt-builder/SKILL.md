@@ -142,7 +142,7 @@ agente (Agent Arena), o executor do motor é o `pi`; os demais entram como
   **gabarito obrigatório** (`reference` textual OU `expected` de rótulo — o evolve recusa sem).
 - **`expected`** (ground-truth): veredito determinístico sem juiz LLM — `"edit"`, `["edit","help"]`
   ou `{"campo":"valor"}`. Rótulo curto (≤5 palavras) exige **`labelSet`** (todos os rótulos
-  válidos; sem ele = exit 3). Casamento estrito: prosa vale no máximo `parcial`; negação,
+  válidos, ≥2 distintos salvo rótulo numérico; sem isso = exit 3). Casamento estrito: prosa vale no máximo `parcial`; negação,
   hesitação ou vários rótulos = `nao`.
 - **arena-config@1**: `scenarios: {"from":"library","profile","ids"}` · `prompt.contracts`
   (never-break) · `prompt.group`+`promptId` (multi-prompt coordinate ascent) · `training.reflection`

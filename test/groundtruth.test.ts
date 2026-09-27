@@ -289,6 +289,8 @@ const SENT = ['positivo', 'negativo', 'neutro'];
 const SIMNAO = ['sim', 'nao'];
 const INTENT = ['edit', 'create', 'delete', 'help'];
 const URG = ['urgente', 'normal'];
+const YN = ['yes', 'no'];
+const EN = ['positive', 'negative', 'neutral'];
 
 interface Caso {
   texto: string;
@@ -372,6 +374,18 @@ const ADVERSARIAL: Record<string, Caso[]> = {
     { texto: 'não-negativo', expected: 'negativo', labelSet: SENT },
     { texto: 'O cliente não está negativo, está neutro.', expected: 'negativo', labelSet: SENT },
     { texto: 'Não é sim.', expected: 'sim', labelSet: SIMNAO },
+    // Revisão IMPL-003: rótulo abrindo a linha + separador + negação. Antes a
+    // regra 'lead' dava resolve — e 'Urgente não, apenas importante.' (sem
+    // vírgula) já dava nao: a pontuação não pode mudar o veredito.
+    { texto: 'Urgente: não', expected: 'urgente', labelSet: URG },
+    { texto: 'urgente, não', expected: 'urgente', labelSet: URG },
+    { texto: 'Urgente - não', expected: 'urgente', labelSet: URG },
+    { texto: 'Urgente — não', expected: 'urgente', labelSet: URG },
+    { texto: 'Urgente, não; apenas importante.', expected: 'urgente', labelSet: URG },
+    { texto: 'Urgente: não se aplica', expected: 'urgente', labelSet: URG },
+    { texto: 'Negativo, não.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Yes, not really.', expected: 'yes', labelSet: YN },
+    { texto: 'Sim, não...', expected: 'sim', labelSet: SIMNAO },
   ],
   hedge: [
     { texto: 'Talvez urgente.', expected: 'urgente', labelSet: URG },
@@ -387,6 +401,21 @@ const ADVERSARIAL: Record<string, Caso[]> = {
     { texto: 'Sim, mas não tenho certeza.', expected: 'sim', labelSet: SIMNAO },
     { texto: 'negativo\nmas não tenho certeza', expected: 'negativo', labelSet: SENT },
     { texto: 'Parece negativo.', expected: 'negativo', labelSet: SENT },
+    // Revisão IMPL-003: hesitação logo depois do rótulo, prefixo de palpite,
+    // e hesitação nas linhas seguintes / na prosa em volta do JSON.
+    { texto: 'Negativo, talvez.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo: talvez', expected: 'negativo', labelSet: SENT },
+    { texto: 'Palpite: negativo', expected: 'negativo', labelSet: SENT },
+    { texto: 'Chute: negativo', expected: 'negativo', labelSet: SENT },
+    { texto: 'Talvez: negativo', expected: 'negativo', labelSet: SENT },
+    { texto: 'negativo\n\nmas pode ser neutro', expected: 'negativo', labelSet: SENT },
+    { texto: 'negativo\nPorém poderia ser positivo.', expected: 'negativo', labelSet: SENT },
+    { texto: 'negativo\nneutro também é possível', expected: 'negativo', labelSet: SENT },
+    { texto: '{"label":"negativo"}\nOu talvez positivo.', expected: 'negativo', labelSet: SENT },
+    { texto: '{"label":"negativo"}\nMas pode ser neutro.', expected: 'negativo', labelSet: SENT },
+    { texto: '{"label":"negativo"}\nNão tenho certeza.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Acho que: {"label":"negativo"}', expected: 'negativo', labelSet: SENT },
+    { texto: '{"label":"negativo","confianca":"talvez"}', expected: 'negativo', labelSet: SENT },
   ],
   multiRotulo: [
     { texto: 'positivo, negativo, neutro', expected: 'negativo', labelSet: SENT },
@@ -402,6 +431,25 @@ const ADVERSARIAL: Record<string, Caso[]> = {
     { texto: 'edit, create, delete, help', expected: 'help', labelSet: INTENT },
     { texto: 'sim e não', expected: 'sim', labelSet: SIMNAO },
     { texto: 'Negativo? Positivo? Difícil dizer.', expected: 'negativo', labelSet: SENT },
+    // Revisão IMPL-003: alternativa, autocorreção, adição e lista emendada ao
+    // rótulo que abre a linha; afirmação de outro rótulo nas linhas seguintes.
+    { texto: 'Negativo (ou neutro)', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo; na verdade neutro', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo. Na verdade, neutro.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo, ou melhor, neutro.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Sim, mas também não.', expected: 'sim', labelSet: SIMNAO },
+    { texto: 'Negativo, positivo', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo. Positivo.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo. É positivo.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo, positivo e neutro são as opções.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negative, or maybe neutral', expected: 'negative', labelSet: EN },
+    { texto: 'Negative; actually neutral', expected: 'negative', labelSet: EN },
+    { texto: 'negativo\nTambém positivo.', expected: 'negativo', labelSet: SENT },
+    { texto: 'negativo\nÉ positivo.', expected: 'negativo', labelSet: SENT },
+    { texto: 'negativo\nou talvez neutro', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo\nNa verdade, o sentimento é neutro.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo\nO sentimento correto é positivo.', expected: 'negativo', labelSet: SENT },
+    { texto: '{"label":"negativo"}\nNa verdade é positivo.', expected: 'negativo', labelSet: SENT },
   ],
   jsonDuplo: [
     { texto: '{"label":"negativo"} ou {"label":"positivo"}', expected: 'negativo', labelSet: SENT },
@@ -413,6 +461,27 @@ const ADVERSARIAL: Record<string, Caso[]> = {
     { texto: '```json\n{"label":"positivo"}\n```\n{"label":"negativo"}', expected: 'negativo', labelSet: SENT },
     { texto: '```json\n{"label":"positivo"}\n```\n```json\n{"label":"negativo"}\n```', expected: { label: 'negativo' } },
     { texto: '{"intent":"edit"}\n{"intent":"help"}', expected: { intent: 'edit' } },
+    // Revisão IMPL-003: segundo rótulo em OUTRO campo (topo ou aninhado) e
+    // prosa que desmente o campo no modo objeto.
+    { texto: '{"resposta":"negativo","outro":"positivo"}', expected: 'negativo', labelSet: SENT },
+    { texto: '{"a": {"label":"positivo"}, "label":"negativo"}', expected: 'negativo', labelSet: SENT },
+    { texto: '{"resultado": {"label": "negativo"}, "extra": {"label": "positivo"}}', expected: 'negativo', labelSet: SENT },
+    { texto: '{"intent":"edit"}\nNa verdade é help.', expected: { intent: 'edit' }, labelSet: INTENT },
+  ],
+  // Revisão IMPL-003: dúvida/negação/alternativa SOLTA depois do rótulo, sem
+  // outro rótulo afirmado. Não é resposta firme (nunca resolve); como o
+  // rótulo em si não foi negado nem trocado, o teto é 'parcial'.
+  duvidaSolta: [
+    { texto: 'Negativo... ou não.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo… ou não.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo. Não.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo. Talvez.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo. Não sei.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo. Na verdade, não.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negative. Not really.', expected: 'negative', labelSet: EN },
+    { texto: 'negativo\nOu não.', expected: 'negativo', labelSet: SENT },
+    { texto: 'negativo\nTalvez.', expected: 'negativo', labelSet: SENT },
+    { texto: 'Negativo\nNegativo? Não.', expected: 'negativo', labelSet: SENT },
   ],
   nulo: [
     { texto: ':', expected: 'negativo', labelSet: SENT },
@@ -445,6 +514,35 @@ describe('IMPL-003 — corpus adversarial: 0 falso resolve', () => {
     for (const c of [...ADVERSARIAL.multiRotulo, ...ADVERSARIAL.jsonDuplo]) {
       const r = matchExpected(c.texto, c.expected, { labelSet: c.labelSet });
       expect(r.verdict, `${c.texto} → ${r.rule}`).toBe('nao');
+    }
+  });
+
+  it('a pontuação não muda o veredito da negação ("urgente não" ≡ "urgente, não" ≡ "Urgente: não")', () => {
+    const variantes = [
+      'Urgente não, apenas importante.',
+      'Urgente, não; apenas importante.',
+      'urgente, não',
+      'Urgente: não',
+      'Urgente - não',
+    ];
+    for (const t of variantes) {
+      const r = matchExpected(t, 'urgente', { labelSet: URG });
+      expect(r.verdict, `${t} → ${r.rule}`).toBe('nao');
+      expect(r.rule, t).toBe('negated');
+    }
+    // e o lado inverso: com esperado 'normal', o rótulo NEGADO não conta como "afirma urgente"
+    for (const t of ['Urgente: não', 'Urgente? Não.']) {
+      const r = matchExpected(t, 'normal', { labelSet: URG });
+      expect(r.verdict, t).toBe('nao');
+      expect(r.explanation, t).not.toContain('afirma outro rótulo');
+    }
+  });
+
+  it('dúvida solta depois do rótulo fica no máximo em parcial, com explicação', () => {
+    for (const c of ADVERSARIAL.duvidaSolta) {
+      const r = matchExpected(c.texto, c.expected, { labelSet: c.labelSet });
+      expect(r.verdict, `${c.texto} → ${r.rule}`).toBe('parcial');
+      expect(r.explanation, c.texto).toContain('modo estrito');
     }
   });
 });
@@ -509,6 +607,39 @@ const LEGITIMOS: Caso[] = [
   { texto: 'Claro: {"intent": "edit"} — pronto!', expected: { intent: 'edit' } },
   { texto: '```json\n{"intent": "edit", "confidence": 0.9}\n```', expected: { intent: 'edit' } },
   { texto: '{"intent":"edit"}\n{"intent":"edit"}', expected: { intent: 'edit' } },
+  // Revisão IMPL-003 — formatos comuns que caíam para parcial/nao:
+  // rótulo na linha seguinte a um cabeçalho, JSON aninhado, lista numerada,
+  // objeto de metadado ao lado, prefixo firme "Sem dúvida:".
+  { texto: 'Sentimento:\nnegativo', expected: 'negativo', labelSet: SENT },
+  { texto: '## Resultado\n\nNegativo', expected: 'negativo', labelSet: SENT },
+  { texto: '**Sentimento:**\nNegativo\nO cliente reclama.', expected: 'negativo', labelSet: SENT },
+  { texto: '{"resultado": {"label": "negativo"}}', expected: 'negativo', labelSet: SENT },
+  { texto: '{"label":"negativo"}\n{"confidence":0.9}', expected: 'negativo', labelSet: SENT },
+  { texto: '1. Negativo', expected: 'negativo', labelSet: SENT },
+  { texto: 'Sem dúvida: negativo', expected: 'negativo', labelSet: SENT },
+  // ... citação do cliente com incerteza (a incerteza NÃO é do modelo),
+  // pergunta retórica rejeitada, "sim" conversacional numa resposta "não".
+  { texto: 'Negativo\n\nO cliente disse: "não tenho certeza se volto a comprar".', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo.\n\nNeutro? Não, há raiva explícita.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo\n\nNeutro não, porque há raiva.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Não. Sim, entendo a frustração, mas não.', expected: 'nao', labelSet: SIMNAO },
+  // ... explicações que citam outro rótulo com SUJEITO, contraste ou contrafactual —
+  // as guardas novas não podem derrubá-las.
+  { texto: 'Negativo\n\nO texto parece neutro no início, mas é negativo.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo\n\nAlguns diriam neutro, mas as reclamações pesam.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Sentimento: negativo\nJustificativa: embora haja elogio (positivo), a queixa domina.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo\n\nNota: poderia ser neutro se não houvesse a ameaça de cancelar.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo, ou seja, o cliente está insatisfeito.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo, sem dúvida.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo, não só pelo atraso, mas pelo tom.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negativo. Não há elogios, apenas reclamações.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Normal, não urgente.', expected: 'normal', labelSet: URG },
+  { texto: 'Normal (não urgente)', expected: 'normal', labelSet: URG },
+  { texto: 'Não, não tem direito.', expected: 'nao', labelSet: SIMNAO },
+  { texto: 'Sim\n\nNão há impedimento.', expected: 'sim', labelSet: SIMNAO },
+  { texto: 'Não\n\nNão há direito, pois o prazo expirou; sim, o cliente pode recorrer.', expected: 'nao', labelSet: SIMNAO },
+  { texto: 'Aqui está: {"label":"negativo"}. Não é positivo.', expected: 'negativo', labelSet: SENT },
+  { texto: 'Negative\n\nThe first sentence is positive, but the complaint dominates.', expected: 'negative', labelSet: EN },
 ];
 
 describe('IMPL-003 — positivos legítimos: ≥95% resolve', () => {
@@ -528,6 +659,10 @@ describe('IMPL-003 — positivos legítimos: ≥95% resolve', () => {
       { texto: 'Classifico como negativo, pois o cliente reclama.', expected: 'negativo', labelSet: SENT },
       { texto: 'Pelo tom da mensagem, eu diria negativo', expected: 'negativo', labelSet: SENT },
       { texto: 'O usuário quer edit do parágrafo', expected: 'edit', labelSet: INTENT },
+      // revisão IMPL-003: rótulo + separador + prosa que começa com negação ou
+      // hesita em outra coisa — a guarda da regra 'lead' rebaixa, não zera.
+      { texto: 'Negativo: não gostou do atendimento.', expected: 'negativo', labelSet: SENT },
+      { texto: 'Negativo. O cliente não sabe se volta; talvez cancele.', expected: 'negativo', labelSet: SENT },
     ];
     for (const c of prosa) {
       const r = matchExpected(c.texto, c.expected, { labelSet: c.labelSet });
@@ -572,6 +707,11 @@ describe('IMPL-003 — modo e labelSet', () => {
     // labelSet vazio/sem expected
     expect(labelSetIssue({ expected: 'negativo', labelSet: ['  '] })).toMatch(/vazio/);
     expect(labelSetIssue({ labelSet: SENT })).toMatch(/junto com expected/);
+    // revisão: [expected] sozinho desligaria a detecção de lista → erro (numérico é resposta aberta)
+    expect(labelSetIssue({ expected: 'negativo', labelSet: ['negativo'] })).toMatch(/pelo menos 2 rótulos distintos/);
+    expect(labelSetIssue({ expected: ['negativo'], labelSet: ['Negativo', 'negativo'] })).toMatch(/pelo menos 2/);
+    expect(labelSetIssue({ expected: '42', labelSet: ['42'] })).toBeNull();
+    expect(labelSetIssue({ expected: 'negativo', labelSet: ['negativo', 'positivo'] })).toBeNull();
     // rótulo longo e objeto não exigem
     expect(labelSetIssue({ expected: 'um dois tres quatro cinco seis' })).toBeNull();
     expect(labelSetIssue({ expected: { intent: 'edit' } })).toBeNull();
