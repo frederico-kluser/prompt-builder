@@ -1,6 +1,13 @@
-import { chatCompletionStream } from './openrouter.js';
+import { chatCompletionStream, isGatewayBlocked } from './openrouter.js';
 import { isControlSignal } from './budget.js';
-import type { CompetitorResponse, ReasoningLevel, RunCtx, StageSpec } from './types.js';
+import type {
+  CompetitorOutcomeCounts,
+  CompetitorResponse,
+  CompetitorStatus,
+  ReasoningLevel,
+  RunCtx,
+  StageSpec,
+} from './types.js';
 
 export interface RunCompetitorParams {
   apiKey: string;
@@ -85,23 +92,49 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
         },
       });
 
+      // Taxonomia (IMPL-010): filtro de conteudo do provedor => 'blocked'
+      // (defesa do gateway, sem veredito para o prompt); recusa DECLARADA pelo
+      // modelo => 'refused' (resposta legitima, julgada normalmente — o texto
+      // da recusa vira o `text` quando nao ha conteudo). Recusa so em texto
+      // corrido ("nao posso ajudar") segue 'ok': o juiz a le como resposta.
+      const status: CompetitorStatus = res.blocked ? 'blocked' : res.refusal ? 'refused' : 'ok';
       return {
         contestantId,
         modelId,
-        text: res.text,
+        text: res.text || (status === 'refused' ? res.refusal! : ''),
         latencyMs: res.latencyMs,
         tokensIn: res.tokensIn,
         tokensOut: res.tokensOut,
         // Custo EXATO vindo de `usage.cost` (fallback: catalogo). Antes era
         // sempre derivado do catalogo, ignorando cache e faixas de preco.
         costUsd: res.cost.usd,
-        status: 'ok',
+        status,
+        ...(res.blocked ? { errorMsg: res.blocked.message } : {}),
+        ...(res.finishReason ? { finishReason: res.finishReason } : {}),
+        ...(res.nativeFinishReason ? { nativeFinishReason: res.nativeFinishReason } : {}),
       };
     } catch (err) {
       // Orcamento/cancelamento sao SINAIS DE CONTROLE: repetir a chamada so
       // gastaria mais, e devolver status 'error' faria a run parecer completa
       // com um competidor "que falhou". Sai do laco propagando.
       if (isControlSignal(err)) throw err;
+      // Bloqueio de moderacao/guardrail (403) e DETERMINISTICO para a mesma
+      // entrada: repetir so gastaria tempo, e nao e falha de infraestrutura
+      // nem de key. Sai do laco como 'blocked' — o OpenRouter nao cobra a
+      // requisicao bloqueada, logo custo 0.
+      if (isGatewayBlocked(err)) {
+        return {
+          contestantId,
+          modelId,
+          text: '',
+          latencyMs: Date.now() - start,
+          tokensIn: 0,
+          tokensOut: 0,
+          costUsd: 0,
+          status: 'blocked',
+          errorMsg: err.message,
+        };
+      }
       lastError = err;
       attempt += 1;
       console.error(`[competitor ${modelId}] tentativa ${attempt} falhou:`, err);
@@ -119,4 +152,23 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
     status: 'error',
     errorMsg: lastError instanceof Error ? lastError.message : String(lastError),
   };
+}
+
+/**
+ * Contagem dos desfechos NAO-ok dos competidores de uma run (IMPL-010): tres
+ * numeros separados porque sao tres coisas diferentes — `blocked` e a defesa
+ * do gateway (metrica de seguranca propria, cenario inconclusivo para o
+ * prompt), `refused` e o modelo recusando (julgavel) e `error` e infra.
+ * Puro e idempotente: recalculado do record inteiro, nunca incrementado.
+ */
+export function countCompetitorOutcomes(
+  stages: ReadonlyArray<{ responses?: ReadonlyArray<{ status: CompetitorStatus }> }>,
+): CompetitorOutcomeCounts {
+  const counts: CompetitorOutcomeCounts = { blocked: 0, refused: 0, error: 0 };
+  for (const st of stages) {
+    for (const r of st.responses ?? []) {
+      if (r.status === 'blocked' || r.status === 'refused' || r.status === 'error') counts[r.status] += 1;
+    }
+  }
+  return counts;
 }

@@ -198,6 +198,10 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         ...(e.record.judgeScoreByContestant
           ? { judgeScoreByContestant: e.record.judgeScoreByContestant }
           : {}),
+        // IMPL-010: bloqueio ≠ recusa ≠ erro (3 números pequenos, cabem no stream).
+        ...(e.record.competitorOutcomeCounts
+          ? { competitorOutcomeCounts: e.record.competitorOutcomeCounts }
+          : {}),
       });
       break;
     }

@@ -208,7 +208,7 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
   return (
     <div className="rounded-xl bg-card ring-1 ring-foreground/10">
       <div className="border-b border-border px-4 py-2 text-[12px] text-muted-foreground">
-        ✓ resolve · ◐ parcial · ✕ não resolve · ⏳ aguardando julgamento · ! erro · · pendente
+        ✓ resolve · ◐ parcial · ✕ não resolve · ⏳ aguardando julgamento · ⊘ bloqueado · ! erro · · pendente
       </div>
       <div className="scroll-slim overflow-x-auto p-3">
         <div className="min-w-fit">
@@ -250,7 +250,11 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
                 // com erro à parte. É o que faz a run longa não parecer travada.
                 const v = row.verdicts[i];
                 const resp = (s.responses ?? []).find((r) => r.contestantId === row.contestantId);
-                const estado = v
+                // Bloqueio (moderação/guardrail) vem ANTES do veredito: o cenário
+                // é inconclusivo para o prompt, nunca um 'não' (IMPL-010).
+                const estado = resp?.status === 'blocked'
+                  ? { glyph: '⊘', cls: 'bg-muted text-muted-foreground', label: 'bloqueado pela moderação — sem veredito para o prompt' }
+                  : v
                   ? { glyph: VERDICT_GLYPH[v], cls: VERDICT_META[v].cell, label: VERDICT_META[v].label }
                   : resp?.status === 'error'
                     ? { glyph: '!', cls: 'bg-nao/20 text-nao', label: 'resposta com erro' }

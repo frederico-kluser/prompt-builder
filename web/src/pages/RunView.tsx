@@ -508,13 +508,18 @@ function StageRow({ stage, byId, contestants }: StageRowProps) {
                   <div className="mt-1 font-mono text-[11.5px] text-muted-foreground tabular">
                     {formatMs(r.latencyMs)} · {r.tokensIn}→{r.tokensOut} tok · {formatUsd(r.costUsd)}
                     {r.status === 'error' && <span className="text-destructive"> · ERRO: {r.errorMsg}</span>}
+                    {/* IMPL-010: bloqueio é a defesa do gateway (sem veredito), não erro nem key. */}
+                    {r.status === 'blocked' && (
+                      <span className="text-muted-foreground"> · BLOQUEADO pela moderação: {r.errorMsg}</span>
+                    )}
+                    {r.status === 'refused' && <span className="text-muted-foreground"> · o modelo recusou</span>}
                   </div>
                   {explanation && (
                     <p className="mt-2 border-l-2 border-border pl-3 text-[13px] text-muted-foreground">
                       {explanation}
                     </p>
                   )}
-                  {r.status === 'ok' && <Pre className="mt-2">{r.text}</Pre>}
+                  {(r.status === 'ok' || r.status === 'refused') && <Pre className="mt-2">{r.text}</Pre>}
                 </div>
               );
             })}

@@ -437,6 +437,15 @@ function relatorioFinal(ctx: NetworkContext, record: RunRecord): void {
   if (record.budgetExhausted) {
     out.line(`Parou em   ${record.stoppedAtPhase ?? '?'} — orçamento esgotado`);
   }
+  // IMPL-010: bloqueio (moderação/guardrail do gateway) NÃO é erro de key nem
+  // falha do prompt — sai numa linha própria, separado de recusa e de erro.
+  const desfechos = record.competitorOutcomeCounts;
+  if (desfechos && desfechos.blocked + desfechos.refused + desfechos.error > 0) {
+    out.line(
+      `Respostas  ${desfechos.blocked} bloqueadas (moderação) · ${desfechos.refused} recusadas pelo modelo · ` +
+        `${desfechos.error} com erro`,
+    );
+  }
 
   // Qual REGUA foi usada precisa ficar explicito: standings (finais) e
   // judge-score nao sao intercambiaveis.
@@ -547,6 +556,8 @@ async function runSingle(
     stoppedAtPhase: record.stoppedAtPhase,
     standings: record.standings,
     judgeScoreByContestant: record.judgeScoreByContestant,
+    // IMPL-010: blocked (defesa do gateway) / refused (modelo) / error (infra).
+    competitorOutcomeCounts: record.competitorOutcomeCounts,
   });
 
   if (record.status === 'error') throw new CliError(record.error ?? 'run falhou', EXIT.ERROR);

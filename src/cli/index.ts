@@ -7,7 +7,7 @@
 
 import { pkgVersion } from '../paths.js';
 import { configureGatewayFromEnv } from '../gatewayEnv.js';
-import { CliError, EXIT, Output } from './output.js';
+import { CliError, EXIT, exitCodeForGatewayError, Output } from './output.js';
 import { buildContext, parse } from './context.js';
 import { cmdModels } from './commands/models.js';
 import { cmdRun } from './commands/run.js';
@@ -201,8 +201,12 @@ async function main(): Promise<void> {
     } catch {
       out = new Output({ format: 'text' });
     }
+    // Falha do gateway que escapou do comando: 401 => auth (4), sem credito =>
+    // 5, 403 de moderacao => 1 (bloqueio, NUNCA auth) — IMPL-010.
     const cliErr =
-      err instanceof CliError ? err : new CliError((err as Error).message, EXIT.ERROR);
+      err instanceof CliError
+        ? err
+        : new CliError((err as Error).message, exitCodeForGatewayError(err) ?? EXIT.ERROR);
     out.fail(cmd ?? '?', cliErr);
     if (cliErr.code === EXIT.USAGE) emitClaudeHint();
     process.exitCode = cliErr.code;

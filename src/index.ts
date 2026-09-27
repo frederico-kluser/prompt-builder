@@ -76,8 +76,20 @@ export {
   extractUsage,
   priceUsage,
   DEFAULT_OPENROUTER_BASE_URL,
+  // Taxonomia bloqueio/recusa/erro (IMPL-010): 403 de moderacao nao e key.
+  GatewayError,
+  gatewayErrorKind,
+  isGatewayBlocked,
+  classifyHttpError,
 } from './openrouter.js';
-export type { GatewayConfig, FetchLike, LimiterSnapshot, UsageInfo } from './openrouter.js';
+export type {
+  GatewayConfig,
+  FetchLike,
+  LimiterSnapshot,
+  UsageInfo,
+  GatewayBlock,
+  GatewayErrorKind,
+} from './openrouter.js';
 export { gatewayConfigFromEnv, configureGatewayFromEnv } from './gatewayEnv.js';
 export type { ChatCompletionParams, ChatCompletionResult, KeyInfo } from './openrouter.js';
 

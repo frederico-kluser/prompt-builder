@@ -486,7 +486,23 @@ export interface StageSpec {
   agentTask?: AgentTaskSpec;
 }
 
-export type CompetitorStatus = 'ok' | 'error';
+/**
+ * Desfecho de UMA resposta de competidor (IMPL-010 / R-21:REC-6):
+ * - `ok`      — resposta normal;
+ * - `blocked` — moderacao/guardrail do gateway ou filtro de conteudo do
+ *               provedor (HTTP 403 de moderacao, `finish_reason` de filtro).
+ *               Defesa do gateway: o cenario fica SEM veredito para o prompt;
+ * - `refused` — o MODELO recusou (`message.refusal`); resposta legitima, julgavel;
+ * - `error`   — infraestrutura (rede, 5xx, timeout, key).
+ */
+export type CompetitorStatus = 'ok' | 'error' | 'blocked' | 'refused';
+
+/** Contagens dos desfechos nao-ok dos competidores de uma run (IMPL-010). */
+export interface CompetitorOutcomeCounts {
+  blocked: number;
+  refused: number;
+  error: number;
+}
 
 export interface CompetitorResponse {
   /** Chave universal. compare: === modelId. */
@@ -498,7 +514,12 @@ export interface CompetitorResponse {
   tokensOut: number;
   costUsd: number;
   status: CompetitorStatus;
+  /** Motivo do `error` (infra) ou do `blocked` (mensagem de moderacao — nunca "key invalida"). */
   errorMsg?: string;
+  /** `finish_reason` normalizado pelo OpenRouter (ex.: stop, length, content_filter). */
+  finishReason?: string;
+  /** `native_finish_reason` cru do provedor (ex.: SAFETY, end_turn). */
+  nativeFinishReason?: string;
   /**
    * Ponteiro para os artefatos da execução de agente em disco. NUNCA o
    * conteúdo: o RunRecord é resserializado inteiro a cada saveRun (throttled
@@ -738,6 +759,13 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** BYOK: cobrado pelo provedor upstream, fora dos creditos do OpenRouter. */
   upstreamCostUsd?: number;
+  /**
+   * Desfechos nao-ok dos competidores, SEPARADOS (IMPL-010): `blocked` =
+   * defesa do gateway (moderacao/guardrail — metrica de seguranca propria,
+   * nunca falha do prompt), `refused` = recusa declarada pelo modelo, `error` =
+   * infraestrutura. Ausente = record anterior a taxonomia.
+   */
+  competitorOutcomeCounts?: CompetitorOutcomeCounts;
   /** Teto de gasto configurado (ausente = sem limite). */
   budgetUsd?: number;
   /** true = a run parou porque o orcamento acabou. */

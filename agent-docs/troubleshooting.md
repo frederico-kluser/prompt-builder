@@ -22,6 +22,25 @@ obrigatório neles.
 `prompt-builder key check` mostra uso, limite e saldo. O pré-voo recusa antes de
 gastar quando o saldo não cobre nem o piso da estimativa.
 
+## `status: "blocked"` / `OpenRouter bloqueou a requisicao` (HTTP 403)
+
+**Não é problema de key.** O 403 do OpenRouter é moderação/guardrail: o conteúdo
+do cenário (ou a saída) foi sinalizado pela rota moderada do provedor, ou um
+guardrail da conta proibiu a chamada. Também vira `blocked` a resposta cortada
+por filtro de conteúdo (`finishReason: "content_filter"` ou equivalente nativo,
+ex. `SAFETY`). É a **defesa do gateway**, contada à parte — o cenário fica sem
+veredito para o prompt:
+
+```bash
+prompt-builder runs show <runId> --json | jq '.data.run.competitorOutcomeCounts'
+# { "blocked": 2, "refused": 0, "error": 0 }
+```
+
+`refused` = o modelo declarou a recusa (julgável normalmente); `error` = infra
+(rede, 5xx, timeout). Key inválida é só o **401**, com código de saída `4`; um
+bloqueio nunca sai com `4`. Um 403 de *limite de gasto da key* é sem crédito
+(código `5`).
+
 ## Todos os vereditos vieram `parcial`
 
 Significa que o juiz não teve gabarito para comparar. Causas, em ordem de

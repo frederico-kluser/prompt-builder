@@ -299,7 +299,19 @@ export interface StageSpec {
   dimensionTags?: string[];
 }
 
-export type CompetitorStatus = 'ok' | 'error';
+/**
+ * Desfecho de UMA resposta (IMPL-010): `ok`; `blocked` = moderacao/guardrail
+ * ou filtro de conteudo (sem veredito para o prompt); `refused` = o modelo
+ * recusou (julgavel); `error` = infraestrutura. Espelho de src/types.ts.
+ */
+export type CompetitorStatus = 'ok' | 'error' | 'blocked' | 'refused';
+
+/** Contagens dos desfechos nao-ok dos competidores de uma run (IMPL-010). */
+export interface CompetitorOutcomeCounts {
+  blocked: number;
+  refused: number;
+  error: number;
+}
 
 export interface CompetitorResponse {
   /** Chave universal. compare: === modelId. */
@@ -311,7 +323,12 @@ export interface CompetitorResponse {
   tokensOut: number;
   costUsd: number;
   status: CompetitorStatus;
+  /** Motivo do `error` (infra) ou do `blocked` (mensagem de moderacao — nunca "key invalida"). */
   errorMsg?: string;
+  /** `finish_reason` normalizado pelo OpenRouter (ex.: stop, length, content_filter). */
+  finishReason?: string;
+  /** `native_finish_reason` cru do provedor (ex.: SAFETY, end_turn). */
+  nativeFinishReason?: string;
 }
 
 /**
@@ -516,6 +533,8 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
+  /** Desfechos nao-ok dos competidores, separados (blocked/refused/error) — IMPL-010. */
+  competitorOutcomeCounts?: CompetitorOutcomeCounts;
   startedAt: string;
   finishedAt?: string;
   error?: string;

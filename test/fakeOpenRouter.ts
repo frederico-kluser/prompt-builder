@@ -40,10 +40,16 @@ export interface FakeChatReply {
   text?: string;
   /** `null` = resposta sem bloco usage. Ausente = usage default com `cost`. */
   usage?: FakeUsage | null;
-  /** Erro in-band (HTTP 200 com corpo de erro). */
-  error?: { message: string };
+  /** Erro in-band (HTTP 200 com corpo de erro). `code`/`metadata` como o OpenRouter manda. */
+  error?: { message: string; code?: number | string; metadata?: Record<string, unknown> };
   /** Só SSE: chunks extras DEPOIS do frame de usage (keep-alive etc.). */
   trailing?: string[];
+  /** `choices[0].finish_reason` (JSON) / chunk final de `finish_reason` (SSE). IMPL-010. */
+  finishReason?: string;
+  /** `choices[0].native_finish_reason` — valor cru do provedor. */
+  nativeFinishReason?: string;
+  /** `message.refusal` (JSON) / `delta.refusal` (SSE) — recusa declarada pelo modelo. */
+  refusal?: string;
 }
 
 export interface FakeOpenRouterOptions {
@@ -128,6 +134,20 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
       for (const pedaco of [text.slice(0, meio), text.slice(meio)]) {
         if (pedaco) frames.push(JSON.stringify({ choices: [{ delta: { content: pedaco } }] }));
       }
+      if (reply.refusal) frames.push(JSON.stringify({ choices: [{ delta: { refusal: reply.refusal } }] }));
+      if (reply.finishReason || reply.nativeFinishReason) {
+        frames.push(
+          JSON.stringify({
+            choices: [
+              {
+                delta: {},
+                finish_reason: reply.finishReason ?? null,
+                native_finish_reason: reply.nativeFinishReason ?? null,
+              },
+            ],
+          }),
+        );
+      }
       if (reply.error) frames.push(JSON.stringify({ error: reply.error }));
       if (usage) frames.push(JSON.stringify({ choices: [], usage }));
       frames.push(...(reply.trailing ?? []));
@@ -137,9 +157,12 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
         headers: { 'content-type': 'text/event-stream' },
       });
     }
-    const json: Record<string, unknown> = {
-      choices: [{ message: { content: text } }],
+    const choice: Record<string, unknown> = {
+      message: { content: text, ...(reply.refusal ? { refusal: reply.refusal } : {}) },
     };
+    if (reply.finishReason) choice.finish_reason = reply.finishReason;
+    if (reply.nativeFinishReason) choice.native_finish_reason = reply.nativeFinishReason;
+    const json: Record<string, unknown> = { choices: [choice] };
     if (usage) json.usage = usage;
     if (reply.error) json.error = reply.error;
     return new Response(JSON.stringify(json), { status: 200 });

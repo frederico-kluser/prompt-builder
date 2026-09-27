@@ -181,8 +181,11 @@ export interface CompetitorResponse {
   tokensIn: number;
   tokensOut: number;
   costUsd: number;
-  status: 'ok' | 'error';
+  /** `blocked` = moderação/guardrail (sem veredito); `refused` = o modelo recusou (julgável); `error` = infra. */
+  status: 'ok' | 'error' | 'blocked' | 'refused';
   errorMsg?: string;
+  finishReason?: string;
+  nativeFinishReason?: string;
 }
 
 export interface StageSpec {
@@ -345,6 +348,8 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
+  /** Desfechos não-ok dos competidores, separados (IMPL-010): bloqueio ≠ recusa ≠ erro. */
+  competitorOutcomeCounts?: { blocked: number; refused: number; error: number };
   startedAt: string;
   finishedAt?: string;
   error?: string;

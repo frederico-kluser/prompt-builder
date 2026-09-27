@@ -603,7 +603,11 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
 - **Juiz e avaliador em `Promise.allSettled`:** um falhando não derruba o outro nem a run.
 - **Casos-limite do juiz:** 0 respostas válidas → inconclusiva; 1 resposta → auto-ranqueada.
 - **Escrita atômica + fila por run**; **timeouts via `AbortController`** em toda chamada à OpenRouter.
-- **Mensagens de erro traduzidas** (401/403 = key inválida; 402 = sem crédito; 429 = rate limit).
+- **Mensagens de erro traduzidas** (401 = key inválida; 402 = sem crédito; 429 = rate limit).
+- **Bloqueio ≠ recusa ≠ erro:** HTTP 403 de moderação/guardrail e `finish_reason` de filtro de
+  conteúdo viram `status: blocked` (defesa do gateway — **não** é problema de key nem falha do
+  prompt); recusa declarada pelo modelo (`message.refusal`) vira `status: refused` (julgável); o
+  resto é `status: error` (infra). O record traz as três contagens em `competitorOutcomeCounts`.
 
 ---
 

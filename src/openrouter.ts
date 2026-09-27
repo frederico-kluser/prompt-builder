@@ -249,22 +249,230 @@ export function modelTuningCaps(m?: {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Taxonomia de desfecho (IMPL-010 / R-21:REC-6). Tres coisas DIFERENTES que
+// antes viravam a mesma ("erro" + veredito 'nao' automatico):
+//   - BLOQUEIO: moderacao/guardrail do gateway ou filtro de conteudo do
+//     provedor (HTTP 403 de moderacao, `finish_reason: content_filter` e
+//     equivalentes nativos). E a DEFESA do gateway — nao diz nada sobre a
+//     politica do prompt sob teste e NUNCA e problema de key.
+//   - RECUSA: o MODELO respondeu recusando (`message.refusal`). E resposta
+//     legitima e julgavel.
+//   - ERRO: infraestrutura (rede, 5xx, timeout, 401 de key...).
+// O 403 do OpenRouter cobre moderacao, guardrail e permissao; so 401 e key.
+// Antes 401 e 403 viravam "a key e invalida" — com os 4 competidores padrao da
+// SPA sendo rotas moderadas, um cenario adversarial mandava o usuario trocar
+// uma key que estava funcionando.
+// ---------------------------------------------------------------------------
+
+/** Por que uma chamada foi BLOQUEADA (moderacao/guardrail/filtro de conteudo). */
+export interface GatewayBlock {
+  /** De onde veio o sinal: erro HTTP, erro in-band (200/SSE) ou `finish_reason`. */
+  source: 'http' | 'in_band' | 'finish_reason';
+  /** 'moderation' = conteudo sinalizado; 'policy' = 403 de guardrail/permissao sem marca de moderacao. */
+  kind: 'moderation' | 'content_filter' | 'policy';
+  /** Motivos declarados pelo provedor (ex.: `metadata.reasons`). NUNCA o texto sinalizado. */
+  reasons?: string[];
+  /** Mensagem PT-BR pronta para record/UI/CLI. Nao menciona key: bloqueio nao e autenticacao. */
+  message: string;
+}
+
+/**
+ * Classe de uma falha do gateway. 'blocked' e a unica que o competidor NAO
+ * trata como erro de infraestrutura; 'auth' e a unica que fala de key.
+ */
+export type GatewayErrorKind = 'auth' | 'blocked' | 'no_credit' | 'rate_limit' | 'http';
+
+/** Marca por propriedade (mesmo motivo de `isControlSignal`: nada de `instanceof` sob ESM). */
+const GATEWAY_ERROR = 'gatewayError';
+
+/** Falha classificada do gateway. Reconheca com `gatewayErrorKind`/`isGatewayBlocked`. */
+export class GatewayError extends Error {
+  readonly gatewayError: GatewayErrorKind;
+  readonly httpStatus?: number;
+  readonly block?: GatewayBlock;
+  constructor(kind: GatewayErrorKind, message: string, opts: { httpStatus?: number; block?: GatewayBlock } = {}) {
+    super(message);
+    this.name = 'GatewayError';
+    this.gatewayError = kind;
+    this.httpStatus = opts.httpStatus;
+    this.block = opts.block;
+  }
+}
+
+/** Classe da falha, sem `instanceof` (instancia dupla do modulo daria `false` em silencio). */
+export function gatewayErrorKind(err: unknown): GatewayErrorKind | undefined {
+  if (typeof err !== 'object' || err === null || !(GATEWAY_ERROR in err)) return undefined;
+  return (err as GatewayError).gatewayError;
+}
+
+/** true = a chamada foi bloqueada por moderacao/guardrail (nao e erro de infra nem de key). */
+export function isGatewayBlocked(err: unknown): err is GatewayError & { block: GatewayBlock } {
+  return gatewayErrorKind(err) === 'blocked';
+}
+
+interface OpenRouterErrorBody {
+  code?: number | string;
+  message?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** Le `{ error: { code, message, metadata } }` (formato do OpenRouter). Corpo nao-JSON => undefined. */
+function parseErrorBody(body: string): OpenRouterErrorBody | undefined {
+  try {
+    const json = JSON.parse(body) as { error?: unknown };
+    const e = json?.error;
+    if (e && typeof e === 'object' && !Array.isArray(e)) return e as OpenRouterErrorBody;
+    if (typeof e === 'string') return { message: e };
+  } catch {
+    // corpo nao-JSON (proxy, pagina HTML): sem estrutura para ler
+  }
+  return undefined;
+}
+
+const clip = (s: string, n = 300): string => s.replace(/\s+/g, ' ').trim().slice(0, n);
+
+/** Marca INEQUIVOCA de moderacao (OpenRouter: "... requires moderation ... Your input was flagged for ..."). */
+const STRONG_MODERATION_RE = /moderat|flagg/i;
+/** Marca fraca: so qualifica um 403 (num erro in-band 400, "safety_settings invalido" nao e bloqueio). */
+const MODERATION_RE = /moderat|flagg|content[ _-]?(policy|filter)|safety|prohibited|violat/i;
+/** 403 de LIMITE de gasto da key/conta — nao e bloqueio de conteudo. */
+const KEY_LIMIT_RE = /key limit|limit exceeded|insufficient (credit|funds|balance)|quota/i;
+
+function moderationReasons(meta: Record<string, unknown> | undefined): string[] | undefined {
+  const r = meta?.reasons;
+  if (!Array.isArray(r)) return undefined;
+  const out = r.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim());
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * Bloqueio a partir de um corpo de erro (HTTP ou in-band). 403 (codigo HTTP ou
+ * `error.code`) e bloqueio por definicao do OpenRouter — exceto o 403 de limite
+ * de gasto da key, que e falta de credito. Marca de moderacao (`metadata.reasons`,
+ * `flagged_input`, texto "flagged/moderation") e bloqueio com qualquer codigo.
+ * ⚠️ `metadata.flagged_input` (o texto sinalizado) NUNCA entra na mensagem: vai
+ * parar no record, no log e no NDJSON.
+ */
+function blockFromErrorBody(
+  err: OpenRouterErrorBody | undefined,
+  httpStatus: number | undefined,
+  source: GatewayBlock['source'],
+): GatewayBlock | undefined {
+  const code = httpStatus ?? (err?.code !== undefined ? Number(err.code) : undefined);
+  const texto = typeof err?.message === 'string' ? err.message : '';
+  const reasons = moderationReasons(err?.metadata);
+  const flagged =
+    Boolean(reasons) ||
+    (typeof err?.metadata === 'object' && err.metadata !== null && 'flagged_input' in err.metadata);
+  const strong = flagged || STRONG_MODERATION_RE.test(texto);
+  if (!strong && code !== 403) return undefined;
+  const moderation = strong || MODERATION_RE.test(texto);
+  if (!moderation && KEY_LIMIT_RE.test(texto)) return undefined; // limite de gasto: no_credit, nao bloqueio
+  const provider = typeof err?.metadata?.provider_name === 'string' ? err.metadata.provider_name : undefined;
+  const httpTag = code === 403 ? ' (HTTP 403)' : '';
+  const detalhe = texto ? ` Detalhe: ${clip(texto)}` : '';
+  const message = moderation
+    ? `OpenRouter bloqueou a requisicao por moderacao${httpTag}: o conteudo foi sinalizado` +
+      `${reasons ? ` (${reasons.join(', ')})` : ''}${provider ? ` pelo provedor ${provider}` : ''}. ` +
+      `E a defesa do gateway, nao falha de autenticacao — o cenario fica sem veredito para o prompt.${detalhe}`
+    : `OpenRouter bloqueou a requisicao${httpTag} por politica do gateway (guardrail, moderacao ou ` +
+      `permissao da conta para este modelo). Nao e falha de autenticacao — o cenario fica sem veredito ` +
+      `para o prompt.${detalhe}`;
+  return { source, kind: moderation ? 'moderation' : 'policy', ...(reasons ? { reasons } : {}), message };
+}
+
 /**
  * Traduz uma resposta de erro da OpenRouter para uma mensagem clara em PT-BR.
- * 401/403 = key invalida/expirada/sem permissao; 402 = sem credito; 429 = rate limit.
+ * 401 = key invalida/expirada; 403 = BLOQUEIO (moderacao/guardrail/permissao —
+ * nunca "key invalida"), exceto 403 de limite de gasto (= sem credito);
+ * 402 = sem credito; 429 = rate limit.
  */
-function describeOpenRouterError(status: number, body: string): string {
-  const snippet = body.replace(/\s+/g, ' ').trim().slice(0, 300);
-  if (status === 401 || status === 403) {
-    return `OpenRouter recusou a key (HTTP ${status}): a key e invalida, expirou ou nao tem permissao. Reconfigure em Configuracoes.${snippet ? ` Detalhe: ${snippet}` : ''}`;
+export function describeOpenRouterError(status: number, body: string): string {
+  return classifyHttpError(status, body).message;
+}
+
+/** Erro HTTP do OpenRouter => `GatewayError` classificado (puro; exportado p/ testes). */
+export function classifyHttpError(status: number, body: string): GatewayError {
+  const parsed = parseErrorBody(body);
+  const snippet = clip(parsed?.message ?? body);
+  const detalhe = snippet ? ` Detalhe: ${snippet}` : '';
+  if (status === 401) {
+    return new GatewayError(
+      'auth',
+      `OpenRouter recusou a key (HTTP 401): a key e invalida, expirou ou foi revogada. Reconfigure em Configuracoes.${detalhe}`,
+      { httpStatus: status },
+    );
+  }
+  if (status === 403) {
+    const block = blockFromErrorBody(parsed ?? { message: body }, status, 'http');
+    if (block) return new GatewayError('blocked', block.message, { httpStatus: status, block });
+    return new GatewayError(
+      'no_credit',
+      `OpenRouter recusou por limite de gasto (HTTP 403): o limite de credito da key/conta foi atingido.${detalhe}`,
+      { httpStatus: status },
+    );
   }
   if (status === 402) {
-    return `OpenRouter sem credito (HTTP 402): adicione creditos na sua conta.${snippet ? ` Detalhe: ${snippet}` : ''}`;
+    return new GatewayError('no_credit', `OpenRouter sem credito (HTTP 402): adicione creditos na sua conta.${detalhe}`, {
+      httpStatus: status,
+    });
   }
   if (status === 429) {
-    return `OpenRouter rate limit (HTTP 429): aguarde e tente novamente.${snippet ? ` Detalhe: ${snippet}` : ''}`;
+    return new GatewayError('rate_limit', `OpenRouter rate limit (HTTP 429): aguarde e tente novamente.${detalhe}`, {
+      httpStatus: status,
+    });
   }
-  return `OpenRouter falhou (HTTP ${status})${snippet ? `: ${snippet}` : ''}`;
+  return new GatewayError('http', `OpenRouter falhou (HTTP ${status})${snippet ? `: ${snippet}` : ''}`, {
+    httpStatus: status,
+  });
+}
+
+/** `finish_reason` NORMALIZADO do OpenRouter que significa filtro de conteudo. */
+const FILTER_FINISH = new Set(['content_filter']);
+/**
+ * Equivalentes NATIVOS (`native_finish_reason`, comparados sem caixa) — o
+ * provedor pode filtrar sem o OpenRouter normalizar. OpenAI/Azure:
+ * content_filter; Gemini: SAFETY/RECITATION/BLOCKLIST/PROHIBITED_CONTENT/SPII/
+ * IMAGE_SAFETY; Bedrock: guardrail_intervened/content_filtered; Anthropic:
+ * `refusal` = intervencao do CLASSIFICADOR de seguranca que corta a saida (nao
+ * e texto escrito pelo modelo — esse chega como `message.refusal`/conteudo).
+ */
+const FILTER_NATIVE = new Set([
+  'content_filter',
+  'content_filtered',
+  'safety',
+  'recitation',
+  'blocklist',
+  'prohibited_content',
+  'spii',
+  'image_safety',
+  'guardrail_intervened',
+  'refusal',
+]);
+
+/** Bloqueio a partir dos sinais de fim da resposta (puro; exportado p/ testes). */
+export function blockFromFinishReason(
+  finishReason: string | undefined,
+  nativeFinishReason: string | undefined,
+): GatewayBlock | undefined {
+  const fr = finishReason?.trim().toLowerCase();
+  const nfr = nativeFinishReason?.trim().toLowerCase();
+  const hit = (fr && FILTER_FINISH.has(fr)) || (nfr && FILTER_NATIVE.has(nfr));
+  if (!hit) return undefined;
+  const sinal = [finishReason, nativeFinishReason].filter(Boolean).join(' / ');
+  return {
+    source: 'finish_reason',
+    kind: 'content_filter',
+    message:
+      `Filtro de conteudo do provedor cortou a resposta (finish_reason: ${sinal}). ` +
+      'E a defesa do gateway/provedor, nao falha do prompt — o cenario fica sem veredito para o prompt.',
+  };
+}
+
+/** Texto de `refusal` (protocolo OpenAI) — so string nao vazia conta. */
+function refusalText(v: unknown): string | undefined {
+  return typeof v === 'string' && v.trim().length > 0 ? v : undefined;
 }
 
 /**
@@ -631,6 +839,18 @@ export interface ChatCompletionResult {
   cost: CallCost;
   cachedTokensIn?: number;
   reasoningTokens?: number;
+  /** `choices[0].finish_reason` normalizado pelo OpenRouter (stream: o ultimo nao-nulo). */
+  finishReason?: string;
+  /** `choices[0].native_finish_reason` — o valor cru do provedor. */
+  nativeFinishReason?: string;
+  /** Recusa DECLARADA pelo modelo (`message.refusal` / `delta.refusal`). `text` segue so com o conteudo. */
+  refusal?: string;
+  /**
+   * Presente = filtro de conteudo/moderacao cortou a resposta (HTTP 200 com
+   * `finish_reason` de filtro, ou erro in-band de moderacao depois de texto
+   * parcial). `text` pode ter o trecho gerado antes do corte — so para auditoria.
+   */
+  blocked?: GatewayBlock;
 }
 
 export interface ChatCompletionParams {
@@ -866,7 +1086,8 @@ export class OpenRouterGateway {
         const errText = await res.text().catch(() => '');
         cleanup();
         limiter.release();
-        throw new Error(describeOpenRouterError(status, errText));
+        // Classificado: 403 de moderacao sai como 'blocked' (nao "key invalida").
+        throw classifyHttpError(status, errText);
       }
 
       // OK: segura o slot ate o chamador terminar de ler o corpo.
@@ -955,9 +1176,13 @@ export class OpenRouterGateway {
     try {
       const latencyMs = Date.now() - startedAt;
       const json = (await res.json()) as {
-        choices?: { message?: { content?: string } }[];
+        choices?: {
+          message?: { content?: string | null; refusal?: string | null };
+          finish_reason?: string | null;
+          native_finish_reason?: string | null;
+        }[];
         usage?: unknown;
-        error?: { message?: string; code?: string | number };
+        error?: OpenRouterErrorBody;
       };
 
       const usage = extractUsage(json.usage);
@@ -966,12 +1191,19 @@ export class OpenRouterGateway {
       // graca nos livros e cara na fatura.
       const cost = this.account(params, reservation, usage);
 
-      const text = json.choices?.[0]?.message?.content ?? '';
+      const choice = json.choices?.[0];
+      const text = choice?.message?.content ?? '';
+      const finishReason = choice?.finish_reason ?? undefined;
+      const nativeFinishReason = choice?.native_finish_reason ?? undefined;
+      const inBandBlock = json.error ? blockFromErrorBody(json.error, undefined, 'in_band') : undefined;
       // OpenRouter as vezes devolve 200 com um corpo de erro (ex.: provider
       // rejeitou um parametro). Sem isto a falha viraria "resposta vazia" muda.
       if (!text && json.error) {
+        if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
         throw new Error(`OpenRouter: ${json.error.message ?? JSON.stringify(json.error)}`);
       }
+      const blocked = inBandBlock ?? blockFromFinishReason(finishReason, nativeFinishReason);
+      const refusal = refusalText(choice?.message?.refusal);
 
       ok = true;
       return {
@@ -983,6 +1215,10 @@ export class OpenRouterGateway {
         cost,
         cachedTokensIn: usage.cachedTokensIn,
         reasoningTokens: usage.reasoningTokens,
+        ...(finishReason ? { finishReason } : {}),
+        ...(nativeFinishReason ? { nativeFinishReason } : {}),
+        ...(refusal ? { refusal } : {}),
+        ...(blocked ? { blocked } : {}),
       };
     } finally {
       if (!ok) reservation?.release();
@@ -1018,7 +1254,12 @@ export class OpenRouterGateway {
     // usage (porque `[DONE]` e ignorado), mas basta um provedor emitir um
     // keep-alive depois do frame de usage para o custo sumir em silencio.
     let usageRaw: unknown = null;
-    let streamError: string | null = null;
+    let streamError: OpenRouterErrorBody | null = null;
+    // Sinais de fim: chegam num chunk proprio perto do fim (antes do frame de
+    // usage). Guarda o ULTIMO nao-nulo — chunks intermediarios trazem null.
+    let finishReason: string | undefined;
+    let nativeFinishReason: string | undefined;
+    let refusal = '';
 
     try {
       if (!res.body) throw new Error('OpenRouter retornou stream sem corpo de resposta.');
@@ -1042,19 +1283,28 @@ export class OpenRouterGateway {
           if (payload === '[DONE]') continue;
           try {
             const chunk = JSON.parse(payload) as {
-              choices?: { delta?: { content?: string } }[];
+              choices?: {
+                delta?: { content?: string | null; refusal?: string | null };
+                finish_reason?: string | null;
+                native_finish_reason?: string | null;
+              }[];
               usage?: unknown;
-              error?: { message?: string };
+              error?: OpenRouterErrorBody;
             };
             lastRaw = chunk;
             if (chunk.error && !streamError) {
-              streamError = chunk.error.message ?? JSON.stringify(chunk.error);
+              streamError =
+                typeof chunk.error === 'object' ? chunk.error : { message: String(chunk.error) };
             }
-            const delta = chunk.choices?.[0]?.delta?.content;
+            const choice = chunk.choices?.[0];
+            const delta = choice?.delta?.content;
             if (typeof delta === 'string' && delta.length > 0) {
               fullText += delta;
               onDelta?.(delta, fullText);
             }
+            if (typeof choice?.delta?.refusal === 'string') refusal += choice.delta.refusal;
+            if (choice?.finish_reason) finishReason = choice.finish_reason;
+            if (choice?.native_finish_reason) nativeFinishReason = choice.native_finish_reason;
             if (chunk.usage) usageRaw = chunk.usage;
           } catch {
             // chunk JSON invalido, ignora
@@ -1066,8 +1316,16 @@ export class OpenRouterGateway {
       // Contabiliza antes do throw in-band — a chamada ja foi cobrada.
       const cost = this.account(params, reservation, usage);
 
+      // Erro no MEIO do stream chega como chunk `{ error, finish_reason: 'error' }`
+      // (o HTTP ja foi 200): moderacao aqui e bloqueio, nao "resposta vazia".
+      const inBandBlock = streamError ? blockFromErrorBody(streamError, undefined, 'in_band') : undefined;
       // Resposta vazia + erro in-band (provider rejeitou parametro etc.): falha alto.
-      if (!fullText && streamError) throw new Error(`OpenRouter: ${streamError}`);
+      if (!fullText && streamError) {
+        if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
+        throw new Error(`OpenRouter: ${streamError.message ?? JSON.stringify(streamError)}`);
+      }
+      const blocked = inBandBlock ?? blockFromFinishReason(finishReason, nativeFinishReason);
+      const refusalFinal = refusalText(refusal);
 
       const latencyMs = Date.now() - startedAt;
       ok = true;
@@ -1080,6 +1338,10 @@ export class OpenRouterGateway {
         cost,
         cachedTokensIn: usage.cachedTokensIn,
         reasoningTokens: usage.reasoningTokens,
+        ...(finishReason ? { finishReason } : {}),
+        ...(nativeFinishReason ? { nativeFinishReason } : {}),
+        ...(refusalFinal ? { refusal: refusalFinal } : {}),
+        ...(blocked ? { blocked } : {}),
       };
     } finally {
       if (!ok) reservation?.release();
@@ -1113,6 +1375,9 @@ export class OpenRouterGateway {
       return { ok: false, error: `Falha de rede ao validar a key: ${(err as Error).message}` };
     }
 
+    // Aqui (e SO aqui) 403 ainda e problema de credencial: `GET /key` nao tem
+    // conteudo para moderar. Nas chamadas de geracao 403 e BLOQUEIO
+    // (`classifyHttpError`) — nao "unifique" os dois caminhos (IMPL-010).
     if (res.status === 401 || res.status === 403) {
       return {
         ok: false,

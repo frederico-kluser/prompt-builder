@@ -1,6 +1,6 @@
 const randomUUID = (): string => crypto.randomUUID();
 import { generateStages } from './datagen';
-import { runCompetitor } from './competitor';
+import { countCompetitorOutcomes, runCompetitor } from './competitor';
 import { judgeStage } from './judge';
 import { generateReferences } from './gabarito';
 import { judgeStageReference } from './refJudge';
@@ -120,6 +120,8 @@ function buildRecord(config: RunConfig, opts: StartRunOpts): RunRecord {
     scoreboard: Object.fromEntries(contestants.map((c) => [c.id, 0])),
     costByContestant: Object.fromEntries(contestants.map((c) => [c.id, 0])),
     totalCostUsd: 0,
+    // IMPL-010: sempre presente numa run nova — "0 bloqueios" e informacao.
+    competitorOutcomeCounts: { blocked: 0, refused: 0, error: 0 },
     startedAt: nowIso(),
     sessionId: opts.sessionId,
     iteration: opts.iteration,
@@ -411,6 +413,9 @@ async function runLoop(
             });
 
             stageRecord.responses.push(response);
+            // Bloqueio (defesa do gateway) ≠ recusa do modelo ≠ erro de infra —
+            // tres contagens separadas no record (IMPL-010 / R-21:REC-6).
+            record.competitorOutcomeCounts = countCompetitorOutcomes(record.stages);
             // Total verdadeiro vem do ledger (juiz/duelo/datagen nao sao
             // atribuiveis a um contestant); `costByContestant` segue sendo a
             // fatia dos competidores — agora com o custo MEDIDO (usage.cost).
@@ -698,6 +703,11 @@ async function runLoop(
       log(runId, `aviso de verbosidade do juiz: ${record.judgeDiagnostics.verbosity.warning}`);
     }
     for (const aviso of record.fairnessWarnings) log(runId, `imparcialidade: ${aviso}`);
+    const desfechos = record.competitorOutcomeCounts;
+    if (desfechos && desfechos.blocked + desfechos.refused + desfechos.error > 0) {
+      // Bloqueio NAO e erro de key nem falha do prompt: e a defesa do gateway.
+      log(runId, 'desfechos dos competidores (bloqueio ≠ recusa ≠ erro)', { ...desfechos });
+    }
   } catch (err) {
     // Diagnostico e SUPORTE, nunca derruba a finalizacao.
     log(runId, `diagnostico do juiz falhou (ignorado): ${err instanceof Error ? err.message : String(err)}`);

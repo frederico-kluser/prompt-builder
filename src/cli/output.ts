@@ -10,6 +10,7 @@
 // linha, abrindo em `start` e terminando SEMPRE em `result`.
 
 import type { CostEntry, CostRole } from '../types.js';
+import { gatewayErrorKind } from '../openrouter.js';
 
 export type OutputFormat = 'text' | 'json' | 'ndjson';
 
@@ -27,6 +28,31 @@ export const EXIT = {
   NETWORK: 8,
   SIGINT: 130,
 } as const;
+
+/**
+ * Codigo de saida para uma falha CLASSIFICADA do gateway (IMPL-010). So `auth`
+ * (HTTP 401) vira `4`: um 403 de moderacao/guardrail e BLOQUEIO — sair com
+ * "auth" mandaria o agente trocar uma key que funciona. `undefined` = nao e
+ * falha do gateway (o chamador decide).
+ */
+export function exitCodeForGatewayError(err: unknown): number | undefined {
+  const kind = gatewayErrorKind(err);
+  if (!kind) return undefined;
+  switch (kind) {
+    case 'auth':
+      return EXIT.AUTH;
+    case 'no_credit':
+      return EXIT.NO_CREDIT;
+    case 'rate_limit':
+      return EXIT.NETWORK;
+    case 'http': {
+      const status = (err as { httpStatus?: number }).httpStatus ?? 0;
+      return status >= 500 ? EXIT.NETWORK : EXIT.ERROR;
+    }
+    case 'blocked':
+      return EXIT.ERROR;
+  }
+}
 
 export class CliError extends Error {
   constructor(

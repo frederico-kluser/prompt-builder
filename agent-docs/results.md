@@ -28,6 +28,8 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 | `costByRole` | quebra por `competitor` / `judge` / `duel` / `gabarito` / `datagen` / `rewriter` |
 | `costByContestant` | fatia **dos competidores** (gasto de juiz não é atribuível a ninguém) |
 | `costAccuracy` | quantas chamadas tiveram preço exato / estimado / desconhecido |
+| `competitorOutcomeCounts` | `{ blocked, refused, error }` — bloqueio de moderação/guardrail (defesa do gateway, sem veredito) ≠ recusa declarada pelo modelo (julgável) ≠ erro de infra |
+| `stages[].responses[].status` | `ok` \| `blocked` \| `refused` \| `error`; `finishReason`/`nativeFinishReason` quando o provedor informa |
 | `stages[].incomplete` | etapa cortada no meio — **fora** do placar e do julgamento |
 | `stages[].referenceJudge` | vereditos pointwise por contestant, com o motivo |
 | `finalists` | ids que disputaram a final |
