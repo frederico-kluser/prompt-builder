@@ -618,7 +618,9 @@ describe('IMPL-024 — MCP (get_result/read_docs/get_agent_dossier) e CLI docs',
       .trim()
       .split('\n')
       .map((l) => JSON.parse(l) as { id: number; result: { isError?: boolean; content: { text: string }[] } });
-    expect(respostas.map((x) => x.id)).toEqual([1, 2]);
+    // IMPL-025: o laço MCP não espera uma ferramenta para ler a próxima linha,
+    // então as respostas podem sair fora de ordem (JSON-RPC casa por id).
+    expect(respostas.map((x) => x.id).sort()).toEqual([1, 2]);
     for (const x of respostas) {
       expect(x.result.isError).toBe(true);
       expect(x.result.content[0].text).not.toMatch(ABS_PATH_RE);

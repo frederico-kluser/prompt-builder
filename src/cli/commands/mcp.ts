@@ -9,11 +9,22 @@
 // A superficie e deliberadamente PEQUENA (6 ferramentas): o schema de cada uma
 // entra no contexto do agente a cada turno, entao cada ferramenta a mais e um
 // imposto permanente de tokens.
+//
+// Cancelamento cooperativo (IMPL-025, R-13:REC-4): o laço de leitura NUNCA
+// espera uma ferramenta — `ping`, `tools/list` e `notifications/cancelled`
+// são atendidos enquanto uma run de minutos está em voo (antes o `await
+// tool.run` serial travava tudo: deadlock MDAT e gasto órfão). Cada
+// `tools/call` ganha um AbortController cujo sinal É o AbortSignal do motor
+// (ledger + fetch em voo); cancelada pelo cliente, a chamada grava o parcial
+// (record 'aborted', stoppedReason 'cancelled') e NÃO recebe resposta. EOF do
+// stdin e SIGTERM abortam tudo com graça de ~10 s antes de sair.
 
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { RunCancelled, isControlSignal } from '../../budget.js';
+import { HeavyLane, SHUTDOWN_GRACE_MS, processLane, settleWithin } from '../../jobs.js';
 import { PKG_DOCS_DIR, pkgVersion } from '../../paths.js';
 import { assertValidRecordId, publicErrorMessage } from '../../pathSafety.js';
 import { readDocTopic } from './knowledge.js';
@@ -42,11 +53,27 @@ interface JsonRpcRequest {
   params?: Record<string, unknown>;
 }
 
-interface Tool {
+/** Contexto de UMA chamada de ferramenta (IMPL-025). */
+export interface ToolCtx {
+  /**
+   * Aborta em `notifications/cancelled`, EOF do stdin ou SIGTERM. É o MESMO
+   * AbortSignal que vai ao motor: o ledger para de reservar e o fetch em voo cai.
+   */
+  signal: AbortSignal;
+  /**
+   * Roda `fn` na fila de runs pesadas do processo (1 por vez, FIFO). A espera
+   * é cancelável e só a parte cara entra nela — validação e catálogo não.
+   */
+  exclusive<T>(fn: () => Promise<T>): Promise<T>;
+}
+
+export interface McpTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  run: (args: Record<string, unknown>, apiKey: string) => Promise<unknown>;
+  /** Não precisa de key (lê disco/docs embarcadas): funciona sem OPENROUTER_API_KEY. */
+  noKey?: boolean;
+  run: (args: Record<string, unknown>, apiKey: string, ctx: ToolCtx) => Promise<unknown>;
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
@@ -103,7 +130,7 @@ function agentSummary(rec: { stages: { responses: { costUsd: number; execution?:
   return { executions, failed, incomplete, avgTurns, avgCostUsd, oracleRate };
 }
 
-const TOOLS: Tool[] = [
+const TOOLS: McpTool[] = [
   {
     name: 'list_models',
     description:
@@ -160,7 +187,7 @@ const TOOLS: Tool[] = [
       },
       required: ['config', 'budgetUsd'],
     },
-    run: async (args, apiKey) => {
+    run: async (args, apiKey, { signal, exclusive }) => {
       const base = await toRunConfig(args.config);
       const budgetUsd = numOf(args.budgetUsd);
       if (budgetUsd === undefined || budgetUsd <= 0) {
@@ -171,10 +198,14 @@ const TOOLS: Tool[] = [
       }
       await ensureCatalog(apiKey);
       const cfg: RunConfig = { ...base, budgetUsd };
-      const rec = await runToCompletion(cfg, apiKey, prepareOptsFor(cfg, apiKey));
+      // IMPL-025: o sinal da requisição É o do motor (mesmo caminho do Ctrl-C do CLI).
+      const rec = await exclusive(() =>
+        runToCompletion(cfg, apiKey, prepareOptsFor(cfg, apiKey, { ctx: { signal } })),
+      );
       return {
         runId: rec.id,
         status: rec.status,
+        stoppedReason: rec.stoppedReason,
         totalCostUsd: rec.totalCostUsd,
         costByRole: rec.costByRole,
         budgetExhausted: Boolean(rec.budgetExhausted),
@@ -197,7 +228,7 @@ const TOOLS: Tool[] = [
       },
       required: ['config', 'budgetUsd'],
     },
-    run: async (args, apiKey) => {
+    run: async (args, apiKey, { signal, exclusive }) => {
       const base = await toRunConfig(args.config);
       const budgetUsd = numOf(args.budgetUsd);
       if (budgetUsd === undefined || budgetUsd <= 0) {
@@ -205,11 +236,12 @@ const TOOLS: Tool[] = [
       }
       if (base.mode !== 'training') throw new Error('config.mode precisa ser "training".');
       await ensureCatalog(apiKey);
-      const rec = await trainToCompletion({ ...base, budgetUsd }, apiKey);
+      const rec = await exclusive(() => trainToCompletion({ ...base, budgetUsd }, apiKey, { signal }));
       const campeao = rec.bestPromptByIteration.at(-1);
       return {
         sessionId: rec.id,
         status: rec.status,
+        stoppedReason: rec.stoppedReason,
         totalCostUsd: rec.totalCostUsd,
         costByRole: rec.costByRole,
         iterationsDone: rec.bestPromptByIteration.length,
@@ -233,6 +265,7 @@ const TOOLS: Tool[] = [
       },
       required: ['id'],
     },
+    noKey: true,
     run: async (args) => {
       // IMPL-024: id com '../' (ou fora do formato) é REJEITADO antes de tocar o
       // disco — a mensagem não ecoa o valor recebido.
@@ -259,7 +292,7 @@ const TOOLS: Tool[] = [
       },
       required: ['config', 'budgetUsd'],
     },
-    run: async (args, apiKey) => {
+    run: async (args, apiKey, { signal, exclusive }) => {
       // Validacao nunca derruba o servidor: erros viram {ok:false, error}.
       let cfg: RunConfig;
       try {
@@ -274,12 +307,23 @@ const TOOLS: Tool[] = [
       let rec: RunRecord;
       try {
         await ensureCatalog(apiKey);
-        rec = await runToCompletion({ ...cfg, budgetUsd }, apiKey, prepareOptsFor(cfg, apiKey));
+        rec = await exclusive(() =>
+          runToCompletion({ ...cfg, budgetUsd }, apiKey, prepareOptsFor(cfg, apiKey, { ctx: { signal } })),
+        );
       } catch (err) {
+        // Cancelado na fila: controle, não erro de config (IMPL-025).
+        if (isControlSignal(err)) throw err;
         // IMPL-024: erro de workspace/executor costuma citar caminho absoluto.
         return { ok: false, error: publicErrorMessage(err) };
       }
-      return { ok: true, runId: rec.id, totalCostUsd: rec.totalCostUsd, agentSummary: agentSummary(rec) };
+      return {
+        ok: true,
+        runId: rec.id,
+        status: rec.status,
+        stoppedReason: rec.stoppedReason,
+        totalCostUsd: rec.totalCostUsd,
+        agentSummary: agentSummary(rec),
+      };
     },
   },
   {
@@ -297,6 +341,7 @@ const TOOLS: Tool[] = [
       },
       required: ['runId', 'stageIndex', 'contestantId'],
     },
+    noKey: true,
     run: async (args) => {
       assertValidRecordId(args.runId, 'runId');
       const rec = await loadRun(args.runId);
@@ -320,6 +365,7 @@ const TOOLS: Tool[] = [
       type: 'object',
       properties: { topic: { type: 'string' } },
     },
+    noKey: true,
     run: async (args) => {
       if (args.topic === undefined || args.topic === '') {
         const raw = await fs.readFile(path.join(PKG_DOCS_DIR, 'index.json'), 'utf-8');
@@ -340,6 +386,20 @@ export interface ToolCallResult {
   isError?: boolean;
 }
 
+export interface CallToolOptions {
+  /** Cancelamento cooperativo (IMPL-025): vira o AbortSignal do motor. */
+  signal?: AbortSignal;
+  /** Fila de runs pesadas. Padrão: a do processo (1 run por vez). */
+  lane?: HeavyLane;
+  /** Narração (stderr no servidor real). */
+  log?: (msg: string) => void;
+  /** Só testes: substitui a tabela de ferramentas. */
+  tools?: readonly McpTool[];
+}
+
+/** Sinal que nunca aborta — chamadas diretas (testes, CLI) sem cancelamento. */
+const NUNCA_ABORTA = new AbortController().signal;
+
 /**
  * Executa UMA tool e devolve o `result` do `tools/call`. Exportado para os
  * testes de contrato (test/security-baseline.test.ts). Erro de ferramenta vai
@@ -350,31 +410,346 @@ export async function callTool(
   name: unknown,
   args: Record<string, unknown>,
   getKey: () => Promise<string> = async () => '',
+  opts: CallToolOptions = {},
 ): Promise<ToolCallResult | null> {
-  const tool = TOOLS.find((t) => t.name === name);
+  const tool = (opts.tools ?? TOOLS).find((t) => t.name === name);
   if (!tool) return null;
+  const signal = opts.signal ?? NUNCA_ABORTA;
+  const lane = opts.lane ?? processLane;
+  const ctx: ToolCtx = {
+    signal,
+    exclusive: (fn) => {
+      if (lane.busy) {
+        opts.log?.(
+          `[mcp] ${tool.name} aguardando a vez — 1 run pesada por processo ` +
+            `(${lane.snapshot().queued + 1} na fila)`,
+        );
+      }
+      return lane.run(fn, signal);
+    },
+  };
   try {
-    const key =
-      tool.name === 'read_docs' || tool.name === 'get_result' || tool.name === 'get_agent_dossier'
-        ? ''
-        : await getKey();
-    const out = await tool.run(args, key);
+    const key = tool.noKey ? '' : await getKey();
+    const out = await tool.run(args, key, ctx);
     return { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] };
   } catch (err) {
     return { content: [{ type: 'text', text: publicErrorMessage(err) }], isError: true };
   }
 }
 
-function send(msg: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify(msg)}\n`);
+// ---------------------------------------------------------------------------
+// Sessão JSON-RPC (transporte-agnóstica: o stdio real e os testes a dirigem)
+// ---------------------------------------------------------------------------
+
+export interface McpSessionOptions {
+  /** Escreve UMA mensagem JSON-RPC (uma linha) no transporte. */
+  write: (msg: Record<string, unknown>) => void;
+  /** Resolvida preguiçosamente: `read_docs` funciona sem key. */
+  getKey?: () => Promise<string>;
+  log?: (msg: string) => void;
+  lane?: HeavyLane;
+  /** Graça do encerramento (EOF/SIGTERM). Padrão SHUTDOWN_GRACE_MS (10 s). */
+  graceMs?: number;
+  /** Só testes: substitui a tabela de ferramentas. */
+  tools?: readonly McpTool[];
 }
 
-function reply(id: unknown, result: unknown): void {
-  send({ jsonrpc: '2.0', id, result });
+export interface ShutdownResult {
+  /** A graça esgotou com chamadas ainda pendentes (o processo sai assim mesmo). */
+  forced: boolean;
+  /** Chamadas ainda pendentes quando a espera terminou. */
+  pending: number;
 }
 
-function replyError(id: unknown, code: number, message: string): void {
-  send({ jsonrpc: '2.0', id, error: { code, message } });
+interface InflightCall {
+  tool: string;
+  controller: AbortController;
+  /** Cancelada pelo CLIENTE (notifications/cancelled): nenhuma resposta sai. */
+  cancelled: boolean;
+  done: Promise<void>;
+}
+
+/**
+ * Chave do mapa de chamadas em voo. JSON-RPC distingue `1` de `"1"`, e o
+ * `requestId` do cancelamento precisa casar com o id EXATO da requisição.
+ */
+function requestKey(id: unknown): string {
+  return JSON.stringify(id);
+}
+
+/** Texto curto e de uma linha para a narração (motivo vem do cliente). */
+function umaLinha(v: unknown, max = 200): string {
+  return String(v).replace(/\s+/gu, ' ').trim().slice(0, max);
+}
+
+/**
+ * Linha de narração do parcial de uma chamada cancelada, a partir do resumo
+ * que a ferramenta devolveu (e que NÃO vai ao cliente): onde ficou gravado,
+ * como terminou e quanto o ledger mediu. É o "log do ledger" do cancelamento.
+ */
+function resumoDoParcial(result: ToolCallResult | null): string | undefined {
+  try {
+    const out = JSON.parse(result?.content[0]?.text ?? '') as {
+      runId?: unknown;
+      sessionId?: unknown;
+      status?: unknown;
+      stoppedReason?: unknown;
+      totalCostUsd?: unknown;
+    };
+    const alvo =
+      typeof out.runId === 'string'
+        ? `run ${out.runId}`
+        : typeof out.sessionId === 'string'
+          ? `sessão ${out.sessionId}`
+          : undefined;
+    if (!alvo) return undefined;
+    const fim = [out.status, out.stoppedReason].filter((x) => typeof x === 'string').join('/');
+    const gasto = typeof out.totalCostUsd === 'number' ? `, gasto medido US$ ${out.totalCostUsd.toFixed(6)}` : '';
+    return `${alvo} ${fim}${gasto} — parcial em get_result`;
+  } catch {
+    return undefined;
+  }
+}
+
+export class McpSession {
+  private readonly inflight = new Map<string, InflightCall>();
+  private closing: Promise<ShutdownResult> | null = null;
+  private readonly log: (msg: string) => void;
+
+  constructor(private readonly opts: McpSessionOptions) {
+    this.log = opts.log ?? (() => undefined);
+  }
+
+  /** Chamadas de ferramenta ainda em andamento. */
+  get pendingCalls(): number {
+    return this.inflight.size;
+  }
+
+  /** Encerramento já pedido (EOF/SIGTERM): novas `tools/call` são recusadas. */
+  get isClosing(): boolean {
+    return this.closing !== null;
+  }
+
+  /**
+   * Uma linha do transporte. NUNCA espera a ferramenta terminar: devolve o
+   * controle ao laço de leitura na hora, e a resposta sai quando ela assentar.
+   */
+  handleLine(line: string): void {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let msg: unknown;
+    try {
+      msg = JSON.parse(trimmed);
+    } catch {
+      this.replyError(null, -32700, 'JSON inválido');
+      return;
+    }
+    this.handleMessage(msg);
+  }
+
+  handleMessage(msg: unknown): void {
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+      this.replyError(null, -32600, 'Requisição inválida');
+      return;
+    }
+    const req = msg as JsonRpcRequest & { result?: unknown; error?: unknown };
+    // Notificacoes (sem `id`) nao recebem resposta — responder quebra o cliente.
+    const isNotification = req.id === undefined || req.id === null;
+    if (typeof req.method !== 'string') {
+      // Resposta do cliente (este servidor nunca pede nada) ou lixo sem método.
+      if (!isNotification && !('result' in req) && !('error' in req)) {
+        this.replyError(req.id, -32600, 'Requisição inválida');
+      }
+      return;
+    }
+
+    try {
+      switch (req.method) {
+        case 'initialize': {
+          const pedido = str((req.params as Record<string, unknown>)?.protocolVersion);
+          this.reply(req.id, {
+            // Ecoa a versao pedida quando conhecida; senao anuncia a nossa.
+            protocolVersion: pedido ?? PROTOCOL_VERSION,
+            capabilities: { tools: {} },
+            serverInfo: SERVER_INFO,
+          });
+          return;
+        }
+        case 'notifications/initialized':
+          return;
+        case 'notifications/cancelled':
+          this.cancel(req.params);
+          return;
+        case 'ping':
+          if (!isNotification) this.reply(req.id, {});
+          return;
+        case 'tools/list':
+          if (!isNotification) {
+            this.reply(req.id, {
+              tools: (this.opts.tools ?? TOOLS).map((t) => ({
+                name: t.name,
+                description: t.description,
+                inputSchema: t.inputSchema,
+              })),
+            });
+          }
+          return;
+        case 'tools/call':
+          // Sem id não haveria como devolver o resultado nem cancelar: uma run
+          // paga disparada assim seria gasto órfão por construção.
+          if (isNotification) {
+            this.log('[mcp] tools/call sem id ignorado (notificação não pode disparar ferramenta)');
+            return;
+          }
+          this.startCall(req.id as string | number, req.params);
+          return;
+        default:
+          if (!isNotification) {
+            this.replyError(req.id, -32601, `Método não suportado: ${umaLinha(req.method, 80)}`);
+          }
+      }
+    } catch (err) {
+      if (!isNotification) this.replyError(req.id, -32603, publicErrorMessage(err));
+    }
+  }
+
+  /**
+   * Encerramento gracioso (EOF do stdin, SIGTERM, stdout quebrado): aborta
+   * TODAS as chamadas em voo — as runs gravam o parcial como 'aborted' — e
+   * espera no máximo `graceMs`. As respostas dessas chamadas ainda saem (o
+   * cliente não as cancelou; só foi embora). Idempotente.
+   */
+  shutdown(reason: string): Promise<ShutdownResult> {
+    if (this.closing) return this.closing;
+    const graceMs = this.opts.graceMs ?? SHUTDOWN_GRACE_MS;
+    const calls = [...this.inflight.values()];
+    for (const c of calls) c.controller.abort(new RunCancelled(`servidor MCP encerrando (${reason})`));
+    if (calls.length > 0) {
+      this.log(
+        `[mcp] encerrando (${reason}): ${calls.length} chamada(s) em andamento abortada(s); ` +
+          `graça de ${Math.round(graceMs / 1000)} s para gravar o parcial`,
+      );
+    }
+    this.closing = settleWithin(
+      calls.map((c) => c.done),
+      graceMs,
+    ).then((ok) => {
+      const pending = this.inflight.size;
+      if (!ok) this.log(`[mcp] graça esgotada com ${pending} chamada(s) pendente(s); saindo assim mesmo`);
+      return { forced: !ok, pending };
+    });
+    return this.closing;
+  }
+
+  // --- interno ---------------------------------------------------------------
+
+  private startCall(id: string | number, params: unknown): void {
+    if (this.closing) {
+      this.replyError(id, -32000, 'Servidor MCP encerrando: chamada recusada.');
+      return;
+    }
+    const key = requestKey(id);
+    if (this.inflight.has(key)) {
+      // Ids precisam ser únicos na sessão; reusar um em voo tornaria o
+      // cancelamento ambíguo (qual das duas parar?).
+      this.replyError(id, -32600, 'id de requisição já em uso por uma chamada em andamento.');
+      return;
+    }
+    const p = (params ?? {}) as { name?: unknown; arguments?: unknown };
+    const args =
+      p.arguments && typeof p.arguments === 'object' && !Array.isArray(p.arguments)
+        ? (p.arguments as Record<string, unknown>)
+        : {};
+    const call: InflightCall = {
+      tool: umaLinha(p.name, 80),
+      controller: new AbortController(),
+      cancelled: false,
+      done: Promise.resolve(),
+    };
+    this.inflight.set(key, call);
+    call.done = (async () => {
+      try {
+        const result = await callTool(p.name, args, this.opts.getKey, {
+          signal: call.controller.signal,
+          lane: this.opts.lane,
+          log: this.log,
+          tools: this.opts.tools,
+        });
+        if (call.cancelled) {
+          // Spec (Cancellation): quem recebe o cancelamento NÃO responde. Não
+          // existe "resultado parcial" no protocolo — o parcial vive no disco.
+          const parcial = resumoDoParcial(result);
+          this.log(
+            `[mcp] ${umaLinha(id, 80)} (${call.tool}) cancelada — resposta suprimida` +
+              (parcial ? `; ${parcial}` : ''),
+          );
+          return;
+        }
+        if (!result) {
+          this.replyError(id, -32602, `Ferramenta desconhecida: ${call.tool}`);
+          return;
+        }
+        this.reply(id, result);
+      } catch (err) {
+        // callTool não rejeita (erro de ferramenta vira isError); rede de segurança.
+        if (!call.cancelled) this.replyError(id, -32603, publicErrorMessage(err));
+      } finally {
+        this.inflight.delete(key);
+      }
+    })();
+  }
+
+  private cancel(params: unknown): void {
+    const p = (params ?? {}) as { requestId?: unknown; reason?: unknown };
+    if (typeof p.requestId !== 'string' && typeof p.requestId !== 'number') return;
+    const call = this.inflight.get(requestKey(p.requestId));
+    // Desconhecida ou já respondida (a notificação cruzou com a resposta) — e
+    // `initialize`, que nunca fica em voo: a spec manda ignorar.
+    if (!call || call.cancelled) return;
+    call.cancelled = true;
+    const motivo = typeof p.reason === 'string' && p.reason.trim() ? umaLinha(p.reason) : 'sem motivo';
+    this.log(
+      `[mcp] notifications/cancelled para ${umaLinha(p.requestId, 80)} (${call.tool}): ${motivo} — ` +
+        'abortando; nenhuma chamada paga nova e nenhuma resposta',
+    );
+    // O motivo é um SINAL DE CONTROLE: o fetch em voo rejeita com ele e os
+    // catch que degradam (competidor/juiz/duelo) o re-lançam (isControlSignal).
+    call.controller.abort(new RunCancelled(`cliente MCP cancelou (${motivo})`));
+  }
+
+  private reply(id: unknown, result: unknown): void {
+    this.opts.write({ jsonrpc: '2.0', id, result });
+  }
+
+  private replyError(id: unknown, code: number, message: string): void {
+    this.opts.write({ jsonrpc: '2.0', id, error: { code, message } });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Servidor por stdio
+// ---------------------------------------------------------------------------
+
+/** 128 + 15: convenção POSIX para "encerrado por SIGTERM". */
+const EXIT_SIGTERM = 143;
+
+type MotivoFim = 'eof' | 'SIGTERM' | 'SIGINT' | 'EPIPE';
+
+function codigoDeSaida(motivo: MotivoFim): number {
+  if (motivo === 'SIGTERM') return EXIT_SIGTERM;
+  if (motivo === 'SIGINT') return EXIT.SIGINT;
+  return EXIT.OK;
+}
+
+/** Espera o stdout escoar (pipe assíncrono fora do Linux), com teto. */
+function flushStdout(maxMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, maxMs);
+    process.stdout.write('', () => {
+      clearTimeout(t);
+      resolve();
+    });
+  });
 }
 
 export async function cmdMcp(argv: string[]): Promise<number> {
@@ -390,67 +765,58 @@ export async function cmdMcp(argv: string[]): Promise<number> {
     return apiKeyCache;
   };
 
+  // stdout é o canal JSON-RPC; narração vai para o stderr (o cliente a loga).
+  let stdoutQuebrado = false;
+  const session = new McpSession({
+    write: (msg) => {
+      if (!stdoutQuebrado) process.stdout.write(`${JSON.stringify(msg)}\n`);
+    },
+    getKey,
+    log: (m) => {
+      process.stderr.write(`${m}\n`);
+    },
+  });
+
+  let motivo: MotivoFim | null = null;
+  let terminar!: (m: MotivoFim) => void;
+  const fim = new Promise<MotivoFim>((resolve) => (terminar = resolve));
+  const pedirFim = (m: MotivoFim): void => {
+    if (motivo) return;
+    motivo = m;
+    terminar(m);
+  };
+
+  // O laço de leitura só DESPACHA: nenhum handler espera ferramenta.
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+  rl.on('line', (line) => session.handleLine(line));
+  // EOF do stdin = o cliente pediu o encerramento (transporte stdio do MCP).
+  rl.once('close', () => pedirFim('eof'));
 
-  for await (const line of rl) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
+  const onSinal = (sig: 'SIGTERM' | 'SIGINT'): void => {
+    // Segundo sinal durante a graça: o cliente perdeu a paciência — sai já.
+    if (motivo) process.exit(codigoDeSaida(sig));
+    pedirFim(sig);
+  };
+  const onSigterm = (): void => onSinal('SIGTERM');
+  const onSigint = (): void => onSinal('SIGINT');
+  // Cliente morreu: escrever no pipe fechado daria EPIPE e derrubaria o
+  // processo SEM gravar o parcial das runs em voo.
+  const onStdoutError = (): void => {
+    stdoutQuebrado = true;
+    pedirFim('EPIPE');
+  };
+  process.on('SIGTERM', onSigterm);
+  process.on('SIGINT', onSigint);
+  process.stdout.on('error', onStdoutError);
 
-    let req: JsonRpcRequest;
-    try {
-      req = JSON.parse(trimmed) as JsonRpcRequest;
-    } catch {
-      replyError(null, -32700, 'JSON inválido');
-      continue;
-    }
-
-    // Notificacoes (sem `id`) nao recebem resposta — responder quebra o cliente.
-    const isNotification = req.id === undefined || req.id === null;
-
-    try {
-      switch (req.method) {
-        case 'initialize': {
-          const pedido = str((req.params as Record<string, unknown>)?.protocolVersion);
-          reply(req.id, {
-            // Ecoa a versao pedida quando conhecida; senao anuncia a nossa.
-            protocolVersion: pedido ?? PROTOCOL_VERSION,
-            capabilities: { tools: {} },
-            serverInfo: SERVER_INFO,
-          });
-          break;
-        }
-        case 'notifications/initialized':
-        case 'notifications/cancelled':
-          break;
-        case 'ping':
-          if (!isNotification) reply(req.id, {});
-          break;
-        case 'tools/list':
-          reply(req.id, {
-            tools: TOOLS.map((t) => ({
-              name: t.name,
-              description: t.description,
-              inputSchema: t.inputSchema,
-            })),
-          });
-          break;
-        case 'tools/call': {
-          const params = (req.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
-          const result = await callTool(params.name, params.arguments ?? {}, getKey);
-          if (!result) {
-            replyError(req.id, -32602, `Ferramenta desconhecida: ${String(params.name).slice(0, 80)}`);
-            break;
-          }
-          reply(req.id, result);
-          break;
-        }
-        default:
-          if (!isNotification) replyError(req.id, -32601, `Método não suportado: ${req.method}`);
-      }
-    } catch (err) {
-      if (!isNotification) replyError(req.id, -32603, publicErrorMessage(err));
-    }
-  }
-
-  return EXIT.OK;
+  const razao = await fim;
+  await session.shutdown(razao);
+  rl.close();
+  process.stdin.destroy();
+  if (!stdoutQuebrado) await flushStdout(1000);
+  process.off('SIGTERM', onSigterm);
+  process.off('SIGINT', onSigint);
+  // Saída EXPLÍCITA: depois da graça pode sobrar trabalho que ignorou o abort
+  // (ou um socket vivo) e o cliente não pode ficar esperando o processo sumir.
+  process.exit(codigoDeSaida(razao));
 }

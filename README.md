@@ -37,6 +37,10 @@ Também expõe um **servidor MCP** no mesmo binário:
 claude mcp add --transport stdio arena -- npx -y prompt-builder-cli mcp
 ```
 
+Cancelar a chamada no cliente (`notifications/cancelled`) interrompe a run na hora: nenhuma
+chamada paga nova sai, o parcial fica gravado como `aborted` (`stoppedReason: "cancelled"`) e
+é lido por `get_result`. Fechar o stdin ou mandar `SIGTERM` faz o mesmo com até ~10 s de graça.
+
 Três coisas que o CLI garante e a UI não garantia:
 
 - **Custo real.** O gasto sai de `usage.cost` (o valor cobrado), quebrado por papel — juiz,
