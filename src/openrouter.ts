@@ -462,10 +462,12 @@ export interface ChatMessage {
 }
 
 export interface ChatCompletionResult {
+  /** Resposta do modelo, já REIDRATADA (tokens de dado pessoal → valor original). */
   text: string;
   tokensIn: number;
   tokensOut: number;
   latencyMs: number;
+  /** Payload do fio como o provedor devolveu (pseudonimizado: com os tokens). */
   raw: unknown;
   /** Custo da chamada. Sempre presente; a honestidade fica em `cost.source`. */
   cost: CallCost;
@@ -759,8 +761,20 @@ export class OpenRouterGateway {
   }
 
   /**
-   * Os MESMOS tokens que o envio usaria no escopo de `sink` — para comparar
-   * localmente com o que o modelo viu (ground truth deterministico). Nao conta
+   * A VOLTA (R-16 DEC-5, reversao fora do caminho de envio): tokens do cofre do
+   * escopo viram de novo o valor original ANTES de a resposta chegar aos papeis.
+   * Sem isto o token vazava irreversivel para o que o usuario recebe (variante
+   * campea gravada por `sessions winner --apply`, cenario, gabarito) e o
+   * contrato `neverBreak` com o valor original rejeitava toda reescrita. O mapa
+   * token→valor so existe em memoria, no cofre; o reenvio re-tokeniza igual.
+   */
+  private restoreText(text: string, sink?: CostSink, count = true): string {
+    return this.piiGuard.restore(text, piiScopeOf(sink), count);
+  }
+
+  /**
+   * Os MESMOS tokens que o envio usaria no escopo de `sink` — utilitario para
+   * comparar localmente com o que o modelo viu (diagnostico/teste). Nao conta
    * como chamada.
    */
   pseudonymize<T>(value: T, sink?: CostSink): T {
@@ -830,7 +844,8 @@ export class OpenRouterGateway {
       // graca nos livros e cara na fatura.
       const cost = this.account(params, reservation, usage);
 
-      const text = json.choices?.[0]?.message?.content ?? '';
+      // Reidratada: o papel recebe o valor original, nunca o token (LGPD, IMPL-042).
+      const text = this.restoreText(json.choices?.[0]?.message?.content ?? '', sink);
       // OpenRouter as vezes devolve 200 com um corpo de erro (ex.: provider
       // rejeitou um parametro). Sem isto a falha viraria "resposta vazia" muda.
       if (!text && json.error) {
@@ -917,7 +932,9 @@ export class OpenRouterGateway {
             const delta = chunk.choices?.[0]?.delta?.content;
             if (typeof delta === 'string' && delta.length > 0) {
               fullText += delta;
-              onDelta?.(delta, fullText);
+              // Previa ja reidratada (sem contar: e a mesma resposta a cada pedaco).
+              // `delta` e o pedaco cru do provedor — pode trazer token parcial.
+              onDelta?.(delta, this.restoreText(fullText, sink, false));
             }
             if (chunk.usage) usageRaw = chunk.usage;
           } catch {
@@ -936,7 +953,8 @@ export class OpenRouterGateway {
       const latencyMs = Date.now() - startedAt;
       ok = true;
       return {
-        text: fullText,
+        // Texto final acumulado, reidratado (LGPD, IMPL-042).
+        text: this.restoreText(fullText, sink),
         tokensIn: usage.tokensIn,
         tokensOut: usage.tokensOut,
         latencyMs,

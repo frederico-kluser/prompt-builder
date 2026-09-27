@@ -26,11 +26,15 @@ o campo** (`customStages[2].question (CPF)`). Nada foi enviado. Saídas:
 - troque por dado sintético (CPF com dígito verificador inválido, `***.***.***-**`);
 - ou, se revisou e pode seguir, `--allow-pii` (ou `"allowPii": true` no arquivo):
   CPF, CNPJ, CNS, RG, CEP, telefone, e-mail e CRM saem **pseudonimizados** antes
-  de cada chamada; **nomes em texto livre não são cobertos** e seguem como estão.
+  de cada chamada e **voltam ao valor original na resposta** (só localmente: o
+  prompt campeão e os cenários nunca carregam `[TELEFONE_…]`); **nomes em texto
+  livre não são cobertos** e seguem como estão.
 
 `--pii-mode synthetic` (ou `"piiMode": "synthetic"`) recusa **sem exceção** —
 `--allow-pii` não vale. O **modo agente** é sempre "só sintético": o executor
-fala com o provedor por conta própria, fora da cascata. O record guarda em
+fala com o provedor por conta própria, fora da cascata. ⚠️ Por isso, no executor,
+o que é só **aviso** (CNPJ, telefone fixo, CEP, e-mail funcional, nome) segue
+**cru** — o stderr avisa; se não pode sair, troque por dado sintético. O record guarda em
 `piiReport` os campos achados (caminho + tipos, nunca o valor).
 
 ## `OpenRouter sem crédito (HTTP 402)` (código 5)

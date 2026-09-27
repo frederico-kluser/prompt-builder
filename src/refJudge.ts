@@ -1,4 +1,4 @@
-import { chatCompletion, pseudonymize } from './openrouter.js';
+import { chatCompletion } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { matchExpected } from './engine/groundTruth.js';
 import type {
@@ -219,18 +219,8 @@ export async function judgeStageReference(
   // princípio do oráculo do Agent Arena). `judgeModelId` vira o marcador
   // 'ground-truth' para o registro mostrar que NENHUM juiz LLM opinou.
   if (stage.expected !== undefined) {
-    // LGPD (IMPL-042): o competidor viu a pergunta PSEUDONIMIZADA (CPF vira
-    // [CPF_…]); comparar a resposta com o rotulo cru daria 'nao' a todos em
-    // silencio. Rotulo E resposta passam pelos MESMOS tokens do escopo da run
-    // (token ja presente fica como esta; valor cru que o modelo derivou vira o
-    // mesmo token do rotulo), e a comparacao acontece no espaco dos tokens.
-    // Rotulo-OBJETO: a resposta e JSON e trocar um numero cru por token a
-    // invalidaria — ali so o rotulo e pseudonimizado (o modelo so viu tokens).
-    const expected = pseudonymize(stage.expected, ctx?.sink);
-    const expectedIsObject = typeof expected === 'object' && !Array.isArray(expected);
     for (const r of judgeable) {
-      const answer = expectedIsObject ? r.text : pseudonymize(r.text, ctx?.sink);
-      const gt = matchExpected(answer, expected);
+      const gt = matchExpected(r.text, stage.expected);
       verdictByContestant[r.contestantId] = gt.verdict;
       explanationByContestant[r.contestantId] = gt.explanation;
     }

@@ -181,19 +181,19 @@ export async function deleteItem(profileId: string, itemId: string): Promise<boo
 // ----------------------------------------------------------------------------
 
 /**
- * Importa itens CRUS (JSON de arquivo — lista solta, {items:[...]} ou pacote de
- * cenários) para um perfil. Valida item a item: inválidos viram erros na lista
- * (PT-BR) e NÃO derrubam a importação. `origin` default = 'import'.
+ * Lista crua (JSON de arquivo — lista solta, {items:[...]} ou pacote de
+ * cenários) → itens válidos + erros PT-BR, item a item. É o funil ÚNICO de
+ * entrada de arquivo na biblioteca (`library add` e `library seed --file`):
+ * formato E LGPD.
  *
  * LGPD (IMPL-042): item com dado pessoal de aparência real é RECUSADO com aviso
  * nomeando o campo (nunca corrigido em silêncio). `allowPii` = revisão humana
- * confirmou que é sintético.
+ * confirmou que pode seguir.
  */
-export async function importItems(
-  profileId: string,
+export function prepareImportItems(
   raw: unknown,
-  opts: { origin?: LibraryItem['origin']; seed?: string; allowPii?: boolean } = {},
-): Promise<{ added: number; updated: number; errors: string[] }> {
+  opts: { origin?: LibraryItem['origin']; allowPii?: boolean } = {},
+): { items: LibraryItem[]; errors: string[] } {
   const lista: unknown[] = Array.isArray(raw)
     ? raw
     : raw && typeof raw === 'object' && Array.isArray((raw as { items?: unknown[] }).items)
@@ -202,7 +202,7 @@ export async function importItems(
         ? (raw as { scenarios: unknown[] }).scenarios
         : [];
   const errors: string[] = [];
-  const validos: LibraryItem[] = [];
+  const items: LibraryItem[] = [];
   lista.forEach((cru, i) => {
     const r = normalizeLibraryItem({
       origin: opts.origin ?? 'import',
@@ -215,8 +215,22 @@ export async function importItems(
     }
     const pii = opts.allowPii ? null : checkImportPii(r.item);
     if (pii && !pii.ok) errors.push(`item ${i + 1}: ${pii.message}`);
-    else validos.push(r.item);
+    else items.push(r.item);
   });
+  return { items, errors };
+}
+
+/**
+ * Importa itens CRUS para um perfil (ver `prepareImportItems`): inválidos e
+ * recusados por LGPD viram erros na lista e NÃO derrubam a importação.
+ * `origin` default = 'import'.
+ */
+export async function importItems(
+  profileId: string,
+  raw: unknown,
+  opts: { origin?: LibraryItem['origin']; seed?: string; allowPii?: boolean } = {},
+): Promise<{ added: number; updated: number; errors: string[] }> {
+  const { items: validos, errors } = prepareImportItems(raw, opts);
   const { added, updated } = await saveItems(profileId, validos.map((it) => ({ ...it, seed: it.seed ?? opts.seed })));
   return { added, updated, errors };
 }

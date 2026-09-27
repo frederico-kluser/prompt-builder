@@ -27,6 +27,7 @@ import {
   importItems,
   listItems,
   listProfiles,
+  prepareImportItems,
   saveItems,
   saveProfile,
   seedItems,
@@ -44,9 +45,9 @@ USO
   library init --profile <id> [--name <n>] [--description <d>]
                                          cria/atualiza o perfil
   library show <itemId> --profile <id>   item completo (JSON)
-  library add --profile <id> --file <arq> [--origin official|ai|manual|import]
+  library add --profile <id> --file <arq> [--origin official|ai|manual|import] [--allow-pii]
                                          importa itens (lista, {items:[…]} ou pacote)
-  library seed --profile <id> --file <arq>
+  library seed --profile <id> --file <arq> [--allow-pii]
                                          seed IDEMPOTENTE por id (o que existe, não sobrescreve)
   library seed --profile <id> --generate <N> --theme <t> --model <id> [--budget <usd>]
                                          gera N itens via datagen + gabarito por item
@@ -205,21 +206,13 @@ export async function cmdLibrary(argv: string[]): Promise<number> {
       // pulado, nunca sobrescreve curadoria. Rodar 2× não muda nada.
       if (typeof parsed.values.file === 'string') {
         const cru = await lerArquivoJson(parsed.values.file);
-        const lista: unknown[] = Array.isArray(cru)
-          ? cru
-          : (cru as { items?: unknown[] })?.items ?? (cru as { scenarios?: unknown[] })?.scenarios ?? [];
-        const now = new Date().toISOString();
-        const errors: string[] = [];
-        const itens: LibraryItem[] = [];
-        lista.forEach((raw, i) => {
-          const r = normalizeLibraryItem({
-            origin: 'import',
-            createdAt: now,
-            ...((raw ?? {}) as Record<string, unknown>),
-          });
-          if (r.ok) itens.push({ ...r.item, seed: r.item.seed ?? 'prompt-builder:seed@1' });
-          else errors.push(`item ${i + 1}: ${r.error}`);
+        // MESMO funil do `add` (formato + LGPD): item com dado pessoal de
+        // aparência real é recusado nomeando o campo, salvo `--allow-pii`.
+        const { items: validos, errors } = prepareImportItems(cru, {
+          origin: 'import',
+          allowPii: parsed.values['allow-pii'] === true,
         });
+        const itens: LibraryItem[] = validos.map((it) => ({ ...it, seed: it.seed ?? 'prompt-builder:seed@1' }));
         for (const e of errors) out.warn(e);
         const res = await seedItems(profileId, itens);
         out.info(`seed: +${res.added} novos · ${res.skipped} já existentes (pulados) · ${errors.length} recusados`);

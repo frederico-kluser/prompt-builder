@@ -31,11 +31,14 @@ import {
   AREA_LIVRE,
   allowlistNotice,
   checkRunCompliance,
+  checkImportPii,
   checkRunPii,
   creatorPrefix,
   familiaFor,
   filterModels,
+  piiReviewKeys,
   runPiiMessage,
+  unreviewedPii,
   type LgpdData,
   type PiiMode,
 } from '../lgpd';
@@ -386,12 +389,18 @@ export function NewRun() {
   const [piiMode, setPiiMode] = useState<PiiMode>('redact');
   // Importação bloqueada por dado pessoal: o arquivo fica pendente até o usuário
   // revisar (nunca corrigimos em silêncio) — ele pode confirmar e importar.
-  const [piiImport, setPiiImport] = useState<{ file: File; message: string } | null>(null);
+  // `keys` = o dado que o aviso mostrou (hash, nunca o valor): é o que "Revisei" confirma.
+  const [piiImport, setPiiImport] = useState<{ file: File; message: string; keys: string[] } | null>(null);
   // Dado de aparência real nos campos no modo "redigir": a run só sai depois da
-  // revisão explícita (vira `allowPii: true` no config). Ref = leitura síncrona
-  // no submit disparado pelo próprio botão "Revisei".
-  const [piiSubmit, setPiiSubmit] = useState<string | null>(null);
-  const piiAck = useRef(false);
+  // revisão explícita (vira `allowPii: true` no config). A revisão vale para o
+  // dado REVISADO (chaves de `piiReviewKeys`), não para o que o usuário puser
+  // depois: CPF trocado ou celular novo em qualquer campo pede nova
+  // confirmação. Ref = leitura síncrona no submit disparado pelo próprio botão.
+  const [piiSubmit, setPiiSubmit] = useState<{ message: string; keys: string[] } | null>(null);
+  const piiAck = useRef<Set<string>>(new Set());
+  const ackPii = (keys: readonly string[]) => {
+    for (const k of keys) piiAck.current.add(k);
+  };
 
   // Filtro de preço dos PARTICIPANTES (USD por 1M tokens; '' = sem limite).
   const [maxInputPrice, setMaxInputPrice] = useState('');
@@ -777,21 +786,22 @@ export function NewRun() {
       setIncludeRessalvas(config.compliance.includeRessalvas);
     }
     if (config.piiMode) setPiiMode(config.piiMode);
-    // Importado com "Revisei" (ou `allowPii` no arquivo): a revisão vale no envio.
-    if (config.allowPii) piiAck.current = true;
+    // Importado com "Revisei" (ou `allowPii` no arquivo): a revisão cobre o dado
+    // DESTE arquivo — não o que for digitado depois.
+    if (config.allowPii) ackPii(piiReviewKeys(checkImportPii(config).blocked));
   }
 
   // Import unificado: UM arquivo, três formatos possíveis (arena-config@1,
   // prompt-builder-pack@1 (ou o legado ai-benchmark-pack@1) ou array cru — `readImportFile` detecta.
-  async function handleImport(file: File, allowPii = false) {
+  async function handleImport(file: File, allowPii = false, reviewedKeys: readonly string[] = []) {
     setError(null);
     const res = await readImportFile(file, { allowPii });
     if (!res.ok) {
-      if (res.pii) return setPiiImport({ file, message: res.error });
+      if (res.pii) return setPiiImport({ file, message: res.error, keys: piiReviewKeys(res.pii.blocked) });
       return setError(res.error);
     }
     setPiiImport(null);
-    if (allowPii) piiAck.current = true;
+    if (allowPii) ackPii(reviewedKeys);
     if (res.data.kind === 'config') {
       applyArenaConfig(res.data.config);
       setConfigSummary(arenaConfigSummary(res.data.config));
@@ -1009,14 +1019,16 @@ export function NewRun() {
       // Modo "redigir": nada sai com dado de aparência real sem revisão —
       // pseudonimizar sem avisar seria correção silenciosa (e nome não é redigido).
       const piiCheck = checkRunPii(config);
-      if (piiCheck.blocked.length) {
-        if (!piiAck.current) {
-          setPiiSubmit(runPiiMessage(piiCheck));
-          window.scrollTo({ top: 0, behavior: 'smooth' });
-          return setError('Dado pessoal com aparência de dado real — revise o aviso no topo da página.');
-        }
-        config = { ...config, allowPii: true };
+      const pendentes = unreviewedPii(piiCheck.blocked, piiAck.current);
+      if (pendentes.length) {
+        setPiiSubmit({
+          message: runPiiMessage({ ...piiCheck, blocked: pendentes }),
+          keys: piiReviewKeys(pendentes),
+        });
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return setError('Dado pessoal com aparência de dado real — revise o aviso no topo da página.');
       }
+      if (piiCheck.blocked.length) config = { ...config, allowPii: true };
     }
     setPiiSubmit(null);
 
@@ -1100,7 +1112,12 @@ export function NewRun() {
             </p>
             <div className="flex flex-wrap gap-2">
               {piiMode !== 'synthetic' && (
-                <Button type="button" size="sm" variant="outline" onClick={() => void handleImport(piiImport.file, true)}>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void handleImport(piiImport.file, true, piiImport.keys)}
+                >
                   Revisei — importar mesmo assim
                 </Button>
               )}
@@ -1113,15 +1130,13 @@ export function NewRun() {
 
         {piiSubmit && (
           <Banner tone="warn" className="mt-4 flex flex-col gap-3">
-            <p>{piiSubmit}</p>
+            <p>{piiSubmit.message}</p>
             <div className="flex flex-wrap gap-2">
               <Button
                 type="submit"
                 size="sm"
                 variant="outline"
-                onClick={() => {
-                  piiAck.current = true;
-                }}
+                onClick={() => ackPii(piiSubmit.keys)}
               >
                 Revisei — iniciar mesmo assim
               </Button>

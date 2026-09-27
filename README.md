@@ -239,25 +239,31 @@ CLI, no servidor e na SPA — passa por uma **cascata PT-BR** no ponto único do
    literatura mede ~49% para nomes em texto livre). Se os seus dados têm nomes reais, use o modo
    "só sintético".
 3. **Aparência de dado real** ⇒ **bloqueio com aviso nomeando o campo**, nunca correção silenciosa:
-   identificador forte realista (CPF, CNS, RG, CRM, celular, e-mail pessoal) ou "ficha" de titular
+   identificador forte realista (CPF, CNS, RG com rótulo de identidade, CRM, celular, e-mail pessoal) ou "ficha" de titular
    (nome + identificador forte, ou nome + ≥2 dados fracos como endereço + CEP). Nome de **persona**
    do prompt ("Você é a Ana Paula, atendente… Rua Augusta, 1500") e contato comercial viram só
    aviso. Vale na **importação** — JSON de cenários, pacote, `arena-config@1`, `arena-agent-config@1`
    e **RunConfig cru** (CLI `--config`/flags, `estimate`, `config validate`, MCP, `POST /runs` e
-   `/sessions`) e `library add` — e de novo no **pré-voo** da run (SPA inclusive).
+   `/sessions`), `library add` e `library seed --file` — e de novo no **pré-voo** da run (SPA inclusive).
 
 **Modo "redigir"** (padrão): o bloqueio acima exige **revisão explícita** — `allowPii: true` no
 config (CLI `--allow-pii`; SPA: "Revisei — importar/iniciar mesmo assim"). Revisado, os
-identificadores seguem pseudonimizados no envio e o record guarda em `piiReport` os campos achados
+identificadores seguem pseudonimizados no envio e **voltam ao valor original nas respostas**
+(reversão fora do caminho de envio: o mapa token→valor vive só em memória, por run/sessão) — o
+prompt campeão, o cenário e o gabarito nunca carregam token, e `neverBreak` com o valor original
+continua valendo. Dado de empresa (CNPJ, fixo, CEP, e-mail funcional) nem pede revisão, mas sai
+pseudonimizado do mesmo jeito e a tela da run diz isso. O record guarda em `piiReport` os campos achados
 (caminho + tipos, **nunca o valor**); o CLI narra o mesmo no stderr. Nomes em texto livre seguem
 como estão. **Modo "só sintético"** (`piiMode: "synthetic"`; `--pii-mode synthetic`; switch em
 Avançado na Nova Run): a run/sessão é **recusada**, antes de qualquer LLM, sem exceção manual. O
 **modo agente** (executor `pi`, que fala com o provedor por conta própria, fora do gateway) é
-sempre tratado como "só sintético" — fail-closed. O ground truth determinístico (`expected`)
-compara no espaço dos tokens, igual ao que o modelo viu.
+sempre tratado como "só sintético" — fail-closed para dado de aparência real. ⚠️ O que é só
+**aviso** (CNPJ, fixo, CEP, e-mail funcional, nome) passa no pré-voo e, no **executor**, segue
+**cru** para o provedor (nos demais papéis sai pseudonimizado); o CLI e a tela da run avisam. O
+ground truth determinístico (`expected`) compara a resposta reidratada com o rótulo cru.
 
 Medido na fixture própria [`test/fixtures/pii-ptbr.json`](./test/fixtures/pii-ptbr.json)
-(344 casos): recall 0,98 e precisão 1,00 nos estruturados, 0% de falso positivo no bloqueio
+(353 casos): recall 0,98 e precisão 1,00 nos estruturados, 0% de falso positivo no bloqueio
 (`test/lgpd-pii.test.ts`).
 
 Detalhes para agentes na memória CoALA do projeto (`coala.py search "lgpd"`).

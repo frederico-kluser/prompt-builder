@@ -25,9 +25,13 @@
 // O que o gateway faz com isso: pseudonimiza os identificadores ESTRUTURADOS
 // realistas com um token estável por run/sessão (`[CPF_1a2b3c4d5e6f]` — mesmo
 // valor ⇒ mesmo token, em qualquer formatação; HMAC-SHA-256 com chave secreta
-// por escopo, não reversível nem previsível a partir de pares conhecidos), e só
-// CONTA os achados contextuais: reescrever prompt com base numa heurística de
-// nome mudaria o benchmark em silêncio (persona "Maria Clara" virando token).
+// por escopo, não reversível nem previsível a partir de pares conhecidos pelo
+// PROVEDOR), e só CONTA os achados contextuais: reescrever prompt com base numa
+// heurística de nome mudaria o benchmark em silêncio (persona "Maria Clara"
+// virando token). A volta (R-16 DEC-5) fica AQUI, fora do caminho de envio: o
+// cofre guarda token→valor só em memória e o gateway reidrata a resposta antes
+// de devolvê-la aos papéis — o que o usuário recebe (prompt campeão, cenário,
+// gabarito, resposta) traz o valor original, nunca o token.
 //
 // ⚠️ Desvio registrado da ação do item: a camada 2 é heurística de dicionário +
 // gatilhos, NÃO um NER/LLM local — e por isso nomes nunca são redigidos, só
@@ -108,7 +112,10 @@ export interface PiiFinding {
    */
   realistic: boolean;
   coverage: PiiCoverage;
-  /** telefone: 'celular' | 'fixo'; e-mail: 'pessoal' | 'funcional'; nome: 'persona' (papel do modelo). */
+  /**
+   * telefone: 'celular' | 'fixo'; e-mail: 'pessoal' | 'funcional'; nome: 'persona' (papel do modelo);
+   * rg: 'sem-contexto' (formato de RG sem rótulo de identidade — não é identificador forte).
+   */
   detail?: string;
 }
 
@@ -206,7 +213,16 @@ const R = String.raw`(?![\p{L}\p{N}]|[.\-\/]\p{N})`;
 
 const CTX_CNPJ = /\bcnpj\b/iu;
 const CTX_CNS = /\b(cns|sus|cart[ãa]o\s+(nacional\s+de\s+sa[úu]de|do\s+sus|sus))\b/iu;
-const CTX_TEL = /(tel\b|telefone|fone|celular|cel\b|whats|zap\b|ligue|ligar|liga\b|contato|ramal|fixo)/iu;
+// "pix"/"chave": celular corrido como chave PIX ("Chave pix: 21988473312") é
+// padrão BR comum — sem o gatilho ele seguia cru para o LLM.
+const CTX_TEL = /(tel\b|telefone|fone|celular|cel\b|whats|zap\b|ligue|ligar|liga\b|contato|ramal|fixo|pix\b|chave\b)/iu;
+// RG formatado só é identificador FORTE com rótulo de identidade por perto.
+const CTX_RG = /(\br\.?g(?![a-z])|identidade|c[ée]dula|registro\s+geral|\bssp\b|\bdocumento\b)/iu;
+const CTX_RG_AFTER = /^\s*[(\-–—,]?\s*(ssp|sesp|detran|ifp|pc)\b/iu;
+// Rótulo de OUTRA coisa logo antes ("Versão 1.234.567-8", "Lote 12.345.678-9",
+// "R$ 1.234.567-8"): nem é RG — não conta nem é redigido.
+const NOT_RG_BEFORE =
+  /(r\$|us\$|€|\bvers[ãa]o|\bv\.?|\blote|\bbuild|\brelease|\bpedido|\bprotocolo|\bnf-?e?|\bnota(?:\s+fiscal)?|\bc[óo]digo|\bsku|\bref\.?|\bserial|\bs[ée]rie)\s*(?:n[º°o]\.?|:|#)?\s*$/iu;
 
 function isDummySubscriber(sub: string): boolean {
   const core = sub.length === 9 ? sub.slice(1) : sub;
@@ -326,10 +342,20 @@ const STRUCTURED_RULES: StructuredRule[] = [
       return cand('cns', m, 1, 'checksum', true);
     },
   },
-  // RG formatado (00.000.000-0 / 0.000.000-X): o formato com DV é específico.
+  // RG formatado (00.000.000-0 / 0.000.000-X): o formato com DV é específico,
+  // mas SEM rótulo de identidade é ambíguo (versão, lote, valor): aí é
+  // `sem-contexto` — ainda redigido no envio (reversível), porém NÃO é
+  // identificador forte (aviso, não bloqueio). Rótulo de outra coisa antes
+  // ("Versão", "Lote", "R$") ⇒ não é RG.
   {
     re: new RegExp(`${L}(\\d{1,2}\\.\\d{3}\\.\\d{3}-[\\dXx])${R}`, 'gu'),
-    build: (m) => cand('rg', m, 1, 'formato', !/^(\d)\1*$/.test(onlyDigits(m[1]))),
+    build: (m, text) => {
+      const start = m.index + m[0].indexOf(m[1]);
+      const antes = text.slice(Math.max(0, start - 40), start);
+      if (NOT_RG_BEFORE.test(antes)) return null;
+      const rotulado = CTX_RG.test(antes) || CTX_RG_AFTER.test(text.slice(start + m[1].length, start + m[1].length + 16));
+      return cand('rg', m, 1, 'formato', !/^(\d)\1*$/.test(onlyDigits(m[1])), rotulado ? undefined : 'sem-contexto');
+    },
   },
   // RG por contexto (sem DV nacional): "RG 1234567", "identidade: MG-12.345.678".
   {
@@ -643,7 +669,9 @@ export type PiiVerdict = 'limpo' | 'aviso' | 'bloqueio';
 /** Identificador que, sozinho e realista, aponta uma PESSOA. */
 function isStrong(f: PiiFinding): boolean {
   if (!f.realistic || f.layer !== 'estruturado') return false;
-  if (f.kind === 'cpf' || f.kind === 'cns' || f.kind === 'rg' || f.kind === 'crm') return true;
+  if (f.kind === 'cpf' || f.kind === 'cns' || f.kind === 'crm') return true;
+  // "00.000.000-0" sem rótulo de identidade pode ser versão/lote: só aviso.
+  if (f.kind === 'rg') return f.detail !== 'sem-contexto';
   if (f.kind === 'telefone') return f.detail === 'celular';
   if (f.kind === 'email') return f.detail === 'pessoal';
   return false;
@@ -894,7 +922,8 @@ export function runPiiMessage(check: RunPiiCheck): string {
         `Dado pessoal com aparência de dado real em ${campos}. Nada foi enviado. Se você revisou e ` +
         `pode seguir, confirme com \`allowPii: true\` no config (CLI: \`--allow-pii\`; Nova Run: ` +
         `"Revisei — iniciar mesmo assim"): CPF, telefone, e-mail e demais identificadores saem ` +
-        `pseudonimizados no envio, mas nomes em texto livre NÃO são cobertos e seguem como estão. ` +
+        `pseudonimizados no envio (e voltam ao valor original nas respostas, só aqui), mas nomes ` +
+        `em texto livre NÃO são cobertos e seguem como estão. ` +
         `Ou troque por dados sintéticos (documento com dígito verificador inválido ou mascarado).`
       );
     default:
@@ -936,13 +965,59 @@ export function summarizeRunPii(check: RunPiiCheck): PiiRunReport | undefined {
   return { mode: check.mode, allowPii: check.allowPii, fields };
 }
 
-/** Uma linha PT-BR para o CLI/UI: o que será pseudonimizado e o que não é coberto. */
+/**
+ * Uma linha PT-BR para o CLI/UI: o que será pseudonimizado e o que não é
+ * coberto. No modo AGENTE ela diz a verdade sobre o executor: o que passou no
+ * pré-voo (só "aviso" — CNPJ, fixo, CEP, e-mail funcional, nome) segue CRU
+ * para o provedor do executor, que fala com ele fora do gateway.
+ */
 export function describeRunPii(check: RunPiiCheck): string | null {
   const todos = [...check.blocked, ...check.warnings];
   if (!todos.length) return null;
+  if (check.agent) {
+    return (
+      `Modo agente: dado de contato/empresa em ${todos.length} campo(s) — ${listFields(todos)}. ` +
+      `O executor fala com o provedor FORA da cascata: nele esses valores seguem CRUS (só dado de ` +
+      `aparência real é recusado); nos demais papéis saem pseudonimizados. Se não podem sair, ` +
+      `troque por dado sintético.`
+    );
+  }
   return (
     `Dado pessoal em ${todos.length} campo(s) — ${listFields(todos)}: identificadores saem ` +
-    `pseudonimizados antes de cada envio ao modelo; nomes/endereços em texto livre não são cobertos.`
+    `pseudonimizados antes de cada envio ao modelo e voltam ao valor original nas respostas (só ` +
+    `localmente); nomes/endereços em texto livre não são cobertos.`
+  );
+}
+
+/**
+ * O relatório GRAVADO no record (`RunRecord.piiReport`) em uma linha PT-BR —
+ * é o que a tela da run mostra: dado de empresa (CNPJ, fixo, CEP, e-mail
+ * funcional) só gera "aviso" e não pede revisão, então sem esta linha a
+ * pseudonimização dele seria invisível na SPA. Nunca traz o valor.
+ */
+export function describePiiReport(
+  report: PiiRunReport | undefined,
+  opts: { agent?: boolean } = {},
+): string | null {
+  if (!report?.fields.length) return null;
+  const shown = report.fields
+    .slice(0, MAX_FIELDS_IN_MESSAGE)
+    .map((f) => `${f.path} (${f.kinds.map((k) => PII_KIND_LABEL[k]).join(' + ')})`)
+    .join('; ');
+  const rest = report.fields.length - MAX_FIELDS_IN_MESSAGE;
+  const campos = rest > 0 ? `${shown}; +${rest} campo(s)` : shown;
+  if (opts.agent) {
+    return (
+      `Modo agente: dado de contato/empresa em ${report.fields.length} campo(s) — ${campos}. O ` +
+      `executor fala com o provedor FORA da cascata: nele esses valores seguiram CRUS; nos demais ` +
+      `papéis saíram pseudonimizados.`
+    );
+  }
+  const revisado = report.allowPii ? ' Dado de aparência real liberado por revisão ("Revisei").' : '';
+  return (
+    `Dado pessoal em ${report.fields.length} campo(s) — ${campos}. Identificadores saíram ` +
+    `pseudonimizados em cada envio ao modelo e voltaram ao valor original nas respostas (só ` +
+    `localmente); nomes/endereços em texto livre não são cobertos.${revisado}`
   );
 }
 
@@ -975,6 +1050,10 @@ function canonical(f: Pick<PiiFinding, 'kind' | 'text'>): string {
       const d = onlyDigits(f.text);
       return d.length > 11 && d.startsWith('55') ? d.slice(2) : d.replace(/^0(?=\d{10,11}$)/, '');
     }
+    // Não viram token (camada contextual), mas entram na chave da revisão humana.
+    case 'nome':
+    case 'endereco':
+      return fold(f.text).replace(/\s+/g, ' ').trim();
     default:
       return onlyDigits(f.text);
   }
@@ -1087,6 +1166,20 @@ function randomKey(): Uint8Array {
 /** Hex do token: 48 bits — colisão desprezível no escopo de uma run/sessão. */
 export const PII_TOKEN_HEX = 12;
 
+/**
+ * Teto do mapa reversível de UM cofre. O cofre de uma run/sessão morre com
+ * ela; o da instância (chamadas sem escopo) vive o processo/aba inteiro — o
+ * teto impede que ele cresça sem fim (o mais antigo sai; token que perdeu o
+ * par volta como token, visível, nunca como outro valor).
+ */
+export const PII_VAULT_MAX_ENTRIES = 5000;
+
+/**
+ * Forma de superfície curta demais para ser procurada literalmente de novo
+ * (CRM de 4 dígitos viraria token em todo "2024" do texto).
+ */
+const MIN_SURFACE_LEN = 6;
+
 export interface PiiRedaction {
   kind: PiiKind;
   token: string;
@@ -1101,6 +1194,12 @@ export interface RedactResult {
   contextualSeen: number;
 }
 
+export interface RehydrateResult {
+  text: string;
+  /** Tokens deste cofre trocados de volta pelo valor original. */
+  restored: number;
+}
+
 export interface PiiVaultOptions {
   /**
    * Chave do HMAC. Default: 256 bits aleatórios por cofre (e há um cofre por
@@ -1109,14 +1208,47 @@ export interface PiiVaultOptions {
   key?: string;
 }
 
+interface VaultEntry {
+  kind: PiiKind;
+  /** Valor original (1ª forma vista; espaços colapsados — cabe em string JSON). */
+  value: string;
+  /** Formas de superfície já vistas que apontam para este token. */
+  surfaces: string[];
+}
+
+const TOKEN_IN_TEXT = new RegExp(
+  String.raw`(\[)?(?<![A-Za-z0-9_])(${Object.values(TOKEN_LABEL).join('|')})_([0-9a-f]{${PII_TOKEN_HEX}})(?![0-9A-Za-z_])(\])?`,
+  'gi',
+);
+
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+
 /**
- * Cofre de pseudônimos: token ESTÁVEL no escopo do cofre (mesmo valor ⇒ mesmo
- * token em todos os papéis da run, em qualquer formatação), sem guardar o valor
- * em claro — o token é HMAC-SHA-256 com chave secreta, então não há mapa que
- * cresça nem que vaze, e um par conhecido valor→token não prevê nenhum outro.
+ * Cofre de pseudônimos de UM escopo (run/sessão). Duas metades:
+ *
+ * - IDA (o que sai para o provedor): token ESTÁVEL no escopo — mesmo valor ⇒
+ *   mesmo token em todos os papéis, em qualquer formatação. É HMAC-SHA-256 com
+ *   chave secreta: um par conhecido valor→token não prevê nenhum outro.
+ * - VOLTA (R-16 DEC-5: "reversão fora do caminho de envio"): o mapa
+ *   token→valor original fica SÓ em memória, em campo `#privado` (nem
+ *   `JSON.stringify` nem spread o alcançam), nunca persistido nem enviado. O
+ *   gateway reidrata a resposta do modelo com ele ANTES de devolvê-la aos
+ *   papéis: sem isso o token vazava irreversível para o prompt campeão, o
+ *   cenário gerado, o gabarito — e o contrato `neverBreak` com o valor original
+ *   rejeitava toda reescrita em silêncio.
+ *
+ * O reenvio re-tokeniza igual: além da varredura, toda forma de superfície já
+ * vista no escopo é procurada literalmente — o valor que só foi achado COM
+ * contexto ("telefone 3071-4455") volta ao token mesmo se o modelo o repetir
+ * sem contexto. A reversão não abre caminho cru na chamada seguinte.
  */
 export class PiiVault {
   private readonly key: Uint8Array;
+  readonly #entries = new Map<string, VaultEntry>();
+  readonly #surfaces = new Map<string, string>();
+  #surfaceRe: RegExp | null = null;
+  #surfaceReDirty = false;
+
   constructor(opts: PiiVaultOptions = {}) {
     this.key = opts.key !== undefined ? utf8(opts.key) : randomKey();
   }
@@ -1126,28 +1258,108 @@ export class PiiVault {
     return `[${TOKEN_LABEL[f.kind]}_${toHex(mac).slice(0, PII_TOKEN_HEX)}]`;
   }
 
-  /** Redige os identificadores ESTRUTURADOS realistas de um texto. */
+  /** Quantos tokens este cofre sabe reverter (diagnóstico/teste; nunca os valores). */
+  get size(): number {
+    return this.#entries.size;
+  }
+
+  /** Guarda o par token→original (só memória) e a forma de superfície vista. */
+  #remember(kind: PiiKind, surface: string, token: string): void {
+    const normal = surface.replace(/\s+/g, ' ');
+    let entry = this.#entries.get(token);
+    if (entry) {
+      // LRU: quem voltou a aparecer vai para o fim da fila de despejo.
+      this.#entries.delete(token);
+    } else {
+      entry = { kind, value: normal, surfaces: [] };
+    }
+    this.#entries.set(token, entry);
+    for (const s of new Set([surface, normal])) {
+      if (s.length < MIN_SURFACE_LEN || this.#surfaces.has(s)) continue;
+      this.#surfaces.set(s, token);
+      entry.surfaces.push(s);
+      this.#surfaceReDirty = true;
+    }
+    while (this.#entries.size > PII_VAULT_MAX_ENTRIES) {
+      const [oldest, old] = this.#entries.entries().next().value as [string, VaultEntry];
+      this.#entries.delete(oldest);
+      for (const s of old.surfaces) this.#surfaces.delete(s);
+      this.#surfaceReDirty = true;
+    }
+  }
+
+  /** Regex das formas já vistas (a mais longa primeiro), com fronteira de palavra. */
+  #knownSurfaces(): RegExp | null {
+    if (this.#surfaceReDirty) {
+      const alts = [...this.#surfaces.keys()].sort((a, b) => b.length - a.length).map(escapeRe);
+      this.#surfaceRe = alts.length
+        ? new RegExp(String.raw`(?<![\p{L}\p{N}])(?:${alts.join('|')})(?![\p{L}\p{N}])`, 'gu')
+        : null;
+      this.#surfaceReDirty = false;
+    }
+    return this.#surfaceRe;
+  }
+
+  /** Redige os identificadores ESTRUTURADOS realistas de um texto (e o já visto no escopo). */
   redact(text: string): RedactResult {
     const { structured, contextual } = scanPii(text);
-    const alvo = structured.filter((f) => f.realistic);
-    if (!alvo.length) return { text, redactions: [], contextualSeen: contextual.length };
+    type Hit = { kind: PiiKind; start: number; end: number; token: string };
+    const hits: Hit[] = [];
+    for (const f of structured) {
+      if (!f.realistic) continue;
+      const token = this.tokenFor(f);
+      this.#remember(f.kind, f.text, token);
+      hits.push({ kind: f.kind, start: f.start, end: f.end, token });
+    }
+    const known = this.#knownSurfaces();
+    if (known) {
+      known.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = known.exec(text)) !== null) {
+        const start = m.index;
+        const end = start + m[0].length;
+        if (hits.some((h) => h.start < end && start < h.end)) continue;
+        const token = this.#surfaces.get(m[0]);
+        const entry = token ? this.#entries.get(token) : undefined;
+        if (!token || !entry) continue;
+        hits.push({ kind: entry.kind, start, end, token });
+      }
+    }
+    if (!hits.length) return { text, redactions: [], contextualSeen: contextual.length };
+    hits.sort((a, b) => a.start - b.start);
     let out = '';
     let cursor = 0;
-    const redactions: PiiRedaction[] = [];
-    for (const f of alvo) {
-      const token = this.tokenFor(f);
-      out += text.slice(cursor, f.start) + token;
-      cursor = f.end;
-      redactions.push({ kind: f.kind, token, start: f.start, end: f.end });
+    for (const h of hits) {
+      out += text.slice(cursor, h.start) + h.token;
+      cursor = h.end;
     }
     out += text.slice(cursor);
-    return { text: out, redactions, contextualSeen: contextual.length };
+    return { text: out, redactions: hits, contextualSeen: contextual.length };
+  }
+
+  /**
+   * VOLTA: troca cada token DESTE cofre pelo valor original (a 1ª forma vista).
+   * Tolera o que o modelo costuma fazer com o token (sem colchetes, caixa
+   * trocada). Token desconhecido (inventado, de outro escopo, já despejado)
+   * fica como está — visível, nunca trocado por outro valor.
+   */
+  rehydrate(text: string): RehydrateResult {
+    if (!text || !this.#entries.size) return { text, restored: 0 };
+    let restored = 0;
+    TOKEN_IN_TEXT.lastIndex = 0;
+    const out = text.replace(TOKEN_IN_TEXT, (match, _open, label: string, hex: string) => {
+      const entry = this.#entries.get(`[${label.toUpperCase()}_${hex.toLowerCase()}]`);
+      if (!entry) return match;
+      restored += 1;
+      return entry.value;
+    });
+    return { text: out, restored };
   }
 
   /**
    * Pseudonimiza toda string de um valor (string, lista, objeto plano) com os
-   * MESMOS tokens do envio — p/ comparar localmente com o que o modelo viu
-   * (ex.: rótulo `expected` do ground truth contra a resposta com token).
+   * MESMOS tokens do envio — utilitário para comparar localmente com o que o
+   * modelo viu (diagnóstico/teste; os papéis recebem a resposta já reidratada).
    */
   redactDeep<T>(value: T): T {
     const visit = (v: unknown, depth: number): unknown => {
@@ -1171,19 +1383,21 @@ export interface PiiGuardStats {
   redactionsByKind: Partial<Record<PiiKind, number>>;
   /** Nomes/endereços vistos e enviados como estão (`nao-coberto`). */
   contextualSeen: number;
+  /** Tokens trocados de volta pelo valor original nas respostas (reidratação). */
+  restoredTokens: number;
 }
 
 /**
  * O guarda do gateway: TODA lista de mensagens passa por `protect` antes de
- * virar corpo de requisição. Contadores por instância (1 por processo ou aba)
- * — é o que o teste usa para provar que nenhuma chamada escapa.
+ * virar corpo de requisição, e TODA resposta passa por `restore` antes de
+ * voltar aos papéis. Contadores por instância (1 por processo ou aba) — é o
+ * que o teste usa para provar que nenhuma chamada escapa.
  *
  * Cofre por ESCOPO: o gateway passa a raiz do ledger da chamada (a run avulsa,
  * ou a sessão de treino inteira), então cada run/sessão tem chave própria — o
  * mesmo CPF vira tokens diferentes em runs de usuários diferentes no servidor
  * (sem ligação entre elas), mas o MESMO token em todos os papéis e iterações da
- * sessão (gabarito, competidor e juiz continuam comparáveis). Chamada sem
- * escopo (utilitários avulsos) usa o cofre da instância.
+ * sessão. Chamada sem escopo (utilitários avulsos) usa o cofre da instância.
  */
 export class PiiGuard {
   readonly vault: PiiVault;
@@ -1195,6 +1409,7 @@ export class PiiGuard {
     redactedCalls: 0,
     redactionsByKind: {},
     contextualSeen: 0,
+    restoredTokens: 0,
   };
 
   constructor(opts: PiiVaultOptions = {}) {
@@ -1234,6 +1449,18 @@ export class PiiGuard {
     return out;
   }
 
+  /**
+   * A volta: tokens do cofre do escopo viram de novo o valor original. `count`
+   * falso para prévias parciais do stream (a mesma resposta seria contada a
+   * cada pedaço).
+   */
+  restore(text: string, scope?: object, count = true): string {
+    if (!text) return text;
+    const r = this.vaultFor(scope).rehydrate(text);
+    if (count) this.counters.restoredTokens += r.restored;
+    return r.text;
+  }
+
   stats(): PiiGuardStats {
     return { ...this.counters, redactionsByKind: { ...this.counters.redactionsByKind } };
   }
@@ -1241,4 +1468,43 @@ export class PiiGuard {
 
 export function createPiiGuard(opts: PiiVaultOptions = {}): PiiGuard {
   return new PiiGuard(opts);
+}
+
+// ---------------------------------------------------------------------------
+// Revisão humana: o "Revisei" vale para o dado REVISADO, não para o futuro
+// ---------------------------------------------------------------------------
+
+/**
+ * Chaves do dado que motivou bloqueio nos campos `blocked`: uma por achado
+ * realista (tipo + valor canônico), como hash SHA-256 truncado — a UI guarda a
+ * chave, não o valor. A confirmação "Revisei" cobre exatamente estas chaves.
+ */
+export function piiReviewKeys(blocked: readonly PiiFieldReport[]): string[] {
+  const hash = (s: string): string => toHex(sha256(utf8(s))).slice(0, 16);
+  const keys = new Set<string>();
+  for (const r of blocked) {
+    let achou = false;
+    for (const f of r.findings) {
+      if (!f.realistic) continue;
+      achou = true;
+      keys.add(hash(`${f.kind}|${canonical(f)}`));
+    }
+    // Fail-closed: campo bloqueado sem achado realista (não acontece hoje) não
+    // pode virar "nada a revisar" — a chave cai para caminho + tipos.
+    if (!achou) keys.add(hash(`campo|${r.path}|${r.assessment.kinds.join('+')}`));
+  }
+  return [...keys];
+}
+
+/**
+ * Campos bloqueados que trazem dado AINDA NÃO revisado (chave fora de
+ * `reviewed`). Vazio = tudo o que bloqueia já foi confirmado pelo usuário.
+ * Trocar o CPF revisado por outro, ou pôr um celular novo em qualquer campo,
+ * devolve o campo aqui — a revisão não é um salvo-conduto para o futuro.
+ */
+export function unreviewedPii(
+  blocked: readonly PiiFieldReport[],
+  reviewed: ReadonlySet<string>,
+): PiiFieldReport[] {
+  return blocked.filter((r) => piiReviewKeys([r]).some((k) => !reviewed.has(k)));
 }

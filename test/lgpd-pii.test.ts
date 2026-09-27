@@ -19,7 +19,9 @@ import { fileURLToPath } from 'node:url';
 import * as pii from '../src/engine/pii.js';
 import * as nodeLgpd from '../src/lgpd.js';
 import * as webLgpd from '../web/src/lgpd.js';
-import { createGateway, pseudonymize, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
+import { chatCompletion, createGateway, pseudonymize, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
+import { generateContestants } from '../src/variator.js';
+import { cmdLibrary } from '../src/cli/commands/library.js';
 import { BudgetLedger } from '../src/budget.js';
 import { judgeStageReference } from '../src/refJudge.js';
 import { runConfigToArenaConfig } from '../src/runArtifact.js';
@@ -1045,19 +1047,33 @@ describe('IMPL-042 (revisão) — fronteira: separador colado na palavra-gatilho
   });
 });
 
-describe('IMPL-042 (revisão) — ground truth compara no espaço dos tokens', () => {
+describe('IMPL-042 (revisão 2) — ground truth: a resposta volta REIDRATADA e casa com o rótulo cru', () => {
   const restaurar: Array<() => void> = [];
   afterEach(() => {
     while (restaurar.length) restaurar.pop()!();
   });
 
-  it('rótulo `expected` com CPF: resposta com o token (o que o modelo viu) ou com o valor derivado resolve', async () => {
-    const fake = fakeOpenRouter({ chat: () => ({ text: 'ok' }) });
-    restaurar.push(((prev) => () => setDefaultGateway(prev))(setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }))));
+  it('o modelo viu e devolveu o token; o papel recebe o CPF original e o gabarito determinístico resolve', async () => {
+    // O "modelo" ecoa o token que recebeu (é tudo o que ele viu do CPF).
+    const fake = fakeOpenRouter({ chat: (req) => ({ text: /\[CPF_[0-9a-f]{12}\]/.exec(req.user)?.[0] ?? 'não sei' }) });
+    const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
+    restaurar.push(((prev) => () => setDefaultGateway(prev))(setDefaultGateway(gw)));
     const ledger = new BudgetLedger();
-    const token = pseudonymize(CPF_1, ledger);
-    expect(token).toMatch(/^\[CPF_[0-9a-f]{12}\]$/);
-    const contestants = ['a', 'b', 'c'].map((id) => ({ id, label: id, modelId: `x/${id}` }));
+    const pergunta = `Extraia o CPF de "titular ${CPF_1}"`;
+    const competidor = await chatCompletion({
+      apiKey: KEY,
+      modelId: 'x/a',
+      messages: [{ role: 'user', content: pergunta }],
+      sink: ledger,
+    });
+    const corpo = JSON.stringify(fake.chatRequests()[0].body);
+    expect(corpo).not.toContain(CPF_1);
+    expect(corpo).toMatch(/\[CPF_[0-9a-f]{12}\]/);
+    expect(competidor.text).toBe(CPF_1); // reidratado: o token não chega ao papel
+    expect(JSON.stringify(competidor.raw)).not.toContain(CPF_1); // o fio segue pseudonimizado
+    expect(gw.piiStats().restoredTokens).toBe(1);
+
+    const contestants = ['a', 'c'].map((id) => ({ id, label: id, modelId: `x/${id}` }));
     const resposta = (id: string, text: string) => ({
       contestantId: id,
       modelId: `x/${id}`,
@@ -1068,17 +1084,18 @@ describe('IMPL-042 (revisão) — ground truth compara no espaço dos tokens', (
       costUsd: 0,
       status: 'ok' as const,
     });
+    const antes = fake.chatRequests().length;
     const r = await judgeStageReference({
-      stage: { question: `Extraia o CPF de "titular ${CPF_1}"`, productContext: 'x', maxTokens: 50, expected: CPF_1, reference: CPF_1 },
-      responses: [resposta('a', token), resposta('b', CPF_1.replace(/\D/g, '')), resposta('c', 'não sei')],
+      stage: { question: pergunta, productContext: 'x', maxTokens: 50, expected: CPF_1, reference: CPF_1 },
+      responses: [resposta('a', competidor.text), resposta('c', 'não sei')],
       contestants,
       judgeModelIds: ['x/j'],
       apiKey: KEY,
       ctx: { sink: ledger },
     });
     expect(r.judgeModelId).toBe('ground-truth');
-    expect(r.verdictByContestant).toEqual({ a: 'resolve', b: 'resolve', c: 'nao' });
-    expect(fake.chatRequests()).toEqual([]); // determinístico: nenhum LLM
+    expect(r.verdictByContestant).toEqual({ a: 'resolve', c: 'nao' });
+    expect(fake.chatRequests().length).toBe(antes); // determinístico: nenhum LLM
   });
 });
 
@@ -1145,6 +1162,227 @@ describe('IMPL-042 (revisão) — run avulsa "redigir" revisada grava o relatór
       }
     } finally {
       silencio.forEach((s) => s.mockRestore());
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Revisão 2 — a VOLTA da pseudonimização (R-16 DEC-5) e os minors
+// ---------------------------------------------------------------------------
+
+describe('IMPL-042 (revisão 2) — reversão fora do caminho de envio: o token nunca chega ao usuário', () => {
+  const restaurar: Array<() => void> = [];
+  afterEach(() => {
+    while (restaurar.length) restaurar.pop()!();
+  });
+
+  const TEL = '(11) 3071-4455';
+  const MAIL = 'sac@lojaalfa.com.br';
+  const CNPJ = '11.444.777/0001-61';
+  const BASE =
+    'Você é o atendente virtual da Loja Alfa. Resolva trocas e devoluções com cordialidade e objetividade. ' +
+    `Para falar com um humano: SAC ${TEL} ou ${MAIL}. CNPJ ${CNPJ}.`;
+
+  it('cofre: ida e volta estáveis; token de outro escopo/inventado fica visível; o mapa não serializa', () => {
+    const v = new pii.PiiVault({ key: 'k' });
+    const r = v.redact(BASE);
+    expect(r.redactions.map((x) => x.kind).sort()).toEqual(['cnpj', 'email', 'telefone']);
+    for (const cru of [TEL, '3071-4455', MAIL, CNPJ]) expect(r.text).not.toContain(cru);
+    expect(v.rehydrate(r.text)).toEqual({ text: BASE, restored: 3 });
+    // O que o modelo costuma fazer com o token: sem colchetes, caixa trocada.
+    const tok = r.redactions.find((x) => x.kind === 'telefone')!.token;
+    const nu = tok.slice(1, -1);
+    expect(v.rehydrate(`ligue ${nu.toLowerCase()} ou ${nu}.`).text).toBe(`ligue ${TEL} ou ${TEL}.`);
+    // Desconhecido (inventado ou de OUTRA run): fica como está, nunca vira outro valor.
+    const outro = new pii.PiiVault({ key: 'k2' });
+    expect(outro.rehydrate(r.text)).toEqual({ text: r.text, restored: 0 });
+    expect(v.rehydrate('[CPF_000000000000]').restored).toBe(0);
+    // Só memória: nem JSON nem spread alcançam o mapa.
+    expect(JSON.stringify(v)).not.toMatch(/3071|lojaalfa|444\.777/);
+    expect(JSON.stringify({ ...v })).not.toMatch(/3071|lojaalfa|444\.777/);
+    expect(v.size).toBe(3);
+  });
+
+  it('reenvio re-tokeniza igual: o valor achado COM contexto volta ao token mesmo repetido SEM contexto', () => {
+    const v = new pii.PiiVault({ key: 'k' });
+    const ida = v.redact('telefone 3071-4455');
+    expect(ida.redactions).toHaveLength(1);
+    const tok = ida.redactions[0].token;
+    const resposta = v.rehydrate(`anote: ${tok}.`).text;
+    expect(resposta).toBe('anote: 3071-4455.');
+    expect(pii.scanPii(resposta).findings).toEqual([]); // sem contexto, a varredura sozinha não pegaria
+    expect(v.redact(resposta).text).toBe(`anote: ${tok}.`); // a volta não abre caminho cru
+    expect(new pii.PiiVault({ key: 'k' }).redact(resposta).text).toBe(resposta); // é o cofre do escopo que lembra
+  });
+
+  it('variação no modo padrão com contato de EMPRESA: corpo com token, variante e neverBreak com o valor original', async () => {
+    const check = pii.checkRunPii({ basePrompt: BASE });
+    expect(pii.runPiiRefusal(check)).toBeNull(); // só "aviso": nem pede revisão
+    expect(check.warnings.map((w) => w.path)).toEqual(['basePrompt']);
+
+    // O reescritor devolve o prompt que RECEBEU (com os tokens) reescrito.
+    const fake = fakeOpenRouter({
+      chat: (req) => {
+        const base = /<prompt_base>\n([\s\S]*?)\n<\/prompt_base>/.exec(req.user)?.[1] ?? '';
+        return { text: `Seja sempre cordial e preciso. ${base} Nunca invente prazos.` };
+      },
+    });
+    const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
+    restaurar.push(((prev) => () => setDefaultGateway(prev))(setDefaultGateway(gw)));
+    const silencio = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    restaurar.push(() => silencio.mockRestore());
+
+    const contestants = await generateContestants({
+      apiKey: KEY,
+      modelId: 'x/a',
+      theme: 'atendimento da Loja Alfa',
+      basePrompt: BASE,
+      includeOriginal: true,
+      techniqueIds: ['persona', 'constraints'],
+      promptOptimization: true,
+      optimizerModelId: 'x/opt',
+      contracts: { neverBreak: [TEL, MAIL] },
+      ctx: { sink: new BudgetLedger() },
+    });
+
+    const reqs = fake.chatRequests();
+    expect(reqs).toHaveLength(2); // uma por técnica, sem retry: nenhum contrato quebrou
+    for (const req of reqs) {
+      const corpo = JSON.stringify(req.body);
+      for (const cru of [TEL, '3071-4455', MAIL, CNPJ]) expect(corpo).not.toContain(cru);
+      expect(corpo).toMatch(/\[TELEFONE_[0-9a-f]{12}\]/);
+    }
+    const variantes = contestants.filter((c) => !c.isOriginal);
+    expect(variantes.map((c) => c.techniqueId)).toEqual(['persona', 'constraints']); // nenhuma rejeitada
+    for (const c of variantes) {
+      expect(c.systemPrompt).toContain(`SAC ${TEL} ou ${MAIL}. CNPJ ${CNPJ}.`);
+      expect(c.systemPrompt).not.toMatch(/(TELEFONE|EMAIL|CNPJ)_[0-9a-f]{12}/i);
+    }
+    expect(gw.piiStats().restoredTokens).toBe(6);
+  });
+
+  it('stream: o texto final e a prévia acumulada chegam reidratados; o fio segue com token', async () => {
+    const fake = fakeOpenRouter({ chat: (req) => ({ text: `Confirmado: ${/\[EMAIL_[0-9a-f]{12}\]/.exec(req.user)?.[0]}` }) });
+    const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
+    const previas: string[] = [];
+    const r = await gw.chatCompletionStream({
+      apiKey: KEY,
+      modelId: 'x/y',
+      messages: [{ role: 'user', content: `Meu e-mail: ${EMAIL_1}` }],
+      onDelta: (_d, acumulado) => previas.push(acumulado),
+    });
+    expect(JSON.stringify(fake.chatRequests()[0].body)).not.toContain(EMAIL_1);
+    expect(r.text).toBe(`Confirmado: ${EMAIL_1}`);
+    expect(previas.at(-1)).toBe(`Confirmado: ${EMAIL_1}`);
+    expect(gw.piiStats().restoredTokens).toBe(1); // a prévia não conta de novo
+  });
+});
+
+describe('IMPL-042 (revisão 2) — `library seed --file` passa pelo MESMO funil LGPD do `add`', () => {
+  it('item com CPF/celular é recusado nomeando o campo (exit 3); `--allow-pii` libera', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'pb-impl042-seed-'));
+    const antes = getDataDir();
+    const stderr: string[] = [];
+    const silencio = [
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true),
+      vi.spyOn(process.stderr, 'write').mockImplementation((c: unknown) => {
+        stderr.push(String(c));
+        return true;
+      }),
+    ];
+    try {
+      const arq = join(tmp, 'seed.json');
+      writeFileSync(
+        arq,
+        JSON.stringify([
+          { id: 'ok-1', title: 'ok', tier: 'mft', question: 'Qual o horário?', productContext: 'Das 8h às 18h.', maxTokens: 200, reference: 'Das 8h às 18h.' },
+          { id: 'pii-1', title: 'pii', tier: 'mft', question: `Meu CPF é 529.982.247-25 e o celular ${CEL_1}.`, productContext: 'x', maxTokens: 200, reference: 'y' },
+        ]),
+      );
+      const base = ['seed', '--profile', 'perfil', '--file', arq, '--data-dir', tmp];
+      await expect(cmdLibrary(base)).resolves.toBe(3);
+      expect(stderr.join('')).toMatch(/item 2: Importação bloqueada \(LGPD\).*question \(CPF \+ telefone\)/);
+      expect((await listItems('perfil')).map((i) => i.id)).toEqual(['ok-1']);
+      await expect(cmdLibrary([...base, '--allow-pii'])).resolves.toBe(0);
+      expect((await listItems('perfil')).map((i) => i.id).sort()).toEqual(['ok-1', 'pii-1']);
+    } finally {
+      silencio.forEach((s) => s.mockRestore());
+      setDataDir(antes);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('IMPL-042 (revisão 2) — RG formatado sem rótulo não é identificador forte; chave PIX', () => {
+  const veredito = (t: string) => pii.assessPii(pii.scanPii(t).findings).verdict;
+
+  it('versão/lote/valor/pedido no formato de RG não bloqueiam (nem são achados)', () => {
+    for (const t of ['Versão 1.234.567-8 do app.', 'Lote 12.345.678-9', 'R$ 1.234.567-8', 'Pedido nº 23.456.789-0']) {
+      expect(pii.scanPii(t).findings, t).toEqual([]);
+      expect(veredito(t), t).toBe('limpo');
+    }
+    // Sem rótulo nenhum: ambíguo ⇒ aviso (ainda pseudonimizado e reversível), nunca bloqueio.
+    expect(veredito('Referência 12.345.678-9 do sistema.')).toBe('aviso');
+  });
+
+  it('com rótulo de identidade (antes ou órgão depois), o RG segue bloqueando', () => {
+    for (const t of ['RG 12.345.678-9', 'identidade: 12.345.678-9', 'documento 1.234.567-X', 'portador do 12.345.678-9 SSP/SP']) {
+      expect(veredito(t), t).toBe('bloqueio');
+    }
+  });
+
+  it('celular/CPF corrido como chave PIX é detectado e bloqueia; chave aleatória (UUID) não', () => {
+    expect(veredito('Chave pix: 21988473312')).toBe('bloqueio');
+    expect(veredito('Minha chave é 48991267754, pode transferir.')).toBe('bloqueio');
+    expect(veredito('Chave PIX (CPF): 47230591805')).toBe('bloqueio');
+    expect(veredito('Chave pix aleatória: 7f3c9a2e-1b4d-4c8e-9a6f-2d1e3b4c5a6f')).toBe('limpo');
+    // Sequência de placeholder (98765432…) é detectada, mas não é número de gente.
+    const seq = pii.scanPii('Chave pix: 11987654321').findings;
+    expect(seq.map((f) => [f.kind, f.realistic])).toEqual([['telefone', false]]);
+  });
+});
+
+describe('IMPL-042 (revisão 2) — "Revisei" vale para o dado REVISADO, não para o que vier depois', () => {
+  const cfg = (question: string, productContext = 'Das 8h às 18h.') => ({
+    mode: 'compare',
+    customStages: [{ question, productContext, maxTokens: 200 }],
+  });
+
+  it('trocar o CPF ou pôr um celular novo pede nova confirmação; o mesmo CPF em outra formatação não', () => {
+    for (const lgpd of [webLgpd, nodeLgpd] as const) {
+      const revisado = lgpd.checkRunPii(cfg(`Meu CPF é ${CPF_1}.`));
+      expect(revisado.blocked).toHaveLength(1);
+      const ack = new Set(lgpd.piiReviewKeys(revisado.blocked));
+      expect([...ack].join()).not.toContain(CPF_1.replace(/\D/g, '')); // chave é hash, não o valor
+      expect(lgpd.unreviewedPii(revisado.blocked, ack)).toEqual([]);
+
+      const mesmo = lgpd.checkRunPii(cfg(`Meu CPF é ${CPF_1.replace(/\D/g, '')}.`));
+      expect(lgpd.unreviewedPii(mesmo.blocked, ack)).toEqual([]);
+
+      const trocado = lgpd.checkRunPii(cfg(`Meu CPF é ${CPF_2}.`));
+      expect(lgpd.unreviewedPii(trocado.blocked, ack).map((r) => r.path)).toEqual(['customStages[0].question']);
+
+      const acrescido = lgpd.checkRunPii(cfg(`Meu CPF é ${CPF_1}.`, `Central: ${CEL_1}.`));
+      expect(lgpd.unreviewedPii(acrescido.blocked, ack).map((r) => r.path)).toEqual(['customStages[0].productContext']);
+    }
+  });
+});
+
+describe('IMPL-042 (revisão 2) — o que saiu pseudonimizado (ou cru, no agente) é dito, nunca silencioso', () => {
+  it('describeRunPii/describePiiReport: modo agente diz que o "aviso" segue CRU no executor; nunca o valor', () => {
+    const base = 'SAC (11) 3071-4455 ou sac@lojaalfa.com.br.';
+    const chat = pii.checkRunPii({ basePrompt: base });
+    const agente = pii.checkRunPii({ basePrompt: base, agent: { harness: 'pi' } });
+    expect(pii.runPiiRefusal(agente)).toBeNull(); // só aviso: o pré-voo deixa passar…
+    expect(pii.describeRunPii(agente)).toMatch(/Modo agente.*basePrompt.*CRUS/); // …e diz a verdade
+    expect(pii.describeRunPii(chat)).toMatch(/pseudonimizados.*voltam ao valor original/);
+
+    const rep = pii.summarizeRunPii(chat)!;
+    expect(webLgpd.describePiiReport(rep)).toMatch(/basePrompt \(telefone \+ e-mail\).*pseudonimizados/);
+    expect(webLgpd.describePiiReport(rep, { agent: true })).toMatch(/Modo agente.*CRUS/);
+    expect(webLgpd.describePiiReport(undefined)).toBeNull();
+    for (const s of [pii.describeRunPii(agente)!, webLgpd.describePiiReport(rep)!]) {
+      expect(s).not.toMatch(/3071|lojaalfa/);
     }
   });
 });

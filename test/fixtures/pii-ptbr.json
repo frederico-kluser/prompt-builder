@@ -3893,6 +3893,98 @@
         }
       ],
       "realPii": true
+    },
+    {
+      "id": "rg-distrator-345",
+      "grupo": "rg-distrator",
+      "text": "Versão 1.234.567-8 do app.",
+      "pii": [],
+      "realPii": false,
+      "nota": "formato de RG com rótulo de versão"
+    },
+    {
+      "id": "rg-distrator-346",
+      "grupo": "rg-distrator",
+      "text": "Lote 12.345.678-9 do fornecedor.",
+      "pii": [],
+      "realPii": false,
+      "nota": "formato de RG com rótulo de lote"
+    },
+    {
+      "id": "rg-distrator-347",
+      "grupo": "rg-distrator",
+      "text": "Valor: R$ 1.234.567-8 (campo mal formatado).",
+      "pii": [],
+      "realPii": false,
+      "nota": "formato de RG precedido de R$"
+    },
+    {
+      "id": "rg-distrator-348",
+      "grupo": "rg-distrator",
+      "text": "Pedido nº 23.456.789-0 enviado ao estoque.",
+      "pii": [],
+      "realPii": false,
+      "nota": "formato de RG com rótulo de pedido"
+    },
+    {
+      "id": "pix-349",
+      "grupo": "pix",
+      "text": "Chave pix: 21988473312",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "21988473312"
+        }
+      ],
+      "realPii": true,
+      "nota": "celular corrido como chave PIX"
+    },
+    {
+      "id": "pix-350",
+      "grupo": "pix",
+      "text": "Pode fazer o PIX para 11974418823, é meu celular.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "11974418823"
+        }
+      ],
+      "realPii": true,
+      "nota": "celular corrido como chave PIX"
+    },
+    {
+      "id": "pix-351",
+      "grupo": "pix",
+      "text": "Minha chave é 48991267754, pode transferir.",
+      "pii": [
+        {
+          "kind": "telefone",
+          "value": "48991267754"
+        }
+      ],
+      "realPii": true,
+      "nota": "celular corrido como chave PIX"
+    },
+    {
+      "id": "pix-352",
+      "grupo": "pix",
+      "text": "Chave PIX (CPF): 47230591805",
+      "pii": [
+        {
+          "kind": "cpf",
+          "value": "47230591805"
+        }
+      ],
+      "realPii": true,
+      "nota": "CPF corrido como chave PIX"
+    },
+    {
+      "id": "pix-353",
+      "grupo": "pix",
+      "text": "Chave pix aleatória: 7f3c9a2e-1b4d-4c8e-9a6f-2d1e3b4c5a6f",
+      "pii": [],
+      "realPii": false,
+      "nota": "chave aleatória (UUID) não é dado pessoal"
     }
   ]
 }
