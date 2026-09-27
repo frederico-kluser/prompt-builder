@@ -26,8 +26,10 @@
 //   2. toda linha do conteúdo leva a calha "│ ": nenhuma linha do agente começa
 //      na coluna 0, então ele não forja marcador, cabeçalho de seção ("### 2.")
 //      nem a linha `marca-dos-dados:` do rodapé;
-//   3. o token do marcador (e variantes: `dados_do_agente`, travessões Unicode)
-//      é NEUTRALIZADO dentro do conteúdo e contado no rodapé (`neutralizacoes`).
+//   3. o token do marcador (e variantes: `dados_do_agente`, travessões Unicode,
+//      caracteres invisíveis no meio) é NEUTRALIZADO dentro do conteúdo e
+//      contado no rodapé (`neutralizacoes`). CR/U+2028/NEL/VT/FF viram '\n'
+//      antes da calha (trava 2 vale para qualquer quebra de linha).
 // Fora dos blocos, só texto produzido por CÓDIGO: cabeçalho, veredito dos checks,
 // contagens e os FATOS em JSON de campos fechados (extração em 2 estágios:
 // parsing determinístico de arquivos/hunks/checks → JSON fechado, `dossierFacts`).
@@ -113,6 +115,23 @@ const MARKER_LINE_PREFIX = 'marca-dos-dados: ';
 /** Token do marcador e variantes (sublinhado, espaço, travessões Unicode), sem caixa. */
 const MARKER_TOKEN_RE = /dados[\s_\-‐-―−]*do[\s_\-‐-―−]*agente/gi;
 
+/**
+ * Caracteres INVISÍVEIS (formato Cf + default-ignorable: U+200B/U+200D/U+2060/
+ * U+FEFF, soft hyphen, seletores de variação…). São removidos do conteúdo do
+ * agente ANTES da neutralização: senão `DADOS\u200B-DO-AGENTE` escaparia do
+ * `MARKER_TOKEN_RE` e seria lido pelo juiz como o marcador. Não são contados
+ * um a um (emoji legítimo usa ZWJ/VS16); o que conta é o token que eles
+ * escondiam, que passa a casar e é neutralizado+contado normalmente.
+ */
+const INVISIBLE_RE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
+
+/**
+ * Terminadores de linha que NÃO são '\n' (CR solto, CRLF, U+2028/U+2029, NEL,
+ * VT, FF): um modelo os lê como quebra de linha, então viram '\n' antes da
+ * calha — senão o texto depois deles "começaria na coluna 0" sem o "│ ".
+ */
+const LINE_BREAK_RE = /\r\n|[\r\u2028\u2029\u0085\v\f]/g;
+
 /** Abertura de bloco (coluna 0) — o formato é contrato com o prompt do juiz. */
 export function agentDataOpen(section: string, marker: string): string {
   return `<<<${AGENT_DATA_TAG} secao="${section}" marca="${marker}">>>`;
@@ -128,7 +147,8 @@ export function agentDataClose(marker: string): string {
  * estrutura do dossiê: o token do marcador (qualquer variante) e os
  * placeholders internos do self-hash/contador. Determinístico e contado.
  */
-function neutralizeAgentText(text: string): { text: string; count: number } {
+function neutralizeAgentText(raw: string): { text: string; count: number } {
+  const text = raw.replace(INVISIBLE_RE, '');
   let count = 0;
   const out = text
     .replace(MARKER_TOKEN_RE, () => {
@@ -148,7 +168,7 @@ function neutralizeAgentText(text: string): { text: string; count: number } {
  * ainda gera o bloco (o juiz vê que a seção existe e está vazia).
  */
 export function quoteAgentData(content: string, section: string, marker: string): { text: string; neutralized: number } {
-  const { text, count } = neutralizeAgentText(content);
+  const { text, count } = neutralizeAgentText(content.replace(LINE_BREAK_RE, '\n'));
   const body = text.split('\n').map((l) => AGENT_DATA_GUTTER + l);
   return { text: [agentDataOpen(section, marker), ...body, agentDataClose(marker)].join('\n'), neutralized: count };
 }

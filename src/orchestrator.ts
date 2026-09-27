@@ -515,6 +515,7 @@ async function runLoop(
   if (referenceJudging && precisamGabarito.length > 0) {
     const preenchidas = await generateReferences({
       stages: precisamGabarito.map((p) => p.spec),
+      stageNumbers: precisamGabarito.map((p) => p.idx + 1),
       apiKey,
       modelId: record.config.referenceModelId ?? record.config.judgeModelIds[0],
       reasoningLevel: record.config.reasoning?.judge,

@@ -16,7 +16,7 @@
 //   `<workDir>/system-prompt.txt`; o modelo pelo env `PI_MODEL_ID`. O 2º
 //   parâmetro (`PiRunOptions`) leva signal + priceTokensIn/Out do catálogo.
 // - O executor NÃO expõe os events crus do stream `--mode json` (consome-os
-//   internamente) e devolve a `trajectory` já normalizada no `outcome`. Por isso
+//   internamente) e devolve a `trajectory` já normalizada (`fromPi`) no `outcome`. Por isso
 //   este módulo usa `outcome.trajectory` direto (§10 passo 9). Um gateway
 //   injetado (fake no smoke) devolve a MESMA forma.
 // - A `CompetitorResponse.execution` é um `ExecutionRef` RELATIVO a getDataDir().

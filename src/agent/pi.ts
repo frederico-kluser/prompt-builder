@@ -42,6 +42,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import type { AgentExecutor, AgentRunOutcome, AgentRunOpts, CleanRoomReport, PrepareOpts, SelfTestOpts } from './executor.js';
 import { createJsonlSplitter } from './jsonl.js';
+import { fromPi } from './trajectory.js';
 import { spawnAgent, type SpawnAgentResult } from './spawn.js';
 import type { AgentLimits, AgentStopReason, AgentTrajectory, AgentTurn } from './types.js';
 import {
@@ -130,8 +131,16 @@ interface ParsedRun {
   parseErrors: number;
   responseIds: string[];
   settled: boolean;
-  /** Turnos individualizados p/ a trajetória mínima (normalização completa é do `trajectory.ts`). */
+  /** Turnos mínimos (só uso/stopReason) — FALLBACK se `fromPi` não montar turno nenhum. */
   turnList: AgentTurn[];
+  /**
+   * Registros crus do stream que `fromPi` (trajectory.ts) precisa para montar os
+   * passos e o texto do agente (IMPL-034 / R-14a A1). Sem isto a trajetória saía
+   * com `steps: []` e sem `text` e o dossiê do juiz ficava com as seções 5/6
+   * vazias. `message_update`/`message_start` ficam de fora: são deltas/eco que
+   * `fromPi` ignora e dominam o volume do stream.
+   */
+  rawEvents: unknown[];
 }
 
 /** Resultado de `runSimple` (spawn único, drena os dois pipes). */
@@ -330,6 +339,7 @@ function createPiParser(parsed: ParsedRun, baseOpts: PiRunOptions): (rec: unknow
   return (rec: unknown): void => {
     const r = (rec ?? {}) as Record<string, unknown>;
     const type = toStr(r.type);
+    if (type !== 'message_update' && type !== 'message_start') parsed.rawEvents.push(rec);
 
     switch (type) {
       // Next Turn — novas iterações do mesmo "turno" original (turn_start).
@@ -401,8 +411,7 @@ function createPiParser(parsed: ParsedRun, baseOpts: PiRunOptions): (rec: unknow
           responseId: rid || lastResponseId,
         });
 
-        // Turno mínimo p/ a trajetória (o texto/blocos completos, com redação e
-        // truncamento, é de responsabilidade do `trajectory.ts` da mesma onda).
+        // Turno mínimo (fallback): passos/texto vêm de `fromPi` em `makeOutcome`.
         if (type === 'turn_end') {
           parsed.turnList.push({
             index: parsed.turnList.length,
@@ -520,9 +529,8 @@ export const piExecutor: AgentExecutor = {
   /**
    * Executa UMA tarefa no pi. Spawna via `spawnAgent` (kill-tree, tetos,
    * shouldStop) com argv/env da receita, alimenta o parser JSONL a partir do
-   * stdout e devolve o `AgentRunOutcome` (trajetória mínima — a normalização
-   * completa, redação/truncamento/blocos thinking, é do `trajectory.ts` da
-   * mesma onda).
+   * stdout e devolve o `AgentRunOutcome` com a trajetória já normalizada por
+   * `fromPi` (`trajectory.ts`: passos, texto, pensamento, truncamento).
    */
   async run(opts: AgentRunOpts, base?: PiRunOptions): Promise<AgentRunOutcome> {
     const startedAt = Date.now();
@@ -705,6 +713,7 @@ export const piExecutor: AgentExecutor = {
       responseIds: [],
       settled: false,
       turnList: [],
+      rawEvents: [],
     };
     const stderrRing = new RingBuffer(STDERR_RING_BYTES);
 
@@ -872,7 +881,13 @@ export type PiRunOutcome = AgentRunOutcome & {
   signal?: string | null;
 };
 
-/** Monta o `PiRunOutcome` — trajetória mínima a partir do parser. */
+/**
+ * Monta o `PiRunOutcome`. A trajetória é NORMALIZADA por `fromPi` a partir dos
+ * registros crus (passos correlacionados toolCall↔tool_execution_*, texto e
+ * pensamento do assistente, compactações). Uso/custo e stopReason continuam os
+ * do parser AO VIVO (custo com fallback de catálogo e razão real do kill), que
+ * são os que o teto de custo e o placar já usaram.
+ */
 function makeOutcome(
   opts: AgentRunOpts,
   parsed: ParsedRun,
@@ -891,18 +906,41 @@ function makeOutcome(
     costSource: 'agent-derived' as const,
   };
 
+  const model = { provider: opts.config.provider ?? 'openrouter', id: opts.env.PI_MODEL_ID ?? '' };
+  const startedAt = new Date(Date.now() - durationMs).toISOString();
+  const finishedAt = new Date().toISOString();
+  let turns: AgentTurn[] = parsed.turnList;
+  let compactions: AgentTrajectory['compactions'] = [];
+  try {
+    const norm = fromPi({
+      events: parsed.rawEvents,
+      stopReason: proc.stopReason,
+      model,
+      parseErrors: parsed.parseErrors,
+      startedAt,
+      finishedAt,
+    });
+    // Stream sem `turn_start` (cortado antes do 1º turno): fica o mínimo do parser.
+    if (norm.turns.length > 0) turns = norm.turns;
+    compactions = norm.compactions;
+  } catch (err) {
+    // `fromPi` é defensivo e não deveria lançar; se lançar, a execução não
+    // morre por causa da trajetória — narra no stderr e fica o mínimo.
+    console.warn(`[pi] normalização da trajetória falhou: ${(err as Error).message}`);
+  }
+
   const trajectory: AgentTrajectory = {
     format: 'agent-trajectory@1',
     executor: { id: piExecutor.id, version: 'unknown' },
-    model: { provider: opts.config.provider ?? 'openrouter', id: opts.env.PI_MODEL_ID ?? '' },
-    startedAt: new Date(Date.now() - durationMs).toISOString(),
-    finishedAt: new Date().toISOString(),
+    model,
+    startedAt,
+    finishedAt,
     durationMs,
     stopReason: proc.stopReason,
-    turns: parsed.turnList,
+    turns,
     usage,
     parseErrors: parsed.parseErrors,
-    compactions: [],
+    compactions,
   };
 
   return {

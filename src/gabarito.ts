@@ -25,6 +25,12 @@ export interface GenerateReferencesParams {
   maxPricePerMTok?: { prompt?: number; completion?: number };
   /** Chamado a cada etapa concluída (sucesso ou falha); total = etapas sem gabarito. */
   onProgress?: (done: number, total: number) => void;
+  /**
+   * Número da etapa (1-based) de cada item de `stages`, para os avisos no stderr.
+   * O orquestrador passa só o SUBCONJUNTO que precisa de gabarito (IMPL-034):
+   * sem isto, a falha da etapa 2 de uma run mista sairia como "etapa 1".
+   */
+  stageNumbers?: number[];
 }
 
 // System = productContext da etapa (idêntico ao que os competidores recebem) +
@@ -61,8 +67,9 @@ Responda APENAS com a resposta de referência ideal, completa e direta, sem pre�
 export async function generateReferences(
   params: GenerateReferencesParams,
 ): Promise<StageSpec[]> {
-  const { stages, apiKey, modelId, reasoningLevel, timeoutMs, ctx, maxPricePerMTok, onProgress } =
+  const { stages, apiKey, modelId, reasoningLevel, timeoutMs, ctx, maxPricePerMTok, onProgress, stageNumbers } =
     params;
+  const etapa = (index: number): number => stageNumbers?.[index] ?? index + 1;
 
   const out = stages.slice();
   const pending = stages
@@ -93,7 +100,7 @@ export async function generateReferences(
           out[index] = { ...stage, reference };
         } else {
           console.warn(
-            `[gabarito] resposta vazia na etapa ${index + 1}; etapa segue sem referência.`,
+            `[gabarito] resposta vazia na etapa ${etapa(index)}; etapa segue sem referência.`,
           );
         }
       } catch (err) {
@@ -102,7 +109,7 @@ export async function generateReferences(
         if (isControlSignal(err)) throw err;
         // Degradação, nunca crash: sem gabarito o juiz pointwise cai para 'parcial'.
         console.warn(
-          `[gabarito] falha ao gerar referência da etapa ${index + 1}: ${(err as Error).message}`,
+          `[gabarito] falha ao gerar referência da etapa ${etapa(index)}: ${(err as Error).message}`,
         );
       } finally {
         done += 1;
