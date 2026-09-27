@@ -18,6 +18,7 @@ import { contestantsFromConfig } from './normalize';
 import { listModels } from './openrouter';
 import { BudgetLedger, isControlSignal, RunCancelled, toControlSignal } from './budget';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
+import { acquireLock } from './runLocks';
 import type {
   Contestant,
   RunConfig,
@@ -171,6 +172,13 @@ function buildRecord(config: RunConfig, opts: StartRunOpts): RunRecord {
   };
 }
 
+/**
+ * Recusa de executar (IMPL-023): o lock da run já tem dono — outra aba a está
+ * executando. Executar de novo somaria gasto na mesma key sem ninguém ver.
+ */
+export const RUN_LOCKED_ELSEWHERE =
+  'Esta run já está em execução em outra aba deste navegador — nada foi executado aqui.';
+
 /** Estado que o runLoop publica para o fechamento em executeRun. */
 interface RunState {
   /** Criado no runLoop, depois do catálogo (a reserva otimista precisa dele). */
@@ -195,6 +203,23 @@ async function executeRun(
   if (opts.signal?.aborted) root.abort(opts.signal.reason);
   else opts.signal?.addEventListener('abort', onParentAbort, { once: true });
   runControllers.set(record.id, root);
+
+  // IMPL-023 (R-10:REC-1): lock EXCLUSIVO da run (Web Locks) ANTES da primeira
+  // gravação e segurado até DEPOIS da última. Assim nenhuma outra aba vê este
+  // record 'running' sem dono (não o marca órfão) e nenhuma o executa de novo.
+  // Se a aba morrer, o navegador solta o lock e a próxima carga marca a órfã.
+  const lock = await acquireLock('run', record.id);
+  if (!lock) {
+    // Outra aba é a dona: NÃO grava (o record no disco é dela) e não executa.
+    runControllers.delete(record.id);
+    opts.signal?.removeEventListener('abort', onParentAbort);
+    record.status = 'error';
+    record.error = RUN_LOCKED_ELSEWHERE;
+    record.finishedAt = nowIso();
+    console.warn(`[bench ${record.id}] ${RUN_LOCKED_ELSEWHERE}`);
+    emitEvent({ type: 'run.error', runId: record.id, error: record.error });
+    return record;
+  }
 
   const state: RunState = {};
   try {
@@ -245,6 +270,9 @@ async function executeRun(
   } finally {
     runControllers.delete(record.id);
     opts.signal?.removeEventListener('abort', onParentAbort);
+    // Só depois do checkpoint final (os `await saveRun` acima): soltar antes
+    // abriria a janela em que outra aba vê 'running' sem dono.
+    lock.release();
   }
   return record;
 }

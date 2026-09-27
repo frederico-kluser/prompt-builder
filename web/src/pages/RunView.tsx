@@ -9,11 +9,12 @@ import {
   cancelRun,
   downloadScenarioPack,
   fetchRun,
+  markRunInterrupted,
   normalizeContestants,
   openRunStream,
   runMode,
 } from '../api';
-import { CancelHoldButton, StopBanner } from '../components/RunControls';
+import { CancelHoldButton, OwnershipBanner, StopBanner } from '../components/RunControls';
 import { StorageNotice } from '../components/StorageNotice';
 import {
   Accordion,
@@ -129,12 +130,16 @@ export function RunView() {
   const [drawerVariant, setDrawerVariant] = useState<string | null>(null);
   // Cancelar pedido: esconde o botão até o run.finished chegar.
   const [cancelRequested, setCancelRequested] = useState(false);
+  // IMPL-023: a run 'running' aberta aqui roda em OUTRA aba (ou o navegador não
+  // tem Web Locks para saber). Some quando o record chega terminal.
+  const [ownership, setOwnership] = useState<'elsewhere' | 'unsupported' | null>(null);
 
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
     setDuelProgress(null);
     setCancelRequested(false);
+    setOwnership(null);
 
     fetchRun(id)
       .then((r) => !cancelled && setRecord(r))
@@ -144,8 +149,13 @@ export function RunView() {
       id,
       (event) => {
         if (cancelled) return;
+        if (event.type === 'ownership') {
+          setOwnership(event.state);
+          return;
+        }
         if (event.type === 'snapshot') {
           setRecord(event.record);
+          if (event.record.status !== 'running') setOwnership(null);
           void cacheRun(event.record);
           return;
         }
@@ -375,6 +385,18 @@ export function RunView() {
         subject="run"
         info={record}
         legacyText="Run interrompida — o servidor reiniciou enquanto ela rodava."
+      />
+      <OwnershipBanner
+        className="mt-4"
+        subject="run"
+        state={isRunning ? ownership : null}
+        onMarkInterrupted={() => {
+          void markRunInterrupted(record.id).then((r) => {
+            if (!r) return;
+            setRecord(r);
+            if (r.status !== 'running') setOwnership(null);
+          });
+        }}
       />
       {/* IMPL-022: gravação local que falhou (run só na memória da aba) ou
           persistência negada pelo navegador — visível, nunca só no console. */}

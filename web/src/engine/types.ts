@@ -538,8 +538,12 @@ export interface RunRecord {
   budgetExhausted?: boolean;
   /** Fase em que a run parou (so quando parou cedo). */
   stoppedAtPhase?: RunPhase;
-  /** Por que parou cedo. Discrimina o status 'aborted'. */
-  stoppedReason?: 'budget' | 'cancelled';
+  /**
+   * Por que parou cedo. Discrimina o status 'aborted'. 'orphan' (IMPL-023, só
+   * na SPA): a aba que executava foi fechada/recarregada/travou — o lock da run
+   * (Web Locks) ficou livre com o record ainda 'running'.
+   */
+  stoppedReason?: 'budget' | 'cancelled' | 'orphan';
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -582,7 +586,7 @@ export interface SessionRecord {
   budgetUsd?: number;
   budgetExhausted?: boolean;
   stoppedAtPhase?: RunPhase;
-  stoppedReason?: 'budget' | 'cancelled';
+  stoppedReason?: 'budget' | 'cancelled' | 'orphan';
   /** Iteracao em que o orcamento/cancelamento interrompeu a sessao. */
   stoppedAtIteration?: number;
   /**

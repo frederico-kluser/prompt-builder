@@ -48,6 +48,18 @@ import {
 } from './engine/promptStore';
 import { parseScenarioPack, SCENARIO_PACK_FORMAT, SCENARIO_PACK_FORMAT_LEGACY } from './engine/scenarioPack';
 import { parseArenaConfig, ARENA_CONFIG_FORMAT, type ArenaConfigFile } from './engine/configFile';
+import { isHeldHere } from './engine/runLocks';
+import {
+  markRunInterrupted as engineMarkRunInterrupted,
+  markSessionInterrupted as engineMarkSessionInterrupted,
+  reconcileRun,
+  reconcileSession,
+  sweepOrphans,
+  watchRun,
+  watchSession,
+  type OrphanCheck,
+  type SweepResult,
+} from './engine/orphans';
 
 export interface OpenRouterModel {
   id: string;
@@ -361,8 +373,12 @@ export interface RunRecord {
   budgetExhausted?: boolean;
   /** Fase em que a run parou (só quando parou cedo). */
   stoppedAtPhase?: RunPhase;
-  /** Por que parou cedo. Discrimina o status 'aborted'. */
-  stoppedReason?: 'budget' | 'cancelled';
+  /**
+   * Por que parou cedo. Discrimina o status 'aborted'. 'orphan' (IMPL-023, só
+   * na SPA): a aba que executava foi fechada/recarregada/travou — o lock da run
+   * (Web Locks) ficou livre com o record ainda 'running'.
+   */
+  stoppedReason?: 'budget' | 'cancelled' | 'orphan';
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -643,7 +659,7 @@ export interface SessionRecord {
   budgetUsd?: number;
   budgetExhausted?: boolean;
   stoppedAtPhase?: RunPhase;
-  stoppedReason?: 'budget' | 'cancelled';
+  stoppedReason?: 'budget' | 'cancelled' | 'orphan';
   /** Iteração em que o orçamento/cancelamento interrompeu a sessão. */
   stoppedAtIteration?: number;
   /** true = o campeão NÃO passou pelo holdout (pulado): não validado contra sobreajuste. */
@@ -717,8 +733,11 @@ export async function fetchSession(id: string): Promise<SessionRecord> {
     return live as unknown as SessionRecord;
   }
   const rec = await loadSession(id);
-  if (rec) return rec as unknown as SessionRecord;
-  throw new Error('Sessão não encontrada');
+  if (!rec) throw new Error('Sessão não encontrada');
+  // IMPL-023: 'running' que NÃO roda nesta aba — o lock decide se é órfã.
+  if (rec.status !== 'running' || isHeldHere('session', id)) return rec as unknown as SessionRecord;
+  const chk = await reconcileSession(id);
+  return (chk.state === 'missing' ? rec : chk.record) as unknown as SessionRecord;
 }
 
 export interface SessionSummary {
@@ -733,6 +752,7 @@ export interface SessionSummary {
 }
 
 export async function fetchSessions(): Promise<SessionSummary[]> {
+  await sweepOrphansShared(); // IMPL-023: o histórico não lista treino zumbi
   return await engineListSessions<SessionSummary>();
 }
 
@@ -745,16 +765,22 @@ export function openSessionStream(
   const live = getSessionRecord(id);
   if (live) {
     onEvent({ type: 'snapshot', record: live });
-    if (['finished', 'error', 'aborted'].includes(live.status)) return () => undefined;
+    if (live.status !== 'running') return () => undefined;
     return subscribeSession(id, onEvent);
   }
-  let active = true;
-  void loadSession(id).then((rec) => {
-    if (active && rec) onEvent({ type: 'snapshot', record: rec });
-  });
-  return () => {
-    active = false;
-  };
+  // Roda nesta aba mas o record vivo ainda não foi publicado: os eventos vêm do motor.
+  if (isHeldHere('session', id)) return subscribeSession(id, onEvent);
+  // IMPL-023: sem record vivo aqui — o disco é cache; o lock diz se ainda roda.
+  const ctrl = new AbortController();
+  void followStoredRecord<SessionRecord>(
+    () => loadSession(id) as Promise<SessionRecord | null>,
+    () => reconcileSession(id) as Promise<OrphanCheck<SessionRecord>>,
+    () => watchSession(id, ctrl.signal) as Promise<OrphanCheck<SessionRecord> | null>,
+    (rec) => onEvent({ type: 'snapshot', record: rec }),
+    (state) => onEvent({ type: 'ownership', state } satisfies OwnershipEvent),
+    ctrl.signal,
+  );
+  return () => ctrl.abort();
 }
 
 // -------------- Biblioteca de prompts (IndexedDB, client-only) --------------
@@ -963,15 +989,22 @@ export async function readImportFile(
 // dois idbPut soltos num Promise.all, com a falha engolida dentro do idbPut.
 // 'relaxed': é re-gravação de cache (o motor já fez o checkpoint 'strict').
 
+// IMPL-023: só a aba DONA (que segura o lock) grava um record 'running'. Outra
+// aba que abre a mesma run tem uma cópia velha do disco; regravá-la podia
+// passar por cima do checkpoint final da dona e ressuscitar um 'running' que a
+// próxima carga marcaria, por engano, como órfão.
+
 /** Persiste uma run completa no cache local (chamado ao carregar/finalizar). */
 export async function cacheRun(r: RunRecord): Promise<void> {
   if (!r?.id) return;
+  if (r.status === 'running' && !isHeldHere('run', r.id)) return;
   await engineSaveRun(r as never, { durability: 'relaxed' });
 }
 
 /** Persiste uma sessão completa no cache local. */
 export async function cacheSession(s: SessionRecord): Promise<void> {
   if (!s?.id) return;
+  if (s.status === 'running' && !isHeldHere('session', s.id)) return;
   await engineSaveSession(s as never, { durability: 'relaxed' });
 }
 
@@ -1015,6 +1048,7 @@ export {
 } from './storageHealth';
 
 export async function fetchRuns(): Promise<RunSummary[]> {
+  await sweepOrphansShared(); // IMPL-023: o histórico não lista run zumbi
   return await engineListRuns<RunSummary>();
 }
 
@@ -1025,11 +1059,13 @@ export async function fetchRun(id: string): Promise<RunRecord> {
     return live as unknown as RunRecord;
   }
   const rec = await loadRun(id);
-  if (rec) return rec as unknown as RunRecord;
-  throw new Error('Run nao encontrada');
+  if (!rec) throw new Error('Run nao encontrada');
+  // IMPL-023: 'running' que NÃO roda nesta aba — o lock decide se é órfã
+  // (recarregar no meio da run reabre aborted/orphan, sem intervenção).
+  if (rec.status !== 'running' || isHeldHere('run', id)) return rec as unknown as RunRecord;
+  const chk = await reconcileRun(id);
+  return (chk.state === 'missing' ? rec : chk.record) as unknown as RunRecord;
 }
-
-const TERMINAL_RUN_STATUSES = ['finished', 'error', 'aborted'];
 
 export function openRunStream(
   id: string,
@@ -1042,20 +1078,125 @@ export function openRunStream(
   const live = getRunRecord(id);
   if (live) {
     onEvent({ type: 'snapshot', record: live });
-    if (TERMINAL_RUN_STATUSES.includes(live.status)) return () => undefined;
+    if (live.status !== 'running') return () => undefined;
     return subscribeRun(id, onEvent);
   }
-  let active = true;
-  void loadRun(id).then((rec) => {
-    if (!active || !rec) return;
+  // Roda nesta aba mas o record vivo ainda não foi publicado: os eventos vêm do motor.
+  if (isHeldHere('run', id)) return subscribeRun(id, onEvent);
+  // IMPL-023: sem record vivo aqui — o disco é cache; o lock diz se ainda roda.
+  const ctrl = new AbortController();
+  const emitRecord = (rec: RunRecord): void => {
     onEvent({ type: 'snapshot', record: rec });
     if (rec.status === 'error') {
       onEvent({ type: 'run.error', runId: id, error: rec.error ?? 'Run terminou com erro.' });
-    } else if (TERMINAL_RUN_STATUSES.includes(rec.status)) {
+    } else if (rec.status !== 'running') {
       onEvent({ type: 'run.finished', runId: id, record: rec });
     }
-  });
-  return () => {
-    active = false;
   };
+  void followStoredRecord<RunRecord>(
+    () => loadRun(id) as Promise<RunRecord | null>,
+    () => reconcileRun(id) as Promise<OrphanCheck<RunRecord>>,
+    () => watchRun(id, ctrl.signal) as Promise<OrphanCheck<RunRecord> | null>,
+    emitRecord,
+    (state) => onEvent({ type: 'ownership', state } satisfies OwnershipEvent),
+    ctrl.signal,
+  );
+  return () => ctrl.abort();
+}
+
+// -------------- Runs de outra aba e órfãs (IMPL-023, Web Locks) --------------
+
+/**
+ * Evento SÓ da UI (não vem do motor): a run/sessão 'running' aberta nesta tela
+ * não roda nesta aba. `elsewhere` = outra aba segura o lock (a tela mostra o
+ * último salvamento e se atualiza sozinha no fim); `unsupported` = navegador
+ * sem Web Locks — não dá para saber se ainda roda (a UI oferece marcar como
+ * interrompida).
+ */
+export interface OwnershipEvent {
+  type: 'ownership';
+  state: 'elsewhere' | 'unsupported';
+}
+
+/**
+ * Record lido do disco (não roda nesta aba): se está 'running', o lock decide —
+ * órfã vira aborted(orphan) na hora; com dono vivo, espera o dono soltar (fim
+ * da run OU morte da aba dela) e publica o record final. Sem polling, sem
+ * heartbeat: a espera é a fila do próprio Web Locks.
+ */
+async function followStoredRecord<R extends { status: string }>(
+  load: () => Promise<R | null>,
+  reconcile: () => Promise<OrphanCheck<R>>,
+  watch: () => Promise<OrphanCheck<R> | null>,
+  emit: (rec: R) => void,
+  ownership: (state: OwnershipEvent['state']) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  try {
+    const rec = await load();
+    if (signal.aborted || !rec) return;
+    if (rec.status !== 'running') {
+      emit(rec);
+      return;
+    }
+    const chk = await reconcile();
+    if (signal.aborted || chk.state === 'missing') return;
+    emit(chk.record);
+    if (chk.state === 'unsupported') ownership('unsupported');
+    if (chk.state !== 'alive') return;
+    ownership('elsewhere');
+    const fim = await watch();
+    if (signal.aborted || !fim || fim.state === 'missing') return;
+    emit(fim.record);
+  } catch (err) {
+    console.warn('[locks] falha ao acompanhar record salvo:', err);
+  }
+}
+
+let sweepEmVoo: Promise<SweepResult | null> | null = null;
+
+/** Uma varredura por vez nesta aba (a lista de runs e a de sessões pedem juntas). */
+function sweepOrphansShared(): Promise<SweepResult | null> {
+  sweepEmVoo ??= sweepOrphans()
+    .catch((err: unknown) => {
+      console.warn('[locks] varredura de órfãs falhou:', err);
+      return null;
+    })
+    .finally(() => {
+      sweepEmVoo = null;
+    });
+  return sweepEmVoo;
+}
+
+let orphanWatchStarted = false;
+
+/**
+ * Chamado UMA vez na carga da página (main.tsx): marca as órfãs sem ninguém
+ * precisar abrir a run e deixa esta aba esperando na fila do lock das runs que
+ * rodam em OUTRAS abas — se uma delas for fechada, a run vira órfã na hora.
+ */
+export function startOrphanWatch(): void {
+  if (orphanWatchStarted) return;
+  orphanWatchStarted = true;
+  void sweepOrphansShared().then((r) => {
+    if (!r) return;
+    for (const id of r.aliveRuns) void watchRun(id).catch(() => undefined);
+    for (const id of r.aliveSessions) void watchSession(id).catch(() => undefined);
+  });
+}
+
+/**
+ * Sem Web Locks não há detecção automática: o usuário marca a run como
+ * interrompida (a aba que a executava já foi fechada). Com Web Locks só marca
+ * se o lock estiver livre — nunca derruba uma run viva.
+ */
+export async function markRunInterrupted(id: string): Promise<RunRecord | null> {
+  const chk = await engineMarkRunInterrupted(id);
+  return chk.state === 'missing' ? null : (chk.record as unknown as RunRecord);
+}
+
+/** Idem para uma sessão de treino. */
+export async function markSessionInterrupted(id: string): Promise<SessionRecord | null> {
+  const chk = await engineMarkSessionInterrupted(id);
+  return chk.state === 'missing' ? null : (chk.record as unknown as SessionRecord);
 }

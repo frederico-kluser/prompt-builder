@@ -63,6 +63,11 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   types: 'mirror',
   // Client-only de propósito.
   promptStore: 'web-only',
+  // IMPL-023 (R-10:REC-1): Web Locks por run/sessão e detecção de órfãs no
+  // carregamento. Só existe no navegador — no Node a run vive no processo e a
+  // órfã é detectada no boot do servidor (src/storage.ts markOrphansAsAborted).
+  runLocks: 'web-only',
+  orphans: 'web-only',
 };
 
 /**

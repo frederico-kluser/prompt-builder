@@ -1,4 +1,5 @@
 import { HoldToConfirmButton } from '@/components/motion-ui/hold-to-confirm';
+import { Button } from '@/components/ui/button';
 import { Banner } from './primitives';
 import type { RunPhase } from '../api';
 
@@ -40,7 +41,7 @@ export function CancelHoldButton({ onConfirm, label = 'Segure para cancelar' }: 
 
 interface StopInfo {
   status: string;
-  stoppedReason?: 'budget' | 'cancelled';
+  stoppedReason?: 'budget' | 'cancelled' | 'orphan';
   stoppedAtPhase?: RunPhase;
   budgetUsd?: number;
   totalCostUsd: number;
@@ -51,7 +52,8 @@ interface StopInfo {
 
 /**
  * Aviso de parada. `aborted` sem `stoppedReason` é o caso legado (a aba/servidor
- * fechou no meio): a mensagem antiga continua valendo para ele.
+ * fechou no meio): a mensagem antiga continua valendo para ele. `orphan`
+ * (IMPL-023) é o mesmo acontecimento, agora DETECTADO pelo lock da run.
  */
 export function StopBanner({
   info,
@@ -92,5 +94,63 @@ export function StopBanner({
       </Banner>
     );
   }
+  if (info.stoppedReason === 'orphan') {
+    return (
+      <Banner tone="warn" className={className}>
+        <strong>{subject === 'run' ? 'Run interrompida' : 'Treino interrompido'}:</strong> a aba que{' '}
+        {subject === 'run' ? 'a executava' : 'o executava'} foi fechada, recarregada ou travou antes do fim. Fica o
+        que foi salvo até o último checkpoint; cenários sem julgamento ficam fora do placar e das médias. O gasto
+        registrado ({usd(info.totalCostUsd)}) vai até esse checkpoint — chamadas em voo no fechamento podem ter
+        sido cobradas sem aparecer aqui (confira o painel do OpenRouter).
+      </Banner>
+    );
+  }
   return <Banner className={className}>{legacyText}</Banner>;
+}
+
+/**
+ * A run/sessão 'running' aberta nesta tela NÃO roda nesta aba (IMPL-023).
+ * `elsewhere`: outra aba segura o lock — a tela mostra o último salvamento e se
+ * atualiza sozinha quando ela terminar (ou se aquela aba for fechada).
+ * `unsupported`: navegador sem Web Locks — não dá para saber se ainda roda;
+ * o usuário pode marcá-la como interrompida.
+ */
+export function OwnershipBanner({
+  state,
+  subject,
+  onMarkInterrupted,
+  className,
+}: {
+  state: 'elsewhere' | 'unsupported' | null;
+  subject: 'run' | 'treino';
+  onMarkInterrupted?: () => void;
+  className?: string;
+}) {
+  if (!state) return null;
+  const aRun = subject === 'run' ? 'Esta run' : 'Este treino';
+  if (state === 'elsewhere') {
+    return (
+      <Banner className={className}>
+        <strong>{aRun} está rodando em outra aba deste navegador.</strong> Acompanhe e cancele por lá; aqui
+        aparece o último salvamento, e esta tela se atualiza sozinha quando {subject === 'run' ? 'ela' : 'ele'}{' '}
+        terminar — ou vira “interrompid{subject === 'run' ? 'a' : 'o'}” se aquela aba for fechada.
+      </Banner>
+    );
+  }
+  return (
+    <Banner tone="warn" className={className}>
+      <span>
+        <strong>Não dá para saber se {aRun.toLowerCase()} ainda roda:</strong> este navegador não oferece Web Locks
+        (exclusão entre abas). Se a aba que {subject === 'run' ? 'a' : 'o'} executava já foi fechada ou recarregada,
+        marque {subject === 'run' ? 'a run' : 'o treino'} como interrompid{subject === 'run' ? 'a' : 'o'}.
+      </span>
+      {onMarkInterrupted && (
+        <div className="mt-2">
+          <Button variant="outline" size="sm" onClick={onMarkInterrupted}>
+            Marcar como interrompid{subject === 'run' ? 'a' : 'o'}
+          </Button>
+        </div>
+      )}
+    </Banner>
+  );
 }

@@ -7,6 +7,7 @@ import {
   canCancelSession,
   cancelSession,
   fetchSession,
+  markSessionInterrupted,
   openSessionStream,
   fetchRun,
   getLiveRun,
@@ -42,7 +43,7 @@ import {
   Tag,
 } from '../components/primitives';
 import { useToasts } from '../components/AppShell';
-import { CancelHoldButton, StopBanner } from '../components/RunControls';
+import { CancelHoldButton, OwnershipBanner, StopBanner } from '../components/RunControls';
 import { StorageNotice } from '../components/StorageNotice';
 import { cn } from '@/lib/utils';
 
@@ -425,12 +426,15 @@ export function TrainingView() {
   const [duelProgress, setDuelProgress] = useState<{ done: number; total: number } | null>(null);
   // Cancelar pedido: esconde o botão até o session.finished chegar.
   const [cancelRequested, setCancelRequested] = useState(false);
+  // IMPL-023: o treino 'running' aberto aqui roda em OUTRA aba (ou sem Web Locks).
+  const [ownership, setOwnership] = useState<'elsewhere' | 'unsupported' | null>(null);
 
   // Efeito A: eventos da SESSAO (iteracoes, snapshot, fim).
   useEffect(() => {
     if (!sessionId) return;
     let cancelled = false;
     setCancelRequested(false);
+    setOwnership(null);
     const refetch = () =>
       fetchSession(sessionId)
         .then((s) => {
@@ -448,9 +452,14 @@ export function TrainingView() {
       sessionId,
       (event) => {
         if (cancelled) return;
+        if (event.type === 'ownership') {
+          setOwnership(event.state);
+          return;
+        }
         if (event.type === 'snapshot') {
           const rec = event.record as SessionRecord;
           setSession(rec);
+          if (rec.status !== 'running') setOwnership(null);
           void cacheSession(rec);
           const doneN = rec.bestPromptByIteration.length;
           const cur = rec.runIds.length > doneN ? rec.runIds[rec.runIds.length - 1] : undefined;
@@ -698,6 +707,18 @@ export function TrainingView() {
         subject="treino"
         info={session}
         legacyText="Treino interrompido — o servidor reiniciou enquanto ele rodava."
+      />
+      <OwnershipBanner
+        className="mt-4"
+        subject="treino"
+        state={isRunning ? ownership : null}
+        onMarkInterrupted={() => {
+          void markSessionInterrupted(session.id).then((s) => {
+            if (!s) return;
+            setSession(s);
+            if (s.status !== 'running') setOwnership(null);
+          });
+        }}
       />
       {/* IMPL-022: a sessão e as runs das rodadas gravam no IndexedDB. */}
       <StorageNotice

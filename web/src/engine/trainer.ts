@@ -8,6 +8,7 @@ import { planHalving, survivorsOf } from '../../../src/engine/halving.js';
 import { seedFromId } from '../../../src/engine/duelCore.js';
 import { emitSessionEvent } from './events';
 import { saveSession } from './storage';
+import { acquireLock } from './runLocks';
 import { computeMedals } from './medals';
 import { judgeScoreFromVerdicts, pickWinner, type RankEntry } from './rank';
 import { MIN_HOLDOUT_SCENARIOS, splitHoldout } from './holdout';
@@ -232,9 +233,21 @@ export async function startTraining(
   if (opts.signal?.aborted) root.abort(opts.signal.reason);
   else opts.signal?.addEventListener('abort', onParentAbort, { once: true });
   sessionControllers.set(sessionId, root);
+  // IMPL-023 (R-10:REC-1): lock EXCLUSIVO da sessão (Web Locks) antes da 1ª
+  // gravação, solto só depois da última (no `finally` do laço). Aba fechada ou
+  // recarregada => o navegador solta o lock e a próxima carga marca a sessão
+  // órfã (aborted + stoppedReason 'orphan'). As runs das iterações seguram o
+  // lock PRÓPRIO (orchestrator.executeRun).
+  const lock = await acquireLock('session', sessionId);
+  if (!lock) {
+    sessionControllers.delete(sessionId);
+    opts.signal?.removeEventListener('abort', onParentAbort);
+    throw new Error('Esta sessão de treino já está em execução em outra aba deste navegador.');
+  }
   const liberar = (): void => {
     sessionControllers.delete(sessionId);
     opts.signal?.removeEventListener('abort', onParentAbort);
+    lock.release();
   };
   // Persiste ANTES de responder ao cliente, para a TrainingView nunca pegar 404.
   await saveSession(record);
@@ -613,7 +626,11 @@ async function trainingLoop(
       // 5) Linhagem: registra o CAMPEAO POS-GATE de cada iteracao (score e
       //    medalhas seguem de computeMedals apenas para a UI — a decisao de
       //    promocao e do gate por margem, nao do quadro de medalhas).
-      const medalRow = computeMedals(runRec).find((r) => r.contestantId === championIdInLastRun);
+      // Cast: o RunRecord do web aceita stoppedReason 'orphan' (IMPL-023, só
+      // SPA) e o de src/ ainda não — uma run desta aba nunca é órfã aqui.
+      const medalRow = computeMedals(runRec as Parameters<typeof computeMedals>[0]).find(
+        (r) => r.contestantId === championIdInLastRun,
+      );
       record.bestPromptByIteration.push({
         iteration: i,
         runId: runRec.id,
