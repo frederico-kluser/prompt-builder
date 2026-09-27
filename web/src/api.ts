@@ -6,7 +6,7 @@ import type { CostEntry, CostRole, RunCtx } from '../../src/types.js';
 export type { CostEntry, CostRole } from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelReasoningMeta } from './modelCaps';
-import { loadLgpdData, type LgpdData } from './lgpd';
+import { checkImportPii, loadLgpdData, type LgpdData, type PiiImportCheck } from './lgpd';
 import { startRun } from './engine/orchestrator';
 import { startTraining } from './engine/trainer';
 import { generateContestants, generateBasePrompt as engineGenerateBasePrompt } from './engine/variator';
@@ -108,6 +108,8 @@ export interface RunConfig {
   iterations?: number;
   /** Perfil de conformidade LGPD (consultivo; gravado no record). Ausente = "livre". */
   compliance?: { area: string; includeRessalvas: boolean };
+  /** Dado pessoal (IMPL-042): 'redact' (default) ou 'synthetic' ("so sintetico", recusa dado de aparencia real). */
+  piiMode?: 'redact' | 'synthetic';
   /** Etapas fornecidas pelo usuario (JSON); pulam o datagen e fixam `stages`. */
   customStages?: StageSpec[];
   // evolucao de prompts / compare-llms:
@@ -786,10 +788,15 @@ function parseRawStages(
  * `prompt-builder-pack@1`/`ai-benchmark-pack@1` (pacote de cenarios) ou um array cru de etapas
  * (`[{question, productContext, rubric?, maxTokens?, reference?}]`, ou `{stages:[…]}`).
  * NUNCA lanca: erro vira `{ ok: false, error }` em PT-BR.
+ *
+ * LGPD (IMPL-042): os TRES formatos passam pela varredura de dado pessoal — aparencia
+ * de dado real bloqueia com aviso nomeando o campo (`pii` preenchido). `allowPii` =
+ * o usuario revisou e confirmou; os identificadores seguem pseudonimizados no envio.
  */
 export async function readImportFile(
   file: File,
-): Promise<{ ok: true; data: ImportedFile } | { ok: false; error: string }> {
+  opts: { allowPii?: boolean } = {},
+): Promise<{ ok: true; data: ImportedFile } | { ok: false; error: string; pii?: PiiImportCheck }> {
   let json: unknown;
   try {
     json = JSON.parse(await file.text());
@@ -802,13 +809,13 @@ export async function readImportFile(
       ? (json as Record<string, unknown>).format
       : undefined;
   if (formato === ARENA_CONFIG_FORMAT) {
-    const r = parseArenaConfig(json);
+    const r = parseArenaConfig(json, opts);
     return r.ok ? { ok: true, data: { kind: 'config', config: r.config } } : r;
   }
   // Aceita tambem o nome legado: pacotes ja exportados pelo usuario nao podem
   // deixar de abrir por causa de uma troca de marca.
   if (formato === SCENARIO_PACK_FORMAT || formato === SCENARIO_PACK_FORMAT_LEGACY) {
-    const r = parseScenarioPack(json);
+    const r = parseScenarioPack(json, opts);
     return r.ok ? { ok: true, data: { kind: 'pack', pack: r.pack } } : r;
   }
   const arr = Array.isArray(json)
@@ -818,7 +825,12 @@ export async function readImportFile(
       : null;
   if (arr) {
     const r = parseRawStages(arr);
-    return r.ok ? { ok: true, data: { kind: 'stages', stages: r.stages } } : r;
+    if (!r.ok) return r;
+    if (!opts.allowPii) {
+      const pii = checkImportPii(r.stages, 'cenarios');
+      if (!pii.ok) return { ok: false, error: pii.message!, pii };
+    }
+    return { ok: true, data: { kind: 'stages', stages: r.stages } };
   }
   return {
     ok: false,

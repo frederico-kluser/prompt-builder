@@ -174,6 +174,9 @@ const baseFields = {
   // Perfil de conformidade LGPD escolhido no assistente (CONSULTIVO: gravado
   // para transparência/rastreabilidade, não força roteamento). Ausente = "livre".
   compliance: z.object({ area: z.string().min(1), includeRessalvas: z.boolean() }).optional(),
+  // Dado pessoal (IMPL-042): 'synthetic' recusa a run com dado de aparencia
+  // real; a pseudonimizacao no gateway vale nos dois modos.
+  piiMode: z.enum(['redact', 'synthetic']).optional(),
   // Etapas fornecidas pelo usuario (JSON): pulam o datagen. Quando presentes,
   // `stages` e forcado ao tamanho desta lista (ver preprocess do runConfigSchema).
   customStages: z.array(stageSpecSchema).min(1).max(50).optional(),

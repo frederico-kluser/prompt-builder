@@ -10,6 +10,7 @@
 // erro em PT-BR legível, para a UI exibir num banner sem derrubar nada.
 
 import { z } from 'zod';
+import { checkImportPii, type PiiImportCheck } from './engine/pii.js';
 import { getTechnique } from './techniques.js';
 import type { ReasoningLevel } from './types.js';
 import type { AgentLimits } from './agent/types.js';
@@ -139,6 +140,8 @@ export interface ArenaConfigFile {
   judging?: { reference?: boolean; passes?: 1 | 2 };
   limits?: { maxOutputTokens?: number; timeoutMs?: number; concurrency?: number }; // int positivos
   compliance?: { area: string; includeRessalvas: boolean };
+  /** Dado pessoal (IMPL-042): 'synthetic' = "só sintético" (recusa dado de aparência real). */
+  piiMode?: 'redact' | 'synthetic';
 }
 
 // ----------------------------------------------------------------------------
@@ -454,6 +457,7 @@ const arenaConfigSchema = z
           'compliance deve ser um objeto com { area, includeRessalvas }',
         )
         .optional(),
+      piiMode: z.enum(['redact', 'synthetic'], "piiMode deve ser 'redact' ou 'synthetic'").optional(),
     },
     'O arquivo deve ser um objeto de configuração',
   )
@@ -553,7 +557,8 @@ function descreverIssues(error: z.ZodError): string {
  */
 export function parseArenaConfig(
   json: unknown,
-): { ok: true; config: ArenaConfigFile } | { ok: false; error: string } {
+  opts: { allowPii?: boolean } = {},
+): { ok: true; config: ArenaConfigFile } | { ok: false; error: string; pii?: PiiImportCheck } {
   // O discriminador `format` é checado à mão ANTES do zod, para garantir a
   // mensagem exata quando o arquivo não é uma configuração (ou é de outra versão).
   const formato =
@@ -567,6 +572,13 @@ export function parseArenaConfig(
   }
   const result = arenaConfigSchema.safeParse(json);
   if (!result.success) return { ok: false, error: descreverIssues(result.error) };
+  // LGPD (IMPL-042): dado pessoal de aparência real BLOQUEIA a importação com
+  // aviso nomeando o campo — nunca corrige em silêncio. `allowPii` = o usuário
+  // revisou e confirmou (os identificadores seguem pseudonimizados no envio).
+  if (!opts.allowPii) {
+    const pii = checkImportPii(result.data);
+    if (!pii.ok) return { ok: false, error: pii.message!, pii };
+  }
   return { ok: true, config: result.data };
 }
 

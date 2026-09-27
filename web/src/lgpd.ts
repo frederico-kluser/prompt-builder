@@ -19,8 +19,11 @@ import {
   type LgpdData,
   type RunComplianceCheck,
 } from '../../src/engine/lgpdCore.js';
+import { assertRunPii, type PiiConfigLike } from '../../src/engine/pii.js';
 
 export * from '../../src/engine/lgpdCore.js';
+// Cascata de dado pessoal PT-BR (IMPL-042) — shim do núcleo puro, igual ao Node.
+export * from '../../src/engine/pii.js';
 
 let cache: Promise<LgpdData> | null = null;
 let override: LgpdData | null = null;
@@ -56,13 +59,22 @@ export function overrideLgpdData(data: LgpdData | null): () => void {
   };
 }
 
-/** Pré-voo da run do motor client-side (espelho de `enforceRunCompliance` do Node). */
+/**
+ * Pré-voo da run do motor client-side (espelho de `enforceRunCompliance` do
+ * Node): allowlist LGPD na área sensível + modo "só sintético" (IMPL-042).
+ * `nested` = run de iteração/triagem/holdout de uma sessão (o config da
+ * sessão já passou pelo pré-voo de dado pessoal).
+ */
 export async function enforceRunCompliance(
-  cfg: ComplianceConfigLike,
+  cfg: ComplianceConfigLike & PiiConfigLike,
   now: Date | number = Date.now(),
+  opts: { nested?: boolean } = {},
 ): Promise<RunComplianceCheck> {
-  if (!cfg.compliance) return { sensivel: false, violations: [] };
-  return assertRunCompliance(cfg, await loadLgpdData(), now);
+  const check: RunComplianceCheck = cfg.compliance
+    ? assertRunCompliance(cfg, await loadLgpdData(), now)
+    : { sensivel: false, violations: [] };
+  if (!opts.nested) assertRunPii(cfg);
+  return check;
 }
 
 /**

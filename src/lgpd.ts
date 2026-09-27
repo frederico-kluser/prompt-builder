@@ -8,6 +8,7 @@ import {
   type LgpdData,
   type RunComplianceCheck,
 } from './engine/lgpdCore.js';
+import { assertRunPii, type PiiConfigLike } from './engine/pii.js';
 
 /**
  * Conformidade LGPD — lado NODE (CLI + servidor). A classificação inteira é a
@@ -21,6 +22,8 @@ import {
  */
 
 export * from './engine/lgpdCore.js';
+// Cascata de dado pessoal PT-BR (IMPL-042): mesma porta de entrada da LGPD.
+export * from './engine/pii.js';
 
 // Resolvido pela raiz do PACOTE, nao pelo cwd: instalado via npm o cwd e o
 // projeto do usuario e a leitura falharia com ENOENT. Ver src/paths.ts.
@@ -66,15 +69,30 @@ export function overrideLgpdData(data: LgpdData | null): () => void {
   };
 }
 
+export interface EnforceRunOptions {
+  /**
+   * Run ANINHADA numa sessão de treino (iteração, triagem, holdout): o
+   * pré-voo de dado pessoal já rodou no config da sessão, e os cenários/
+   * gabaritos que as iterações carregam foram gerados pelo nosso LLM.
+   */
+  nested?: boolean;
+}
+
 /**
  * Pré-voo da run (chamado pelo orquestrador ANTES de qualquer LLM): no modo
  * sensível, recusa com `LgpdPolicyError` se algum papel estiver fora da
- * allowlist ou se o snapshot estiver vencido.
+ * allowlist ou se o snapshot estiver vencido; no modo "só sintético"
+ * (`piiMode: 'synthetic'`, IMPL-042), recusa com `PiiPolicyError` nomeando o
+ * campo com dado pessoal de aparência real.
  */
 export async function enforceRunCompliance(
-  cfg: ComplianceConfigLike,
+  cfg: ComplianceConfigLike & PiiConfigLike,
   now: Date | number = Date.now(),
+  opts: EnforceRunOptions = {},
 ): Promise<RunComplianceCheck> {
-  if (!cfg.compliance) return { sensivel: false, violations: [] };
-  return assertRunCompliance(cfg, getLgpdData(), now);
+  const check: RunComplianceCheck = cfg.compliance
+    ? assertRunCompliance(cfg, getLgpdData(), now)
+    : { sensivel: false, violations: [] };
+  if (!opts.nested) assertRunPii(cfg);
+  return check;
 }

@@ -1,4 +1,5 @@
 import { applyReasoning } from './reasoning.js';
+import { createPiiGuard, type PiiGuardStats } from './engine/pii.js';
 import type {
   CallCost,
   CostRole,
@@ -539,6 +540,9 @@ export class OpenRouterGateway {
   private cfg: GatewayConfig;
   readonly limiter: AimdLimiter;
   private readonly modelsCache = new Map<string, { fetchedAt: number; data: OpenRouterModel[] }>();
+  // LGPD (IMPL-042): cascata de dado pessoal — uma por instância (sal e
+  // contadores próprios), aplicada em `buildBody`, o ponto único dos 6 papéis.
+  private readonly piiGuard = createPiiGuard();
 
   constructor(config: Partial<GatewayConfig> = {}) {
     this.cfg = mergeConfig(DEFAULT_CONFIG, config);
@@ -717,7 +721,7 @@ export class OpenRouterGateway {
     const model = this.cachedModel(apiKey, modelId);
     const body: Record<string, unknown> = {
       model: modelId,
-      messages,
+      messages: this.protectMessages(messages),
       ...deterministicSampling(model, modelId, temperature),
     };
     if (stream) body.stream = true;
@@ -729,6 +733,22 @@ export class OpenRouterGateway {
     if (params.reasoningLevel) applyReasoning(body, params.reasoningLevel, model?.reasoning);
     applyMaxPrice(body, params.maxPricePerMTok);
     return body;
+  }
+
+  /**
+   * LGPD (IMPL-042): NENHUMA mensagem vira corpo de requisicao sem passar pela
+   * cascata de dado pessoal (src/engine/pii.ts) — identificadores estruturados
+   * realistas (CPF, CNPJ, CNS, RG, CEP, telefone, e-mail, CRM) saem
+   * pseudonimizados com token estavel por instancia; nomes/enderecos so sao
+   * contados (camada `nao-coberto`). Obrigatoria: nao ha parametro que desligue.
+   */
+  private protectMessages(messages: ChatMessage[]): ChatMessage[] {
+    return this.piiGuard.protect(messages);
+  }
+
+  /** Contadores da cascata (o teste prova: chamadas varridas == chamadas enviadas). */
+  piiStats(): PiiGuardStats {
+    return this.piiGuard.stats();
   }
 
   /** O PONTO UNICO da contabilidade: precifica e lanca no ledger (role + sink). */

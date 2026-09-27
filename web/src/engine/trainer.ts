@@ -231,6 +231,8 @@ function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     // Campos declarativos repassados verbatim p/ a run nao perder o intent do
     // usuario (datagen guiado, julgamento por referencia, reasoning por papel).
     compliance: cfg.compliance,
+    // IMPL-042: o modo de dado pessoal vale para toda iteracao e o holdout.
+    piiMode: cfg.piiMode,
     reasoning: cfg.reasoning,
     referenceModelId: cfg.referenceModelId,
     referenceJudging: cfg.referenceJudging,

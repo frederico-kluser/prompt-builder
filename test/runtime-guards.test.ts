@@ -227,6 +227,7 @@ describe('whitelists silenciosos — os campos NÃO podem sumir', () => {
       halving: true,
       // Campos "esquecíveis" — os que já sumiram uma vez:
       compliance: { area: 'saude', includeRessalvas: true },
+      piiMode: 'synthetic', // IMPL-042
       reasoning: { competitor: 'low', judge: 'high', rewriter: 'medium', datagen: 'off' },
       referenceModelId: 'r/x',
       referenceJudging: true,

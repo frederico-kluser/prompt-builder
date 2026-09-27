@@ -221,6 +221,34 @@ criador do modelo:
   (exit 3 se vencida/ausente ou com desconhecido liberado).
 - Servido em `GET /v1/benchmark/lgpd`.
 
+### Dado pessoal: redação obrigatória e modo "só sintético"
+
+Toda chamada de LLM — dos 6 papéis (gerador, gabarito, competidor, juiz, duelo, reescritor), no
+CLI, no servidor e na SPA — passa por uma **cascata PT-BR** no ponto único do gateway
+([`src/engine/pii.ts`](./src/engine/pii.ts)) **antes** do envio:
+
+1. **Identificadores estruturados** (regex + dígito verificador mod-11 onde existe): CPF, CNPJ
+   (inclusive o **alfanumérico** de jul/2026), CNS, RG, CEP, telefone, e-mail e CRM saem
+   **pseudonimizados** com token estável por processo/aba (`[CPF_1a2b3c4d]` — o mesmo documento em
+   qualquer formatação vira o mesmo token; o sal é secreto, então o token não é revertido).
+   Placeholders (`(11) 99999-9999`), exemplos notórios e números de serviço (0800/4004) não mexem.
+2. **Nomes e endereços** (heurística local): detectados e contados, **não reescritos** —
+   marcados **"não coberto"**: não há promessa de recall (a literatura mede ~49% para nomes em
+   texto livre). Se os seus dados têm nomes reais, use o modo "só sintético".
+3. **Aparência de dado real** ⇒ **bloqueio com aviso nomeando o campo**, nunca correção silenciosa:
+   identificador forte realista (CPF, CNS, RG, CRM, celular, e-mail pessoal) ou "ficha" (nome junto
+   de outro dado pessoal). Vale na **importação** (JSON de cenários, pacote, `arena-config@1` na
+   SPA/CLI/MCP e `library add`); depois de revisar, dá para importar mesmo assim (botão na SPA,
+   `allowPii` na API) — os identificadores seguem pseudonimizados no envio.
+
+**Modo "só sintético"** (`piiMode: "synthetic"` no config; switch em Avançado na Nova Run): a
+run/sessão é **recusada no pré-voo**, antes de qualquer LLM, se qualquer campo fornecido tiver
+dado de aparência real — sem exceção manual. Medido na fixture própria
+[`test/fixtures/pii-ptbr.json`](./test/fixtures/pii-ptbr.json) (333 casos): recall 0,98 e
+precisão 1,00 nos estruturados, 0% de falso positivo no bloqueio da importação
+(`test/lgpd-pii.test.ts`). ⚠️ O modo agente (executor `pi`) fala com o provedor por conta própria
+e fica **fora** desta cascata.
+
 Detalhes para agentes na memória CoALA do projeto (`coala.py search "lgpd"`).
 
 ---
@@ -346,6 +374,7 @@ prompt-builder/
 │  ├─ techniques.ts          # Biblioteca curada de técnicas de prompt
 │  ├─ lgpd.ts                # Base LGPD + allowlist do pacote e pré-voo da run (Node)
 │  ├─ engine/lgpdCore.ts     # Núcleo PURO da LGPD: classificação ÚNICA, allowlist por endpoint, pré-voo
+│  ├─ engine/pii.ts          # Núcleo PURO de dado pessoal PT-BR: detecção (DV mod-11), pseudonimização, bloqueio
 │  ├─ events.ts / normalize.ts / storage.ts / types.ts
 │  └─ data/                  # JSON estático VERSIONADO (lgpd-compliance, lgpd-allowlist.generated)
 │

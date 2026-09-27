@@ -296,6 +296,14 @@ export interface RunConfigBase {
    */
   compliance?: { area: string; includeRessalvas: boolean };
   /**
+   * Dado pessoal (LGPD, IMPL-042). A cascata PT-BR roda em TODA chamada de LLM
+   * nos dois modos (identificadores estruturados saem pseudonimizados; nomes
+   * em texto livre NAO sao cobertos). 'synthetic' ("so sintetico") alem disso
+   * RECUSA a run no pre-voo se algum campo fornecido pelo usuario tiver dado
+   * pessoal de aparencia real. Ausente = 'redact'.
+   */
+  piiMode?: 'redact' | 'synthetic';
+  /**
    * Etapas fornecidas pelo usuario (JSON), substituindo o datagen automatico.
    * Quando presente e nao-vazio, o pipeline PULA a geracao de cenarios e usa
    * estas specs verbatim; `stages` passa a valer o tamanho desta lista. Cada

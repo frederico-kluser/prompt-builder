@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { listRuns, loadRun, listSessions, loadSession, getDataDir } from '../../storage.js';
 import { listTechniques } from '../../techniques.js';
-import { allowlistHealth, getLgpdData, isSensitiveArea } from '../../lgpd.js';
+import { allowlistHealth, getLgpdData, isSensitiveArea, PII_COVERAGE, PII_MODES } from '../../lgpd.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
 import { parseArenaConfig, arenaConfigSummary } from '../../configFile.js';
 import { arenaConfigToRunConfig } from '../../arenaConfig.js';
@@ -504,10 +504,17 @@ export async function cmdLgpd(argv: string[]): Promise<number> {
       ctx.out.line(`${a.id.padEnd(24)} ${a.label}${isSensitiveArea(a.id, data) ? '  [sensível: bloqueia fora da allowlist]' : ''}`);
     }
     ctx.out.info(`${health.message} Detalhes: \`prompt-builder models allowlist --check\`.`);
+    // IMPL-042: o que a cascata de dado pessoal cobre (e o que NÃO cobre).
+    ctx.out.info(
+      'Dado pessoal: CPF/CNPJ/CNS (dígito verificador), RG, CEP, telefone, e-mail e CRM são pseudonimizados ' +
+        'antes de TODA chamada de LLM; nomes/endereços em texto livre: não coberto. `piiMode: "synthetic"` ' +
+        'recusa a run com dado de aparência real.',
+    );
   }
   ctx.out.result(true, 'lgpd.areas', {
     areas: data.areas.map((a) => ({ ...a, sensivel: isSensitiveArea(a.id, data) })),
     allowlist: { state: health.state, usable: health.usable, dataGeracao: health.geradoEm ?? null, ageDays: health.ageDays ?? null },
+    pii: { modes: PII_MODES, coverage: PII_COVERAGE },
   });
   return EXIT.OK;
 }

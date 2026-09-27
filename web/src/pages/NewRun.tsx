@@ -31,10 +31,13 @@ import {
   AREA_LIVRE,
   allowlistNotice,
   checkRunCompliance,
+  checkRunPii,
   creatorPrefix,
   familiaFor,
   filterModels,
+  runPiiMessage,
   type LgpdData,
+  type PiiMode,
 } from '../lgpd';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
 import {
@@ -378,6 +381,12 @@ export function NewRun() {
   const [includeRessalvas, setIncludeRessalvas] = useState(true);
   const [lgpd, setLgpd] = useState<LgpdData | null>(null);
   const [prunedNotice, setPrunedNotice] = useState<string | null>(null);
+  // Dado pessoal (IMPL-042): 'synthetic' recusa dado de aparência real antes de
+  // começar; nos dois modos o gateway pseudonimiza CPF/telefone/e-mail… no envio.
+  const [piiMode, setPiiMode] = useState<PiiMode>('redact');
+  // Importação bloqueada por dado pessoal: o arquivo fica pendente até o usuário
+  // revisar (nunca corrigimos em silêncio) — ele pode confirmar e importar.
+  const [piiImport, setPiiImport] = useState<{ file: File; message: string } | null>(null);
 
   // Filtro de preço dos PARTICIPANTES (USD por 1M tokens; '' = sem limite).
   const [maxInputPrice, setMaxInputPrice] = useState('');
@@ -762,14 +771,19 @@ export function NewRun() {
       setComplianceArea(config.compliance.area);
       setIncludeRessalvas(config.compliance.includeRessalvas);
     }
+    if (config.piiMode) setPiiMode(config.piiMode);
   }
 
   // Import unificado: UM arquivo, três formatos possíveis (arena-config@1,
   // prompt-builder-pack@1 (ou o legado ai-benchmark-pack@1) ou array cru — `readImportFile` detecta.
-  async function handleImport(file: File) {
+  async function handleImport(file: File, allowPii = false) {
     setError(null);
-    const res = await readImportFile(file);
-    if (!res.ok) return setError(res.error);
+    const res = await readImportFile(file, { allowPii });
+    if (!res.ok) {
+      if (res.pii) return setPiiImport({ file, message: res.error });
+      return setError(res.error);
+    }
+    setPiiImport(null);
     if (res.data.kind === 'config') {
       applyArenaConfig(res.data.config);
       setConfigSummary(arenaConfigSummary(res.data.config));
@@ -887,6 +901,7 @@ export function NewRun() {
       maxOutputTokens: maxTokensNum,
       ...(rawStages ? { customStages: rawStages } : {}),
       ...(isLivre ? {} : { compliance: { area: complianceArea, includeRessalvas } }),
+      ...(piiMode === 'synthetic' ? { piiMode } : {}),
       ...(scenarioBrief.trim() ? { scenarioBrief: scenarioBrief.trim() } : {}),
       // Seed do pacote: perde o `id` do arquivo (o engine re-rotula as etapas).
       ...(seedCount > 0 && pack ? { scenarioSeed: pack.scenarios.map(({ id, ...spec }) => spec) } : {}),
@@ -977,6 +992,13 @@ export function NewRun() {
       }
     }
 
+    // IMPL-042: "só sintético" recusa dado pessoal de aparência real — avisa
+    // aqui, nomeando o campo, em vez de a run nascer e morrer no pré-voo.
+    if (piiMode === 'synthetic') {
+      const piiCheck = checkRunPii(config);
+      if (piiCheck.blocked.length) return setError(runPiiMessage(piiCheck));
+    }
+
     setSubmitting(true);
     try {
       if (mode === 'training') {
@@ -1046,6 +1068,27 @@ export function NewRun() {
             </SegmentedToggleOption>
           ))}
         </SegmentedToggle>
+
+        {piiImport && (
+          <Banner tone="warn" className="mt-4 flex flex-col gap-3">
+            <p>{piiImport.message}</p>
+            <p className="text-muted-foreground">
+              {piiMode === 'synthetic'
+                ? 'No modo "só sintético" não há exceção: corrija o arquivo ou troque para o modo "redigir" em Avançado.'
+                : 'Se você revisou e são dados sintéticos, pode importar mesmo assim: CPF, telefone, e-mail e demais identificadores continuam pseudonimizados antes de cada envio ao modelo. Nomes em texto livre não são cobertos.'}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {piiMode !== 'synthetic' && (
+                <Button type="button" size="sm" variant="outline" onClick={() => void handleImport(piiImport.file, true)}>
+                  Revisei — importar mesmo assim
+                </Button>
+              )}
+              <Button type="button" size="sm" variant="ghost" onClick={() => setPiiImport(null)}>
+                Dispensar
+              </Button>
+            </div>
+          </Banner>
+        )}
 
         {(configSummary || draftNotice) && (
           <div className="mt-4 flex flex-col gap-2">
@@ -1572,6 +1615,13 @@ export function NewRun() {
                     onChange={setIncludeRessalvas}
                   />
                 )}
+
+                <SwitchRow
+                  label="Só dados sintéticos"
+                  sub="Recusa a run se algum campo tiver dado pessoal com aparência real (CPF, CNS, RG, celular, e-mail pessoal, nome junto de documento ou endereço). Nos dois modos, identificadores são pseudonimizados antes de cada envio; nomes em texto livre não são cobertos pelo detector."
+                  checked={piiMode === 'synthetic'}
+                  onChange={(v) => setPiiMode(v ? 'synthetic' : 'redact')}
+                />
 
                 <SettingRow
                   label="Preço input/output máx. ($/1M)"

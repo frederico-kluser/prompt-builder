@@ -1,0 +1,989 @@
+// ===========================================================================
+// Cascata de dado pessoal PT-BR — detecção, pseudonimização e bloqueio
+// (IMPL-042 · R-16:REC-5 / DEC-5).
+//
+// PURO: sem `node:*`, sem `process.env`, sem estado de módulo. Roda igual no
+// Node (gateway, CLI, servidor) e no navegador (SPA) — o gateway único
+// (`src/openrouter.ts`) chama `PiiGuard.protect` em TODA requisição de chat,
+// dos 6 papéis (datagen, gabarito, competidor, juiz, duelo, reescritor).
+//
+// Camadas (ordem = confiança):
+//   1. ESTRUTURADO — regex + dígito verificador mod-11 onde existe (CPF, CNPJ
+//      numérico e alfanumérico, CNS); formato + faixa/DDD/contexto onde não
+//      existe (RG, CEP, telefone, e-mail, CRM). Recall/precisão MEDIDOS na
+//      fixture `test/fixtures/pii-ptbr.json` (piso: recall ≥0,95, precisão ≥0,90).
+//   2. CONTEXTUAL — heurística local para nomes (dicionário + gatilhos como
+//      "paciente", "Sr.", "meu nome é") e endereços (logradouro + número).
+//      Marcada `nao-coberto`: SEM promessa de recall (a literatura mede ~49%
+//      para nomes em texto livre com detectores dedicados; R-16 Q7b). Para
+//      nomes o default seguro é o modo "só sintético", não a redação.
+//   3. APARÊNCIA DE DADO REAL — `assessPii`: identificador forte realista, ou
+//      nome junto de outro dado pessoal no mesmo campo ("ficha"), ⇒ BLOQUEIO
+//      com aviso nomeando o campo. Nunca correção silenciosa: quem decide é
+//      a revisão humana.
+//
+// O que o gateway faz com isso: pseudonimiza os identificadores ESTRUTURADOS
+// realistas com um token estável por instância (`[CPF_1a2b3c4d]` — mesmo
+// valor ⇒ mesmo token, em qualquer formatação), e só CONTA os achados
+// contextuais: reescrever prompt com base numa heurística de nome mudaria o
+// benchmark em silêncio (persona "Maria Clara" virando token).
+// ===========================================================================
+
+export type PiiKind =
+  | 'cpf'
+  | 'cnpj'
+  | 'cns'
+  | 'rg'
+  | 'cep'
+  | 'telefone'
+  | 'email'
+  | 'crm'
+  | 'nome'
+  | 'endereco';
+
+export type PiiLayer = 'estruturado' | 'contextual';
+
+/** `nao-coberto` = o detector existe, mas sem piso de recall (nomes/endereços). */
+export type PiiCoverage = 'coberto' | 'nao-coberto';
+
+/** De onde vem a confiança no achado. */
+export type PiiEvidence = 'checksum' | 'formato' | 'contexto' | 'heuristica';
+
+export const STRUCTURED_PII_KINDS: readonly PiiKind[] = [
+  'cpf',
+  'cnpj',
+  'cns',
+  'rg',
+  'cep',
+  'telefone',
+  'email',
+  'crm',
+];
+
+export const PII_COVERAGE: Record<PiiKind, PiiCoverage> = {
+  cpf: 'coberto',
+  cnpj: 'coberto',
+  cns: 'coberto',
+  rg: 'coberto',
+  cep: 'coberto',
+  telefone: 'coberto',
+  email: 'coberto',
+  crm: 'coberto',
+  nome: 'nao-coberto',
+  endereco: 'nao-coberto',
+};
+
+export const PII_KIND_LABEL: Record<PiiKind, string> = {
+  cpf: 'CPF',
+  cnpj: 'CNPJ',
+  cns: 'CNS',
+  rg: 'RG',
+  cep: 'CEP',
+  telefone: 'telefone',
+  email: 'e-mail',
+  crm: 'CRM',
+  nome: 'nome',
+  endereco: 'endereço',
+};
+
+export interface PiiFinding {
+  kind: PiiKind;
+  layer: PiiLayer;
+  /** Posição no texto original: `text.slice(start, end)`. */
+  start: number;
+  end: number;
+  text: string;
+  evidence: PiiEvidence;
+  /**
+   * Aparência de dado REAL: dígito verificador válido (ou formato plausível) e
+   * NÃO é exemplo conhecido, placeholder (99999-9999, 12345-678…) nem número de
+   * serviço (0800/4004). Só achado realista é redigido no envio.
+   */
+  realistic: boolean;
+  coverage: PiiCoverage;
+  /** telefone: 'celular' | 'fixo'; e-mail: 'pessoal' | 'funcional'. */
+  detail?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Dígitos verificadores
+// ---------------------------------------------------------------------------
+
+const onlyDigits = (s: string): string => s.replace(/\D/g, '');
+
+/** CPF: 11 dígitos, dois DV mod-11 (pesos 10..2 e 11..2); repetidos são inválidos. */
+export function isValidCpf(value: string): boolean {
+  const d = onlyDigits(value);
+  if (d.length !== 11 || /^(\d)\1{10}$/.test(d)) return false;
+  const dv = (len: number): number => {
+    let sum = 0;
+    for (let i = 0; i < len; i++) sum += Number(d[i]) * (len + 1 - i);
+    const r = (sum * 10) % 11;
+    return r === 10 ? 0 : r;
+  };
+  return dv(9) === Number(d[9]) && dv(10) === Number(d[10]);
+}
+
+const CNPJ_W1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+const CNPJ_W2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+
+/**
+ * CNPJ numérico E alfanumérico (Receita, a partir de jul/2026): 12 posições
+ * [0-9A-Z] + 2 DV numéricos; cada caractere vale `código ASCII − 48` e o DV é
+ * o mod-11 de sempre — o numérico é o caso particular só com dígitos.
+ */
+export function isValidCnpj(value: string): boolean {
+  const s = value.toUpperCase().replace(/[.\/\-\s]/g, '');
+  if (!/^[A-Z0-9]{12}\d{2}$/.test(s) || /^(.)\1{13}$/.test(s)) return false;
+  const dv = (w: number[]): number => {
+    let sum = 0;
+    for (let i = 0; i < w.length; i++) sum += (s.charCodeAt(i) - 48) * w[i];
+    const r = sum % 11;
+    return r < 2 ? 0 : 11 - r;
+  };
+  return dv(CNPJ_W1) === Number(s[12]) && dv(CNPJ_W2) === Number(s[13]);
+}
+
+/**
+ * CNS (Cartão Nacional de Saúde): 15 dígitos, Σ dígito×(15−i) ≡ 0 (mod 11).
+ * Definitivo (1/2) nasce do PIS e tem "000"/"001" nas posições 12–14;
+ * provisório começa com 7, 8 ou 9.
+ */
+export function isValidCns(value: string): boolean {
+  const d = onlyDigits(value);
+  if (d.length !== 15 || !/^[12789]/.test(d)) return false;
+  if ((d[0] === '1' || d[0] === '2') && !/^\d{11}00[01]\d$/.test(d)) return false;
+  let sum = 0;
+  for (let i = 0; i < 15; i++) sum += Number(d[i]) * (15 - i);
+  return sum % 11 === 0;
+}
+
+/** DDDs em uso no Brasil (Anatel). DDD fora da lista ⇒ não é telefone. */
+const DDDS = new Set(
+  (
+    '11 12 13 14 15 16 17 18 19 21 22 24 27 28 31 32 33 34 35 37 38 41 42 43 44 45 46 47 48 49 ' +
+    '51 53 54 55 61 62 63 64 65 66 67 68 69 71 73 74 75 77 79 81 82 83 84 85 86 87 88 89 ' +
+    '91 92 93 94 95 96 97 98 99'
+  ).split(' '),
+);
+
+export function isValidDdd(ddd: string): boolean {
+  return DDDS.has(ddd);
+}
+
+// Exemplos que circulam em documentação/validadores: dígito verificador válido,
+// mas ninguém real por trás no uso do produto. Não bloqueiam nem são redigidos.
+const KNOWN_EXAMPLES = new Set(['12345678909', '11144477735', '11222333000181']);
+
+// ---------------------------------------------------------------------------
+// Camada 1 — estruturados
+// ---------------------------------------------------------------------------
+
+type Candidate = PiiFinding & { rank: number };
+
+const EVIDENCE_RANK: Record<PiiEvidence, number> = { checksum: 4, formato: 3, contexto: 2, heuristica: 1 };
+
+/** O trecho ANTES de `index` (janela curta) contém a palavra-gatilho? */
+function contextBefore(text: string, index: number, re: RegExp, window = 32): boolean {
+  return re.test(text.slice(Math.max(0, index - window), index));
+}
+
+// Fronteiras: não pode estar colado em letra/dígito, nem continuar como parte
+// de um número maior (1.234.567-89.0, 12345-678/9 etc.).
+const L = String.raw`(?<![\p{L}\p{N}.\-\/])`;
+const R = String.raw`(?![\p{L}\p{N}]|[.\-\/]\p{N})`;
+
+const CTX_CNPJ = /\bcnpj\b/iu;
+const CTX_CNS = /\b(cns|sus|cart[ãa]o\s+(nacional\s+de\s+sa[úu]de|do\s+sus|sus))\b/iu;
+const CTX_TEL = /(tel\b|telefone|fone|celular|cel\b|whats|zap\b|ligue|ligar|liga\b|contato|ramal|fixo)/iu;
+
+function isDummySubscriber(sub: string): boolean {
+  const core = sub.length === 9 ? sub.slice(1) : sub;
+  if (/^(\d)\1+$/.test(core) || /^(\d)\1+$/.test(sub)) return true;
+  // Sequências de placeholder: 12345678, 23456789, 87654321, 98765432, 0000…
+  const asc = '0123456789';
+  const desc = '9876543210';
+  return asc.includes(core) || desc.includes(core) || /^0+$/.test(core.slice(1));
+}
+
+/** Números de serviço (capitais 3003/4004…) — de empresa, não de pessoa. */
+const SERVICE_PREFIX = /^(300\d|400\d|4020|4062|4090)/;
+
+function phoneFinding(
+  raw: string,
+  start: number,
+  ddd: string | undefined,
+  subscriber: string,
+  evidence: PiiEvidence,
+): Candidate | null {
+  if (ddd !== undefined && !isValidDdd(ddd)) return null;
+  subscriber = subscriber.replace(/\s/g, '');
+  const celular = subscriber.length === 9 && subscriber[0] === '9';
+  if (!celular && !(subscriber.length === 8 && /^[2-5]/.test(subscriber))) return null;
+  // Número de serviço (4004/3003…) é de EMPRESA: não é dado pessoal.
+  if (!celular && SERVICE_PREFIX.test(subscriber)) return null;
+  return {
+    kind: 'telefone',
+    layer: 'estruturado',
+    start,
+    end: start + raw.length,
+    text: raw,
+    evidence,
+    realistic: !isDummySubscriber(subscriber),
+    coverage: 'coberto',
+    detail: celular ? 'celular' : 'fixo',
+    rank: EVIDENCE_RANK[evidence],
+  };
+}
+
+const ROLE_LOCALPART =
+  /^(contato|contact|suporte|support|sac|atendimento|vendas|comercial|financeiro|faturamento|cobranca|rh|recrutamento|noreply|no-reply|naoresponda|nao-responda|nao_responda|info|informacoes|ouvidoria|faleconosco|fale-conosco|adm|admin|administracao|secretaria|agendamento|marketing|imprensa|juridico|compras|ti|dpo|privacidade|lgpd|parcerias|loja|pedidos|help|ajuda)([._-].*)?$/i;
+const EXAMPLE_DOMAIN =
+  /(^|\.)(example\.(com|org|net)|exemplo\.(com|com\.br|org)|teste\.(com|com\.br)|test\.com|email\.com|dominio\.(com|com\.br)|seudominio\.(com|com\.br)|empresa\.(com|com\.br)|sample\.com)$/i;
+
+const FILE_TLD = /\.(pdf|png|jpe?g|gif|webp|docx?|xlsx?|pptx?|txt|csv|zip|json|html?|js|ts|md|xml)$/i;
+
+interface StructuredRule {
+  re: RegExp;
+  build: (m: RegExpExecArray, text: string) => Candidate | null;
+}
+
+function cand(
+  kind: PiiKind,
+  m: RegExpExecArray,
+  group: number,
+  evidence: PiiEvidence,
+  realistic: boolean,
+  detail?: string,
+): Candidate {
+  const raw = m[group];
+  const start = m.index + m[0].indexOf(raw);
+  return {
+    kind,
+    layer: 'estruturado',
+    start,
+    end: start + raw.length,
+    text: raw,
+    evidence,
+    realistic,
+    coverage: PII_COVERAGE[kind],
+    detail,
+    rank: EVIDENCE_RANK[evidence],
+  };
+}
+
+const STRUCTURED_RULES: StructuredRule[] = [
+  // CPF — formatado (000.000.000-00, 000000000-00) ou corrido (11 dígitos).
+  {
+    re: new RegExp(`${L}(\\d{3}\\.\\d{3}\\.\\d{3}-\\d{2}|\\d{3} \\d{3} \\d{3}[ -]\\d{2}|\\d{9}-\\d{2}|\\d{11})${R}`, 'gu'),
+    build: (m) => {
+      if (!isValidCpf(m[1])) return null;
+      return cand('cpf', m, 1, 'checksum', !KNOWN_EXAMPLES.has(onlyDigits(m[1])));
+    },
+  },
+  // CNPJ numérico — formatado ou corrido (14 dígitos).
+  {
+    re: new RegExp(`${L}(\\d{2}\\.\\d{3}\\.\\d{3}\\/\\d{4}-\\d{2}|\\d{14})${R}`, 'gu'),
+    build: (m) => {
+      if (!isValidCnpj(m[1])) return null;
+      return cand('cnpj', m, 1, 'checksum', !KNOWN_EXAMPLES.has(onlyDigits(m[1])));
+    },
+  },
+  // CNPJ alfanumérico — formatado aceita pelo DV; corrido só com "CNPJ" antes
+  // (tokens de 14 caracteres alfanuméricos são comuns em códigos/hashes).
+  {
+    re: new RegExp(
+      `${L}([A-Z0-9]{2}\\.[A-Z0-9]{3}\\.[A-Z0-9]{3}\\/[A-Z0-9]{4}-\\d{2}|[A-Z0-9]{12}\\d{2})${R}`,
+      'gu',
+    ),
+    build: (m, text) => {
+      const raw = m[1];
+      if (!/[A-Z]/.test(raw) || !isValidCnpj(raw)) return null;
+      const formatado = raw.includes('/');
+      if (!formatado && !contextBefore(text, m.index, CTX_CNPJ)) return null;
+      return cand('cnpj', m, 1, 'checksum', true);
+    },
+  },
+  // CNS — "000 0000 0000 0000" ou corrido; provisório (7/8/9) corrido exige contexto.
+  {
+    re: new RegExp(`${L}(\\d{3}[ .]\\d{4}[ .]\\d{4}[ .]\\d{4}|\\d{15})${R}`, 'gu'),
+    build: (m, text) => {
+      const raw = m[1];
+      if (!isValidCns(raw)) return null;
+      const corrido = /^\d{15}$/.test(raw);
+      if (corrido && /^[789]/.test(raw) && !contextBefore(text, m.index, CTX_CNS, 40)) return null;
+      return cand('cns', m, 1, 'checksum', true);
+    },
+  },
+  // RG formatado (00.000.000-0 / 0.000.000-X): o formato com DV é específico.
+  {
+    re: new RegExp(`${L}(\\d{1,2}\\.\\d{3}\\.\\d{3}-[\\dXx])${R}`, 'gu'),
+    build: (m) => cand('rg', m, 1, 'formato', !/^(\d)\1*$/.test(onlyDigits(m[1]))),
+  },
+  // RG por contexto (sem DV nacional): "RG 1234567", "identidade: MG-12.345.678".
+  {
+    re: /\b(?:[Rr][Gg]|R\.G\.|[Ii]dentidade|[Cc][ée]dula de identidade|[Cc]arteira de identidade)\s*(?:n[º°o]\.?|:|-)?\s*((?:[A-Z]{2}[-\s]?)?\d{1,2}\.?\d{3}\.?\d{3}(?:-?[\dXx])?)(?![\p{L}\p{N}])/gu,
+    build: (m) => cand('rg', m, 1, 'contexto', !/^(\d)\1*$/.test(onlyDigits(m[1]))),
+  },
+  // CEP formatado (00000-000 / 00.000-000), faixa 01000-000..99999-999.
+  {
+    re: new RegExp(`${L}(\\d{2}\\.?\\d{3}-\\d{3})${R}`, 'gu'),
+    build: (m) => {
+      const d = onlyDigits(m[1]);
+      if (Number(d.slice(0, 5)) < 1000) return null;
+      return cand('cep', m, 1, 'formato', !/^(\d)\1{7}$/.test(d) && d !== '12345678');
+    },
+  },
+  // CEP corrido/espaçado só com "CEP" antes.
+  {
+    re: /\bCEP\s*(?:n[º°o]\.?|:|-)?\s*(\d{8}|\d{5}\s\d{3})(?![\p{L}\p{N}])/giu,
+    build: (m) => {
+      const d = onlyDigits(m[1]);
+      if (Number(d.slice(0, 5)) < 1000) return null;
+      return cand('cep', m, 1, 'contexto', !/^(\d)\1{7}$/.test(d) && d !== '12345678');
+    },
+  },
+  // Telefone com +55.
+  {
+    re: /(?<![\p{N}+])(\+\s?55[\s.-]?\(?(\d{2})\)?[\s.-]?(9\s?\d{4}|[2-5]\d{3})[\s.-]?(\d{4}))(?![\p{N}])/gu,
+    build: (m) => phoneFinding(m[1], m.index + m[0].indexOf(m[1]), m[2], m[3] + m[4], 'formato'),
+  },
+  // Telefone com DDD entre parênteses: (11) 91234-5678, (011) 3456-7890.
+  {
+    re: /(?<![\p{N}])(\(\s?0?(\d{2})\s?\)[\s.-]?(9\s?\d{4}|[2-5]\d{3})[\s.-]?(\d{4}))(?![\p{N}])/gu,
+    build: (m) => phoneFinding(m[1], m.index + m[0].indexOf(m[1]), m[2], m[3] + m[4], 'formato'),
+  },
+  // Telefone com DDD separado: 11 91234-5678, 11-3456-7890, 11 3456 7890.
+  {
+    re: /(?<![\p{N}\/.,\-])((\d{2})[\s.-](9\s?\d{4}|[2-5]\d{3})[\s.-]?(\d{4}))(?![\p{N}]|[.,]\p{N})/gu,
+    build: (m) => phoneFinding(m[1], m.index + m[0].indexOf(m[1]), m[2], m[3] + m[4], 'formato'),
+  },
+  // Celular sem DDD, com hífen: 91234-5678.
+  {
+    re: /(?<![\p{N}\-\/.])((9\d{4})-(\d{4}))(?![\p{N}]|[.\-\/]\p{N})/gu,
+    build: (m) => phoneFinding(m[1], m.index + m[0].indexOf(m[1]), undefined, m[2] + m[3], 'formato'),
+  },
+  // Fixo sem DDD: só com palavra de telefone antes (senão "2019-2023" vira telefone).
+  {
+    re: /(?<![\p{N}\-\/.])(([2-5]\d{3})-(\d{4}))(?![\p{N}]|[.\-\/]\p{N})/gu,
+    build: (m, text) =>
+      contextBefore(text, m.index, CTX_TEL, 28)
+        ? phoneFinding(m[1], m.index, undefined, m[2] + m[3], 'contexto')
+        : null,
+  },
+  // Corrido (10–11 dígitos): só com +55/55 ou palavra de telefone antes.
+  {
+    re: /(?<![\p{N}])((?:\+?55)?(\d{2})(9\d{8}|[2-5]\d{7}))(?![\p{N}])/gu,
+    build: (m, text) => {
+      const comPais = /^\+?55/.test(m[1]) && m[1].length > 11;
+      if (!comPais && !contextBefore(text, m.index, CTX_TEL, 28)) return null;
+      return phoneFinding(m[1], m.index, m[2], m[3], comPais ? 'formato' : 'contexto');
+    },
+  },
+  // E-mail.
+  {
+    re: /(?<![\p{L}\p{N}._%+\-])([A-Za-z0-9](?:[A-Za-z0-9._%+\-]*[A-Za-z0-9])?@[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,})(?![\p{L}\p{N}\-]|\.[\p{L}\p{N}])/gu,
+    build: (m) => {
+      const [local, domain] = m[1].split('@');
+      // "relatorio@2024.pdf" é nome de arquivo, não e-mail.
+      if (FILE_TLD.test(domain) || !/[A-Za-z]/.test(domain.split('.')[0])) return null;
+      const exemplo = EXAMPLE_DOMAIN.test(domain);
+      const funcional = ROLE_LOCALPART.test(local);
+      return cand('email', m, 1, 'formato', !exemplo, funcional ? 'funcional' : 'pessoal');
+    },
+  },
+  // CRM: "CRM/SP 123456", "CRM-RJ 52.123.456", "CRM 12345/MG", "CRM: 123456".
+  {
+    re: /\bCRM\s*[-\/]?\s*(?:[A-Z]{2})?\s*(?:n[º°o]\.?|:|-)?\s*(\d{1,3}(?:\.\d{3})+|\d{4,7})(?:\s*[-\/]\s*[A-Z]{2}\b)?/gu,
+    build: (m) => cand('crm', m, 1, 'contexto', true),
+  },
+];
+
+function detectStructured(text: string): Candidate[] {
+  const out: Candidate[] = [];
+  for (const rule of STRUCTURED_RULES) {
+    rule.re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = rule.re.exec(text)) !== null) {
+      const r = rule.build(m, text);
+      if (r) out.push(r);
+      if (m[0].length === 0) rule.re.lastIndex += 1;
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Camada 2 — contextual (heurística local; `nao-coberto`)
+// ---------------------------------------------------------------------------
+
+const fold = (s: string): string => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+
+// Prenomes e sobrenomes frequentes no Brasil (IBGE Censo 2010/2022, recorte
+// curto). É heurística: um dicionário maior sobe recall E falso positivo —
+// por isso a camada é "não coberta", sem promessa de recall.
+const FIRST_NAMES = new Set(
+  (
+    'ana maria joao jose antonio francisco carlos paulo pedro lucas luiz luis marcos gabriel rafael daniel ' +
+    'marcelo bruno eduardo felipe raimundo rodrigo manoel manuel mateus matheus andre fernando fabio leonardo ' +
+    'gustavo guilherme leandro tiago thiago anderson ricardo marcio jorge sebastiao alexandre roberto edson ' +
+    'diego vitor victor sergio claudio cesar julio joaquim vinicius henrique miguel arthur artur heitor ' +
+    'bernardo davi david theo enzo lorenzo samuel benjamin nicolas murilo caio igor renato renan otavio ' +
+    'wagner wellington adriano alan alessandro alberto augusto benedito cicero elias emerson everton ' +
+    'fabricio flavio geraldo gilberto hugo ivan jair jefferson jonas juliano kleber lauro luciano mario ' +
+    'mauricio mauro nelson osvaldo raul reinaldo ronaldo rogerio rubens silvio valter walter william ' +
+    'juliana fernanda patricia aline adriana sandra camila amanda bruna jessica leticia julia luciana ' +
+    'vanessa mariana gabriela vera vitoria larissa claudia beatriz luana rita sonia renata eliane josefa ' +
+    'simone natalia francisca carla paula lucia raquel tatiana priscila daniela cristina helena alice ' +
+    'laura manuela valentina sophia sofia isabela isabella heloisa luiza luisa lorena livia giovanna ' +
+    'giovana cecilia lara clara marina yasmin isadora rafaela carolina bianca debora elaine fabiana ' +
+    'flavia gisele ingrid jaqueline joana karina lais lilian marcia marta michele monica nathalia ' +
+    'pamela regina roberta rosana sabrina silvia tereza teresa viviane denise cintia sueli solange ' +
+    'marlene aparecida conceicao fatima joice thais cristiane andreia andrea alessandra samara sara ' +
+    'agatha esther olivia pietra rebeca emanuele emanuelly otilia ester'
+  ).split(/\s+/),
+);
+
+const SURNAMES = new Set(
+  (
+    'silva santos oliveira souza sousa rodrigues ferreira alves pereira lima gomes costa ribeiro martins ' +
+    'carvalho almeida lopes soares fernandes vieira barbosa rocha dias nascimento andrade moreira nunes ' +
+    'marques machado mendes freitas cardoso ramos goncalves santana teixeira araujo azevedo batista borges ' +
+    'campos castro correia cunha duarte farias fonseca guimaraes jesus leite melo mello miranda monteiro ' +
+    'moraes morais moura neves pinheiro pinto prado queiroz reis sales sampaio siqueira tavares ' +
+    'vasconcelos xavier cavalcanti cavalcante bezerra brito cruz lacerda macedo medeiros nogueira paiva ' +
+    'peixoto rezende resende torres viana coelho franco matos mattos aguiar amaral antunes assis barros ' +
+    'bastos bueno camargo cordeiro esteves figueiredo galvao garcia godoy lemos lourenco magalhaes maia ' +
+    'mota motta pacheco pimentel rangel simoes toledo valente veloso junior neto filho sobrinho'
+  ).split(/\s+/),
+);
+
+// Palavras capitalizadas que encerram a sequência de nome mesmo depois de um
+// prenome ("Vitória da Conquista", "Ana Paula Verão 2026"): só as frequentes.
+const NOT_NAME = new Set(
+  (
+    'sao santa santo rua avenida av hospital clinica banco brasil janeiro fevereiro marco abril maio ' +
+    'junho julho agosto setembro outubro novembro dezembro segunda terca quarta quinta sexta sabado ' +
+    'domingo unidade loja centro norte sul leste oeste conquista shopping plano premium gold verao ' +
+    'inverno outono primavera colecao linha edicao'
+  ).split(/\s+/),
+);
+
+const NAME_WORD = String.raw`\p{Lu}\p{Ll}+(?:-\p{Lu}\p{Ll}+)?`;
+const PARTICLE = String.raw`(?:d[aeo]s?|e)`;
+const NAME_SEQ = String.raw`${NAME_WORD}(?:\s+(?:${PARTICLE}\s+)?${NAME_WORD}){0,4}`;
+
+const TITLE_CUE = new RegExp(
+  String.raw`(?<![\p{L}])(?:Sr|Sra|Srta|Dr|Dra|Prof|Profa)\.?\s+(${NAME_SEQ})`,
+  'gu',
+);
+const WORD_CUE = new RegExp(
+  String.raw`(?<![\p{L}])(?:[Pp]aciente|[Cc]liente|[Tt]itular|[Bb]enefici[aá]ri[oa]|[Rr]espons[aá]vel|[Mm]e chamo|[Mm]eu nome [ée]|[Nn]ome(?:\s+completo)?\s*:|[Cc]hamad[oa]|[Ss]enhora?|[Dd]ona|[Mm][ãa]e|[Pp]ai|[Ff]ilh[oa])\s+(${NAME_SEQ})`,
+  'gu',
+);
+const NAME_RUN = new RegExp(String.raw`(?<![\p{L}])(${NAME_WORD})((?:\s+(?:${PARTICLE}\s+)?${NAME_WORD}){1,4})`, 'gu');
+
+const STREET = new RegExp(
+  String.raw`(?<![\p{L}])((?:Rua|R\.|Avenida|Av\.?|Alameda|Al\.|Travessa|Tv\.|Pra[çc]a|P[çc]a\.|Rodovia|Rod\.|Estrada|Estr\.|Largo|Viela)\s+(?:(?:\p{Lu}[\p{L}'.]*|\d{1,2}|d[aeo]s?|de)\s+){0,6}(?:\p{Lu}[\p{L}'.]*|\d{1,2})(?:\s*,\s*|\s+)(?:n[º°o]\.?\s*)?\d{1,5})(?![\p{N}])`,
+  'gu',
+);
+
+function words(seq: string): string[] {
+  return seq.split(/\s+/).filter((w) => !/^(d[aeo]s?|e)$/.test(w));
+}
+
+function contextualCand(kind: PiiKind, raw: string, start: number, evidence: PiiEvidence): Candidate {
+  return {
+    kind,
+    layer: 'contextual',
+    start,
+    end: start + raw.length,
+    text: raw,
+    evidence,
+    realistic: true,
+    coverage: PII_COVERAGE[kind],
+    rank: EVIDENCE_RANK[evidence],
+  };
+}
+
+/** Corta a sequência no primeiro termo que não é nome (NOT_NAME). */
+function trimNameSeq(seq: string): string {
+  const parts = seq.split(/(\s+)/);
+  let out = '';
+  for (let i = 0; i < parts.length; i += 2) {
+    const w = parts[i];
+    if (NOT_NAME.has(fold(w))) break;
+    out += (i > 0 ? parts[i - 1] : '') + w;
+  }
+  return out.replace(/\s+(d[aeo]s?|e)$/u, '');
+}
+
+function detectContextual(text: string): Candidate[] {
+  const out: Candidate[] = [];
+  let m: RegExpExecArray | null;
+
+  TITLE_CUE.lastIndex = 0;
+  while ((m = TITLE_CUE.exec(text)) !== null) {
+    const seq = trimNameSeq(m[1]);
+    if (!seq) continue;
+    out.push(contextualCand('nome', seq, m.index + m[0].indexOf(m[1]), 'contexto'));
+  }
+
+  WORD_CUE.lastIndex = 0;
+  while ((m = WORD_CUE.exec(text)) !== null) {
+    const seq = trimNameSeq(m[1]);
+    const ws = words(seq).map(fold);
+    // "Cliente Premium" não; "paciente Maria", "cliente Souza" sim.
+    if (!seq || !ws.some((w) => FIRST_NAMES.has(w) || SURNAMES.has(w))) continue;
+    out.push(contextualCand('nome', seq, m.index + m[0].indexOf(m[1]), 'contexto'));
+  }
+
+  NAME_RUN.lastIndex = 0;
+  while ((m = NAME_RUN.exec(text)) !== null) {
+    const first = fold(m[1]);
+    if (!FIRST_NAMES.has(first)) {
+      // Deixa o regex tentar a partir da próxima palavra ("Olá Maria Souza").
+      NAME_RUN.lastIndex = m.index + m[1].length;
+      continue;
+    }
+    const seq = trimNameSeq(m[1] + m[2]);
+    const ws = words(seq);
+    if (ws.length < 2) continue;
+    const second = fold(ws[1]);
+    if (NOT_NAME.has(second)) continue;
+    out.push(contextualCand('nome', seq, m.index, 'heuristica'));
+  }
+
+  STREET.lastIndex = 0;
+  while ((m = STREET.exec(text)) !== null) {
+    out.push(contextualCand('endereco', m[1], m.index + m[0].indexOf(m[1]), 'heuristica'));
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Cascata
+// ---------------------------------------------------------------------------
+
+function overlaps(a: { start: number; end: number }, b: { start: number; end: number }): boolean {
+  return a.start < b.end && b.start < a.end;
+}
+
+/** Escolhe achados sem sobreposição: maior evidência primeiro, depois o mais longo. */
+function resolve(cands: Candidate[]): PiiFinding[] {
+  const sorted = cands
+    .slice()
+    .sort((a, b) => b.rank - a.rank || b.end - b.start - (a.end - a.start) || a.start - b.start);
+  const picked: Candidate[] = [];
+  for (const c of sorted) if (!picked.some((p) => overlaps(p, c))) picked.push(c);
+  return picked
+    .sort((a, b) => a.start - b.start)
+    .map(({ rank: _rank, ...f }) => f);
+}
+
+export interface PiiScan {
+  findings: PiiFinding[];
+  structured: PiiFinding[];
+  contextual: PiiFinding[];
+}
+
+/**
+ * A cascata inteira sobre UM texto: estruturados (regex + DV) primeiro; a
+ * camada contextual só fica com o que não colide com um estruturado.
+ */
+export function scanPii(text: string): PiiScan {
+  if (!text) return { findings: [], structured: [], contextual: [] };
+  const structured = resolve(detectStructured(text));
+  const contextual = resolve(detectContextual(text)).filter(
+    (c) => !structured.some((s) => overlaps(s, c)),
+  );
+  const findings = [...structured, ...contextual].sort((a, b) => a.start - b.start);
+  return { findings, structured, contextual };
+}
+
+// ---------------------------------------------------------------------------
+// Camada 3 — aparência de dado real
+// ---------------------------------------------------------------------------
+
+export type PiiVerdict = 'limpo' | 'aviso' | 'bloqueio';
+
+/** Identificador que, sozinho e realista, aponta uma PESSOA. */
+function isStrong(f: PiiFinding): boolean {
+  if (!f.realistic || f.layer !== 'estruturado') return false;
+  if (f.kind === 'cpf' || f.kind === 'cns' || f.kind === 'rg' || f.kind === 'crm') return true;
+  if (f.kind === 'telefone') return f.detail === 'celular';
+  if (f.kind === 'email') return f.detail === 'pessoal';
+  return false;
+}
+
+export interface PiiAssessment {
+  verdict: PiiVerdict;
+  /** Tipos que motivaram o veredito (ordem de aparição, sem repetição). */
+  kinds: PiiKind[];
+  reason?: 'identificador' | 'ficha';
+}
+
+/**
+ * Heurística de "aparência de dado real" de UM campo. Bloqueia quando há
+ * identificador forte realista (CPF, CNS, RG, CRM, celular, e-mail pessoal) ou
+ * uma "ficha": nome junto de outro dado pessoal realista. CNPJ, CEP, fixo e
+ * endereço sozinhos (dado típico de EMPRESA num contexto de produto) e nome
+ * sozinho (persona) viram só aviso.
+ */
+export function assessPii(findings: PiiFinding[]): PiiAssessment {
+  const reais = findings.filter((f) => f.realistic);
+  const kinds = [...new Set(reais.map((f) => f.kind))];
+  if (reais.some(isStrong)) return { verdict: 'bloqueio', kinds, reason: 'identificador' };
+  if (kinds.includes('nome') && kinds.length >= 2) return { verdict: 'bloqueio', kinds, reason: 'ficha' };
+  return { verdict: reais.length ? 'aviso' : 'limpo', kinds };
+}
+
+// ---------------------------------------------------------------------------
+// Varredura de objetos (importação e pré-voo)
+// ---------------------------------------------------------------------------
+
+export interface PiiFieldReport {
+  /** Caminho legível do campo: `customStages[2].question`. */
+  path: string;
+  findings: PiiFinding[];
+  assessment: PiiAssessment;
+}
+
+export interface ScanObjectOptions {
+  /** Pula a chave (ids de modelo, enums…). Default: `isNonContentKey`. */
+  skipKey?: (key: string) => boolean;
+  /** Pula o nó inteiro (ex.: cenário gerado por LLM, `origin: 'ai'`). */
+  skipNode?: (node: Record<string, unknown>) => boolean;
+}
+
+// Chaves que nunca carregam conteúdo digitado (ids de modelo, enums, formato).
+const NON_CONTENT_KEY =
+  /^(mode|format|origin|source|runner|piiMode|compliance|reasoning|reasoningLevel|techniqueIds|maxPricePerMTok|limits|agent|models|id|.*ModelIds?|.*Id|.*Ids|.*At)$/;
+
+export function isNonContentKey(key: string): boolean {
+  return NON_CONTENT_KEY.test(key);
+}
+
+function joinPath(base: string, key: string | number): string {
+  if (typeof key === 'number') return `${base}[${key}]`;
+  return base ? `${base}.${key}` : key;
+}
+
+/** Varre toda string de um objeto (JSON importado, RunConfig) e relata por campo. */
+export function scanObjectPii(value: unknown, root = '', opts: ScanObjectOptions = {}): PiiFieldReport[] {
+  const skipKey = opts.skipKey ?? isNonContentKey;
+  const out: PiiFieldReport[] = [];
+  const visit = (v: unknown, path: string, depth: number): void => {
+    if (depth > 12 || v === null || v === undefined) return;
+    if (typeof v === 'string') {
+      const { findings } = scanPii(v);
+      if (findings.length) out.push({ path: path || '(texto)', findings, assessment: assessPii(findings) });
+      return;
+    }
+    if (Array.isArray(v)) {
+      v.forEach((item, i) => visit(item, joinPath(path, i), depth + 1));
+      return;
+    }
+    if (typeof v === 'object') {
+      const node = v as Record<string, unknown>;
+      if (opts.skipNode?.(node)) return;
+      for (const [k, child] of Object.entries(node)) {
+        if (skipKey(k)) continue;
+        visit(child, joinPath(path, k), depth + 1);
+      }
+    }
+  };
+  visit(value, root, 0);
+  return out;
+}
+
+function describeField(r: PiiFieldReport): string {
+  const kinds = r.assessment.kinds.map((k) => PII_KIND_LABEL[k]);
+  const extra = r.assessment.kinds.includes('nome') ? ' — nomes: não coberto' : '';
+  return `${r.path} (${kinds.join(' + ')}${extra})`;
+}
+
+const MAX_FIELDS_IN_MESSAGE = 6;
+
+function listFields(reports: PiiFieldReport[]): string {
+  const shown = reports.slice(0, MAX_FIELDS_IN_MESSAGE).map(describeField).join('; ');
+  const rest = reports.length - MAX_FIELDS_IN_MESSAGE;
+  return rest > 0 ? `${shown}; +${rest} campo(s)` : shown;
+}
+
+export interface PiiImportCheck {
+  ok: boolean;
+  /** Campos com aparência de dado real (motivo do bloqueio). */
+  blocked: PiiFieldReport[];
+  /** Campos com achado fraco (CNPJ/CEP/fixo/endereço/nome sozinhos): só aviso. */
+  warnings: PiiFieldReport[];
+  /** Mensagem PT-BR que NOMEIA os campos (presente quando `ok === false`). */
+  message?: string;
+}
+
+/**
+ * Varredura da IMPORTAÇÃO (cenários, pacote, config JSON, biblioteca): dado
+ * pessoal de aparência real ⇒ bloqueio com aviso nomeando o campo. Nunca
+ * corrige em silêncio — quem revisa decide (e pode reimportar com
+ * `allowPii`, caso em que os identificadores seguem pseudonimizados no envio).
+ */
+export function checkImportPii(value: unknown, root = '', opts: ScanObjectOptions = {}): PiiImportCheck {
+  const reports = scanObjectPii(value, root, opts);
+  const blocked = reports.filter((r) => r.assessment.verdict === 'bloqueio');
+  const warnings = reports.filter((r) => r.assessment.verdict === 'aviso');
+  if (!blocked.length) return { ok: true, blocked, warnings };
+  return {
+    ok: false,
+    blocked,
+    warnings,
+    message:
+      `Importação bloqueada (LGPD): dado pessoal com aparência de dado real em ${blocked.length} campo(s) — ` +
+      `${listFields(blocked)}. Revise o arquivo e use dados sintéticos (documento com dígito verificador ` +
+      `inválido ou mascarado, ex.: ***.***.***-**). Nada foi corrigido automaticamente.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Modo da run: "redigir" (default) × "só sintético"
+// ---------------------------------------------------------------------------
+
+/**
+ * - `redact` (default): identificadores estruturados são pseudonimizados no
+ *   gateway antes de TODA chamada; nomes em texto livre NÃO são cobertos.
+ * - `synthetic` ("só sintético"): além disso, a run é RECUSADA no pré-voo se
+ *   qualquer campo fornecido pelo usuário tiver aparência de dado real — sem
+ *   exceção manual. É o default recomendado pela R-16 para quem tem nomes.
+ */
+export type PiiMode = 'redact' | 'synthetic';
+
+export const PII_MODES: readonly PiiMode[] = ['redact', 'synthetic'];
+
+export interface PiiConfigLike {
+  piiMode?: PiiMode;
+}
+
+export interface RunPiiCheck {
+  mode: PiiMode;
+  blocked: PiiFieldReport[];
+  warnings: PiiFieldReport[];
+}
+
+/**
+ * Varre os campos que o USUÁRIO fornece num RunConfig de topo (tema, brief,
+ * prompts, cenários, contratos…). Tudo o que o config carrega conta — inclusive
+ * cenário marcado `origin: 'ai'`, porque esse campo é editável no JSON
+ * importado. O que o NOSSO LLM gera durante a sessão (cenários/gabaritos das
+ * iterações) não passa por aqui: o pré-voo das runs aninhadas pula esta parte.
+ */
+export function checkRunPii(cfg: PiiConfigLike & object): RunPiiCheck {
+  const mode: PiiMode = cfg.piiMode === 'synthetic' ? 'synthetic' : 'redact';
+  const reports = scanObjectPii(cfg);
+  return {
+    mode,
+    blocked: reports.filter((r) => r.assessment.verdict === 'bloqueio'),
+    warnings: reports.filter((r) => r.assessment.verdict === 'aviso'),
+  };
+}
+
+/** Erro de POLÍTICA (não de rede): a run "só sintético" não pode começar. */
+export class PiiPolicyError extends Error {
+  readonly code = 'PII_POLICY';
+  readonly fields: PiiFieldReport[];
+  // Sem "parameter property": mantém o arquivo compatível com strip de tipos.
+  constructor(message: string, fields: PiiFieldReport[]) {
+    super(message);
+    this.name = 'PiiPolicyError';
+    this.fields = fields;
+  }
+}
+
+/** Reconhece o erro sem `instanceof` (ESM com instância dupla do módulo). */
+export function isPiiPolicyError(err: unknown): err is PiiPolicyError {
+  return Boolean(err && typeof err === 'object' && (err as { code?: unknown }).code === 'PII_POLICY');
+}
+
+export function runPiiMessage(check: RunPiiCheck): string {
+  return (
+    `Modo "só sintético" recusou a run: dado pessoal com aparência de dado real em ` +
+    `${check.blocked.length} campo(s) — ${listFields(check.blocked)}. Troque por dados sintéticos ` +
+    `ou use o modo "redigir" (identificadores pseudonimizados no envio; nomes não cobertos).`
+  );
+}
+
+/**
+ * Pré-voo (antes de qualquer LLM): no modo "só sintético" lança
+ * `PiiPolicyError` nomeando os campos. No modo "redigir" só relata.
+ */
+export function assertRunPii(cfg: PiiConfigLike & object): RunPiiCheck {
+  const check = checkRunPii(cfg);
+  if (check.mode === 'synthetic' && check.blocked.length) {
+    throw new PiiPolicyError(runPiiMessage(check), check.blocked);
+  }
+  return check;
+}
+
+// ---------------------------------------------------------------------------
+// Pseudonimização (o que o gateway aplica em toda requisição)
+// ---------------------------------------------------------------------------
+
+const TOKEN_LABEL: Record<PiiKind, string> = {
+  cpf: 'CPF',
+  cnpj: 'CNPJ',
+  cns: 'CNS',
+  rg: 'RG',
+  cep: 'CEP',
+  telefone: 'TELEFONE',
+  email: 'EMAIL',
+  crm: 'CRM',
+  nome: 'NOME',
+  endereco: 'ENDERECO',
+};
+
+/** Forma canônica: o mesmo documento em qualquer formatação vira o mesmo token. */
+function canonical(f: Pick<PiiFinding, 'kind' | 'text'>): string {
+  switch (f.kind) {
+    case 'email':
+      return f.text.toLowerCase();
+    case 'cnpj':
+    case 'rg':
+      return f.text.toUpperCase().replace(/[^0-9A-Z]/g, '');
+    case 'telefone': {
+      const d = onlyDigits(f.text);
+      return d.length > 11 && d.startsWith('55') ? d.slice(2) : d.replace(/^0(?=\d{10,11}$)/, '');
+    }
+    default:
+      return onlyDigits(f.text);
+  }
+}
+
+function fnv1a(s: string, seed = 0x811c9dc5): number {
+  let h = seed >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function randomSalt(): string {
+  const c = (globalThis as { crypto?: { getRandomValues?: (a: Uint32Array) => Uint32Array } }).crypto;
+  const buf = new Uint32Array(4);
+  if (c?.getRandomValues) c.getRandomValues(buf);
+  else for (let i = 0; i < buf.length; i++) buf[i] = Math.floor(Math.random() * 0x100000000);
+  return Array.from(buf, (n) => n.toString(16).padStart(8, '0')).join('');
+}
+
+export interface PiiRedaction {
+  kind: PiiKind;
+  token: string;
+  start: number;
+  end: number;
+}
+
+export interface RedactResult {
+  text: string;
+  redactions: PiiRedaction[];
+  /** Achados contextuais (nomes/endereços) vistos e NÃO reescritos. */
+  contextualSeen: number;
+}
+
+export interface PiiVaultOptions {
+  /**
+   * Sal do token. Default: aleatório por instância — sem ele, o hash de um CPF
+   * (espaço de 10^9) seria revertido por força bruta pelo provedor.
+   */
+  salt?: string;
+}
+
+/**
+ * Cofre de pseudônimos: token ESTÁVEL por instância (mesmo valor ⇒ mesmo
+ * token em toda a run, em qualquer papel), sem guardar o valor em claro — o
+ * token é hash com sal secreto, então não há mapa que cresça nem que vaze.
+ */
+export class PiiVault {
+  private readonly salt: string;
+  constructor(opts: PiiVaultOptions = {}) {
+    this.salt = opts.salt ?? randomSalt();
+  }
+
+  tokenFor(f: Pick<PiiFinding, 'kind' | 'text'>): string {
+    const h = fnv1a(`${this.salt}|${f.kind}|${canonical(f)}`).toString(16).padStart(8, '0');
+    return `[${TOKEN_LABEL[f.kind]}_${h}]`;
+  }
+
+  /** Redige os identificadores ESTRUTURADOS realistas de um texto. */
+  redact(text: string): RedactResult {
+    const { structured, contextual } = scanPii(text);
+    const alvo = structured.filter((f) => f.realistic);
+    if (!alvo.length) return { text, redactions: [], contextualSeen: contextual.length };
+    let out = '';
+    let cursor = 0;
+    const redactions: PiiRedaction[] = [];
+    for (const f of alvo) {
+      const token = this.tokenFor(f);
+      out += text.slice(cursor, f.start) + token;
+      cursor = f.end;
+      redactions.push({ kind: f.kind, token, start: f.start, end: f.end });
+    }
+    out += text.slice(cursor);
+    return { text: out, redactions, contextualSeen: contextual.length };
+  }
+}
+
+export interface PiiGuardStats {
+  /** Requisições que passaram pela cascata (== requisições de chat enviadas). */
+  scannedCalls: number;
+  scannedMessages: number;
+  /** Requisições com ≥1 identificador pseudonimizado. */
+  redactedCalls: number;
+  redactionsByKind: Partial<Record<PiiKind, number>>;
+  /** Nomes/endereços vistos e enviados como estão (`nao-coberto`). */
+  contextualSeen: number;
+}
+
+/**
+ * O guarda do gateway: TODA lista de mensagens passa por `protect` antes de
+ * virar corpo de requisição. Mantém contadores por instância (1 por processo
+ * ou aba) — é o que o teste usa para provar que nenhuma chamada escapa.
+ */
+export class PiiGuard {
+  readonly vault: PiiVault;
+  private readonly counters: PiiGuardStats = {
+    scannedCalls: 0,
+    scannedMessages: 0,
+    redactedCalls: 0,
+    redactionsByKind: {},
+    contextualSeen: 0,
+  };
+
+  constructor(opts: PiiVaultOptions = {}) {
+    this.vault = new PiiVault(opts);
+  }
+
+  protect<M extends { content: string }>(messages: readonly M[]): M[] {
+    this.counters.scannedCalls += 1;
+    let redigiu = false;
+    const out = messages.map((msg) => {
+      this.counters.scannedMessages += 1;
+      if (typeof msg.content !== 'string' || !msg.content) return msg;
+      const r = this.vault.redact(msg.content);
+      this.counters.contextualSeen += r.contextualSeen;
+      if (!r.redactions.length) return msg;
+      redigiu = true;
+      for (const x of r.redactions) {
+        this.counters.redactionsByKind[x.kind] = (this.counters.redactionsByKind[x.kind] ?? 0) + 1;
+      }
+      return { ...msg, content: r.text };
+    });
+    if (redigiu) this.counters.redactedCalls += 1;
+    return out;
+  }
+
+  stats(): PiiGuardStats {
+    return { ...this.counters, redactionsByKind: { ...this.counters.redactionsByKind } };
+  }
+}
+
+export function createPiiGuard(opts: PiiVaultOptions = {}): PiiGuard {
+  return new PiiGuard(opts);
+}

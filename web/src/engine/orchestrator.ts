@@ -238,7 +238,9 @@ async function runLoop(
   // LGPD (IMPL-041): área SENSÍVEL é fail-closed — todo papel que vê o dado
   // (competidor, juiz/duelo, gerador, gabarito, reescritor) precisa de endpoint
   // ZDR na allowlist fresca; senão a run é recusada AQUI, antes de qualquer LLM.
-  await enforceRunCompliance(record.config);
+  // IMPL-042: + modo "só sintético" (dado pessoal de aparência real recusa a
+  // run). Runs de uma sessão pulam essa parte: o config da SESSÃO já passou.
+  await enforceRunCompliance(record.config, undefined, { nested: Boolean(record.sessionId) });
 
   // Resolve contestants on-demand (variacao: gera as variantes via optimizer).
   if (opts.prepare) {

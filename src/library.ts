@@ -27,6 +27,7 @@ import {
   type SeedResult,
 } from './engine/libraryCore.js';
 import { SCENARIO_PACK_FORMAT } from './scenarioPack.js';
+import { checkImportPii } from './engine/pii.js';
 import type { ScenarioPack, StageSpec } from './types.js';
 
 function libraryDir(): string {
@@ -183,11 +184,15 @@ export async function deleteItem(profileId: string, itemId: string): Promise<boo
  * Importa itens CRUS (JSON de arquivo — lista solta, {items:[...]} ou pacote de
  * cenários) para um perfil. Valida item a item: inválidos viram erros na lista
  * (PT-BR) e NÃO derrubam a importação. `origin` default = 'import'.
+ *
+ * LGPD (IMPL-042): item com dado pessoal de aparência real é RECUSADO com aviso
+ * nomeando o campo (nunca corrigido em silêncio). `allowPii` = revisão humana
+ * confirmou que é sintético.
  */
 export async function importItems(
   profileId: string,
   raw: unknown,
-  opts: { origin?: LibraryItem['origin']; seed?: string } = {},
+  opts: { origin?: LibraryItem['origin']; seed?: string; allowPii?: boolean } = {},
 ): Promise<{ added: number; updated: number; errors: string[] }> {
   const lista: unknown[] = Array.isArray(raw)
     ? raw
@@ -204,8 +209,13 @@ export async function importItems(
       createdAt: nowIso(),
       ...((cru ?? {}) as Record<string, unknown>),
     });
-    if (r.ok) validos.push(r.item);
-    else errors.push(`item ${i + 1}: ${r.error}`);
+    if (!r.ok) {
+      errors.push(`item ${i + 1}: ${r.error}`);
+      return;
+    }
+    const pii = opts.allowPii ? null : checkImportPii(r.item);
+    if (pii && !pii.ok) errors.push(`item ${i + 1}: ${pii.message}`);
+    else validos.push(r.item);
   });
   const { added, updated } = await saveItems(profileId, validos.map((it) => ({ ...it, seed: it.seed ?? opts.seed })));
   return { added, updated, errors };

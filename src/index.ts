@@ -78,6 +78,32 @@ export {
   DEFAULT_OPENROUTER_BASE_URL,
 } from './openrouter.js';
 export type { GatewayConfig, FetchLike, LimiterSnapshot, UsageInfo } from './openrouter.js';
+
+// Dado pessoal PT-BR (IMPL-042): a cascata que o gateway aplica em toda chamada.
+export {
+  scanPii,
+  assessPii,
+  checkImportPii,
+  checkRunPii,
+  assertRunPii,
+  isPiiPolicyError,
+  createPiiGuard,
+  PiiGuard,
+  PiiVault,
+  PII_COVERAGE,
+  PII_MODES,
+  isValidCpf,
+  isValidCnpj,
+  isValidCns,
+} from './engine/pii.js';
+export type {
+  PiiFinding,
+  PiiKind,
+  PiiMode,
+  PiiImportCheck,
+  PiiGuardStats,
+  PiiFieldReport,
+} from './engine/pii.js';
 export { gatewayConfigFromEnv, configureGatewayFromEnv } from './gatewayEnv.js';
 export type { ChatCompletionParams, ChatCompletionResult, KeyInfo } from './openrouter.js';
 
