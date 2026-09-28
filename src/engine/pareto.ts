@@ -96,6 +96,111 @@ export function pickParent<T extends ParetoEntry>(
   )[0];
 }
 
+// ---------------------------------------------------------------------------
+// IMPL-062 (R-02b:REC-4): amostragem de pai ∝ COBERTURA + diagnóstico do front.
+// O rodízio pelo menos usado ignora QUANTAS instâncias cada candidato vence;
+// o GEPA escolhe o pai proporcionalmente à cobertura (vitórias por cenário).
+// E, com veredito ruidoso e n pequeno, o front de Pareto é ruído — daí as
+// métricas de diagnóstico (fração de pares não dominados + tamanho do front).
+// ---------------------------------------------------------------------------
+
+/** n mínimo para a amostragem ∝ cobertura (abaixo disso, o front é ruído). */
+export const PARETO_MIN_N = 20;
+/** Fração de pares não dominados acima da qual o front vira alerta de ruído. */
+export const PARETO_NOISE_FRACTION = 0.6;
+
+export interface ParetoDiagnostics {
+  /** Instâncias (cenários) por trás da matriz. */
+  n: number;
+  /** Tamanho do front de Pareto (entradas não dominadas). */
+  frontSize: number;
+  /** Fração de pares (a,b) em que NENHUM domina o outro (0–1). */
+  nonDominatedPairFraction: number;
+  /**
+   * true = front provavelmente RUÍDO: fração de pares não dominados >
+   * {@link PARETO_NOISE_FRACTION} com n < {@link PARETO_MIN_N} (a ablação do
+   * GEPA foi com D_pareto de 111–300 instâncias).
+   */
+  noiseAlert: boolean;
+}
+
+/**
+ * Diagnóstico do pool: fração de pares não dominados e tamanho do front.
+ * `n` = número de instâncias (cenários) da matriz candidato × cenário.
+ */
+export function paretoDiagnostics(entries: ParetoEntry[], n: number): ParetoDiagnostics {
+  const frontSize = paretoFront(entries).length;
+  let pares = 0;
+  let naoDominados = 0;
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = i + 1; j < entries.length; j++) {
+      pares += 1;
+      const a = entries[i].bySlice;
+      const b = entries[j].bySlice;
+      if (!dominates(a, b) && !dominates(b, a)) naoDominados += 1;
+    }
+  }
+  const frac = pares ? naoDominados / pares : 0;
+  return {
+    n,
+    frontSize,
+    nonDominatedPairFraction: Number(frac.toFixed(4)),
+    noiseAlert: frac > PARETO_NOISE_FRACTION && n < PARETO_MIN_N,
+  };
+}
+
+/**
+ * COBERTURA de cada candidato: em quantas instâncias (cenários) ele vence —
+ * empate no topo conta como vitória para todos os empatados. `scoresByCandidate`
+ * é a matriz candidato × cenário (score por instância; null/undefined = sem
+ * observação, nunca pontua).
+ */
+export function coverageWins(
+  scoresByCandidate: Record<string, readonly (number | null | undefined)[]>,
+): Record<string, number> {
+  const ids = Object.keys(scoresByCandidate);
+  const n = ids.reduce((m, id) => Math.max(m, scoresByCandidate[id]?.length ?? 0), 0);
+  const wins: Record<string, number> = Object.fromEntries(ids.map((id) => [id, 0]));
+  for (let s = 0; s < n; s++) {
+    let best = Number.NEGATIVE_INFINITY;
+    for (const id of ids) {
+      const v = scoresByCandidate[id]?.[s];
+      if (typeof v === 'number' && Number.isFinite(v) && v > best) best = v;
+    }
+    if (best === Number.NEGATIVE_INFINITY) continue;
+    for (const id of ids) {
+      const v = scoresByCandidate[id]?.[s];
+      if (typeof v === 'number' && Number.isFinite(v) && v >= best) wins[id] += 1;
+    }
+  }
+  return wins;
+}
+
+/**
+ * Escolhe o PAI por amostragem ∝ cobertura (quantas instâncias o candidato
+ * vence — GEPA). `rng` é injetável para os testes (determinísticos). Sem
+ * vitória registrada ninguém tem peso: cai numa amostragem uniforme (o pai
+ * nunca some).
+ */
+export function pickParentByCoverage<T extends ParetoEntry>(
+  pool: T[],
+  wins: Record<string, number>,
+  rng: () => number = Math.random,
+): T | undefined {
+  if (!pool.length) return undefined;
+  const pesos = pool.map((e) => Math.max(0, wins[e.id] ?? 0));
+  const total = pesos.reduce((a, b) => a + b, 0);
+  if (total <= 0) {
+    return pool[Math.min(pool.length - 1, Math.floor(rng() * pool.length))];
+  }
+  let alvo = rng() * total;
+  for (let i = 0; i < pool.length; i++) {
+    alvo -= pesos[i];
+    if (alvo < 0) return pool[i];
+  }
+  return pool[pool.length - 1];
+}
+
 /** Judge-score (0–100) por fatia de um contestant, a partir de pares (fatia, veredito). */
 export function sliceScores(
   observations: { slice: string; score: number }[],

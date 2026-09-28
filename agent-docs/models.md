@@ -1,8 +1,9 @@
 # Modelos e think levels
 
-O catálogo vem do OpenRouter (`GET /models`), é cacheado por 24 h em
-`~/.prompt-builder/cache/` e funciona **offline** depois da primeira busca.
-`--refresh-models` força a atualização.
+O catálogo vem do OpenRouter (`GET /models`, **público: não exige key**), é
+cacheado por 24 h em `~/.prompt-builder/cache/` e funciona **offline** depois da
+primeira busca. `--refresh-models` força a atualização. Sem key, o `--json`
+traz `"scope": "public"`.
 
 ## Exportar
 
@@ -20,9 +21,29 @@ prompt-builder models list --format ids         # só os ids, um por linha
 `--no-reasoning` · `--effort <nível>` (só modelos que aceitam **aquele** degrau) ·
 `--supports <param>` (repetível, ex.: `temperature`, `seed`) · `--min-context N` ·
 `--max-prompt-price N` / `--max-completion-price N` (**USD por milhão de
-tokens**) · `--free` · `--lgpd-area <área> [--include-ressalvas]` · `--limit N`.
+tokens**; `--include-variable-price` mantém os de preço variável, que o teto
+exclui por padrão) · `--free` · `--lgpd-area <área> [--include-ressalvas]` ·
+`--expiring N` (só quem sai do catálogo em até N dias) · `--limit N`. Com teto
+de preço, o stderr diz (linha `teto de preço: …`) quantos ficaram acima do teto
+e quantos de preço variável ficaram fora — ou entraram.
 
-## O formato de export (`prompt-builder-models@1`)
+### LGPD: allowlist por endpoint (fail-closed)
+
+`--lgpd-area` filtra pela allowlist **por endpoint** (provedor + região) que
+viaja no pacote, derivada de `GET /models` + `GET /endpoints/zdr`. Em área
+**sensível** (tudo menos `geral`) só passa modelo com criador conhecido e ≥ 1
+endpoint ZDR de provedor mapeado; o que é desconhecido é **bloqueado**, e uma
+run sensível com qualquer papel (competidor, juiz, gerador, gabarito,
+reescritor) fora da allowlist é recusada antes da primeira chamada. Snapshot
+com mais de 90 dias bloqueia a área sensível inteira.
+
+```bash
+prompt-builder models allowlist --check            # idade + contagens; exit 3 se vencida
+prompt-builder models allowlist --check --max-age 30 --json
+prompt-builder models allowlist --area saude       # liberados + tags p/ provider.only
+```
+
+## O formato de export (`prompt-builder-models@2`)
 
 ```json
 {
@@ -44,13 +65,35 @@ tokens**) · `--free` · `--lgpd-area <área> [--include-ressalvas]` · `--limit
       "off": "none", "minimal": "minimal", "low": "low", "medium": "medium",
       "high": "high", "xhigh": "high", "max": "high"
     }
+  },
+  "lifecycle": {
+    "canonicalSlug": "openai/gpt-5-mini-2025-08-07",
+    "expirationDate": null,
+    "aliasTarget": null
   }
 }
 ```
 
+`lifecycle` diz qual snapshot está por trás do id, quando ele sai do catálogo
+e, para aliases `~…-latest`, para onde apontam hoje. Alertas 30/14/7 dias,
+política de remoção e o gate de baseline: `prompt-builder docs lifecycle`.
+
 **Duas unidades diferentes convivem, e confundi-las erra por 1.000.000×:**
 `pricing.*` é **USD por token** (o formato do catálogo) e `pricePerMTok.*` é
 **USD por milhão** (o que humanos usam e o que os filtros de preço esperam).
+
+**Preço desconhecido = a string `"unknown"`** (novo no `@2`; no `@1` saía `-1`).
+Roteadores como `openrouter/auto` vêm do catálogo com `"-1"` — preço variável,
+depende do modelo para onde a chamada for roteada — e campos de preço
+ausentes/inválidos também viram `"unknown"`. Na tabela aparece `variável`.
+Trate como "não sei", **nunca** como número: `--max-*-price` (salvo
+`--include-variable-price`) e `--free` excluem esses modelos, e a estimativa de
+custo os deixa fora da soma com aviso (ver `budget`).
+
+O catálogo é validado ao carregar: campo de preço/contexto ruim segue como
+desconhecido (fail-open, com alerta); `supported_parameters` ou
+`reasoning.supported_efforts` malformados desligam o que eles controlariam
+(fail-closed: nada opcional vai no corpo daquele modelo).
 
 ## `thinkLevels` — o campo que evita HTTP 400
 

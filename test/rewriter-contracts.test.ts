@@ -124,16 +124,24 @@ describe('verifyRewrite — gate pós-rewriter', () => {
 });
 
 describe('extractPlaceholders — contrato implícito', () => {
-  it('detecta {…}, {{…}}, <…>, $VAR e %s', () => {
-    const text = 'Use {os} e {lang}; total {{count}}; anexe <image>; exporte $API_KEY e preencha %s.';
+  // IMPL-011: tag XML só conta com PAR FECHADO (ou auto-fechada). Antes, um
+  // `<image>` solto era placeholder — o mesmo erro que tornava `<instrucoes>`
+  // sem fechamento (e `"<id>"` dentro de um exemplo de JSON) obrigatório.
+  it('detecta {…}, {{…}}, <tag>…</tag>, $VAR e %s', () => {
+    const text =
+      'Use {os} e {lang}; total {{count}}; anexe <image>{img}</image>; exporte $API_KEY e preencha %s.';
     expect(extractPlaceholders(text)).toEqual([
       '{os}',
       '{lang}',
       '{{count}}',
       '<image>',
+      '{img}',
+      '</image>',
       '$API_KEY',
       '%s',
     ]);
+    // O mesmo `<image>` SEM fechamento não é placeholder.
+    expect(extractPlaceholders('anexe <image> e rode em {os}')).toEqual(['{os}']);
   });
 
   it('{{count}} é um token só (não vira {count}) e repetições são deduplicadas', () => {

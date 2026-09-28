@@ -1,0 +1,16 @@
+# gitleaks — regras default + allowlist mínima de PLACEHOLDERS (IMPL-044).
+# Só entra aqui o que é comprovadamente falso: chaves de teste `sk-or-v1-FALSA…`
+# (fixtures) e o `sk-or-v1-...` literal dos exemplos de doc. Nada de allowlist por
+# arquivo inteiro — um segredo real no mesmo arquivo continuaria sendo pego.
+title = "prompt-builder"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "placeholders de key OpenRouter em testes e docs"
+regexTarget = "secret"
+regexes = [
+  '''^sk-or-v1-FALSA[\w-]*$''',
+  '''^sk-or-v1-\.\.\.$''',
+]

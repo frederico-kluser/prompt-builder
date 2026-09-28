@@ -23,12 +23,17 @@ const TAB_LABEL: Record<HelpTutorial, string> = {
   compare: 'Comparar',
   variation: 'Variação',
   training: 'Treino',
+  runs: 'Histórico',
+  prompts: 'Prompts',
+  settings: 'Configurações',
 };
 
-// Tutoriais curtos: 3 passos por modo (o que é / o que selecionar / como ler).
-// Devem refletir a tela atual — página única de configuração + heatmap ao vivo +
-// bloco "Final" com os 3 melhores duelando.
-const TUTORIALS: Record<HelpTutorial, Step[]> = {
+// Tutoriais curtos: no máximo 3 passos por tópico (o que é / o que selecionar /
+// como ler). Devem refletir a tela atual — página única de configuração +
+// heatmap ao vivo + bloco "Final" com os 3 melhores duelando. Nada de número
+// inventado: os defaults citados batem com os do motor (teste de conteúdo em
+// test/ux-keygate-help.test.ts).
+export const TUTORIALS: Record<HelpTutorial, Step[]> = {
   compare: [
     {
       kicker: 'O que é',
@@ -80,9 +85,60 @@ const TUTORIALS: Record<HelpTutorial, Step[]> = {
       body: 'O heatmap acompanha a rodada corrente e “Evolução” mostra o score de cada variante por rodada. Em “Melhor prompt” você compara com o original, copia e salva na biblioteca.',
     },
   ],
+  runs: [
+    {
+      kicker: 'O que é',
+      title: 'Runs e treinos guardados neste navegador',
+      body: 'Tudo o que você rodou fica salvo neste navegador: runs de comparar/variação e sessões de treino, cada uma com modo, tema, status e horário.',
+    },
+    {
+      kicker: 'Como abrir',
+      title: 'Run abre o heatmap, treino abre o cockpit',
+      body: 'Uma run abre com o heatmap cenário × variante e o bloco “Final”; um treino abre o cockpit, com a evolução por rodada e a escolha do melhor prompt.',
+    },
+    {
+      kicker: 'Detalhe',
+      title: 'As iterações de um treino ficam de fora da lista',
+      body: 'Cada rodada do treino é uma run-filha: elas não aparecem na lista plana e são acessíveis pela tela da própria sessão.',
+    },
+  ],
+  prompts: [
+    {
+      kicker: 'O que é',
+      title: 'Biblioteca de prompts salvos',
+      body: 'Os prompts que você salva — por exemplo, os promovidos num treino — ficam guardados neste navegador, com nome e texto completo.',
+    },
+    {
+      kicker: 'Versionamento',
+      title: 'Texto novo vira versão nova',
+      body: 'Mudar o texto cria uma nova versão e registra o histórico; renomear não cria versão.',
+    },
+    {
+      kicker: 'Como usar',
+      title: 'Renomear, comparar e reusar',
+      body: 'Aqui você renomeia, exclui, compara as versões e manda o texto para o rascunho da Nova run.',
+    },
+  ],
+  settings: [
+    {
+      kicker: 'O que é',
+      title: 'Chave, tema e armazenamento',
+      body: 'Aqui ficam a chave da OpenRouter, o tema do app (claro, escuro ou o do sistema) e o armazenamento local.',
+    },
+    {
+      kicker: 'A chave',
+      title: 'Local, com limite e revogável',
+      body: 'A key vive só no localStorage deste navegador e segue direto para o OpenRouter. Qualquer key válida é aceite; se algo parecer errado, revogue-a na página de keys e crie outra.',
+    },
+    {
+      kicker: 'Tema',
+      title: 'Claro, escuro ou o do sistema',
+      body: 'A troca é imediata e vale para todas as telas; em “sistema” o app acompanha o tema do computador enquanto estiver aberto.',
+    },
+  ],
 };
 
-const ORDER: HelpTutorial[] = ['compare', 'variation', 'training'];
+const ORDER: HelpTutorial[] = ['compare', 'variation', 'training', 'runs', 'prompts', 'settings'];
 
 export function HelpModal({ tutorial, onClose }: { tutorial: HelpTutorial; onClose: () => void }) {
   const [active, setActive] = useState<HelpTutorial>(tutorial);

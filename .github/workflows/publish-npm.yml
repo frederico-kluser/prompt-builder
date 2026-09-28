@@ -1,0 +1,107 @@
+# Publicação npm do `prompt-builder-cli` (IMPL-104/IMPL-105 — R-18:REC-1/REC-2).
+#
+# PUBLICAÇÃO POR TRUSTED PUBLISHING (OIDC): não existe NPM_TOKEN de longa
+# duração nas secrets do repositório e este workflow não usa nenhum. O npmjs.com
+# valida o publish pelo trio (org/repo + nome EXATO deste arquivo + branch/tag):
+# por isso este arquivo é o ÚNICO que roda `npm publish` e não pode ser
+# renomeado sem reconfigurar o trusted publisher.
+#
+# Fluxo de release (≤2 ações manuais: 1 changeset + 1 merge):
+#   1. o PR traz um changeset (.changeset/*.md) com notas escritas à mão;
+#   2. merge no main → job `version-pr` mantém o PR "Version Packages";
+#   3. merge do "Version Packages" → `scripts/release-tag.mjs` cria a tag
+#      `v<versão>` e dispara ESTE workflow nela (workflow_dispatch é isento da
+#      guarda de recursão — o push da tag com GITHUB_TOKEN não dispararia);
+#   4. job `publish` (referência = a tag) roda os gates via prepublishOnly e
+#      `npm publish`, e confere `dist.attestations` no registry.
+#
+# TESTE NEGATIVO DOCUMENTADO (critério de IMPL-104): `npm publish` fora deste
+# workflow — notebook de alguém, outro workflow, outra branch — FALHA, porque
+# (a) não há token npm no repo para usar e (b) o trusted publisher só emite
+# credencial OIDC para este arquivo de workflow neste repositório. O mesmo vale
+# para um fork: sem o trusted publisher registrado, o publish não autentica.
+#
+# ⚠️ OPERAÇÃO (uma vez, humana, ANTES de restringir qualquer token antigo):
+#   npmjs.com → prompt-builder-cli → Trusted Publisher → GitHub Actions →
+#   repository `frederico-kluser/prompt-builder`, workflow `publish-npm.yml`.
+#   Depois: `npm view prompt-builder-cli@<versão> --json` tem de exibir
+#   `dist.attestations` (o passo final do job verifica isto sozinho).
+
+name: publish-npm
+
+on:
+  push:
+    branches: [main] # job version-pr: PR "Version Packages" gerado pelo changesets
+    tags: ['v*'] # job publish: release sai DA TAG
+  workflow_dispatch: # reexecução numa tag já existente (--ref v<versão>)
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Versionamento (IMPL-105): PR "Version Packages" + notas humanas do changeset.
+  # Não publica nada — só prepara a versão e, no merge dela, cria a tag.
+  # ---------------------------------------------------------------------------
+  version-pr:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # criar a tag de release
+      pull-requests: write # abrir/atualizar o PR "Version Packages"
+      actions: write # gh workflow run (dispacho do publish na tag)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: PR "Version Packages" (e tag/dispatch na merge)
+        uses: changesets/action@v1
+        with:
+          version: npm run version-packages
+          publish: node scripts/release-tag.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Publicação (IMPL-104): SÓ na tag, por OIDC, com os gates e provenance.
+  # ---------------------------------------------------------------------------
+  publish:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC do trusted publishing — o "token" é efêmero e auditável
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: npm ≥ 11.5.1 (trusted publishing + provenance)
+        run: npm install -g npm@^11.5.1
+      - run: npm ci
+      - name: dependências do web (registry privado da Motion)
+        run: npm run setup
+        env:
+          MOTION_TOKEN: ${{ secrets.MOTION_TOKEN }}
+      # prepublishOnly faz build + npm test + publint + attw + allowlist + smoke.
+      # CI=true (de default no Actions) faz o diff da allowlist REPROVAR também.
+      - name: npm publish (OIDC; gates dentro do prepublishOnly)
+        run: npm publish --access public
+      - name: verificar dist.attestations no registry
+        run: |
+          V=$(node -p "require('./package.json').version")
+          npm view "prompt-builder-cli@$V" --json > "$RUNNER_TEMP/view.json"
+          node -e "
+            const j = require(process.env.RUNNER_TEMP + '/view.json');
+            const a = j?.dist?.attestations;
+            if (!a || (Array.isArray(a) && a.length === 0)) {
+              console.error('dist.attestations AUSENTE — provenance não gerado');
+              process.exit(1);
+            }
+            console.log('dist.attestations ok:', JSON.stringify(a));
+          "

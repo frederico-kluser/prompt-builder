@@ -3,10 +3,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   addToPool,
+  coverageWins,
   dominates,
+  paretoDiagnostics,
   paretoFront,
   pickParent,
+  pickParentByCoverage,
   sliceScores,
+  PARETO_MIN_N,
+  PARETO_NOISE_FRACTION,
   type ParetoEntry,
 } from '../src/engine/pareto.js';
 
@@ -90,5 +95,120 @@ describe('pareto.ts — sliceScores', () => {
     expect(s.mft).toBe(75);
     expect(s.adv).toBe(0);
     expect(sliceScores([])).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IMPL-062 (R-02b:REC-4) — amostragem de pai ∝ COBERTURA + diagnóstico do front.
+// ---------------------------------------------------------------------------
+
+/** LCG determinístico (Numerical Recipes) — os testes de distribuição são fixos. */
+const lcg = (seed: number): (() => number) => {
+  let s = seed >>> 0;
+  return () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 2 ** 32;
+  };
+};
+
+/**
+ * Matriz sintética 3 candidatos × 25 cenários (critério 2): vitórias DISJUNTAS
+ * A=15, B=7, C=3 (25 cenários — acima do piso n ≥ 20 para a amostragem ∝ cobertura).
+ */
+const MATRIZ_3x25: Record<string, readonly (number | null | undefined)[]> = {
+  A: [...Array(15).fill(1), ...Array(7).fill(0), ...Array(3).fill(0)],
+  B: [...Array(15).fill(0.5), ...Array(7).fill(1), ...Array(3).fill(0)],
+  C: [...Array(15).fill(0), ...Array(7).fill(0.5), ...Array(3).fill(1)],
+};
+
+describe('IMPL-062 — cobertura (quantas instâncias o candidato vence)', () => {
+  it('vitória por instância: A=15, B=7, C=3 na matriz 3×25', () => {
+    expect(coverageWins(MATRIZ_3x25)).toEqual({ A: 15, B: 7, C: 3 });
+  });
+
+  it('empate no topo conta como vitória para TODOS os empatados', () => {
+    const wins = coverageWins({ A: [1, 0], B: [1, 0.5] });
+    // cenário 0: ambos no topo ⇒ vitória para os DOIS; cenário 1: só B.
+    expect(wins).toEqual({ A: 1, B: 2 });
+  });
+
+  it('null/undefined = sem observação: NUNCA pontua', () => {
+    const wins = coverageWins({ A: [null, 1, undefined], B: [1, null, 1] });
+    // cenário 0: só B tem valor; cenário 1: só A; cenário 2: só B.
+    expect(wins).toEqual({ A: 1, B: 2 });
+  });
+});
+
+describe('IMPL-062 — amostragem de pai ∝ cobertura (feature-flag, n ≥ 20)', () => {
+  it('matriz 3×25: 1.000 amostras reproduzem ∝ cobertura (qui-quadrado < 5.99 ⇒ p > 0,05)', () => {
+    const pool = [e('A', {}), e('B', {}), e('C', {})];
+    const wins = coverageWins(MATRIZ_3x25);
+    const total = 25;
+    const N = 1000;
+    // Várias seeds: a régua estatística vale para QUALQUER sequência do rng.
+    for (const seed of [42, 7, 2026]) {
+      const rng = lcg(seed);
+      const cont: Record<string, number> = { A: 0, B: 0, C: 0 };
+      for (let i = 0; i < N; i++) {
+        const pai = pickParentByCoverage(pool, wins, rng);
+        expect(pai).toBeDefined();
+        cont[pai!.id] += 1;
+      }
+      // Qui-quadrado de aderência (gl = 2): esperado ∝ cobertura (600/280/120).
+      let qui2 = 0;
+      for (const id of ['A', 'B', 'C']) {
+        const esperado = (N * wins[id]) / total;
+        const obs = cont[id];
+        qui2 += ((obs - esperado) ** 2) / esperado;
+        // Frequência observada colada na proporção esperada (± 5 p.p.).
+        expect(Math.abs(obs / N - wins[id] / total), `seed ${seed}, ${id}`).toBeLessThan(0.05);
+      }
+      // χ² < 5.991 (gl 2, α = 0,05) ⇒ não se rejeita a distribuição ∝ cobertura.
+      expect(qui2, `seed ${seed}: qui-quadrado ${qui2.toFixed(2)}`).toBeLessThan(5.991);
+    }
+  });
+
+  it('sem vitória registrada ninguém tem peso: amostragem uniforme, o pai nunca some', () => {
+    const pool = [e('A', {}), e('B', {}), e('C', {})];
+    const rng = lcg(99);
+    const cont: Record<string, number> = { A: 0, B: 0, C: 0 };
+    for (let i = 0; i < 3000; i++) cont[pickParentByCoverage(pool, {}, rng)!.id] += 1;
+    for (const id of ['A', 'B', 'C']) {
+      expect(cont[id], `${id} nunca some`).toBeGreaterThan(0);
+      expect(Math.abs(cont[id] / 3000 - 1 / 3)).toBeLessThan(0.05);
+    }
+    expect(pickParentByCoverage([], {}, rng)).toBeUndefined();
+  });
+});
+
+describe('IMPL-062 — diagnóstico do front (métricas + alerta de RUÍDO)', () => {
+  it('reporta tamanho do front e fração de pares (a,b) não dominados', () => {
+    // 3 entradas: topo domina as outras 2 → pares (topo,a) e (topo,b) dominados,
+    // par (a,b) incomparável ⇒ fração 1/3.
+    const entradas = [e('topo', { mft: 90, adv: 90 }), e('a', { mft: 40, adv: 10 }), e('b', { mft: 10, adv: 40 })];
+    const d = paretoDiagnostics(entradas, 30);
+    expect(d.n).toBe(30);
+    expect(d.frontSize).toBe(1);
+    expect(d.nonDominatedPairFraction).toBeCloseTo(1 / 3, 3);
+    expect(d.noiseAlert).toBe(false);
+  });
+
+  it('alerta de RUÍDO: fração de pares não dominados > 60% com n < 20', () => {
+    // Réguas do motor: piso n = 20 e limiar de fração 0,6.
+    expect(PARETO_MIN_N).toBe(20);
+    expect(PARETO_NOISE_FRACTION).toBe(0.6);
+    // Dois especialistas INCOMPARÁVEIS: o único par não é dominado ⇒ fração 1,0.
+    const especialistas = [e('mft', { mft: 95, adv: 20 }), e('adv', { mft: 20, adv: 95 })];
+    const ruidoso = paretoDiagnostics(especialistas, 8);
+    expect(ruidoso.nonDominatedPairFraction).toBe(1);
+    expect(ruidoso.noiseAlert).toBe(true); // n = 8 < 20: front = ruído
+    const robusto = paretoDiagnostics(especialistas, 25);
+    expect(robusto.noiseAlert).toBe(false); // n ≥ 20: ablação do GEPA foi com 111–300
+    // Fração ≤ 60% nunca alerta, mesmo com n pequeno.
+    const dominado = paretoDiagnostics(
+      [e('topo', { mft: 90, adv: 90 }), e('a', { mft: 40, adv: 10 }), e('b', { mft: 10, adv: 40 })],
+      8,
+    );
+    expect(dominado.noiseAlert).toBe(false);
   });
 });

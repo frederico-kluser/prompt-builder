@@ -9,6 +9,9 @@ a interface mostra **placar, heatmap, custo e o texto sendo gerado token a token
 > **Em uma frase:** "dado um tema, descubra qual modelo (ou qual prompt) responde melhor — e quais
 > respostas são boas o bastante para usar no trabalho de verdade — com evidência, ranking e custo."
 
+> **Novo por aqui?** O **[GUIA](./GUIA.md)** leva do primeiro acesso (a chave do OpenRouter) à
+> leitura do resultado — em linguagem de quem usa a interface, sem jargão do motor.
+
 ## CLI para agentes de programação (`prompt-builder`)
 
 Publicado no npm. Feito para ser dirigido por **Claude Code, Codex, opencode, Cursor, Gemini CLI** —
@@ -21,8 +24,8 @@ npx prompt-builder-cli docs quickstart
 # descobre o modelo do ambiente e QUAIS níveis de raciocínio ele aceita
 npx prompt-builder-cli models show anthropic/claude-opus-5 --json
 
-# valida e estima o custo SEM gastar nada
-npx prompt-builder-cli train --config arena.json --budget 3 --dry-run
+# pré-voo inteiro SEM gastar nada (e sem key): recusa com o MESMO código da run real
+npx prompt-builder-cli train --config arena.json --budget 3 --dry-run --json
 
 # treina com teto de gasto, emitindo um evento JSON por linha
 npx prompt-builder-cli train --config arena.json --budget 3 --output-format ndjson
@@ -36,6 +39,19 @@ Também expõe um **servidor MCP** no mesmo binário:
 ```bash
 claude mcp add --transport stdio arena -- npx -y prompt-builder-cli mcp
 ```
+
+Runs levam minutos e os clientes MCP cortam uma chamada em ~60 s, então o caminho é por
+**job**: `start_run` devolve o `jobId` na hora (a run roda em segundo plano, uma por processo,
+as demais em fila), `run_status` acompanha e `cancel_run` interrompe. `idempotencyKey` é
+obrigatória no `start_run`: um retry com a MESMA chave — até de outro processo — devolve o mesmo
+job em vez de pagar uma segunda run. `run_benchmark`/`train_prompt`/`run_agent_benchmark`
+continuam, mas esperam no máximo ~25 s e então devolvem o `jobId`. Cliente que declara a
+extensão `io.modelcontextprotocol/tasks` recebe uma task (`tasks/get`, `tasks/cancel`).
+
+Cancelar (`cancel_run`, `tasks/cancel` ou `notifications/cancelled` da chamada) interrompe a run
+na hora: nenhuma chamada paga nova sai, o parcial fica gravado como `aborted`
+(`stoppedReason: "cancelled"`) e é lido por `get_result`. Fechar o stdin ou mandar `SIGTERM` faz
+o mesmo com até ~10 s de graça; um job que passa do prazo (`ttlSeconds`, padrão 2 h) também.
 
 Três coisas que o CLI garante e a UI não garantia:
 
@@ -63,8 +79,44 @@ prompt-arena):
 - **Reprodutibilidade**: `runs reproduce` (config + comando exato), `runs export` (artefato
   auto-contido), `sessions winner --apply` (handoff com backup+diff+commit) e `registry validate`
   (guarda de drift do prompt em código).
+- **Ciclo de vida dos modelos**: toda run grava `canonicalSlug`/`expirationDate`/`aliasTarget`
+  do catálogo e alerta 30/14/7 dias antes da expiração; `baseline check` é o gate de CI que
+  reprova quando juiz/gabarito mudam ou somem sem re-baseline declarada (`docs lifecycle`).
 
 Documentação completa: `npx prompt-builder-cli docs --list`.
+
+### Skill para agentes — instalar globalmente (symlink)
+
+A **skill de agente** do pacote ([`skills/prompt-builder/SKILL.md`](./skills/prompt-builder/SKILL.md))
+ensina o agente a operar o benchmark **sem interface web** — MCP, modo agente, orçamento, `--dry-run`,
+NDJSON, `sessions winner`, `runs reproduce`, exit codes — apontando para as docs embarcadas em vez de
+as duplicar. Dois caminhos para a instalar (não copie à mão: [`skills/`](./skills/) é fonte única):
+
+- **Global por symlink (recomendado)** — vale a partir de qualquer diretório e acompanha o repo/pacote
+  (atualizou? todos os agentes veem a skill nova):
+
+  ```bash
+  bash scripts/install-agent-skill.sh install    # todos os agentes conhecidos que existirem
+  bash scripts/install-agent-skill.sh doctor     # onde está · link íntegro · SKILL.md visível
+  bash scripts/install-agent-skill.sh uninstall  # remove só os symlinks desta skill
+  ```
+
+  Cria `<dir-de-skills>/prompt-builder` apontando para `skills/prompt-builder` (caminho absoluto) nos
+  diretórios de skills dos agentes instalados — relativos ao home: `.claude/skills` (Claude Code),
+  `.codex/skills` (Codex CLI), `.dsh/skills` (DSH), `.gemini/skills` (Gemini CLI),
+  `.config/opencode/skills` (OpenCode), `.agents/skills` (genérico) — criando o diretório quando o
+  agente está instalado; outros alvos com `--target <dir>`. O script resolve a skill a partir da
+  própria localização, por isso roda tanto deste checkout como do pacote instalado
+  (`node_modules/prompt-builder-cli/scripts/install-agent-skill.sh`). Exit codes: `0` ok · `2` uso
+  inválido · `1` operacional.
+
+- **Por projeto (cópia)** — `npx prompt-builder-cli init --agent <nome|all>` copia a skill para
+  `.claude/skills`, `.agents/skills`, … do repositório corrente e acrescenta um bloco ao `AGENTS.md`:
+  versiona com o projeto, mas não acompanha as atualizações do pacote.
+
+**Caminho alternativo via npm (sem instalar nada):** o conteúdo viaja no pacote —
+`npx prompt-builder-cli docs --list` (tópicos, com custo aprox. em tokens), `docs <tópico>` (uma doc) e
+`npx prompt-builder-cli skill` (imprime a SKILL.md); o servidor MCP é `prompt-builder mcp`.
 
 ---
 
@@ -77,10 +129,11 @@ foi consolidada na memória em 2026-09-26.)
 
 ## Sumário
 
+- [Guia do utilizador (GUIA.md)](./GUIA.md)
 - [Como funciona (visão geral)](#como-funciona-visão-geral)
 - [Os três modos](#os-três-modos)
 - [Os papéis dos modelos](#os-papéis-dos-modelos)
-- [Conformidade LGPD (filtro consultivo)](#conformidade-lgpd-filtro-consultivo)
+- [Conformidade LGPD (allowlist por endpoint)](#conformidade-lgpd-allowlist-por-endpoint)
 - [Anatomia de uma etapa](#anatomia-de-uma-etapa)
 - [Sistema de pontuação](#sistema-de-pontuação)
 - [Stack tecnológica](#stack-tecnológica)
@@ -107,7 +160,7 @@ mini-benchmark independente e auto-contido:
 flowchart LR
   T([Tema + config]) --> DG[1 · Datagen<br/>gera o cenário]
   DG --> C{2 · Participantes<br/>respondem em paralelo}
-  C --> J[3 · Juiz<br/>veredito vs gabarito<br/>+ duelos Copeland]
+  C --> J[3 · Juiz<br/>veredito vs gabarito<br/>+ duelos por taxa de vitória]
   J --> S[(Placar + Heatmap)]
   S -->|próxima etapa| DG
   S --> R([Run finalizada])
@@ -115,15 +168,18 @@ flowchart LR
 
 1. **Datagen** — um modelo recebe o tema (e um `scenarioBrief` opcional) e produz os **cenários**
    em lotes paralelos: uma pergunta de usuário (`question`), um **contexto de produto**
-   (`productContext`, que vira o *system prompt*: políticas, FAQs, dados, restrições) e um teto de
+   (`productContext`: políticas, FAQs, dados, restrições — entregue ao participante como bloco de
+   dado delimitado antes da pergunta; a variante sob teste é o único *system prompt*) e um teto de
    tokens sugerido (`maxTokens`). Cada etapa varia o tipo de tarefa (extração, raciocínio,
    comparação, recusa…). Um **pacote de cenários** importado vira seed e mescla com os gerados.
 2. **Participantes** — respondem **ao mesmo cenário em paralelo** (com limite de concorrência),
    em *streaming*. A UI mostra o texto crescendo, a velocidade (chars/s), latência, tokens e custo.
 3. **Julgamento** — por default (fora do compare clássico) é **por referência**: um **gabarito**
    temp-0 é gerado por cenário, o juiz classifica cada resposta isoladamente contra ele
-   (**resolve / parcial / não**, com explicação de 1 frase) e os melhores disputam **duelos
-   Copeland** (cada par nas duas ordens; empate em desacordo). Sem gabarito (ou no compare
+   (**resolve / parcial / não**, com explicação de 1 frase; com 2+ juízes vale a **maioria
+   simples**, e painel dividido é **empate técnico**, nunca arredondado para cima) e os melhores
+   disputam **duelos** classificados por **taxa de vitória** (cada par nas duas ordens; empate em
+   desacordo). Sem gabarito (ou no compare
    clássico), cai no **juiz listwise** clássico: ordena as respostas às cegas e dá o veredito de
    aceitabilidade ("dá para usar em produção sem causar erro/dano?").
 4. **Todas as etapas rodam em paralelo** (cenários pré-gerados juntos; execução concorrente
@@ -131,15 +187,19 @@ flowchart LR
    importa; ao final a run é `finished` e fica no histórico (com export JSON/CSV).
 
 Tudo é transmitido ao navegador em tempo real via **Server-Sent Events (SSE)**: durante a run a tela
-mostra um **visualizador de processo** (etapas em paralelo + previews ao vivo) e revela o **placar /
-heatmap só quando tudo termina**. Detalhes do motor em [`FUNCIONAMENTO.md`](./FUNCIONAMENTO.md).
+da run mostra um **Resumo em linguagem natural** (fases do pipeline com contagem, placar simples e
+gasto face ao teto) e o **heatmap** de vereditos por cenário × participante; os duelos finais e os
+diagnósticos entram quando tudo termina. O caminho de alto nível está no [GUIA](./GUIA.md#6-durante-a-execução);
+o motor, abaixo.
 
 ---
 
 ## Os três modos
 
-O assistente de **Nova Run** tem 5 passos (Objetivo → Tema → Participantes → Avaliação → Revisar)
-e atende três objetivos. O que muda é **quem é o "participante"** (`Contestant`):
+A **Nova Run** tem duas superfícies sobre o mesmo estado: o **fluxo guiado** (default, 5 passos em
+linguagem natural — Objetivo → Teste → Participantes → Limites → Revisão, com o plano da run em
+frases) e a **configuração completa** (página única com tudo à vista) — ver [GUIA §3–4](./GUIA.md#3-a-configuração-guiada).
+Qualquer uma delas atende três objetivos. O que muda é **quem é o "participante"** (`Contestant`):
 
 | Modo | O que compara | Participante | Endpoint | Requisito |
 |---|---|---|---|---|
@@ -155,8 +215,9 @@ e atende três objetivos. O que muda é **quem é o "participante"** (`Contestan
   é a semente da próxima — mas **só é promovida se superar o campeão por `minGain`** (default 1
   p.p.); sem margem, a sessão **converge** e para. Os cenários são **congelados** após a iteração 0
   (`pinnedStages`, com split de **holdout**) para comparação justa; o feedback vem de **lições
-  determinísticas** das falhas do campeão (sem LLM extra). Ao final, uma run de **holdout** e uma
-  **significância bootstrap** validam o campeão. Acompanhe em `TrainingView`.
+  determinísticas** das falhas do campeão (sem LLM extra). Ao final, uma run de **holdout** e um
+  **teste pareado exato** (troca de sinais + IC por inversão) validam o campeão. Acompanhe em
+  `TrainingView`.
 - Nos modos de um modelo, o **juiz nunca é o modelo sob teste** (anti-viés de auto-preferência), e
   há a opção **"juiz em 2 ordens"** (`judgePasses: 2`) contra viés de posição.
 
@@ -174,7 +235,7 @@ Toda run tem **modelos de apoio** (gerador + juiz) além dos participantes:
 | **Participante** | compare: **≥2** (ou 2–12 configs); variation/training: **1** (+ variações) | Respondem ao cenário e disputam o ranking | `competitorModelIds[]` / `competitorConfigs[]` / `contestantModelId` |
 | **Gerador (datagen)** | exatamente **1** | Inventa os cenários (pergunta + contexto + maxTokens) | `datagenModelId` |
 | **Juiz** | **1 ou mais** | Vereditos vs gabarito + duelos (ou ranking listwise, no fallback) | `judgeModelIds[]` |
-| **Referência (gabarito)** | 1 (default = 1º juiz) | Gera a resposta de referência temp-0 por cenário | `referenceModelId` |
+| **Referência (gabarito)** | 1 (**obrigatório** em variation/training; em compare o default = 1º juiz) | Gera a resposta de referência temp-0 por cenário | `referenceModelId` |
 | **Optimizer** | 1 (variation/training) | Reescreve prompts aplicando técnicas | `optimizerModelId` (default = `datagenModelId`) |
 
 **Regras validadas no backend** (Zod) — config inválida é recusada com `400`:
@@ -182,35 +243,113 @@ Toda run tem **modelos de apoio** (gerador + juiz) além dos participantes:
 - compare: ≥ **2 competidores distintos**; gerador ≠ juiz; nem gerador nem juiz são competidores.
 - variation/training: ≥ 2 variações (técnicas ou manuais, contando o `basePrompt` como controle);
   **juiz ≠ modelo sob teste**.
+- **papéis separados (IMPL-048):** a referência **não pode ser juiz nem competidor** (erro de
+  config — o mesmo modelo escreveria o gabarito e o veredito sobre ele, com erros correlacionados);
+  o mesmo vendor/família só gera **aviso** de viés em `fairnessWarnings`. `referenceModelId` é
+  **obrigatório em variation/training**; em compare o default documentado (1º juiz) é denunciado
+  pelo mesmo aviso, nunca escondido.
+- **esforço de raciocínio por papel (IMPL-079):** `reasoning.judge` / `reasoning.duel` /
+  `reasoning.gab` **não compartilham mais um campo só**. Defaults: juiz pointwise **`medium`**,
+  duelo **`low`** e gabarito **`high`** (acima de `low` o ganho de esforço satura ou reverte e o
+  papel juiz domina o custo). Papel sem campo próprio cai no `reasoning.judge` antigo (compat) e,
+  sem nenhum dos dois, no default do papel — sempre com `fitEffort` na allowlist do modelo. Exemplo
+  de config (judge=medium, duel=low, gab=high):
+
+  ```json
+  "reasoning": { "competitor": "low", "judge": "medium", "duel": "low", "gab": "high" }
+  ```
 
 ---
 
-## Conformidade LGPD (filtro consultivo)
+## Conformidade LGPD (allowlist por endpoint)
 
-No passo **Tema** do assistente há um bloco **"Propósito / Conformidade LGPD"** que **filtra o
-catálogo de modelos** conforme a área de uso e a adequação à LGPD — útil porque este repositório é
-do **Grupo Fleury** (dados de saúde = sensíveis). Você escolhe um **propósito/área** (Geral,
-Jurídico, Saúde, Financeiro, Crianças e adolescentes, Setor público — ou **"Livre"**, que mostra
-tudo) e um **rigor** (incluir ou não modelos "permitido com ressalvas"). O filtro vale para **todos**
-os seletores (participantes, gerador, juiz) e **poda** automaticamente seleções que ficaram fora —
-inclusive os defaults de origem chinesa.
+No passo **Tema** do assistente há um bloco **"Conformidade LGPD"** que **filtra o catálogo de
+modelos** conforme a área de uso — útil porque este repositório é do **Grupo Fleury** (dados de
+saúde = sensíveis). Você escolhe uma **área** (Geral, Jurídico, Saúde, Financeiro, Crianças e
+adolescentes, Setor público — ou **"Livre"**, que mostra tudo) e um **rigor** (incluir ou não
+modelos "permitido com ressalvas").
 
-> ⚠️ É **consultivo** e **não é aconselhamento jurídico**: orienta e esconde modelos, mas **não força**
-> o roteamento de providers no OpenRouter. O perfil escolhido é apenas **gravado** em
-> `RunConfig.compliance` (gancho para uma futura fase de *enforcement* — ZDR + `provider.only`).
+A unidade da política é o **endpoint** (provedor + região/variante), como no OpenRouter — não o
+criador do modelo:
 
-**Como classifica** (`web/src/lgpd.ts` + `src/data/lgpd-compliance.json`): pelo **criador** do modelo
-(prefixo do id) quando ele está nas 9 famílias do relatório; senão, por **heurística de origem**
-(China/SG → não recomendado; ocidental → permitido com ressalvas). Status ∈ `permitido` /
-`permitido com ressalvas` / `não recomendado`.
+- **Áreas sensíveis** (todas menos Geral) são **fail-closed**: um modelo só passa com criador
+  conhecido **e** ≥ 1 endpoint ZDR de provedor mapeado no snapshot. Desconhecido ⇒ bloqueado
+  (criador fora da base, provedor fora do mapa, modelo que surgiu depois da geração, área
+  inexistente). Snapshot com mais de **90 dias** (alvo 30) bloqueia a área inteira.
+- A run/sessão sensível passa por um **pré-voo** antes de qualquer chamada de LLM: se QUALQUER
+  papel que vê o dado (competidor, juiz/duelo, gerador, gabarito, reescritor) estiver fora da
+  allowlist, ela é recusada com o papel e o motivo na mensagem.
+- **Geral** segue consultiva (classificação por criador; China/SG → não recomendado).
 
-- Base de conhecimento: [`src/data/lgpd-compliance.json`](./src/data/lgpd-compliance.json) (áreas,
-  famílias, origem de providers/criadores, status ANPD, config ZDR recomendada).
-- Snapshot de referência dos modelos atuais por área:
+- **Roteamento forçado (modo "dados sensíveis", fail-closed):** em área sensível, TODA requisição
+  dos 6 papéis sai com `provider: { zdr: true, data_collection: "deny", only: [tags ZDR da
+  allowlist do modelo], allow_fallbacks: false }` — sem fallback silencioso para endpoint que
+  retém dados. Se faltar qualquer um dos 4 campos (modelo sem rota, snapshot ausente/vencido), a
+  chamada é recusada **antes** do envio. Ponto único: o gateway (`src/engine/sensitiveRouting.ts`,
+  aplicado em `OpenRouterGateway.buildBody`), igual no CLI/servidor e na SPA — inclusive o
+  "Gerar prompt base" da tela Nova Run. **Modo agente não roda em área sensível:** o executor do
+  agente (`pi`) chama o provedor por fora do gateway e não enviaria os 4 campos, então o pré-voo
+  recusa a run (`roteamento_incompleto`) antes de qualquer LLM. As tags de cada modelo:
+  `models allowlist --area saude`.
+
+> ⚠️ **Não é aconselhamento jurídico.**
+
+- Classificação: **um só** núcleo puro, [`src/engine/lgpdCore.ts`](./src/engine/lgpdCore.ts),
+  usado pelo CLI/servidor (`src/lgpd.ts`), pela SPA (`web/src/lgpd.ts`) e pelo gerador.
+- Base de conhecimento: [`src/data/lgpd-compliance.json`](./src/data/lgpd-compliance.json) (áreas
+  com `sensivel`, famílias, origem de providers/criadores, status ANPD, config ZDR recomendada).
+- Snapshot por endpoint (consumido em runtime, viaja no pacote npm):
   [`src/data/lgpd-allowlist.generated.json`](./src/data/lgpd-allowlist.generated.json).
-- Regenerar o snapshot: `node scripts/gen-lgpd-allowlist.mjs` (usa os endpoints **públicos**
-  `/models` e `/endpoints/zdr` — sem key).
+- Regenerar: `npm run lgpd:allowlist` (endpoints **públicos** `/models` e `/endpoints/zdr` — sem
+  key). A CI regenera toda semana e abre PR (`.github/workflows/lgpd-allowlist.yml`).
+- Conferir idade e contagens: `prompt-builder models allowlist --check [--max-age 30] [--json]`
+  (exit 3 se vencida/ausente ou com desconhecido liberado).
 - Servido em `GET /v1/benchmark/lgpd`.
+
+### Dado pessoal: redação obrigatória e modo "só sintético"
+
+Toda chamada de LLM — dos 6 papéis (gerador, gabarito, competidor, juiz, duelo, reescritor), no
+CLI, no servidor e na SPA — passa por uma **cascata PT-BR** no ponto único do gateway
+([`src/engine/pii.ts`](./src/engine/pii.ts)) **antes** do envio:
+
+1. **Identificadores estruturados** (regex + dígito verificador mod-11 onde existe): CPF, CNPJ
+   (inclusive o **alfanumérico** de jul/2026), CNS, RG, CEP, telefone, e-mail e CRM saem
+   **pseudonimizados** (`[CPF_1a2b3c4d5e6f]` — o mesmo documento em qualquer formatação vira o
+   mesmo token). O token é **HMAC-SHA-256 com chave secreta de 256 bits por run/sessão**: conhecer
+   pares valor→token (o CPF que o próprio modelo gerou volta pseudonimizado) não permite prever
+   nem reverter outro token, e runs diferentes não se ligam pelo mesmo titular. Placeholders
+   (`(11) 99999-9999`), exemplos notórios e números de serviço (0800/4004) não mexem.
+2. **Nomes e endereços** (heurística local de dicionário + gatilhos — **não** um NER): detectados
+   e contados, **não reescritos** — marcados **"não coberto"**: não há promessa de recall (a
+   literatura mede ~49% para nomes em texto livre). Se os seus dados têm nomes reais, use o modo
+   "só sintético".
+3. **Aparência de dado real** ⇒ **bloqueio com aviso nomeando o campo**, nunca correção silenciosa:
+   identificador forte realista (CPF, CNS, RG com rótulo de identidade, CRM, celular, e-mail pessoal) ou "ficha" de titular
+   (nome + identificador forte, ou nome + ≥2 dados fracos como endereço + CEP). Nome de **persona**
+   do prompt ("Você é a Ana Paula, atendente… Rua Augusta, 1500") e contato comercial viram só
+   aviso. Vale na **importação** — JSON de cenários, pacote, `arena-config@1`, `arena-agent-config@1`
+   e **RunConfig cru** (CLI `--config`/flags, `estimate`, `config validate`, MCP, `POST /runs` e
+   `/sessions`), `library add` e `library seed --file` — e de novo no **pré-voo** da run (SPA inclusive).
+
+**Modo "redigir"** (padrão): o bloqueio acima exige **revisão explícita** — `allowPii: true` no
+config (CLI `--allow-pii`; SPA: "Revisei — importar/iniciar mesmo assim"). Revisado, os
+identificadores seguem pseudonimizados no envio e **voltam ao valor original nas respostas**
+(reversão fora do caminho de envio: o mapa token→valor vive só em memória, por run/sessão) — o
+prompt campeão, o cenário e o gabarito nunca carregam token, e `neverBreak` com o valor original
+continua valendo. Dado de empresa (CNPJ, fixo, CEP, e-mail funcional) nem pede revisão, mas sai
+pseudonimizado do mesmo jeito e a tela da run diz isso. O record guarda em `piiReport` os campos achados
+(caminho + tipos, **nunca o valor**); o CLI narra o mesmo no stderr. Nomes em texto livre seguem
+como estão. **Modo "só sintético"** (`piiMode: "synthetic"`; `--pii-mode synthetic`; switch em
+Avançado na Nova Run): a run/sessão é **recusada**, antes de qualquer LLM, sem exceção manual. O
+**modo agente** (executor `pi`, que fala com o provedor por conta própria, fora do gateway) é
+sempre tratado como "só sintético" — fail-closed para dado de aparência real. ⚠️ O que é só
+**aviso** (CNPJ, fixo, CEP, e-mail funcional, nome) passa no pré-voo e, no **executor**, segue
+**cru** para o provedor (nos demais papéis sai pseudonimizado); o CLI e a tela da run avisam. O
+ground truth determinístico (`expected`) compara a resposta reidratada com o rótulo cru.
+
+Medido na fixture própria [`test/fixtures/pii-ptbr.json`](./test/fixtures/pii-ptbr.json)
+(353 casos): recall 0,98 e precisão 1,00 nos estruturados, 0% de falso positivo no bloqueio
+(`test/lgpd-pii.test.ts`).
 
 Detalhes para agentes na memória CoALA do projeto (`coala.py search "lgpd"`).
 
@@ -241,9 +380,9 @@ sequenceDiagram
   end
   O->>UI: stage.judging
   O->>J: vereditos vs gabarito (pointwise, cego)
-  O->>J: duelos Copeland (2 ordens por par)
+  O->>J: duelos (2 ordens por par)
   O->>UI: stage.dueled / duel.progress
-  J-->>O: vereditos + ordem Copeland (JudgeResult sintetizado)
+  J-->>O: vereditos + ordem por taxa de vitória (JudgeResult sintetizado)
   O->>UI: stage.judged (placar + custo atualizados)
 ```
 
@@ -330,12 +469,14 @@ prompt-builder/
 │  ├─ datagen.ts             # Gera o cenário (question/productContext/maxTokens)
 │  ├─ competitor.ts          # Roda 1 participante (streaming, retry, progresso, custo)
 │  ├─ judge.ts               # Juiz listwise (fallback — ranking cego + vereditos)
-│  ├─ gabarito.ts / refJudge.ts / duels.ts   # Julgamento por referência: gabarito, vereditos pointwise, duelos Copeland
-│  ├─ rank.ts / holdout.ts / stats.ts        # Promoção (minGain), holdout, significância bootstrap
+│  ├─ gabarito.ts / refJudge.ts / duels.ts   # Julgamento por referência: gabarito, vereditos pointwise, duelos (taxa de vitória)
+│  ├─ rank.ts / holdout.ts / stats.ts        # Promoção (minGain), holdout, significância pareada exata
 │  ├─ llmVariants.ts / reasoning.ts / dedup.ts / scenarioPack.ts   # compare-llms, reasoning por papel, dedup, pacote de cenários
 │  ├─ openrouter.ts          # Cliente OpenRouter: models, chat, stream, custo, validateKey
 │  ├─ techniques.ts          # Biblioteca curada de técnicas de prompt
-│  ├─ lgpd.ts                # Serve a base de conhecimento LGPD (GET /lgpd)
+│  ├─ lgpd.ts                # Base LGPD + allowlist do pacote e pré-voo da run (Node)
+│  ├─ engine/lgpdCore.ts     # Núcleo PURO da LGPD: classificação ÚNICA, allowlist por endpoint, pré-voo
+│  ├─ engine/pii.ts          # Núcleo PURO de dado pessoal PT-BR: detecção (DV mod-11), pseudonimização, bloqueio
 │  ├─ events.ts / normalize.ts / storage.ts / types.ts
 │  └─ data/                  # JSON estático VERSIONADO (lgpd-compliance, lgpd-allowlist.generated)
 │
@@ -344,18 +485,20 @@ prompt-builder/
 │     ├─ main.tsx            # Router, layout, navegação
 │     ├─ api.ts              # Cliente HTTP/SSE + tipos + key no localStorage
 │     ├─ idb.ts              # Cache IndexedDB v2 (incl. store `prompts`); theme.ts / help.ts (contexts)
-│     ├─ lgpd.ts             # Classificação/filtragem de conformidade
+│     ├─ lgpd.ts             # Shim do núcleo LGPD + loader do bundle (SPA)
 │     ├─ styles.css          # Design tokens (claro/escuro)
 │     ├─ components/         # ModelSelector, Toggle, TechniqueSelector, ManualVariantsEditor, KeySetup, HelpModal
 │     └─ pages/              # NewRun (assistente 5 passos), RunsList, RunView, TrainingView, PromptsPage, Settings
 │
-├─ scripts/gen-lgpd-allowlist.mjs   # Regenera o snapshot LGPD (endpoints públicos)
+├─ scripts/gen-lgpd-allowlist.mjs   # Regenera a allowlist LGPD por endpoint (npm run lgpd:allowlist)
+├─ scripts/install-agent-skill.sh  # Instala a skill globalmente por symlink (install/doctor/uninstall)
+├─ skills/prompt-builder/          # Skill de agente (SKILL.md) — fonte única, vai no tarball npm
 ├─ .agents/skills/          # Biblioteca de Knowledge Skills (fonte única) — ver seção abaixo
 ├─ .claude/skills           # symlink → ../.agents/skills (portabilidade Claude Code)
 ├─ AGENTS.md                # Instruções mínimas para agentes de código (CLAUDE.md é symlink)
 ├─ data/                    # runtime: runs/ e sessions/ (gitignored — regra /data/)
 ├─ .env.example             # Variáveis OPCIONAIS (o app roda sem .env)
-├─ README.md  ·  TELAS.md   # Este arquivo · documentação das telas
+├─ README.md  ·  GUIA.md    # Este arquivo · guia do utilizador (telas e fluxos)
 └─ package.json  ·  tsconfig.json
 ```
 
@@ -402,9 +545,10 @@ symlinks versionados. Começo: [`AGENTS.md`](./AGENTS.md) (comandos exatos + reg
 ## Configuração
 
 **Não é preciso nenhum `.env` para rodar** — todos os parâmetros têm default. A **chave do
-OpenRouter não vai em variável de ambiente**: você cola na interface (tela de **Configurações** /
-*gate* da Nova Run) e ela fica no `localStorage` do navegador, indo ao backend só no header
-`x-openrouter-key`.
+OpenRouter não vai em variável de ambiente**: a app **pede-a logo ao abrir** (first-run, com os
+pontos de risco/limite/revogação) e ela continua gerível em **Configurações** — fica no
+`localStorage` do navegador, indo ao backend só no header `x-openrouter-key`. Detalhes no
+[GUIA §2](./GUIA.md#2-primeiro-acesso-a-chave).
 
 Variáveis **opcionais** (veja `.env.example`):
 
@@ -414,6 +558,8 @@ Variáveis **opcionais** (veja `.env.example`):
 | `OPENROUTER_APP_URL` | `http://localhost:3000` | Header `HTTP-Referer` de atribuição |
 | `OPENROUTER_APP_TITLE` | `Prompt Builder` | Header `X-Title` de atribuição |
 | `BENCHMARK_PORT` | `3001` | Porta do backend |
+| `PB_HOST` (ou `--host`) | `127.0.0.1` | Interface de bind do backend. Fora de localhost é pedido explícito (aviso no log); com `PROMPT_BUILDER_AGENTS=1` o servidor **recusa** subir fora de localhost. `HOST` **não** vale para o bind (containers/CI exportam o hostname nele): se estiver definido fora de localhost, só gera um aviso — e, no modo agente, a recusa |
+| `PB_ALLOWED_HOSTS` | — | Nomes extras aceitos no header `Host`/`Origin`, separados por vírgula (ex.: túnel ou proxy). Sem isso, só `localhost`/`127.0.0.1`/`::1` — o resto leva 400/403 (proteção contra DNS rebinding) |
 | `OPENROUTER_MAX_CONCURRENCY` | `32` | Teto do limitador global adaptativo de chamadas ao OpenRouter |
 
 Parâmetros da **run** (na tela de Nova Run, validados no backend):
@@ -430,7 +576,7 @@ Parâmetros da **run** (na tela de Nova Run, validados no backend):
 
 > A concorrência efetiva das chamadas ao OpenRouter é governada por um **limitador global
 > adaptativo** (`OPENROUTER_MAX_CONCURRENCY`); o campo `concurrency` por run é legado (não limita
-> mais o paralelismo). Ver [`FUNCIONAMENTO.md`](./FUNCIONAMENTO.md).
+> mais o paralelismo). O funcionamento interno do motor está descrito nesta secção e no GUIA.
 
 ---
 
@@ -603,7 +749,18 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
 - **Juiz e avaliador em `Promise.allSettled`:** um falhando não derruba o outro nem a run.
 - **Casos-limite do juiz:** 0 respostas válidas → inconclusiva; 1 resposta → auto-ranqueada.
 - **Escrita atômica + fila por run**; **timeouts via `AbortController`** em toda chamada à OpenRouter.
-- **Mensagens de erro traduzidas** (401/403 = key inválida; 402 = sem crédito; 429 = rate limit).
+- **Mensagens de erro traduzidas** (401 = key inválida; 402 = sem crédito; 429 = rate limit).
+- **Bloqueio ≠ recusa ≠ erro:** HTTP 403 de moderação/guardrail e `finish_reason` de filtro de
+  conteúdo viram `status: blocked` (defesa do gateway — **não** é problema de key nem falha do
+  prompt); recusa declarada pelo modelo (`message.refusal`) vira `status: refused` (julgável); o
+  resto é `status: error` (infra). O record traz as três contagens em `competitorOutcomeCounts`.
+- **Truncamento nunca é silencioso:** o gateway lê `finish_reason`/`native_finish_reason` (JSON e
+  stream) + raciocínio ≈ teto + conteúdo vazio com tokens; competidor e gabarito repetem 1x com
+  `max_tokens` x2. Resposta ainda truncada deixa a etapa `incomplete` (`incompleteReason:
+  truncation`), fora do placar e das médias; o record traz `truncationRate` (todas as chamadas,
+  juiz e duelo inclusive), os sinais de fim agregados por papel (`finishSignalsByRole`) e o
+  CLI/UI alertam acima de 2% dizendo quais papéis truncaram. Gabarito ainda truncado é
+  descartado com aviso visível (a etapa é julgada sem gabarito).
 
 ---
 
@@ -626,8 +783,10 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
   exatas vs estimadas). `costByContestant` é a fatia **só dos competidores**: gasto de juiz/duelo
   não é atribuível a um contestant. Os comandos `runs show`/`sessions show` trazem a quebra por
   papel (`costByRole`).
-- **Filtro LGPD é consultivo**, não garante conformidade (não força roteamento) — ver
-  [Conformidade LGPD](#conformidade-lgpd-filtro-consultivo). **Não é aconselhamento jurídico.**
+- **LGPD:** áreas sensíveis bloqueiam o que está fora da allowlist de endpoints ZDR e forçam o
+  roteamento por requisição (`provider.only` + `zdr` + `data_collection: deny` +
+  `allow_fallbacks: false`); a área "geral" segue consultiva — ver
+  [Conformidade LGPD](#conformidade-lgpd-allowlist-por-endpoint). **Não é aconselhamento jurídico.**
 - **Sem autenticação de usuário / multiusuário:** ferramenta local; o histórico é compartilhado por
   quem acessa o servidor.
 - **Persistência em arquivo** (não em banco): ótimo para uso local, não pensado para alta escala.
@@ -636,6 +795,7 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
 ---
 
 Para o **funcionamento interno** (pipeline, os 3 modos em detalhe e oportunidades de
-otimização/paralelização), veja **[`FUNCIONAMENTO.md`](./FUNCIONAMENTO.md)**. Para entender **cada
-tela**, veja **[`TELAS.md`](./TELAS.md)**. Para trabalhar no código com um agente, comece por
-**[`AGENTS.md`](./AGENTS.md)** e a biblioteca de **[skills](./.agents/skills/catalog.md)**.
+otimização/paralelização), use a **memória CoALA** (`coala.py search "pipeline"` — a corpus antiga de
+`docs/` foi consolidada lá em 2026-09-26). Para **usar cada tela**, veja o **[GUIA](./GUIA.md)**. Para
+trabalhar no código com um agente, comece por **[`AGENTS.md`](./AGENTS.md)** e a biblioteca de
+**[skills](./.agents/skills/catalog.md)**.

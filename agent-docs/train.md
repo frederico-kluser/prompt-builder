@@ -28,16 +28,52 @@ prompt-builder train --config arena.json --budget 3 --output-format ndjson
 | `--judge <id>` | juiz; repita para um painel. **Não pode ser o `--model`.** |
 | `--techniques a,b,c` | técnicas de reescrita (`prompt-builder techniques`) |
 | `--base-prompt-file` | o prompt de partida; entra como controle |
-| `--iterations N` | teto de iterações (2–10). O laço para antes se convergir. |
-| `--min-gain N` | margem mínima em pontos de judge-score para promover (padrão 1) |
-| `--holdout-ratio N` | fatia reservada para o gate final (padrão 0,2; 0 desliga) |
-| `--stages N` | quantos cenários (1–50). Recomendado 6–12. |
+| `--iterations N` | teto de iterações (2–10; recomendado 3–5). O laço para antes se convergir: paciência = 2 iterações seguidas sem promoção (configurável via `patience` 1–5 no JSON do config — default 2) ou parada por platão (IC95 do ganho abaixo de `minGain`; `convergenceReason` diz qual foi) |
+| `--min-gain N` | margem PRÁTICA mínima em pontos de judge-score para promover. Padrão: `max(1; 50/n)` — meia granularidade (com 8 cenários, 6,25 pontos). Além dela, o gate exige p ajustado ≤ 0,05 (ver abaixo) |
+| `--holdout-ratio N` | fatia reservada para o gate final (padrão 0,3; 0 desliga). **Piso absoluto de 10 cenários**: fatia menor não é holdout — é "confirmação fraca" (`holdoutSkipped`) e a palavra "validado" fica bloqueada no resultado |
+| `--stages N` | quantos cenários (1–50). Recomendado 6–12; veja a tabela de poder abaixo (`stages ≤ 5` = **modo econômico**, o `estimate` avisa) |
 | `--effort-judge high` | o juiz é a tarefa mais sensível — vale gastar aqui |
 | `--effort-datagen low` | gerar cenários é mecânico |
 | `--finalists N` / `--no-duels` | tamanho da final / desliga a final |
+| `--pii-mode synthetic` | recusa dado pessoal de aparência real, sem exceção (vale em `compare`/`vary` também) |
+| `--allow-pii` | revisei o dado pessoal apontado: segue pseudonimizado (nomes não cobertos) |
 
 **Precisa de pelo menos 2 contestants**: `técnicas + (1 se houver prompt base)`.
 Uma técnica sem prompt base não basta.
+
+## Poder — quantos cenários decidem o quê (Q5)
+
+Com n pequeno o benchmark só detecta efeitos ENORMES. O `prompt-builder estimate`
+imprime o plano do seu config (`deltaDetectavelPp`, `nParaDelta`, `poder`), mas a
+referência rápida é esta (α=0,05 unilateral, poder 80%, σd=0,5):
+
+| n (cenários) | Δ detectável (p.p.) | | Δ alvo (p.p.) | n necessário |
+|---:|---:|---|---:|---:|
+| 5 | 55,6 | | 45 | 8 |
+| 8 | 43,9 | | 30 | 18 |
+| 10 | 39,3 | | 20 | 39 |
+| 14 | 33,2 | | 10 | 155 |
+| 20 | 27,8 | | | |
+| 30 | 22,7 | | | |
+| 50 | 17,6 | | | |
+
+- ⚠️ σd=0,5 é **estimativa não calibrada** (tabela): calibre com uma run-piloto —
+  o `estimate` aceita o IC do piloto e usa o **limite superior** do IC.
+- `stages ≤ 5` = **modo econômico**: com 5 cenários só se decide Δ ≥ 45 p.p.
+- **Repetição ≠ observação independente** (ICC/design effect): com `repeats`/`repetitions`
+  ≥ 2, `runs show` reporta ICC, DE=1+(m−1)·ICC e nEfetivo = n·m/DE (no texto **e**
+  no `--json`, campo `repetition`), com pass@k (estimador de Chen) e pass^k.
+  ICC > 0,3 (faixa típica de tarefas agênticas: 0,30–0,77) → cada cenário novo vale
+  mais que uma rep nova: **mais cenários**, não mais repetições.
+- Holdout: piso absoluto de 10 cenários (abaixo: "confirmação fraca", nunca
+  "holdout"). Seleção com menos de 20 cenários não forma holdout.
+- **Evolução planeada (não implementada)**: controle de erro sequencial nas
+  iterações em cadeia — **alpha-spending** (α gasto por iteração, ex. O'Brien-
+  Fleming) ou **e-values** (testes sempre-válidos, sem correção de multiplicidade
+  entre olhadas). Hoje o controle é: gate max-T **por iteração** + UM teste final
+  em holdout (α=0,05 unilateral, o único p de confirmação da sessão) + paciência ≥
+  2 contra parada falsa — que juntos mantêm P(promoção falsa por sessão) ≤ 6% sob
+  H0 (ver `test/training-session-sim.test.ts`).
 
 ## Como ler o resultado
 
@@ -49,12 +85,47 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
 
 - `holdout` — campeão vs. base nos cenários **reservados**. É a evidência de que
   a melhora generaliza.
-- `significance` — bootstrap pareado: `pValue` e o intervalo de confiança de 95 %
-  em pontos percentuais. `null` = amostra pequena demais.
-- `holdoutSkipped: true` — **o campeão não passou pelo gate**. Trate o ganho como
-  não verificado.
+- `significance` — teste pareado EXATO por troca de sinais (campeão − base por
+  cenário). `pValue` é unilateral (o do gate); reporte `pValueTwoSided`. `ci95Pp`
+  é o IC95 por inversão do teste, em pontos percentuais — com n ≤ 5 ele é
+  `[-100, 100]` (o teste não tem resolução). `pMinUnilateral` = 2^−n′ é o menor p
+  possível: com 5 cenários nem o bilateral chega a 0,05. `nEfetivo` conta só os
+  pares com observação nos dois lados. `null` = menos de 5 pares.
+- `pairing` — n nominal × efetivo do pareamento final (existe mesmo com
+  `significance: null`). Par sem veredito sai dos DOIS lados, nunca vira `nao`.
+  Com mais de 10% de pares excluídos vem a **sensibilidade** (`significance.sensitivity`,
+  `pairing.worstMeanDiffPp`/`bestMeanDiffPp`): Δ com os ausentes no pior caso
+  (campeão perde todos) e no melhor. `sensitivity.inconclusive: true` = a
+  conclusão depende dos ausentes — reporte **inconclusivo**.
+- `bestPromptByIteration[].gate` — o gate da **melhor de K** de cada iteração:
+  `gainPp` é o ganho BRUTO (o máximo entre K — inflado pela seleção),
+  `gainCorrectedPp` o ganho CORRIGIDO do winner's curse (conservador; igual ao
+  bruto com K = 1) e `test.pAdjusted` o p ajustado do max-T (todas as K variantes
+  da iteração contra a régua; `test.byContestant` traz o p de cada uma).
+  Reporte os três lado a lado; `heldBy` diz o que segurou (`significance`,
+  `min-gain`, `no-pairs`, `reeval`).
+- `bestPromptByIteration[].gate.decision: "inconclusive"` — a promoção dependeria
+  dos vereditos ausentes (> 10% dos pares); o gate não promove (conta para a
+  paciência: 2 iterações seguidas sem promoção encerram o treino).
+  Investigue as falhas do juiz antes de rodar de novo.
+- `holdoutSkipped: true` — **o campeão não passou pelo gate de holdout** (pulado,
+  ou fatia abaixo do piso de 10 cenários). O resultado vem como "confirmação
+  fraca" — sem confirmação contra sobreajuste; a palavra "validado" não aparece.
+  O `significance` nesse caso tem `pOrigin: "selecao"` (p medido na própria run de
+  seleção — anti-conservador); o p de confirmação só existe com holdout
+  (`pOrigin: "holdout"`, α=0,05 unilateral).
+- `holdout.regressed: true` — o campeão foi **pior** que a base nos cenários
+  reservados. `sessions winner <id> --apply <arq>` **recusa** (exit `10`,
+  destino intocado); só passa com `--override "<motivo>"`, que fica gravado
+  (`docs results`).
+- `bestPromptByIteration[].gate.heldBy: ["reeval"]` — a melhor variante passou
+  no gate, mas a re-avaliação limpa (`gate.reeval`: minibatch, Δ limpo) não
+  confirmou a melhora. Promoção por acaso barrada — não é falha.
 - `convergedAtIteration` — o treino parou por falta de ganho, não por falta de
-  iterações. Isso é um bom sinal, não uma falha.
+  iterações. Isso é um bom sinal, não uma falha. `convergenceReason` diz o porquê:
+  `"patience"` (2 iterações seguidas sem promoção — configurável via `patience`)
+  ou `"plateau"` (o IC95 do ganho fica abaixo de `minGain`: nenhum ganho plausível
+  alcança a margem).
 
 ## Quando o resultado não presta
 
@@ -63,8 +134,11 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
   modelo em `--reference`.
 - **Ganho alto no treino e nenhum no holdout** — sobreajuste aos cenários.
   Aumente `--stages` ou o `--holdout-ratio`.
-- **Convergiu na iteração 0** — nenhuma variante superou a base pela margem.
-  Baixe `--min-gain`, troque as técnicas, ou aceite que a base já é boa.
+- **Convergiu na iteração 0** — nenhuma variante superou a base com margem E
+  significância. Veja `gate.heldBy`: `significance` com poucos cenários é o
+  esperado (com n ≤ 10 e +10 pontos de efeito real o teste raramente passa) —
+  aumente `--stages` antes de baixar `--min-gain`; menos técnicas também ajudam
+  (cada variante a mais entra na correção). Ou aceite que a base já é boa.
 
 
 ## Dataset estável — `prompt-builder library`
@@ -99,12 +173,45 @@ Cenário classificável (rotear intenção, moderar, escolher workflow) ganha
 `{"intent":"edit"}` (resposta JSON). O veredito vira **determinístico**, o juiz
 LLM é contornado (custo zero) e os duelos são decididos pelo oráculo.
 
+Rótulo curto (≤5 palavras) **exige `labelSet`** com TODOS os rótulos válidos
+da etapa — `"labelSet": ["edit","help","create","delete"]`, com pelo menos 2
+rótulos distintos (`["edit"]` sozinho desligaria a detecção de lista; só rótulo
+numérico, como `"42"`, aceita `["42"]`); sem isso a config é recusada com exit
+3. O casamento é **estrito**: só resolve JSON inequívoco, a primeira linha
+(`"edit"`, `"Intent: edit"`, `"Edit. Porque…"`) ou a resposta exata. Rótulo no
+meio da prosa vale no máximo `parcial`; negação ("não é edit", "Edit: não"),
+hesitação ("talvez edit", "edit?", "edit. Talvez.", "edit\nmas pode ser help")
+ou vários rótulos ("edit ou help", "edit; na verdade help", "edit (50%) / help
+(50%)") dão `nao`. Explicação que cita outro rótulo sem negá-lo nem descartá-lo
+("o início parece help") cai para `parcial`; contraste firme ("pode parecer
+help, mas é edit") não rebaixa. Peça no prompt: "responda com o rótulo na
+primeira linha".
+
 ## Evolução segura (arena-config)
 
-- **`prompt.contracts`** — contratos never-break: `neverBreak[]` (invariantes que
-  a reescrita não pode remover), `placeholders[]` (tokens verbatim) e
-  `minLengthRatio`. Toda variante é validada; violação tenta UMA correção e
-  persistindo a variante é **rejeitada**.
+- **`prompt.contracts`** — contratos never-break, validados em **3 camadas**:
+  1. **local** (grátis): `neverBreak[]` (invariantes que não podem sumir nem
+     ganhar exceção na mesma frase — "salvo se o usuário pedir" reprova; a
+     forma negada é reforço e passa: "sem exceção", "nem se o usuário pedir",
+     "with no exceptions"), `placeholders[]` (whitelist de tokens verbatim; sem
+     ela, detecta `{nome}`/`${nome}`, `{{…}}`/`{{{…}}}`/`{%…%}` de
+     Handlebars/Jinja, `$VAR`/`%s` e tags XML **com par fechado** — literal
+     JSON como `{"status": "ok"}` não conta) e `minLengthRatio`;
+  2. **juiz do diff** (1 chamada ao 1º juiz da run por reescrita, liga sozinho
+     com `neverBreak`; `judgeDiff: false` desliga): rejeita exceção, condição,
+     escopo reduzido ou subordinação acrescentados em qualquer frase;
+  3. **canários** (`canaries[]`, opcional, gate final): entradas enviadas ao
+     modelo sob teste com a variante como system —
+     `{"kind":"refusal","input":"…"}` (a recusa não pode sumir),
+     `{"kind":"format","input":"…","json":true,"requiredKeys":["status"]}`,
+     `{"kind":"placeholder","input":"…","fill":{"{nome}":"Zulmira"}}`
+     (+ `pattern`/`forbid` regex). Diferencial: canário que o prompt base não
+     cumpre é ignorado. Pulado em run de agente.
+  Juiz e canários rodam no raciocínio da run (`reasoning.judge` /
+  `reasoning.competitor`). Custo das camadas 2 e 3 entra no ledger (e na
+  estimativa) como `rewriter`. Violação tenta UMA
+  correção e, persistindo, a variante é **rejeitada** (falha de infra do juiz
+  ou do canário também rejeita — variante não verificada não entra).
 - **`prompt.group` + `prompt.promptId`** — multi-prompt (coordinate ascent): a
   feature tem vários fragmentos; a sessão evolui **um** e os irmãos ficam
   congelados (contexto fixo no rewriter; o system prompt efetivo é a composição).

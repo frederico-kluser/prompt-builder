@@ -2,7 +2,7 @@
 
 ```bash
 prompt-builder compare \
-  --models openai/gpt-5-mini,google/gemini-3-flash,deepseek/deepseek-v4 \
+  --models openai/gpt-5-mini,google/gemini-3.8-flash,deepseek/deepseek-v4-pro \
   --judge anthropic/claude-sonnet-5 \
   --datagen openai/gpt-5-mini \
   --theme "Extração de dados de notas fiscais brasileiras" \
@@ -56,6 +56,6 @@ prompt-builder runs winner <runId> --json
 prompt-builder runs show <runId> --json | jq '.data.run.judgeScoreByContestant'
 ```
 
-Se as finais rodaram, a régua é `standings` (pontos Copeland dos duelos); senão
+Se as finais rodaram, a régua é `standings` (taxa de vitória nos duelos); senão
 é o judge-score médio. O CLI sempre diz qual das duas foi usada — elas não são
 intercambiáveis.

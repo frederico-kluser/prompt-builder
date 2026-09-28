@@ -2,8 +2,8 @@
   {
     "topic": "quickstart",
     "title": "Começo rápido",
-    "summary": "o caminho de 6 passos e as 5 regras que evitam erro. COMECE AQUI.",
-    "approxTokens": 700
+    "summary": "o caminho de 6 passos e as 6 regras que evitam erro (inclui retentativa com --idempotency-key). COMECE AQUI.",
+    "approxTokens": 900
   },
   {
     "topic": "overview",
@@ -14,14 +14,20 @@
   {
     "topic": "models",
     "title": "Modelos e think levels",
-    "summary": "filtros, schema de export e como não tomar HTTP 400 no esforço",
-    "approxTokens": 900
+    "summary": "filtros, allowlist LGPD por endpoint, schema de export e como não tomar HTTP 400 no esforço",
+    "approxTokens": 1300
+  },
+  {
+    "topic": "lifecycle",
+    "title": "Ciclo de vida dos modelos",
+    "summary": "o que a run grava do catálogo, alertas 30/14/7 dias, política de remoção e o gate `baseline check`",
+    "approxTokens": 1300
   },
   {
     "topic": "budget",
     "title": "Orçamento e custo",
-    "summary": "como o teto para a run sem corromper o resultado; pré-voo e códigos de saída",
-    "approxTokens": 900
+    "summary": "como o teto para a run sem corromper o resultado; pré-voo em ordem, códigos de recusa, o --dry-run com paridade e a defesa anti-gasto N× (lock da config, --idempotency-key, teto diário da máquina, limite da key)",
+    "approxTokens": 1900
   },
   {
     "topic": "compare",
@@ -44,8 +50,8 @@
   {
     "topic": "ndjson",
     "title": "Saída NDJSON",
-    "summary": "tabela completa de eventos e o que deliberadamente não vem no stream",
-    "approxTokens": 700
+    "summary": "tabela completa de eventos, o envelope de erro (kind/code/hint) e o que não vem no stream",
+    "approxTokens": 1000
   },
   {
     "topic": "results",
@@ -56,8 +62,8 @@
   {
     "topic": "troubleshooting",
     "title": "Problemas comuns",
-    "summary": "400 no esforço, 402 sem crédito, tudo 'parcial', run travada",
-    "approxTokens": 650
+    "summary": "400 no esforço, 402 sem crédito, 403 = bloqueio (não é key), dado pessoal recusado (--allow-pii/--pii-mode), modelo fora do catálogo, run.locked, teto diário, doctor exit 4, truncamento > 2%, run inconclusiva (código 6), tudo 'parcial', run travada",
+    "approxTokens": 1700
   },
   {
     "topic": "config",
@@ -68,13 +74,13 @@
   {
     "topic": "agents",
     "title": "Modo agente (Agent Arena)",
-    "summary": "o que é o modo agente, o caminho feliz em 5 comandos, os limites obrigatórios e a tabela de stopReason",
-    "approxTokens": 1200
+    "summary": "o que é o modo agente, o caminho feliz em 5 comandos, os limites obrigatórios, a tabela de stopReason e o modo container (sandbox + proxy de inferência)",
+    "approxTokens": 3800
   },
   {
     "topic": "agent-task",
     "title": "Contrato arena-agent-config@1",
     "summary": "o contrato do modo agente inteiro, campo a campo, com JSON e os erros comuns (longo)",
-    "approxTokens": 4000
+    "approxTokens": 4700
   }
 ]

@@ -176,6 +176,7 @@ function stageSpecToScenario(spec: StageSpec): ArenaConfigScenario {
     ...(spec.rubric ? { rubric: spec.rubric } : {}),
     ...(spec.reference ? { reference: spec.reference } : {}),
     ...(spec.expected !== undefined ? { expected: spec.expected } : {}),
+    ...(spec.labelSet !== undefined ? { labelSet: spec.labelSet } : {}),
   };
 }
 
@@ -275,6 +276,10 @@ export function runConfigToArenaConfig(config: RunConfig): ArenaConfigFile {
   if (config.duels !== undefined) arena.duels = config.duels;
   if (config.finalists !== undefined) arena.finalists = config.finalists;
   if (config.compliance) arena.compliance = { ...config.compliance };
+  // LGPD (IMPL-042): sem isto uma run "só sintético" reproduzida pelo dialeto
+  // arena voltava ao "redigir" (e a revisão `allowPii` se perdia).
+  if (config.piiMode) arena.piiMode = config.piiMode;
+  if (config.allowPii) arena.allowPii = true;
 
   return arena;
 }

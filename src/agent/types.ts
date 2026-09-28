@@ -24,9 +24,66 @@
 import type { ReasoningLevel } from '../types.js';
 
 /**
+ * Um check do oráculo/regressão da tarefa (IMPL-039 + IMPL-098).
+ * `fail_to_pass` (default) = o que a tarefa pede (falha no seed, tem de passar);
+ * `pass_to_pass` = REGRESSÃO (passava no seed e tem de continuar passando).
+ */
+export interface AgentTaskCheck {
+  cmd: string;
+  expectExit?: number;
+  timeoutMs?: number;
+  weight?: number;
+  /** Rótulo curto p/ o dossiê e o CSV ("testes unitários", "typecheck", "lint"). */
+  label?: string;
+  kind?: 'fail_to_pass' | 'pass_to_pass';
+  /**
+   * IMPL-098 — check CRÍTICO: o veredito dele decide sozinho (falhou ⇒ score 0
+   * mesmo com os pesos; passou no seed ⇒ barreira de `fail-before`). Os pesos
+   * não o substituem: `weight` é para os checks comuns.
+   */
+  critical?: boolean;
+}
+
+/**
+ * IMPL-098 (agentTask@2) — SOLUÇÃO DE REFERÊNCIA ("golden"). Obrigatória em
+ * modo validate: sem ela não há `pass-after` validável nem `flakiness` medível.
+ * `script` = comando shell que implementa a solução; `diff` = patch unificado
+ * aplicado com `git apply` sobre o seed.
+ */
+export type AgentTaskSolution = { kind: 'script'; script: string } | { kind: 'diff'; diff: string };
+
+/**
+ * IMPL-098 — ambiente FIXADO por digest (imagem OCI ou lockfile). `path`, quando
+ * existe, tem de ser ABSOLUTO (path relativo é rejeitado pelo schema: um
+ * caminho relativo muda de significado com o cwd e quebra a reprodutibilidade).
+ */
+export interface AgentTaskEnv {
+  /** `sha256:<hex>` ou `<ref>@sha256:<hex>`. */
+  digest: string;
+  /** Caminho absoluto do lockfile/imagem local, quando houver. */
+  path?: string;
+}
+
+/** IMPL-098 — metadados da tarefa (proveniência e curadoria). */
+export interface AgentTaskMetadata {
+  /** De onde veio (dataset, repo, mineração --from-commit…). */
+  origin?: string;
+  /** Commit de origem, quando minerada de um repo. */
+  commit?: string;
+  difficulty?: 'easy' | 'medium' | 'hard';
+  tags?: string[];
+  /** Canário de sala limpa/sanidade: roda sempre, não entra no placar. */
+  canary?: boolean;
+}
+
+/**
  * O que transforma uma etapa em tarefa executável. Tudo aqui descreve o MUNDO
  * em que o agente acorda — nunca o agente em si (isso é `AgentRunnerConfig`).
  * Separar os dois é o que permite rodar a MESMA tarefa com agentes diferentes.
+ *
+ * Formato `arena-agent-config@2` (IMPL-098): os campos novos (`solution`,
+ * `regression[]`, `testsDir`, `env`, `metadata`) são ADITIVOS — o @1 continua
+ * legível (schema em `taskSchema.ts`).
  */
 export interface AgentTaskSpec {
   /**
@@ -68,23 +125,79 @@ export interface AgentTaskSpec {
    * Quando existe oráculo, ele MANDA. É a única parte do julgamento que não
    * depende de um LLM ter um bom dia.
    */
-  verify?: {
-    cmd: string;
-    expectExit?: number;
-    timeoutMs?: number;
-    weight?: number;
-    /** Rótulo curto p/ o dossiê e o CSV ("testes unitários", "typecheck", "lint"). */
-    label?: string;
-  }[];
+  verify?: AgentTaskCheck[];
+
+  /**
+   * IMPL-098 (agentTask@2) — REGRESSÃO (PASS_TO_PASS): checks que já passavam
+   * no seed e têm de continuar passando depois da solução. Na prática entram no
+   * oráculo como `kind: 'pass_to_pass'` (quebrar um zera a nota).
+   */
+  regression?: AgentTaskCheck[];
+
+  /**
+   * IMPL-098 (agentTask@2) — SOLUÇÃO DE REFERÊNCIA. Obrigatória em modo
+   * validate (`taskSchema.ts`): é o que valida `pass-after`, `flakiness`,
+   * `trivialidade` e `oráculo fraco` (IMPL-097).
+   */
+  solution?: AgentTaskSolution;
+
+  /**
+   * IMPL-098 (agentTask@2) — `tests/` copiado para o verificador DEPOIS do
+   * agente, NUNCA no workspace durante a execução (o agente não entrega o
+   * próprio teste adulterado — padrão Harbor/SWE-bench). Caminho relativo ao
+   * diretório da configuração; o conteúdo é colhido na compilação/execução.
+   */
+  testsDir?: string;
+
+  /**
+   * IMPL-098 (agentTask@2) — ambiente fixado por digest (imagem/lockfile).
+   */
+  env?: AgentTaskEnv;
+
+  /** IMPL-098 (agentTask@2) — metadados (proveniência, dificuldade, canário). */
+  metadata?: AgentTaskMetadata;
 
   /**
    * Caminhos que o agente NÃO pode tocar. Violação => veredito 'nao' automático,
    * sem gastar juiz. Existe porque a forma mais barata de "passar no teste" é
    * editar o teste — é o reward hacking clássico deste domínio, e ele precisa de
    * uma barreira determinística, não de um pedido educado no prompt.
-   * Globs simples (prefixo de caminho + `*`).
+   * Semântica GITIGNORE (IMPL-039, `guard.ts`): `*.test.ts` casa em qualquer
+   * nível, `/test/` ancora na raiz, `dir/` casa tudo dentro, `**`, `!` reinclui.
+   * Checado pelo diff (inclusive a ORIGEM de renames) E por SHA-256 do arquivo
+   * contra o seed no filesystem (pega arquivo ignorado pelo `.gitignore`).
    */
   forbiddenPaths?: string[];
+
+  /**
+   * IMPL-039 — rebuild de dependências ANTES do `verify[]`: os `lockfiles` voltam
+   * aos bytes do seed e `cmd` reconstrói (default `npm ci --ignore-scripts
+   * --no-audit --no-fund`). Com rebuild ligado,
+   * `lockfiles` e `protect` (default `node_modules/`) entram no hash de
+   * protegidos: dependência adulterada pelo agente é VIOLAÇÃO — e o rebuild a
+   * neutraliza para os checks rodarem contra dependências limpas. Falha do
+   * rebuild = oráculo inconclusivo, checks não rodam (nunca contra deps sujas)
+   * e a repetição fica SEM veredito (infra, nunca `nao`) — salvo violação.
+   * O default `npm ci --ignore-scripts` não roda `postinstall`/`prepare` do
+   * pacote raiz: um script de instalação plantado pelo agente adulteraria
+   * `node_modules` DEPOIS do snapshot pós.
+   */
+  rebuild?: {
+    cmd?: string;
+    /** Default `['package-lock.json']`. */
+    lockfiles?: string[];
+    /** Padrões (gitignore) do que o rebuild reconstrói. Default `['node_modules/']`. */
+    protect?: string[];
+    timeoutMs?: number;
+  };
+
+  /**
+   * IMPL-039 — detectores estáticos sobre o diff (skip/only/todo, xfail,
+   * exit(0)/`|| true`, teste apagado, config de runner editada). Heurística:
+   * `'warn'` (default) só registra em `oracle.json`; `'fail'` vira violação
+   * (veredito `nao` sem LLM); `'off'` desliga.
+   */
+  detectors?: 'off' | 'warn' | 'fail';
 
   /**
    * default false — ver o aviso em §12.2 do plano. `--no-context-files` (default)
@@ -107,7 +220,12 @@ export interface AgentTaskSpec {
 export interface AgentLimits {
   /** Turnos do agente (contados por evento `turn_start`). Default 30. */
   maxTurns?: number;
-  /** Teto de gasto DESTA execução, em USD. Default: obrigatório em modo agente. */
+  /**
+   * Teto de gasto DESTA execução, em USD. Default: obrigatório em modo agente.
+   * Imposto ANTES da chamada (IMPL-035): o proxy de custo recusa (429
+   * `budget_exhausted`) a chamada cujo custo projetado não cabe mais; o kill
+   * pelo custo derivado do executor fica como segunda barreira.
+   */
   maxCostUsd?: number;
   /** Parede de tempo da execução inteira, ms. Default 600_000 (10 min). */
   timeoutMs?: number;
@@ -190,8 +308,18 @@ export interface AgentRunnerConfig {
     kind?: 'worktree' | 'clone' | 'container';
     /** Guarda o workspace ao fim (debug). Default false — ocupa disco rápido. */
     keepWorkspace?: boolean;
-    /** Imagem, quando kind==='container'. */
+    /**
+     * Imagem, quando kind==='container': tag (resolvida para o digest sha256 na
+     * preparação) ou referência por digest (`repo@sha256:…`/`sha256:…`). O
+     * `docker run` usa SEMPRE o digest — nunca a tag (IMPL-036).
+     */
     image?: string;
+    /**
+     * Runtime OCI alternativo do Docker (ex.: `runsc` = gVisor), opt-in de ALTO
+     * RISCO operacional, fora do default (R-15 DEC-1: ~2× em syscalls, ~11× em
+     * I/O de arquivos pequenos). Ausente = runc do daemon + perfil endurecido.
+     */
+    runtime?: string;
   };
 
   /** Nível de esforço do agente. MESMA escada do repo (7 degraus). */
@@ -201,11 +329,20 @@ export interface AgentRunnerConfig {
   dossierTokens?: number;
 }
 
+/**
+ * De onde veio o custo de uma execução (R-14b DEC-4). `usage` = medido pelo
+ * proxy de custo (`usage.cost` que o OpenRouter cobrou, em TODAS as chamadas);
+ * `catalog` = medido pelo proxy, mas alguma chamada sem `usage.cost` (catálogo ou
+ * desconhecido); `agent-derived` = o que o executor calculou por tabela própria
+ * (sem chamadas pelo proxy); `reconciled` = conferido com `/generation`.
+ */
+export type AgentCostSource = 'usage' | 'catalog' | 'agent-derived' | 'reconciled';
+
 /** Por que a execução de um agente terminou. */
 export type AgentStopReason =
   | 'completed' // o agente terminou por conta própria
   | 'maxTurns' // bateu o teto de turnos
-  | 'maxCost' // bateu o teto de custo DA EXECUÇÃO
+  | 'maxCost' // teto de custo: o proxy recusou a chamada seguinte (execução OU run) / kill pelo derivado
   | 'timeout' // bateu a parede de tempo
   | 'maxOutput' // vomitou mais bytes que o permitido
   | 'error' // o processo morreu / o executor falhou
@@ -225,6 +362,12 @@ export interface ExecutionRef {
   durationMs: number;
   /** Por que a execução terminou. */
   stopReason: AgentStopReason;
+  /**
+   * Mensagem do provedor quando a execução terminou por erro de INFRA
+   * (`stopReason: 'error'` sem culpa do agente) — a repetição fica sem veredito,
+   * salvo oráculo conclusivo (IMPL-036, `infraError.ts`). Ausente em records antigos.
+   */
+  infraError?: string;
   /** Linhas +/- e nº de arquivos, do diff seed..HEAD. */
   diffStat?: { files: number; added: number; removed: number };
   /** Resultado do oráculo, quando houve. */
@@ -296,7 +439,24 @@ export interface ExecutionRecord {
     cacheRead: number;
     cacheWrite: number;
     costUsd: number;
-    costSource: 'agent-derived' | 'reconciled';
+    /** Ver `AgentCostSource`. Records antigos: 'agent-derived'. */
+    costSource: AgentCostSource;
+    /** O custo que o EXECUTOR reportou (tabela própria) — auditoria contra o medido. */
+    agentDerivedCostUsd?: number;
+    /**
+     * O que o proxy de custo MEDIU desta execução (IMPL-035): chamadas, quantas com
+     * `usage.cost`, recusadas pelo freio e os ids de geração (ponte com a fatura).
+     */
+    proxy?: {
+      calls: number;
+      exact: number;
+      estimated: number;
+      unknown: number;
+      refused: number;
+      generationIds: string[];
+      /** A recusa por orçamento que parou a execução, se houve. */
+      budgetStop?: { scope: 'execution' | 'run'; committedUsd: number; projectedUsd: number; limitUsd: number };
+    };
   };
 
   oracle?: OracleResult;
@@ -308,9 +468,32 @@ export interface ExecutionRecord {
     complete: boolean;
     redactions: number;
     mode: 'full' | 'compact' | 'summarized';
+    /** Marca dos blocos DADOS-DO-AGENTE (IMPL-034) — ausente em execuções antigas. */
+    marker?: string;
+    /** Tokens estruturais neutralizados no conteúdo do agente (tentativa de forjar bloco). */
+    neutralized?: number;
   };
 
   digests: Record<string, string>; // arquivo → sha256
+
+  /**
+   * ONDE rodou cada fase de código não confiável (IMPL-038). `mode: 'host'` =
+   * SEM ISOLAMENTO (sem Docker): setup/verify rodaram com o uid do operador,
+   * só com env mínimo. Ausente em records antigos.
+   */
+  sandbox?: {
+    mode: 'host' | 'container';
+    isolated: boolean;
+    setup: 'host' | 'sandbox';
+    verify: 'host' | 'sandbox';
+    /** Como o artefato foi colhido: cópia de árvore + git do produto num --git-dir próprio. */
+    collect: 'tree-copy';
+    /** Rede do sandbox de setup (container): pré-agente, sem segredo no env. */
+    setupNetwork?: 'none' | 'bridge';
+    /** Digest da imagem do sandbox verificador (container). */
+    verifierImage?: string;
+    note?: string;
+  };
 }
 
 /**
@@ -318,9 +501,16 @@ export interface ExecutionRecord {
  * nunca o formato do executor), senão trocar de executor vira reescrita. É uma
  * função pura que roda uma vez e grava `trajectory.json`; o bruto continua em
  * disco — normalizar não é descartar.
+ *
+ * Duas versões em circulação (IMPL-095):
+ * - `agent-trajectory@1` — o que `fromPi` produz hoje (turnos só do agente);
+ * - `agent-trajectory@2` — formato de INTERCÂMBIO (R-14b:REC-3 / R-14c:REC-8):
+ *   cada turno ganha `source` (system/user/agent) e `timestamp`, o que torna o
+ *   round-trip ATIF↔próprio sem perda possível. Os leitores aceitam as duas —
+ *   os campos novos são aditivos e opcionais.
  */
 export interface AgentTrajectory {
-  format: 'agent-trajectory@1';
+  format: 'agent-trajectory@1' | 'agent-trajectory@2';
   executor: { id: string; version: string };
   model: { provider: string; id: string; thinking?: ReasoningLevel };
   startedAt: string;
@@ -335,7 +525,9 @@ export interface AgentTrajectory {
     cacheRead: number;
     cacheWrite: number;
     costUsd: number;
-    costSource: 'agent-derived' | 'reconciled';
+    costSource: AgentCostSource;
+    /** O custo que o executor reportou, quando `costUsd` passou a ser o MEDIDO. */
+    agentDerivedCostUsd?: number;
   };
   /** Linhas do stream que não deram parse. > 0 ⇒ trajetória incompleta. */
   parseErrors: number;
@@ -345,6 +537,15 @@ export interface AgentTrajectory {
 
 export interface AgentTurn {
   index: number;
+  /**
+   * Quem falou (IMPL-095, `agent-trajectory@2`): `agent` (default — o agente)
+   * ou as mensagens de CONTEXTO que rodeiam os turnos (`user` = enunciado,
+   * `system` = instrução de sistema) — sem elas o intercâmbio ATIF perderia
+   * mensagens no round-trip.
+   */
+  source?: 'system' | 'user' | 'agent';
+  /** ISO do instante do turno (IMPL-095, `agent-trajectory@2`). */
+  timestamp?: string;
   /** Texto visível do assistente neste turno. */
   text?: string;
   /** Raciocínio, quando o executor expõe. Vai para o disco; ao juiz só com flag. */
@@ -381,11 +582,61 @@ export interface OracleResult {
     durationMs: number;
     /** Últimas N linhas, guardadas inteiras em oracle.json. */
     tail: string;
+    /**
+     * Por que o check NÃO terminou com exit normal (ausente = terminou). Em
+     * todos os casos `ok` é false e o peso fica no denominador do `score`:
+     * - `spawn`   — o comando nem começou (ausente, sem permissão): o único caso
+     *               que pode ser defeito do AMBIENTE da tarefa; quem decide é a
+     *               célula (`oracleCellDefect`, IMPL-033);
+     * - `timeout` — passou do `timeoutMs` do check (código que pendura);
+     * - `signal`  — morto por sinal que não foi o nosso timeout (OOM, segfault);
+     * - `rebuild` — não rodou porque o rebuild de dependências falhou (IMPL-039:
+     *               infra — a rep fica sem veredito, ver runAgentStage).
+     * `timeout`/`signal` são desfecho do código sob teste: contam como check falho
+     * (num P2P, regressão — IMPL-039).
+     */
+    notRun?: OracleNotRun;
+    /** IMPL-039: papel do check (ausente = `fail_to_pass`). */
+    kind?: 'fail_to_pass' | 'pass_to_pass';
+    /** IMPL-039: não rodou por falha do rebuild de dependências. */
+    skipped?: boolean;
   }[];
   /** Soma ponderada dos ok / soma dos pesos, em [0,1]. */
   score: number;
-  /** Caminhos proibidos que foram modificados. Não-vazio ⇒ veredito 'nao'. */
+  /** Caminhos proibidos que foram modificados. Não-vazio ⇒ veredito 'nao' (e `score` 0). */
   violations: string[];
-  /** true = algum check não pôde rodar (comando ausente, timeout do próprio check). */
+  /**
+   * true = algum check não terminou com exit normal (ver `checks[].notRun`) ou
+   * o hash dos protegidos foi truncado (IMPL-039).
+   */
   inconclusive: boolean;
+  // --- IMPL-039 (opcionais: `oracle.json` antigos não têm) ---------------------
+  /** Nota antes das penalidades (violação / P2P quebrado). */
+  rawScore?: number;
+  f2p?: { passed: number; total: number };
+  /**
+   * `broken` ⇒ regressão: a execução falhou (score 0) — inclui P2P que travou
+   * (timeout) ou morreu por sinal. `unverified` = P2P que não pôde ser aferido
+   * (spawn error/rebuild): com ele > 0 a nota cheia NÃO basta para `resolve`.
+   */
+  p2p?: { passed: number; total: number; broken: boolean; unverified?: number };
+  /** Mudanças nos arquivos protegidos por SHA-256 vs o seed (filesystem). */
+  protectedChanges?: { path: string; change: 'modified' | 'deleted' | 'added' | 'renamed'; to?: string }[];
+  /**
+   * true = o percurso dos protegidos bateu no teto de entradas (seed ou pós):
+   * o hash NÃO foi comparado (evita `added`/`deleted` fantasma pelo corte) e só
+   * o diff do git vigiou `forbiddenPaths`. O oráculo fica `inconclusive`.
+   */
+  guardTruncated?: boolean;
+  /** Violações que vieram SÓ dos detectores em modo `fail` (não de caminho protegido). */
+  detectorViolations?: string[];
+  /** Caches de ferramenta apagados antes do rebuild/checks (`__pycache__`, `node_modules/.vite`…). */
+  purged?: string[];
+  /** Achados dos detectores estáticos (`detectors`). */
+  findings?: { kind: 'skip' | 'xfail' | 'exit0' | 'test-deleted' | 'runner-config'; path: string; detail: string }[];
+  /** Rebuild de dependências rodado antes dos checks. */
+  rebuild?: { cmd: string; exitCode: number; ok: boolean; durationMs: number; tail: string; restored: string[] };
 }
+
+/** Motivo de um check do oráculo não ter terminado com exit normal (IMPL-033 + `rebuild` do IMPL-039). */
+export type OracleNotRun = 'spawn' | 'timeout' | 'signal' | 'rebuild';

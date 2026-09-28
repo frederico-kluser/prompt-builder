@@ -224,9 +224,10 @@ describe('whitelists silenciosos — os campos NÃO podem sumir', () => {
       iterations: 2,
       reflection: 'llm', // proposital: consumido pelo trainer, NÃO copiado p/ a run
       paretoPool: 3,
-      halving: true,
       // Campos "esquecíveis" — os que já sumiram uma vez:
       compliance: { area: 'saude', includeRessalvas: true },
+      piiMode: 'synthetic', // IMPL-042
+      allowPii: true, // IMPL-042 (revisão do usuário vale para a sessão inteira)
       reasoning: { competitor: 'low', judge: 'high', rewriter: 'medium', datagen: 'off' },
       referenceModelId: 'r/x',
       referenceJudging: true,
@@ -262,7 +263,6 @@ describe('whitelists silenciosos — os campos NÃO podem sumir', () => {
       'feedbackDriven',
       'reflection', // consumido pelo trainingLoop (reflexão GEPA), não pela run
       'paretoPool', // idem (pool Pareto do loop)
-      'halving', // idem (triagem de variantes do loop)
       'budgetUsd',
     ]);
     for (const [key, value] of Object.entries(cfg)) {

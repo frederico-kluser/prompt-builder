@@ -1,0 +1,163 @@
+{
+  "format": "prompt-builder-catalog-contract@1",
+  "models": {
+    "anthropic/claude-sonnet-5": {
+      "wireParameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "response_format"
+      ],
+      "supportedEfforts": [
+        "high",
+        "low",
+        "max",
+        "medium",
+        "xhigh"
+      ],
+      "mandatory": false,
+      "defaultEffort": "high",
+      "price": "known"
+    },
+    "deepseek/deepseek-v4-pro": {
+      "wireParameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "seed",
+        "temperature"
+      ],
+      "supportedEfforts": [
+        "high",
+        "xhigh"
+      ],
+      "mandatory": false,
+      "defaultEffort": "high",
+      "price": "known"
+    },
+    "google/gemini-2.5-flash": {
+      "wireParameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "response_format",
+        "seed",
+        "temperature"
+      ],
+      "supportedEfforts": null,
+      "mandatory": false,
+      "defaultEffort": null,
+      "price": "known"
+    },
+    "moonshotai/kimi-k2.6": {
+      "wireParameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "response_format",
+        "seed",
+        "temperature"
+      ],
+      "supportedEfforts": null,
+      "mandatory": false,
+      "defaultEffort": null,
+      "price": "known"
+    },
+    "openai/gpt-5-mini": {
+      "wireParameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "seed"
+      ],
+      "supportedEfforts": [
+        "high",
+        "low",
+        "medium",
+        "minimal"
+      ],
+      "mandatory": true,
+      "defaultEffort": "medium",
+      "price": "known"
+    },
+    "openai/gpt-5-nano": {
+      "wireParameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "seed"
+      ],
+      "supportedEfforts": [
+        "high",
+        "low",
+        "medium",
+        "minimal"
+      ],
+      "mandatory": true,
+      "defaultEffort": "medium",
+      "price": "known"
+    },
+    "openai/gpt-5.4-mini": {
+      "wireParameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "seed"
+      ],
+      "supportedEfforts": [
+        "high",
+        "low",
+        "medium",
+        "none",
+        "xhigh"
+      ],
+      "mandatory": false,
+      "defaultEffort": "medium",
+      "price": "known"
+    },
+    "openai/gpt-5.4-nano": {
+      "wireParameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "seed"
+      ],
+      "supportedEfforts": [
+        "high",
+        "low",
+        "medium",
+        "none",
+        "xhigh"
+      ],
+      "mandatory": false,
+      "defaultEffort": "medium",
+      "price": "known"
+    },
+    "openrouter/auto": {
+      "wireParameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "seed",
+        "temperature"
+      ],
+      "supportedEfforts": null,
+      "mandatory": null,
+      "defaultEffort": null,
+      "price": "unknown"
+    }
+  }
+}

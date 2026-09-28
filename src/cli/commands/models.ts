@@ -6,11 +6,35 @@
 // modelo aceita (`thinkLevels`) e treina contra ele sem arriscar um HTTP 400.
 
 import { MODELS_EXPORT_FORMAT, modelCaps, toExportRow, type ModelExportRow } from '../../modelCaps.js';
-import { filterModels, getLgpdData } from '../../lgpd.js';
+import {
+  AREA_LIVRE,
+  allowlistHealth,
+  allowlistReport,
+  filterModels,
+  getLgpdData,
+  isSensitiveArea,
+  permissionOf,
+  type LgpdData,
+} from '../../lgpd.js';
 import { REASONING_LEVELS } from '../../reasoning.js';
 import { promises as fs } from 'node:fs';
-import { CliError, EXIT, fmtPerMTok } from '../output.js';
-import { buildNetworkContext, parse, type ParsedArgs } from '../context.js';
+import {
+  filterByMaxPrice,
+  formatPricePerMTok,
+  isFreePricing,
+  maxPriceFilterDetails,
+  type MaxPriceFilterResult,
+} from '../../engine/pricing.js';
+import { CliError, EXIT } from '../output.js';
+import {
+  buildCatalogContext,
+  buildContext,
+  limitList,
+  parse,
+  parseListLimit,
+  type ParsedArgs,
+} from '../context.js';
+import { daysUntil, describeSuccessor, lifecycleAlertFor } from '../../engine/modelLifecycle.js';
 import type { OpenRouterModel, ReasoningLevel } from '../../types.js';
 
 const OPTIONS = {
@@ -23,12 +47,20 @@ const OPTIONS = {
   'min-context': { type: 'string' },
   'max-prompt-price': { type: 'string' },
   'max-completion-price': { type: 'string' },
+  'include-variable-price': { type: 'boolean' },
   free: { type: 'boolean' },
   'lgpd-area': { type: 'string' },
   'include-ressalvas': { type: 'boolean' },
+  // IMPL-092: teto de lista — default 50, --all devolve a lista inteira.
   limit: { type: 'string' },
+  all: { type: 'boolean' },
+  expiring: { type: 'string' },
   format: { type: 'string' },
   out: { type: 'string', short: 'o' },
+  // `models allowlist`
+  check: { type: 'boolean' },
+  area: { type: 'string' },
+  'max-age': { type: 'string' },
 } as const;
 
 function num(v: unknown, campo: string): number | undefined {
@@ -38,8 +70,15 @@ function num(v: unknown, campo: string): number | undefined {
   return n;
 }
 
-function applyFilters(models: OpenRouterModel[], v: Record<string, unknown>): OpenRouterModel[] {
+interface FilterOutcome {
+  models: OpenRouterModel[];
+  /** Resultado do teto de preço (contagem "X de Y" + preço variável), quando houve teto. */
+  price?: MaxPriceFilterResult<OpenRouterModel>;
+}
+
+function applyFilters(models: OpenRouterModel[], v: Record<string, unknown>): FilterOutcome {
   let out = models;
+  let price: MaxPriceFilterResult<OpenRouterModel> | undefined;
 
   const search = typeof v.search === 'string' ? v.search.toLowerCase().trim() : '';
   if (search) {
@@ -77,14 +116,39 @@ function applyFilters(models: OpenRouterModel[], v: Record<string, unknown>): Op
   if (minCtx !== undefined) out = out.filter((m) => (m.contextLength ?? 0) >= minCtx);
 
   // Precos de filtro sao em USD por MILHAO (o que humanos usam); o catalogo e
-  // por token. A conversao acontece so aqui.
+  // por token. Preco DESCONHECIDO (roteador, "-1") nao passa em teto nenhum por
+  // default nem conta como gratis — antes o -1 passava em qualquer
+  // `--max-*-price`. `--include-variable-price` e a decisao EXPLICITA de mante-los
+  // (IMPL-043: mesma regra do filtro da SPA, src/engine/pricing.ts).
   const maxIn = num(v['max-prompt-price'], '--max-prompt-price');
-  if (maxIn !== undefined) out = out.filter((m) => m.pricing.prompt * 1_000_000 <= maxIn);
   const maxOut = num(v['max-completion-price'], '--max-completion-price');
-  if (maxOut !== undefined) out = out.filter((m) => m.pricing.completion * 1_000_000 <= maxOut);
+  for (const [campo, teto] of [['--max-prompt-price', maxIn], ['--max-completion-price', maxOut]] as const) {
+    // Teto negativo nao tem sentido (e o filtro puro o ignora): erro de uso, nao silencio.
+    if (teto !== undefined && teto < 0) throw new CliError(`${campo} deve ser >= 0.`, EXIT.USAGE);
+  }
+  if (maxIn !== undefined || maxOut !== undefined) {
+    price = filterByMaxPrice(out, {
+      maxPromptPerMTok: maxIn,
+      maxCompletionPerMTok: maxOut,
+      includeUnknown: v['include-variable-price'] === true,
+    });
+    out = price.models;
+  }
 
   if (v.free === true) {
-    out = out.filter((m) => m.pricing.prompt === 0 && m.pricing.completion === 0);
+    out = out.filter((m) => isFreePricing(m.pricing));
+  }
+
+  // `--expiring <dias>` (IMPL-019): só modelos com expiration_date em até N
+  // dias (inclui os já expirados que o catálogo ainda lista).
+  const expiring = num(v.expiring, '--expiring');
+  if (expiring !== undefined) {
+    const agora = new Date();
+    out = out.filter((m) => {
+      if (!m.expirationDate) return false;
+      const d = daysUntil(m.expirationDate, agora);
+      return d !== null && d <= expiring;
+    });
   }
 
   const area = typeof v['lgpd-area'] === 'string' ? v['lgpd-area'].trim() : '';
@@ -100,7 +164,12 @@ function applyFilters(models: OpenRouterModel[], v: Record<string, unknown>): Op
     out = filterModels(out, area, v['include-ressalvas'] === true, data).allowed;
   }
 
-  return out;
+  return { models: out, price };
+}
+
+/** Preco de uma linha de export ("variável" quando desconhecido — nunca "-1"). */
+function fmtRowPrice(p: ModelExportRow['pricing']['prompt']): string {
+  return formatPricePerMTok(typeof p === 'number' ? p : null);
 }
 
 function renderTable(rows: ModelExportRow[]): string[] {
@@ -108,7 +177,7 @@ function renderTable(rows: ModelExportRow[]): string[] {
     const think = r.thinkLevels.accepted.length
       ? r.thinkLevels.accepted.join(',')
       : '—';
-    const preco = `in ${fmtPerMTok(r.pricing.prompt)} / out ${fmtPerMTok(r.pricing.completion)}`;
+    const preco = `in ${fmtRowPrice(r.pricing.prompt)} / out ${fmtRowPrice(r.pricing.completion)}`;
     return `${r.id}\n    ${preco} /1M · ctx ${r.contextLength ?? '?'} · think: ${think}`;
   });
 }
@@ -149,11 +218,125 @@ function toCsv(rows: ModelExportRow[]): string {
   return [head.join(','), ...linhas].join('\n');
 }
 
+/** Resultado de `models allowlist` (puro: `now`/`data` injetáveis nos testes). */
+export interface AllowlistCheck {
+  ok: boolean;
+  /** Por que o `--check` reprovou (vazio = aprovado). */
+  failures: string[];
+  data: Record<string, unknown>;
+  lines: string[];
+}
+
+/**
+ * Idade e contagem da allowlist LGPD por endpoint que ESTE pacote carrega
+ * (IMPL-041). Não precisa de key nem de rede: lê o snapshot versionado.
+ * `--check` vira porta (CI): reprova snapshot vencido/ausente/inválido,
+ * idade acima de `--max-age` e qualquer desconhecido liberado em área sensível.
+ */
+export function allowlistCheck(
+  data: LgpdData,
+  opts: { area?: string; maxAgeDays?: number; now?: Date | number } = {},
+): AllowlistCheck {
+  const now = opts.now ?? Date.now();
+  const rep = allowlistReport(data, now);
+  const h = rep.health;
+  const desconhecidos = Object.values(rep.porArea).reduce((s, a) => s + a.desconhecidos_liberados, 0);
+  const failures: string[] = [];
+  if (!h.usable) failures.push(h.message);
+  if (opts.maxAgeDays !== undefined && h.ageDays !== undefined && h.ageDays > opts.maxAgeDays) {
+    failures.push(`idade ${h.ageDays} dias > --max-age ${opts.maxAgeDays}`);
+  }
+  if (desconhecidos > 0) failures.push(`${desconhecidos} desconhecido(s) liberado(s) em área sensível (limiar 0)`);
+
+  const lines = [
+    h.message,
+    `  estado ${h.state} · validade ${h.maxAgeDays} dias · alvo ${h.targetAgeDays} dias`,
+    `  ${h.modelos} modelos no snapshot · ${h.modelosComZdr} com endpoint ZDR · ${h.endpoints} endpoints ZDR`,
+    `  modelos com endpoint elegível na UE: ${rep.modelosComEndpointUe}`,
+  ];
+  if (rep.provedoresForaDoMapa.length) {
+    lines.push(`  provedores fora do mapa (excluídos): ${rep.provedoresForaDoMapa.join(', ')}`);
+  }
+  for (const [id, a] of Object.entries(rep.porArea)) {
+    lines.push(
+      `  ${id.padEnd(22)} ${a.sensivel ? 'sensível  ' : 'consultiva'} permitidos=${a.permitidos} ` +
+        `ressalvas=${a.com_ressalvas} bloqueados=${a.bloqueados} desconhecidos_liberados=${a.desconhecidos_liberados}`,
+    );
+  }
+
+  let modelos: { id: string; status: string; endpoints: string[] }[] | undefined;
+  if (opts.area) {
+    modelos = Object.keys(data.allowlist?.modelos ?? {})
+      .sort()
+      .map((id) => ({ id, p: permissionOf(id, opts.area!, data, now) }))
+      .filter(({ p }) => p.status !== 'não recomendado')
+      .map(({ id, p }) => ({ id, status: p.status, endpoints: (p.endpoints ?? []).map((e) => e.tag) }));
+    lines.push('', `Liberados em "${opts.area}" (${modelos.length}):`);
+    for (const m of modelos) {
+      lines.push(`  ${m.id}  [${m.status}]${m.endpoints.length ? `  only: ${m.endpoints.join(', ')}` : ''}`);
+    }
+  }
+
+  return {
+    ok: failures.length === 0,
+    failures,
+    lines,
+    data: {
+      state: h.state,
+      usable: h.usable,
+      dataGeracao: h.geradoEm ?? null,
+      ageDays: h.ageDays ?? null,
+      maxAgeDays: h.maxAgeDays,
+      targetAgeDays: h.targetAgeDays,
+      counts: { modelos: h.modelos, modelosComZdr: h.modelosComZdr, endpoints: h.endpoints },
+      desconhecidosLiberados: desconhecidos,
+      modelosComEndpointUe: rep.modelosComEndpointUe,
+      provedoresForaDoMapa: rep.provedoresForaDoMapa,
+      porArea: rep.porArea,
+      fonte: data.allowlist?.fonte ?? null,
+      ...(modelos ? { area: opts.area, modelos } : {}),
+      ...(failures.length ? { failures } : {}),
+    },
+  };
+}
+
+async function cmdAllowlist(parsed: ParsedArgs): Promise<number> {
+  const ctx = buildContext(parsed);
+  const { out, values } = ctx;
+  const data = getLgpdData();
+  const area = typeof values.area === 'string' ? values.area.trim() : '';
+  if (area && (area === AREA_LIVRE || !data.areas.some((a) => a.id === area))) {
+    throw new CliError(
+      `--area desconhecida: "${area}". Disponíveis: ${data.areas.map((a) => a.id).join(', ')}.`,
+      EXIT.USAGE,
+    );
+  }
+  const maxAge = num(values['max-age'], '--max-age');
+  const r = allowlistCheck(data, { area: area || undefined, maxAgeDays: maxAge });
+  for (const l of r.lines) out.line(l);
+  const check = values.check === true;
+  if (check && !r.ok) for (const f of r.failures) out.warn(`allowlist reprovada: ${f}`);
+  // Sem --check é só relatório; com --check a reprovação é erro de CONFIG (3),
+  // pelo envelope único de erro (IMPL-028).
+  if (check && !r.ok) {
+    throw new CliError(`Allowlist LGPD reprovada: ${r.failures.join('; ')}.`, EXIT.CONFIG, r.data, {
+      code: 'config.lgpd_allowlist_failed',
+      hint: 'Regenere o snapshot com `npm run lgpd:allowlist` (ou atualize o pacote) e rode `models allowlist --check` de novo.',
+    });
+  }
+  out.result(true, 'models.allowlist', r.data);
+  return EXIT.OK;
+}
+
 export async function cmdModels(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
   const rest = sub === argv[0] ? argv.slice(1) : argv;
   const parsed: ParsedArgs = parse(rest, OPTIONS);
-  const ctx = await buildNetworkContext(parsed);
+  // `allowlist` lê o snapshot do pacote: sem key, sem rede.
+  if (sub === 'allowlist') return cmdAllowlist(parsed);
+  // Catalogo e dado PUBLICO (GET /models responde sem Authorization): sem key,
+  // usa o cache em disco ou busca o publico — nunca exit 4 (IMPL-029).
+  const ctx = await buildCatalogContext(parsed);
   const { out, values } = ctx;
 
   // `show <id>` — tudo o que se pode ajustar naquele modelo.
@@ -172,7 +355,7 @@ export async function cmdModels(argv: string[]): Promise<number> {
       out.line(`${row.id}  —  ${row.name}`);
       out.line(`  contexto        ${row.contextLength ?? '?'} tokens`);
       out.line(
-        `  preço           in ${fmtPerMTok(row.pricing.prompt)} / out ${fmtPerMTok(row.pricing.completion)} por 1M tokens`,
+        `  preço           in ${fmtRowPrice(row.pricing.prompt)} / out ${fmtRowPrice(row.pricing.completion)} por 1M tokens`,
       );
       out.line(`  temperature     ${row.caps.temperature ? 'aceita' : 'NÃO aceita'}`);
       out.line(
@@ -184,15 +367,49 @@ export async function cmdModels(argv: string[]): Promise<number> {
       for (const [pedido, real] of Object.entries(row.thinkLevels.fit)) {
         out.line(`    ${pedido.padEnd(8)} -> ${real}`);
       }
+      // IMPL-019: ciclo de vida — o snapshot por trás do id e quando ele sai.
+      if (row.lifecycle.canonicalSlug) out.line(`  snapshot        ${row.lifecycle.canonicalSlug}`);
+      if (row.lifecycle.aliasTarget) out.line(`  alias ->        ${row.lifecycle.aliasTarget} (muda sem aviso: não use como juiz de baseline)`);
+      out.line(`  expira          ${row.lifecycle.expirationDate ?? 'sem data anunciada'}`);
     }
-    out.result(true, 'models.show', { model: row });
+    // Alerta 30/14/7 dias (stderr) com sucedâneo — o agente vê antes de treinar.
+    const alerta = lifecycleAlertFor(model.id, [], model, ctx.models, new Date());
+    if (alerta) {
+      const quando =
+        alerta.kind === 'expired'
+          ? `expirou em ${alerta.expirationDate}`
+          : `expira em ${alerta.expirationDate} (${alerta.daysLeft} dias; janela de ${alerta.window})`;
+      out.warn(
+        `${model.id} ${quando} — ${describeSuccessor(alerta.successor)}. Numa baseline, rode uma ` +
+          'run-ponte com o sucessor antes da data e declare a re-baseline (`docs lifecycle`).',
+      );
+    }
+    out.result(true, 'models.show', { model: row, lifecycleAlert: alerta });
     return EXIT.OK;
   }
 
   // list | export
-  const filtrados = applyFilters(ctx.models, values);
-  const limit = num(values.limit, '--limit');
-  const rows = (limit !== undefined ? filtrados.slice(0, limit) : filtrados).map(toExportRow);
+  const { models: filtrados, price } = applyFilters(ctx.models, values);
+  // O que o teto de preço fez, com o preço variável explícito — na NARRAÇÃO
+  // (stderr), nunca no payload. O "X de Y modelos." geral sai no fim, como antes.
+  const detalhes = price ? maxPriceFilterDetails(price) : [];
+  if (price && detalhes.length > 0) {
+    const dica =
+      price.unknownIds.length > 0 && !price.includeUnknown ? ' — use --include-variable-price para mantê-los' : '';
+    out.info(`teto de preço: ${detalhes.join(' · ')}${dica}`);
+  }
+  // Área sensível com snapshot inutilizável (ou velho) esvazia/encolhe a lista:
+  // diga POR QUÊ em vez de devolver 0 modelos em silêncio.
+  const lgpdArea = typeof values['lgpd-area'] === 'string' ? values['lgpd-area'].trim() : '';
+  if (lgpdArea && isSensitiveArea(lgpdArea, getLgpdData())) {
+    const h = allowlistHealth(getLgpdData().allowlist);
+    if (h.state !== 'ok') out.warn(h.message);
+  }
+  // IMPL-092: teto default de 50 itens — `models list --json` sem flags já
+  // devolveu o catálogo inteiro (~594 KB ≈ 150 mil tokens, satura o contexto
+  // do agente). --all é a decisão explícita de querer tudo; truncar avisa.
+  const cap = parseListLimit(values);
+  const rows = limitList(filtrados, cap, out, 'modelos').map(toExportRow);
 
   const format =
     typeof values.format === 'string'
@@ -205,20 +422,22 @@ export async function cmdModels(argv: string[]): Promise<number> {
             ? 'json'
             : 'table';
 
+  // JSON compacto por padrão (--pretty formata) — IMPL-092.
+  const json = (v: unknown): string => (values.pretty === true ? JSON.stringify(v, null, 2) : JSON.stringify(v));
+
   let payload: string;
   switch (format) {
     case 'json':
-      payload = JSON.stringify(
-        {
-          format: MODELS_EXPORT_FORMAT,
-          fetchedAt: new Date().toISOString(),
-          source: ctx.catalogSource,
-          count: rows.length,
-          data: rows,
-        },
-        null,
-        2,
-      );
+      payload = json({
+        format: MODELS_EXPORT_FORMAT,
+        fetchedAt: new Date().toISOString(),
+        source: ctx.catalogSource,
+        scope: ctx.catalogScope,
+        count: rows.length,
+        total: filtrados.length,
+        truncated: rows.length < filtrados.length,
+        data: rows,
+      });
       break;
     case 'ndjson':
       payload = rows.map((r) => JSON.stringify(r)).join('\n');

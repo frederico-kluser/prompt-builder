@@ -1,8 +1,8 @@
-// Núcleo PURO dos duelos Copeland (F0 do PLANO-PARIDADE: fonte única).
+// Núcleo PURO dos duelos (F0 do PLANO-PARIDADE: fonte única).
 //
 // Vive separado de `src/duels.ts` porque o `runStageDuels` (que chama o juiz e
 // lê dossiês de agente em disco) é Node-only e tem um espelho próprio no
-// navegador; a MATEMÁTICA do bracket/Copeland, não — e é ela que decide
+// navegador; a MATEMÁTICA do bracket/placar, não — e é ela que decide
 // colocação. Ambos os lados importam daqui: mesma seed ⇒ mesmo bracket, nos
 // dois motores, para sempre.
 //
@@ -97,26 +97,38 @@ export function pickFinalists(
 }
 
 /**
- * Agregação Copeland dos duelos de uma etapa: vitória 1, empate 0.5, derrota 0.
- * Placement 1-based por pontos desc; empates de pontos DIVIDEM a média dos ranks
+ * Placar dos duelos de uma etapa por TAXA DE VITÓRIA (IMPL-007, R-04:DEC-5):
+ * vitória 1, empate 0.5, derrota 0, dividido pelos duelos que o contestant
+ * DISPUTOU (0..1). Antes a soma crua era chamada de "pontos Copeland" — mas
+ * Copeland é maioria par-a-par; isto é win-rate. Dividir pelos disputados
+ * também para de punir quem perdeu um duelo por falha do juiz (IMPL-004): o
+ * duelo sem resultado não entra no numerador NEM no denominador.
+ * Placement 1-based por taxa desc; empates de taxa DIVIDEM a média dos ranks
  * que ocupam (placements fracionários). `order` = ids do melhor ao pior
  * placement (empate mantém a ordem de `ids` — o chamador passa a ordem cega).
  */
 export function standingsFromDuels(
   ids: string[],
   duels: DuelOutcome[],
-): { points: Record<string, number>; placementById: Record<string, number>; order: string[] } {
-  const points = new Map<string, number>(ids.map((id) => [id, 0]));
+): { winRate: Record<string, number>; placementById: Record<string, number>; order: string[] } {
+  const acc = new Map<string, { score: number; played: number }>(ids.map((id) => [id, { score: 0, played: 0 }]));
   for (const d of duels ?? []) {
-    if (!points.has(d.a) || !points.has(d.b)) continue;
-    if (d.outcome === 'a') points.set(d.a, (points.get(d.a) ?? 0) + 1);
-    else if (d.outcome === 'b') points.set(d.b, (points.get(d.b) ?? 0) + 1);
+    const A = acc.get(d.a);
+    const B = acc.get(d.b);
+    if (!A || !B) continue;
+    A.played += 1;
+    B.played += 1;
+    if (d.outcome === 'a') A.score += 1;
+    else if (d.outcome === 'b') B.score += 1;
     else {
-      points.set(d.a, (points.get(d.a) ?? 0) + 0.5);
-      points.set(d.b, (points.get(d.b) ?? 0) + 0.5);
+      A.score += 0.5;
+      B.score += 0.5;
     }
   }
-  const sorted = [...points.entries()].sort((x, y) => y[1] - x[1]);
+  const winRate = new Map<string, number>(
+    [...acc.entries()].map(([id, s]) => [id, s.played > 0 ? Number((s.score / s.played).toFixed(4)) : 0]),
+  );
+  const sorted = [...winRate.entries()].sort((x, y) => y[1] - x[1]);
   const placementById = new Map<string, number>();
   let i = 0;
   while (i < sorted.length) {
@@ -127,7 +139,7 @@ export function standingsFromDuels(
     i = j + 1;
   }
   const order = [...placementById.entries()].sort((x, y) => x[1] - y[1]).map(([id]) => id);
-  return { points: Object.fromEntries(points), placementById: Object.fromEntries(placementById), order };
+  return { winRate: Object.fromEntries(winRate), placementById: Object.fromEntries(placementById), order };
 }
 
 /**

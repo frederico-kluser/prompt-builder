@@ -1,22 +1,31 @@
 // Duelos round-robin (Critério 2, portado do prompt-arena): depois do juiz
 // pointwise, cada PAR de candidatos é julgado head-to-head contra a REFERÊNCIA,
 // nas DUAS ordens (desacordo => empate — cancela viés de posição), e o placar
-// Copeland (vitória 1, empate 0.5) vira o placement da etapa. O round-robin é
+// taxa de vitória ((vitória 1 + empate 0.5) / disputados) vira o placement da etapa. O round-robin é
 // QUADRÁTICO (C(n,2) pares × 2 ordens, no modelo mais caro do pipeline), então
 // só duelam um BRACKET: normalmente os FINALISTAS globais da run (`duelists`,
 // escolhidos por `pickFinalists` depois de todas as etapas); sem eles, o bracket
-// por etapa do `selectDuelists` (controle + K−1 melhores no pointwise). Toda
-// falha degrada para empate/ausência de duelos — NUNCA derruba a run.
+// por etapa do `selectDuelists` (controle + K−1 melhores no pointwise). Falha
+// NUNCA derruba a run e NUNCA vira empate: o duelo sem resultado vai para
+// `failedDuels`, fora do placar (IMPL-004).
 
 import { chatCompletion } from './openrouter';
+import { ROLE_MAX_TOKENS } from './roleLimits';
+import { callJudgeWithRetry, withReminder, type JudgeAttempt } from '../../../src/engine/judgeRetry.js';
+import { isJudgeCutKind } from '../../../src/engine/truncation.js';
+import { buildDuelPrompt, DUEL_SCHEMA, parseDuelVerdict } from '../../../src/engine/duelPrompt.js';
 import type {
   CompetitorResponse,
   Contestant,
+  DuelFailure,
   DuelOutcome,
+  JudgeConfidence,
   ReasoningLevel,
+  RunCtx,
   StageDuels,
   StageSpec,
   Verdict,
+  VerdictError,
 } from './types';
 
 import {
@@ -41,77 +50,10 @@ export {
   VERDICT_SCORE,
 } from '../../../src/engine/duelCore.js';
 
-// Head do prompt de duelo — fixa o contrato do veredito head-to-head (portado).
-const DUEL_HEAD = `Você é um juiz técnico estrito decidindo um DUELO DIRETO entre DUAS respostas candidatas para a MESMA tarefa. Um modelo mais forte já produziu a RESPOSTA DE REFERÊNCIA (correta). Decida qual candidato alcança melhor o MESMO resultado e intenção da referência; ignore redação, estilo e tamanho. Os rótulos A/B são neutros e a ordem não significa nada. Responda APENAS com um objeto JSON {"winner": "A"|"B"|"tie", "explanation": "<uma frase curta>"} — "tie" SOMENTE quando ambos alcançam resultado genuinamente equivalente (ou falham igualmente).`;
-
-function buildDuelUserPrompt(
-  stage: StageSpec,
-  reference: string,
-  textA: string,
-  textB: string,
-): string {
-  const rubricBlock = stage.rubric?.trim()
-    ? `\nRUBRICA DA ETAPA (critério de corretude):\n${stage.rubric.trim()}\n`
-    : '';
-  return `REFERÊNCIA (resposta correta):
-${reference}
-
-PERGUNTA DO USUÁRIO:
-${stage.question}
-${rubricBlock}
-Candidato A:
-${textA || '(vazio)'}
-
-Candidato B:
-${textB || '(vazio)'}
-
-Qual candidato alcança melhor o resultado e a intenção da referência — A, B ou tie?`;
-}
-
-// Mesmo helper do judge.ts (extrai o objeto JSON mesmo com markdown ao redor).
-function extractJson(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed.startsWith('{')) return trimmed;
-  const match = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (match) return match[1].trim();
-  const firstBrace = trimmed.indexOf('{');
-  const lastBrace = trimmed.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return trimmed.slice(firstBrace, lastBrace + 1);
-  }
-  return trimmed;
-}
-
-/**
- * Parse tolerante da resposta do duelo: JSON primeiro; fallback por regex
- * (TIE/EMPATE => tie; senão o 1º A ou B isolado). Lixo degrada para 'tie' —
- * nunca inventa um vencedor.
- */
-function parseDuelVerdict(text: string): { winner: 'A' | 'B' | 'tie'; explanation: string } {
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(extractJson(text));
-  } catch {
-    parsed = null;
-  }
-  const p = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
-  const raw = typeof p?.winner === 'string' ? p.winner.trim().toUpperCase() : '';
-  let winner: 'A' | 'B' | 'tie' | null =
-    raw === 'A' || raw === 'B' ? raw : raw === 'TIE' || raw === 'EMPATE' ? 'tie' : null;
-  if (!winner) {
-    const up = (text || '').toUpperCase();
-    if (/\bTIE\b|\bEMPATE\b/.test(up)) {
-      winner = 'tie';
-    } else {
-      const a = /\bA\b/.exec(up);
-      const b = /\bB\b/.exec(up);
-      winner = a && (!b || a.index < b.index) ? 'A' : b ? 'B' : 'tie';
-    }
-  }
-  const explanation =
-    (typeof p?.explanation === 'string' && p.explanation.trim().slice(0, 300)) || '';
-  return { winner, explanation };
-}
+// Prompt + parse do juiz de duelo: fonte ÚNICA em `src/engine/duelPrompt.ts`
+// (IMPL-006 — marcador aleatório por ordem, INSTRUÇÕES anti-injeção, JSON
+// estrito com canário). Reexportados para os consumidores/testes.
+export { buildDuelPrompt, parseDuelVerdict, DUEL_HEAD, DUEL_SCHEMA } from '../../../src/engine/duelPrompt.js';
 
 export interface RunStageDuelsOptions {
   stage: StageSpec;
@@ -128,6 +70,9 @@ export interface RunStageDuelsOptions {
   apiKey: string;
   reasoningLevel?: ReasoningLevel;
   timeoutMs?: number;
+  /** Sinal de abort + ledger de custo (espelho de src/duels.ts). */
+  ctx?: RunCtx;
+  maxPricePerMTok?: { prompt?: number; completion?: number };
   /** Vereditos do juiz pointwise (refJudge) — ordenam o bracket. Ausente => score −1. */
   verdictByContestant?: Record<string, Verdict>;
   /**
@@ -163,6 +108,8 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
     apiKey,
     reasoningLevel,
     timeoutMs,
+    ctx,
+    maxPricePerMTok,
     verdictByContestant,
     oracleScoresByContestant,
     onPair,
@@ -186,7 +133,7 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
   const semDuelos = (placement: number): StageDuels => ({
     placementByContestant: Object.fromEntries(okIds.map((id) => [id, placement])),
     order: [...okIds],
-    points: Object.fromEntries(okIds.map((id) => [id, 0])),
+    winRate: Object.fromEntries(okIds.map((id) => [id, 0])),
     duels: [],
     topK: topKGravado,
   });
@@ -223,56 +170,69 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
     for (let j = i + 1; j < ids.length; j += 1) pairs.push([ids[i], ids[j]]);
   }
 
-  // UMA apresentação ordenada (first => rótulo A, second => rótulo B).
-  const judgeOnce = async (
+  // UMA apresentação ordenada (first => rótulo A, second => rótulo B), com a
+  // re-tentativa SELETIVA do juiz (timeout 1×; saída inválida => 1 pedido com
+  // lembrete). Orçamento/cancelamento SOBEM de dentro de callJudgeWithRetry:
+  // sem isso, dinheiro estourado viraria duelo "sem resultado" em TODA a final.
+  const judgeOnce = (
     firstId: string,
     secondId: string,
-  ): Promise<{ winner: 'A' | 'B' | 'tie'; explanation: string }> => {
-    try {
-      const result = await chatCompletion({
-        apiKey,
-        modelId: judgeModelId,
-        messages: [
-          { role: 'system', content: DUEL_HEAD },
-          {
-            role: 'user',
-            content: buildDuelUserPrompt(
-              stage,
-              reference,
-              textById.get(firstId) ?? '',
-              textById.get(secondId) ?? '',
-            ),
-          },
-        ],
-        temperature: 0,
-        maxTokens: 512,
-        timeoutMs,
-        responseFormatJson: true,
-        reasoningLevel,
-      });
-      return parseDuelVerdict(result.text);
-    } catch (err) {
-      // Ordem falhou => ESSA ordem vira empate (nunca inventa vencedor).
-      return {
-        winner: 'tie',
-        explanation: `(juiz falhou: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)})`,
-      };
-    }
+  ): Promise<
+    JudgeAttempt<{ winner: 'A' | 'B' | 'tie'; explanation: string; canary: string; confianca?: JudgeConfidence }>
+  > => {
+    // Marcador + canário sorteados AQUI: cada ORDEM é um veredito próprio.
+    const prompt = buildDuelPrompt(
+      stage,
+      reference,
+      textById.get(firstId) ?? '',
+      textById.get(secondId) ?? '',
+    );
+    return callJudgeWithRetry({
+      call: async (reminder) =>
+        // Resultado INTEIRO (texto + finish_reason): o truncamento e checado antes do parse (IMPL-015).
+        await chatCompletion({
+          apiKey,
+          modelId: judgeModelId,
+          messages: [
+            { role: 'system', content: prompt.system },
+            { role: 'user', content: withReminder(prompt.user, reminder) },
+          ],
+          temperature: 0,
+          // Teto TOTAL com sala p/ raciocinio (IMPL-016, espelho de src/duels.ts).
+          maxTokens: ROLE_MAX_TOKENS.duel,
+          timeoutMs,
+          responseFormatJson: true,
+          responseSchema: { name: 'veredito_duelo', schema: DUEL_SCHEMA },
+          reasoningLevel,
+          // Papel 'duel' no ledger (IMPL-021): sem isto o gateway contaria o
+          // duelo como 'competitor' (o default de role).
+          role: 'duel',
+          signal: ctx?.signal,
+          sink: ctx?.sink,
+          maxPricePerMTok,
+        }),
+      parse: (text) => parseDuelVerdict(text, prompt.guard.canary),
+      formatReminder: prompt.formatReminder,
+      signal: ctx?.signal,
+    });
   };
 
   // Todos os pares em paralelo (o limitador global do openrouter gateia a
   // concorrência — sem cap local). Cada par é julgado 2× EM PARALELO, nas duas
   // ordens; os vencedores são convertidos para os termos REAIS do par ('a' = o
   // primeiro do par): acordo => vencedor, desacordo => empate.
-  const duels: DuelOutcome[] = await Promise.all(
-    pairs.map(async ([a, b]) => {
-      // ORACULO (aditivo): scores deterministicos divergentes decidem o par
-      // sem LLM (mesma regra de src/duels.ts §19.1).
+  // Exceção — ORÁCULO (§19.1): quando ambos os lados têm score de oráculo e os
+  // scores diferem, o par é decidido PELO ORÁCULO (maior score), SEM chamada
+  // LLM. As duas ordens espelham o MESMO resultado ('a'/'b').
+  // IMPL-004: par sem resultado legítimo (ordem que falhou, ou sem régua) vai
+  // para `failedDuels` e NÃO pontua — antes a ordem que falhava virava empate.
+  type Julgado = { ok: true; duel: DuelOutcome } | { ok: false; failure: DuelFailure };
+  const julgados: Julgado[] = await Promise.all(
+    pairs.map(async ([a, b]): Promise<Julgado> => {
       const oracleA = oracleScoresByContestant?.[a];
       const oracleB = oracleScoresByContestant?.[b];
-      const oracleDecides =
-        typeof oracleA === 'number' && typeof oracleB === 'number' && oracleA !== oracleB;
-      if (oracleDecides) {
+      const temAmbos = typeof oracleA === 'number' && typeof oracleB === 'number';
+      if (temAmbos && oracleA !== oracleB) {
         const winner = oracleA > oracleB ? 'a' : 'b';
         const explanation = `(decidido pelo oráculo: ${oracleA} vs ${oracleB})`;
         const duel: DuelOutcome = {
@@ -281,58 +241,117 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
           order1: { winner, explanation },
           order2: { winner, explanation },
           outcome: winner,
+          source: 'ground-truth',
         };
         onPair?.(duel);
-        return duel;
+        return { ok: true, duel };
       }
       if (!reference) {
-        // Sem gabarito, o juiz LLM nao teria regua: par que o oraculo nao
-        // separou vira empate honesto (nunca inventa vencedor).
-        const duel: DuelOutcome = {
-          a,
-          b,
-          order1: { winner: 'tie', explanation: '(sem gabarito: só o oráculo decide)' },
-          order2: { winner: 'tie', explanation: '(sem gabarito: só o oráculo decide)' },
-          outcome: 'tie',
+        // Sem gabarito o juiz LLM não teria régua. Oráculo EMPATADO é empate
+        // legítimo (a régua determinística disse "iguais"); faltar o score de
+        // um lado é falta de régua — sem resultado, nunca um empate imputado.
+        if (temAmbos) {
+          const explanation = `(empate no oráculo: ${oracleA} vs ${oracleB})`;
+          const duel: DuelOutcome = {
+            a,
+            b,
+            order1: { winner: 'tie', explanation },
+            order2: { winner: 'tie', explanation },
+            outcome: 'tie',
+            source: 'ground-truth',
+          };
+          onPair?.(duel);
+          return { ok: true, duel };
+        }
+        const error: VerdictError = {
+          kind: 'no_reference',
+          message: 'Sem gabarito e sem score de oráculo para os dois lados — duelo sem régua.',
         };
-        onPair?.(duel);
-        return duel;
+        return { ok: false, failure: { a, b, error } };
       }
       const [v1, v2] = await Promise.all([judgeOnce(a, b), judgeOnce(b, a)]);
-      const o1 = v1.winner === 'A' ? 'a' : v1.winner === 'B' ? 'b' : 'tie';
-      const o2 = v2.winner === 'A' ? 'b' : v2.winner === 'B' ? 'a' : 'tie';
+      const o1 = v1.ok ? (v1.value.winner === 'A' ? 'a' : v1.value.winner === 'B' ? 'b' : 'tie') : undefined;
+      const o2 = v2.ok ? (v2.value.winner === 'A' ? 'b' : v2.value.winner === 'B' ? 'a' : 'tie') : undefined;
+      if (!v1.ok || !v2.ok || !o1 || !o2) {
+        // Ordem com saida CORTADA (IMPL-015) tem precedencia no motivo: o duelo
+        // fica SEM resultado (nunca empate) e o evento `judge.truncated` a ve.
+        const erros = [v1, v2].flatMap((v) => (v.ok ? [] : [v.error]));
+        const falha = erros.find((e) => isJudgeCutKind(e.kind)) ?? erros[0];
+        return {
+          ok: false,
+          failure: {
+            a,
+            b,
+            ...(v1.ok && o1
+              ? {
+                  order1: {
+                    winner: o1,
+                    explanation: v1.value.explanation,
+                    canary: v1.value.canary,
+                    ...(v1.value.confianca ? { confidence: v1.value.confianca } : {}),
+                  },
+                }
+              : {}),
+            ...(v2.ok && o2
+              ? {
+                  order2: {
+                    winner: o2,
+                    explanation: v2.value.explanation,
+                    canary: v2.value.canary,
+                    ...(v2.value.confianca ? { confidence: v2.value.confianca } : {}),
+                  },
+                }
+              : {}),
+            error: falha ?? { kind: 'judge_failed', message: 'Ordem do duelo sem resultado.' },
+          },
+        };
+      }
       const duel: DuelOutcome = {
         a,
         b,
-        order1: { winner: o1, explanation: v1.explanation },
-        order2: { winner: o2, explanation: v2.explanation },
+        order1: {
+          winner: o1,
+          explanation: v1.value.explanation,
+          canary: v1.value.canary,
+          ...(v1.value.confianca ? { confidence: v1.value.confianca } : {}),
+        },
+        order2: {
+          winner: o2,
+          explanation: v2.value.explanation,
+          canary: v2.value.canary,
+          ...(v2.value.confianca ? { confidence: v2.value.confianca } : {}),
+        },
         outcome: combineDuelOrders(o1, o2),
+        source: 'judge',
       };
       onPair?.(duel);
-      return duel;
+      return { ok: true, duel };
     }),
   );
+  const duels = julgados.flatMap((j) => (j.ok ? [j.duel] : []));
+  const failedDuels = julgados.flatMap((j) => (j.ok ? [] : [j.failure]));
 
-  const { points, placementById, order } = standingsFromDuels(ids, duels);
+  const { winRate, placementById, order } = standingsFromDuels(ids, duels);
 
-  // Fora do bracket (não selecionado): placement = bracketSize + 1, pontos 0.
+  // Fora do bracket (não selecionado): placement = bracketSize + 1, taxa 0.
   const inBracket = new Set(ids);
   const blindRank = blindRankMap(okIds, seed);
   const outsiders = okIds
     .filter((id) => !inBracket.has(id))
     .sort((a, b) => scoreOf(b) - scoreOf(a) || (blindRank.get(a) ?? 0) - (blindRank.get(b) ?? 0));
   const placementByContestant: Record<string, number> = { ...placementById };
-  const allPoints: Record<string, number> = { ...points };
+  const allWinRate: Record<string, number> = { ...winRate };
   for (const id of outsiders) {
     placementByContestant[id] = ids.length + 1;
-    allPoints[id] = 0;
+    allWinRate[id] = 0;
   }
 
   return {
     placementByContestant,
     order: [...order, ...outsiders],
-    points: allPoints,
+    winRate: allWinRate,
     duels,
+    ...(failedDuels.length > 0 ? { failedDuels } : {}),
     topK: topKGravado,
   };
 }

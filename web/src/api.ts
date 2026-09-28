@@ -1,13 +1,95 @@
-import { idbGet, idbGetAll, idbPut, idbPutMany } from './idb';
-import type { ExpectedSpec } from '../../src/engine/groundTruth.js';
+import { requestPersistentStorage, type StorageSubject } from './storageHealth';
+// Shape do rotulo esperado e da validacao do gabarito: fonte unica no motor.
+import type { ExpectedSpec, ReferenceValidation } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
+import type {
+  CallFinishSignals,
+  CostEntry,
+  CostLedgerSummary,
+  CostRole,
+  FinishSignalCounts,
+  RunCtx,
+  RunPhase,
+  StageIncompleteReason,
+  StoredSignificance,
+  TruncationSignal,
+} from '../../src/types.js';
+export type { CostEntry, CostLedgerSummary, CostRole, RunPhase } from '../../src/types.js';
+import {
+  estimateLaunchCost,
+  type LaunchCostEstimate,
+} from '../../src/engine/costConfirmation.js';
+export type {
+  CostConfirmationReason,
+  CostDriver,
+  LaunchCostEstimate,
+} from '../../src/engine/costConfirmation.js';
+export { COST_CONFIRM_THRESHOLD_USD, costConfirmationReason } from '../../src/engine/costConfirmation.js';
+// Significância pareada: fonte única em src/types.ts (IMPL-001), como os tipos de custo.
+export type { PairedSignificance, SignificanceMethod, StoredSignificance } from '../../src/types.js';
+// Pareamento honesto (IMPL-005): fonte única em src/types.ts, como a significância.
+import type { IterationGate, RunCompleteness, SessionPairing } from '../../src/types.js';
+export type {
+  BestOfKEntry,
+  BestOfKTest,
+  GateHoldReason,
+  IterationGate,
+  MultiplicityMethod,
+  ObservationCoverage,
+  PairCoverage,
+  PairSensitivity,
+  PromotionReeval,
+  RunCompleteness,
+  SessionPairing,
+} from '../../src/types.js';
+// Sinais de fim / truncamento (IMPL-014): fonte única em src/types.ts.
+export type {
+  CallFinishSignals,
+  FinishSignalCounts,
+  StageIncompleteReason,
+  TruncationSignal,
+} from '../../src/types.js';
+// Integridade do veredito (IMPL-004): fonte única em src/types.ts.
+import type { DuelFailure, VerdictError, VerdictIntegrity, VerdictSource } from '../../src/types.js';
+import { isTerminalRunStatus } from '../../src/types.js';
+export type {
+  DuelFailure,
+  VerdictError,
+  VerdictErrorKind,
+  VerdictIntegrity,
+  VerdictSource,
+} from '../../src/types.js';
+export { isTerminalRunStatus } from '../../src/types.js';
+// Fila `needs-human-review` + voto de cada juiz + diagnóstico de verbosidade
+// (IMPL-055/057/053): fonte única em src/types.ts, como acima.
+import type { HumanReviewItem, JudgeVote } from '../../src/types.js';
+export type {
+  HumanReviewItem,
+  HumanReviewReason,
+  JudgeVote,
+  VerbosityDiag,
+} from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
+import type { ModelLifecycleSnapshot } from '../../src/engine/modelLifecycle.js';
+export type {
+  ModelLifecycleAlert,
+  ModelLifecycleEntry,
+  ModelLifecycleSnapshot,
+} from '../../src/engine/modelLifecycle.js';
 import type { ModelReasoningMeta } from './modelCaps';
-import type { LgpdData } from './lgpd';
-import lgpdData from './data/lgpd-compliance.json';
-import { startRun } from './engine/orchestrator';
-import { startTraining } from './engine/trainer';
+import { reasoningLevelForRole } from './modelCaps';
+import {
+  checkImportPii,
+  loadLgpdData,
+  sensitiveRoutingFor,
+  type LgpdData,
+  type PiiImportCheck,
+  type PiiRunReport,
+} from './lgpd';
+import { BudgetLedger } from '../../src/budget.js';
+import { cancelRun as engineCancelRun, isRunCancellable, startRun } from './engine/orchestrator';
+import { cancelTraining, isTrainingCancellable, startTraining } from './engine/trainer';
 import { generateContestants, generateBasePrompt as engineGenerateBasePrompt } from './engine/variator';
 import { listModels, validateKey as engineValidateKey, currentConcurrency } from './engine/openrouter';
 import { listTechniques } from './engine/techniques';
@@ -19,7 +101,14 @@ import {
   getSessionRecord,
   cacheSessionRecord,
 } from './engine/events';
-import { loadRun, loadSession, listRuns as engineListRuns, listSessions as engineListSessions } from './engine/storage';
+import {
+  loadRun,
+  loadSession,
+  listRuns as engineListRuns,
+  listSessions as engineListSessions,
+  saveRun as engineSaveRun,
+  saveSession as engineSaveSession,
+} from './engine/storage';
 import {
   savePrompt as engineSavePrompt,
   updatePrompt as engineUpdatePrompt,
@@ -29,22 +118,70 @@ import {
 } from './engine/promptStore';
 import { parseScenarioPack, SCENARIO_PACK_FORMAT, SCENARIO_PACK_FORMAT_LEGACY } from './engine/scenarioPack';
 import { parseArenaConfig, ARENA_CONFIG_FORMAT, type ArenaConfigFile } from './engine/configFile';
+import { isHeldHere } from './engine/runLocks';
+import {
+  markRunInterrupted as engineMarkRunInterrupted,
+  markSessionInterrupted as engineMarkSessionInterrupted,
+  reconcileRun,
+  reconcileSession,
+  sweepOrphans,
+  watchRun,
+  watchSession,
+  type OrphanCheck,
+  type SweepResult,
+} from './engine/orphans';
 
 export interface OpenRouterModel {
   id: string;
   name: string;
   contextLength?: number;
-  pricing: { prompt: number; completion: number };
+  /** USD por token. `null` = preço DESCONHECIDO/variável (ex.: roteadores; "-1" no catálogo). */
+  pricing: { prompt: number | null; completion: number | null };
   /** `supported_parameters` do OpenRouter — usado p/ determinismo por modelo. */
   supportedParameters?: string[];
   /** Metadados de raciocínio: quais degraus de esforço este modelo aceita. */
   reasoning?: ModelReasoningMeta;
+  /** Ciclo de vida (IMPL-019): snapshot datado, data de deprecação e alvo do alias. */
+  canonicalSlug?: string;
+  expirationDate?: string | null;
+  aliasTarget?: string;
+  created?: number;
 }
+
+// Tetos de max_tokens por papel (IMPL-016): a prévia de custo usa os MESMOS
+// números que o motor envia e o ledger reserva (fonte única em src/roleLimits.ts).
+export { ROLE_MAX_TOKENS, competitorMaxTokens } from './engine/roleLimits';
+export { competitorModelHint } from './engine/competitor';
 
 // Capacidades de ajuste por modelo (temperatura/esforço) — a UI consome pela
 // porta única (api.ts), a regra mora em modelCaps.ts.
 export type { ModelCaps, ModelReasoningMeta } from './modelCaps';
 export { modelCaps, effortOptions, EFFORT_LABEL } from './modelCaps';
+// IMPL-079: esforço de raciocínio POR PAPEL de juízo (judge/duel/gab).
+export {
+  reasoningForRole,
+  reasoningLevelForRole,
+  REASONING_ROLE_DEFAULT,
+  type JudgingRole,
+} from './modelCaps';
+// Preço com "desconhecido" explícito (IMPL-018): fonte única em src/engine/pricing.ts.
+// IMPL-043: filtro de preço com decisão explícita p/ o variável, contagem "X de Y",
+// prévia de custo com contribuição neutra e o aviso "custo não estimável".
+export {
+  createCostPreviewPricer,
+  describeMaxPriceFilter,
+  filterByMaxPrice,
+  formatPricePerMTok,
+  formatPricingLabel,
+  isKnownPrice,
+  knownPricing,
+  priceTokens,
+  unestimableCostNotice,
+  unknownPriceNote,
+  withinMaxPricePerMTok,
+  UNESTIMABLE_COST_LABEL,
+  UNKNOWN_PRICE_LABEL,
+} from '../../src/engine/pricing.js';
 
 export type RunMode = 'compare' | 'variation' | 'training';
 
@@ -55,6 +192,10 @@ export type ReasoningLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xh
 export interface ReasoningConfig {
   competitor?: ReasoningLevel;
   judge?: ReasoningLevel;
+  /** IMPL-079: esforço do DUELO das finais (default `low`; ausente → `judge`). */
+  duel?: ReasoningLevel;
+  /** IMPL-079: esforço do GABARITO/referência (default `high`; ausente → `judge`). */
+  gab?: ReasoningLevel;
   rewriter?: ReasoningLevel;
   datagen?: ReasoningLevel;
 }
@@ -105,8 +246,12 @@ export interface RunConfig {
   optimizerModelId?: string;
   judgePasses?: 1 | 2;
   iterations?: number;
-  /** Perfil de conformidade LGPD (consultivo; gravado no record). Ausente = "livre". */
+  /** Perfil de conformidade LGPD (área sensível: fail-closed, roteamento ZDR forçado — IMPL-040). Ausente = "livre". */
   compliance?: { area: string; includeRessalvas: boolean };
+  /** Dado pessoal (IMPL-042): 'redact' (default) ou 'synthetic' ("so sintetico", recusa dado de aparencia real). */
+  piiMode?: 'redact' | 'synthetic';
+  /** Revisei o dado pessoal apontado: pode seguir pseudonimizado ('redact'; nomes nao cobertos). */
+  allowPii?: boolean;
   /** Etapas fornecidas pelo usuario (JSON); pulam o datagen e fixam `stages`. */
   customStages?: StageSpec[];
   // evolucao de prompts / compare-llms:
@@ -135,14 +280,30 @@ export interface RunConfig {
   scenarioSeed?: StageSpec[];
   /** compare-llms: variantes de config {modelo, temp, reasoning}. */
   competitorConfigs?: { modelId: string; temperature?: number; reasoningLevel?: ReasoningLevel }[];
-  /** training: margem minima de ganho (pp) p/ promover; sem ganho = convergiu. Default 1.0. */
+  /**
+   * training: margem PRATICA minima de ganho (pp) p/ promover; sem ganho =
+   * convergiu. Ausente = max(1; 50/n) (meia granularidade — IMPL-002); o gate
+   * tambem exige p ajustado (max-T sobre as K variantes) <= 0,05.
+   */
   minGain?: number;
-  /** training: fracao de cenarios p/ holdout (clamp [0, 0.5]). Default 0.2. */
+  /** training: fracao de cenarios p/ holdout (clamp [0, 0.5]). Default 0.3 (IMPL-050). */
   holdoutRatio?: number;
+  /** training: paciencia do laco (IMPL-051) — iteracoes seguidas sem promocao antes de convergir. Default 2. */
+  patience?: number;
   /** training: variantes recebem licoes das falhas do campeao (GEPA). */
   feedbackDriven?: boolean;
   /** Reflexao GEPA: 'deterministic' (default) | 'llm' (meta-modelo reescreve as licoes) | 'off'. */
   reflection?: 'off' | 'deterministic' | 'llm';
+  /** training: pool Pareto (F4.1) — >1 = populacao de prompts em vez do campeao unico. */
+  paretoPool?: number;
+  /** IMPL-062: amostragem de pai ∝ cobertura (matriz candidato × cenário). Só com fatias múltiplas e n ≥ 20. */
+  paretoCoverageSampling?: boolean;
+  /** IMPL-060: teto do dossiê de lições (GEPA) em TOKENS (aprox. chars/4). Default 4000. */
+  maxLessonTokens?: number;
+  /** IMPL-060: inclui o gabarito no dossiê de lições. Default OFF (risco de exploração do juiz). */
+  lessonsIncludeReference?: boolean;
+  /** IMPL-065: piso de itens curados (âncora humana) p/ declarar campeão. Default 20. */
+  minCuratedItems?: number;
   // meta:
   datagenModelId: string;
   /** Um ou mais juizes — rodam em paralelo. */
@@ -150,6 +311,12 @@ export interface RunConfig {
   concurrency?: number;
   timeoutMs?: number;
   maxOutputTokens?: number;
+  /**
+   * Teto de gasto em USD da run (ou da SESSÃO inteira, em training). Ausente =
+   * sem limite. O ledger do motor para a run numa porta de fase (aborted +
+   * stoppedReason 'budget') em vez de estourar o teto.
+   */
+  budgetUsd?: number;
 }
 
 export interface CompetitorResponse {
@@ -160,8 +327,22 @@ export interface CompetitorResponse {
   tokensIn: number;
   tokensOut: number;
   costUsd: number;
-  status: 'ok' | 'error';
+  /**
+   * Union FIXO do CONVENTIONS (dono `gw`) — espelho de src/types.ts. `blocked` =
+   * moderação/guardrail (sem veredito); `refused` = o modelo recusou (julgável); `error` = infra.
+   */
+  status: 'ok' | 'error' | 'blocked' | 'refused';
   errorMsg?: string;
+  finishReason?: string;
+  nativeFinishReason?: string;
+  /** Cortada no teto mesmo após o retry x2 (IMPL-014) — a etapa fica fora do placar. */
+  truncated?: boolean;
+  reasoningTokens?: number;
+  maxTokens?: number;
+  truncationSignals?: TruncationSignal[];
+  truncationRetried?: boolean;
+  /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
+  firstAttempt?: CallFinishSignals;
 }
 
 export interface StageSpec {
@@ -172,14 +353,50 @@ export interface StageSpec {
   rubric?: string;
   /** Gabarito: resposta de referencia ideal (juiz pointwise + duelos). */
   reference?: string;
+  /**
+   * Validacao do gabarito (IMPL-055): verificacao dirigida pela rubrica +
+   * 2º gabarito de familia distinta (condicionado) + itens `needs-human-review`.
+   * Preenchida por `validateGeneratedReferences` (src/gabarito.ts).
+   */
+  referenceValidation?: ReferenceValidation;
   /** Rotulo esperado (ground-truth): veredito deterministico sem juiz LLM. */
   expected?: ExpectedSpec;
+  /** Todos os rotulos validos da etapa; obrigatorio com `expected` curto (IMPL-003). */
+  labelSet?: string[];
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
+  /**
+   * Metadados de curriculo (IMPL-064): tier curatorial e dimensoes medidas —
+   * alimentam a selecao Pareto por fatia. Espelho de src/types.ts.
+   */
+  tier?: string;
+  dimensionTags?: string[];
+  /** Idioma do cenario (IMPL-056): default 'pt-BR', variado so via opt-in. */
+  language?: string;
+  /** Quem pergunta (persona do usuario) — realismo/curadoria (IMPL-064). */
+  persona?: string;
+  /** Estimativa de dificuldade (1-5) — sinal de curadoria, NUNCA rotulo. */
+  difficultyEstimate?: number;
+  /** Grupo de invariancia (pares cuja saida esperada nao pode mudar). */
+  invarianceGroup?: string;
+  /**
+   * Metadados adversariais (IMPL-068): categoria, rotulo de turno
+   * ('single-turn' = ASR@1, limite inferior) e hash do prompt-base condicionador.
+   */
+  adversarialCategory?: string;
+  turnLabel?: string;
+  basePromptHash?: string;
 }
 
 /** Veredito ternario: resolve / parcial / nao. */
 export type Verdict = 'resolve' | 'parcial' | 'nao';
+
+/**
+ * Confiança do juiz no próprio veredito (IMPL-047) — campo `confianca` do JSON
+ * do juiz (pointwise e duelo), para triar revisão humana. Espelho de
+ * src/types.ts.
+ */
+export type JudgeConfidence = 'baixa' | 'media' | 'alta';
 
 export interface JudgeVerdict {
   contestantId: string;
@@ -189,6 +406,8 @@ export interface JudgeVerdict {
   motivo: string;
   /** @deprecated compat: records antigos guardavam so o binario. */
   acceptable?: boolean;
+  /** Canário do veredito (IMPL-006). */
+  canary?: string;
 }
 
 export interface SingleJudgeResult {
@@ -206,6 +425,16 @@ export interface JudgeResult {
   acceptableByContestant: Record<string, boolean>;
   /** Veredito ternario agregado por contestant (consenso). Ausente em records antigos. */
   verdictByContestant?: Record<string, Verdict>;
+  /** Origem de cada veredito presente (IMPL-004). */
+  verdictSourceByContestant?: Record<string, VerdictSource>;
+  /** Motivo de cada veredito AUSENTE (IMPL-004) — sem chave em verdictByContestant. */
+  verdictErrorByContestant?: Record<string, VerdictError>;
+  /**
+   * EMPATE TECNICO do painel (IMPL-007): contestantId -> votos (pior -> melhor)
+   * quando nenhum veredito teve maioria estrita. O veredito gravado e o nivel
+   * que a maioria endossa (nunca o voto de cima). So a chave dos empatados.
+   */
+  verdictTieByContestant?: Record<string, Verdict[]>;
   /** Resultado individual de cada juiz. */
   judges: SingleJudgeResult[];
   blindMap: Record<string, string>;
@@ -219,6 +448,31 @@ export interface ReferenceJudgeResult {
   verdictByContestant: Record<string, Verdict>;
   /** Explicacao curta (1 frase) por contestant. */
   explanationByContestant: Record<string, string>;
+  /**
+   * Confiança do juiz no veredito (IMPL-047) — triagem de revisão humana.
+   * Com painel, vale o MENOR entre os votos legítimos. Ausente quando o juiz
+   * não devolveu o campo.
+   */
+  confidenceByContestant?: Record<string, JudgeConfidence>;
+  /** Origem de cada veredito presente (IMPL-004). */
+  verdictSourceByContestant?: Record<string, VerdictSource>;
+  /** Motivo de cada veredito AUSENTE (IMPL-004) — sem chave em verdictByContestant. */
+  verdictErrorByContestant?: Record<string, VerdictError>;
+  /**
+   * EMPATE TECNICO do painel (IMPL-007): contestantId -> votos (pior -> melhor)
+   * quando nenhum veredito teve maioria estrita. O veredito gravado e o nivel
+   * que a maioria endossa (nunca o voto de cima). So a chave dos empatados.
+   */
+  verdictTieByContestant?: Record<string, Verdict[]>;
+  /** Canário de cada voto legítimo, 1 por juiz (IMPL-006). */
+  canaryByContestant?: Record<string, string[]>;
+  /**
+   * Voto de CADA juiz por contestant (IMPL-057): veredito + explicação +
+   * confiança + canário, ou a falha do juiz (`error`, sem veredito — badge
+   * 'avaliador falhou' ≠ veredito). Ausente em records antigos e em vereditos
+   * determinísticos (ground-truth/auto — não há painel).
+   */
+  judgeVotesByContestant?: Record<string, JudgeVote[]>;
   judgeModelId: string;
   inconclusive?: boolean;
 }
@@ -227,21 +481,34 @@ export interface ReferenceJudgeResult {
 export interface DuelOutcome {
   a: string;
   b: string;
-  order1: { winner: 'a' | 'b' | 'tie'; explanation: string };
-  order2: { winner: 'a' | 'b' | 'tie'; explanation: string };
+  order1: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence };
+  order2: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence };
   /** Resultado combinado das 2 ordens. */
   outcome: 'a' | 'b' | 'tie';
+  /** Quem decidiu (IMPL-004): juiz LLM ou oráculo. */
+  source?: VerdictSource;
 }
 
-/** Duelos round-robin da etapa (bracket top-K): placar Copeland, placements fracionarios em empate. */
+/** Duelos round-robin da etapa (bracket top-K): placar por taxa de vitória, placements fracionarios em empate. */
 export interface StageDuels {
   /** Placement final por contestant (1 = melhor; fracionario em empate). */
   placementByContestant: Record<string, number>;
   /** ContestantIds ordenados do melhor ao pior placement. */
   order: string[];
-  /** Pontos Copeland por contestant (vitoria 1, empate 0.5). */
-  points: Record<string, number>;
+  /**
+   * Taxa de vitória por contestant nos duelos da etapa (IMPL-007, R-04:DEC-5):
+   * (vitórias + ½·empates) / duelos disputados, em 0..1. É a régua do placar —
+   * NÃO é Copeland (Copeland = maioria par-a-par). Fora do bracket = 0.
+   */
+  winRate: Record<string, number>;
+  /**
+   * @deprecated Records anteriores ao IMPL-007: soma vitória 1/empate 0.5,
+   * rotulada "pontos Copeland" por engano. `normalizeRunRecord` deriva `winRate`.
+   */
+  points?: Record<string, number>;
   duels: DuelOutcome[];
+  /** Duelos SEM resultado (IMPL-004) — fora do placar. */
+  failedDuels?: DuelFailure[];
   /** Tamanho do bracket usado (0 = round-robin completo). */
   topK: number;
 }
@@ -271,12 +538,18 @@ export interface StageRecord {
   judge?: JudgeResult;
   /** Julgamento pointwise contra o gabarito (quando a etapa tem `reference`). */
   referenceJudge?: ReferenceJudgeResult;
-  /** Duelos pairwise (Copeland) da etapa (quando duelos ligados). */
+  /** Duelos pairwise da etapa, placar por taxa de vitória (quando duelos ligados). */
   duels?: StageDuels;
   /** @deprecated Avaliador fundido no juiz. Presente so em records antigos. */
   evaluation?: StageEvaluation;
   /** Preenchido quando a etapa falhou (datagen/imprevisto) e foi pulada. */
   error?: string;
+  /** Etapa fora do placar e das médias (orçamento/cancelamento/truncamento). */
+  incomplete?: boolean;
+  /** Motivo do `incomplete` (IMPL-014: `truncation` = resposta cortada no teto mesmo após o retry x2). */
+  incompleteReason?: StageIncompleteReason;
+  /** Sinais de fim da chamada do gabarito (IMPL-014). */
+  gabaritoCall?: CallFinishSignals;
   startedAt: string;
   finishedAt?: string;
 }
@@ -294,7 +567,7 @@ export interface CompetitorLiveState {
 
 export interface RunRecord {
   id: string;
-  status: 'running' | 'finished' | 'error' | 'aborted';
+  status: 'running' | 'finished' | 'inconclusive' | 'error' | 'aborted';
   config: RunConfig;
   mode?: RunMode;
   contestants?: Contestant[];
@@ -303,20 +576,76 @@ export interface RunRecord {
   costByContestant?: Record<string, number>;
   /** Judge-score agregado por contestant: (resolve + 0.5*parcial) / total * 100. */
   judgeScoreByContestant?: Record<string, number>;
+  /** n nominal × efetivo por contestant e pares com a regua (IMPL-005). */
+  completeness?: RunCompleteness;
+  /**
+   * Convencao de agregacao do painel de juizes (IMPL-007). `'majority'` =
+   * maioria simples com empate tecnico. AUSENTE = record antigo (media ordinal
+   * arredondada para cima): judge-score de painel >= 2 juizes NAO comparavel.
+   */
+  verdictAggregation?: 'majority';
   /** Ids dos finalistas (top-N por judge-score) que disputaram os duelos. */
   finalists?: string[];
-  /** Classificacao final agregada (Copeland dos duelos / pontos do placar). */
+  /**
+   * Fila `needs-human-review` (IMPL-055): gabarito divergente da rubrica, 2º
+   * gabarito discordante ou amostra humana de auditoria (5–10%).
+   */
+  needsHumanReview?: HumanReviewItem[];
+  /**
+   * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
+   * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).
+   */
   standings?: {
     id: string;
     label: string;
     isControl: boolean;
-    points: number;
+    /** @deprecated records anteriores ao IMPL-007 (soma vitória 1/empate 0.5); use `winRate`. */
+    points?: number;
     wins: number;
     ties: number;
     losses: number;
     winRate: number;
   }[];
+  /** Custo TOTAL (todos os papéis), medido por `usage.cost` via ledger. */
   totalCostUsd: number;
+  /** Quebra do gasto por papel do pipeline. */
+  costByRole?: Record<CostRole, CostEntry>;
+  /** Quantas chamadas tiveram preço exato, estimado ou desconhecido. */
+  costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** Ledger: spent/committed/pending (IMPL-017). Ausente em records antigos. */
+  costLedger?: CostLedgerSummary;
+  /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
+  upstreamCostUsd?: number;
+  /** Ciclo de vida de todo modelo da run + alertas 30/14/7 dias (IMPL-019). */
+  modelLifecycle?: ModelLifecycleSnapshot;
+  /**
+   * Teto de gasto configurado (ausente = sem limite). Em run de rodada de treino
+   * (`sessionId`) é o teto da SESSÃO — a tela precisa rotulá-lo assim.
+   */
+  budgetUsd?: number;
+  /** true = a run parou porque o orçamento acabou. */
+  budgetExhausted?: boolean;
+  /** Fase em que a run parou (só quando parou cedo). */
+  stoppedAtPhase?: RunPhase;
+  /**
+   * Por que parou cedo. Discrimina o status 'aborted'. 'orphan' (IMPL-023, só
+   * na SPA): a aba que executava foi fechada/recarregada/travou — o lock da run
+   * (Web Locks) ficou livre com o record ainda 'running'.
+   */
+  stoppedReason?: 'budget' | 'cancelled' | 'orphan';
+  /** Desfechos não-ok dos competidores, separados (IMPL-010): bloqueio ≠ recusa ≠ erro. */
+  competitorOutcomeCounts?: { blocked: number; refused: number; error: number };
+  /** Fração das chamadas de LLM da run (todos os papéis) truncadas no teto (IMPL-014); alerta acima de 2%. */
+  truncationRate?: number;
+  truncationCounts?: { calls: number; truncated: number };
+  /** Os 4 sinais de fim agregados por papel — 100% das chamadas que completaram (IMPL-014). */
+  finishSignalsByRole?: Partial<Record<CostRole, FinishSignalCounts>>;
+  /** LGPD (IMPL-042): campos com dado pessoal achados no pré-voo (caminho + tipos, nunca o valor). */
+  piiReport?: PiiRunReport;
+  /** Vereditos PERDIDOS por papel (IMPL-004). */
+  failureCountByRole?: Partial<Record<CostRole, number>>;
+  /** A conta que decidiu `inconclusive` (IMPL-004). */
+  verdictIntegrity?: VerdictIntegrity;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -353,17 +682,123 @@ export function normalizeContestants(record: RunRecord): Contestant[] {
   return ids.map((id) => ({ id, label: id, modelId: id }));
 }
 
-// -------------- API key (localStorage) --------------
-
+// -------------- API key (memória por default; localStorage só com "lembrar") --------------
+// IMPL-082 (R-10:REC-4): a key era gravada DIRETO no localStorage, sem
+// alternativa — persistência silenciosa por meses, exposta a qualquer XSS do
+// domínio (nenhum código defensivo sobrevive a script malicioso no mesmo
+// origin). O contrato novo é:
+//  • default = SÓ EM MEMÓRIA: sem "lembrar", a key não sobrevive ao reload;
+//  • opt-in explícito "lembrar neste dispositivo" persiste no localStorage — e
+//    quem expõe a UI tem de DECLARAR isso (`keyPersistence()`), porque aí a key
+//    vive no disco do navegador até ser removida;
+//  • cenário "key sumida" (Safari ITP apagando dados após 7 dias, limpeza
+//    manual, modo privado) = RE-PROMPT (`KeyMissingError`), nunca erro de fetch
+//    opaco de 401;
+//  • migração: key gravada por versões antigas (sem flag) é tratada como
+//    "lembrada" — o usuário a salvou explicitamente; apagá-la em silêncio no
+//    upgrade seria perda surpresa. A UI a declara como persistida.
 const KEY_STORAGE = 'openrouter_api_key';
+const KEY_REMEMBER = 'openrouter_api_key:remember';
 
-export function getStoredKey(): string {
-  return localStorage.getItem(KEY_STORAGE) ?? '';
+let memoryKey: string | null = null; // null = ainda não resolvido (reload)
+
+function lsGet(k: string): string | null {
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage.getItem(k);
+  } catch {
+    return null; // storage bloqueado (modo privado/iframe): key só em memória
+  }
 }
 
-export function setStoredKey(key: string): void {
-  if (key) localStorage.setItem(KEY_STORAGE, key);
-  else localStorage.removeItem(KEY_STORAGE);
+function lsSet(k: string, v: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(k, v);
+  } catch {
+    /* sem persistência: segue em memória */
+  }
+}
+
+function lsDel(k: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(k);
+  } catch {
+    /* sem persistência */
+  }
+}
+
+/** Resolve a key persistida quando o usuário optou por "lembrar" (ou migração). */
+function loadRemembered(): string {
+  const persisted = lsGet(KEY_STORAGE);
+  if (!persisted) return '';
+  if (lsGet(KEY_REMEMBER) === null) lsSet(KEY_REMEMBER, '1'); // migração: key antiga era persistida de fato
+  return persisted;
+}
+
+export function getStoredKey(): string {
+  if (memoryKey === null) memoryKey = loadRemembered();
+  return memoryKey;
+}
+
+export interface SetKeyOpts {
+  /** true = "lembrar neste dispositivo" (localStorage). Default: false (só memória). */
+  remember?: boolean;
+}
+
+/**
+ * Guarda a key. SEM `remember` ela vive só em memória e morre no reload; com
+ * `remember` persiste no localStorage (a UI declara via `keyPersistence()`).
+ * `key` vazio REMOVE a key dos dois lugares.
+ */
+export function setStoredKey(key: string, opts: SetKeyOpts = {}): void {
+  const k = key ?? '';
+  memoryKey = k;
+  if (!k) {
+    lsDel(KEY_STORAGE);
+    lsDel(KEY_REMEMBER);
+    return;
+  }
+  if (opts.remember) {
+    lsSet(KEY_STORAGE, k);
+    lsSet(KEY_REMEMBER, '1');
+  } else {
+    lsDel(KEY_STORAGE);
+    lsDel(KEY_REMEMBER);
+  }
+}
+
+export type KeyPersistence = 'memory' | 'remembered';
+
+/**
+ * Como a key está guardada AGORA. `remembered` = localStorage: a UI precisa
+ * dizer isso ao usuário (risco XSS/limpeza do navegador) em vez de fingir que a
+ * chave fica só nesta sessão.
+ */
+export function keyPersistence(): KeyPersistence {
+  return lsGet(KEY_REMEMBER) === '1' && lsGet(KEY_STORAGE) ? 'remembered' : 'memory';
+}
+
+/**
+ * "Key sumida" é re-prompt, não erro de fetch (IMPL-082): quem consome detecta
+ * por `isKeyMissing` (PROPRIEDADE, nunca `instanceof` — instância dupla do
+ * módulo em ESM daria false em silêncio) e mostra a tela de colar a key.
+ */
+export class KeyMissingError extends Error {
+  readonly code = 'key-missing' as const;
+  constructor(message = 'Conecte sua chave da OpenRouter para continuar.') {
+    super(message);
+    this.name = 'KeyMissingError';
+  }
+}
+
+export function isKeyMissing(err: unknown): err is KeyMissingError {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'key-missing';
+}
+
+/** Key para o que GASTA dinheiro; sem key => `KeyMissingError` (re-prompt). */
+export function requireKey(): string {
+  const key = getStoredKey();
+  if (!key) throw new KeyMissingError();
+  return key;
 }
 
 function authHeaders(): Record<string, string> {
@@ -405,16 +840,101 @@ export async function fetchModels(): Promise<OpenRouterModel[]> {
   return (await listModels(getStoredKey())) as unknown as OpenRouterModel[];
 }
 
-export async function createRun(config: RunConfig): Promise<string> {
+// -------------- Custo: estimativa e portão de confirmação (IMPL-020) --------------
+
+/**
+ * Faixa low–high + drivers da config, com o MESMO estimador que alimenta as
+ * portas de orçamento do motor. Síncrona: recebe o catálogo que a tela já tem.
+ */
+export function estimateConfigCost(config: RunConfig, models: OpenRouterModel[]): LaunchCostEstimate {
+  return estimateLaunchCost(config as never, models as never);
+}
+
+/** Recusa de iniciar: a estimativa pede um "sim" explícito (faixa alta > US$ 1). */
+export class CostConfirmationRequiredError extends Error {
+  readonly code = 'cost-confirmation-required' as const;
+  constructor(readonly estimate: LaunchCostEstimate) {
+    super(
+      `Custo estimado de US$ ${estimate.low.toFixed(2)} – ${estimate.high.toFixed(2)}: confirme antes de iniciar.`,
+    );
+    this.name = 'CostConfirmationRequiredError';
+  }
+}
+
+/**
+ * Reconhece a recusa por PROPRIEDADE (mesma regra de `isControlSignal`): sob
+ * ESM com instância dupla do módulo, `instanceof` daria false em silêncio.
+ */
+export function isCostConfirmationRequired(err: unknown): err is CostConfirmationRequiredError {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { code?: unknown }).code === 'cost-confirmation-required'
+  );
+}
+
+export interface LaunchOpts {
+  /**
+   * O usuário VIU a faixa e os drivers e confirmou. Sem isto, uma estimativa
+   * acima do limiar recusa iniciar — o portão mora aqui (e não só no botão)
+   * para nenhum caminho da SPA gastar acima de US$ 1 sem confirmação.
+   */
+  costConfirmed?: boolean;
+}
+
+async function assertCostConfirmed(config: RunConfig, opts: LaunchOpts): Promise<void> {
+  if (opts.costConfirmed) return;
+  // Catálogo em cache (o formulário já o carregou); indisponível => preço
+  // desconhecido, que também exige confirmação.
+  const models = await listModels(getStoredKey()).catch(() => []);
+  const est = estimateLaunchCost(config as never, models);
+  if (est.requiresConfirmation) throw new CostConfirmationRequiredError(est);
+}
+
+// -------------- Cancelamento (IMPL-020) --------------
+
+/**
+ * Cancela a run NESTA aba: aborta a raiz — o que está em voo morre, a fila do
+ * limitador esvazia e nenhuma chamada nova começa. A run fecha como
+ * `aborted` + `stoppedReason: 'cancelled'`, com o parcial honesto.
+ */
+export function cancelRun(id: string): boolean {
+  return engineCancelRun(id);
+}
+
+/** Cancela o treino NESTA aba (a run da iteração em voo cai junto). */
+export function cancelSession(id: string): boolean {
+  return cancelTraining(id);
+}
+
+/** true = a run roda nesta aba e ainda pode ser cancelada. */
+export function canCancelRun(id: string): boolean {
+  return isRunCancellable(id);
+}
+
+/** true = o treino roda nesta aba e ainda pode ser cancelado. */
+export function canCancelSession(id: string): boolean {
+  return isTrainingCancellable(id);
+}
+
+export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Promise<string> {
+  // IMPL-022: persist() na PRIMEIRA run, ANTES de qualquer await — ainda dentro
+  // da ativação do clique em Iniciar (o Firefox pergunta ao usuário). Memoizado
+  // por página; o estado (negado inclusive) aparece na UI via storageHealth.
+  void requestPersistentStorage();
+  // IMPL-082: "key sumida" (Safari ITP/limpeza) recusa ANTES de qualquer fetch:
+  // vira re-prompt (`isKeyMissing`), nunca erro de rede opaco.
+  const apiKey = requireKey();
+  await assertCostConfirmed(config, launch);
   // Client-side: o run roda na própria aba (engine). Para variação, as variantes
   // são geradas via "optimizer" antes do loop (igual ao prepare do backend).
-  const apiKey = getStoredKey();
   const cfg = config as Record<string, any>;
   const opts: Record<string, unknown> = {};
   if (cfg.mode === 'variation') {
     const optimizerModelId = cfg.optimizerModelId ?? cfg.datagenModelId;
     const promptOptimization = cfg.promptOptimization !== false;
-    opts.prepare = () =>
+    // `runCtx` = ledger da run: o custo do reescritor entra na conta da run.
+    opts.prepare = (runCtx: RunCtx) =>
       generateContestants({
         apiKey,
         modelId: cfg.contestantModelId,
@@ -430,9 +950,15 @@ export async function createRun(config: RunConfig): Promise<string> {
         timeoutMs: cfg.timeoutMs,
         // Contratos never-break (F2/P0.3): o gate pós-rewriter vale na SPA igual.
         contracts: cfg.contracts,
+        // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
+        contractJudgeModelId: cfg.judgeModelIds?.[0],
+        // Verificações do contrato no MESMO raciocínio da run (juiz/competidor).
+        contractJudgeReasoningLevel: reasoningLevelForRole(cfg.reasoning, 'judge'),
+        contestantReasoningLevel: cfg.reasoning?.competitor,
         // Multi-prompt (F2/P0.4): grupo + fragmento-alvo.
         promptGroup: cfg.promptGroup,
         promptId: cfg.promptId,
+        ctx: runCtx,
       });
   }
   const { runId, record } = startRun(config as never, apiKey, opts as never);
@@ -452,8 +978,21 @@ export async function generateBasePrompt(
   taskDescription: string,
   modelId: string,
   theme?: string,
+  compliance?: { area: string; includeRessalvas: boolean },
 ): Promise<string> {
-  return engineGenerateBasePrompt({ apiKey: getStoredKey(), modelId, taskDescription, theme });
+  // IMPL-040 (revisão): a descrição da tarefa é dado da run — em área sensível
+  // esta chamada (fora da run, papel 'rewriter') também sai pelo modo sensível:
+  // o ledger carrega a política e o gateway força os 4 campos ou recusa antes
+  // do fetch (fail-closed, mesmo ponto único das runs).
+  const routing = compliance ? sensitiveRoutingFor({ compliance }, await loadLgpdData()) : undefined;
+  let ctx: RunCtx | undefined;
+  if (routing) {
+    const sink = new BudgetLedger();
+    sink.setSensitiveRouting(routing);
+    ctx = { sink };
+  }
+  const apiKey = requireKey(); // IMPL-082: re-prompt em vez de fetch sem key
+  return engineGenerateBasePrompt({ apiKey, modelId, taskDescription, theme, ctx });
 }
 
 // -------------- Telemetria / subscricao ao vivo (cockpit de treino) --------------
@@ -478,8 +1017,9 @@ export function subscribeRunLive(id: string, onEvent: (e: any) => void): () => v
 }
 
 export async function fetchLgpd(): Promise<LgpdData> {
-  // Client-side: a base de conhecimento LGPD é empacotada no bundle.
-  return lgpdData as unknown as LgpdData;
+  // Client-side: base + allowlist de endpoints ZDR do bundle, lidas de
+  // `src/data/` (fonte única; a cópia em web/src/data sumiu — IMPL-041).
+  return loadLgpdData();
 }
 
 // -------------- Sessões de treino --------------
@@ -496,6 +1036,8 @@ export interface SessionIterationSummary {
   golds?: number;
   silvers?: number;
   bronzes?: number;
+  /** Gate da iteracao com o pareamento honesto (IMPL-005). */
+  gate?: IterationGate;
 }
 
 export interface SessionRecord {
@@ -507,6 +1049,21 @@ export interface SessionRecord {
   pinnedStages?: StageSpec[];
   bestPromptByIteration: SessionIterationSummary[];
   totalCostUsd: number;
+  costByRole?: Record<CostRole, CostEntry>;
+  /** Soma do `failureCountByRole` de todas as runs da sessão (IMPL-004). */
+  failureCountByRole?: Partial<Record<CostRole, number>>;
+  costAccuracy?: { exact: number; estimated: number; unknown: number };
+  /** Ledger da sessão: spent/committed/pending (IMPL-017). */
+  costLedger?: CostLedgerSummary;
+  upstreamCostUsd?: number;
+  budgetUsd?: number;
+  budgetExhausted?: boolean;
+  stoppedAtPhase?: RunPhase;
+  stoppedReason?: 'budget' | 'cancelled' | 'orphan';
+  /** Iteração em que o orçamento/cancelamento interrompeu a sessão. */
+  stoppedAtIteration?: number;
+  /** true = o campeão NÃO passou pelo holdout (pulado): não validado contra sobreajuste. */
+  holdoutSkipped?: boolean;
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -517,16 +1074,59 @@ export interface SessionRecord {
     championScore: number;
     gain: number;
     regressed: boolean;
+    /** IMPL-005: pares com veredito nos DOIS lados (scores sao medias SO sobre eles). */
+    nEfetivo?: number;
+    excludedPairs?: number;
+    completeness?: number;
   };
-  /** Significancia estatistica (bootstrap pareado). null = amostra insuficiente. */
-  significance?: {
-    n: number;
-    meanDiffPp: number;
-    ci95Pp: [number, number];
-    pValue: number;
-  } | null;
+  /**
+   * Significancia estatistica: teste pareado EXATO por troca de sinais + IC por
+   * inversao (IMPL-001; antes era bootstrap percentil). null = < 5 pares. Tipo
+   * canonico em src/types.ts (fonte unica, sessoes antigas so tem os 4 campos base).
+   */
+  significance?: StoredSignificance | null;
+  /** Pareamento final (IMPL-005): n nominal × efetivo, mesmo com significance null. */
+  pairing?: SessionPairing;
   /** Iteracao em que o treino convergiu (ganho < minGain), quando parou antes do fim. */
   convergedAtIteration?: number;
+  /** Motivo da convergencia (IMPL-051): 'patience' (streak sem promocao) | 'plateau' (IC do ganho abaixo de minGain). */
+  convergenceReason?: 'patience' | 'plateau';
+  /**
+   * IMPL-062 (R-02b:REC-4): diagnóstico Pareto da última iteração (métricas +
+   * alerta de ruído). Com fatia única o treino roda como elitismo explícito.
+   */
+  paretoMetrics?: {
+    mode: 'elitismo' | 'pareto';
+    n: number;
+    frontSize: number;
+    nonDominatedPairFraction: number;
+    noiseAlert?: boolean;
+  };
+  /**
+   * IMPL-065 (R-05:REC-4): declaração de campeão sob âncora HUMANA — abaixo do
+   * piso de itens curados o treino NÃO declara campeão (bootstrap, não evidência).
+   */
+  championDeclaration?: ChampionDeclaration;
+}
+
+/**
+ * IMPL-065 (R-05:REC-4): declaração de campeão sob âncora humana. Espelho de
+ * src/types.ts / web/src/engine/types.ts. Item curado = proveniência humana
+ * (`origin` !== 'ai') E gabarito acompanhando o item.
+ */
+export interface ChampionDeclaration {
+  /** false = recusa declarar campeão (piso de itens curados não atingido). */
+  declared: boolean;
+  /** Itens curados (âncora humana) presentes nos cenários da sessão. */
+  curatedItems: number;
+  /** Piso aplicado (`minCuratedItems`, default 20 — proposta sem fonte, calibrar). */
+  minCuratedItems: number;
+  /** Motivo da recusa, quando houver. */
+  reason?: 'sem-ancora-humana';
+  /** Mensagem em PT-BR citando o piso e o número de itens curados. */
+  message: string;
+  /** IC95 do score do campeão (p.p.) — bootstrap/inversão pareada. */
+  scoreCi95Pp?: [number, number] | null;
 }
 
 /** Prompt versionado da biblioteca local no IndexedDB (nova versao a cada promocao). */
@@ -560,9 +1160,12 @@ export interface ScenarioPack {
   scenarios: (StageSpec & { id: string })[];
 }
 
-export async function createSession(config: RunConfig): Promise<string> {
+export async function createSession(config: RunConfig, launch: LaunchOpts = {}): Promise<string> {
+  void requestPersistentStorage(); // IMPL-022: ver createRun
+  const apiKey = requireKey(); // IMPL-082: "key sumida" => re-prompt, não fetch
+  await assertCostConfirmed(config, launch);
   // Client-side: a sessão de treino roda na própria aba (engine trainer).
-  const { sessionId, record } = await startTraining(config as never, getStoredKey());
+  const { sessionId, record } = await startTraining(config as never, apiKey);
   cacheSessionRecord(record);
   return sessionId;
 }
@@ -574,8 +1177,11 @@ export async function fetchSession(id: string): Promise<SessionRecord> {
     return live as unknown as SessionRecord;
   }
   const rec = await loadSession(id);
-  if (rec) return rec as unknown as SessionRecord;
-  throw new Error('Sessão não encontrada');
+  if (!rec) throw new Error('Sessão não encontrada');
+  // IMPL-023: 'running' que NÃO roda nesta aba — o lock decide se é órfã.
+  if (rec.status !== 'running' || isHeldHere('session', id)) return rec as unknown as SessionRecord;
+  const chk = await reconcileSession(id);
+  return (chk.state === 'missing' ? rec : chk.record) as unknown as SessionRecord;
 }
 
 export interface SessionSummary {
@@ -590,6 +1196,7 @@ export interface SessionSummary {
 }
 
 export async function fetchSessions(): Promise<SessionSummary[]> {
+  await sweepOrphansShared(); // IMPL-023: o histórico não lista treino zumbi
   return await engineListSessions<SessionSummary>();
 }
 
@@ -602,16 +1209,22 @@ export function openSessionStream(
   const live = getSessionRecord(id);
   if (live) {
     onEvent({ type: 'snapshot', record: live });
-    if (['finished', 'error', 'aborted'].includes(live.status)) return () => undefined;
+    if (isTerminalRunStatus(live.status)) return () => undefined;
     return subscribeSession(id, onEvent);
   }
-  let active = true;
-  void loadSession(id).then((rec) => {
-    if (active && rec) onEvent({ type: 'snapshot', record: rec });
-  });
-  return () => {
-    active = false;
-  };
+  // Roda nesta aba mas o record vivo ainda não foi publicado: os eventos vêm do motor.
+  if (isHeldHere('session', id)) return subscribeSession(id, onEvent);
+  // IMPL-023: sem record vivo aqui — o disco é cache; o lock diz se ainda roda.
+  const ctrl = new AbortController();
+  void followStoredRecord<SessionRecord>(
+    () => loadSession(id) as Promise<SessionRecord | null>,
+    () => reconcileSession(id) as Promise<OrphanCheck<SessionRecord>>,
+    () => watchSession(id, ctrl.signal) as Promise<OrphanCheck<SessionRecord> | null>,
+    (rec) => onEvent({ type: 'snapshot', record: rec }),
+    (state) => onEvent({ type: 'ownership', state } satisfies OwnershipEvent),
+    ctrl.signal,
+  );
+  return () => ctrl.abort();
 }
 
 // -------------- Biblioteca de prompts (IndexedDB, client-only) --------------
@@ -722,7 +1335,9 @@ export async function readArenaConfigFile(
 
 /** Resultado do import unificado de arquivo JSON do assistente. */
 export type ImportedFile =
-  | { kind: 'config'; config: ArenaConfigFile }
+  // `raw` = o JSON como veio: o import compara com o validado para AVISAR das
+  // chaves que o zod descartou (desconhecidas/typo) — IMPL-045.
+  | { kind: 'config'; config: ArenaConfigFile; raw: unknown }
   | { kind: 'pack'; pack: ScenarioPack }
   | { kind: 'stages'; stages: StageSpec[] };
 
@@ -772,10 +1387,15 @@ function parseRawStages(
  * `prompt-builder-pack@1`/`ai-benchmark-pack@1` (pacote de cenarios) ou um array cru de etapas
  * (`[{question, productContext, rubric?, maxTokens?, reference?}]`, ou `{stages:[…]}`).
  * NUNCA lanca: erro vira `{ ok: false, error }` em PT-BR.
+ *
+ * LGPD (IMPL-042): os TRES formatos passam pela varredura de dado pessoal — aparencia
+ * de dado real bloqueia com aviso nomeando o campo (`pii` preenchido). `allowPii` =
+ * o usuario revisou e confirmou; os identificadores seguem pseudonimizados no envio.
  */
 export async function readImportFile(
   file: File,
-): Promise<{ ok: true; data: ImportedFile } | { ok: false; error: string }> {
+  opts: { allowPii?: boolean } = {},
+): Promise<{ ok: true; data: ImportedFile } | { ok: false; error: string; pii?: PiiImportCheck }> {
   let json: unknown;
   try {
     json = JSON.parse(await file.text());
@@ -788,13 +1408,15 @@ export async function readImportFile(
       ? (json as Record<string, unknown>).format
       : undefined;
   if (formato === ARENA_CONFIG_FORMAT) {
-    const r = parseArenaConfig(json);
-    return r.ok ? { ok: true, data: { kind: 'config', config: r.config } } : r;
+    const r = parseArenaConfig(json, opts);
+    // Chave descontinuada (ex.: training.halving, IMPL-012): lida e ignorada.
+    if (r.ok) for (const w of r.warnings ?? []) console.warn(w);
+    return r.ok ? { ok: true, data: { kind: 'config', config: r.config, raw: json } } : r;
   }
   // Aceita tambem o nome legado: pacotes ja exportados pelo usuario nao podem
   // deixar de abrir por causa de uma troca de marca.
   if (formato === SCENARIO_PACK_FORMAT || formato === SCENARIO_PACK_FORMAT_LEGACY) {
-    const r = parseScenarioPack(json);
+    const r = parseScenarioPack(json, opts);
     return r.ok ? { ok: true, data: { kind: 'pack', pack: r.pack } } : r;
   }
   const arr = Array.isArray(json)
@@ -804,7 +1426,12 @@ export async function readImportFile(
       : null;
   if (arr) {
     const r = parseRawStages(arr);
-    return r.ok ? { ok: true, data: { kind: 'stages', stages: r.stages } } : r;
+    if (!r.ok) return r;
+    if (!opts.allowPii) {
+      const pii = checkImportPii(r.stages, 'cenarios');
+      if (!pii.ok) return { ok: false, error: pii.message!, pii };
+    }
+    return { ok: true, data: { kind: 'stages', stages: r.stages } };
   }
   return {
     ok: false,
@@ -815,50 +1442,71 @@ export async function readImportFile(
 
 // -------------- Cache local (IndexedDB) --------------
 
-function summaryFromRecord(r: RunRecord): RunSummary {
-  const n = r.contestants?.length ?? r.config?.competitorModelIds?.length ?? 0;
-  return {
-    id: r.id,
-    status: r.status,
-    mode: r.mode ?? r.config?.mode ?? 'compare',
-    theme: r.config?.theme ?? '',
-    stages: r.config?.stages ?? r.stages?.length ?? 0,
-    contestants: n,
-    competitors: n,
-    totalCostUsd: r.totalCostUsd ?? 0,
-    startedAt: r.startedAt,
-    finishedAt: r.finishedAt,
-    sessionId: r.sessionId,
-    iteration: r.iteration,
-  };
-}
+// IMPL-022: a UI grava pelo MESMO caminho do motor (engine/storage.ts): record +
+// resumo numa transação só e falha de gravação vira evento/aviso — antes eram
+// dois idbPut soltos num Promise.all, com a falha engolida dentro do idbPut.
+// 'relaxed': é re-gravação de cache (o motor já fez o checkpoint 'strict').
 
-function summaryFromSession(s: SessionRecord): SessionSummary {
-  return {
-    id: s.id,
-    status: s.status,
-    theme: s.config?.theme ?? '',
-    iterationsPlanned: s.config?.iterations ?? 0,
-    iterationsDone: s.bestPromptByIteration?.length ?? 0,
-    totalCostUsd: s.totalCostUsd ?? 0,
-    startedAt: s.startedAt,
-    finishedAt: s.finishedAt,
-  };
-}
+// IMPL-023: só a aba DONA (que segura o lock) grava um record 'running'. Outra
+// aba que abre a mesma run tem uma cópia velha do disco; regravá-la podia
+// passar por cima do checkpoint final da dona e ressuscitar um 'running' que a
+// próxima carga marcaria, por engano, como órfão.
 
 /** Persiste uma run completa no cache local (chamado ao carregar/finalizar). */
 export async function cacheRun(r: RunRecord): Promise<void> {
   if (!r?.id) return;
-  await Promise.all([idbPut('runs', r), idbPut('runSummaries', summaryFromRecord(r))]);
+  if (r.status === 'running' && !isHeldHere('run', r.id)) return;
+  await engineSaveRun(r as never, { durability: 'relaxed' });
 }
 
 /** Persiste uma sessão completa no cache local. */
 export async function cacheSession(s: SessionRecord): Promise<void> {
   if (!s?.id) return;
-  await Promise.all([idbPut('sessions', s), idbPut('sessionSummaries', summaryFromSession(s))]);
+  if (s.status === 'running' && !isHeldHere('session', s.id)) return;
+  await engineSaveSession(s as never, { durability: 'relaxed' });
 }
 
+/**
+ * "Tentar salvar de novo" do aviso de gravação: regrava o record VIVO (em
+ * memória nesta aba) como checkpoint. true = salvou (o aviso some sozinho).
+ */
+export async function retrySave(subject: StorageSubject, id: string): Promise<boolean> {
+  if (subject === 'run') {
+    const live = getRunRecord(id);
+    return live ? engineSaveRun(live) : false;
+  }
+  const live = getSessionRecord(id);
+  return live ? engineSaveSession(live) : false;
+}
+
+/** Record VIVO (memória desta aba) de um item não salvo — o "Baixar JSON" do aviso. */
+export function liveStorageRecord(subject: StorageSubject, id: string): RunRecord | SessionRecord | undefined {
+  return (subject === 'run' ? getRunRecord(id) : getSessionRecord(id)) as unknown as
+    | RunRecord
+    | SessionRecord
+    | undefined;
+}
+
+// Estado do armazenamento local (persistência + gravações que falharam) — a UI
+// consome pela porta única; a regra mora em storageHealth.ts.
+export type {
+  PersistState,
+  StorageHealth,
+  StorageIssue,
+  StorageNotice,
+  StorageSubject,
+} from './storageHealth';
+export {
+  estimateStorage,
+  getStorageHealth,
+  refreshPersistState,
+  requestPersistentStorage,
+  storageNoticeContent,
+  subscribeStorageHealth,
+} from './storageHealth';
+
 export async function fetchRuns(): Promise<RunSummary[]> {
+  await sweepOrphansShared(); // IMPL-023: o histórico não lista run zumbi
   return await engineListRuns<RunSummary>();
 }
 
@@ -869,11 +1517,13 @@ export async function fetchRun(id: string): Promise<RunRecord> {
     return live as unknown as RunRecord;
   }
   const rec = await loadRun(id);
-  if (rec) return rec as unknown as RunRecord;
-  throw new Error('Run nao encontrada');
+  if (!rec) throw new Error('Run nao encontrada');
+  // IMPL-023: 'running' que NÃO roda nesta aba — o lock decide se é órfã
+  // (recarregar no meio da run reabre aborted/orphan, sem intervenção).
+  if (rec.status !== 'running' || isHeldHere('run', id)) return rec as unknown as RunRecord;
+  const chk = await reconcileRun(id);
+  return (chk.state === 'missing' ? rec : chk.record) as unknown as RunRecord;
 }
-
-const TERMINAL_RUN_STATUSES = ['finished', 'error', 'aborted'];
 
 export function openRunStream(
   id: string,
@@ -886,20 +1536,125 @@ export function openRunStream(
   const live = getRunRecord(id);
   if (live) {
     onEvent({ type: 'snapshot', record: live });
-    if (TERMINAL_RUN_STATUSES.includes(live.status)) return () => undefined;
+    if (isTerminalRunStatus(live.status)) return () => undefined;
     return subscribeRun(id, onEvent);
   }
-  let active = true;
-  void loadRun(id).then((rec) => {
-    if (!active || !rec) return;
+  // Roda nesta aba mas o record vivo ainda não foi publicado: os eventos vêm do motor.
+  if (isHeldHere('run', id)) return subscribeRun(id, onEvent);
+  // IMPL-023: sem record vivo aqui — o disco é cache; o lock diz se ainda roda.
+  const ctrl = new AbortController();
+  const emitRecord = (rec: RunRecord): void => {
     onEvent({ type: 'snapshot', record: rec });
     if (rec.status === 'error') {
       onEvent({ type: 'run.error', runId: id, error: rec.error ?? 'Run terminou com erro.' });
-    } else if (TERMINAL_RUN_STATUSES.includes(rec.status)) {
+    } else if (isTerminalRunStatus(rec.status)) {
       onEvent({ type: 'run.finished', runId: id, record: rec });
     }
-  });
-  return () => {
-    active = false;
   };
+  void followStoredRecord<RunRecord>(
+    () => loadRun(id) as Promise<RunRecord | null>,
+    () => reconcileRun(id) as Promise<OrphanCheck<RunRecord>>,
+    () => watchRun(id, ctrl.signal) as Promise<OrphanCheck<RunRecord> | null>,
+    emitRecord,
+    (state) => onEvent({ type: 'ownership', state } satisfies OwnershipEvent),
+    ctrl.signal,
+  );
+  return () => ctrl.abort();
+}
+
+// -------------- Runs de outra aba e órfãs (IMPL-023, Web Locks) --------------
+
+/**
+ * Evento SÓ da UI (não vem do motor): a run/sessão 'running' aberta nesta tela
+ * não roda nesta aba. `elsewhere` = outra aba segura o lock (a tela mostra o
+ * último salvamento e se atualiza sozinha no fim); `unsupported` = navegador
+ * sem Web Locks — não dá para saber se ainda roda (a UI oferece marcar como
+ * interrompida).
+ */
+export interface OwnershipEvent {
+  type: 'ownership';
+  state: 'elsewhere' | 'unsupported';
+}
+
+/**
+ * Record lido do disco (não roda nesta aba): se está 'running', o lock decide —
+ * órfã vira aborted(orphan) na hora; com dono vivo, espera o dono soltar (fim
+ * da run OU morte da aba dela) e publica o record final. Sem polling, sem
+ * heartbeat: a espera é a fila do próprio Web Locks.
+ */
+async function followStoredRecord<R extends { status: string }>(
+  load: () => Promise<R | null>,
+  reconcile: () => Promise<OrphanCheck<R>>,
+  watch: () => Promise<OrphanCheck<R> | null>,
+  emit: (rec: R) => void,
+  ownership: (state: OwnershipEvent['state']) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  try {
+    const rec = await load();
+    if (signal.aborted || !rec) return;
+    if (rec.status !== 'running') {
+      emit(rec);
+      return;
+    }
+    const chk = await reconcile();
+    if (signal.aborted || chk.state === 'missing') return;
+    emit(chk.record);
+    if (chk.state === 'unsupported') ownership('unsupported');
+    if (chk.state !== 'alive') return;
+    ownership('elsewhere');
+    const fim = await watch();
+    if (signal.aborted || !fim || fim.state === 'missing') return;
+    emit(fim.record);
+  } catch (err) {
+    console.warn('[locks] falha ao acompanhar record salvo:', err);
+  }
+}
+
+let sweepEmVoo: Promise<SweepResult | null> | null = null;
+
+/** Uma varredura por vez nesta aba (a lista de runs e a de sessões pedem juntas). */
+function sweepOrphansShared(): Promise<SweepResult | null> {
+  sweepEmVoo ??= sweepOrphans()
+    .catch((err: unknown) => {
+      console.warn('[locks] varredura de órfãs falhou:', err);
+      return null;
+    })
+    .finally(() => {
+      sweepEmVoo = null;
+    });
+  return sweepEmVoo;
+}
+
+let orphanWatchStarted = false;
+
+/**
+ * Chamado UMA vez na carga da página (main.tsx): marca as órfãs sem ninguém
+ * precisar abrir a run e deixa esta aba esperando na fila do lock das runs que
+ * rodam em OUTRAS abas — se uma delas for fechada, a run vira órfã na hora.
+ */
+export function startOrphanWatch(): void {
+  if (orphanWatchStarted) return;
+  orphanWatchStarted = true;
+  void sweepOrphansShared().then((r) => {
+    if (!r) return;
+    for (const id of r.aliveRuns) void watchRun(id).catch(() => undefined);
+    for (const id of r.aliveSessions) void watchSession(id).catch(() => undefined);
+  });
+}
+
+/**
+ * Sem Web Locks não há detecção automática: o usuário marca a run como
+ * interrompida (a aba que a executava já foi fechada). Com Web Locks só marca
+ * se o lock estiver livre — nunca derruba uma run viva.
+ */
+export async function markRunInterrupted(id: string): Promise<RunRecord | null> {
+  const chk = await engineMarkRunInterrupted(id);
+  return chk.state === 'missing' ? null : (chk.record as unknown as RunRecord);
+}
+
+/** Idem para uma sessão de treino. */
+export async function markSessionInterrupted(id: string): Promise<SessionRecord | null> {
+  const chk = await engineMarkSessionInterrupted(id);
+  return chk.state === 'missing' ? null : (chk.record as unknown as SessionRecord);
 }

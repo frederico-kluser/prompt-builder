@@ -34,10 +34,10 @@ UI consome, `"openrouter"` se chama modelo (as antigas skills `knowledge-*` fora
 - Resposta de lista: `{ data: [...] }`. Erro: `{ error: string }`.
 - Mantenha PT-BR nas mensagens. Reúse `describeOpenRouterError` para erros do OpenRouter.
 
-## <evolution>
+## registo de aprendizado (memória CoALA local)
 Ao concluir:
 1. Só persista aprendizados se o type-check passou e o endpoint respondeu como esperado.
 2. Registre surpresas/gotchas (ex.: peculiaridade do Zod, ordem de middleware, CORS/proxy) em `LEARNINGS.md` com data + fonte (usuário > inferência).
 3. Se virar padrão estável, destile no corpo desta skill e incremente `version`.
-4. Se surgiu área nova (ex.: auth, websockets), invoque `meta-skill-evolution`.
+4. Se surgiu área nova (ex.: auth, websockets), invoque a memória CoALA local (`coala.py add`).
 5. Não faça merge sozinho: deixe a mudança como diff git para revisão humana.

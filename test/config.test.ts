@@ -95,6 +95,9 @@ describe('runConfigSchema — variation/training', () => {
     stages: 4,
     datagenModelId: 'gerador/x',
     judgeModelIds: ['juiz/x'],
+    // IMPL-048: obrigatório em variation/training (papéis separados referência ×
+    // juiz × competidores — o gabarito não sai do 1º juiz).
+    referenceModelId: 'referencia/x',
     contestantModelId: 'modelo/x',
     basePrompt: 'prompt base do usuario',
     techniqueIds: ['tecnica-a', 'tecnica-b'],

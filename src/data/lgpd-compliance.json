@@ -1,7 +1,7 @@
 {
   "data_referencia": "2026-06-17",
   "aviso": "Análise técnica/informativa de conformidade — NÃO constitui aconselhamento jurídico. Antes de tratar dados pessoais reais, valide com o DPO/Encarregado e com assessoria jurídica especializada em LGPD.",
-  "principio_central": "No OpenRouter, o mesmo modelo é servido por múltiplos providers de infraestrutura com políticas distintas. A adequação à LGPD depende PRINCIPALMENTE do provider (ZDR, não-treinamento, localização) e não do modelo. Este filtro é CONSULTIVO: orienta a escolha por família de modelo, mas não força o roteamento — ative ZDR e restrinja providers na sua conta OpenRouter para garantir a conformidade.",
+  "principio_central": "No OpenRouter, o mesmo modelo é servido por múltiplos providers de infraestrutura com políticas distintas. A adequação à LGPD depende PRINCIPALMENTE do provider (ZDR, não-treinamento, localização) e não do modelo. Em área sensível o prompt-builder FORÇA o roteamento em toda requisição (provider.only com os endpoints ZDR da allowlist, zdr, data_collection deny, allow_fallbacks false) e recusa a chamada que ficaria sem esses campos; na área geral o filtro segue CONSULTIVO. Mantenha também ZDR e o logging desativado na sua conta OpenRouter.",
   "status_adequacao_anpd": {
     "unica_decisao_publicada": "União Europeia + EEE (Islândia, Liechtenstein, Noruega) — Resolução CD/ANPD nº 32/2026, publicada no DOU em 27/01/2026 (30 jurisdições).",
     "eua": "NÃO adequado — exige cláusulas-padrão da ANPD (SCCs/CCPs) + DPA; risco residual do CLOUD Act.",
@@ -20,31 +20,37 @@
     {
       "id": "geral",
       "label": "Geral (baixo risco)",
+      "sensivel": false,
       "descricao": "Uso corporativo geral com dados pessoais comuns. Aceita provider dos EUA com ZDR+DPA+SCCs, ou UE. China não recomendada (a menos que dados anonimizados)."
     },
     {
       "id": "juridico",
       "label": "Jurídico",
+      "sensivel": true,
       "descricao": "Processos costumam conter dados sensíveis (Art. 11) e sigilo. Exige confidencialidade alta → UE/EU in-region ou EUA com ZDR+DPA+SCCs; nunca China."
     },
     {
       "id": "saude",
       "label": "Saúde",
+      "sensivel": true,
       "descricao": "Dados de saúde são sensíveis (Art. 11), proteção elevada. Exige provider com HIPAA/BAA + ZDR + DPA; preferir UE/EU in-region. Atenção ao NGS2/ICP-Brasil em telemedicina. China vedada."
     },
     {
       "id": "financeiro",
       "label": "Financeiro/Bancário",
+      "sensivel": true,
       "descricao": "Sigilo bancário + regras do BACEN (Res. CMN 4.893/2021 e BCB 85/2021). Exige SOC 2/ISO 27001 + ZDR + DPA e comunicação ao BACEN; preferir UE. China vedada."
     },
     {
       "id": "criancas_adolescentes",
       "label": "Crianças e adolescentes",
+      "sensivel": true,
       "descricao": "Art. 14: melhor interesse, consentimento específico de um dos pais/responsável. Cautela máxima → UE/EU in-region, ZDR, DPA. China vedada."
     },
     {
       "id": "setor_publico",
       "label": "Setor público / Governo",
+      "sensivel": true,
       "descricao": "Arts. 23-30. A adequação UE NÃO cobre segurança pública/defesa/investigação criminal. Recomenda-se soberania máxima (UE/EU in-region ou on-premise no Brasil)."
     }
   ],
@@ -357,7 +363,16 @@
     "Reka": { "origem": "Indefinido", "zdr": true, "treina": false },
     "Infermatic": { "origem": "Indefinido", "zdr": true, "treina": false },
     "Perceptron": { "origem": "EUA", "zdr": true, "treina": false },
-    "Inception": { "origem": "EUA", "zdr": true, "treina": false }
+    "Inception": { "origem": "EUA", "zdr": true, "treina": false },
+    "Mistral": { "origem": "UE", "zdr": true, "treina": false },
+    "xAI": { "origem": "EUA", "zdr": true, "treina": false },
+    "Cohere": { "origem": "Canadá", "zdr": true, "treina": false },
+    "CoreWeave": { "origem": "EUA", "zdr": true, "treina": false },
+    "Crusoe": { "origem": "EUA", "zdr": true, "treina": false },
+    "Modal": { "origem": "EUA", "zdr": true, "treina": false },
+    "PrimeIntellect": { "origem": "EUA", "zdr": true, "treina": false },
+    "Upstage": { "origem": "Coreia do Sul", "zdr": true, "treina": false },
+    "Tencent": { "origem": "China", "zdr": true, "treina": false }
   },
   "regioes_ue_tags": ["eu-west-1", "swedencentral", "europe", "/eu", "eu-central", "eu-north"]
 }

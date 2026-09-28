@@ -7,7 +7,24 @@
 // enxuto; o record completo fica no disco, acessivel por `runs show`.
 
 import type { Output } from './output.js';
-import type { RunEvent, SessionEvent, RunRecord } from '../types.js';
+import type { CostLedgerSummary, CostRole, RunEvent, SessionEvent, RunRecord } from '../types.js';
+import {
+  truncationAlert,
+  truncationByRoleEffort,
+  truncationCellAlert,
+  type TruncationCell,
+} from '../engine/truncation.js';
+import { agentVerdictTreeVersionOf, classifyStop } from '../agent/verdictTree.js';
+
+/**
+ * Ledger SEM a lista de pendentes: no stream vao so os 6 numeros (um run com
+ * centenas de timeouts nao pode inflar uma linha de NDJSON). A lista completa
+ * fica no RunRecord e no `--json` (IMPL-017).
+ */
+function leanLedger(l: CostLedgerSummary): CostLedgerSummary {
+  const { pendingEntries: _omit, ...enxuto } = l;
+  return enxuto;
+}
 
 export interface NdjsonMapperOptions {
   /** Com --verbose, inclui config e systemPrompt (que sao grandes). */
@@ -21,14 +38,32 @@ export interface AgentSummary {
   executions: number;
   /** Execuções que morreram em erro de infra/processo (stopReason 'error'). */
   failed: number;
-  /** Execuções cortadas por nossos tetos (maxTurns/maxCost/timeout/maxOutput/cancelled). */
+  /**
+   * Execuções canceladas (sinal de controle) — as ÚNICAS que saem do placar.
+   * Até o IMPL-032 também contava os cortes por limite (agora em `limitCut`).
+   */
   incomplete: number;
+  /** Execuções cortadas por limite (timeout/maxTurns/maxCost/maxOutput) — contam 'nao'. */
+  limitCut: number;
   /** Média de turnos por execução (0 quando não há execuções). */
   avgTurns: number;
   /** Média de custo (USD, do response.costUsd) por execução (0 quando não há). */
   avgCostUsd: number;
   /** Razão passed/(passed+failed) do oráculo, agregada (0 quando não há oráculo). */
   oracleRate: number;
+  /**
+   * Versão da árvore de veredito que produziu as notas (`agentVerdictTreeVersion`
+   * do record; 1 = legado, corte por limite FORA do denominador). Notas de
+   * versões diferentes não se comparam (IMPL-032).
+   */
+  verdictTreeVersion?: number;
+  /**
+   * IMPL-033: reps em que o juiz de agente falhou mesmo após 2 retentativas
+   * (flag `judgeError`; a nota ficou com o oráculo). Ausente em record legado.
+   */
+  judgeErrors?: number;
+  /** IMPL-033: reps sem veredito (execução inválida / juiz falho sem oráculo) — fora do placar. */
+  unscoredReps?: number;
 }
 
 /**
@@ -46,6 +81,7 @@ function buildAgentSummary(record: RunRecord): AgentSummary | undefined {
 
   let failed = 0;
   let incomplete = 0;
+  let limitCut = 0;
   let turnsSum = 0;
   let costSum = 0;
   let oraclePassed = 0;
@@ -53,13 +89,12 @@ function buildAgentSummary(record: RunRecord): AgentSummary | undefined {
   for (const r of exes) {
     turnsSum += r.execution.turns;
     costSum += r.costUsd;
-    if (r.execution.stopReason === 'error') {
-      failed += 1;
-    } else if (r.execution.stopReason !== 'completed') {
-      // maxTurns/maxCost/timeout/maxOutput/cancelled: a culpa é do NOSSO teto,
-      // não do agente — conta como incompleta, nunca como erro (§15.2 do plano).
-      incomplete += 1;
-    }
+    // IMPL-032: corte por limite é FALHA no denominador ('nao'), não
+    // incompleta; `incomplete` é só cancelamento (sinal de controle).
+    const cls = classifyStop(r.execution.stopReason);
+    if (cls === 'error') failed += 1;
+    else if (cls === 'limit') limitCut += 1;
+    else if (cls === 'cancelled') incomplete += 1;
     if (r.execution.oracle) {
       oraclePassed += r.execution.oracle.passed;
       oracleTotal += r.execution.oracle.passed + r.execution.oracle.failed;
@@ -70,9 +105,54 @@ function buildAgentSummary(record: RunRecord): AgentSummary | undefined {
     executions: exes.length,
     failed,
     incomplete,
+    limitCut,
     avgTurns: turnsSum / exes.length,
     avgCostUsd: costSum / exes.length,
     oracleRate: oracleTotal > 0 ? oraclePassed / oracleTotal : 0,
+    verdictTreeVersion: agentVerdictTreeVersionOf(record),
+    ...(record.agentJudgeErrorCount !== undefined ? { judgeErrors: record.agentJudgeErrorCount } : {}),
+    ...(record.agentUnscoredRepsByContestant
+      ? { unscoredReps: Object.values(record.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0) }
+      : {}),
+  };
+}
+
+/**
+ * Campos de truncamento do resultado da run (IMPL-014 / R-07b:REC-2): a taxa
+ * (TODAS as chamadas de LLM da run), o numerador/denominador, a quebra POR
+ * PAPEL (`truncationByRole` — so `calls`/`truncated`; os histogramas de
+ * finish_reason ficam no record, `runs show`) e o ALERTA (texto) quando passa
+ * de 2%. Usado no `run.finished` do NDJSON e no `result` do `--json` — o mesmo
+ * formato nos dois. Record anterior ao IMPL-014 (sem `truncationRate`) nao
+ * ganha campo nenhum.
+ */
+export function truncationFields(record: RunRecord): {
+  truncationRate?: number;
+  truncationCounts?: { calls: number; truncated: number };
+  truncationByRole?: Partial<Record<CostRole, { calls: number; truncated: number }>>;
+  truncationAlert?: string;
+  /** IMPL-015: taxa por papel x esforco (celulas com chamada). */
+  truncationByRoleEffort?: TruncationCell[];
+  /** IMPL-015: alerta das celulas papel x esforco acima de 1%. */
+  truncationCellAlert?: string;
+} {
+  if (typeof record.truncationRate !== 'number') return {};
+  const counts = record.truncationCounts ?? { calls: 0, truncated: 0 };
+  const porPapel = Object.fromEntries(
+    Object.entries(record.finishSignalsByRole ?? {})
+      .filter(([, c]) => c && c.calls > 0)
+      .map(([role, c]) => [role, { calls: c!.calls, truncated: c!.truncated }]),
+  ) as Partial<Record<CostRole, { calls: number; truncated: number }>>;
+  const alerta = truncationAlert({ ...counts, rate: record.truncationRate }, porPapel);
+  const celulas = truncationByRoleEffort(record.finishSignalsByRole);
+  const alertaCelula = truncationCellAlert(celulas);
+  return {
+    truncationRate: record.truncationRate,
+    truncationCounts: counts,
+    ...(Object.keys(porPapel).length ? { truncationByRole: porPapel } : {}),
+    ...(alerta ? { truncationAlert: alerta } : {}),
+    ...(celulas.length ? { truncationByRoleEffort: celulas } : {}),
+    ...(alertaCelula ? { truncationCellAlert: alertaCelula } : {}),
   };
 }
 
@@ -116,10 +196,25 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         question: e.spec.question,
         hasRubric: Boolean(e.spec.rubric?.trim()),
         hasReference: Boolean(e.spec.reference?.trim()),
+        // IMPL-014: gabarito truncado mesmo apos o retry x2 e descartado — a
+        // etapa e julgada sem regua. Aviso curto (sem o texto do gabarito).
+        ...(e.gabaritoCall?.truncated ? { referenceTruncated: true } : {}),
+        ...(e.warning ? { warning: e.warning } : {}),
       });
       break;
     case 'stage.failed':
       out.event('stage.failed', { ...base, stageIndex: e.stageIndex, error: e.error });
+      break;
+    case 'stage.incomplete':
+      // IMPL-014: etapa fora do placar e das medias. So ids e o motivo — o
+      // texto das respostas truncadas fica no record (`runs show`).
+      out.event('stage.incomplete', {
+        ...base,
+        stageIndex: e.stageIndex,
+        reason: e.reason,
+        detail: e.detail,
+        ...(e.contestantIds?.length ? { contestantIds: e.contestantIds } : {}),
+      });
       break;
     case 'competitor.finished':
       out.event('competitor.finished', {
@@ -134,6 +229,21 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         costUsd: e.response.costUsd,
         chars: e.response.text.length,
         ...(e.response.errorMsg ? { errorMsg: e.response.errorMsg } : {}),
+        // IMPL-014: cortada no teto (mesmo apos o retry x2) / precisou do retry.
+        ...(e.response.truncated ? { truncated: true } : {}),
+        ...(e.response.truncationRetried ? { truncationRetried: true } : {}),
+      });
+      break;
+    case 'judge.truncated':
+      // IMPL-015: veredito invalidado por saida do juiz cortada. Ids + motivo,
+      // nunca o texto da resposta nem a saida do juiz.
+      out.event('judge.truncated', {
+        ...base,
+        stageIndex: e.stageIndex,
+        phase: e.phase,
+        contestantIds: e.contestantIds,
+        kinds: e.kinds,
+        detail: e.detail,
       });
       break;
     case 'stage.judging':
@@ -144,6 +254,14 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         ...base,
         stageIndex: e.stageIndex,
         verdicts: e.judge.verdictByContestant ?? {},
+        // IMPL-004: veredito AUSENTE nao aparece em `verdicts` — so o motivo, enxuto.
+        ...(e.judge.verdictErrorByContestant && Object.keys(e.judge.verdictErrorByContestant).length
+          ? {
+              missing: Object.fromEntries(
+                Object.entries(e.judge.verdictErrorByContestant).map(([id, err]) => [id, err.kind]),
+              ),
+            }
+          : {}),
         ranked: e.judge.rankedContestantIds,
         scoreboard: e.scoreboard,
         totalCostUsd: e.totalCostUsd,
@@ -162,6 +280,10 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         ...base,
         stageIndex: e.stageIndex,
         pairs: e.duels.duels.map((d) => ({ a: d.a, b: d.b, winner: d.outcome })),
+        // IMPL-004: duelo sem resultado nao pontua — listado a parte, com o motivo.
+        ...(e.duels.failedDuels?.length
+          ? { failedPairs: e.duels.failedDuels.map((d) => ({ a: d.a, b: d.b, error: d.error.kind })) }
+          : {}),
       });
       break;
     case 'duel.progress':
@@ -190,6 +312,8 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         ...base,
         status: e.record.status,
         totalCostUsd: e.record.totalCostUsd,
+        // IMPL-017: spent/committed/pending (6 números, cabem no stream).
+        ...(e.record.costLedger ? { costLedger: leanLedger(e.record.costLedger) } : {}),
         stages: e.record.stages.length,
         ...(agentSummary ? { agentSummary } : {}),
         ...(e.record.budgetExhausted ? { budgetExhausted: true } : {}),
@@ -197,6 +321,16 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         ...(e.record.standings ? { standings: e.record.standings } : {}),
         ...(e.record.judgeScoreByContestant
           ? { judgeScoreByContestant: e.record.judgeScoreByContestant }
+          : {}),
+        // IMPL-010: bloqueio ≠ recusa ≠ erro (3 números pequenos, cabem no stream).
+        ...(e.record.competitorOutcomeCounts
+          ? { competitorOutcomeCounts: e.record.competitorOutcomeCounts }
+          : {}),
+        // IMPL-014: taxa de truncamento + alerta acima de 2%.
+        ...truncationFields(e.record),
+        ...(e.record.failureCountByRole ? { failureCountByRole: e.record.failureCountByRole } : {}),
+        ...(e.record.status === 'inconclusive'
+          ? { inconclusiveReasons: e.record.verdictIntegrity?.reasons ?? [] }
           : {}),
       });
       break;
@@ -256,6 +390,7 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         contestantId: e.contestantId,
         execId: e.execId,
         results: e.results,
+        ...(e.attempt !== undefined ? { attempt: e.attempt } : {}),
       });
       break;
     case 'run.error':
@@ -292,6 +427,12 @@ export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {
         iteration: e.iteration,
         championId: e.championId,
         gain: e.gain,
+        // IMPL-002: ganho corrigido e p ajustado lado a lado com o bruto.
+        ...(e.gainCorrected !== undefined ? { gainCorrected: e.gainCorrected } : {}),
+        ...(e.pAdjusted !== undefined ? { pAdjusted: e.pAdjusted } : {}),
+        ...(e.k !== undefined ? { k: e.k } : {}),
+        ...(e.method ? { method: e.method } : {}),
+        ...(e.minGain !== undefined ? { minGain: e.minGain } : {}),
       });
       break;
     case 'session.holdout':
@@ -305,8 +446,11 @@ export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {
         ...base,
         status: e.record.status,
         totalCostUsd: e.record.totalCostUsd,
+        ...(e.record.costLedger ? { costLedger: leanLedger(e.record.costLedger) } : {}), // IMPL-017
         iterationsDone: e.record.bestPromptByIteration.length,
         ...(e.record.significance ? { significance: e.record.significance } : {}),
+        // IMPL-005: n nominal × efetivo do pareamento final (mesmo sem significância).
+        ...(e.record.pairing ? { pairing: e.record.pairing } : {}),
         ...(e.record.holdoutSkipped ? { holdoutSkipped: true } : {}),
         ...(e.record.budgetExhausted ? { budgetExhausted: true } : {}),
       });

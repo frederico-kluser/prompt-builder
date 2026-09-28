@@ -2,7 +2,8 @@
 //
 // Travam o comportamento determinístico dos módulos portados do prompt-arena
 // ANTES de qualquer refactor: seeds, cadeias de desempate, pisos e a
-// semântica Copeland. Se um golden aqui mudar, a mudança é deliberada e
+// semântica do placar dos duelos (taxa de vitória — IMPL-007 trocou a soma
+// "Copeland" pela taxa, de propósito). Se um golden aqui mudar, a mudança é deliberada e
 // precisa ser revisada — não pode passar despercebida num refactor "de leve".
 
 import { describe, expect, it } from 'vitest';
@@ -35,8 +36,14 @@ describe('rank.ts — judge-score e promoção com margem', () => {
     expect(judgeScoreFromVerdicts([])).toBe(0);
   });
 
-  it('veredito ausente conta como nao (resposta com erro não pontua)', () => {
-    expect(judgeScoreFromVerdicts(['resolve', undefined])).toBe(50);
+  // IMPL-004/IMPL-005 (R-03b:REC-4): o contrato MUDOU de propósito. Antes o
+  // ausente contava como 'nao' — um veredito imputado que movia o score mais
+  // que o minGain. Agora ausente = sem observação: fora do numerador E do
+  // denominador.
+  it('veredito ausente é EXCLUÍDO (nem numerador nem denominador), nunca vira nao', () => {
+    expect(judgeScoreFromVerdicts(['resolve', undefined])).toBe(100);
+    expect(judgeScoreFromVerdicts(['resolve', 'nao', undefined, undefined])).toBe(50);
+    expect(judgeScoreFromVerdicts([undefined, undefined])).toBe(0);
   });
 
   it('rankEntries: judgeScore desc → placement asc → menos erros → prompt mais curto', () => {
@@ -95,11 +102,14 @@ describe('rank.ts — judge-score e promoção com margem', () => {
 });
 
 describe('holdout.ts — split intercalado com piso', () => {
-  it('intercala deterministicamente (a cada k-ésimo → holdout)', () => {
+  it('intercala deterministicamente com a fatia do tamanho planejado', () => {
     const items = Array.from({ length: 25 }, (_, i) => i);
     const { train, holdout } = splitHoldout(items, 0.2);
-    expect(holdout).toEqual([4, 9, 14, 19, 24]);
-    expect(train).toHaveLength(20);
+    // IMPL-050: piso absoluto de 10 — 25 × 0,2 = 5 sobe para 10 cenários.
+    expect(holdout).toEqual([2, 4, 7, 9, 12, 14, 17, 19, 22, 24]);
+    expect(train).toHaveLength(15);
+    // Determinístico: redividir devolve as mesmas fatias.
+    expect(splitHoldout(items, 0.2).holdout).toEqual(holdout);
     // As duas fatias amostram a seleção inteira (não um bloco contíguo de
     // cabeça/cauda): há itens de TREINO depois do primeiro holdout, e a união
     // disjunta recompõe a seleção original.
@@ -108,16 +118,21 @@ describe('holdout.ts — split intercalado com piso', () => {
   });
 
   it('abaixo do piso o holdout é descartado por inteiro (tudo treina)', () => {
-    const items = Array.from({ length: 12 }, (_, i) => i); // k=5 → só 2 no holdout
-    const { train, holdout } = splitHoldout(items, 0.2);
-    expect(holdout).toHaveLength(0);
-    expect(train).toEqual(items);
+    const items = Array.from({ length: 12 }, (_, i) => i); // 6 reservados < 10
+    const split = splitHoldout(items, 0.2);
+    expect(split.holdout).toHaveLength(0);
+    expect(split.train).toEqual(items);
+    // IMPL-050: fatia curta é "confirmação fraca", nunca "holdout".
+    expect(split.strength).toBe('confirmacao-fraca');
   });
 
-  it('piso MIN_HOLDOUT_SCENARIOS=5 casa com o piso da significância', () => {
-    expect(MIN_HOLDOUT_SCENARIOS).toBe(5);
+  it('piso MIN_HOLDOUT_SCENARIOS=10 é ABSOLUTO (IMPL-050, R-04:REC-5)', () => {
+    expect(MIN_HOLDOUT_SCENARIOS).toBe(10);
     const items = Array.from({ length: 25 }, (_, i) => i);
-    expect(splitHoldout(items, 0.2).holdout.length).toBeGreaterThanOrEqual(5);
+    expect(splitHoldout(items, 0.2).holdout.length).toBeGreaterThanOrEqual(10);
+    // Seleção com menos de 20 cenários nunca forma holdout (teto de ratio 0,5).
+    const curta = splitHoldout(Array.from({ length: 19 }, (_, i) => i), 0.5);
+    expect(curta.strength).toBe('confirmacao-fraca');
   });
 
   it('ratio é clampado em [0, 0.5]; 0 desliga o holdout', () => {
@@ -127,27 +142,45 @@ describe('holdout.ts — split intercalado com piso', () => {
   });
 });
 
-describe('stats.ts — bootstrap pareado determinístico', () => {
+// IMPL-001: o bootstrap percentil saiu (não é p-valor); o golden abaixo passou
+// a ser o do teste EXATO por troca de sinais + IC por inversão. As sondas N2 e
+// a força bruta de referência vivem em test/stats-exact.test.ts.
+describe('stats.ts — teste pareado exato determinístico', () => {
   it('n < 5 pares → null (amostra insuficiente)', () => {
     expect(pairedSignificance([1, 1, 1, 1], [1, 1, 1, 1])).toBeNull();
     expect(pairedSignificance([1, 1, 1, 1, 1], [1, 1, 1, 1, 1])).not.toBeNull();
   });
 
-  it('mesma seed ⇒ mesmo resultado (golden)', () => {
+  it('golden: p exato 2^−6 (6 diffs +0,5, 4 zeros) e IC por inversão [12,5; 50]', () => {
     const control = [0.5, 0, 1, 0.5, 1, 0, 0.5, 1, 1, 0];
     const champion = [1, 0.5, 1, 1, 1, 0.5, 1, 1, 1, 0.5];
     expect(pairedSignificance(control, champion)).toMatchInlineSnapshot(`
       {
         "ci95Pp": [
-          15,
-          45,
+          12.5,
+          50,
         ],
+        "ciMethod": "exact",
+        "completeness": 1,
+        "excludedPairs": 0,
         "meanDiffPp": 30,
+        "method": "exact",
         "n": 10,
-        "pValue": 0,
+        "nEfetivo": 10,
+        "nNonZero": 6,
+        "pMinUnilateral": 0.015625,
+        "pValue": 0.015625,
+        "pValueTwoSided": 0.03125,
+        "signTest": {
+          "negative": 0,
+          "pValue": 0.015625,
+          "pValueTwoSided": 0.03125,
+          "positive": 6,
+        },
       }
     `);
-    // Determinismo puro: recalcular não pode mover o p-valor.
+    // Determinismo puro: recalcular não pode mover o p-valor (o caminho exato
+    // não sorteia nada; o Monte Carlo é semeado).
     expect(pairedSignificance(control, champion)).toEqual(pairedSignificance(control, champion));
   });
 
@@ -180,7 +213,7 @@ describe('stats.ts — bootstrap pareado determinístico', () => {
   });
 });
 
-describe('duels.ts — seeds cegas, bracket e Copeland', () => {
+describe('duels.ts — seeds cegas, bracket e taxa de vitória', () => {
   it('seedFromId (FNV-1a) é estável (golden)', () => {
     expect(seedFromId('qualquer pergunta')).toMatchInlineSnapshot(`2467653837`);
     expect(seedFromId('x')).toBe(seedFromId('x'));
@@ -259,7 +292,7 @@ describe('duels.ts — seeds cegas, bracket e Copeland', () => {
     expect(pickFinalists(entries, 0, 5)).toEqual(['b', 'c', 'a']);
   });
 
-  it('standingsFromDuels: Copeland (1 / 0.5 / 0) e placements fracionários em empate', () => {
+  it('standingsFromDuels: taxa de vitória ((1 / 0.5 / 0) ÷ disputados) e placements fracionários em empate', () => {
     const duel = (a: string, b: string, outcome: 'a' | 'b' | 'tie'): DuelOutcome => ({
       a,
       b,
@@ -267,17 +300,17 @@ describe('duels.ts — seeds cegas, bracket e Copeland', () => {
       order2: { winner: outcome, explanation: '' },
       outcome,
     });
-    const { points, placementById, order } = standingsFromDuels(
+    const { winRate, placementById, order } = standingsFromDuels(
       ['x', 'y', 'z'],
       [duel('x', 'y', 'a'), duel('x', 'z', 'b'), duel('y', 'z', 'tie')],
     );
-    // x: 1 vitória + 1 derrota = 1 · y: 1 derrota + 1 empate = 0.5 · z: 1 vitória + 1 empate = 1.5
-    expect(points).toEqual({ x: 1, y: 0.5, z: 1.5 });
+    // x: (1 vitória + 1 derrota)/2 = 0.5 · y: (1 derrota + 1 empate)/2 = 0.25 · z: (1 vitória + 1 empate)/2 = 0.75
+    expect(winRate).toEqual({ x: 0.5, y: 0.25, z: 0.75 });
     expect(order).toEqual(['z', 'x', 'y']);
     expect(placementById['z']).toBe(1);
   });
 
-  it('standingsFromDuels: empate de pontos divide a média dos ranks (placement fracionário)', () => {
+  it('standingsFromDuels: empate de taxa divide a média dos ranks (placement fracionário)', () => {
     const duel = (a: string, b: string, outcome: 'a' | 'b' | 'tie'): DuelOutcome => ({
       a,
       b,

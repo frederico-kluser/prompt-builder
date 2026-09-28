@@ -1,114 +1,97 @@
 #!/usr/bin/env node
-// Gera src/data/lgpd-allowlist.generated.json: um snapshot de referência do
-// catálogo OpenRouter cruzado com a base de conformidade LGPD.
+// Gera src/data/lgpd-allowlist.generated.json — a allowlist LGPD POR ENDPOINT
+// (provedor + região/variante), derivada de GET /models + GET /endpoints/zdr.
+// Os dois endpoints são PÚBLICOS e gratuitos: não precisa de API key.
 //
-// Usa SOMENTE os endpoints PÚBLICOS do OpenRouter (/models e /endpoints/zdr) —
-// NÃO precisa de API key. A regra de classificação espelha web/src/lgpd.ts.
+// ⚠️ Este script NÃO classifica nada (IMPL-041): antes ele era a 3ª cópia da
+// regra de classificação. Agora só BUSCA e GRAVA; derivação e classificação
+// são as de `src/engine/lgpdCore.ts`, a MESMA usada em runtime pelo CLI, pelo
+// servidor e pela SPA (`test/lgpd-allowlist.test.ts` falha se divergir).
 //
-// Uso:  node scripts/gen-lgpd-allowlist.mjs
-//       OPENROUTER_BASE_URL=... node scripts/gen-lgpd-allowlist.mjs
+// Uso:  npm run lgpd:allowlist                 (= tsx scripts/gen-lgpd-allowlist.mjs)
+//       npm run lgpd:allowlist -- --dry-run    (não grava; só o relatório)
+//       OPENROUTER_BASE_URL=... npm run lgpd:allowlist
+//
+// Regenerar ANTES de 90 dias (alvo 30): passado isso o runtime bloqueia toda
+// área sensível (fail-closed). A CI regenera sozinha (.github/workflows).
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  allowlistReport,
+  buildAllowlistSnapshot,
+  serializeAllowlistSnapshot,
+} from '../src/engine/lgpdCore.ts';
 
-const BASE = (process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1').replace(/\/+$/, '');
-const ROOT = process.cwd();
-const DATA = JSON.parse(readFileSync(path.join(ROOT, 'src/data/lgpd-compliance.json'), 'utf-8'));
+// Raiz pelo próprio arquivo, nunca por process.cwd() (ver src/paths.ts).
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+export const COMPLIANCE_FILE = path.join(ROOT, 'src', 'data', 'lgpd-compliance.json');
+export const SNAPSHOT_FILE = path.join(ROOT, 'src', 'data', 'lgpd-allowlist.generated.json');
 
-// ---- classificação (espelha web/src/lgpd.ts) ----
-const creatorPrefix = (id) => (id.split('/')[0] ?? '').replace(/^~/, '').toLowerCase();
-const familiaFor = (id) =>
-  DATA.familias.find((f) => f.prefixos.some((p) => p.toLowerCase() === creatorPrefix(id)));
-const originFor = (id) => familiaFor(id)?.origem ?? DATA.creators_origem[creatorPrefix(id)] ?? 'Indefinido';
+const DEFAULT_BASE = 'https://openrouter.ai/api/v1';
 
-function statusFor(id, area) {
-  const fam = familiaFor(id);
-  if (fam) return fam.areas_permitidas[area] ?? 'permitido com ressalvas';
-  const origem = DATA.creators_origem[creatorPrefix(id)];
-  const restrita = origem === 'China' || origem === 'SG';
-  const defaults = restrita
-    ? DATA.heuristica_nao_classificados.defaults_restrita
-    : DATA.heuristica_nao_classificados.defaults_ocidental;
-  return defaults[area] ?? 'permitido com ressalvas';
-}
-
-const EU_PATTERNS = ['eu-west', 'swedencentral', 'europe', 'eu-central', 'eu-north'];
-const isEuTag = (tag) => {
-  const t = (tag ?? '').toLowerCase();
-  return EU_PATTERNS.some((p) => t.includes(p)) || t.endsWith('/eu') || t === 'azure/eu';
-};
-
-async function getJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
-  return res.json();
-}
-
-async function main() {
-  console.log(`[gen-lgpd] buscando catálogo público em ${BASE} …`);
-  const [modelsResp, zdrResp] = await Promise.all([
-    getJson(`${BASE}/models`),
-    getJson(`${BASE}/endpoints/zdr`),
-  ]);
-  const models = Array.isArray(modelsResp.data) ? modelsResp.data : [];
-  const zdr = Array.isArray(zdrResp.data) ? zdrResp.data : [];
-
-  // model_id -> { providers:Set, eu:bool }
-  const zdrByModel = new Map();
-  for (const ep of zdr) {
-    const e = zdrByModel.get(ep.model_id) ?? { providers: new Set(), eu: false };
-    if (ep.provider_name) e.providers.add(ep.provider_name);
-    if (isEuTag(ep.tag)) e.eu = true;
-    zdrByModel.set(ep.model_id, e);
-  }
-
-  const areaIds = DATA.areas.map((a) => a.id);
-  const porModelo = {};
-  const resumo = Object.fromEntries(
-    areaIds.map((a) => [a, { permitidos: 0, com_ressalvas: 0, bloqueados: 0 }]),
-  );
-
-  for (const m of models.sort((a, b) => String(a.id).localeCompare(String(b.id)))) {
-    const id = m.id;
-    const areas = {};
-    for (const a of areaIds) {
-      const s = statusFor(id, a);
-      areas[a] = s;
-      if (s === 'permitido') resumo[a].permitidos += 1;
-      else if (s === 'permitido com ressalvas') resumo[a].com_ressalvas += 1;
-      else resumo[a].bloqueados += 1;
-    }
-    const z = zdrByModel.get(id);
-    porModelo[id] = {
-      familia: familiaFor(id)?.id ?? null,
-      origem: originFor(id),
-      areas,
-      zdr_providers: z ? [...z.providers].sort() : [],
-      zdr_eu: z?.eu ?? false,
-    };
-  }
-
-  const out = {
-    gerado_em: new Date().toISOString().slice(0, 10),
-    fonte: `${BASE}/models + ${BASE}/endpoints/zdr (públicos)`,
-    base_conhecimento: DATA.data_referencia,
-    aviso: DATA.aviso,
-    total_modelos: models.length,
-    total_modelos_com_zdr: zdrByModel.size,
-    resumo_por_area: resumo,
-    por_modelo: porModelo,
+/**
+ * Busca os dois catálogos públicos e deriva o snapshot pelo núcleo único.
+ * `fetchImpl` é injetável (testes usam transporte falso: zero rede).
+ */
+export async function generateAllowlist({ baseUrl = DEFAULT_BASE, fetchImpl = fetch, now = new Date() } = {}) {
+  const base = String(baseUrl).replace(/\/+$/, '');
+  const getJson = async (url) => {
+    // Chamada como FUNÇÃO (não método): `fetchImpl` pode ser o fetch global.
+    const res = await fetchImpl(url, { headers: { accept: 'application/json' } });
+    if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
+    return res.json();
   };
-
-  const target = path.join(ROOT, 'src/data/lgpd-allowlist.generated.json');
-  writeFileSync(target, JSON.stringify(out, null, 2) + '\n', 'utf-8');
-  console.log(`[gen-lgpd] ${models.length} modelos (${zdrByModel.size} com ZDR) → ${path.relative(ROOT, target)}`);
-  for (const a of areaIds) {
-    const r = resumo[a];
-    console.log(`  ${a.padEnd(22)} permitidos=${r.permitidos}  ressalvas=${r.com_ressalvas}  bloqueados=${r.bloqueados}`);
-  }
+  const [models, zdr] = await Promise.all([getJson(`${base}/models`), getJson(`${base}/endpoints/zdr`)]);
+  return buildAllowlistSnapshot({
+    models,
+    zdr,
+    now,
+    fonte: `${base}/models + ${base}/endpoints/zdr (públicos)`,
+  });
 }
 
-main().catch((err) => {
-  console.error('[gen-lgpd] falhou:', err.message);
-  process.exit(1);
-});
+/** Linhas do relatório (idade, contagens, por área) — o mesmo de `models allowlist --check`. */
+export function reportLines(snapshot, compliance, now = new Date()) {
+  const r = allowlistReport({ ...compliance, allowlist: snapshot }, now);
+  const out = [
+    `${r.health.message}`,
+    `  catálogo: ${snapshot.total_modelos_catalogo} modelos · ${r.health.modelosComZdr} com endpoint ZDR · ` +
+      `${r.health.endpoints} endpoints ZDR (${snapshot.endpoints_zdr_fora_do_catalogo} fora do catálogo)`,
+    `  modelos com endpoint elegível na UE: ${r.modelosComEndpointUe}`,
+  ];
+  if (r.provedoresForaDoMapa.length) {
+    out.push(
+      `  provedores FORA do mapa (excluídos até a base classificá-los): ${r.provedoresForaDoMapa.join(', ')}`,
+    );
+  }
+  for (const [area, a] of Object.entries(r.porArea)) {
+    out.push(
+      `  ${area.padEnd(22)} ${a.sensivel ? 'sensível ' : 'consultiva'}  permitidos=${a.permitidos}  ` +
+        `ressalvas=${a.com_ressalvas}  bloqueados=${a.bloqueados}  desconhecidos_liberados=${a.desconhecidos_liberados}`,
+    );
+  }
+  return out;
+}
+
+async function main(argv) {
+  const dryRun = argv.includes('--dry-run');
+  const baseUrl = process.env.OPENROUTER_BASE_URL ?? DEFAULT_BASE;
+  process.stderr.write(`[gen-lgpd] buscando catálogo público em ${baseUrl} …\n`);
+  const snapshot = await generateAllowlist({ baseUrl });
+  const compliance = JSON.parse(readFileSync(COMPLIANCE_FILE, 'utf-8'));
+  if (!dryRun) writeFileSync(SNAPSHOT_FILE, serializeAllowlistSnapshot(snapshot), 'utf-8');
+  process.stderr.write(
+    `[gen-lgpd] ${dryRun ? '(dry-run, nada gravado)' : `gravado em ${path.relative(ROOT, SNAPSHOT_FILE)}`}\n`,
+  );
+  for (const l of reportLines(snapshot, compliance)) process.stderr.write(`${l}\n`);
+}
+
+// Executado direto (não importado por teste).
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main(process.argv.slice(2)).catch((err) => {
+    process.stderr.write(`[gen-lgpd] falhou: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  });
+}

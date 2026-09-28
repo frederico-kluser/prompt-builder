@@ -73,6 +73,9 @@ export function arenaConfigToRunConfig(
     ...(s.rubric ? { rubric: s.rubric } : {}),
     ...(s.reference ? { reference: s.reference } : {}),
     ...(s.expected !== undefined ? { expected: s.expected } : {}),
+    // Sem esta linha o labelSet sumiria na tradução e o parseRunConfig abaixo
+    // recusaria o cenário de rótulo curto (IMPL-003) — whitelist campo a campo.
+    ...(s.labelSet !== undefined ? { labelSet: s.labelSet } : {}),
     origin: 'import' as const,
   }));
 
@@ -122,6 +125,8 @@ export function arenaConfigToRunConfig(
     ...(file.models.reference ? { referenceModelId: file.models.reference } : {}),
     ...(Object.keys(reasoning).length ? { reasoning } : {}),
     ...(file.compliance ? { compliance: file.compliance } : {}),
+    ...(file.piiMode ? { piiMode: file.piiMode } : {}),
+    ...(file.allowPii ? { allowPii: true } : {}),
     // Contratos never-break (F2/P0.3): vivem no perfil do prompt, valem para
     // toda reescrita do variator.
     ...(file.prompt?.contracts ? { contracts: file.prompt.contracts } : {}),
@@ -169,11 +174,12 @@ export function arenaConfigToRunConfig(
       ...(file.mode === 'training'
         ? {
             iterations: clamp(Math.round(file.training?.iterations ?? d.iterations), 2, 10),
-            minGain: clamp(file.training?.minGain ?? 1, 0, 100),
+            // IMPL-002: sem minGain no arquivo o gate usa o default max(1; 50/n)
+            // — cravar 1 aqui desligaria a margem ligada à granularidade.
+            ...(file.training?.minGain !== undefined ? { minGain: clamp(file.training.minGain, 0, 100) } : {}),
             holdoutRatio: clamp(file.training?.holdoutRatio ?? 0.2, 0, 0.5),
             feedbackDriven: file.training?.feedbackDriven !== false,
             ...(file.training?.reflection ? { reflection: file.training.reflection } : {}),
-            ...(file.training?.halving !== undefined ? { halving: file.training.halving } : {}),
             ...(file.training?.paretoPool !== undefined ? { paretoPool: file.training.paretoPool } : {}),
           }
         : {}),
@@ -247,6 +253,8 @@ export function arenaAgentConfigToRunConfig(
         ...(s.agentTask.files ? { files: s.agentTask.files } : {}),
         ...(s.agentTask.verify ? { verify: s.agentTask.verify } : {}),
         ...(s.agentTask.forbiddenPaths ? { forbiddenPaths: s.agentTask.forbiddenPaths } : {}),
+        ...(s.agentTask.rebuild ? { rebuild: s.agentTask.rebuild } : {}),
+        ...(s.agentTask.detectors ? { detectors: s.agentTask.detectors } : {}),
         ...(s.agentTask.contextFiles ? { contextFiles: s.agentTask.contextFiles } : {}),
         limits: taskLimits,
       },
@@ -265,7 +273,15 @@ export function arenaAgentConfigToRunConfig(
   // em si usa `agent.thinking`). Sem ajuste por papel aqui — defaults do pipeline.
   const reasoning: ReasoningConfig = {};
 
-  const referenceJudging = file.judging?.reference ?? true;
+  // IMPL-034 (R-14a DEC-7): com `verify[]` o oráculo decide (veredito e finais)
+  // e o juiz de agente NÃO lê o gabarito textual — gerá-lo era custo sem leitor
+  // (64% de uma run trivial medida). Todas as etapas com verify[] ⇒ `false`
+  // automático, mesmo com `judging.reference: true` explícito (não há quem leia
+  // a referência). Com alguma etapa sem verify[], o default segue ligado e o
+  // orquestrador pula o gabarito POR ETAPA (`needsTextReference`).
+  const todasComVerify =
+    stageSpecs.length > 0 && stageSpecs.every((s) => (s.agentTask?.verify?.length ?? 0) > 0);
+  const referenceJudging = todasComVerify ? false : (file.judging?.reference ?? true);
 
   const common = {
     theme: file.theme.trim(),

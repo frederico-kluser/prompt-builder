@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, Link } from 'react-router-dom';
 import { AnimatePresence, motion, useTransform } from 'motion/react';
 import {
   Check,
@@ -37,8 +37,9 @@ import { Toast, ToastStack, useToastStack } from '@/components/motion-ui/toast-s
 import { useMotionUITransition, useMotionUITheme } from '@/components/motion-ui/ui-theme';
 import { Button } from '@/components/ui/button';
 import { ThemeContext, applyTheme, getStoredTheme, persistTheme, type ResolvedTheme, type Theme } from '../theme';
-import { HelpContext, markFirstOpen, type HelpTutorial } from '../help';
+import { HelpContext, helpTopicForRoute, markFirstOpen, type HelpTutorial } from '../help';
 import { HelpModal } from './HelpModal';
+import { BottomNav, NAV_DESTINATIONS, activeNavTarget } from './BottomNav';
 import { cn } from '@/lib/utils';
 
 /* ------------------------------------------------------------------ toasts */
@@ -143,12 +144,6 @@ function ThemeToggle({ theme, onChange }: { theme: Theme; onChange: (t: Theme) =
 
 /* ------------------------------------------------------------- cabeçalho */
 
-const NAV = [
-  { to: '/new', label: 'Nova run' },
-  { to: '/runs', label: 'Histórico' },
-  { to: '/prompts', label: 'Prompts' },
-];
-
 /**
  * Adapta um ícone do Lucide ao slot do CommandPalette. O Lucide tipa
  * `aria-hidden` como Booleanish (aceita a string "true"), e o slot pede
@@ -193,14 +188,15 @@ function HeaderContent({
         <span className="font-heading text-sm font-medium tracking-tight">Prompt Builder</span>
       </motion.button>
 
+      {/* Navegação do topo: <a href> reais (mesmos destinos da barra inferior),
+          com `aria-current` do MESMO mapa de rotas — exatamente 1 por rota. */}
       <nav className="ml-2 hidden items-center gap-0.5 md:flex" aria-label="Seções">
-        {NAV.map((item) => {
-          const active = pathname === item.to || pathname.startsWith(`${item.to}/`);
+        {NAV_DESTINATIONS.map((item) => {
+          const active = activeNavTarget(pathname) === item.to;
           return (
-            <button
+            <Link
               key={item.to}
-              type="button"
-              onClick={() => navigate(item.to)}
+              to={item.to}
               aria-current={active ? 'page' : undefined}
               className={cn(
                 'relative rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors',
@@ -216,7 +212,7 @@ function HeaderContent({
                 />
               )}
               <span className="relative">{item.label}</span>
-            </button>
+            </Link>
           );
         })}
       </nav>
@@ -289,6 +285,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       { id: 'help:compare', label: 'Como funciona: comparar modelos', group: 'Ajuda', icon: cmdIcon(CircleHelp), keywords: ['tutorial'] },
       { id: 'help:variation', label: 'Como funciona: testar prompts', group: 'Ajuda', icon: cmdIcon(CircleHelp), keywords: ['tutorial', 'variação'] },
       { id: 'help:training', label: 'Como funciona: treinar prompt', group: 'Ajuda', icon: cmdIcon(CircleHelp), keywords: ['tutorial', 'treino'] },
+      { id: 'help:runs', label: 'Como funciona: histórico de runs', group: 'Ajuda', icon: cmdIcon(CircleHelp), keywords: ['tutorial', 'histórico'] },
+      { id: 'help:prompts', label: 'Como funciona: biblioteca de prompts', group: 'Ajuda', icon: cmdIcon(CircleHelp), keywords: ['tutorial', 'biblioteca'] },
+      { id: 'help:settings', label: 'Como funciona: configurações', group: 'Ajuda', icon: cmdIcon(CircleHelp), keywords: ['tutorial', 'key', 'tema'] },
       { id: 'theme:light', label: 'Tema claro', group: 'Aparência', icon: cmdIcon(Sun) },
       { id: 'theme:dark', label: 'Tema escuro', group: 'Aparência', icon: cmdIcon(Moon) },
       { id: 'theme:system', label: 'Tema do sistema', group: 'Aparência', icon: cmdIcon(Monitor) },
@@ -314,7 +313,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <HeaderContent
               theme={theme}
               onTheme={setTheme}
-              onHelp={() => setHelp('compare')}
+              onHelp={() => setHelp(helpTopicForRoute(location.pathname))}
               palette={
                 <CommandPalette
                   open={paletteOpen}
@@ -337,9 +336,14 @@ export function AppShell({ children }: { children: ReactNode }) {
             />
           </ShrinkHeader>
 
-          <main style={{ paddingTop: HEADER_TALL + 16 }}>
+          <main style={{ paddingTop: HEADER_TALL + 16, paddingBottom: 24 }}>
             <RouteTransition routeKey={location.pathname}>{children}</RouteTransition>
           </main>
+
+          {/* Barra inferior (IMPL-110): os 4 destinos ficam a1 toque abaixo de
+              768px. Mora FORA do wrapper de transição, que não pode ter
+              transform (vira containing block de `fixed` no iOS). */}
+          <BottomNav pathname={location.pathname} onNavigate={navigate} />
 
           {help && <HelpModal tutorial={help} onClose={() => setHelp(null)} />}
         </ToastLayer>
@@ -352,22 +356,23 @@ export function AppShell({ children }: { children: ReactNode }) {
  * Transição entre rotas. O catálogo tem `page-curtain` e `mask-wipe`, mas os
  * dois carregam o NOME da página atravessando a tela — coreografia de site de
  * marketing, insuportável numa ferramenta que se navega o dia inteiro (e o
- * mask-wipe ainda é React 19 canary). Aqui é só opacity + translateY, no token
- * "ui" do tema.
+ * mask-wipe ainda é React 19 canary). Aqui é só opacity, no token "ui" do tema.
+ * SEM transform: qualquer `transform` no wrapper vira containing block dos
+ * `fixed` descendentes no iOS (IMPL-110) — a barra inferior e os toasts ficam
+ * fora, mas a regra vale para o que entrar aqui.
  */
 function RouteTransition({ routeKey, children }: { routeKey: string; children: ReactNode }) {
   const ui = useMotionUITransition('ui');
   const { motionMode } = useMotionUITheme();
   const still = motionMode === 'off';
-  const travel = motionMode === 'full' ? 8 : 0;
 
   return (
     <AnimatePresence mode="wait" initial={false}>
       <motion.div
         key={routeKey}
-        initial={still ? false : { opacity: 0, transform: `translateY(${travel}px)` }}
-        animate={{ opacity: 1, transform: 'translateY(0px)' }}
-        exit={still ? { opacity: 1 } : { opacity: 0, transform: `translateY(${-travel}px)` }}
+        initial={still ? false : { opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={still ? { opacity: 1 } : { opacity: 0 }}
         transition={still ? { duration: 0 } : { type: 'tween', duration: ui.duration * 0.7, ease: ui.ease }}
       >
         {children}

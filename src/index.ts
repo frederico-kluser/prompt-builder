@@ -7,6 +7,15 @@
 //   1. `setDataDir()` antes do primeiro save (senao grava em `./data`);
 //   2. `ensureCatalog()` antes da primeira chamada de LLM — com o catalogo frio,
 //      o custo sai 0 e o esforco de raciocinio vai sem encaixe na allowlist.
+//
+// O gateway de LLM e configurado a partir do ambiente (OPENROUTER_BASE_URL,
+// OPENROUTER_APP_URL, OPENROUTER_APP_TITLE, OPENROUTER_MAX_CONCURRENCY) no
+// IMPORT deste modulo — o mesmo comportamento de quando `openrouter.ts` lia o
+// processo direto. Quem quiser outra config chama `configureGateway` depois.
+
+import { configureGatewayFromEnv } from './gatewayEnv.js';
+
+configureGatewayFromEnv();
 
 export { runToCompletion, startRun } from './orchestrator.js';
 export type { StartRunOpts, StartRunResult } from './orchestrator.js';
@@ -43,8 +52,11 @@ export {
   thinkLevelsFor,
   toExportRow,
   MODELS_EXPORT_FORMAT,
+  reasoningForRole,
+  reasoningLevelForRole,
+  REASONING_ROLE_DEFAULT,
 } from './modelCaps.js';
-export type { ModelCaps, ModelExportRow, ThinkLevels } from './modelCaps.js';
+export type { ModelCaps, ModelExportRow, ThinkLevels, JudgingRole } from './modelCaps.js';
 
 export { ensureCatalog, clearCatalog, catalogPath } from './modelsCache.js';
 export {
@@ -54,10 +66,65 @@ export {
   computeCost,
   chatCompletion,
   chatCompletionStream,
+  pseudonymize,
   primeModelsCache,
   peekModelsCache,
   currentConcurrency,
+  // Gateway unico com configuracao injetada (IMPL-021).
+  OpenRouterGateway,
+  AimdLimiter,
+  createGateway,
+  getGateway,
+  configureGateway,
+  setDefaultGateway,
+  extractUsage,
+  priceUsage,
+  DEFAULT_OPENROUTER_BASE_URL,
+  // Taxonomia bloqueio/recusa/erro (IMPL-010): 403 de moderacao nao e key.
+  GatewayError,
+  gatewayErrorKind,
+  isGatewayBlocked,
+  classifyHttpError,
 } from './openrouter.js';
+export type {
+  GatewayConfig,
+  FetchLike,
+  LimiterSnapshot,
+  UsageInfo,
+  GatewayBlock,
+  GatewayErrorKind,
+} from './openrouter.js';
+
+// Dado pessoal PT-BR (IMPL-042): a cascata que o gateway aplica em toda chamada.
+export {
+  scanPii,
+  assessPii,
+  checkImportPii,
+  checkRunPii,
+  assertRunPii,
+  runPiiRefusal,
+  runPiiMessage,
+  summarizeRunPii,
+  isPiiPolicyError,
+  createPiiGuard,
+  PiiGuard,
+  PiiVault,
+  PII_COVERAGE,
+  PII_MODES,
+  isValidCpf,
+  isValidCnpj,
+  isValidCns,
+} from './engine/pii.js';
+export type {
+  PiiFinding,
+  PiiKind,
+  PiiMode,
+  PiiImportCheck,
+  PiiGuardStats,
+  PiiFieldReport,
+  PiiRunReport,
+} from './engine/pii.js';
+export { gatewayConfigFromEnv, configureGatewayFromEnv } from './gatewayEnv.js';
 export type { ChatCompletionParams, ChatCompletionResult, KeyInfo } from './openrouter.js';
 
 export { REASONING_LEVELS, fitEffort, applyReasoning, coerceLevel } from './reasoning.js';

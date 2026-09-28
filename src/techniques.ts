@@ -1,4 +1,133 @@
-import type { PromptTechnique, PublicTechnique } from './types.js';
+import { modelCaps } from './modelCaps.js';
+import type { ModelReasoningMeta, PromptTechnique, PublicTechnique, ReasoningLevel } from './types.js';
+
+// ---------------------------------------------------------------------------
+// Few-shot a partir de TRACES REAIS (IMPL-061 / R-02a:REC-3, padrao
+// BootstrapFewShot/MIPROv2): as demos vem do conjunto ROTULADO (cenários com
+// reference/expected verificados da run/biblioteca) — nunca inventadas.
+// ---------------------------------------------------------------------------
+
+/** Cenário rotulado do conjunto (run/biblioteca) — matéria-prima das demos. */
+export interface LabeledScenario {
+  /** A pergunta do cenário (trace de entrada). */
+  question: string;
+  /** Resposta/gabarito verificado (trace de saída). */
+  response?: string;
+  /** Rótulo esperado verificado (trace de rótulo). */
+  label?: string;
+}
+
+/** Demo few-shot selecionada do conjunto rotulado — pergunta/resposta/rótulo. */
+export interface FewShotDemo {
+  question: string;
+  response: string;
+  label?: string;
+}
+
+/** Abaixo de 3 demos a técnica DECAI para formato sem demos (nada de inventar). */
+export const FEWSHOT_MIN_DEMOS = 3;
+/** Teto de demos por prompt. */
+export const FEWSHOT_MAX_DEMOS = 5;
+/**
+ * Teto de caracteres das demos — cruzado com a penalidade de comprimento
+ * (R-02a:DEC-5): prompt maior piora o score do candidato, então demos mais
+ * curtas entram primeiro e o conjunto para de crescer no orçamento.
+ */
+export const FEWSHOT_MAX_CHARS = 1600;
+
+/**
+ * Instrução SEM demos (fallback): a técnica decai para "formato por instrução"
+ * e PROÍBE exemplos fabricados. É o `metaInstruction` estático da biblioteca —
+ * sozinho, ele já garante que o reescritor não fabrique exemplos.
+ */
+export const FEWSHOT_NO_DEMOS_INSTRUCTION =
+  'Reescreva o system prompt reforcando o formato e o padrao desejados por INSTRUCAO (sem exemplos): descreva o formato de saida esperado, os criterios de qualidade e os casos de borda em texto. NAO fabrique exemplos few-shot — exemplo inventado nao tem ganho medido, incha o prompt de producao e pode imitar os cenarios do benchmark. Se houver demonstracoes reais disponiveis, use-as exatamente como foram entregues. Preserve as instrucoes do base.';
+
+/**
+ * Seleciona demos do conjunto ROTULADO (padrão BootstrapFewShot/MIPROv2):
+ * só cenários com rótulo/gabarito verificado; round-robin entre rótulos
+ * (balance de classes, contra o viés de rótulo majoritário) com os mais curtos
+ * primeiro (penalidade de comprimento); corta em `max` demos e em `maxChars`.
+ * Menos de `min` (3) cenários rotulados → [] (a técnica decai; nada se inventa).
+ */
+export function selectFewShotDemos(
+  labeled: LabeledScenario[],
+  opts?: { min?: number; max?: number; maxChars?: number },
+): FewShotDemo[] {
+  const min = opts?.min ?? FEWSHOT_MIN_DEMOS;
+  const max = opts?.max ?? FEWSHOT_MAX_DEMOS;
+  const maxChars = opts?.maxChars ?? FEWSHOT_MAX_CHARS;
+
+  const demos: FewShotDemo[] = [];
+  for (const item of labeled ?? []) {
+    const question = item?.question?.trim();
+    const response = item?.response?.trim() || item?.label?.trim();
+    if (!question || !response) continue;
+    demos.push({ question, response, ...(item.label?.trim() ? { label: item.label.trim() } : {}) });
+  }
+  if (demos.length < min) return [];
+
+  // Round-robin entre rótulos (ordenados) — balance de classes determinístico;
+  // dentro de cada rótulo, as demos mais curtas primeiro (penalidade de tamanho).
+  const porRotulo = new Map<string, FewShotDemo[]>();
+  for (const demo of demos) {
+    const chave = (demo.label ?? '').toLowerCase();
+    const lista = porRotulo.get(chave) ?? [];
+    lista.push(demo);
+    porRotulo.set(chave, lista);
+  }
+  const grupos = [...porRotulo.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([, lista]) => lista.sort((a, b) => a.question.length - b.question.length));
+
+  const escolhidas: FewShotDemo[] = [];
+  let chars = 0;
+  for (let volta = 0; escolhidas.length < max; volta += 1) {
+    let avancou = false;
+    for (const grupo of grupos) {
+      if (escolhidas.length >= max) break;
+      const demo = grupo[volta];
+      if (!demo) continue;
+      avancou = true;
+      const custo = demo.question.length + demo.response.length;
+      if (chars + custo > maxChars && escolhidas.length > 0) continue;
+      escolhidas.push(demo);
+      chars += custo;
+    }
+    if (!avancou) break;
+  }
+  return escolhidas;
+}
+
+/**
+ * `metaInstruction` da técnica few-shot COM demos reais (o payload do reescritor
+ * le o bloco `<demonstracoes_reais>` — pergunta/resposta/rótulo — e a regra
+ * dura: usar EXATAMENTE estes exemplos, nenhum inventado). Sem demos (ou com
+ * menos de `FEWSHOT_MIN_DEMOS`) decai para `FEWSHOT_NO_DEMOS_INSTRUCTION`.
+ */
+export function fewshotMetaInstruction(demos?: FewShotDemo[]): string {
+  const lista = (demos ?? []).filter((d) => d?.question && d?.response);
+  if (lista.length < FEWSHOT_MIN_DEMOS) return FEWSHOT_NO_DEMOS_INSTRUCTION;
+  const bloco = lista
+    .map(
+      (d, i) =>
+        `[${i + 1}] Pergunta: ${d.question}\n    Resposta: ${d.response}${d.label ? `\n    Rotulo: ${d.label}` : ''}`,
+    )
+    .join('\n');
+  return (
+    'Reescreva o system prompt incluindo os exemplos abaixo — demonstracoes REAIS do conjunto rotulado (traces verificados) — para demonstrar o formato e o padrao desejados. ' +
+    'REGRAS DURAS: use EXATAMENTE estes exemplos (pergunta/resposta/rotulo como estao); NAO invente, NAO crie e NAO "melhore" nenhum exemplo; se precisar de mais um caso, prefira omitir a inventar; ' +
+    'equilibre a ordem dos rotulos para evitar vies de classe e atente ao efeito de recencia na ordem. Preserve as instrucoes do base.\n\n' +
+    '<demonstracoes_reais>\n' +
+    bloco +
+    '\n</demonstracoes_reais>'
+  );
+}
+
+/** Atalho do payload: seleciona as demos do conjunto rotulado e monta a instrução. */
+export function fewshotInstructionFor(labeled: LabeledScenario[]): string {
+  return fewshotMetaInstruction(selectFewShotDemos(labeled));
+}
 
 /**
  * Biblioteca curada de tecnicas de variacao de prompt. Cada item:
@@ -39,8 +168,13 @@ export const TECHNIQUE_LIBRARY: PromptTechnique[] = [
     name: 'Exemplos (few-shot)',
     good: 'Otimo para fixar formato, estilo e classificacao, reduzindo ambiguidade.',
     bad: 'Exemplos enviesam por ordem, recencia e rotulo majoritario, consomem contexto e exigem alta qualidade.',
-    metaInstruction:
-      'Reescreva o system prompt incluindo de 2 a 5 exemplos curtos e de alta qualidade que demonstrem o formato e o padrao desejados, equilibrando os rotulos para evitar vies de classe e atentando ao efeito de recencia na ordem. Garanta que os exemplos sejam corretos e cubram casos de borda relevantes. Preserve as instrucoes do base.',
+    // IMPL-061 (R-02a:REC-3): a tecnica NAO manda mais INVENTAR "de 2 a 5
+    // exemplos" — exemplo fabricado nao tem precedente medido, incha o prompt
+    // de producao e pode imitar cenarios do benchmark (contaminacao
+    // dados→prompt). Com demos do conjunto rotulado, use
+    // `fewshotMetaInstruction(selectFewShotDemos(...))`; sem elas, a tecnica
+    // DECAI para formato sem demos (a instrucao abaixo).
+    metaInstruction: FEWSHOT_NO_DEMOS_INSTRUCTION,
   },
   {
     id: 'format',
@@ -208,4 +342,97 @@ export function listTechniques(): PublicTechnique[] {
 
 export function getTechnique(id: string): PromptTechnique | undefined {
   return TECHNIQUE_LIBRARY.find((t) => t.id === id);
+}
+
+// ---------------------------------------------------------------------------
+// Filtro por CLASSE do modelo-alvo (IMPL-066, R-20:REC-2/DEC-2).
+//
+// O reescritor era cego ao modelo de produção e acabava propondo cot/fewshot/
+// selfcritique/stepback para modelos de RACIOCÍNIO, onde elas degradam (o
+// efeito oposto da mesma instrução entre SF e CR está documentado na R-20):
+// o modelo já raciocina internamente, o passo extra só infla tokens e piora o
+// score — avaliações caras gerando ruído. Agora as capacidades vêm do CATÁLOGO
+// (supported_parameters + reasoning.supported_efforts + mandatory — nunca de
+// tabela por modelo, ver `modelCaps`) e o think level de produção do run
+// decidem ANTES da reescrita se a técnica classe-dependente é proposta.
+//
+// SÓ o classe-dependente é condicionado (regra de portabilidade, R-02a Q8/D-94):
+// o texto resultante continua um drop-in portável para outros modelos — as
+// demais técnicas (formato, restrições, persona…) valem igual para qualquer
+// classe e NUNCA são filtradas daqui.
+// ---------------------------------------------------------------------------
+
+/**
+ * Técnicas cujo ganho depende da CLASSE do modelo-alvo (as quatro que a R-20
+ * mediu degradando em modelos de raciocínio): cadeia de raciocínio, exemplos,
+ * autocrítica e step-back. As demais são classe-independentes.
+ */
+export const MODEL_CLASS_DEPENDENT_TECHNIQUE_IDS = [
+  'cot',
+  'fewshot',
+  'selfcritique',
+  'stepback',
+] as const;
+
+/** Item de catálogo do modelo-alvo (mesma forma que `modelCaps` consome). */
+export interface TargetModelInfo {
+  /** `supported_parameters` parseado do catálogo. */
+  supportedParameters?: string[];
+  /** Bloco `reasoning` parseado (supported_efforts/default_effort/mandatory). */
+  reasoning?: ModelReasoningMeta;
+}
+
+/** O modelo sob teste: id, think level de produção e capacidades do catálogo. */
+export interface TechniqueTarget {
+  modelId: string;
+  /** Think level de PRODUÇÃO do modelo sob teste (RunConfig.reasoning.competitor). */
+  thinkLevel?: ReasoningLevel;
+  /** Capacidades reais, direto do catálogo (ausente = sem metadados). */
+  catalogModel?: TargetModelInfo;
+}
+
+/**
+ * O modelo-alvo está em modo de RACIOCÍNIO? True quando (a) o catálogo marca
+ * `reasoning.mandatory` (o provedor rejeita desligar — ele SEMPRE pensa) ou
+ * (b) o think level de produção está acima de `off`. Sem think level explícito,
+ * o default do provedor decide (`reasoning.defaultEffort`/`defaultEnabled`).
+ */
+export function targetReasoningActive(target: TechniqueTarget): boolean {
+  const caps = modelCaps(target.catalogModel);
+  if (caps.mandatory) return true;
+  if (target.thinkLevel !== undefined) return target.thinkLevel !== 'off';
+  const reasoning = target.catalogModel?.reasoning;
+  return caps.reasoning && Boolean(caps.defaultEffort || reasoning?.defaultEnabled === true);
+}
+
+/**
+ * Filtra as técnicas propostas ANTES da reescrita (custo zero: nada de chamada
+ * paga para variante redundante). Em modelo de raciocínio, as técnicas
+ * classe-dependentes ({@link MODEL_CLASS_DEPENDENT_TECHNIQUE_IDS}) não são
+ * propostas — cot/fewshot à frente, por serem as com degradação medida; o
+ * motivo de cada descarte é PT-BR e vai para o log/stderr do motor.
+ */
+export function filterTechniquesForTarget(
+  techniqueIds: readonly string[] | undefined,
+  target: TechniqueTarget,
+): { kept: string[]; dropped: { id: string; reason: string }[] } {
+  const ids = techniqueIds ?? [];
+  if (!targetReasoningActive(target)) return { kept: [...ids], dropped: [] };
+  const dependent = new Set<string>(MODEL_CLASS_DEPENDENT_TECHNIQUE_IDS);
+  const kept: string[] = [];
+  const dropped: { id: string; reason: string }[] = [];
+  for (const id of ids) {
+    if (dependent.has(id)) {
+      dropped.push({
+        id,
+        reason:
+          `técnica classe-dependente (${id}) não é proposta para modelo de raciocínio ` +
+          `(${target.modelId}${target.thinkLevel ? `, think level ${target.thinkLevel}` : ', raciocínio obrigatório do catálogo'}): ` +
+          'o modelo já faz o passo internamente e a instrução extra degrada o resultado.',
+      });
+      continue;
+    }
+    kept.push(id);
+  }
+  return { kept, dropped };
 }

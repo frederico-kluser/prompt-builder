@@ -52,7 +52,7 @@ O que vale medir, porque a olho passa batido:
 Type-check verde + comportamento observado bate com o esperado. Relate honestamente o que foi (e
 o que não foi) verificado.
 
-## <evolution>
+## registo de aprendizado (memória CoALA local)
 Ao concluir:
 1. Persista só se a verificação realmente passou.
 2. Registre em `LEARNINGS.md` qualquer passo de verificação novo/útil ou armadilha de ambiente

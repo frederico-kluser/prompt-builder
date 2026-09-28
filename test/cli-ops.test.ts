@@ -46,6 +46,9 @@ const config: VariationConfig = {
   stages: 2,
   datagenModelId: 'openai/gpt-5-mini',
   judgeModelIds: ['anthropic/claude-sonnet-5', 'google/gemini-2.5-pro'],
+  // IMPL-048: papéis separados — a referência (gabarito) não pode ser juiz nem
+  // o modelo sob teste; em training/variation o campo é OBRIGATÓRIO.
+  referenceModelId: 'google/gemini-2.5-flash',
   contestantModelId: 'openai/gpt-5-mini',
   basePrompt: 'Você é um assistente de suporte. Responda com base na política do produto.',
   promptOptimization: true,

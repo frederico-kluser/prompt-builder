@@ -1,26 +1,74 @@
 import { randomUUID } from 'node:crypto';
 import { cpus } from 'node:os';
 import { generateStages } from './datagen.js';
-import { runCompetitor } from './competitor.js';
-import { judgeStage } from './judge.js';
+import { countCompetitorOutcomes, runCompetitor } from './competitor.js';
+import { judgeStage, JUDGE_LISTWISE_CONTRACT_TEXT } from './judge.js';
 import { generateReferences } from './gabarito.js';
 import { judgeStageReference } from './refJudge.js';
-import { blindRankMap, pickFinalists, runStageDuels, seedFromId, VERDICT_SCORE } from './duels.js';
+import {
+  blindRankMap,
+  DUEL_AGENT_TRUST,
+  DUEL_HEAD,
+  pickFinalists,
+  runStageDuels,
+  seedFromId,
+  VERDICT_SCORE,
+} from './duels.js';
 import { oracleScoresFromVerdicts } from './engine/duelCore.js';
+import { assessVerdictIntegrity } from './engine/verdictIntegrity.js';
+import { VERDICT_AGGREGATION } from './engine/verdictAggregate.js';
 import { fairnessWarningsForModels } from './llmVariants.js';
 import { JUDGE_CONTRACT_TEXT } from './refJudge.js';
-import { pinJudgeContract, verbosityReport } from './engine/judgeCalibration.js';
+import {
+  noteJudgeContract,
+  pinJudgeContract,
+  verbosityReport,
+  verbositySamples,
+  type VerbositySampleRow,
+} from './engine/judgeCalibration.js';
+import type { JudgeContractComponents } from './types.js';
+import { modelRolesForRun, snapshotModelLifecycle } from './engine/modelLifecycle.js';
 import { mergeScenarios } from './scenarioPack.js';
 import { sanitizeLlmVariants, variantsToContestants } from './llmVariants.js';
 import { judgeScoreFromVerdicts } from './rank.js';
+import { runCompleteness } from './stats.js';
 import { emitEvent } from './events.js';
 import { saveRun, getDataDir } from './storage.js';
 import { contestantsFromConfig } from './normalize.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
+import { reasoningLevelForRole } from './modelCaps.js';
 import { listModels } from './openrouter.js';
+import {
+  cutDuels,
+  cutVerdicts,
+  describeJudgeCut,
+  describeTruncatedReference,
+  describeTruncatedStage,
+  truncatedResponses,
+  truncationAlert,
+  truncationByRoleEffort,
+  truncationCellAlert,
+  truncationRecordFields,
+} from './engine/truncation.js';
+import { enforceRunCompliance } from './lgpd.js';
 import { runAgentStage, aggregateAgentVerdict } from './agent/runAgentStage.js';
+import { AGENT_JUDGE_SYSTEM_PROMPT } from './agent/agentJudge.js';
+import {
+  AGENT_VERDICT_TREE_VERSION,
+  agentOracleDuelScores,
+  agentRateMetrics,
+  agentStageProvenance,
+  needsTextReference,
+  oracleCellDefect,
+  stageHasVerify,
+  stageObservations,
+  tallyReps,
+  type RepCounts,
+} from './agent/verdictTree.js';
+import type { AgentRepResult } from './agent/runAgentStage.js';
 import type {
+  CallFinishSignals,
   Contestant,
   ReferenceJudgeResult,
   RunConfig,
@@ -30,6 +78,9 @@ import type {
   StageRecord,
   StageSpec,
   Verdict,
+  VerdictError,
+  VerdictSource,
+  ReasoningLevel,
 } from './types.js';
 
 function nowIso(): string {
@@ -101,8 +152,11 @@ export interface StartRunOpts {
   /**
    * Resolve os contestants no inicio da run (ex.: gerar variantes via optimizer),
    * emitindo variants.generating/generated. Usado pelo modo variacao.
+   * Recebe o `ctx` DA RUN (sinal + ledger): sem ele o reescritor chamava o
+   * gateway sem `sink` e o custo das variantes escapava do ledger e das
+   * portas de orcamento (IMPL-021 — soma(papeis) == fatura).
    */
-  prepare?: () => Promise<Contestant[]>;
+  prepare?: (ctx: RunCtx) => Promise<Contestant[]>;
   sessionId?: string;
   iteration?: number;
   parentRunId?: string;
@@ -168,6 +222,14 @@ function buildRecord(config: RunConfig, opts: StartRunOpts): RunRecord {
     scoreboard: Object.fromEntries(contestants.map((c) => [c.id, 0])),
     costByContestant: Object.fromEntries(contestants.map((c) => [c.id, 0])),
     totalCostUsd: 0,
+    // IMPL-010: sempre presente numa run nova — "0 bloqueios" e informacao.
+    competitorOutcomeCounts: { blocked: 0, refused: 0, error: 0 },
+    // IMPL-014: idem — "0% truncado" tambem e informacao.
+    truncationRate: 0,
+    truncationCounts: { calls: 0, truncated: 0 },
+    // IMPL-007: vereditos de painel por MAIORIA SIMPLES (empate tecnico) — marca a
+    // escala do judge-score; record sem isto = media ordinal antiga (inflada).
+    verdictAggregation: VERDICT_AGGREGATION,
     startedAt: nowIso(),
     sessionId: opts.sessionId,
     iteration: opts.iteration,
@@ -187,12 +249,23 @@ const SAVE_INTERVAL_MS = 800;
 interface Saver {
   schedule(): void;
   flush(): Promise<void>;
+  /**
+   * Liga o ledger da run: `flush` copia o custo para o record ANTES de gravar.
+   * Sem isto uma run cortada por cancelamento/orçamento no meio de uma fase
+   * era gravada com o gasto do ÚLTIMO marco (ou zero, antes das respostas) —
+   * o parcial mentia sobre o dinheiro já cobrado (IMPL-025).
+   */
+  bindLedger(sync: () => void): void;
 }
 
 function createSaver(record: RunRecord): Saver {
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let lastSave = 0;
+  let syncLedger: (() => void) | undefined;
   return {
+    bindLedger(sync: () => void): void {
+      syncLedger = sync;
+    },
     schedule(): void {
       if (saveTimer) return;
       const delay = Math.max(0, SAVE_INTERVAL_MS - (Date.now() - lastSave));
@@ -208,6 +281,7 @@ function createSaver(record: RunRecord): Saver {
         clearTimeout(saveTimer);
         saveTimer = null;
       }
+      syncLedger?.();
       lastSave = Date.now();
       await saveRun(record).catch(() => undefined);
     },
@@ -302,19 +376,39 @@ async function runLoop(
     new BudgetLedger({
       budgetUsd: record.config.budgetUsd,
       signal: opts.ctx?.signal ?? opts.signal,
-      estimateCall: makeCallEstimator(catalogo),
+      estimateCall: makeCallEstimator(catalogo, { maxPricePerMTok: record.config.maxPricePerMTok }),
     });
   const ctx: RunCtx = { signal: opts.ctx?.signal ?? opts.signal ?? ledger.signal, sink: ledger };
   const maxPricePerMTok = record.config.maxPricePerMTok;
   record.budgetUsd = ledger.remainingUsd() !== undefined ? ledger.snapshot().budgetUsd : undefined;
 
-  // Estimativa por papel — base das PORTAS SUAVES de orcamento.
-  const est = estimateRunCost(
-    estimateInputFromConfig(record.config, {
-      contestantIds: record.contestants.map((c) => c.id),
-    }),
-    catalogo,
-  );
+  // Estimativa por papel — base das PORTAS SUAVES de orcamento. Preco
+  // desconhecido (roteador, "-1") entra pelo PIOR CASO: projetar de menos
+  // deixaria a fase comecar e a porta dura corta-la no meio (IMPL-018).
+  // ⚠️ Em variation (`opts.prepare`) os contestants ainda NAO existem aqui:
+  // `contestantIds: []` estimaria ZERO competidores e a porta atomica G2 nunca
+  // dispararia (a run pagava as respostas e parava sem nota, passando do teto).
+  // Lista vazia => o estimador conta tecnicas+base; a estimativa e refeita com
+  // os contestants reais depois do `prepare` (espelho do web).
+  // Degrau por contestant = o MESMO que o competidor recebe (IMPL-016): o teto
+  // do competidor inclui a folga de raciocinio desse degrau.
+  const estimar = (contestants: ReadonlyArray<{ id: string; reasoningLevel?: ReasoningLevel }>) =>
+    estimateRunCost(
+      estimateInputFromConfig(
+        record.config,
+        contestants.length > 0
+          ? {
+              contestantIds: contestants.map((c) => c.id),
+              contestantReasoningLevels: contestants.map(
+                (c) => c.reasoningLevel ?? record.config.reasoning?.competitor,
+              ),
+            }
+          : {},
+      ),
+      catalogo,
+      { unknownPrice: 'worst-case' },
+    );
+  let est = estimar(record.contestants);
 
   /**
    * Porta suave. A unidade NAO e "uma fase", e um GRUPO que produz resultado
@@ -344,14 +438,45 @@ async function runLoop(
     return false;
   };
 
-  /** Copia o ledger para o record (chamado nos marcos e no fim). */
+  /**
+   * Copia o ledger para o record (chamado nos marcos e no fim). Inclui os
+   * sinais de fim por papel e a taxa de truncamento da run (IMPL-014): o
+   * gateway os entrega ao ledger no mesmo ponto unico do custo, entao cobrem
+   * 100% das chamadas que completaram — juiz e duelo inclusive.
+   */
   const syncLedger = (): void => {
     const snap = ledger.snapshot();
     record.totalCostUsd = snap.spentUsd;
     record.costByRole = snap.byRole;
     record.costAccuracy = snap.accuracy;
+    record.costLedger = ledger.summary(); // IMPL-017: spent/committed/pending
     if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
+    Object.assign(record, truncationRecordFields(snap.finishByRole));
   };
+  saver.bindLedger(syncLedger);
+
+  /**
+   * IMPL-019 (R-07b:REC-8) — ciclo de vida de TODO modelo da run, do catálogo
+   * já carregado (zero rede extra): canonicalSlug/expirationDate/aliasTarget por
+   * papel + alertas 30/14/7 dias / expirado / ausente. NUNCA migra sozinho: só
+   * grava e avisa — trocar o modelo em silêncio quebraria a comparação pareada.
+   * Roda no início (cobre a run que para cedo) e de novo quando o `prepare`
+   * troca os contestants; `avisados` evita repetir o mesmo aviso no log.
+   */
+  const avisados = new Set<string>();
+  const captureLifecycle = (): void => {
+    record.modelLifecycle = snapshotModelLifecycle(
+      modelRolesForRun(record.config, record.contestants),
+      catalogo,
+      new Date(),
+    );
+    for (const a of record.modelLifecycle.alerts) {
+      if (avisados.has(a.modelId)) continue;
+      avisados.add(a.modelId);
+      log(runId, `ciclo de vida: ${a.message}`);
+    }
+  };
+  captureLifecycle();
 
   await saveRun(record);
   emitEvent({ type: 'run.started', runId, record });
@@ -373,6 +498,21 @@ async function runLoop(
     if (sane.error) throw new Error(sane.error);
   }
 
+  // LGPD (IMPL-041): área SENSÍVEL é fail-closed — todo papel que vê o dado
+  // (competidor, juiz/duelo, gerador, gabarito, reescritor) precisa de endpoint
+  // ZDR na allowlist fresca; senão a run é recusada AQUI, antes de qualquer LLM.
+  // IMPL-042: + dado pessoal de aparência real recusa a run ("só sintético",
+  // modo agente, ou "redigir" sem `allowPii`). Runs de uma sessão só relatam:
+  // o config da SESSÃO já passou. O relatório (campo + tipos, nunca o valor)
+  // fica no record — pseudonimizar no envio nunca é correção silenciosa.
+  const preflight = await enforceRunCompliance(record.config, undefined, {
+    nested: Boolean(record.sessionId),
+  });
+  if (preflight.piiReport) record.piiReport = preflight.piiReport;
+  // IMPL-040: área sensível ⇒ o gateway força o roteamento ZDR em TODA chamada
+  // desta run (a política viaja no ledger, que todo papel recebe via ctx.sink).
+  ledger.setSensitiveRouting(preflight.sensitiveRouting);
+
   // Resolve contestants on-demand (variacao: gera as variantes via optimizer).
   if (opts.prepare) {
     if (!gate('variants', est.byRole.rewriter)) {
@@ -381,7 +521,7 @@ async function runLoop(
       return;
     }
     emitEvent({ type: 'variants.generating', runId });
-    const contestants = await opts.prepare();
+    const contestants = await opts.prepare(ctx);
     if (contestants.length < 2) {
       throw new Error(
         'Variacao precisa de ao menos 2 contestants validos (verifique as tecnicas/variantes ou o modelo optimizer).',
@@ -390,6 +530,9 @@ async function runLoop(
     record.contestants = contestants;
     record.scoreboard = Object.fromEntries(contestants.map((c) => [c.id, 0]));
     record.costByContestant = Object.fromEntries(contestants.map((c) => [c.id, 0]));
+    captureLifecycle();
+    // As portas seguintes (G1, G2 atomica, finais) medem com os contestants REAIS.
+    est = estimar(contestants);
     await saveRun(record);
     emitEvent({ type: 'variants.generated', runId, contestants });
   }
@@ -485,12 +628,30 @@ async function runLoop(
   // cenario roda uma unica vez. Etapas que ja trazem reference (seed/pinadas)
   // passam intactas; falha num gabarito so deixa a etapa sem reference
   // (degrada na fase 3). ===
-  if (referenceJudging) {
-    specs = await generateReferences({
-      stages: specs,
+  // Sinais de fim de cada gabarito (IMPL-014), por posicao em `specs` ANTES
+  // da expansao de repeats — vao para o StageRecord na materializacao.
+  const gabaritoCalls = new Map<number, CallFinishSignals>();
+  // IMPL-034 (R-14a DEC-7): etapa com `verify[]` numa run só de agentes NÃO
+  // gera gabarito — o veredito vem do oráculo (+ juiz de dossiê, que não lê a
+  // referência) e as finais são decididas pelo oráculo. Antes o gabarito saía
+  // igual e era 64% do custo de uma run trivial, sem leitor (0 tokens agora).
+  const hasChatContestant = record.contestants.some((c) => c.runner !== 'agent');
+  const precisamGabarito = specs
+    .map((spec, idx) => ({ spec, idx }))
+    .filter(({ spec }) => needsTextReference(spec, { hasChatContestant }));
+  if (referenceJudging && precisamGabarito.length > 0) {
+    const preenchidas = await generateReferences({
+      stages: precisamGabarito.map((p) => p.spec),
+      stageNumbers: precisamGabarito.map((p) => p.idx + 1),
       apiKey,
+      // IMPL-048: default EXPLÍCITO e documentado — só compare chega aqui sem
+      // `referenceModelId` (train/vary reprova na validação sem ele). Sem
+      // referência própria o gabarito sai do 1º juiz: o mesmo modelo escreve a
+      // régua e julga contra ela (erros correlacionados) — o risco NUNCA fica
+      // escondido, aparece em `fairnessWarnings`.
       modelId: record.config.referenceModelId ?? record.config.judgeModelIds[0],
-      reasoningLevel: record.config.reasoning?.judge,
+      // IMPL-079: gabarito tem esforço PRÓPRIO (default high) — não mais o do juiz.
+      reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'gab'),
       timeoutMs: datagenTimeout,
       ctx,
       maxPricePerMTok,
@@ -498,6 +659,13 @@ async function runLoop(
       // concluidos), nao de uma etapa especifica.
       onProgress: (done, total) =>
         emitEvent({ type: 'stage.gabarito', runId, stageIndex: -1, done, total }),
+      // `k` indexa o SUBCONJUNTO que precisou de gabarito (IMPL-034) — volta
+      // para a posicao em `specs`.
+      onCall: (k, call) => gabaritoCalls.set(precisamGabarito[k].idx, call),
+    });
+    specs = specs.slice();
+    precisamGabarito.forEach((p, k) => {
+      specs[p.idx] = preenchidas[k];
     });
   }
 
@@ -510,7 +678,23 @@ async function runLoop(
   // os slots do rabo viram stage.failed e a run segue com o que houver.
   specs.forEach((spec, i) => {
     record.stages[i].spec = spec;
-    emitEvent({ type: 'stage.generated', runId, stageIndex: i, spec });
+    // O gabarito e UMA chamada por cenario: com repeats, so o 1o clone guarda
+    // os sinais (senao a visao por etapa contaria a mesma chamada N vezes).
+    const call = i % repeats === 0 ? gabaritoCalls.get(i / repeats) : undefined;
+    if (call) record.stages[i].gabaritoCall = call;
+    // Gabarito que CONTINUOU truncado apos o retry x2 foi descartado: a etapa
+    // segue sem regua (listwise). Aviso VISIVEL — antes so um console.warn. Um aviso
+    // por gabarito: com repeats, no 1o clone (onde a chamada fica persistida).
+    const warning = call?.truncated ? describeTruncatedReference(i, call) : undefined;
+    if (warning) log(runId, warning);
+    emitEvent({
+      type: 'stage.generated',
+      runId,
+      stageIndex: i,
+      spec,
+      ...(call ? { gabaritoCall: call } : {}),
+      ...(warning ? { warning } : {}),
+    });
   });
   for (let i = specs.length; i < record.stages.length; i++) {
     const msg = `Datagen entregou menos cenarios que o alvo apos dedup/falha de lote; etapa descartada.`;
@@ -518,6 +702,7 @@ async function runLoop(
     record.stages[i].finishedAt = nowIso();
     emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
   }
+  syncLedger();
   scheduleSave();
 
   // Contestants ja sao finais aqui (opts.prepare rodou). Controle = ancora do
@@ -535,10 +720,26 @@ async function runLoop(
   // Em modo agente, G2 ganha `est.byRole.agent` no mesmo grupo (o plano §20.1/§20.6:
   // execuções de agente + julgamento são ATÔMICOS, de propósito).
   const hasAgent = record.contestants.some((c) => c.runner === 'agent');
+  // Versão da árvore de veredito de agente que produz as notas desta run —
+  // estampada ANTES de qualquer veredito, para valer também em run abortada.
+  // Ausente numa run com agente = legado (v1: corte por limite fora do
+  // denominador); notas de versões diferentes não se comparam (IMPL-032).
+  if (hasAgent) record.agentVerdictTreeVersion = AGENT_VERDICT_TREE_VERSION;
+  // IMPL-033: contagem de `judgeError` (juiz de agente que falhou mesmo após as
+  // 2 retentativas) e de reps sem veredito por motivo não-controle, POR RUN —
+  // presentes desde já (0) para valerem também em run abortada.
+  if (hasAgent) {
+    record.agentJudgeErrorCount = 0;
+    record.agentJudgeErrorsByContestant = {};
+    record.agentUnscoredRepsByContestant = {};
+  }
   const custoG2 = est.byRole.competitor + est.byRole.judge + (hasAgent ? est.byRole.agent : 0);
   if (custoG2 > 0 && !gate('competitors', custoG2)) {
     for (const st of record.stages) {
-      if (st.spec && !st.error) st.incomplete = true;
+      if (st.spec && !st.error) {
+        st.incomplete = true;
+        st.incompleteReason = 'budget';
+      }
     }
     syncLedger();
     return;
@@ -556,6 +757,9 @@ async function runLoop(
   // Governador de processos de agente COMPARTILHADO entre todas as etapas: se
   // cada etapa tivesse o próprio, N etapas em paralelo = N×maxParallel processos.
   const agentSemaphore = hasAgent ? new AgentSemaphore(agentMaxParallel) : undefined;
+  // IMPL-034: nota de ORÁCULO por contestant das etapas decididas pelo oráculo
+  // (verify[] + só agentes) — as finais dessas etapas saem daqui, sem LLM.
+  const oracleDuelScoresByStage = new Map<number, Record<string, number>>();
 
   const etapasSettled = await Promise.allSettled(
     record.stages.map(async (stageRecord) => {
@@ -565,7 +769,9 @@ async function runLoop(
 
       try {
         // Verditios dos contestants de runner 'agent' (agregados por rep) e os
-        // que ficaram 'incomplete' (§18.3 — saem do ranking/judgeScore).
+        // que ficaram sem veredito — cancelamento, ou (IMPL-033) toda rep sem
+        // observação: sem oráculo e juiz falho/não chamado. Corte por limite e
+        // check que não terminou contam como falha e ficam no ranking/judge-score.
         const agentVerdicts: Record<string, Verdict> = {};
         const agentExplanations: Record<string, string> = {};
         const agentIncompleteIds = new Set<string>();
@@ -575,6 +781,24 @@ async function runLoop(
         // judge-score e a significância, não só da média ordinal da etapa.
         const agentVerdictsByRep: Record<string, Verdict[]> = {};
         const agentRepIncomplete: Record<string, number> = {};
+        // Reps decididas pelo caminho 'limit-cut' (já contadas como 'nao'): só
+        // alimentam o diagnóstico "sucesso até o limite" (IMPL-032).
+        const agentLimitCuts: Record<string, number> = {};
+        // IMPL-033: reps com juiz falho (flag judgeError) e reps sem veredito por
+        // motivo NÃO-controle (sem oráculo: juiz falhou ou não foi chamado).
+        const agentJudgeErrors: Record<string, number> = {};
+        const agentUnscored: Record<string, number> = {};
+        // Procedência do veredito agregado de cada agente, nos nomes FIXOS do
+        // CONVENTIONS §2 (os consumidores do IMPL-004 leem esses dois mapas).
+        // Sai das reps (`agentStageProvenance`): o motivo da ausência é o real
+        // (juiz falhou / sem régua), não um 'competitor_error' genérico — no
+        // merge com o IMPL-004, este mapa prevalece para os agentes.
+        const agentVerdictSources: Record<string, VerdictSource> = {};
+        const agentVerdictErrors: Record<string, VerdictError> = {};
+        // Reps e contagens de cada agente — a regra da CÉLULA (defeito do
+        // ambiente) só pode ser aplicada depois que TODOS terminaram.
+        const agentRepsById: Record<string, AgentRepResult[]> = {};
+        const agentTallies: Record<string, RepCounts> = {};
         const agentContestants = record.contestants.filter((c) => c.runner === 'agent');
         const chatContestants = record.contestants.filter((c) => c.runner !== 'agent');
 
@@ -604,30 +828,43 @@ async function runLoop(
                 });
               const agentRes = agentSemaphore ? await agentSemaphore.run(run) : await run();
               response = agentRes.response;
-              // Veredito agregado da etapa = média ordinal dos vereditos das reps.
-              // incomplete (tudo null, ou tudo erro) => contestant sai do ranking
-              // e do judgeScore SEM pontos e SEM 'nao' (§18.3/§15.2).
-              const valid = agentRes.repResults
-                .map((r) => r.verdict)
-                .filter((v): v is Verdict => v !== null);
+              // Veredito agregado da etapa = MAIORIA SIMPLES das reps (IMPL-007).
+              // Sem veredito algum (cancelamento — que na prática já subiu como
+              // RunCancelled — ou rep sem veredito legítimo, IMPL-033) => fora do
+              // ranking e do judge-score SEM pontos e SEM 'nao' (IMPL-004). Corte
+              // por limite e erro de execução TÊM veredito ('nao') e ficam no
+              // denominador (IMPL-032).
+              const tally = tallyReps(agentRes.repResults);
+              const valid = tally.verdicts;
+              agentRepsById[contestant.id] = agentRes.repResults;
+              agentTallies[contestant.id] = tally;
+              if (tally.judgeErrors > 0) agentJudgeErrors[contestant.id] = tally.judgeErrors;
+              if (tally.unscored > 0) agentUnscored[contestant.id] = tally.unscored;
+              const proc = agentStageProvenance(agentRes.repResults);
+              if (proc.source) agentVerdictSources[contestant.id] = proc.source;
+              if (proc.error) agentVerdictErrors[contestant.id] = proc.error;
               if (valid.length === 0) {
                 agentIncompleteIds.add(contestant.id);
               } else {
-                agentVerdicts[contestant.id] = aggregateAgentVerdict(valid);
+                const agg = aggregateAgentVerdict(valid);
+                agentVerdicts[contestant.id] = agg;
+                // Explicação de uma rep que votou O veredito agregado — nunca a
+                // da rep de voto mais alto num empate (IMPL-007).
                 agentExplanations[contestant.id] =
-                  agentRes.repResults.find((r) => r.verdict !== null)?.explanation ??
+                  agentRes.repResults.find((r) => r.verdict === agg)?.explanation ??
                   '(sem explicação do juiz)';
               }
+              if (tally.limitCuts > 0) agentLimitCuts[contestant.id] = tally.limitCuts;
               // Expõe POR-REPETIÇÃO quando reps > 1 (§18.4): o vetor plano vira
               // observações independentes no denominador do judge-score e no
               // pareamento (cenário × repetição) do pairedSignificance. Reps
-              // `incomplete` (veredito null) NÃO entram no vetor — são contadas
-              // em repIncomplete.
+              // sem veredito NÃO entram no vetor — canceladas contam em
+              // repIncomplete, juiz-sem-oráculo em unscoredRepsByContestant;
+              // reps cortadas por limite ENTRAM como 'nao'.
               const reps = record.config.agent?.repetitions ?? 1;
               if (reps > 1) {
                 agentVerdictsByRep[contestant.id] = valid;
-                const incompletas = agentRes.repResults.filter((r) => r.verdict === null).length;
-                if (incompletas > 0) agentRepIncomplete[contestant.id] = incompletas;
+                if (tally.cancelled > 0) agentRepIncomplete[contestant.id] = tally.cancelled;
               }
             } else {
               response = await runCompetitor({
@@ -649,6 +886,9 @@ async function runLoop(
             }
 
             stageRecord.responses.push(response);
+            // Bloqueio (defesa do gateway) ≠ recusa do modelo ≠ erro de infra —
+            // tres contagens separadas no record (IMPL-010 / R-21:REC-6).
+            record.competitorOutcomeCounts = countCompetitorOutcomes(record.stages);
             // `costByContestant` continua sendo a FATIA dos competidores; o
             // total verdadeiro vem do ledger (juiz/duelo/datagen nao sao
             // atribuiveis a um contestant e nao devem ser espalhados neles).
@@ -665,13 +905,92 @@ async function runLoop(
         for (const r of respSettled) {
           if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
         }
+        // IMPL-004: agente 'incomplete' (§18.3) não tem veredito — o motivo fica
+        // registrado (conta em failureCountByRole.agent), nunca um 'nao'.
+        const agentErrors: Record<string, VerdictError> = {};
+        for (const id of agentIncompleteIds) {
+          agentErrors[id] = {
+            kind: 'competitor_error',
+            message: 'Execução de agente incompleta (nenhuma repetição com veredito).',
+          };
+        }
+        // O motivo da árvore de veredito (`agentStageProvenance`) prevalece.
+        const agentErrorsAll: Record<string, VerdictError> = { ...agentErrors, ...agentVerdictErrors };
+
+        // IMPL-033 (revisão) — DEFEITO DO AMBIENTE invalida a CÉLULA para TODOS
+        // (R-14a DEC-2). Check que nem começou (comando ausente/sem permissão)
+        // já entra no score de cada rep como FALHO; aqui se decide se isso era
+        // o agente (o check rodou em alguma outra execução da etapa: o ambiente
+        // serve) ou a tarefa (não rodou em NENHUMA: o ambiente não serve).
+        // No 2º caso a etapa sai do placar para todos — agentes E chat —, com
+        // `error` explícito; tirar só de quem falhou recriaria o viés de
+        // sobrevivência (quem quebra o verificador escaparia do denominador).
+        const defeito =
+          agentContestants.length > 0 ? oracleCellDefect(Object.values(agentRepsById).flat()) : null;
+        if (defeito) {
+          const msg =
+            `etapa inválida para TODOS os contestants: o verificador (${defeito.labels.join(', ')}) ` +
+            `nem começou em nenhuma das ${defeito.executions} execução(ões) — comando ausente ou sem ` +
+            `permissão no ambiente da tarefa (defeito da tarefa, não desempenho; R-14a DEC-2)`;
+          stageRecord.error = msg;
+          stageRecord.finishedAt = nowIso();
+          scheduleSave();
+          emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
+          log(runId, `stage ${i + 1} ${msg}`);
+          return;
+        }
+        // IMPL-014 (R-07b:DEC-2): resposta que CONTINUOU truncada depois do
+        // retry x2 torna a etapa `incomplete` — fora do placar e das medias.
+        // Nao julga: comparar uma resposta cortada com respostas inteiras mede
+        // o nosso teto, nao o prompt (e o juiz so pagaria por um veredito que
+        // seria descartado). Sem veredito, todo consumidor (judge-score,
+        // medalhas, pareamento, licoes, finais) ja pula a etapa.
+        const truncadas = truncatedResponses(stageRecord.responses);
+        if (truncadas.length > 0) {
+          stageRecord.incomplete = true;
+          stageRecord.incompleteReason = 'truncation';
+          stageRecord.finishedAt = nowIso();
+          const detail = describeTruncatedStage(i, truncadas, labelOf);
+          log(runId, detail);
+          scheduleSave();
+          emitEvent({
+            type: 'stage.incomplete',
+            runId,
+            stageIndex: i,
+            reason: 'truncation',
+            detail,
+            contestantIds: truncadas.map((r) => r.contestantId),
+          });
+          return;
+        }
+
+        // Contagens POR RUN só das etapas que valem (a inválida acima não soma).
+        for (const [id, t] of Object.entries(agentTallies)) {
+          if (t.judgeErrors > 0) {
+            record.agentJudgeErrorCount = (record.agentJudgeErrorCount ?? 0) + t.judgeErrors;
+            const porContestant = (record.agentJudgeErrorsByContestant ??= {});
+            porContestant[id] = (porContestant[id] ?? 0) + t.judgeErrors;
+          }
+          if (t.unscored > 0) {
+            const porContestant = (record.agentUnscoredRepsByContestant ??= {});
+            porContestant[id] = (porContestant[id] ?? 0) + t.unscored;
+          }
+        }
+
+        // IMPL-034: etapa com verify[] numa run só de agentes é DECIDIDA PELO
+        // ORÁCULO — sem gabarito textual (fase 1.5 pulada): o veredito vem da
+        // árvore de cada execução e as finais, das notas do oráculo.
+        const decididaPeloOraculo =
+          agentContestants.length > 0 && chatContestants.length === 0 && stageHasVerify(stageSpec);
+        if (decididaPeloOraculo) oracleDuelScoresByStage.set(i, agentOracleDuelScores(agentRepsById));
 
         // === FASE 3: julgamento POINTWISE. Com gabarito: cada resposta contra
         // a referencia (os duelos sairam daqui — viraram a fase 4 de finais).
+        // Etapa decidida pelo oráculo: os vereditos da árvore de agente.
         // Sem gabarito: juiz LISTWISE classico (compare antigo / fallback). ===
         emitEvent({ type: 'stage.judging', runId, stageIndex: i });
         try {
-          if (stageSpec.reference?.trim()) {
+          if (stageSpec.reference?.trim() || decididaPeloOraculo) {
             // Pointwise: cada resposta classificada isoladamente contra o
             // gabarito (resolve/parcial/nao) — base do judge-score.
             //
@@ -690,7 +1009,7 @@ async function runLoop(
                 contestants: record.contestants,
                 judgeModelIds: record.config.judgeModelIds,
                 apiKey,
-                reasoningLevel: record.config.reasoning?.judge,
+                reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
                 timeoutMs: record.config.timeoutMs,
                 ctx,
                 maxPricePerMTok,
@@ -700,6 +1019,10 @@ async function runLoop(
               refJudge = {
                 verdictByContestant: { ...agentVerdicts },
                 explanationByContestant: { ...agentExplanations },
+                verdictSourceByContestant: { ...agentVerdictSources },
+                // IMPL-004: agente sem veredito fica SEM chave, com o motivo (o da
+                // árvore de veredito prevalece sobre o genérico de 'incomplete').
+                ...(Object.keys(agentErrorsAll).length > 0 && { verdictErrorByContestant: { ...agentErrorsAll } }),
                 judgeModelId: record.config.judgeModelIds.join('+'),
                 // §18.4: quando a etapa tem reps>1, guarda o vetor plano por rep
                 // para o orquestrador montar o judge-score/vetor plano e a
@@ -709,6 +1032,15 @@ async function runLoop(
                 }),
                 ...(Object.keys(agentRepIncomplete).length > 0 && {
                   repIncomplete: agentRepIncomplete,
+                }),
+                ...(Object.keys(agentLimitCuts).length > 0 && {
+                  limitCutByContestant: agentLimitCuts,
+                }),
+                ...(Object.keys(agentJudgeErrors).length > 0 && {
+                  judgeErrorByContestant: agentJudgeErrors,
+                }),
+                ...(Object.keys(agentUnscored).length > 0 && {
+                  unscoredRepsByContestant: agentUnscored,
                 }),
               };
             } else {
@@ -723,15 +1055,18 @@ async function runLoop(
                 contestants: chatContestants,
                 judgeModelIds: record.config.judgeModelIds,
                 apiKey,
-                reasoningLevel: record.config.reasoning?.judge,
+                reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
                 timeoutMs: record.config.timeoutMs,
                 ctx,
                 maxPricePerMTok,
               });
+              const erros = { ...(base.verdictErrorByContestant ?? {}), ...agentErrorsAll };
               refJudge = {
                 ...base,
                 verdictByContestant: { ...base.verdictByContestant, ...agentVerdicts },
                 explanationByContestant: { ...base.explanationByContestant, ...agentExplanations },
+                verdictSourceByContestant: { ...(base.verdictSourceByContestant ?? {}), ...agentVerdictSources },
+                ...(Object.keys(erros).length > 0 && { verdictErrorByContestant: erros }),
                 // §18.4: reps>1 — anexa o vetor plano por rep e o count de
                 // incomplete dos agentes (chat não tem reps, fica de fora).
                 ...(Object.keys(agentVerdictsByRep).length > 0 && {
@@ -740,30 +1075,41 @@ async function runLoop(
                 ...(Object.keys(agentRepIncomplete).length > 0 && {
                   repIncomplete: agentRepIncomplete,
                 }),
+                ...(Object.keys(agentLimitCuts).length > 0 && {
+                  limitCutByContestant: agentLimitCuts,
+                }),
+                ...(Object.keys(agentJudgeErrors).length > 0 && {
+                  judgeErrorByContestant: agentJudgeErrors,
+                }),
+                ...(Object.keys(agentUnscored).length > 0 && {
+                  unscoredRepsByContestant: agentUnscored,
+                }),
               };
             }
             stageRecord.referenceJudge = refJudge;
 
             // JudgeResult SINTETIZADO para nao quebrar scoreboard/medals/UI:
             // ranking SEMPRE por veredito (resolve > parcial > nao). Os duelos so
-            // acontecem na fase 4, entao nao ha ordem Copeland para consultar aqui.
+            // acontecem na fase 4, entao nao ha ordem de duelos para consultar aqui.
             // O desempate NAO pode ser a ordem dos contestants: o controle
             // ('original'/'carry') e sempre o primeiro do array, entao sort estavel
             // daria a ele todos os 1os lugares em empate — enviesando medalhas e
             // placar a favor da regua. Usa o shuffle cego semeado pelo conteudo da
             // etapa (mesmo criterio dos duelos): deterministico e neutro.
-            // Agentes incompletos (§18.3) ficam FORA do ranking (sem pontos, sem
-            // 'nao') — por isso o `filter` abaixo.
+            // Contestant SEM veredito (agente sem veredito legítimo, juiz que
+            // falhou, competidor com erro de infra/bloqueado — IMPL-004) fica
+            // FORA do ranking: sem pontos e sem 'nao' imputado — por isso o
+            // `filter` abaixo. Corte por limite de agente é 'nao' e é ranqueado.
             const ordemCega = blindRankMap(
               record.contestants.map((c) => c.id),
               seedFromId(stageSpec.question),
             );
             const ranked = [...record.contestants]
-              .filter((c) => !agentIncompleteIds.has(c.id))
+              .filter((c) => refJudge.verdictByContestant[c.id] !== undefined)
               .sort(
                 (a, b) =>
-                  VERDICT_SCORE[refJudge.verdictByContestant[b.id] ?? 'nao'] -
-                    VERDICT_SCORE[refJudge.verdictByContestant[a.id] ?? 'nao'] ||
+                  VERDICT_SCORE[refJudge.verdictByContestant[b.id]] -
+                    VERDICT_SCORE[refJudge.verdictByContestant[a.id]] ||
                   (ordemCega.get(a.id) ?? 0) - (ordemCega.get(b.id) ?? 0),
               )
               .map((c) => c.id);
@@ -773,9 +1119,14 @@ async function runLoop(
                 Object.entries(refJudge.verdictByContestant).map(([id, v]) => [id, v !== 'nao']),
               ),
               verdictByContestant: { ...refJudge.verdictByContestant },
+              verdictSourceByContestant: { ...refJudge.verdictSourceByContestant },
+              verdictErrorByContestant: { ...refJudge.verdictErrorByContestant },
               judges: [],
               blindMap: {},
-              rawJudgeText: 'Juiz de referência (gabarito)',
+              rawJudgeText:
+                chatContestants.length === 0
+                  ? 'Árvore de veredito do agente (oráculo + juiz de dossiê)'
+                  : 'Juiz de referência (gabarito)',
               inconclusive: refJudge.inconclusive,
             };
           } else {
@@ -794,7 +1145,7 @@ async function runLoop(
               judgeModelIds: record.config.judgeModelIds,
               timeoutMs: record.config.timeoutMs,
               passes: record.config.judgePasses,
-              reasoningLevel: record.config.reasoning?.judge,
+              reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
               ctx,
               maxPricePerMTok,
             });
@@ -803,15 +1154,47 @@ async function runLoop(
           // Sem isto, orcamento estourado viraria "juiz inconclusivo" e a etapa
           // entraria no placar como se tivesse sido avaliada.
           if (isControlSignal(judgeErr)) throw judgeErr;
+          const motivo = judgeErr instanceof Error ? judgeErr.message : String(judgeErr);
+          // IMPL-004: a etapa fica SEM veredito para todos — com o motivo, para
+          // a falha entrar em failureCountByRole (nunca passa por run íntegra).
           stageRecord.judge = {
             rankedContestantIds: [],
             acceptableByContestant: {},
+            verdictByContestant: {},
+            verdictErrorByContestant: Object.fromEntries(
+              record.contestants.map((c) => [
+                c.id,
+                { kind: 'judge_failed' as const, message: motivo.slice(0, 200) },
+              ]),
+            ),
             judges: [],
             blindMap: {},
-            rawJudgeText: judgeErr instanceof Error ? judgeErr.message : String(judgeErr),
+            rawJudgeText: motivo,
             inconclusive: true,
           };
           log(runId, `stage ${i + 1} juiz falhou: ${stageRecord.judge.rawJudgeText}`);
+        }
+        // IMPL-015 (R-08:REC-11): saida do juiz CORTADA (finish_reason
+        // length/timeout) => veredito INVALIDO — ja chega AUSENTE (fora do
+        // placar sintetizado, das medias e do pareamento; conta em
+        // failureCountByRole.judge). Aqui so o torna VISIVEL.
+        const cortados = cutVerdicts(stageRecord.referenceJudge, stageRecord.judge);
+        if (cortados.length > 0) {
+          const detail = describeJudgeCut(
+            i,
+            'judge',
+            cortados.map((c) => ({ label: labelOf(c.contestantId), kind: c.kind })),
+          );
+          log(runId, detail);
+          emitEvent({
+            type: 'judge.truncated',
+            runId,
+            stageIndex: i,
+            phase: 'judge',
+            contestantIds: cortados.map((c) => c.contestantId),
+            kinds: cortados.map((c) => c.kind),
+            detail,
+          });
         }
         // Placar ADITIVO (ordem-independente). Listwise: POR JUIZ (cada juiz
         // pontua seu ranking). Referencia: 1x pelo ranking sintetizado por
@@ -850,6 +1233,7 @@ async function runLoop(
         // MENOS orcamento/cancelamento, que sao decisao, nao acidente.
         if (isControlSignal(stageErr)) {
           stageRecord.incomplete = true;
+          stageRecord.incompleteReason = stageErr.benchControl === 'budget' ? 'budget' : 'cancelled';
           stageRecord.finishedAt = nowIso();
           throw stageErr;
         }
@@ -871,78 +1255,46 @@ async function runLoop(
   // etapa sem julgamento como 'nao' rebaixaria todo mundo por falta de dinheiro.
   const stagesComRef = record.stages.filter((s) => s.referenceJudge && !s.incomplete);
   if (stagesComRef.length > 0) {
-    // judge-score = (resolve + 0.5*parcial) / total * 100, por contestant,
-    // sobre as etapas com juiz de referencia (ausente conta como 'nao').
+    // judge-score = (resolve + 0.5*parcial) / julgados * 100, por contestant,
+    // sobre as etapas com juiz de referencia. Veredito AUSENTE (IMPL-004: juiz
+    // que falhou, competidor com erro de infra/bloqueado, agente sem veredito
+    // legitimo) e "sem evidencia" e NAO conta como 'nao' — sai do numerador e
+    // do denominador (`judgeScoreFromVerdicts` ignora `undefined`).
     //
-    // Agentes 'incomplete' (§18.3) NÃO aparecem no verdictByContestant (o
-    // orquestrador só os soma quando tiveram veredito) — para eles o `undefined`
-    // é "sem evidência" e NÃO pode contar como 'nao' (a culpa foi do nosso teto,
-    // não do agente). Filtramos os `undefined`, então o contestant entra no
-    // judge-score só com as etapas em que ele pontuou de verdade. Chat NÃO muda:
-    // vereditos de chat nunca são `undefined` no map.
-    //
-    // §18.4 — REPETIÇÕES: cada rep é uma observação independente. Quando algum
-    // `referenceJudge` guarda `verdictsByRep` (contestant de agente com reps>1),
-    // o score do contestant sai do vetor PLANO (todas as etapas × todas as reps),
-    // não da média ordinal por etapa. `judgeScoreFromVerdicts` não muda uma linha;
-    // mudou só QUEM chama com o quê. Sem `verdictsByRep` (reps=1 / chat) o fluxo
-    // é exatamente o legado.
-    const temVerdictsByRep = stagesComRef.some(
-      (s) => s.referenceJudge!.verdictsByRep && Object.keys(s.referenceJudge!.verdictsByRep!).length > 0,
-    );
+    // Observacoes por etapa (`stageObservations`): o vetor POR REP quando existe
+    // (§18.4 — cada rep de agente e uma observacao independente; vetor PLANO de
+    // todas as etapas x todas as reps), senao o veredito agregado da etapa.
+    // Para agentes a ausencia so acontece por cancelamento ou rep sem veredito
+    // legitimo (IMPL-033: sem oraculo e juiz falho/nao chamado); etapa com
+    // defeito do ambiente sai para TODOS (error, sem referenceJudge). Corte por
+    // limite (timeout/maxTurns/maxCost/maxOutput) chega aqui como 'nao' e CONTA
+    // no denominador (IMPL-032 / R-14a DEC-1 — antes saia, e um agente que
+    // estourava o teto nas tarefas dificeis ficava com nota perfeita nas
+    // faceis: vies de sobrevivencia). Chat numa run mista com reps>1 usa o
+    // agregado da etapa (antes ficava com vetor vazio => 0).
     record.judgeScoreByContestant = Object.fromEntries(
-      record.contestants.map((c) => {
-        if (temVerdictsByRep) {
-          // Vetor PLANO: concatena os vereditos POR REP de todas as etapas.
-          const flat: Verdict[] = [];
-          for (const s of stagesComRef) {
-            const porRep = s.referenceJudge!.verdictsByRep?.[c.id];
-            if (porRep) flat.push(...porRep);
-          }
-          return [c.id, judgeScoreFromVerdicts(flat)];
-        }
-        return [
-          c.id,
-          judgeScoreFromVerdicts(
-            stagesComRef
-              .map((s) => s.referenceJudge!.verdictByContestant[c.id])
-              .filter((v): v is Verdict => v !== undefined),
-          ),
-        ];
-      }),
+      record.contestants.map((c) => [
+        c.id,
+        judgeScoreFromVerdicts(stagesComRef.flatMap((s) => stageObservations(s.referenceJudge!, c.id))),
+      ]),
     );
   }
 
-  // §18.4 — resolveRate por contestant: fração de 'resolve' entre os vereditos
-  // PLANOS (todas as etapas × todas as reps), em 0..1 com 3 casas. Presente só
-  // quando há contestants de agente: é o número que separa "resolve sempre" de
-  // "resolve às vezes". Com reps=1 vira uma amostra de tamanho 1 — o relatório
-  // final já avisa (§18.4). Usa o mesmo vetor plano do judge-score acima.
+  // §18.4 — resolveRate por contestant de agente: fracao de 'resolve' entre os
+  // vereditos PLANOS (todas as etapas x todas as reps), em 0..1 com 3 casas —
+  // o numero que separa "resolve sempre" de "resolve as vezes". Mesmo vetor do
+  // judge-score, corte por limite incluido como 'nao'. Ao lado, SO como
+  // diagnostico (nunca ranking/finais/gate): "sucesso ate o limite" (a metrica
+  // censurada, sem os cortes no denominador) e a contagem de cortes.
   const agentIds = record.contestants.filter((c) => c.runner === 'agent').map((c) => c.id);
   if (agentIds.length > 0 && stagesComRef.length > 0) {
-    record.resolveRateByContestant = Object.fromEntries(
-      agentIds.map((id) => {
-        let resolve = 0;
-        let total = 0;
-        for (const s of stagesComRef) {
-          const porRep = s.referenceJudge?.verdictsByRep?.[id];
-          if (porRep) {
-            for (const v of porRep) {
-              total += 1;
-              if (v === 'resolve') resolve += 1;
-            }
-          } else {
-            // reps=1 / etapa sem verdictsByRep — usa o veredito agregado da etapa.
-            const v = s.referenceJudge?.verdictByContestant[id];
-            if (v !== undefined) {
-              total += 1;
-              if (v === 'resolve') resolve += 1;
-            }
-          }
-        }
-        return [id, total > 0 ? Number((resolve / total).toFixed(3)) : 0];
-      }),
+    const m = agentRateMetrics(
+      stagesComRef.map((s) => s.referenceJudge!),
+      agentIds,
     );
+    record.resolveRateByContestant = m.resolveRateByContestant;
+    record.censoredResolveRateByContestant = m.censoredResolveRateByContestant;
+    record.limitCutsByContestant = m.limitCutsByContestant;
   }
 
   // === FASE 4: FINAIS. So os N melhores por judge-score MEDIO (todos os
@@ -951,8 +1303,12 @@ async function runLoop(
   // conjunto de finalistas em todas as etapas). ===
   const finalsOn = record.config.duels !== false;
   const finalistCount = record.config.finalists ?? 3;
+  // Etapa decidida pelo oráculo (IMPL-034) entra nas finais SEM gabarito: o
+  // par é decidido pela nota do oráculo e empate de oráculo é empate — o juiz
+  // LLM não duela ali (não há régua textual, nem deve haver).
   const stagesParaDuelo = record.stages.filter(
-    (s) => s.spec?.reference?.trim() && !s.error && !s.incomplete,
+    (s) =>
+      (s.spec?.reference?.trim() || oracleDuelScoresByStage.has(s.index)) && !s.error && !s.incomplete,
   );
   const podeFinais = est.byRole.duel === 0 || gate('finals', est.byRole.duel);
   if (
@@ -991,8 +1347,13 @@ async function runLoop(
       const dueloSettled = await Promise.allSettled(
         stagesParaDuelo.map(async (st) => {
           try {
+            const notasDoOraculo = oracleDuelScoresByStage.get(st.index);
+            // Sem `reference`, `runStageDuels` só decide pelo oráculo (par com
+            // notas iguais empata) — é o que torna a final "do oráculo" mesmo
+            // quando a etapa trazia um gabarito importado.
+            const { reference: _semGabarito, ...specSemGabarito } = st.spec!;
             st.duels = await runStageDuels({
-              stage: st.spec!,
+              stage: notasDoOraculo ? specSemGabarito : st.spec!,
               responses: st.responses,
               contestants: record.contestants,
               judgeModelId: record.config.judgeModelIds[0],
@@ -1001,16 +1362,39 @@ async function runLoop(
               verdictByContestant: st.referenceJudge?.verdictByContestant,
               // Etapa ground-truth (F1.4): vereditos determinísticos viram
               // scores de oráculo — os duelos decidem sem LLM (§19.1).
+              // Etapa com verify[] (IMPL-034): notas do oráculo por execução.
               oracleScoresByContestant:
-                st.spec?.expected !== undefined
+                notasDoOraculo ??
+                (st.spec?.expected !== undefined
                   ? oracleScoresFromVerdicts(st.referenceJudge?.verdictByContestant)
-                  : undefined,
+                  : undefined),
               apiKey,
-              reasoningLevel: record.config.reasoning?.judge,
+              // IMPL-079: duelo tem esforço PRÓPRIO (default low) — não mais o do juiz.
+              reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'duel'),
               timeoutMs: record.config.timeoutMs,
               ctx,
               maxPricePerMTok,
             });
+            // IMPL-015: duelo com saida do juiz cortada fica SEM resultado
+            // (failedDuels, nunca empate) — e o evento o torna visivel.
+            const duelosCortados = cutDuels(st.duels);
+            if (duelosCortados.length > 0) {
+              const detail = describeJudgeCut(
+                st.index,
+                'duel',
+                duelosCortados.map((d) => ({ label: `${labelOf(d.a)} × ${labelOf(d.b)}`, kind: d.kind })),
+              );
+              log(runId, detail);
+              emitEvent({
+                type: 'judge.truncated',
+                runId,
+                stageIndex: st.index,
+                phase: 'duel',
+                contestantIds: [...new Set(duelosCortados.flatMap((d) => [d.a, d.b]))],
+                kinds: duelosCortados.map((d) => d.kind),
+                detail,
+              });
+            }
             emitEvent({ type: 'stage.dueled', runId, stageIndex: st.index, duels: st.duels });
           } catch (err) {
             if (isControlSignal(err)) throw err;
@@ -1034,9 +1418,10 @@ async function runLoop(
 
   const stagesComDuelos = record.stages.filter((s) => s.duels);
   if (stagesComDuelos.length > 0) {
-    // Copeland agregado cross-estagio: vitoria 1, empate 0.5, derrota 0.
+    // Taxa de vitória agregada cross-estagio (IMPL-007, R-04:DEC-5): vitoria 1,
+    // empate 0.5, derrota 0, dividido pelos duelos disputados. NAO e Copeland.
     const acc = new Map(
-      record.contestants.map((c) => [c.id, { points: 0, wins: 0, ties: 0, losses: 0 }]),
+      record.contestants.map((c) => [c.id, { wins: 0, ties: 0, losses: 0 }]),
     );
     for (const s of stagesComDuelos) {
       for (const d of s.duels!.duels) {
@@ -1044,16 +1429,12 @@ async function runLoop(
         const B = acc.get(d.b);
         if (!A || !B) continue;
         if (d.outcome === 'a') {
-          A.points += 1;
           A.wins += 1;
           B.losses += 1;
         } else if (d.outcome === 'b') {
-          B.points += 1;
           B.wins += 1;
           A.losses += 1;
         } else {
-          A.points += 0.5;
-          B.points += 0.5;
           A.ties += 1;
           B.ties += 1;
         }
@@ -1070,8 +1451,8 @@ async function runLoop(
           winRate: played > 0 ? Number(((s.wins + 0.5 * s.ties) / played).toFixed(4)) : 0,
         };
       })
-      // Estavel: empate de pontos E winRate mantem a ordem dos contestants.
-      .sort((a, b) => b.points - a.points || b.winRate - a.winRate);
+      // Estavel: empate de taxa (e de vitorias) mantem a ordem dos contestants.
+      .sort((a, b) => b.winRate - a.winRate || b.wins - a.wins);
   }
 
   syncLedger();
@@ -1092,44 +1473,154 @@ async function runLoop(
     );
   }
 
+  // IMPL-005 (R-04:REC-2): n nominal × efetivo por contestant, motivo de cada
+  // veredito ausente e pares com a regua — a diferenca fica NO RECORD, visivel
+  // em `runs show`/UI, em vez de sumir numa media com ausente contado como 'nao'.
+  record.completeness = runCompleteness(record);
+
   // F3.6 + F4.2 (PLANO-PARIDADE): avisos de imparcialidade + diagnostico do
   // juiz ficam NO RECORD — zero LLM, tudo derivado do que ja rodou. O pin do
   // contrato (hash do prompt do juiz + modelos) denuncia calibration drift ao
   // comparar sessoes; o relatorio de verbosidade expoe o vies score×comprimento.
   try {
+    // IMPL-048: a REFERÊNCIA entra na conta de imparcialidade — em compare o
+    // default é o 1º juiz (`referenceModelId ?? judgeModelIds[0]`, documentado
+    // na fase 1.5) e o aviso é o que denuncia esse default, não o default em si.
+    const referenceModelId = record.config.referenceModelId ?? record.config.judgeModelIds[0];
     record.fairnessWarnings = fairnessWarningsForModels(
       record.contestants.map((c) => c.modelId),
       record.config.judgeModelIds,
+      referenceModelId,
     );
-    const samples: { score: number; length: number }[] = [];
+    // IMPL-052 (R-03b:REC-2): higiene das amostras do diagnóstico de verbosidade.
+    // Fontes de veredito SEGREGADAS (pointwise/rótulo/listwise/imputado — nunca
+    // misturadas na mesma regressão), vazios/imputados/truncados excluídos e
+    // contados, comprimento em TOKENS com razão candidato/referência (caracteres
+    // só como fallback) e n por célula (fonte × contestant) no relatório.
+    const rows: VerbositySampleRow[] = [];
     for (const st of record.stages) {
+      const refJudge = st.referenceJudge;
+      const listwise = st.judge;
       for (const r of st.responses) {
-        const v =
-          st.referenceJudge?.verdictByContestant?.[r.contestantId] ??
-          st.judge?.verdictByContestant?.[r.contestantId];
-        if (!v || r.status !== 'ok') continue;
-        samples.push({
+        if (r.status !== 'ok') continue;
+        const vRef = refJudge?.verdictByContestant?.[r.contestantId];
+        const vList = vRef === undefined ? listwise?.verdictByContestant?.[r.contestantId] : undefined;
+        const v = vRef ?? vList;
+        if (!v) continue;
+        const origem =
+          vRef !== undefined
+            ? refJudge?.verdictSourceByContestant?.[r.contestantId]
+            : listwise?.verdictSourceByContestant?.[r.contestantId];
+        // Papel do veredito (IMPL-052): 'auto' é IMPUTADO (regra fabricou a
+        // nota, ex.: resposta vazia), ground-truth é RÓTULO; o resto segue o
+        // caminho — pointwise (contra gabarito) ou listwise (fallback clássico).
+        const fonte: VerbositySampleRow['source'] =
+          origem === 'auto'
+            ? 'imputado'
+            : origem === 'ground-truth'
+              ? 'rotulo'
+              : vRef !== undefined
+                ? 'pointwise'
+                : 'listwise';
+        rows.push({
+          contestantId: r.contestantId,
+          source: fonte,
           score: v === 'resolve' ? 1 : v === 'parcial' ? 0.5 : 0,
-          length: r.text.length,
+          text: r.text,
+          candidateTokens: r.tokensOut > 0 ? r.tokensOut : undefined,
+          referenceText: st.spec?.reference,
+          referenceTokens: st.gabaritoCall?.tokensOut ? st.gabaritoCall.tokensOut : undefined,
+          maxTokens: r.maxTokens ?? st.spec?.maxTokens,
+          truncated: r.truncated === true || r.finishReason === 'length',
         });
       }
     }
-    record.judgeDiagnostics = {
-      contract: pinJudgeContract(record.config.judgeModelIds, JUDGE_CONTRACT_TEXT),
-      verbosity: verbosityReport(samples),
+    // IMPL-034: numa run com agente quem dá as notas é o juiz de DOSSIÊ — o
+    // pin precisa mudar quando o prompt DELE muda (senão o drift some).
+    const judgePromptText = !hasAgent
+      ? JUDGE_CONTRACT_TEXT
+      : record.contestants.every((c) => c.runner === 'agent')
+        ? AGENT_JUDGE_SYSTEM_PROMPT
+        : `${JUDGE_CONTRACT_TEXT}\n\n${AGENT_JUDGE_SYSTEM_PROMPT}`;
+    // IMPL-049 (R-03a:REC-9): o contrato do juiz cobre juízes + prompt
+    // pointwise + prompt do duelo + prompt listwise + modelo de referência +
+    // think level + provedor — trocar QUALQUER um muda a distribuição de
+    // veredito, muda o hash e sugere recalibração (`judge.contract.changed`).
+    const components: JudgeContractComponents = {
+      duelPromptText: hasAgent ? `${DUEL_HEAD}\n\n${DUEL_AGENT_TRUST}` : DUEL_HEAD,
+      listwisePromptText: JUDGE_LISTWISE_CONTRACT_TEXT,
+      referenceModelId,
+      // Ausente = default do pipeline (canônico vazio) — é o mesmo hash que o
+      // `baseline check` recomputa para o setup (granularidade documentada em
+      // `contractHashFor` do CLI). Esforço/roteamento fora do default entram
+      // cheios e são o drift que `judge.contract.changed` denuncia.
+      judgeReasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
+      providerPolicy: ctx.sink?.sensitiveRouting?.()
+        ? JSON.stringify(ctx.sink.sensitiveRouting!())
+        : undefined,
     };
+    const contract = pinJudgeContract(
+      record.config.judgeModelIds,
+      judgePromptText,
+      undefined,
+      components,
+    );
+    const drift = noteJudgeContract(contract.hash);
+    record.judgeDiagnostics = {
+      contract,
+      verbosity: verbosityReport(verbositySamples(rows)),
+    };
+    if (drift.changed) {
+      const detail = `judge.contract.changed: ${drift.message}`;
+      log(runId, detail);
+      emitEvent({
+        type: 'judge.contract.changed',
+        runId,
+        previousHash: drift.previousHash ?? '',
+        currentHash: contract.hash,
+        detail,
+      });
+    }
     if (record.judgeDiagnostics.verbosity.warning) {
       log(runId, `aviso de verbosidade do juiz: ${record.judgeDiagnostics.verbosity.warning}`);
     }
     for (const aviso of record.fairnessWarnings) log(runId, `imparcialidade: ${aviso}`);
+    const desfechos = record.competitorOutcomeCounts;
+    if (desfechos && desfechos.blocked + desfechos.refused + desfechos.error > 0) {
+      // Bloqueio NAO e erro de key nem falha do prompt: e a defesa do gateway.
+      log(runId, 'desfechos dos competidores (bloqueio ≠ recusa ≠ erro)', { ...desfechos });
+    }
+    // IMPL-014: acima de 2% de chamadas truncadas (TODOS os papeis) o teto
+    // esta baixo p/ estes modelos; o alerta diz quais papeis truncaram.
+    syncLedger();
+    const alertaTrunc = truncationAlert(
+      { ...record.truncationCounts!, rate: record.truncationRate! },
+      record.finishSignalsByRole,
+    );
+    if (alertaTrunc) log(runId, `ALERTA de truncamento: ${alertaTrunc}`);
+    // IMPL-015: taxa por papel x esforco, alerta por celula > 1%.
+    const alertaCelula = truncationCellAlert(truncationByRoleEffort(record.finishSignalsByRole));
+    if (alertaCelula) log(runId, `ALERTA de truncamento: ${alertaCelula}`);
   } catch (err) {
     // Diagnostico e SUPORTE, nunca derruba a finalizacao.
     log(runId, `diagnostico do juiz falhou (ignorado): ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  record.status = 'finished';
+  // IMPL-004 (R-03b:REC-4): a run terminou o pipeline, mas só é `finished` se
+  // a evidência sustenta conclusão — senão `inconclusive` (terminal), com a
+  // conta gravada no record para auditoria.
+  const integridade = assessVerdictIntegrity({
+    stages: record.stages,
+    contestants: record.contestants,
+    referenceJudging,
+  });
+  record.failureCountByRole = integridade.failureCountByRole;
+  record.verdictIntegrity = integridade.integrity;
+  for (const motivo of integridade.integrity.reasons) log(runId, `inconclusiva: ${motivo}`);
+
+  record.status = integridade.inconclusive ? 'inconclusive' : 'finished';
   record.finishedAt = nowIso();
   await saver.flush();
   emitEvent({ type: 'run.finished', runId, record });
-  log(runId, 'finished', { totalCostUsd: record.totalCostUsd });
+  log(runId, record.status, { totalCostUsd: record.totalCostUsd });
 }

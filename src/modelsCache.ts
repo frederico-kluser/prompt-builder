@@ -14,11 +14,36 @@
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { listModels, primeModelsCache } from './openrouter.js';
-import { getDataDir } from './storage.js';
-import type { OpenRouterModel } from './types.js';
+import { getGateway, listModels, primeModelsCache } from './openrouter.js';
+import { isKnownPrice } from './engine/pricing.js';
+import { ensurePrivateDataDir, getDataDir } from './storage.js';
+import type { OpenRouterModel, OpenRouterModelPricing } from './types.js';
 
-const CACHE_VERSION = 1;
+/**
+ * v2 (IMPL-018): preco desconhecido e `null`. Um arquivo v1 ainda e LIDO (o
+ * modo offline depende dele), mas passa por `sanitizePricing`: no v1 o "-1"
+ * dos roteadores foi gravado como -1 numerico.
+ */
+const CACHE_VERSION = 2;
+const READABLE_VERSIONS = new Set([1, CACHE_VERSION]);
+
+/** Preco negativo/nao finito vindo do disco vira desconhecido (nunca -1). */
+function sanitizePricing(p: OpenRouterModelPricing | undefined): OpenRouterModelPricing {
+  const fix = (v: unknown): number | null => (isKnownPrice(v as number | null) ? (v as number) : null);
+  return {
+    prompt: fix(p?.prompt),
+    completion: fix(p?.completion),
+    ...(p?.overrides
+      ? {
+          overrides: p.overrides.map((t) => ({
+            minPromptTokens: t.minPromptTokens,
+            prompt: fix(t.prompt),
+            completion: fix(t.completion),
+          })),
+        }
+      : {}),
+  };
+}
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 
 interface CatalogFile {
@@ -30,8 +55,12 @@ interface CatalogFile {
   data: OpenRouterModel[];
 }
 
+/** Cache do catalogo PUBLICO (sem key — IMPL-029). */
+const PUBLIC_FILE = 'models-public.json';
+
+/** Base em vigor NO GATEWAY (configurado pelo ponto de entrada a partir do ambiente). */
 function baseUrl(): string {
-  return process.env.OPENROUTER_BASE_URL?.replace(/\/+$/, '') ?? 'https://openrouter.ai/api/v1';
+  return getGateway().config.baseUrl;
 }
 
 /**
@@ -40,28 +69,60 @@ function baseUrl(): string {
  * qualquer `ls` — ou qualquer processo da maquina — consegue ler.
  */
 export function catalogPath(apiKey: string): string {
+  // Sem key (IMPL-029): o catalogo PUBLICO (`GET /models` responde sem
+  // Authorization) mora num arquivo proprio, legivel por nome.
+  if (!apiKey) return path.join(getDataDir(), 'cache', PUBLIC_FILE);
   const h = createHash('sha256').update(apiKey).digest('hex').slice(0, 16);
   return path.join(getDataDir(), 'cache', `models-${h}.json`);
 }
 
-async function readCatalog(apiKey: string): Promise<CatalogFile | null> {
+async function readCatalogFile(file: string): Promise<CatalogFile | null> {
   try {
-    const raw = await fs.readFile(catalogPath(apiKey), 'utf-8');
+    const raw = await fs.readFile(file, 'utf-8');
     const parsed = JSON.parse(raw) as CatalogFile;
-    if (parsed.v !== CACHE_VERSION) return null;
+    if (!READABLE_VERSIONS.has(parsed.v)) return null;
     if (parsed.base !== baseUrl()) return null;
     if (!Array.isArray(parsed.data) || parsed.data.length === 0) return null;
-    return parsed;
+    return { ...parsed, data: parsed.data.map((m) => ({ ...m, pricing: sanitizePricing(m.pricing) })) };
   } catch {
     return null;
   }
+}
+
+function readCatalog(apiKey: string): Promise<CatalogFile | null> {
+  return readCatalogFile(catalogPath(apiKey));
+}
+
+/**
+ * Sem key: o catalogo em disco MAIS RECENTE de qualquer escopo (o publico ou o
+ * de uma key usada antes). O `/models` nao depende da conta, entao o arquivo
+ * de outra key serve para listar/estimar — e evita rede quando ha cache fresco
+ * ("catalogo do cache em disco", R-12:REC-4). Com key, cada key segue no seu.
+ */
+async function readFreshestCatalog(): Promise<CatalogFile | null> {
+  const dir = path.join(getDataDir(), 'cache');
+  let nomes: string[];
+  try {
+    nomes = await fs.readdir(dir);
+  } catch {
+    return null;
+  }
+  let melhor: CatalogFile | null = null;
+  for (const n of nomes) {
+    if (!/^models-[\w-]+\.json$/.test(n)) continue;
+    const c = await readCatalogFile(path.join(dir, n));
+    if (c && (!melhor || c.fetchedAt > melhor.fetchedAt)) melhor = c;
+  }
+  return melhor;
 }
 
 async function writeCatalog(apiKey: string, data: OpenRouterModel[]): Promise<void> {
   const target = catalogPath(apiKey);
   const dir = path.dirname(target);
   try {
-    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    // IMPL-024: raiz + cache/ em 0700 com chmod explícito (mkdir({mode}) só vale
+    // na criação — um cache/ antigo 0755 seguiria aberto).
+    await ensurePrivateDataDir(dir);
     // `raw` e o payload cru do OpenRouter e nada em src/ o le — manter
     // persistiria megabytes por invocacao.
     const enxuto = data.map(({ raw: _raw, ...rest }) => rest);
@@ -84,6 +145,8 @@ export interface EnsureCatalogResult {
   models: OpenRouterModel[];
   fetchedAt: number;
   source: 'disk' | 'network' | 'stale';
+  /** `key` = catalogo da key informada; `public` = sem key (GET /models publico). */
+  scope: 'key' | 'public';
 }
 
 /**
@@ -96,18 +159,36 @@ export async function ensureCatalog(
   opts: { force?: boolean; ttlMs?: number; onWarn?: (msg: string) => void } = {},
 ): Promise<EnsureCatalogResult> {
   const ttl = opts.ttlMs ?? DEFAULT_TTL_MS;
-  const disk = await readCatalog(apiKey);
+  // Key vazia = catalogo PUBLICO (IMPL-029): `models`/`estimate`/`--dry-run`
+  // nao exigem key. O `GET /models` e publico e gratuito, entao sem cache em
+  // disco ele e buscado sem credencial.
+  const scope: EnsureCatalogResult['scope'] = apiKey ? 'key' : 'public';
+  const disk = apiKey ? await readCatalog(apiKey) : await readFreshestCatalog();
   const fresco = disk && Date.now() - disk.fetchedAt < ttl;
 
   if (!opts.force && disk && fresco) {
     primeModelsCache(apiKey, disk.data, disk.fetchedAt);
-    return { models: disk.data, fetchedAt: disk.fetchedAt, source: 'disk' };
+    return { models: disk.data, fetchedAt: disk.fetchedAt, source: 'disk', scope };
   }
 
   try {
     const data = await listModels(apiKey, true);
     await writeCatalog(apiKey, data);
-    return { models: data, fetchedAt: Date.now(), source: 'network' };
+    // Validacao do /models (IMPL-018): so os fail-closed viram alerta — o "-1"
+    // dos roteadores e esperado e nao gera ruido.
+    const graves = getGateway()
+      .catalogIssues(apiKey)
+      .filter((i) => i.severity === 'error');
+    if (graves.length > 0) {
+      const amostra = graves
+        .slice(0, 3)
+        .map((i) => `${i.modelId} ${i.field}`)
+        .join('; ');
+      opts.onWarn?.(
+        `catálogo: ${graves.length} campo(s) contratual(is) malformado(s) — tratados em fail-closed (${amostra}${graves.length > 3 ? '; …' : ''}).`,
+      );
+    }
+    return { models: data, fetchedAt: Date.now(), source: 'network', scope };
   } catch (err) {
     if (disk) {
       primeModelsCache(apiKey, disk.data, disk.fetchedAt);
@@ -115,7 +196,7 @@ export async function ensureCatalog(
       opts.onWarn?.(
         `catálogo offline (${(err as Error).message}); usando cache de ${horas}h atrás.`,
       );
-      return { models: disk.data, fetchedAt: disk.fetchedAt, source: 'stale' };
+      return { models: disk.data, fetchedAt: disk.fetchedAt, source: 'stale', scope };
     }
     throw err;
   }

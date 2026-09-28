@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { createContext, useContext, useRef, useState, type ReactNode } from 'react';
+import { ChevronRight } from 'lucide-react';
 import {
   StaggerReveal,
   StaggerRevealHeadline,
@@ -97,14 +98,17 @@ export function Banner({
   tone = 'neutral',
   children,
   className,
+  alert,
 }: {
   tone?: BannerTone;
   children: ReactNode;
   className?: string;
+  /** Anuncia já ao leitor de tela (role="alert") — para avisos acionáveis. */
+  alert?: boolean;
 }) {
   return (
     <div
-      role={tone === 'error' ? 'alert' : undefined}
+      role={tone === 'error' || alert ? 'alert' : undefined}
       className={cn('rounded-lg border px-4 py-3 text-sm', BANNER_TONE[tone], className)}
     >
       {children}
@@ -145,6 +149,9 @@ export function EmptyState({ children }: { children: ReactNode }) {
 const STATUS_TONE: Record<string, string> = {
   running: 'border-primary/30 bg-primary/10 text-primary',
   finished: 'border-resolve/30 bg-resolve-soft/60 text-resolve',
+  // IMPL-004: terminou, mas a evidência não sustenta conclusão — mesmo token
+  // do pill de veredito 'parcial' (contraste já medido nos dois temas).
+  inconclusive: 'border-parcial/30 bg-parcial-soft/60 text-parcial',
   error: 'border-destructive/30 bg-destructive/10 text-destructive',
   aborted: 'border-border bg-muted text-muted-foreground',
 };
@@ -233,31 +240,235 @@ export function SettingRow({
   );
 }
 
-/** Grupo de linhas de ajuste, com cabeçalho e rodapé opcionais. */
+/**
+ * Grupo de linhas de ajuste, com cabeçalho e rodapé opcionais.
+ * `id` torna a seção uma ÂNCORA estável (foco + scroll da navegação de
+ * pendências do formulário de Nova Run — IMPL-106).
+ */
 export function SettingGroup({
+  id,
   title,
   status,
   footer,
+  pending,
   children,
   className,
 }: {
+  /** Âncora estável da seção (id do `<section>`, focável em `tabIndex={-1}`). */
+  id?: string;
   title?: string;
   status?: ReactNode;
   footer?: ReactNode;
+  /** Ponto de pendência ao lado do título ('muted' antes de tentar, 'error' depois). */
+  pending?: 'muted' | 'error';
   children: ReactNode;
   className?: string;
 }) {
   return (
-    <section className={cn('mb-4', className)}>
+    <section
+      id={id}
+      tabIndex={id ? -1 : undefined}
+      className={cn('mb-4 scroll-mt-28 outline-none', className)}
+    >
       {title && (
         <div className="mb-2 flex items-baseline justify-between gap-3 px-1">
-          <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+          <h2 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
+            {title}
+            {pending && (
+              <span
+                className={cn('size-1.5 rounded-full', pending === 'error' ? 'bg-destructive' : 'bg-muted-foreground/60')}
+                aria-label="pendência nesta seção"
+              />
+            )}
+          </h2>
           {status && <span className="text-xs text-muted-foreground tabular">{status}</span>}
         </div>
       )}
       <div className="rounded-xl bg-card ring-1 ring-foreground/10">{children}</div>
       {footer && <p className="mt-2 px-1 text-[13px] text-muted-foreground">{footer}</p>}
     </section>
+  );
+}
+
+/* ------------------------------------------------- foco composto (roving) */
+
+/**
+ * Toolbar com ROVING TABINDEX (padrão APG "toolbar"): o grupo inteiro é UMA
+ * parada de Tab e as setas movem o item ativo entre os controles dele. É o que
+ * segura o orçamento de Tab do formulário — uma fileira de 14 chips não pode
+ * virar 14 paradas antes do "Iniciar" (R-11b:REC-1).
+ */
+const RovingCtx = createContext<{ active: number } | null>(null);
+
+export interface RovingProps {
+  tabIndex: 0 | -1;
+  'data-roving-item': '';
+}
+
+/**
+ * Props de roving para o item `index` do toolbar mais próximo. Fora de um
+ * `RovingToolbar` devolve tab stop normal (tabIndex 0).
+ */
+export function useRovingTabStop(index: number): RovingProps {
+  const ctx = useContext(RovingCtx);
+  return { tabIndex: ctx ? (ctx.active === index ? 0 : -1) : 0, 'data-roving-item': '' };
+}
+
+/**
+ * Item de um `RovingToolbar` cujo controle vem de render-prop. O hook precisa
+ * rodar num COMPONENTE filho do toolbar (o contexto não pega em chamadas feitas
+ * no corpo do pai) — é por isso que o controle é devolvido como função.
+ */
+export function RovingItem({
+  index,
+  children,
+}: {
+  index: number;
+  children: (p: RovingProps) => ReactNode;
+}) {
+  return <>{children(useRovingTabStop(index))}</>;
+}
+
+/** Grupo de controles relacionados com uma parada de Tab só (setas navegam). */
+export function RovingToolbar({
+  label,
+  count,
+  className,
+  children,
+}: {
+  /** Nome acessível do grupo. */
+  label: string;
+  /** Nº de itens focáveis do grupo (define o wrap das setas). */
+  count: number;
+  className?: string;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [active, setActive] = useState(0);
+  function move(next: number) {
+    const total = Math.max(1, count);
+    const alvo = ((next % total) + total) % total;
+    setActive(alvo);
+    ref.current?.querySelectorAll<HTMLElement>('[data-roving-item]')[alvo]?.focus();
+  }
+  return (
+    <RovingCtx.Provider value={{ active }}>
+      <div
+        ref={ref}
+        role="toolbar"
+        aria-label={label}
+        className={className}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            move(active + 1);
+          } else if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            move(active - 1);
+          } else if (e.key === 'Home') {
+            e.preventDefault();
+            move(0);
+          } else if (e.key === 'End') {
+            e.preventDefault();
+            move(count - 1);
+          }
+        }}
+      >
+        {children}
+      </div>
+    </RovingCtx.Provider>
+  );
+}
+
+/**
+ * Seção recolhível — o 2º nível da revelação progressiva. A região fica
+ * MONTADA com `hidden`: o estado dos campos sobrevive ao recolher, e o
+ * `aria-controls` nunca aponta para id inexistente. Conteúdo recolhido sai da
+ * ordem de Tab (o `hidden` cuida disso).
+ */
+export function Disclosure({
+  id,
+  title,
+  status,
+  pending,
+  open,
+  onToggle,
+  children,
+  footer,
+}: {
+  /** Âncora estável da seção (id do `<section>` e base do `aria-controls`). */
+  id: string;
+  title: string;
+  status?: ReactNode;
+  /** Ponto de pendência ao lado do título ('muted' antes de tentar, 'error' depois). */
+  pending?: 'muted' | 'error';
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+  footer?: ReactNode;
+}) {
+  return (
+    <section id={id} tabIndex={-1} className="mb-4 scroll-mt-28 outline-none">
+      <div className="mt-10 mb-3 flex items-center gap-3">
+        <h2 className="text-xs font-semibold tracking-[0.08em] text-muted-foreground uppercase">
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={`${id}-region`}
+            onClick={onToggle}
+            className="flex items-center gap-2 rounded-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+          >
+            <ChevronRight className={cn('size-3.5', open && 'rotate-90')} aria-hidden="true" />
+            {title}
+          </button>
+        </h2>
+        {pending && (
+          <span
+            className={cn('size-1.5 rounded-full', pending === 'error' ? 'bg-destructive' : 'bg-muted-foreground/60')}
+            aria-label="pendência nesta seção"
+          />
+        )}
+        <span className="h-px flex-1 bg-border" aria-hidden="true" />
+        {status && <span className="text-xs text-muted-foreground">{status}</span>}
+      </div>
+      <div id={`${id}-region`} hidden={!open}>
+        {children}
+      </div>
+      {footer && open && <p className="mt-2 px-1 text-[13px] text-muted-foreground">{footer}</p>}
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ chips */
+
+/**
+ * Chip de alternância (`aria-pressed`). Dentro de um `RovingToolbar`, `index`
+ * decide quem é a parada de Tab do grupo.
+ */
+export function Chip(p: {
+  on: boolean;
+  label: string;
+  title?: string;
+  onClick: () => void;
+  index?: number;
+}) {
+  const roving = useRovingTabStop(p.index ?? 0);
+  return (
+    <button
+      type="button"
+      {...roving}
+      aria-pressed={p.on}
+      title={p.title}
+      onClick={p.onClick}
+      className={cn(
+        'rounded-full border px-2.5 py-1 text-[12.5px] font-medium transition-colors',
+        p.on
+          ? 'border-primary bg-primary/12 text-foreground'
+          : 'border-border bg-muted text-muted-foreground hover:text-foreground',
+      )}
+    >
+      {p.label}
+    </button>
   );
 }
 

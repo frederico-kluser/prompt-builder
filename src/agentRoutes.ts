@@ -27,7 +27,8 @@ import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { getDataDir, listRuns, loadRun } from './storage.js';
+import { ensurePrivateDataDir, getDataDir, listRuns, loadRun } from './storage.js';
+import { isValidRecordId } from './pathSafety.js';
 import { normalizeRunRecord } from './normalize.js';
 import { subscribe } from './events.js';
 import { startRun } from './orchestrator.js';
@@ -43,6 +44,7 @@ import {
   ensureAgentsTokenFile,
 } from './agent/store.js';
 import type { ExecutionRef } from './agent/types.js';
+import { isTerminalRunStatus } from './types.js';
 import type { RunRecord } from './types.js';
 
 const router = Router();
@@ -158,6 +160,16 @@ function buildExecRef(
 // aplicado ANTES de qualquer handler.
 router.use(requireAgentsToken);
 
+// IMPL-024: `:id` decodificado pelo Express (`..%2F`, `%2e%2e`, `..%5C`) nunca
+// chega ao disco — mesma guarda de /v1/benchmark, sem ecoar o valor.
+router.param('id', (_req, res, next, id: unknown) => {
+  if (!isValidRecordId(id)) {
+    res.status(400).json({ error: 'id inválido: use o runId (UUID) devolvido ao criar a run.' });
+    return;
+  }
+  next();
+});
+
 /**
  * GET /doctor — pré-voo do executor (§21.4). Executor presente? versão certa?
  * git? disco? `?deep=1` roda o canário de sala limpa (gasta a key do
@@ -167,6 +179,8 @@ router.get('/doctor', async (req, res) => {
   try {
     const deep = req.query.deep === '1' || req.query.deep === 'true';
     const runDir = path.join(getDataDir(), 'tmp', 'doctor-' + randomUUID());
+    // IMPL-024: a sala envenenada do canário nasce dentro de tmp/ 0700.
+    await ensurePrivateDataDir(runDir);
     const apiKeyHeader = req.headers['x-openrouter-key'];
     const apiKey =
       typeof apiKeyHeader === 'string' && apiKeyHeader.trim().length > 0
@@ -175,7 +189,7 @@ router.get('/doctor', async (req, res) => {
     const model =
       typeof req.query.model === 'string' && req.query.model.trim()
         ? (req.query.model as string).trim()
-        : 'openai/gpt-5-mini';
+        : 'xiaomi/mimo-v2.6-pro'; // default do dono (2026-09-27)
     const result = await runPreflight({
       expectedVersion: '0.84.2',
       cacheKey: deep ? 'pi-0.84.2-cleanroom' : undefined,
@@ -352,8 +366,7 @@ router.get('/runs/:id/events', async (req, res) => {
   // Snapshot leve: o record já carrega ExecutionRefs, não trajetórias (§21.7).
   send({ type: 'snapshot', record: normalizeRunRecord(record) });
 
-  const isTerminal =
-    record.status === 'finished' || record.status === 'error' || record.status === 'aborted';
+  const isTerminal = isTerminalRunStatus(record.status); // inclui 'inconclusive' (IMPL-004)
   if (isTerminal) {
     if (record.status === 'error') {
       send({ type: 'run.error', runId, error: record.error ?? 'Run terminou com erro.' });
@@ -391,8 +404,7 @@ router.post('/runs/:id/cancel', async (req, res) => {
       res.status(404).json({ error: 'Run não encontrada' });
       return;
     }
-    const terminal =
-      record.status === 'finished' || record.status === 'error' || record.status === 'aborted';
+    const terminal = isTerminalRunStatus(record.status); // inclui 'inconclusive' (IMPL-004)
     if (terminal) {
       res.status(409).json({ error: 'Run já terminou — nada a cancelar.' });
       return;

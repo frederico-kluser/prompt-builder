@@ -12,7 +12,13 @@
 // que aquele modelo nao tem e comer um HTTP 400.
 
 import { fitEffort, REASONING_LEVELS } from './reasoning.js';
-import type { ModelReasoningMeta, OpenRouterModel, ReasoningLevel } from './types.js';
+import { exportPrice, UNKNOWN_PRICE_JSON } from './engine/pricing.js';
+import type {
+  ModelReasoningMeta,
+  OpenRouterModel,
+  ReasoningConfig,
+  ReasoningLevel,
+} from './types.js';
 
 export interface ModelCaps {
   /** Aceita `temperature`. */
@@ -39,11 +45,14 @@ interface ModelLike {
 export function modelCaps(m?: ModelLike): ModelCaps {
   const supported = m?.supportedParameters;
   const r = m?.reasoning;
-  if (!supported || supported.length === 0) {
+  if (!supported) {
     // Sem metadados (modelo fora do catalogo carregado): oferece temperatura e
     // esconde esforco — e o que a chamada consegue enviar com seguranca.
     return { temperature: true, reasoning: false, effort: false, mandatory: false };
   }
+  // `[]` = declarado vazio (roteadores) ou fail-closed de campo malformado
+  // (IMPL-018): o gateway nao envia nada opcional, entao nada e oferecido.
+  // Espelha `deterministicSampling`/`modelTuningCaps` de openrouter.ts.
   const effort = supported.includes('reasoning_effort');
   return {
     temperature: supported.includes('temperature'),
@@ -53,6 +62,50 @@ export function modelCaps(m?: ModelLike): ModelCaps {
     defaultEffort: r?.defaultEffort,
     mandatory: r?.mandatory ?? false,
   };
+}
+
+/**
+ * IMPL-079 (R-08:REC-1 / DEC-1) — papéis de JUÍZO com esforço próprio. O
+ * `reasoning.judge` único mandava no juiz pointwise, no duelo e no gabarito ao
+ * mesmo tempo; acima de `low` o ganho de esforço satura ou reverte e o papel
+ * juiz domina o custo (~47%). Agora cada papel resolve o seu degrau:
+ *   judge  → medium (pointwise: acima disso satura)
+ *   duel   → low    (par curto; `low` já pega o ganho)
+ *   gab    → high   (escrever a régua é a tarefa mais exigente)
+ * Compat: papel sem campo próprio cai no `reasoning.judge` antigo (comportamento
+ * legado preservado) e, sem nenhum dos dois, no default do papel.
+ */
+export type JudgingRole = 'judge' | 'duel' | 'gab';
+
+/** Defaults por papel de juízo (IMPL-079) — só valem quando nada foi pedido. */
+export const REASONING_ROLE_DEFAULT: Record<JudgingRole, ReasoningLevel> = {
+  judge: 'medium',
+  duel: 'low',
+  gab: 'high',
+};
+
+/**
+ * Degrau EFETIVO do papel de juízo + o `effort` que vai no fio depois do
+ * `fitEffort` na allowlist do modelo (mesma regra do `applyReasoning`; `off`
+ * não é degrau — sai como `'none'`, que o gateway traduz em `enabled: false`).
+ */
+export function reasoningForRole(
+  reasoning: ReasoningConfig | undefined,
+  role: JudgingRole,
+  meta?: ModelReasoningMeta,
+): { level: ReasoningLevel; effort: string } {
+  const proprio = role === 'judge' ? reasoning?.judge : reasoning?.[role];
+  // Campo unico antigo (`reasoning.judge`) como fallback dos papeis novos.
+  const level = proprio ?? reasoning?.judge ?? REASONING_ROLE_DEFAULT[role];
+  return { level, effort: level === 'off' ? 'none' : fitEffort(level, meta) };
+}
+
+/** Atalho para os call sites: só o degrau efetivo do papel. */
+export function reasoningLevelForRole(
+  reasoning: ReasoningConfig | undefined,
+  role: JudgingRole,
+): ReasoningLevel {
+  return reasoningForRole(reasoning, role).level;
 }
 
 /** Rotulo PT-BR de cada degrau de esforco. */
@@ -129,19 +182,31 @@ export function thinkLevelsFor(m?: ModelLike): ThinkLevels {
   };
 }
 
-/** Formato de export do catalogo (`prompt-builder models --json`). */
-export const MODELS_EXPORT_FORMAT = 'prompt-builder-models@1';
+/**
+ * Formato de export do catalogo (`prompt-builder models --json`).
+ * @2 (IMPL-018): preco desconhecido/variavel sai como a string `'unknown'` —
+ * no @1 o "-1" do catalogo (roteadores) saia como numero negativo.
+ */
+export const MODELS_EXPORT_FORMAT = 'prompt-builder-models@2';
+
+/** Preco exportado: numero, ou `'unknown'` (catalogo trouxe "-1"/ausente/invalido). */
+export type ExportPrice = number | typeof UNKNOWN_PRICE_JSON;
 
 export interface ModelExportRow {
   id: string;
   name: string;
   contextLength?: number;
-  pricing: { prompt: number; completion: number; unit: 'usd-per-token' };
+  pricing: { prompt: ExportPrice; completion: ExportPrice; unit: 'usd-per-token' };
   /** Mesmos precos em USD por milhao — o que humanos e tabelas usam. */
-  pricePerMTok: { prompt: number; completion: number };
+  pricePerMTok: { prompt: ExportPrice; completion: ExportPrice };
   supportedParameters?: string[];
   caps: ModelCaps;
   thinkLevels: ThinkLevels;
+  /**
+   * Ciclo de vida do catálogo (IMPL-019): snapshot datado por trás do id, data
+   * de deprecação (AAAA-MM-DD) e alvo do alias. null = o catálogo não informa.
+   */
+  lifecycle: { canonicalSlug: string | null; expirationDate: string | null; aliasTarget: string | null };
 }
 
 export function toExportRow(m: OpenRouterModel): ModelExportRow {
@@ -149,13 +214,22 @@ export function toExportRow(m: OpenRouterModel): ModelExportRow {
     id: m.id,
     name: m.name,
     contextLength: m.contextLength,
-    pricing: { prompt: m.pricing.prompt, completion: m.pricing.completion, unit: 'usd-per-token' },
+    pricing: {
+      prompt: exportPrice(m.pricing.prompt),
+      completion: exportPrice(m.pricing.completion),
+      unit: 'usd-per-token',
+    },
     pricePerMTok: {
-      prompt: m.pricing.prompt * 1_000_000,
-      completion: m.pricing.completion * 1_000_000,
+      prompt: exportPrice(m.pricing.prompt, 1_000_000),
+      completion: exportPrice(m.pricing.completion, 1_000_000),
     },
     supportedParameters: m.supportedParameters,
     caps: modelCaps(m),
     thinkLevels: thinkLevelsFor(m),
+    lifecycle: {
+      canonicalSlug: m.canonicalSlug ?? null,
+      expirationDate: m.expirationDate ?? null,
+      aliasTarget: m.aliasTarget ?? null,
+    },
   };
 }

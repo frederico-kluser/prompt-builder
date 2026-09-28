@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import type { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { listModels, validateKey } from './openrouter.js';
 import { startRun } from './orchestrator.js';
 import { startTraining } from './trainer.js';
@@ -9,9 +9,45 @@ import { listRuns, loadRun, listSessions, loadSession } from './storage.js';
 import { subscribe, subscribeSession } from './events.js';
 import { runConfigSchema } from './runConfigSchema.js';
 import { prepareOptsFor } from './prepareRun.js';
+import { isTerminalRunStatus } from './types.js';
+import { isValidRecordId, publicErrorMessage } from './pathSafety.js';
 import type { CompareConfig, CompetitorResponse, RunRecord } from './types.js';
 
 const router = Router();
+
+// ---------------------------------------------------------------------------
+// Linha de base de segurança (IMPL-024, R-09:REC-10)
+// ---------------------------------------------------------------------------
+
+/**
+ * O Express DECODIFICA `:id` (`..%2Fpackage` → `../package`, `%2e%2e` → `..`,
+ * `..%5C` → `..\`): validar o id é a única correção. `router.param` roda antes
+ * de TODA rota com `:id` deste router — rota nova herda a guarda sozinha.
+ * A resposta não ecoa o valor recebido (seria devolver um caminho).
+ */
+router.param('id', (_req, res, next, id: unknown) => {
+  if (!isValidRecordId(id)) {
+    res.status(400).json({ error: 'id inválido: use o id (UUID) devolvido ao criar a run/sessão.' });
+    return;
+  }
+  next();
+});
+
+/**
+ * Express 4 não captura rejeição de handler async: um `await loadRun` que
+ * lança (EISDIR, EACCES, JSON corrompido) virava unhandledRejection e DERRUBAVA
+ * o processo. O wrapper manda o erro ao error handler do app (500 tratado).
+ */
+function ah(fn: (req: Request, res: Response, next: NextFunction) => Promise<void>): RequestHandler {
+  return (req, res, next) => {
+    fn(req, res, next).catch(next);
+  };
+}
+
+/** 500 com mensagem pública (sem caminho absoluto). */
+function fail500(res: Response, err: unknown): void {
+  res.status(500).json({ error: publicErrorMessage(err) });
+}
 
 const HEADER_NAME = 'x-openrouter-key';
 
@@ -33,7 +69,7 @@ function requireKey(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-router.post('/validate-key', async (req, res) => {
+router.post('/validate-key', ah(async (req, res) => {
   const key = extractKey(req) ?? (req.body?.apiKey as string | undefined);
   if (!key) {
     res.status(400).json({ ok: false, error: 'Key ausente.' });
@@ -41,18 +77,18 @@ router.post('/validate-key', async (req, res) => {
   }
   const result = await validateKey(key);
   res.status(result.ok ? 200 : 401).json(result);
-});
+}));
 
-router.get('/models', requireKey, async (req, res) => {
+router.get('/models', requireKey, ah(async (req, res) => {
   try {
     const models = await listModels((req as Request & { apiKey: string }).apiKey);
     res.json({ data: models });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    fail500(res, err);
   }
-});
+}));
 
-router.post('/runs', requireKey, async (req, res) => {
+router.post('/runs', requireKey, ah(async (req, res) => {
   const parsed = runConfigSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Config invalida', details: parsed.error.flatten() });
@@ -90,9 +126,9 @@ router.post('/runs', requireKey, async (req, res) => {
     const { runId } = startRun(cfg as CompareConfig, apiKey);
     res.status(202).json({ runId });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    fail500(res, err);
   }
-});
+}));
 
 // Biblioteca curada de tecnicas de variacao (sem o meta-prompt). Nao exige key.
 router.get('/techniques', (_req, res) => {
@@ -105,16 +141,16 @@ router.get('/lgpd', (_req, res) => {
   res.json({ data: getLgpdData() });
 });
 
-router.get('/runs', async (_req, res) => {
+router.get('/runs', ah(async (_req, res) => {
   try {
     const data = await listRuns();
     res.json({ data });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    fail500(res, err);
   }
-});
+}));
 
-router.get('/runs/:id', async (req, res) => {
+router.get('/runs/:id', ah(async (req, res) => {
   try {
     const record = await loadRun(req.params.id);
     if (!record) {
@@ -123,13 +159,14 @@ router.get('/runs/:id', async (req, res) => {
     }
     res.json(record);
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    fail500(res, err);
   }
-});
+}));
 
 // SSE: nao exige key (a key so e necessaria para INICIAR a run, nao para acompanhar)
-router.get('/runs/:id/events', async (req, res) => {
+router.get('/runs/:id/events', ah(async (req, res) => {
   const runId = req.params.id;
+  // Lança (EISDIR…) ANTES dos headers de SSE: o `ah` responde 500 em JSON.
   const record = await loadRun(runId);
   if (!record) {
     res.status(404).json({ error: 'Run nao encontrada' });
@@ -150,8 +187,9 @@ router.get('/runs/:id/events', async (req, res) => {
 
   send({ type: 'snapshot', record });
 
-  const isTerminal =
-    record.status === 'finished' || record.status === 'error' || record.status === 'aborted';
+  // Helper único (IMPL-004): lista solta esquecia 'inconclusive' e o cliente
+  // ficava pendurado num stream que nunca mais emitiria nada.
+  const isTerminal = isTerminalRunStatus(record.status);
   if (isTerminal) {
     // evento terminal correto: 'error' vira run.error (UI mostra o motivo),
     // o resto vira run.finished. Em ambos o cliente fecha o EventSource.
@@ -180,7 +218,7 @@ router.get('/runs/:id/events', async (req, res) => {
     clearInterval(keepAlive);
     unsubscribe();
   });
-});
+}));
 
 function csvEscape(value: unknown): string {
   const s = value === undefined || value === null ? '' : String(value);
@@ -188,7 +226,7 @@ function csvEscape(value: unknown): string {
   return s;
 }
 
-router.get('/runs/:id/export.csv', async (req, res) => {
+router.get('/runs/:id/export.csv', ah(async (req, res) => {
   const record = await loadRun(req.params.id);
   if (!record) {
     res.status(404).json({ error: 'Run nao encontrada' });
@@ -263,13 +301,13 @@ router.get('/runs/:id/export.csv', async (req, res) => {
     'Content-Disposition': `attachment; filename="run-${record.id}.csv"`,
   });
   res.send(rows.join('\n'));
-});
+}));
 
 // ---------------------------------------------------------------------------
 // Sessoes de treino (modo training = N iteracoes encadeadas)
 // ---------------------------------------------------------------------------
 
-router.post('/sessions', requireKey, async (req, res) => {
+router.post('/sessions', requireKey, ah(async (req, res) => {
   const parsed = runConfigSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Config invalida', details: parsed.error.flatten() });
@@ -291,19 +329,19 @@ router.post('/sessions', requireKey, async (req, res) => {
     const { sessionId } = await startTraining(parsed.data, apiKey);
     res.status(202).json({ sessionId });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    fail500(res, err);
   }
-});
+}));
 
-router.get('/sessions', async (_req, res) => {
+router.get('/sessions', ah(async (_req, res) => {
   try {
     res.json({ data: await listSessions() });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    fail500(res, err);
   }
-});
+}));
 
-router.get('/sessions/:id', async (req, res) => {
+router.get('/sessions/:id', ah(async (req, res) => {
   try {
     const record = await loadSession(req.params.id);
     if (!record) {
@@ -312,11 +350,11 @@ router.get('/sessions/:id', async (req, res) => {
     }
     res.json(record);
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    fail500(res, err);
   }
-});
+}));
 
-router.get('/sessions/:id/events', async (req, res) => {
+router.get('/sessions/:id/events', ah(async (req, res) => {
   const sessionId = req.params.id;
   const record = await loadSession(sessionId);
   if (!record) {
@@ -338,8 +376,9 @@ router.get('/sessions/:id/events', async (req, res) => {
 
   send({ type: 'snapshot', record });
 
-  const isTerminal =
-    record.status === 'finished' || record.status === 'error' || record.status === 'aborted';
+  // Helper único (IMPL-004): lista solta esquecia 'inconclusive' e o cliente
+  // ficava pendurado num stream que nunca mais emitiria nada.
+  const isTerminal = isTerminalRunStatus(record.status);
   if (isTerminal) {
     if (record.status === 'error') {
       send({ type: 'session.error', sessionId, error: record.error ?? 'Sessao terminou com erro.' });
@@ -366,7 +405,7 @@ router.get('/sessions/:id/events', async (req, res) => {
     clearInterval(keepAlive);
     unsubscribe();
   });
-});
+}));
 
 export type { RunRecord, CompetitorResponse };
 

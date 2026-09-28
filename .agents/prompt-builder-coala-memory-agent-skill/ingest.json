@@ -15,6 +15,17 @@
       "type": "semantic",
       "origin": "agent",
       "tags": "docs,readme"
+    },
+    {
+      "name": "docs-archive",
+      "include": [
+        "data/coala-archive/docs/**/*.md",
+        "data/coala-archive/*.md"
+      ],
+      "mode": "markdown",
+      "type": "semantic",
+      "origin": "agent",
+      "tags": "docs,arquivo,{dir}"
     }
   ],
   "graph": {

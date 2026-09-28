@@ -10,9 +10,14 @@
 // erro em PT-BR legível, para a UI exibir num banner sem derrubar nada.
 
 import { z } from 'zod';
+import { checkImportPii, type PiiImportCheck } from './engine/pii.js';
 import { getTechnique } from './techniques.js';
+import { stageLabelIssues } from './engine/groundTruth.js';
+import { validatePromptGroup } from './engine/promptGroup.js';
 import type { ReasoningLevel } from './types.js';
 import type { AgentLimits } from './agent/types.js';
+import { promptContractsSchema } from './engine/contracts.js';
+import type { PromptContracts } from './engine/contracts.js';
 
 /** Valor do campo `format` — versão do contrato do arquivo de configuração. */
 export const ARENA_CONFIG_FORMAT = 'arena-config@1';
@@ -47,6 +52,11 @@ export interface ArenaConfigScenario {
    * LLM. `string` | alternativas | par campo→valor (resposta JSON).
    */
   expected?: string | string[] | Record<string, string | number | boolean>;
+  /**
+   * TODOS os rótulos válidos do cenário (IMPL-003). Obrigatório quando
+   * `expected` é rótulo curto (≤5 palavras) — sem ele o arquivo é recusado.
+   */
+  labelSet?: string[];
 }
 
 /**
@@ -63,12 +73,8 @@ export interface ArenaConfigLibraryRef {
   ids?: string[];
 }
 
-/** Contratos never-break do prompt base (F2/P0.3) — vivem no perfil do prompt. */
-export interface ArenaConfigContracts {
-  neverBreak?: string[];
-  placeholders?: string[];
-  minLengthRatio?: number;
-}
+/** Contratos never-break do prompt base (F2/P0.3) — vivem no perfil do prompt. IMPL-011: + judgeDiff/canaries (3 camadas). */
+export type ArenaConfigContracts = PromptContracts;
 
 /** Contrato do arquivo de configuração importável do assistente Nova Run. */
 export interface ArenaConfigFile {
@@ -123,8 +129,8 @@ export interface ArenaConfigFile {
     reflection?: 'off' | 'deterministic' | 'llm';
     /** Pool Pareto (F4.1): >1 = população de prompts em vez do campeão único. */
     paretoPool?: number;
-    /** Sequential halving (F4.3): triagem barata corta variantes perdedoras cedo. */
-    halving?: boolean;
+    // `halving` foi descontinuado (IMPL-012): arquivo antigo que o traga ainda
+    // é aceito — o zod descarta a chave e `parseArenaConfig` devolve um aviso.
     /** Aceito aqui por compat; o lugar canônico é a raiz do arquivo. */
     duels?: boolean;
     /** Aceito aqui por compat; o lugar canônico é a raiz do arquivo. */
@@ -139,6 +145,15 @@ export interface ArenaConfigFile {
   judging?: { reference?: boolean; passes?: 1 | 2 };
   limits?: { maxOutputTokens?: number; timeoutMs?: number; concurrency?: number }; // int positivos
   compliance?: { area: string; includeRessalvas: boolean };
+  /** Dado pessoal (IMPL-042): 'synthetic' = "só sintético" (recusa dado de aparência real). */
+  piiMode?: 'redact' | 'synthetic';
+  /**
+   * Revisei o dado pessoal apontado na importação e pode seguir (modo 'redact':
+   * identificadores pseudonimizados no envio; nomes NÃO cobertos). Explícito no
+   * arquivo ou via `parseArenaConfig(json, { allowPii: true })` (CLI `--allow-pii`,
+   * botão "Revisei" da SPA) — que o grava aqui para a run herdar a revisão.
+   */
+  allowPii?: boolean;
 }
 
 // ----------------------------------------------------------------------------
@@ -158,8 +173,17 @@ export interface ArenaAgentTaskConfig {
   repo?: { kind: 'git'; url?: string; path?: string; ref: string; shallow?: boolean };
   setup?: { cmd: string; timeoutMs?: number }[];
   files?: { path: string; content: string }[];
-  verify?: { label?: string; cmd: string; expectExit?: number; timeoutMs?: number; weight?: number }[];
+  verify?: {
+    label?: string;
+    cmd: string;
+    expectExit?: number;
+    timeoutMs?: number;
+    weight?: number;
+    kind?: 'fail_to_pass' | 'pass_to_pass';
+  }[];
   forbiddenPaths?: string[];
+  rebuild?: { cmd?: string; lockfiles?: string[]; protect?: string[]; timeoutMs?: number };
+  detectors?: 'off' | 'warn' | 'fail';
   contextFiles?: boolean;
   limits?: ArenaAgentConfigLimits;
 }
@@ -176,7 +200,14 @@ export interface ArenaAgentConfigAgent {
   repetitions?: number; // int 1..10
   maxParallel?: number; // int 1..32
   limits: ArenaAgentConfigLimits;
-  isolation?: { kind?: 'worktree' | 'clone' | 'container'; keepWorkspace?: boolean; image?: string };
+  isolation?: {
+    kind?: 'worktree' | 'clone' | 'container';
+    keepWorkspace?: boolean;
+    /** Tag ou digest; o `docker run` usa SEMPRE o digest sha256 (IMPL-036). */
+    image?: string;
+    /** Runtime OCI opt-in (ex.: `runsc` = gVisor) — alto risco, fora do default. */
+    runtime?: string;
+  };
 }
 
 /** Contrato do arquivo de configuração do MODO AGENTE (`arena-agent-config@1`). */
@@ -236,6 +267,13 @@ const scenarioSchema = z.object({
       z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
     ])
     .optional(),
+  // Todos os rotulos validos (IMPL-003): obrigatorio com `expected` curto —
+  // a regra (`labelSetIssue`) roda no superRefine da config.
+  labelSet: z
+    .array(z.string('labelSet deve ser lista de textos').min(1, 'rótulo vazio em labelSet'), 'labelSet deve ser uma lista de rótulos')
+    .min(1, 'labelSet não pode ser vazio')
+    .max(200, 'labelSet não pode passar de 200 rótulos')
+    .optional(),
 });
 
 // Referencia a biblioteca de cenarios persistente (`scenarios.from: 'library'`).
@@ -248,18 +286,8 @@ const libraryRefSchema = z.object(
   'library deve ser { from: "library", profile, ids? }',
 );
 
-const contractsSchema = z.object(
-  {
-    neverBreak: z.array(z.string()).optional(),
-    placeholders: z.array(z.string()).optional(),
-    minLengthRatio: z
-      .number('minLengthRatio deve ser número')
-      .min(0, 'mínimo 0')
-      .max(1, 'máximo 1')
-      .optional(),
-  },
-  'contracts deve ser um objeto { neverBreak?, placeholders?, minLengthRatio? }',
-);
+// Fonte única (IMPL-011): neverBreak/placeholders/minLengthRatio + judgeDiff/canaries.
+const contractsSchema = promptContractsSchema;
 
 const modelsSchema = z.object(
   {
@@ -295,7 +323,12 @@ const modelsSchema = z.object(
   'models deve ser um objeto com { datagen, judges }',
 );
 
-const arenaConfigSchema = z
+/**
+ * Schema zod do `arena-config@1`. Exportado para o `config schema` publicar o
+ * JSON Schema correspondente (IMPL-093): o validador real é este, não uma
+ * reimpressão que pudesse divergir.
+ */
+export const arenaConfigSchema = z
   .object(
     {
       format: z.literal(ARENA_CONFIG_FORMAT),
@@ -389,7 +422,9 @@ const arenaConfigSchema = z
               .enum(['off', 'deterministic', 'llm'], "deve ser 'off', 'deterministic' ou 'llm'")
               .optional(),
             paretoPool: z.number().int().min(0).max(8).optional(),
-            halving: z.boolean('deve ser boolean').optional(),
+            // `halving`: descontinuado (IMPL-012) — fora do schema de propósito; o
+            // zod descarta a chave (qualquer valor) e o aviso sai de
+            // `deprecationWarnings`, então arquivo antigo nunca quebra.
             // Compat: `duels`/`finalists` valem para todos os modos e moram na
             // raiz; aceitos aqui para não invalidar arquivos antigos.
             duels: z.boolean('deve ser boolean').optional(),
@@ -454,11 +489,23 @@ const arenaConfigSchema = z
           'compliance deve ser um objeto com { area, includeRessalvas }',
         )
         .optional(),
+      piiMode: z.enum(['redact', 'synthetic'], "piiMode deve ser 'redact' ou 'synthetic'").optional(),
+      allowPii: z.boolean('allowPii deve ser true ou false').optional(),
     },
     'O arquivo deve ser um objeto de configuração',
   )
   .superRefine((cfg, ctx) => {
     const { mode, models, variation } = cfg;
+
+    // Rótulo esperado curto sem `labelSet` = erro de config (IMPL-003,
+    // R-03b:DEC-4): sem o conjunto de rótulos o verificador estrito não
+    // reconhece a resposta que lista/hesita entre rótulos. Fica aqui (e não no
+    // item do array) para a mensagem sair nomeando o cenário, não o union.
+    if (Array.isArray(cfg.scenarios)) {
+      for (const { index, message } of stageLabelIssues(cfg.scenarios)) {
+        ctx.addIssue({ code: 'custom', path: ['scenarios', index, 'labelSet'], message });
+      }
+    }
 
     // compare: o eixo de competidores é XOR — modelos distintos OU configs.
     if (mode === 'compare') {
@@ -528,6 +575,16 @@ const arenaConfigSchema = z
         }
       }
     }
+    // Multi-prompt (F2/P0.4): a MESMA regra do runConfigSchema — grupo com >1
+    // prompt exige promptId, e o id precisa existir no grupo. Sem ela a SPA
+    // aceitava o arquivo e `composePrompt` descartava a variante: todo
+    // contestant recebia o mesmo prompt e a run paga não media nada (IMPL-045).
+    if (cfg.prompt?.group) {
+      const grupo = validatePromptGroup({ prompts: cfg.prompt.group }, cfg.prompt.promptId);
+      if (!grupo.ok) {
+        ctx.addIssue({ code: 'custom', path: ['prompt', 'group'], message: grupo.error! });
+      }
+    }
   });
 
 // Converte os issues do zod numa frase PT-BR com o caminho do campo —
@@ -553,7 +610,10 @@ function descreverIssues(error: z.ZodError): string {
  */
 export function parseArenaConfig(
   json: unknown,
-): { ok: true; config: ArenaConfigFile } | { ok: false; error: string } {
+  opts: { allowPii?: boolean } = {},
+):
+  | { ok: true; config: ArenaConfigFile; warnings?: string[] }
+  | { ok: false; error: string; pii?: PiiImportCheck } {
   // O discriminador `format` é checado à mão ANTES do zod, para garantir a
   // mensagem exata quando o arquivo não é uma configuração (ou é de outra versão).
   const formato =
@@ -567,7 +627,33 @@ export function parseArenaConfig(
   }
   const result = arenaConfigSchema.safeParse(json);
   if (!result.success) return { ok: false, error: descreverIssues(result.error) };
-  return { ok: true, config: result.data };
+  // LGPD (IMPL-042): dado pessoal de aparência real BLOQUEIA a importação com
+  // aviso nomeando o campo — nunca corrige em silêncio. `allowPii` = o usuário
+  // revisou e confirmou (os identificadores seguem pseudonimizados no envio).
+  if (!opts.allowPii && result.data.allowPii !== true) {
+    const pii = checkImportPii(result.data);
+    if (!pii.ok) return { ok: false, error: pii.message!, pii };
+  }
+  const config = opts.allowPii ? { ...result.data, allowPii: true } : result.data;
+  const warnings = deprecationWarnings(json);
+  return warnings.length ? { ok: true, config, warnings } : { ok: true, config };
+}
+
+/** Aviso de `training.halving`, descontinuado no IMPL-012 (lido e ignorado, nunca erro). */
+export const HALVING_DEPRECATED_WARNING =
+  'training.halving foi descontinuado e será ignorado: a triagem cobrava uma run completa, ' +
+  'não eliminava nenhuma variante e descartava as respostas (IMPL-012). Remova a chave do arquivo.';
+
+/**
+ * Chaves descontinuadas presentes no JSON CRU (o zod já as descartou do
+ * `config`). Vazio = nada a avisar; o chamador narra os avisos (stderr no CLI).
+ */
+function deprecationWarnings(json: unknown): string[] {
+  const training = (json as { training?: unknown }).training;
+  if (training && typeof training === 'object' && 'halving' in training) {
+    return [HALVING_DEPRECATED_WARNING];
+  }
+  return [];
 }
 
 /**
@@ -681,6 +767,10 @@ const agentTaskSchema = z
               expectExit: z.number('deve ser número inteiro').int('deve ser número inteiro').optional(),
               timeoutMs: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
               weight: z.number('deve ser número').positive('deve ser maior que zero').optional(),
+              // IMPL-039: F2P (default) × P2P (regressão: quebrar = falha).
+              kind: z
+                .enum(['fail_to_pass', 'pass_to_pass'], 'kind deve ser "fail_to_pass" ou "pass_to_pass"')
+                .optional(),
             },
             'cada verify deve ser { cmd }',
           ),
@@ -688,6 +778,19 @@ const agentTaskSchema = z
         )
         .optional(),
       forbiddenPaths: z.array(z.string('caminho deve ser texto'), 'deve ser uma lista de caminhos').optional(),
+      // IMPL-039: rebuild de dependências do lockfile do seed antes do verify[].
+      rebuild: z
+        .object(
+          {
+            cmd: z.string('cmd deve ser texto').min(1, 'cmd não pode ser vazio').optional(),
+            lockfiles: z.array(z.string('caminho deve ser texto'), 'lockfiles deve ser uma lista').optional(),
+            protect: z.array(z.string('caminho deve ser texto'), 'protect deve ser uma lista').optional(),
+            timeoutMs: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
+          },
+          'rebuild deve ser um objeto',
+        )
+        .optional(),
+      detectors: z.enum(['off', 'warn', 'fail'], 'detectors deve ser "off", "warn" ou "fail"').optional(),
       contextFiles: z.boolean('contextFiles deve ser boolean').optional(),
       limits: agentLimitsSchema.optional(),
     },
@@ -723,6 +826,12 @@ const agentConfigSchema = z
             kind: z.enum(['worktree', 'clone', 'container'], "deve ser 'worktree', 'clone' ou 'container'").optional(),
             keepWorkspace: z.boolean('keepWorkspace deve ser boolean').optional(),
             image: z.string('image deve ser texto').optional(),
+            // Runtime OCI opt-in (gVisor = 'runsc'); mesmo formato que o daemon
+            // registra (RUNTIME_NAME_RE em src/agent/container.ts).
+            runtime: z
+              .string('runtime deve ser texto')
+              .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'runtime deve ser um nome de runtime Docker (ex.: runsc)')
+              .optional(),
           },
           'isolation deve ser um objeto',
         )

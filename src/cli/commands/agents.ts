@@ -1,14 +1,16 @@
 // `agents` — a superfície CLI do MODO AGENTE (Agent Arena, plano §22).
 //
 // Subcomandos:
-//   doctor   [--deep] [--container] [--json]   pré-voo do executor (pi) + canário de sala limpa
+//   doctor   [--deep] [--container] [--config <arq>] [--json]   pré-voo do executor (pi) + canário de sala limpa
 //   run      --config <arq> --budget .. roda a arena até o fim (+ --dry-run)
 //   show     <runId> [--json]           record (loadRun) + execução via store
 //   list     [--json]                   varre <dataDir>/agent-runs/<runId>
 //   logs     <runId> --stage N --contestant <id> [--rep N] [--what ...]
 //   replay   <runId> --stage N --contestant <id> [--rep N]
-//   reconcile <runId> [--json]        custo derivado + reconciliação (§20.4)
+//   reconcile <runId> [--generations] [--json]  custo medido (proxy) × derivado × cobrado (§20.4, IMPL-035)
 //   gc       [--older-than 30d] [--dry-run]
+//   task     validate <arq> [--repetitions N]   as 6 checagens bloqueantes de uma tarefa (IMPL-097) — SÓ aqui, nunca na run
+//   task     compile  <arq> --out-dir <dir>     compila a tarefa para o layout Harbor pinado (IMPL-098)
 //
 // Contrato de saída idêntico ao resto do CLI: stdout é PAYLOAD, stderr é narração.
 // A regra de ouro: NENHUM destes comandos interfere nos comandos existentes de
@@ -17,25 +19,55 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { runToCompletion } from '../../orchestrator.js';
 import { prepareOptsFor } from '../../prepareRun.js';
 import { parseArenaAgentConfig } from '../../configFile.js';
 import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
-import { runPreflight } from '../../agent/doctor.js';
+import { runPreflight, type PreflightOpts } from '../../agent/doctor.js';
+import { agentVerdictTreeVersionOf, classifyStop } from '../../agent/verdictTree.js';
+import { defaultPiImageTag } from '../../agent/container.js';
+import { compileAgentTaskToHarbor, HARBOR_VERSION } from '../../agent/harbor.js';
+import { parseAgentTaskSpec } from '../../agent/taskSchema.js';
+import { validateAgentTask, type TaskValidationReport } from '../../agent/taskValidate.js';
+import {
+  COST_FIDELITY_TOLERANCE,
+  reconcileGenerations,
+  summarizeProxyCostLog,
+  type GenerationReconciliation,
+} from '../../agent/costProxy.js';
+import { getGateway } from '../../openrouter.js';
 import {
   agentRunsRoot,
   execDir,
   readArtifact,
   readExecutionRef,
 } from '../../agent/store.js';
-import { loadRun, getDataDir } from '../../storage.js';
+import { ensurePrivateDataDir, loadRun, getDataDir, writePrivateDataFile } from '../../storage.js';
+import { isValidRecordId } from '../../pathSafety.js';
 import { subscribe } from '../../events.js';
-import { buildContext, isAgentContext, parse, resolveKey } from '../context.js';
-import { CliError, EXIT, fmtUsd, renderSpend } from '../output.js';
+import {
+  assertNoUnknownConfigKeys,
+  buildContext,
+  isAgentContext,
+  limitList,
+  loadCatalog,
+  parse,
+  parseListLimit,
+  readJsonFile,
+  resolveHome,
+  resolveKey,
+  tryResolveKey,
+  type LoadedCatalog,
+} from '../context.js';
+import { budgetRequiredError, budgetUsdOf, keyRequirement, toRefusal, type BudgetChoice } from '../preflight.js';
+import { CliError, EXIT, failAndExit, fmtUsd, isCliError, renderSpend } from '../output.js';
 import { emitRunEvent } from '../ndjson.js';
-import type { RunRecord, RunConfig } from '../../types.js';
+import { openSpendGuards, spendGuardRefusals, type SpendGuards } from '../spendGuards.js';
+import { forceExitNow, installGracefulStop } from '../runControl.js';
+import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
+import type { RunRecord, RunConfig, OpenRouterModel } from '../../types.js';
 import type { AgentRunnerConfig, ExecutionRef } from '../../agent/types.js';
 
 /** Versão pinada do executor `pi` (plano §22/§26). Divergência => doctor falha. */
@@ -56,48 +88,176 @@ function n(v: unknown, campo: string): number | undefined {
   return x;
 }
 
-/** `--budget <usd|none>`; ausente e sem TTY => EXIT.USAGE sem gastar (mesma regra do chat). */
-function resolveBudget(value: unknown, warn: (m: string) => void): number | undefined {
+/**
+ * `--budget <usd|none>`; ausente e sem TTY => recusa `usage.budget_required`
+ * (mesma regra, mesma mensagem e mesmo código do chat — `../preflight.ts`). A
+ * recusa em si fica para o chamador: o `--dry-run` a reporta com a estimativa.
+ */
+function resolveBudget(value: unknown, warn: (m: string) => void): BudgetChoice {
   if (typeof value === 'string' && value.trim()) {
-    if (value.trim().toLowerCase() === 'none') return undefined;
+    if (value.trim().toLowerCase() === 'none') return { kind: 'none' };
     const v = Number(value);
     if (!Number.isFinite(v) || v <= 0) {
-      throw new CliError('--budget deve ser um valor em USD maior que zero, ou "none".', EXIT.USAGE);
+      throw new CliError('--budget deve ser um valor em USD maior que zero, ou "none".', EXIT.USAGE, { value }, {
+        code: 'usage.invalid_budget',
+        hint: 'Use `--budget 5` (teto de US$ 5) ou `--budget none` (sem teto, assumindo o custo).',
+      });
     }
-    return v;
+    return { kind: 'usd', usd: v };
   }
-  if (isAgentContext()) {
-    throw new CliError(
-      'Faltou definir orçamento. Escolha explicitamente:\n' +
-        '  --budget 5      teto de US$ 5 para esta execução\n' +
-        '  --budget none   sem teto (assumindo o custo)\n' +
-        '(a exigência vale fora de um terminal interativo — nada foi gasto)',
-      EXIT.USAGE,
-    );
-  }
+  if (isAgentContext()) return { kind: 'missing' };
   warn('Sem --budget: rodando SEM teto de gasto.');
-  return undefined;
+  return { kind: 'unset' };
 }
 
-/** Lê e valida um `arena-agent-config@1` -> RunConfig (nunca lança por config). */
-async function readAgentConfigFile(file: string): Promise<RunConfig> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(file, 'utf-8');
-  } catch {
-    throw new CliError(`Não consegui ler o arquivo "${file}".`, EXIT.USAGE);
-  }
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch (err) {
-    throw new CliError(`"${file}" não é um JSON válido: ${(err as Error).message}`, EXIT.CONFIG);
-  }
+/**
+ * Lê e valida um `arena-agent-config@1` -> RunConfig (nunca lança por config).
+ * Além do schema: fail-closed de chaves desconhecidas (IMPL-093) e contenção
+ * de `files[]` ao workspace (IMPL-099/E6) — ANTES de qualquer execução.
+ */
+export async function readAgentConfigFile(file: string): Promise<RunConfig> {
+  // Leitor comum do CLI: caminho errado = uso (2), JSON quebrado = config (3).
+  const json = await readJsonFile(file);
   const parsed = parseArenaAgentConfig(json);
   if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG);
+  // IMPL-093: chave que o parser descartaria em silêncio é ERRO (fail-closed).
+  assertNoUnknownConfigKeys(json, parsed.config);
+  // IMPL-099 (E6): `files[].path` contido ao workspace, por validação (exit 3).
+  assertAgentFilesContained(parsed.config);
   const conv = arenaAgentConfigToRunConfig(parsed.config);
   if (!conv.ok) throw new CliError(conv.error, EXIT.CONFIG);
   return conv.config;
+}
+
+/**
+ * Contenção de `files[]` ao workspace (IMPL-099, E6): caminho absoluto ou
+ * `../` escrevia FORA do workspace (`writeFileNoFollow` do engine também
+ * barra na escrita — aqui a recusa é VALIDAÇÃO, exit 3, antes de rodar nada).
+ * A regra é a mesma do engine: `path.resolve(workspace, rel)` tem de voltar
+ * para dentro da raiz.
+ */
+export function assertAgentFilesContained(config: {
+  scenarios?: { agentTask?: { files?: { path?: unknown }[] } }[];
+}): void {
+  const ruins: { scenario: number; path: string }[] = [];
+  const cenarios = config.scenarios ?? [];
+  cenarios.forEach((c, i) => {
+    for (const f of c.agentTask?.files ?? []) {
+      const rel = typeof f.path === 'string' ? f.path : '';
+      if (!caminhoRelativoSeguro(rel)) ruins.push({ scenario: i + 1, path: rel });
+    }
+  });
+  if (ruins.length === 0) return;
+  const citados = ruins.slice(0, 5).map((r) => `cenário ${r.scenario}: "${r.path}"`).join('; ');
+  throw new CliError(
+    `files[].path fora do workspace: ${citados}. Use caminhos RELATIVOS à raiz do workspace ` +
+      '(sem "/" inicial, sem ".." e sem caminho absoluto).',
+    EXIT.CONFIG,
+    { filesOutsideWorkspace: ruins },
+    {
+      code: 'config.files_path_escapes_workspace',
+      hint:
+        'Cada files[].path é gravado dentro do workspace da execução — caminho absoluto ou "../" ' +
+        'escapa dele e é recusado. Corrija o arquivo e rode `prompt-builder config validate <arq>`.',
+    },
+  );
+}
+
+/** Relativo, não-vazio e sem fuga do workspace (mesma régua do `writeFileNoFollow`). */
+function caminhoRelativoSeguro(rel: string): boolean {
+  if (!rel.trim()) return false;
+  const base = '/workspace-raiz';
+  const alvo = path.resolve(base, rel);
+  const norm = path.relative(base, alvo);
+  return norm !== '' && !norm.startsWith('..') && !path.isAbsolute(norm);
+}
+
+// ---------------------------------------------------------------------------
+// Portão de config EXECUTÁVEL (IMPL-099, R-15:REC-6)
+// ---------------------------------------------------------------------------
+//
+// `arena-agent-config` executa `setup[]`/`verify[]` na máquina de quem roda —
+// config é conteúdo NÃO confiável quando o autor é um LLM. O portão tem duas
+// peças: flag explícita (`--allow-exec-config`; no MCP, `allowExecConfig`) e
+// pin SHA-256 do conteúdo gravado no PRIMEIRO aceite. Conteúdo muda ⇒ hash muda
+// ⇒ a revisão revive (aprovação é ÚNICA por conteúdo).
+
+const EXEC_APPROVALS_FILE = 'exec-config-approvals.json';
+
+interface ExecApprovalStore {
+  version: 1;
+  approvals: Record<string, { identity: string; approvedAt: string; command: string }>;
+}
+
+export function sha256Hex(text: string): string {
+  return createHash('sha256').update(text, 'utf-8').digest('hex');
+}
+
+function execApprovalsPath(dataDir: string): string {
+  return path.join(dataDir, EXEC_APPROVALS_FILE);
+}
+
+/**
+ * Confere (e grava) a aprovação de um config executável. `identity` é estável
+ * por config (caminho absoluto do arquivo ou `mcp:<tool>`); `content` é o que
+ * vai para o hash. Sem aceite pinado ⇒ recusa `config.exec_not_approved`;
+ * conteúdo mudou desde o aceite ⇒ recusa `config.exec_hash_changed`. Ambas
+ * exit 3 e com a instrução EXATA de como aprovar.
+ */
+export async function ensureExecConfigApproved(opts: {
+  dataDir: string;
+  content: string;
+  identity: string;
+  /** Rótulo do erro (o caminho como o usuário digitou; nunca o absoluto). */
+  label: string;
+  /** Comando exato a citar na dica (ex.: `agents run --config x.json`). */
+  command: string;
+  allowExecConfig: boolean;
+}): Promise<{ hash: string; firstApproval: boolean }> {
+  const hash = sha256Hex(opts.content);
+  const file = execApprovalsPath(opts.dataDir);
+  let store: ExecApprovalStore = { version: 1, approvals: {} };
+  try {
+    const lido = JSON.parse(await fs.readFile(file, 'utf-8')) as ExecApprovalStore;
+    if (lido && typeof lido === 'object' && typeof lido.approvals === 'object' && lido.approvals) {
+      store = lido;
+    }
+  } catch {
+    /* primeiro uso: sem store ainda */
+  }
+  const pinado = store.approvals[hash];
+  if (pinado) return { hash, firstApproval: false };
+
+  const anterior = Object.values(store.approvals).find((a) => a.identity === opts.identity);
+  if (!opts.allowExecConfig) {
+    if (anterior) {
+      throw new CliError(
+        `O conteúdo de "${opts.label}" mudou desde a aprovação de ${anterior.approvedAt.slice(0, 10)}: ` +
+          'a revisão revive (setup/verify/files executam comandos).',
+        EXIT.CONFIG,
+        { label: opts.label, previousApprovedAt: anterior.approvedAt, currentHash: hash },
+        {
+          code: 'config.exec_hash_changed',
+          hint: `Revise o que mudou e aprove de novo: \`${opts.command} --allow-exec-config\`.`,
+        },
+      );
+    }
+    throw new CliError(
+      `Config executável SEM aprovação: "${opts.label}" traz comandos (setup[]/verify[]) que rodam ` +
+        'nesta máquina e ninguém aprovou este conteúdo.',
+      EXIT.CONFIG,
+      { label: opts.label, hash },
+      {
+        code: 'config.exec_not_approved',
+        hint:
+          `Aprove UMA vez com \`${opts.command} --allow-exec-config\` — o SHA-256 fica pinado e o MESMO ` +
+          'conteúdo passa sem flag depois; qualquer mudança exige nova aprovação.',
+      },
+    );
+  }
+  store.approvals[hash] = { identity: opts.identity, approvedAt: new Date().toISOString(), command: opts.command };
+  await writePrivateDataFile(file, `${JSON.stringify(store, null, 2)}\n`);
+  return { hash, firstApproval: true };
 }
 
 /** Ajusta `config.agent` pelas flags `--repetitions/--max-parallel/--keep-workspace`. */
@@ -124,10 +284,19 @@ function applyAgentOverrides(
 export interface AgentRunSummary {
   executions: number;
   failed: number;
+  /** Só canceladas (sinal de controle) — as únicas fora do placar (IMPL-032). */
   incomplete: number;
+  /** Cortadas por limite (timeout/maxTurns/maxCost/maxOutput) — contam 'nao'. */
+  limitCut: number;
   avgTurns: number;
   avgCostUsd: number;
   oracleRate: number;
+  /** Versão da árvore de veredito (1 = legado: corte por limite fora do denominador). */
+  verdictTreeVersion?: number;
+  /** IMPL-033: reps com falha do juiz após 2 retentativas (nota ficou com o oráculo). */
+  judgeErrors?: number;
+  /** IMPL-033: reps sem veredito (execução inválida / juiz falho sem oráculo). */
+  unscoredReps?: number;
 }
 
 function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
@@ -140,6 +309,7 @@ function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
   if (exes.length === 0) return undefined;
   let failed = 0;
   let incomplete = 0;
+  let limitCut = 0;
   let turnsSum = 0;
   let costSum = 0;
   let oraclePassed = 0;
@@ -147,11 +317,10 @@ function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
   for (const r of exes) {
     turnsSum += r.execution.turns;
     costSum += r.costUsd;
-    if (r.execution.stopReason === 'error') {
-      failed += 1;
-    } else if (r.execution.stopReason !== 'completed') {
-      incomplete += 1;
-    }
+    const cls = classifyStop(r.execution.stopReason);
+    if (cls === 'error') failed += 1;
+    else if (cls === 'limit') limitCut += 1;
+    else if (cls === 'cancelled') incomplete += 1;
     if (r.execution.oracle) {
       oraclePassed += r.execution.oracle.passed;
       oracleTotal += r.execution.oracle.passed + r.execution.oracle.failed;
@@ -161,9 +330,15 @@ function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
     executions: exes.length,
     failed,
     incomplete,
+    limitCut,
     avgTurns: turnsSum / exes.length,
     avgCostUsd: costSum / exes.length,
     oracleRate: oracleTotal > 0 ? oraclePassed / oracleTotal : 0,
+    verdictTreeVersion: agentVerdictTreeVersionOf(record),
+    ...(record.agentJudgeErrorCount !== undefined ? { judgeErrors: record.agentJudgeErrorCount } : {}),
+    ...(record.agentUnscoredRepsByContestant
+      ? { unscoredReps: Object.values(record.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0) }
+      : {}),
   };
 }
 
@@ -176,7 +351,7 @@ function firstAgentError(record: RunRecord): string | undefined {
   return record.error;
 }
 
-/** Código de saída do desfecho — 130/7/1/0, sem inventar código novo (§22). */
+/** Código de saída do desfecho — 130/7/1/6/0 (o 6 é o INCONCLUSIVE do IMPL-004). */
 function exitFor(record: RunRecord, summary: AgentRunSummary | undefined): number {
   if (record.stoppedReason === 'cancelled') return EXIT.SIGINT;
   if (record.budgetExhausted || record.stoppedReason === 'budget') return EXIT.BUDGET;
@@ -186,6 +361,8 @@ function exitFor(record: RunRecord, summary: AgentRunSummary | undefined): numbe
     return EXIT.ERROR;
   }
   if (record.status === 'error') return EXIT.ERROR;
+  // IMPL-004: terminou, mas a evidencia nao sustenta conclusao.
+  if (record.status === 'inconclusive') return EXIT.INCONCLUSIVE;
   return EXIT.OK;
 }
 
@@ -207,6 +384,23 @@ function refFor(
   };
 }
 
+/**
+ * IMPL-024: o runId vira segmento de caminho (`runs/<id>.json`,
+ * `agent-runs/<id>/…`) — regex estrita ANTES de tocar o disco, exit 2 (uso) e
+ * sem ecoar o valor recebido. A contenção de `resolveUnderAgentRuns` continua
+ * valendo para o resto do caminho (etapa/contestante/rep).
+ */
+function assertRunIdArg(runId: string): void {
+  if (!isValidRecordId(runId)) {
+    throw new CliError('Id de run inválido: use o id listado em `prompt-builder agents list`.', EXIT.USAGE);
+  }
+}
+
+/** Onde procurar, SEM caminho absoluto (IMPL-024): relativo ao data dir. */
+function noDataDir(rel: string): string {
+  return `${rel.split(path.sep).join('/')} (relativo ao diretório de dados)`;
+}
+
 /** Resolve um dir relativo sob agentRunsRoot() e valida que não escapa (path traversal, §21.6). */
 function resolveUnderAgentRuns(refDir: string): string {
   const root = path.resolve(agentRunsRoot());
@@ -222,16 +416,41 @@ function resolveUnderAgentRuns(refDir: string): string {
 // doctor
 // ---------------------------------------------------------------------------
 
+/**
+ * O isolamento que o `agents doctor` verifica. Com `--config`, o sandbox DAQUELA
+ * run: `isolation.image`/`runtime` do arquivo (e a imagem default da
+ * `executorVersion` dele). Sem isso, o "ok" — inclusive o do canário, cacheado
+ * por imagem/runtime — seria de OUTRO sandbox (imagem default, runc) enquanto a
+ * run usaria outra imagem ou o gVisor. `--container` sozinho = imagem default.
+ */
+export function doctorIsolation(config: RunConfig | undefined, containerFlag: boolean): PreflightOpts['isolation'] {
+  const iso = config?.agent?.isolation;
+  if (config && (iso?.kind === 'container' || containerFlag)) {
+    return {
+      kind: 'container',
+      image: iso?.image ?? defaultPiImageTag(config.agent?.executorVersion ?? EXPECTED_PI_VERSION),
+      ...(iso?.runtime ? { runtime: iso.runtime } : {}),
+    };
+  }
+  return containerFlag ? { kind: 'container' } : undefined;
+}
+
 async function cmdDoctor(argv: string[]): Promise<number> {
   const parsed = parse(argv, {
     deep: { type: 'boolean' },
     model: { type: 'string' },
     container: { type: 'boolean' },
+    config: { type: 'string', short: 'c' },
   });
   const ctx = buildContext(parsed);
   const { out, values } = ctx;
   const deep = values.deep === true;
-  const containerMode = values.container === true;
+
+  const isolation = doctorIsolation(
+    typeof values.config === 'string' ? await readAgentConfigFile(values.config) : undefined,
+    values.container === true,
+  );
+  const containerMode = isolation?.kind === 'container';
 
   // runDir temporário para o doctor (salary: cria doctor-proj/doctor-home).
   let runDir = '';
@@ -240,6 +459,8 @@ async function cmdDoctor(argv: string[]): Promise<number> {
   } catch {
     // se o /tmp não deixar, cai no dataDir — só para o `dfGb` ter um caminho
     runDir = path.join(getDataDir(), 'doctor-tmp');
+    // IMPL-024: dentro do data dir, 0700 (best-effort: o dfGb tolera falha)
+    await ensurePrivateDataDir(runDir).catch(() => undefined);
   }
 
   // key só entra no canário REAL (--deep), via ambiente; nunca por flag. Sem
@@ -252,6 +473,8 @@ async function cmdDoctor(argv: string[]): Promise<number> {
       throw new CliError(
         `--deep exige a key do OpenRouter no ambiente (OPENROUTER_API_KEY): ${(err as Error).message}`,
         EXIT.AUTH,
+        isCliError(err) ? err.details : undefined,
+        { code: 'auth.key_missing', hint: isCliError(err) ? err.hint : undefined },
       );
     }
   }
@@ -266,7 +489,7 @@ async function cmdDoctor(argv: string[]): Promise<number> {
     apiKey,
     model,
     cacheKey: deep ? `pi-v${EXPECTED_PI_VERSION}:${model}` : undefined,
-    isolation: containerMode ? { kind: 'container' } : undefined,
+    isolation,
   });
 
   if (!preflight.ok) {
@@ -287,10 +510,17 @@ async function cmdDoctor(argv: string[]): Promise<number> {
     const d = preflight.docker;
     if (d) {
       if (d.imagePresent) {
-        out.line(`· docker ok (${d.image})`);
+        // O digest é o que a run usa (a tag só serve para achá-lo) — IMPL-036.
+        out.line(`· docker ok (${d.image}${d.digest ? ` → ${d.digest}` : ''})`);
       } else {
         out.warn(`· docker ${d.present ? '' : 'CLI AUSENTE — '}imagem '${d.image ?? '?'}' ausente`);
       }
+    }
+    // Rota de inferência medida DENTRO do sandbox (IMPL-037): relay → proxy, key fora, egress.
+    const route = preflight.inferenceRoute;
+    if (route?.ok) {
+      const egress = route.egressBlocked === null ? 'egress ABERTO (válvula bridge)' : 'egress bloqueado';
+      out.line(`· rota de inferência ok (proxy local via socket; key fora do sandbox; ${egress})`);
     }
     for (const e of preflight.errors) out.warn(e);
   }
@@ -302,15 +532,32 @@ async function cmdDoctor(argv: string[]): Promise<number> {
 // run
 // ---------------------------------------------------------------------------
 
+const AGENTS_RUN_OPTIONS = {
+  config: { type: 'string', short: 'c' },
+  budget: { type: 'string' },
+  'dry-run': { type: 'boolean' },
+  detach: { type: 'boolean' },
+  repetitions: { type: 'string' },
+  'max-parallel': { type: 'string' },
+  'keep-workspace': { type: 'boolean' },
+  // IMPL-031 (revisão): réplica intencional da mesma config, sem o lock.
+  'allow-concurrent': { type: 'boolean' },
+  // IMPL-099: aceite do config EXECUTÁVEL (grava o pin SHA-256 do conteúdo).
+  'allow-exec-config': { type: 'boolean' },
+} as const;
+
 async function cmdRun(argv: string[]): Promise<number> {
-  const parsed = parse(argv, {
-    config: { type: 'string', short: 'c' },
-    budget: { type: 'string' },
-    'dry-run': { type: 'boolean' },
-    repetitions: { type: 'string' },
-    'max-parallel': { type: 'string' },
-    'keep-workspace': { type: 'boolean' },
-  });
+  // IMPL-030: filho de um `--detach` — adota o job e roda o comando de sempre.
+  const jobId = takeDetachedJobId();
+  if (jobId) {
+    const home = resolveHome(parse(argv, AGENTS_RUN_OPTIONS).values);
+    return runAsDetachedChild(jobId, 'agent', home, (hooks) => runAgents(argv, hooks));
+  }
+  return runAgents(argv);
+}
+
+async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<number> {
+  const parsed = parse(argv, AGENTS_RUN_OPTIONS);
   const ctx = buildContext(parsed);
   const { out, values } = ctx;
 
@@ -319,25 +566,70 @@ async function cmdRun(argv: string[]): Promise<number> {
     throw new CliError('Uso: prompt-builder agents run --config <arena-agent-config.json>', EXIT.USAGE);
   }
   const config = await readAgentConfigFile(file);
-  const budgetUsd = resolveBudget(values.budget, (m) => out.warn(m));
+  const budget = resolveBudget(values.budget, (m) => out.warn(m));
+  const budgetUsd = budgetUsdOf(budget);
   const configComOrcamento: RunConfig = {
     ...config,
     ...(budgetUsd !== undefined ? { budgetUsd } : {}),
   };
 
-  // --dry-run: valida, estima e NÃO chama NENHUMA API (nem o catálogo). Sem
-  // catálogo o preço sai 0 — é o preço de "não gastar nada para estimar".
+  // --dry-run: valida, estima COM o catálogo (público sem key — IMPL-029; antes
+  // saía sem catálogo e a estimativa dava $0) e espelha as recusas da execução
+  // real de agentes: orçamento ausente fora de TTY, lock da mesma config e teto
+  // diário esgotado (recusas, na ordem da real — IMPL-031) e key ausente
+  // (pré-condição em `requires`). Nada é gasto.
   if (values['dry-run'] === true) {
-    const est = estimateRunCost(estimateInputFromConfig(configComOrcamento), []);
+    const apiKey = await tryResolveKey(values);
+    let catalog: LoadedCatalog | null = null;
+    try {
+      catalog = await loadCatalog(ctx, apiKey);
+    } catch (err) {
+      if (!isCliError(err)) throw err;
+      // A execução de agentes não recusa por catálogo — aqui é só aviso.
+      out.warn(`sem catálogo (${err.message}) — preços dos papéis de LLM saem 0 na estimativa.`);
+    }
+    const est = estimateRunCost(estimateInputFromConfig(configComOrcamento), catalog?.models ?? []);
+    const guardas = spendGuardRefusals({
+      dataDir: ctx.dataDir,
+      config: applyAgentOverrides(configComOrcamento, values),
+      lock: values['allow-concurrent'] !== true,
+    });
+    const wouldRefuse = [
+      ...(budget.kind === 'missing' ? [toRefusal(budgetRequiredError())] : []),
+      ...guardas.map(toRefusal),
+    ];
+    const requires = apiKey ? [] : [keyRequirement()];
+    const resumo = {
+      dryRun: true,
+      estimate: est,
+      wouldRefuse,
+      requires,
+      checks: {
+        catalog: catalog
+          ? { source: catalog.catalogSource, scope: catalog.catalogScope, models: catalog.models.length }
+          : null,
+        key: apiKey ? 'present' : 'missing',
+      },
+    };
     if (out.isText) {
       out.line(JSON.stringify(configComOrcamento, null, 2));
       out.line();
       out.line(`Custo estimado: ${fmtUsd(est.low)} – ${fmtUsd(est.high)}`);
-      out.line('(sem catálogo no dry-run — preços saem 0; use estimate para números com o catálogo)');
+      for (const r of wouldRefuse) out.line(`  RECUSARIA  ${r.code} — ${r.message.split('\n')[0]}`);
+      for (const r of requires) out.line(`  REQUER     ${r.code} — ${r.message}`);
     }
-    out.result(true, 'agents.run.dry-run', { config: configComOrcamento, estimate: est });
+    const primeira = wouldRefuse[0];
+    if (primeira) {
+      throw new CliError(primeira.message, primeira.exit, resumo, {
+        code: primeira.code,
+        hint: primeira.hint ?? undefined,
+      });
+    }
+    out.result(true, 'agents.run.dry-run', { config: configComOrcamento, ...resumo });
     return EXIT.OK;
   }
+
+  if (budget.kind === 'missing') throw budgetRequiredError();
 
   // execução real: precisa da key (EXIT.AUTH quando ausente).
   let apiKey = '';
@@ -347,14 +639,81 @@ async function cmdRun(argv: string[]): Promise<number> {
     throw new CliError(
       `Exige a key do OpenRouter (OPENROUTER_API_KEY ou \`key set\`): ${(err as Error).message}`,
       EXIT.AUTH,
+      isCliError(err) ? err.details : undefined,
+      { code: 'auth.key_missing', hint: isCliError(err) ? err.hint : undefined },
     );
   }
 
   const runConfigComFlags = applyAgentOverrides(configComOrcamento, values);
 
+  // IMPL-099: portão de config EXECUTÁVEL — o arena-agent-config manda rodar
+  // setup[]/verify[] NESTA máquina e config de origem LLM não é confiável. Sem
+  // hash SHA-256 aprovado nada executa; o aceite é ÚNICO por conteúdo (mudou ⇒
+  // a revisão revive). Fica DEPOIS do --dry-run (que não executa nada) e da
+  // recusa por orçamento ausente (a ordem das recusas é a de sempre).
+  const pin = await ensureExecConfigApproved({
+    dataDir: ctx.dataDir,
+    content: await fs.readFile(file, 'utf-8'),
+    identity: path.resolve(file),
+    label: file,
+    command: `agents run --config ${file}`,
+    allowExecConfig: values['allow-exec-config'] === true,
+  });
+  if (pin.firstApproval) {
+    out.info(
+      `config aprovado (SHA-256 ${pin.hash.slice(0, 12)}…) — o pin fica em ${EXEC_APPROVALS_FILE} e o MESMO ` +
+        'conteúdo passa sem --allow-exec-config.',
+    );
+  }
+
+  // IMPL-030: `--detach` — validado (config, orçamento, key); o FILHO
+  // destacado abre as guardas (lock, teto diário) e roda a run.
+  if (values.detach === true && !detached) {
+    return launchDetached(ctx, {
+      command: 'agents.run',
+      kind: 'agent',
+      argv,
+      budgetUsd,
+      commandPrefix: ['agents', 'run'],
+    });
+  }
+
+  // Catálogo para a reserva otimista do ledger da máquina (sem ele a reserva
+  // por chamada vale 0 e o teto diário só pega DEPOIS do gasto).
+  let modelos: OpenRouterModel[] = [];
+  try {
+    modelos = (await loadCatalog(ctx, apiKey)).models;
+  } catch (err) {
+    if (!isCliError(err)) throw err;
+    out.warn(`sem catálogo (${err.message}) — a reserva do teto diário por chamada fica em 0.`);
+  }
+
   // Ctrl-C: primeiro aborta com elegância (a run finaliza/salva e imprime o
   // parcial), segundo mata. Mesmo padrão do chat (run.ts).
   const ac = new AbortController();
+
+  // IMPL-031 (revisão): a run de agentes passa pelas MESMAS camadas do
+  // compare/vary/train — teto diário da máquina somando processos (ledger em
+  // arquivo, via parentLedger) e lock por config (`run.locked`). Recusa aqui,
+  // antes de gastar (e antes de armar o handler de Ctrl-C).
+  const guards: SpendGuards = openSpendGuards({
+    dataDir: ctx.dataDir,
+    config: runConfigComFlags,
+    command: 'agents run',
+    models: modelos,
+    signal: ac.signal,
+    lock: values['allow-concurrent'] !== true,
+    warn: (m) => out.warn(m),
+  });
+
+  const sairInterrompido = (code: number): void =>
+    failAndExit(
+      out,
+      'agents.run',
+      new CliError('Interrompido: saída imediata, sem esperar a run fechar.', code, undefined, {
+        code: 'control.interrupted',
+      }),
+    );
   let interrupts = 0;
   const onSigint = (): void => {
     interrupts += 1;
@@ -363,61 +722,99 @@ async function cmdRun(argv: string[]): Promise<number> {
       ac.abort('SIGINT');
       return;
     }
-    process.exit(EXIT.SIGINT);
+    // Saida imediata: grava o parcial do que ja esta em disco (IMPL-030) e
+    // termina no envelope — o NDJSON nao fica sem `result` (IMPL-028).
+    void forceExitNow(EXIT.SIGINT, sairInterrompido);
   };
   process.on('SIGINT', onSigint);
+  // IMPL-030: SIGTERM = parada graciosa (graça ~10 s, parcial gravado).
+  const stopGraceful = installGracefulStop(ac, { warn: (m) => out.warn(m), exit: sairInterrompido });
 
   let record: RunRecord;
   try {
     const runId = randomUUID();
     const unsub = subscribe(runId, (e) => emitRunEvent(out, e, { verbose: ctx.verbose }));
     out.info(`agents run ${runId} — ${runConfigComFlags.mode}`);
+    detached?.onRunId(runId);
     try {
-      record = await runToCompletion(
-        runConfigComFlags,
-        apiKey,
-        prepareOptsFor(runConfigComFlags, apiKey, { runId, ctx: { signal: ac.signal } }),
-      );
+      guards.lock?.update({ runId });
+      guards.machine.setLabel(`agents run ${runId}`);
+      record = await runToCompletion(runConfigComFlags, apiKey, {
+        ...prepareOptsFor(runConfigComFlags, apiKey, { runId, ctx: { signal: ac.signal } }),
+        parentLedger: guards.parentLedger,
+      });
     } finally {
       unsub();
     }
   } finally {
     process.off('SIGINT', onSigint);
+    stopGraceful();
+    guards.close();
   }
 
   const summary = buildAgentSummary(record);
 
   if (out.isText) {
-    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy)) {
+    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) {
       out.line(l);
     }
     if (record.budgetExhausted) out.line(`Parou em   ${record.stoppedAtPhase ?? '?'} — orçamento esgotado`);
     if (summary) {
       out.line(
-        `Agentes    ${summary.executions} execuções · ${summary.failed} falhas · ${summary.incomplete} incompletas · ` +
-          `média ${summary.avgTurns.toFixed(1)} turnos · ${fmtUsd(summary.avgCostUsd)} · oráculo ${(summary.oracleRate * 100).toFixed(0)}%`,
+        `Agentes    ${summary.executions} execuções · ${summary.failed} falhas · ` +
+          `${summary.limitCut} cortadas por limite (contam 'nao') · ${summary.incomplete} canceladas · ` +
+          `média ${summary.avgTurns.toFixed(1)} turnos · ${fmtUsd(summary.avgCostUsd)} · oráculo ${(summary.oracleRate * 100).toFixed(0)}%` +
+          (summary.judgeErrors ? ` · ${summary.judgeErrors} falha(s) do juiz (nota do oráculo)` : '') +
+          (summary.unscoredReps ? ` · ${summary.unscoredReps} sem veredito (fora do placar)` : ''),
       );
     }
   }
-  out.result(record.status !== 'error', 'agents.run', {
+  const resumo = {
     runId: record.id,
     status: record.status,
     totalCostUsd: record.totalCostUsd,
     budgetExhausted: Boolean(record.budgetExhausted),
+    // ok:true com exit 7/130 = parcial; o motivo explicito evita ler o exit code.
+    stoppedReason: record.stoppedReason ?? null,
     stoppedAtPhase: record.stoppedAtPhase,
     standings: record.standings,
     judgeScoreByContestant: record.judgeScoreByContestant,
     ...(summary ? { agentSummary: summary } : {}),
-  });
-
+    // A run parou (ou foi barrada) pelo teto DIÁRIO da máquina, não pelo --budget.
+    ...(guards.machine.capHit ? { dailyCapReached: true } : {}),
+  };
   const code = exitFor(record, summary);
+  // Falha sai SÓ pelo envelope de erro (resumo em `details`) — antes saía um
+  // `result` ok:false E depois o erro: dois objetos no stdout (IMPL-028).
   if (code === EXIT.ERROR) {
+    const todasFalharam = summary && summary.executions > 0 && summary.failed === summary.executions;
     throw new CliError(
-      `A run terminou mas TODAS as execuções de agente falharam: ${firstAgentError(record) ?? 'sem detalhes'}. ` +
-        'É problema de infra/credencial, não de qualidade — corrija e rode de novo.',
+      todasFalharam
+        ? `A run terminou mas TODAS as execuções de agente falharam: ${firstAgentError(record) ?? 'sem detalhes'}. ` +
+            'É problema de infra/credencial, não de qualidade — corrija e rode de novo.'
+        : (record.error ?? 'run de agentes falhou'),
       EXIT.ERROR,
+      resumo,
+      {
+        code: todasFalharam ? 'agents.all_executions_failed' : 'run.failed',
+        hint: `Rode \`prompt-builder agents doctor --deep\` e veja \`prompt-builder agents show ${record.id} --json\`.`,
+      },
     );
   }
+  // IMPL-004 × IMPL-028: inconclusiva (6) também sai pelo envelope — há
+  // resultado (em `details`), mas ele não sustenta conclusão.
+  if (code === EXIT.INCONCLUSIVE) {
+    throw new CliError(
+      `Run de agentes ${record.id} inconclusiva: ${(record.verdictIntegrity?.reasons ?? []).join('; ') || 'o resultado não sustenta conclusão'}.`,
+      code,
+      resumo,
+      {
+        code: 'run.inconclusive',
+        hint: `Não promova com base nela; veja \`prompt-builder agents show ${record.id} --json\` (verdictIntegrity, failureCountByRole).`,
+      },
+    );
+  }
+  out.result(true, 'agents.run', resumo);
   return code;
 }
 
@@ -431,8 +828,14 @@ async function cmdShow(argv: string[]): Promise<number> {
   const { out } = ctx;
   const id = parsed.positionals[0];
   if (!id) throw new CliError('Uso: prompt-builder agents show <runId> [--json]', EXIT.USAGE);
+  assertRunIdArg(id);
   const record = await loadRun(id);
-  if (!record) throw new CliError(`Run de agente "${id}" não encontrada em ${getDataDir()}.`, EXIT.USAGE);
+  if (!record) {
+    throw new CliError(
+      `Run de agente "${id}" não encontrada no diretório de dados (confira \`prompt-builder agents list\` e --data-dir).`,
+      EXIT.USAGE,
+    );
+  }
 
   const execs = record.stages
     .flatMap((s) =>
@@ -455,7 +858,7 @@ async function cmdShow(argv: string[]): Promise<number> {
     out.line(`${record.id}  ${record.status}  ${record.mode}`);
     out.line(`tema: ${record.config.theme}`);
     out.line(`etapas: ${record.stages.length} · contestants: ${record.contestants.length}`);
-    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy)) out.line(l);
+    for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) out.line(l);
     out.line();
     out.line(`execuções de agente: ${execs.length}`);
     for (const e of execs) {
@@ -539,10 +942,15 @@ async function countFiles(dir: string): Promise<number> {
 }
 
 async function cmdList(argv: string[]): Promise<number> {
-  const parsed = parse(argv, {});
+  const parsed = parse(argv, {
+    // IMPL-092: teto default de 50 (--limit N / --all; truncar avisa no stderr).
+    limit: { type: 'string' },
+    all: { type: 'boolean' },
+  });
   const ctx = buildContext(parsed);
   const { out } = ctx;
-  const rows = await scanAgentRunDirs();
+  const todas = await scanAgentRunDirs();
+  const rows = limitList(todas, parseListLimit(parsed.values), out, 'runs de agente');
   if (out.isText) {
     for (const r of rows) {
       out.line(
@@ -558,7 +966,7 @@ async function cmdList(argv: string[]): Promise<number> {
     sizeBytes: r.sizeBytes,
     mtime: new Date(r.mtimeMs).toISOString(),
   }));
-  out.result(true, 'agents.list', { runs: list });
+  out.result(true, 'agents.list', { runs: list, total: todas.length });
   return EXIT.OK;
 }
 
@@ -596,6 +1004,7 @@ async function cmdLogs(argv: string[]): Promise<number> {
   const stageIndex = n(parsed.values.stage, '--stage');
   const contestantId = parsed.values.contestant;
   if (!runId) throw new CliError('Uso: prompt-builder agents logs <runId> --stage N --contestant <id> [--what …]', EXIT.USAGE);
+  assertRunIdArg(runId);
   if (stageIndex === undefined) throw new CliError('--stage N é obrigatório.', EXIT.USAGE);
   if (typeof contestantId !== 'string' || !contestantId.trim()) {
     throw new CliError('--contestant <id> é obrigatório.', EXIT.USAGE);
@@ -613,12 +1022,12 @@ async function cmdLogs(argv: string[]): Promise<number> {
       names = (await fs.readdir(abs)).filter((f) => f.endsWith('.jsonl')).sort();
     } catch {
       throw new CliError(
-        `Sessão não encontrada para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} (esperava ${abs}).`,
+        `Sessão não encontrada para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} (esperava ${noDataDir(path.join(ref.dir, 'session'))}).`,
         EXIT.ERROR,
       );
     }
     if (names.length === 0) {
-      throw new CliError(`Nenhum arquivo de sessão sob ${abs}.`, EXIT.ERROR);
+      throw new CliError(`Nenhum arquivo de sessão sob ${noDataDir(path.join(ref.dir, 'session'))}.`, EXIT.ERROR);
     }
     for (const name of names) {
       out.raw(`\n===== session/${name} =====\n`);
@@ -639,7 +1048,7 @@ async function cmdLogs(argv: string[]): Promise<number> {
   const content = await readArtifact(ref, artifact);
   if (content === null) {
     throw new CliError(
-      `Artefato "${what}" não encontrado para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} em ${path.join(getDataDir(), ref.dir)}.`,
+      `Artefato "${what}" não encontrado para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} em ${noDataDir(ref.dir)}.`,
       EXIT.ERROR,
     );
   }
@@ -671,11 +1080,12 @@ async function cmdReplay(argv: string[]): Promise<number> {
       EXIT.USAGE,
     );
   }
+  assertRunIdArg(runId);
   const ref = refFor(runId, stageIndex, contestantId.trim(), rep);
   const exec = await readExecutionRef(ref);
   if (!exec) {
     throw new CliError(
-      `exec.json não encontrado para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} em ${path.join(getDataDir(), ref.dir)}.`,
+      `exec.json não encontrado para ${runId} etapa ${stageIndex} contestante ${contestantId} rep ${rep} em ${noDataDir(ref.dir)}.`,
       EXIT.ERROR,
     );
   }
@@ -712,33 +1122,39 @@ async function cmdReplay(argv: string[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// reconcile — §20.4
+// reconcile — §20.4 + IMPL-035
 // ---------------------------------------------------------------------------
 //
-// O subcomando fecha a conta do custo de modo agente. VERIFICAÇÃO EMPÍRICA
-// (2026-08-23, ver reconcile-evidence.md): o `responseId` do pi (`gen-...`) NÃO
-// é aceito por `GET /api/v1/generation?id=...` (HTTP 404 "Generation not found")
-// com a mesma key da chamada. Por isso a reconciliação com o OpenRouter está
-// INDISPONÍVEL/INVERIFICADA nesta versão e o endpoint NÃO é chamado em
-// produção: ficamos com o resumo DERIVADO (soma dos `usage.costUsd` das
-// execuções de agente somada ao `totalCostUsd` da run) e um aviso explícito.
-// O `RunRecord.agentCostReconciled` (outra sub-tarefa da onda, NULL na 6.1)
-// permanece vazio pelo mesmo motivo.
+// Fecha a conta do custo de modo agente. Três números, lado a lado:
+//   - DERIVADO: o que cada execução registrou na resposta (hoje = o medido,
+//     quando a execução passou pelo proxy; o do executor, quando não);
+//   - MEDIDO: a soma do `usage.cost` que o proxy de custo leu do último chunk SSE
+//     de CADA chamada do agente (`inference-proxy.jsonl`, uma linha por chamada,
+//     com o id de geração do OpenRouter);
+//   - COBRADO (`--generations`): o `total_cost` que o OpenRouter lançou para cada
+//     id de geração (`GET /generation`, leitura de auditoria — não é chamada de
+//     LLM). Fidelidade exigida: |medido − cobrado| ≤ 2% por run (R-14b REC-2).
+// Histórico (2026-08-23): o `responseId` que o PI reporta (`gen-<unix>-…`) dava
+// 404 em `/generation`; os ids que o proxy lê vêm do PROVEDOR (`gen-<24>`), que é
+// o formato documentado.
 async function cmdReconcile(argv: string[]): Promise<number> {
-  const parsed = parse(argv, {});
+  const parsed = parse(argv, { generations: { type: 'boolean' } });
   const ctx = buildContext(parsed);
   const { out } = ctx;
   const runId = parsed.positionals[0];
   if (!runId) {
-    throw new CliError('Uso: prompt-builder agents reconcile <runId> [--json]', EXIT.USAGE);
+    throw new CliError('Uso: prompt-builder agents reconcile <runId> [--generations] [--json]', EXIT.USAGE);
   }
+  assertRunIdArg(runId);
   const record = await loadRun(runId);
   if (!record) {
-    throw new CliError(`Run de agente "${runId}" não encontrada em ${getDataDir()}.`, EXIT.USAGE);
+    throw new CliError(
+      `Run de agente "${runId}" não encontrada no diretório de dados (confira \`prompt-builder agents list\` e --data-dir).`,
+      EXIT.USAGE,
+    );
   }
 
-  // Soma os custos DERIVADOS das execuções de agente (cada rep registra seu
-  // `usage.costUsd` no ledger/trajectory com source 'agent-derived'/'catalog').
+  // Soma o custo registrado por execução (resposta de cada contestant de agente).
   let derivedExecutionUsd = 0;
   let executions = 0;
   for (const s of record.stages) {
@@ -752,29 +1168,81 @@ async function cmdReconcile(argv: string[]): Promise<number> {
   // totalCostUsd já embute as execuções + os demais papéis (juiz/gabarito/…).
   const totalUsd = typeof record.totalCostUsd === 'number' ? record.totalCostUsd : 0;
 
-  // AVISO EXPLÍCITO (§20.4 / Fase 4): reconciliar com o OpenRouter é
-  // impossível/indisponível — ver reconcile-evidence.md. NÃO chamamos o
-  // endpoint de geração em produção neste caso.
-  const aviso =
-    'reconciliação com o OpenRouter indisponível/não-verificada — custo permanece source \'catalog\'/\'agent-derived\'';
+  // MEDIDO: o log do proxy de custo da run (uma linha `exchange` por chamada).
+  const logFile = path.join(agentRunsRoot(), runId, 'inference-proxy.jsonl');
+  const logText = await fs.readFile(logFile, 'utf8').catch(() => undefined);
+  const measured = logText !== undefined ? summarizeProxyCostLog(logText) : undefined;
+
+  // COBRADO: só com --generations (usa a key; leitura de auditoria, não gasta).
+  let billing: GenerationReconciliation | undefined;
+  if (parsed.values.generations === true) {
+    if (!measured || measured.generationIds.length === 0) {
+      throw new CliError(
+        `Sem ids de geração no log do proxy (${logFile}) — nada a conferir com o OpenRouter.`,
+        EXIT.USAGE,
+      );
+    }
+    const apiKey = await resolveKey(parsed.values);
+    billing = await reconcileGenerations(measured, { baseUrl: getGateway().config.baseUrl, apiKey });
+  }
+
+  const aviso = measured
+    ? billing
+      ? !billing.fidelity.withinTolerance
+        ? `medido × cobrado fora da tolerância de ${COST_FIDELITY_TOLERANCE * 100}%`
+        : !billing.complete
+          ? `${billing.notFound + billing.errors} geração(ões) sem lançamento conferível no OpenRouter (404 pode ser transitório: rode de novo em alguns minutos)`
+          : undefined
+      : 'custo MEDIDO pelo proxy (usage.cost); confira com a fatura via --generations'
+    : `log do proxy de custo ausente (${logFile}) — run anterior ao IMPL-035: custo permanece derivado (source 'catalog'/'agent-derived')`;
 
   if (out.isText) {
     out.line(`reconcile ${record.id}  ${record.status}  ${record.mode}`);
     out.line(`execuções de agente: ${executions}`);
-    out.line(`custo DERIVADO das execuções: ${fmtUsd(derivedExecutionUsd)}`);
+    out.line(`custo registrado nas execuções: ${fmtUsd(derivedExecutionUsd)}`);
+    if (measured) {
+      out.line(
+        `custo MEDIDO pelo proxy: ${fmtUsd(measured.usd)} em ${measured.calls} chamada(s) ` +
+          `(${measured.exact} com usage.cost · ${measured.estimated} catálogo · ${measured.unknown} desconhecido · ` +
+          `${measured.refused} recusada(s) pelo freio)`,
+      );
+    }
+    if (billing) {
+      out.line(
+        `COBRADO pelo OpenRouter: ${fmtUsd(billing.billedUsd)} (${billing.found} geração(ões) conferida(s), ` +
+          `${billing.notFound} não encontrada(s), ${billing.errors} erro(s))`,
+      );
+      out.line(
+        `fidelidade: |medido − cobrado| = ${fmtUsd(billing.fidelity.diffUsd)} ` +
+          `(${(billing.fidelity.relative * 100).toFixed(2)}%) — ${billing.fidelity.withinTolerance ? 'OK' : 'FORA'} (≤ ${COST_FIDELITY_TOLERANCE * 100}%)`,
+      );
+    }
     out.line(`custo total da run (totalCostUsd): ${fmtUsd(totalUsd)}`);
-    out.warn(aviso);
+    if (aviso) out.warn(aviso);
   }
   out.result(true, 'agents.reconcile', {
     runId,
-    reconciled: false,
-    available: false,
+    // Conciliada = toda geração do log foi conferida E a fidelidade ficou na tolerância.
+    reconciled: billing !== undefined && billing.complete && billing.fidelity.withinTolerance,
+    available: measured !== undefined,
     executions,
     derivedExecutionUsd,
     totalCostUsd: totalUsd,
-    // `agentCostReconciled` é campo NULL na 6.1 (adicionado por outra sub-tarefa
-    // da onda); não o populamos porque não há billed a comparar.
-    note: aviso,
+    ...(measured
+      ? {
+          measured: {
+            usd: measured.usd,
+            calls: measured.calls,
+            exact: measured.exact,
+            estimated: measured.estimated,
+            unknown: measured.unknown,
+            refused: measured.refused,
+            generationIds: measured.generationIds.length,
+          },
+        }
+      : {}),
+    ...(billing ? { billing } : {}),
+    ...(aviso ? { note: aviso } : {}),
   });
   return EXIT.OK;
 }
@@ -831,6 +1299,206 @@ async function cmdGc(argv: string[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// task (IMPL-097/IMPL-098) — validação de tarefa e exportação Harbor
+//
+// As 6 checagens bloqueantes (build/fail-before/pass-after/flakiness/
+// trivialidade/oráculo fraco) rodam SÓ aqui (`task validate`) — nunca durante
+// uma run: validar custa várias execuções da solução e a run precisa medir o
+// agente, não a tarefa.
+// ---------------------------------------------------------------------------
+
+/** Nós `agentTask` de um arquivo de tarefa/config, com rótulo estável no relatório. */
+export function agentTaskNodesFrom(json: unknown, fallbackLabel: string): { label: string; node: unknown; question?: string }[] {
+  const obj = (typeof json === 'object' && json !== null ? json : {}) as Record<string, unknown>;
+  if (Array.isArray(obj.scenarios)) {
+    return obj.scenarios
+      .map((s, i) => ({ s: (typeof s === 'object' && s !== null ? s : {}) as Record<string, unknown>, i }))
+      .filter(({ s }) => s.agentTask !== undefined)
+      .map(({ s, i }) => ({
+        label: `scenarios[${i}].agentTask`,
+        node: s.agentTask,
+        question: typeof s.question === 'string' ? s.question : undefined,
+      }));
+  }
+  if (obj.agentTask !== undefined) return [{ label: 'agentTask', node: obj.agentTask }];
+  return [{ label: fallbackLabel, node: json }];
+}
+
+/** Carrega o arquivo e extrai os nós `agentTask` (modo validate: `solution` obrigatória). */
+async function loadTaskNodes(file: string): Promise<{ baseDir: string; entries: ReturnType<typeof agentTaskNodesFrom> }> {
+  const json = await readJsonFile(file);
+  const entries = agentTaskNodesFrom(json, path.basename(file));
+  if (entries.length === 0) {
+    throw new CliError(
+      `Nenhum \`agentTask\` no arquivo "${file}".`,
+      EXIT.CONFIG,
+      { path: file },
+      {
+        code: 'config.task_missing',
+        hint: 'O arquivo deve ser um nó `agentTask` (arena-agent-config@2) ou um arena-agent-config com `scenarios[].agentTask`.',
+      },
+    );
+  }
+  return { baseDir: path.dirname(path.resolve(file)), entries };
+}
+
+interface TaskReportEntry extends TaskValidationReport {
+  label: string;
+}
+
+function renderTaskReport(out: ReturnType<typeof buildContext>['out'], entry: TaskReportEntry): void {
+  out.line(`${entry.label}: ${entry.status}${entry.includedInStandings ? ' (entra no placar)' : ' (FORA do placar)'}`);
+  for (const c of entry.checks) {
+    const marca = c.state === 'ok' ? 'ok  ' : c.state === 'fail' ? 'FAIL' : 'skip';
+    out.line(`  [${marca}] ${c.id}: ${c.detail}`);
+  }
+  for (const e of entry.errors) out.line(`  erro: ${e}`);
+}
+
+/**
+ * `agents task validate <arq>` — as 6 checagens bloqueantes (IMPL-097).
+ * Exit 0 só com `status: 'ok'`; `invalid`/`unstable` saem com 3 (config) e o
+ * relatório completo em `error.details.tasks` — `unstable` fica FORA do placar.
+ */
+async function cmdTaskValidate(argv: string[]): Promise<number> {
+  const parsed = parse(argv, { repetitions: { type: 'string' } });
+  const ctx = buildContext(parsed);
+  const { out, positionals } = ctx;
+  const file = positionals[0];
+  if (!file) {
+    throw new CliError('Informe o arquivo da tarefa (ex.: `agents task validate tarefa.json`).', EXIT.USAGE);
+  }
+  const repetitions = n(parsed.values.repetitions, '--repetitions');
+  const { baseDir, entries } = await loadTaskNodes(file);
+
+  const tasks: TaskReportEntry[] = [];
+  for (const { label, node } of entries) {
+    const t = parseAgentTaskSpec(node, { mode: 'validate' });
+    if (!t.ok) {
+      throw new CliError(
+        `Tarefa inválida em ${label}: ${t.errors.join('; ')}`,
+        EXIT.CONFIG,
+        { label, errors: t.errors },
+        {
+          code: 'config.task_invalid',
+          hint: 'Em modo validate a `solution` (script ou diff) e ao menos um check (verify/regression) são obrigatórios.',
+        },
+      );
+    }
+    for (const w of t.warnings) out.warn(`[${label}] ${w}`);
+    out.info(`validando ${label} (build, fail-before, pass-after, flakiness, trivialidade, oráculo fraco)…`);
+    const report = await validateAgentTask(t.task, {
+      baseDir,
+      ...(repetitions !== undefined ? { repetitions } : {}),
+    });
+    const entry: TaskReportEntry = { label, ...report };
+    tasks.push(entry);
+    renderTaskReport(out, entry);
+  }
+
+  const reprovadas = tasks.filter((t) => t.status !== 'ok');
+  if (reprovadas.length > 0) {
+    throw new CliError(
+      `Tarefa reprovada na validação (${reprovadas.map((t) => `${t.label}: ${t.status}`).join('; ')}).`,
+      EXIT.CONFIG,
+      { tasks },
+      {
+        code: 'config.task_invalid',
+        hint: 'Cada checagem reprovada diz o porquê em details.tasks[].checks — corrija a tarefa e rode de novo. ' +
+          '`unstable` = os checks não são determinísticos (veredito divergente em 3 reexecuções): a tarefa fica FORA do placar.',
+      },
+    );
+  }
+  out.result(true, 'agents.task.validate', { tasks });
+  return EXIT.OK;
+}
+
+/**
+ * `agents task compile <arq> --out <dir>` — compila a tarefa para o layout
+ * Harbor pinado (`HARBOR_VERSION`): instruction.md + environment/ + solution/
+ * + tests/ (com reward.json do `tests/test.sh`). Modo validate: sem golden
+ * (solution) e sem checks não há tarefa Harbor que se sustente.
+ */
+async function cmdTaskCompile(argv: string[]): Promise<number> {
+  const parsed = parse(argv, {
+    'out-dir': { type: 'string', short: 'o' },
+    instruction: { type: 'string' },
+    'instruction-file': { type: 'string' },
+    name: { type: 'string' },
+    scenario: { type: 'string' },
+  });
+  const ctx = buildContext(parsed);
+  const { out, values, positionals } = ctx;
+  const file = positionals[0];
+  const outDir = typeof values['out-dir'] === 'string' && values['out-dir'].trim() ? values['out-dir'] : undefined;
+  if (!file || !outDir) {
+    throw new CliError(
+      'Uso: `agents task compile <arquivo.json> --out-dir <dir> [--instruction <txt> | --instruction-file <arq>]`.',
+      EXIT.USAGE,
+    );
+  }
+  const { entries } = await loadTaskNodes(file);
+  let entry = entries[0];
+  if (entries.length > 1) {
+    const idx = n(values.scenario, '--scenario');
+    if (idx === undefined || !entries.some((e) => e.label === `scenarios[${idx}].agentTask`)) {
+      throw new CliError(
+        `O arquivo tem ${entries.length} tarefas — escolha uma com \`--scenario <índice>\`.`,
+        EXIT.USAGE,
+      );
+    }
+    entry = entries.find((e) => e.label === `scenarios[${idx}].agentTask`)!;
+  }
+
+  const t = parseAgentTaskSpec(entry.node, { mode: 'validate' });
+  if (!t.ok) {
+    throw new CliError(`Tarefa inválida em ${entry.label}: ${t.errors.join('; ')}`, EXIT.CONFIG, { errors: t.errors }, {
+      code: 'config.task_invalid',
+    });
+  }
+
+  let instruction = typeof values.instruction === 'string' ? values.instruction : undefined;
+  if (!instruction && typeof values['instruction-file'] === 'string') {
+    instruction = await fs.readFile(values['instruction-file'], 'utf8');
+  }
+  instruction = instruction ?? entry.question;
+  if (!instruction?.trim()) {
+    throw new CliError(
+      'Falta o enunciado (instruction.md): use `--instruction <txt>`, `--instruction-file <arq>` ' +
+        'ou um cenário com `question`.',
+      EXIT.USAGE,
+    );
+  }
+
+  const name = typeof values.name === 'string' && values.name.trim() ? values.name : undefined;
+  const result = compileAgentTaskToHarbor(t.task, { outDir, instruction, ...(name ? { name } : {}) });
+  out.info(`árvore Harbor ${HARBOR_VERSION} escrita em ${result.outDir} (${result.files.length} arquivo(s)).`);
+  out.result(true, 'agents.task.compile', {
+    outDir: result.outDir,
+    harborVersion: HARBOR_VERSION,
+    files: result.files,
+    rewardSpec: result.rewardSpec,
+  });
+  return EXIT.OK;
+}
+
+async function cmdTask(argv: string[]): Promise<number> {
+  const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : undefined;
+  const rest = sub ? argv.slice(1) : argv;
+  switch (sub) {
+    case 'validate':
+      return cmdTaskValidate(rest);
+    case 'compile':
+      return cmdTaskCompile(rest);
+    default:
+      throw new CliError(
+        `Subcomando desconhecido de "agents task": "${sub ?? ''}". Use um de: validate, compile.`,
+        EXIT.USAGE,
+      );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // dispatcher
 // ---------------------------------------------------------------------------
 
@@ -854,9 +1522,11 @@ export async function cmdAgents(argv: string[]): Promise<number> {
       return cmdReconcile(rest);
     case 'gc':
       return cmdGc(rest);
+    case 'task':
+      return cmdTask(rest);
     default:
       throw new CliError(
-        `Subcomando desconhecido de "agents": "${sub ?? ''}". Use um de: doctor, run, show, list, logs, replay, reconcile, gc.`,
+        `Subcomando desconhecido de "agents": "${sub ?? ''}". Use um de: doctor, run, show, list, logs, replay, reconcile, gc, task.`,
         EXIT.USAGE,
       );
   }

@@ -8,6 +8,9 @@
 import { z } from 'zod';
 import { sanitizeLlmVariants, MIN_LLM_VARIANTS, MAX_LLM_VARIANTS } from './llmVariants.js';
 import { validatePromptGroup } from './engine/promptGroup.js';
+import { promptContractsSchema } from './engine/contracts.js';
+import { checkRunPii, runPiiMessage, runPiiRefusal } from './engine/pii.js';
+import { stageLabelIssues } from './engine/groundTruth.js';
 import type { RunConfig } from './types.js';
 
 // Nivel de esforco de raciocinio (ReasoningLevel de types.ts / REASONING_LEVELS
@@ -76,11 +79,24 @@ const agentTaskSchema = z.object({
         timeoutMs: z.number().int().positive().optional(),
         weight: z.number().positive().optional(),
         label: z.string().optional(),
+        // IMPL-039: F2P (default) x P2P (regressao: quebrar = falha).
+        kind: z.enum(['fail_to_pass', 'pass_to_pass']).optional(),
       }),
     )
     .optional(),
-  // Caminhos que o agente NAO pode tocar (reward-hacking). Globs simples.
+  // Caminhos que o agente NAO pode tocar (reward-hacking). Semantica gitignore.
   forbiddenPaths: z.array(z.string()).optional(),
+  // IMPL-039: rebuild de dependencias (lockfile do seed) antes do verify[].
+  rebuild: z
+    .object({
+      cmd: z.string().min(1).optional(),
+      lockfiles: z.array(z.string()).optional(),
+      protect: z.array(z.string()).optional(),
+      timeoutMs: z.number().int().positive().optional(),
+    })
+    .optional(),
+  // IMPL-039: detectores estaticos (skip/xfail/exit0/teste apagado/config de runner).
+  detectors: z.enum(['off', 'warn', 'fail']).optional(),
   // default false: ver aviso §12.2 do plano (`--no-context-files`).
   contextFiles: z.boolean().default(false),
   // Limites POR EXECUCAO (contrato de custo da tarefa). Default = config.agent.limits.
@@ -115,8 +131,15 @@ const agentSchema = z.object({
       kind: z.enum(['worktree', 'clone', 'container']).optional(),
       // Guarda o workspace ao fim (debug). Default false.
       keepWorkspace: z.boolean().optional(),
-      // Imagem, quando kind==='container'.
+      // Imagem, quando kind==='container': tag (pinada no digest sha256 na
+      // preparacao) ou referencia por digest. O docker run usa SEMPRE o digest.
       image: z.string().optional(),
+      // Runtime OCI opt-in (ex.: 'runsc' = gVisor) — alto risco, fora do default.
+      // Mesmo formato de nome que o daemon registra (RUNTIME_NAME_RE, container.ts).
+      runtime: z
+        .string()
+        .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'runtime: nome de runtime Docker invalido')
+        .optional(),
     })
     .optional(),
   // Nivel de esforco do agente. MESMA escada do repo (7 degraus).
@@ -145,6 +168,9 @@ const stageSpecSchema = z.object({
       z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
     ])
     .optional(),
+  // TODOS os rotulos validos da etapa (IMPL-003). Obrigatorio com `expected`
+  // curto (<=5 palavras) — o superRefine abaixo aplica `labelSetIssue`.
+  labelSet: z.array(z.string().min(1)).min(1).max(200).optional(),
   // Proveniencia da etapa: gerada pela IA ou importada de pacote JSON.
   origin: z.enum(['ai', 'import']).optional(),
   // A etapa, quando executada por um agente. AUSENTE => a etapa so serve ao
@@ -171,23 +197,42 @@ const baseFields = {
   promptOptimization: z.boolean().optional(),
   optimizerModelId: z.string().min(1).optional(),
   judgePasses: z.union([z.literal(1), z.literal(2)]).optional(),
-  // Perfil de conformidade LGPD escolhido no assistente (CONSULTIVO: gravado
-  // para transparência/rastreabilidade, não força roteamento). Ausente = "livre".
+  // Perfil de conformidade LGPD escolhido no assistente. Área sensível é
+  // fail-closed: pré-voo (IMPL-041) + roteamento ZDR forçado em toda requisição
+  // (IMPL-040); "geral" segue consultiva. Ausente = "livre".
   compliance: z.object({ area: z.string().min(1), includeRessalvas: z.boolean() }).optional(),
+  // Dado pessoal (IMPL-042): 'synthetic' recusa a run com dado de aparencia
+  // real; a pseudonimizacao no gateway vale nos dois modos.
+  piiMode: z.enum(['redact', 'synthetic']).optional(),
+  // Revisao explicita do dado pessoal apontado (modo 'redact'): sem ela, um
+  // RunConfig com dado de aparencia real e RECUSADO aqui, nomeando o campo.
+  allowPii: z.boolean().optional(),
   // Etapas fornecidas pelo usuario (JSON): pulam o datagen. Quando presentes,
   // `stages` e forcado ao tamanho desta lista (ver preprocess do runConfigSchema).
   customStages: z.array(stageSpecSchema).min(1).max(50).optional(),
-  // Esforco de raciocinio por papel (competitor/judge/rewriter/datagen);
-  // papel ausente = default do pipeline.
+  // Esforco de raciocinio por papel (competitor/judge/duel/gab/rewriter/datagen);
+  // papel ausente = default do pipeline. IMPL-079: juiz/duelo/gabarito deixam de
+  // compartilhar o `judge` unico — papel novo sem campo cai no `judge` antigo e,
+  // sem nenhum dos dois, no default do papel (judge=medium, duel=low, gab=high).
   reasoning: z
     .object({
       competitor: reasoningLevelSchema.optional(),
       judge: reasoningLevelSchema.optional(),
+      duel: reasoningLevelSchema.optional(),
+      gab: reasoningLevelSchema.optional(),
       rewriter: reasoningLevelSchema.optional(),
       datagen: reasoningLevelSchema.optional(),
     })
     .optional(),
-  // Modelo que gera os gabaritos (respostas de referencia). Default = 1o juiz.
+  // Modelo que gera os gabaritos (respostas de referencia).
+  // IMPL-048 (R-03a:REC-2) — papéis separados: OBRIGATÓRIO em training/
+  // variation (o gabarito não pode sair do 1º juiz: o mesmo modelo escrever a
+  // régua e julgar contra ela produz erros correlacionados que não se cancelam).
+  // Nos demais modos (compare) o default é explícito e documentado: o
+  // orquestrador resolve `referenceModelId ?? judgeModelIds[0]` — o risco de
+  // auto-preferência desse default aparece em `fairnessWarnings`, não escondido.
+  // Erro de config quando a referência é igual a um juiz ou a um competidor
+  // (superRefine abaixo); mesmo vendor/família é AVISO (não-bloqueante).
   referenceModelId: z.string().min(1).optional(),
   // Julgamento por referencia (pointwise vs gabarito + duelos).
   referenceJudging: z.boolean().optional(),
@@ -197,7 +242,7 @@ const baseFields = {
   scenarioSeed: z.array(stageSpecSchema).max(50).optional(),
   // Nº de finalistas (melhores por judge-score) que disputam os duelos. 0 = sem finais.
   finalists: z.number().int().min(0).max(12).optional(),
-  // Liga/desliga a fase de finais (duelos Copeland entre os finalistas).
+  // Liga/desliga a fase de finais (duelos entre os finalistas, por taxa de vitória).
   duels: z.boolean().optional(),
   // Teto de gasto em USD para a run/sessao inteira. Ausente = sem limite.
   budgetUsd: z.number().positive().optional(),
@@ -212,13 +257,9 @@ const baseFields = {
     .optional(),
   // Contratos never-break do prompt base (F2/P0.3): o pos-rewriter valida toda
   // reescrita (invariantes, placeholders verbatim, piso de comprimento).
-  contracts: z
-    .object({
-      neverBreak: z.array(z.string()).optional(),
-      placeholders: z.array(z.string()).optional(),
-      minLengthRatio: z.number().min(0).max(1).optional(),
-    })
-    .optional(),
+  // IMPL-011: schema fonte única (inclui judgeDiff e canaries — sem ele o zod
+  // STRIPAVA os campos novos em silêncio e a camada 3 nunca rodava pela API).
+  contracts: promptContractsSchema.optional(),
 };
 
 const manualVariantSchema = z.object({
@@ -291,6 +332,9 @@ const trainingObj = z.object({
   minGain: z.number().min(0).max(100).optional(),
   // Fracao de cenarios reservada p/ holdout (re-score campeao vs controle).
   holdoutRatio: z.number().min(0).max(0.5).optional(),
+  // Paciencia do laco (IMPL-051): iteracoes seguidas sem promocao antes de
+  // convergir. Default 2 (trainingPolicy) — 1 com veredito ruidoso e anti-patrao.
+  patience: z.number().int().min(1).max(5).optional(),
   // Reflection estilo GEPA: variantes recebem licoes das falhas do campeao.
   feedbackDriven: z.boolean().optional(),
   // Reflexao GEPA por LLM (opt-in, §7.5): default deterministico (zero custo).
@@ -333,6 +377,35 @@ export const runConfigSchema = z
     z.discriminatedUnion('mode', [compareObj, variationObj, trainingObj]),
   )
   .superRefine((cfg, ctx) => {
+    // ---------------------------------------------------------- rotulos (IMPL-003)
+    // Rotulo esperado CURTO sem `labelSet` e erro de config (R-03b:DEC-4): sem o
+    // conjunto de rotulos validos o verificador estrito nao reconhece a resposta
+    // que lista/hesita entre rotulos. O CLI traduz em exit 3 (EXIT.CONFIG).
+    for (const [campo, lista] of [
+      ['customStages', cfg.customStages],
+      ['scenarioSeed', cfg.scenarioSeed],
+    ] as const) {
+      for (const { index, message } of stageLabelIssues(lista)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [campo, index, 'labelSet'],
+          message: `etapa ${index + 1}: ${message}`,
+        });
+      }
+    }
+
+    // ------------------------------------------------------------ dado pessoal
+    // LGPD (IMPL-042): um RunConfig CRU e importacao como qualquer outra — CLI
+    // (`--config`, flags, `estimate`, `config validate`), MCP, HTTP (POST
+    // /runs, /sessions, rotas de agente) e o arena-agent-config (que termina
+    // aqui). MESMA regra do pre-voo do orquestrador: dado de aparencia real
+    // bloqueia nomeando o campo — no "so sintetico" e no modo agente sem
+    // excecao; no "redigir" ate a revisao explicita (`allowPii: true`).
+    const pii = checkRunPii(cfg);
+    if (runPiiRefusal(pii)) {
+      ctx.addIssue({ code: 'custom', path: [], message: runPiiMessage(pii) });
+    }
+
     // ------------------------------------------------------------------ agente
     // Validacoes do modo agente, ativas quando `config.agent` existe (qualquer
     // `mode` — o eixo runner e ortogonal ao mode).
@@ -370,6 +443,53 @@ export const runConfigSchema = z
       // (maxOutputTokens/#maxTokens NAO se aplicam ao agente — ele controla os
       // proprios tokens — entao nao os exigimos aqui; §29.11 mantem o campo para
       // o caso de a etapa rodar em modo chat tambem.)
+    }
+
+    // ------------------------------------------- papéis separados (IMPL-048, R-03a:REC-2)
+    // A REFERÊNCIA (quem escreve o gabarito) não pode ser juiz nem competidor:
+    // o mesmo modelo escrever a régua e julgar contra ela produz erros
+    // CORRELACIONADOS que não se cancelam (DEC-2). Modelo igual => ERRO de
+    // config; mesmo vendor/família => AVISO em `fairnessWarnings` (a validação
+    // não bloqueia famílias — o mercado muda de vendor mais rápido que o schema).
+    if (cfg.referenceModelId) {
+      const ref = cfg.referenceModelId;
+      const juiz = cfg.judgeModelIds.find((id) => id === ref);
+      if (juiz) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['referenceModelId'],
+          message:
+            `A referência "${ref}" não pode ser também juiz: o mesmo modelo escreveria o gabarito e emitiria o veredito sobre ele (viés de auto-preferência). Escolha modelos distintos.`,
+        });
+      }
+      const competidores =
+        cfg.mode === 'compare'
+          ? [
+              ...(cfg.competitorModelIds ?? []),
+              ...(cfg.competitorConfigs ?? []).map((c) => c.modelId),
+            ]
+          : [cfg.contestantModelId];
+      const concorrente = competidores.find((id) => id === ref);
+      if (concorrente) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['referenceModelId'],
+          message:
+            `A referência "${ref}" não pode ser também competidor: quem escreve o gabarito não compete contra ele (viés de auto-preferência). Escolha modelos distintos.`,
+        });
+      }
+    }
+    // IMPL-048: `referenceModelId` é OBRIGATÓRIO em training/variation. Em
+    // compare o default (1º juiz) continua existindo, explícito e documentado
+    // no campo acima + `fairnessWarnings` — mas train/vary sem referência
+    // própria reprova AQUI: a régua do treino inteiro não sai do painel.
+    if (cfg.mode !== 'compare' && !cfg.referenceModelId?.trim()) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['referenceModelId'],
+        message:
+          'referenceModelId é obrigatório em training/variation: o gabarito não pode sair do 1º juiz (o mesmo modelo escreveria a régua e julgaria contra ela).',
+      });
     }
 
     // Gerador e juiz PODEM repetir o mesmo modelo (repeticao permitida).

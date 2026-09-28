@@ -4,7 +4,10 @@ import { ArrowRight, Download } from 'lucide-react';
 import type { RunRecord, SessionRecord, StageSpec } from '../api';
 import {
   cacheSession,
+  canCancelSession,
+  cancelSession,
   fetchSession,
+  markSessionInterrupted,
   openSessionStream,
   fetchRun,
   getLiveRun,
@@ -13,10 +16,11 @@ import {
   buildScenarioPack,
   downloadScenarioPack,
 } from '../api';
-import { useTheme } from '../theme';
-import { applyEvent, denseStages, rankColor, ScoreHeatmap, FinalsPanel } from './runShared';
+import { applyEvent, denseStages, EvolutionHeatmap, ScoreHeatmap, FinalsPanel } from './runShared';
+import { RunNarrative } from '../components/RunNarrative';
 import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
 import { diffLines } from '../diff';
+import { formatIterationGate, formatPValue, reportPValue } from '../engine/stats';
 import {
   SmoothTabs,
   SmoothTabsList,
@@ -25,7 +29,6 @@ import {
   SmoothTabsPanel,
 } from '@/components/motion-ui/smooth-tabs';
 import { CopyButton } from '@/components/motion-ui/copy-button';
-import { Sparkline } from '@/components/motion-ui/sparkline';
 import { Skeleton } from '@/components/motion-ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -40,6 +43,8 @@ import {
   Tag,
 } from '../components/primitives';
 import { useToasts } from '../components/AppShell';
+import { CancelHoldButton, OwnershipBanner, StopBanner } from '../components/RunControls';
+import { StorageNotice } from '../components/StorageNotice';
 import { cn } from '@/lib/utils';
 
 // ---------------------------------------------------------------------------
@@ -48,124 +53,6 @@ import { cn } from '@/lib/utils';
 // entre rodadas e a escolha do melhor prompt.
 // ---------------------------------------------------------------------------
 
-/** Heatmap de evolucao: variante x rodada; celula = judge-score arredondado. */
-function EvolutionHeatmap({
-  rounds,
-  dark,
-  holdoutAt,
-}: {
-  rounds: RunRecord[];
-  dark: boolean;
-  holdoutAt?: number;
-}) {
-  const cols = useMemo(
-    () =>
-      rounds.map((r) => {
-        const scores = r.judgeScoreByContestant ?? {};
-        const ordered = Object.entries(scores).sort((a, b) => b[1] - a[1]);
-        return {
-          iteration: r.iteration ?? 0,
-          isHoldout: r.iteration === holdoutAt,
-          scores,
-          total: ordered.length,
-          place: new Map(ordered.map(([id], i) => [id, i + 1])),
-        };
-      }),
-    [rounds, holdoutAt],
-  );
-  // Ordem estavel: primeira aparicao da variante ao longo das rodadas.
-  const vars = useMemo(() => {
-    const seen = new Set<string>();
-    const out: { id: string; label: string; isOriginal?: boolean }[] = [];
-    for (const r of rounds) {
-      for (const c of r.contestants ?? []) {
-        if (seen.has(c.id)) continue;
-        seen.add(c.id);
-        out.push({ id: c.id, label: c.label, isOriginal: c.isOriginal });
-      }
-    }
-    return out;
-  }, [rounds]);
-
-  if (!cols.length || !vars.length) return null;
-
-  const gridStyle = {
-    gridTemplateColumns: `minmax(8rem, 1fr) repeat(${cols.length}, 3rem) 5rem`,
-  };
-
-  return (
-    <div className="rounded-xl bg-card ring-1 ring-foreground/10">
-      <div className="scroll-slim overflow-x-auto p-3">
-        <div className="min-w-fit">
-          <div className="grid items-center gap-1 pb-1.5" style={gridStyle}>
-            <div />
-            {cols.map((col) => (
-              <div
-                key={col.iteration}
-                className="grid h-6 place-items-center text-[11px] text-muted-foreground tabular"
-              >
-                {col.isHoldout ? 'H' : `R${col.iteration + 1}`}
-              </div>
-            ))}
-            <div className="pr-1 text-right text-[11px] text-muted-foreground">curva</div>
-          </div>
-
-          {vars.map((v) => {
-            // A trilha da variante ao longo das rodadas alimenta a sparkline.
-            const history = cols.map((c) => c.scores[v.id]).filter((s): s is number => s !== undefined);
-            return (
-              <div key={v.id} className="grid items-center gap-1 py-0.5" style={gridStyle}>
-                <div className="flex min-w-0 items-center gap-1.5 pr-3">
-                  <span className="truncate text-[13px]">{v.label}</span>
-                  {v.isOriginal && <Tag>base</Tag>}
-                </div>
-                {cols.map((col) => {
-                  const rodada = col.isHoldout ? 'Holdout' : `Rodada ${col.iteration + 1}`;
-                  const score = col.scores[v.id];
-                  if (score === undefined) {
-                    return (
-                      <div
-                        key={col.iteration}
-                        className="grid h-7 place-items-center rounded-[5px] bg-muted/50 text-[13px] text-muted-foreground"
-                        title={`${rodada}: não participou`}
-                      >
-                        ·
-                      </div>
-                    );
-                  }
-                  const rc = rankColor(col.place.get(v.id) ?? 1, col.total, dark);
-                  return (
-                    <div
-                      key={col.iteration}
-                      className="grid h-7 place-items-center rounded-[5px] text-[13px] font-medium tabular"
-                      style={{ background: rc.soft, color: rc.text }}
-                      title={`${rodada}: judge-score ${score.toFixed(1)}`}
-                    >
-                      {Math.round(score)}
-                    </div>
-                  );
-                })}
-                <div className="flex justify-end pr-1">
-                  {history.length > 1 ? (
-                    <Sparkline
-                      history={history}
-                      width={64}
-                      height={22}
-                      tone="primary"
-                      label={`Evolução de ${v.label}`}
-                    />
-                  ) : (
-                    <span className="text-[12px] text-muted-foreground">—</span>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /** Estudio final: escolher qualquer variante de qualquer rodada, ver o diff vs.
  *  o prompt original, copiar e salvar na biblioteca local. */
@@ -270,8 +157,10 @@ function BestPromptStudio({
       setSaved(true);
       setSaveOpen(false);
       notify('Prompt salvo na biblioteca.');
-    } catch {
-      notify('Não foi possível salvar na biblioteca.', 'error');
+    } catch (err) {
+      // IMPL-022: agora a falha do IndexedDB chega aqui (antes o idbPut a engolia
+      // e este aviso nunca aparecia) — com a causa (ex.: sem espaço).
+      notify(`Não foi possível salvar na biblioteca: ${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setSaving(false);
     }
@@ -319,8 +208,11 @@ function BestPromptStudio({
               <span className="truncate text-[13px]">{v.label}</span>
               {v.isOriginal && <Tag>base</Tag>}
             </span>
-            <span className="shrink-0 text-[12px] text-muted-foreground tabular">
-              {v.score === undefined ? '—' : `${Math.round(v.score)} pts`}
+            <span
+              className="shrink-0 text-[12px] text-muted-foreground tabular"
+              title={v.score === undefined ? undefined : `judge-score ${v.score.toFixed(1)}`}
+            >
+              {v.score === undefined ? '—' : `score ${Math.round(v.score)}`}
             </span>
           </button>
         ))}
@@ -407,8 +299,6 @@ function BestPromptStudio({
 export function TrainingView() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
-  const { resolved } = useTheme();
-  const dark = resolved === 'dark';
   const [session, setSession] = useState<SessionRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [liveRun, setLiveRun] = useState<RunRecord | null>(null);
@@ -417,11 +307,17 @@ export function TrainingView() {
   const [drawerVariant, setDrawerVariant] = useState<string | null>(null);
   const [pastRuns, setPastRuns] = useState<Record<string, RunRecord>>({});
   const [duelProgress, setDuelProgress] = useState<{ done: number; total: number } | null>(null);
+  // Cancelar pedido: esconde o botão até o session.finished chegar.
+  const [cancelRequested, setCancelRequested] = useState(false);
+  // IMPL-023: o treino 'running' aberto aqui roda em OUTRA aba (ou sem Web Locks).
+  const [ownership, setOwnership] = useState<'elsewhere' | 'unsupported' | null>(null);
 
   // Efeito A: eventos da SESSAO (iteracoes, snapshot, fim).
   useEffect(() => {
     if (!sessionId) return;
     let cancelled = false;
+    setCancelRequested(false);
+    setOwnership(null);
     const refetch = () =>
       fetchSession(sessionId)
         .then((s) => {
@@ -439,9 +335,14 @@ export function TrainingView() {
       sessionId,
       (event) => {
         if (cancelled) return;
+        if (event.type === 'ownership') {
+          setOwnership(event.state);
+          return;
+        }
         if (event.type === 'snapshot') {
           const rec = event.record as SessionRecord;
           setSession(rec);
+          if (rec.status !== 'running') setOwnership(null);
           void cacheSession(rec);
           const doneN = rec.bestPromptByIteration.length;
           const cur = rec.runIds.length > doneN ? rec.runIds[rec.runIds.length - 1] : undefined;
@@ -576,6 +477,8 @@ export function TrainingView() {
   const done = session.bestPromptByIteration.length;
   const planned = session.config.iterations ?? 0;
   const isRunning = session.status === 'running';
+  // Só a aba que roda o treino consegue abortá-lo (o motor vive nela).
+  const cancellable = isRunning && !cancelRequested && canCancelSession(session.id);
   // A run de holdout e marcada com iteracao == planned ("rodada H"): em toda
   // lista de rodadas ela vira "Holdout", nunca "Rodada N+1".
   const holdoutAt = planned > 0 ? planned : undefined;
@@ -607,8 +510,19 @@ export function TrainingView() {
   }
   if (session.significance !== undefined) {
     const sig = session.significance;
-    gates.push(sig === null ? 'amostra insuficiente p/ significância' : sig.pValue < 0.001 ? 'p<0.001' : `p=${sig.pValue.toFixed(3)}`);
+    // IMPL-001: relatório mostra o p BILATERAL do teste exato (o unilateral é o do gate).
+    const rep = sig === null ? null : reportPValue(sig);
+    gates.push(
+      rep === null
+        ? 'amostra insuficiente p/ significância'
+        : `${formatPValue(rep.p)} ${rep.kind === 'two-sided' ? 'bilateral' : '(bootstrap, legado)'}`,
+    );
   }
+
+  // IMPL-002: gate de cada rodada — ganho bruto × corrigido × p ajustado (max-T).
+  const gateLines = session.bestPromptByIteration
+    .filter((it) => it.gate?.test)
+    .map((it) => ({ key: it.iteration, text: `Rodada ${it.iteration + 1} — ${formatIterationGate(it.gate!)}` }));
 
   function downloadPack() {
     if (!session || !packScenarios.length) return;
@@ -644,19 +558,36 @@ export function TrainingView() {
               </div>
             </div>
             <div className="min-w-[5rem]">
-              <div className="text-[11px] tracking-wide text-muted-foreground uppercase">custo</div>
+              <div className="text-[11px] tracking-wide text-muted-foreground uppercase">
+                {session.budgetUsd !== undefined ? 'custo / teto' : 'custo'}
+              </div>
               <div className="mt-0.5 font-heading text-lg font-medium tabular">
                 ${session.totalCostUsd.toFixed(4)}
+                {session.budgetUsd !== undefined && (
+                  <span className="text-sm text-muted-foreground"> / ${session.budgetUsd.toFixed(2)}</span>
+                )}
               </div>
             </div>
           </div>
         </div>
 
-        <div className="mt-4 border-t border-border pt-4">
+        <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-4">
           <Button variant="outline" size="sm" onClick={downloadPack} disabled={!packScenarios.length}>
             <Download aria-hidden="true" />
             Pacote
           </Button>
+          {cancellable && (
+            <div className="ml-auto">
+              <CancelHoldButton
+                onConfirm={() => {
+                  if (cancelSession(session.id)) setCancelRequested(true);
+                }}
+              />
+            </div>
+          )}
+          {isRunning && cancelRequested && (
+            <span className="ml-auto text-[13px] text-muted-foreground">Cancelando…</span>
+          )}
         </div>
       </header>
 
@@ -665,13 +596,49 @@ export function TrainingView() {
           <strong>Treino falhou:</strong> {session.error}
         </Banner>
       )}
-      {session.status === 'aborted' && (
-        <Banner className="mt-4">Treino interrompido — o servidor reiniciou enquanto ele rodava.</Banner>
+      <StopBanner
+        className="mt-4"
+        subject="treino"
+        info={session}
+        legacyText="Treino interrompido — o servidor reiniciou enquanto ele rodava."
+      />
+      <OwnershipBanner
+        className="mt-4"
+        subject="treino"
+        state={isRunning ? ownership : null}
+        onMarkInterrupted={() => {
+          void markSessionInterrupted(session.id).then((s) => {
+            if (!s) return;
+            setSession(s);
+            if (s.status !== 'running') setOwnership(null);
+          });
+        }}
+      />
+      {/* IMPL-022: a sessão e as runs das rodadas gravam no IndexedDB. */}
+      <StorageNotice
+        className="mt-4"
+        targets={[
+          { subject: 'session', id: session.id },
+          ...session.runIds.map((id) => ({ subject: 'run' as const, id })),
+        ]}
+      />
+      {session.holdoutSkipped && (
+        <Banner tone="warn" className="mt-4">
+          <strong>Holdout pulado</strong> (orçamento/cancelamento): o campeão NÃO foi validado nos cenários
+          reservados — o ganho pode ser sobreajuste à seleção de treino.
+        </Banner>
       )}
       {gates.length > 0 && (
         <Banner tone={session.holdout?.regressed ? 'error' : 'neutral'} className="mt-4">
           {gates.join(' · ')}
         </Banner>
+      )}
+      {gateLines.length > 0 && (
+        <ul className="mt-2 space-y-0.5 text-xs text-muted-foreground" aria-label="Gate de promoção por rodada">
+          {gateLines.map((l) => (
+            <li key={l.key}>{l.text}</li>
+          ))}
+        </ul>
       )}
 
       {roundShown ? (
@@ -690,9 +657,13 @@ export function TrainingView() {
             {roundLabel}
             {isRunning && ' — ao vivo'}
           </SectionHead>
+          {/* Representação de ALTO NÍVEL da rodada (o mesmo painel da run):
+              fases do pipeline, placar em linguagem simples e gasto — o heatmap
+              continua a ser a camada de detalhe logo abaixo. */}
+          <RunNarrative record={roundShown} duelProgress={isRunning ? duelProgress : null} />
           <ScoreHeatmap
             record={roundShown}
-            ranked={roundShown.status === 'finished'}
+            ranked={roundShown.status === 'finished' || roundShown.status === 'inconclusive'}
             onStageClick={() => navigate(`/runs/${roundShown.id}`)}
           />
 
@@ -726,7 +697,7 @@ export function TrainingView() {
       {rounds.length > 1 && (
         <>
           <SectionHead>Evolução</SectionHead>
-          <EvolutionHeatmap rounds={rounds} dark={dark} holdoutAt={holdoutAt} />
+          <EvolutionHeatmap rounds={rounds} holdoutAt={holdoutAt} />
         </>
       )}
 

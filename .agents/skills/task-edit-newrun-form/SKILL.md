@@ -1,20 +1,39 @@
 ---
 name: task-edit-newrun-form
-description: Procedimento para alterar o formulário de Nova Run (web/src/pages/NewRun.tsx), que é um FLUXO EM ABAS animadas — adicionar/remover um campo ou aba, mexer na validação, nos seletores de modelo, na aba Avançado ou no import de JSON. Use sempre que a tarefa tocar a tela de criação de run/sessão ou a montagem do RunConfig enviado.
+description: Procedimento para alterar o formulário de Nova Run (web/src/pages/NewRun.tsx), que tem DUAS superfícies sobre o mesmo estado — o fluxo GUIADO de 5 passos (default, components/GuidedSetup.tsx) e a página única COMPLETA (seções + Avançado recolhível). Adicionar/remover campo, mexer na validação, nos seletores de modelo, no guiado, no Avançado ou no import de JSON. Use sempre que a tarefa tocar a tela de criação de run/sessão ou a montagem do RunConfig enviado.
 metadata:
-  version: 0.3.0
+  version: 0.4.0
   type: task
 ---
 # Tarefa: alterar o formulário de Nova Run
 
-Pré-requisitos: memória CoALA — `coala.py search "frontend nova run"`. O formulário vive em `web/src/pages/NewRun.tsx`.
-**Não é assistente em passos nem página única de blocos**: desde 2026-07-26 é um `<form>` com um
-`<SegmentedToggle>` de MODO e um `<SmoothTabs>` de 4 etapas, mais um rodapé **fixo** com a pendência,
-a estimativa de custo e o `<MultiStateButton type="submit">`.
+Pré-requisitos: memória CoALA — `coala.py search "frontend nova run"`. O formulário vive em
+`web/src/pages/NewRun.tsx` e tem, desde 2026-09-27 (pedido do dono), **DUAS superfícies sobre o
+MESMO estado**: o fluxo **GUIADO** (default, `components/GuidedSetup.tsx` — `SmoothTabs` de 5
+passos: `objetivo | teste | participantes | limites | revisao`, uma pergunta por passo + plano em
+linguagem natural) e a página única **COMPLETA** (IMPL-106, sem abas). O `formStyle` (`pb.formStyle`
+no localStorage) decide qual renderiza; o rodapé **fixo** (pendência + estimativa + `<MultiStateButton
+type="submit">`) é comum às duas.
 
 ## Anatomia
-Ordem fixa: `<PageHeader>` (título + `[Importar JSON]`) → segmentado de modo → avisos de import →
-`<SmoothTabs>` → rodapé fixo.
+Ordem fixa: `<PageHeader>` (título + roving-toolbar `Ações da configuração`: `[Importar JSON]`
+`[Exportar JSON]` + `[Guiado]` `[Completo]`) → avisos de import → **guiado** (`<GuidedSetup>`) ou
+**completo** (segmentado de modo → seções) → rodapé fixo.
+
+⚠️ O switch Guiado/Completo e o Importar/Exportar vivem no MESMO `RovingToolbar` de propósito: são
+UMA parada de Tab, e o orçamento IMPL-106 (c) — ≤ 10 paradas do topo do formulário até "Iniciar" — é
+CONTRATO de teste (`test/ux-nova-run-e2e.test.ts`). Controle novo no caminho do formulário → some do
+orçamento; ponha-o no roving, fora do `<form>` ou depois do "Iniciar".
+
+- Os campos compactos (`NumRow`, `TxtNumRow`, `SwitchRow`, `AreaRow`, `LinkButton`) vivem em
+  `components/formRows.tsx` (extraídos p/ o guiado compor as MESMAS perguntas); `TxtNumField` e
+  `EffortField` continuam locais no NewRun (só o eixo configs usa).
+- As seções da completa têm **ids estáveis**: `cenarios | sujeitos | juizes | avancado`. Só o
+  rótulo de `sujeitos` muda por modo (`Modelos` no compare, `Prompts` em variation/training).
+  **Não crie uma seção condicional** — a âncora sumiria ao trocar de modo.
+- `problems()` continua devolvendo `{ section, text }`; no guiado o `irPara` mapeia section → passo
+  via `SECTION_STEP` (`components/GuidedSetup.tsx`). Ao adicionar pendência nova, escolha a
+  `section` certa E confira o passo que o `SECTION_STEP` aponta.
 
 - As abas têm **ids estáveis**: `cenarios | sujeitos | juizes | avancado`. Só o rótulo de
   `sujeitos` muda por modo (`Modelos` no compare, `Prompts` em variation/training). **Não crie uma
@@ -89,12 +108,12 @@ CoALA (`search "code style tokens"`). Componha de `components/primitives.tsx` an
 O rodapé é `fixed bottom-0`, e é o `pb-32` do `<Screen>` que impede o último campo de ficar embaixo
 dele: se aumentar a altura do rodapé, aumente o padding também.
 
-## <evolution>
+## registo de aprendizado (memória CoALA local)
 Ao concluir:
 1. Só persista aprendizados se o type-check passou e o formulário funcionou de ponta a ponta nos
    três modos (smoke manual — inclusive com um JSON importado e no Avançado aberto).
 2. Registre gotchas (layout de grid, elemento sempre renderizado, validação de campo escondido,
    deps órfãs de `useMemo`) em `LEARNINGS.md` com data + fonte.
 3. Padrão estável → destile no corpo + incremente `version`.
-4. Nova área (ex.: persistência de rascunho do formulário) → `meta-skill-evolution`.
+4. Nova área (ex.: persistência de rascunho do formulário) → a memória CoALA local (`coala.py add`).
 5. Não faça merge sozinho: diff git para revisão humana.

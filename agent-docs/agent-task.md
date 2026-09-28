@@ -101,40 +101,21 @@ duas coisas ao mesmo tempo. `agent.limits` é o **default** de todo
 
 | Campo | Tipo | Obr. | Default | Descrição |
 |---|---|---|---|---|
-| `kind` | string | não | `worktree` | `'worktree'` (default) \| `'clone'` \| `'container'`. **`worktree`** = `git worktree` raiz de mundo, artefatos no workspace local, nada de Docker. **`clone`** = clone descartável por execução (o executor o clona/descarta ao fim). **`container`** = cada execução do `pi` roda num **container Docker efêmero** (ver `#### Modo container` abaixo) — o agente fica isolado do host além da parede de processo; `setup[]`/`verify[]` (oráculo) seguem no **host** (ver nota). |
-| `keepWorkspace` | bool | não | `false` | Guardar o workspace ao fim ocupa disco rápido; o default é **não guardar** (descarta quando o modo permitir) — só ligue para debug. |
-| `image` | string | não | `prompt-builder-pi:<executorVersion>` | Só tem efeito quando `kind === 'container'`. **Sobrescreve a tag** da imagem do `pi` (default `prompt-builder-pi:<executorVersion>`). Use para apontar uma imagem pré-buildada/alternativa. |
+| `kind` | string | não | `worktree` | `'worktree'` (default) \| `'clone'` \| `'container'`. **`worktree`** = `git worktree` raiz de mundo, artefatos no workspace local, nada de Docker. **`clone`** = clone descartável por execução (o executor o clona/descarta ao fim). **`container`** = cada execução do `pi` roda num **container Docker efêmero** (ver **Modo container** abaixo e em `docs agents`) — o agente fica isolado do host além da parede de processo; `setup[]`/`verify[]` (oráculo) também rodam em sandbox próprio (ver `docs agents`). |
+| `keepWorkspace` | bool | não | `false` | Guardar o workspace ocupa disco rápido; default **não guardar** — só para debug. `.workspace-kept` = caminhos do workspace e do repo de auditoria. |
+| `image` | string | não | `prompt-builder-pi:<executorVersion>` | Só tem efeito quando `kind === 'container'`. **Sobrescreve a tag** da imagem do `pi` (default `prompt-builder-pi:<executorVersion>`). Aceita tag **ou** referência por digest (`repo@sha256:…`/`sha256:…`). A tag só serve para achar a imagem: a preparação a resolve para o **digest sha256** e **todo `docker run` usa o digest** (gravado no `argv.json`). Digest ausente no daemon = erro pedindo `docker pull` (nada é puxado em silêncio). |
+| `runtime` | string | não | — (runc) | Só em `kind === 'container'`. Runtime OCI **opt-in** do Docker, ex. `"runsc"` (gVisor) — opção de **alto risco operacional**, fora do default (~2× em syscalls, muito pior em I/O de arquivos pequenos como `npm ci`). Validado no daemon **antes** da run. |
 
 #### `Modo container` (`kind: "container"`)
 
-Quando `isolation.kind` é `'container'`, a **execução** do agente (e só ela — `setup[]`
-e `verify[]`/oráculo continuam no host) roda num container Docker **efêmero** por
-repetição:
-
-- **Imagem default:** `prompt-builder-pi:<executorVersion>` (ex. `prompt-builder-pi:0.84.2`),
-  derivada da versão pinada do executor. Ela é **criada na primeira preparação de run
-  em container** (via `ensurePiImage`, com o Dockerfile embutido em `src/agent/container.ts`)
-  e **cacheada por tag** — o `doctor` **não** builda; `isolation.image` sobrescreve a tag.
-  Dockerfile em produção: `node:22-bookworm-slim` + `git`/`ca-certificates`/`bash` +
-  `npm i -g @earendil-works/pi-coding-agent@<versão>`.
-- **Execução efêmera por rep:** `docker run -i --rm` com o container nomeado
-  `pb-agent-<execId>`, mounts `-v <workspace>:/ws` + `-v <execDir>:/exec`, cwd `/ws`.
-  Os artefatos que o agente grava **aparecem no host** sem `docker cp`. Limites de
-  contenção: `-m 2g --pids-limit 512`.
-- **Usuário:** `--user <uid>:<gid>` = o **usuário do host** — os artefatos criados no
-  container são legíveis pelo host **sem sudo**.
-- **Key do OpenRouter:** entra por um **`--env-file` tmp 0600 no HOST** (fora dos
-  volumes, via `os.tmpdir()`), que é **apagado ao fim** do run. Nunca em arquivo de
-  volume/container, nunca em `argv` (o `argv.json` de auditoria mascara o caminho como
-  `<env-file-tmp-0600>`); a key só existe no env do processo do container.
-- **Timeout/cancelamento:** mata o container **por nome** → `docker kill <nome>` +
-  `docker rm -f <nome>` (fire-and-forget, idempotente). Nenhum órfão no host.
-- **Pré-requisito:** Docker **CLI** no PATH **e** daemon acessível (sem sudo), rede padrão
-  (o container chama o OpenRouter). Confira com `agents doctor --container`.
-
-**Nota de escopo (TODO de fase futura):** hoje só a **execução** do agente é isolada
-pelo container. `setup[]` e `verify[]` (oráculo) rodam no HOST. Isolar esses também via
-`dockerExec` está no roadmap de uma fase futura.
+Cada execução do `pi` roda num container Docker efêmero por repetição, com perfil
+endurecido fixo (`--network none`, `--read-only`, `--cap-drop ALL`, usuário do host,
+imagem por digest) e a key do OpenRouter **fora** do sandbox (proxy de inferência
+local, token fictício por execução). `setup[]`/`verify[]` em sandboxes próprios. Detalhes —
+imagem, binds, proxy, rede, `agents doctor --container` e a válvula do operador:
+`prompt-builder docs agents` → **Modo container**. Modelo inalcançável numa execução
+= **erro de infraestrutura** (`execution.infraError`): sem veredito, fora do placar;
+nunca `nao`.
 
 ### `agent.limits`
 
@@ -203,7 +184,9 @@ tarefa com agentes diferentes.
 | `setup` | não | Comandos rodados **antes** do agente acordar (`npm ci`, `pip install`, build). **Não contam como trabalho do agente e não entram na trajetória julgada.** Falha aqui = etapa `error` para todos. |
 | `files` | não | Fixtures escritos no workspace depois do setup (entrada, casos de teste, mocks): `{path, content}[]`. |
 | `verify` | não | **Oráculo determinístico** (ver abaixo). |
-| `forbiddenPaths` | não | Caminhos que o agente **não pode tocar**. Violação ⇒ veredito `nao` automático, sem gastar juiz. Globs simples (prefixo + `*`). É a barreira determinística contra editable o teste. |
+| `forbiddenPaths` | não | Caminhos que o agente **não pode tocar**. Violação ⇒ `nao` automático (score 0), sem juiz. **Semântica gitignore** (`*.test.ts` em qualquer nível, `/test/` na raiz, `**`, `!padrão`). Checado pelo diff (inclusive a **origem** de rename) **e** por SHA-256 contra o seed no filesystem — pega arquivo ignorado pelo `.gitignore`. |
+| `rebuild` | não | Rebuild de dependências **antes** do `verify[]`: `lockfiles` (default `["package-lock.json"]`) voltam aos bytes do seed e `cmd` (default `npm ci --ignore-scripts --no-audit --no-fund` — sem os lifecycle scripts do pacote raiz, que o agente controla pelo `package.json`) reconstrói. Com rebuild, `lockfiles` e `protect` (default `["node_modules/"]`) entram no hash de protegidos: dependência adulterada é violação — e os checks rodam contra as deps limpas. Rebuild falho ⇒ checks não rodam e a repetição fica **sem veredito** (infra; nunca `nao`), salvo violação. Deps que exigem install script: declare `cmd` e proteja o `package.json` em `forbiddenPaths`. `timeoutMs` default 600000. |
+| `detectors` | não | Detectores estáticos sobre o diff (`skip`/`only`/`todo`, `xfail`, `exit(0)`/`\|\| true` **só em arquivo de teste/config de runner**, teste apagado, config de runner editada — inclusive `preinstall`/`install`/`postinstall`/`prepare` no `package.json`). `warn` (default) só registra em `oracle.json`; `fail` transforma em violação (a explicação do `nao` distingue detector de caminho protegido); `off` desliga. |
 | `contextFiles` | não | Autoriza o agente a ler `AGENTS.md`/`CLAUDE.md` do repo-semente. Default desligado (segurança contra prompt injection); quando ligado, o dossiê **destaca** que o repo instruiu o agente. |
 | `limits` | não | Limites **por execução**; herda de `agent.limits`. Default: obrigatório (ver `maxCostUsd`). |
 
@@ -230,6 +213,7 @@ do julgamento que não depende de um LLM ter um bom dia.
 | `expectExit` | não | 0 | Exit code esperado. |
 | `timeoutMs` | não | — | Tempo máximo do próprio check. |
 | `weight` | não | 1 | Ponderação quando há vários. |
+| `kind` | não | `fail_to_pass` | `fail_to_pass` = o que a tarefa pede; `pass_to_pass` = **regressão** (passava no seed, tem de continuar passando). A nota é a dos F2P; **P2P quebrado zera a nota** (a execução falhou) — P2P que **trava** (timeout) ou **morre por sinal** conta como quebrado. P2P que não pôde rodar (comando ausente) fica `unverified`: a nota cheia não vira `resolve` (teto `parcial`). |
 
 **Por que lista, não um "script de teste":** o veredito precisa ser *decomponível*
 — "typecheck ✓ · testes ✗ (3 falhas) · lint ✓" em vez de 4000 linhas de test runner.
@@ -238,24 +222,44 @@ Mapeamento do oráculo para veredito:
 
 | Situação | Veredito | Juiz LLM |
 |---|---|---|
-| `forbiddenPaths` violado | **`nao`** | não roda (indiscutível) |
+| `forbiddenPaths` violado (diff, rename, hash, deps do rebuild) | **`nao`** (score 0) | não roda (indiscutível) |
+| `pass_to_pass` quebrado (inclui travado/morto por sinal) | **`nao`** (score 0) | não roda |
+| `rebuild` falhou (sem violação) | **sem veredito** (fora do placar — infra) | não roda |
+| check que **pendura ou morre** (passa do `timeoutMs` do check / morto por sinal) | o check conta como **falho** no `score` (sem re-verificação: é o código sob teste) | conforme o `score` resultante — nunca promove |
+| check cujo comando **nem começa** (ausente / sem permissão) | re-verifica **só esse check** 2×; persistindo, conta como **falho** — se ele rodou em alguma outra execução da etapa (o agente quebrou o verificador) | conforme o `score` |
+| … e não rodou em **nenhuma** execução da etapa | **etapa inválida para TODOS** os contestants (`stage.error`, fora do placar de todos) — defeito da tarefa | não conta |
+| `score === 1` com P2P não aferido | **`parcial`** (candidato, teto) | roda; pode rebaixar para `nao` |
 | `score === 1` | **`resolve`** (candidato) | roda só para graduar qualidade; **não pode rebaixar para `nao`** |
-| `0 < score < 1` | **`parcial`** (candidato) | roda; pode confirmar ou rebaixar para `nao` |
+| `0 < score < 1` | **`parcial`** (candidato) | roda; pode confirmar ou rebaixar para `nao` — **nunca promover a `resolve`** |
 | `score === 0` | **`nao`** | não roda |
+
+Falha do juiz (exceção, timeout ou resposta que não é o JSON pedido — recusa
+e texto livre incluídos —, mesmo após 2 retentativas) **não mexe na nota**: fica
+o candidato do oráculo, com a flag `judgeError` contada por run
+(`agentJudgeErrorCount`). Sem oráculo não há candidato — a execução fica sem nota
+em vez de ganhar um `parcial` inventado.
+
+Dica de autoria: prefira chamar a suíte por um programa que sempre existe no
+ambiente (`sh run_tests.sh`, `npm test`) a executar o script direto
+(`./run_tests.sh`): o comando sempre começa, e um script apagado pelo agente vira
+falha limpa do check. A invalidação da etapa fica para o que não começa em
+execução nenhuma (binário que falta na imagem/ambiente da tarefa).
 
 ## `judging`
 
 | Campo | Tipo | Obr. | Default | Descrição |
 |---|---|---|---|---|
-| `reference` | bool | não | true | Julgamento por referência (gabarito). |
+| `reference` | bool | não | true (**false automático** quando toda etapa tem `verify[]`) | Julgamento por referência (gabarito). Etapa com `verify[]` **nunca** gera gabarito, mesmo com `true` explícito: o oráculo decide. |
 | `passes` | int | não | 1 | Passadas do juiz. |
 | `dossierTokens` | int | não | 12000 | Teto de tokens do **dossiê** — o que o juiz realmente lê (não a trajetória crua, que tem megabytes). É **config**, não constante: é ele que liga o custo do juiz ao tamanho da evidência. |
 
 O gabarito de agente tem três encarnações, em ordem de preferência: **(a)** se a
-tarefa tem `verify[]`, ela já tem gabarito ("os testes passam") — não pague uma
-execução de referência; **(b)** gabarito importado via `reference` do scenario;
-**(c)** uma execução de referência (modelo forte, mesmos limites) cujo dossiê vira
-o gabarito.
+tarefa tem `verify[]`, ela já tem gabarito ("os testes passam") — o gabarito
+textual **não é gerado** (0 tokens; antes custava ~64% de uma run trivial sem
+ninguém lê-lo) e as **finais dessa etapa são decididas pelo oráculo** (maior score
+vence; score igual = empate, sem juiz LLM); **(b)** gabarito importado via
+`reference` do scenario; **(c)** uma execução de referência (modelo forte, mesmos
+limites) cujo dossiê vira o gabarito.
 
 ## `duels` / `finalists` — as finais
 
