@@ -403,13 +403,10 @@ describe('teto diário: configuração e relógio UTC', () => {
   });
 });
 
-describe('doctor — recomendação de limite por key (limit + limit_reset)', () => {
-  it('sem limite → recomenda limit + limit_reset=daily (reset 00:00 UTC) com o teto local como sugestão', () => {
-    const r = keyLimitAdvice({ limitUsd: null, limitReset: null }, 12);
-    expect(r).toHaveLength(1);
-    expect(r[0]).toContain('limit_reset=daily');
-    expect(r[0]).toContain('UTC');
-    expect(r[0]).toContain('US$ 12');
+describe('doctor — recomendação de limite por key (só quando a key TEM limite)', () => {
+  it('sem limite → NADA a recomendar: key aceite em igualdade (decisão do dono, 2026-09-27)', () => {
+    expect(keyLimitAdvice({ limitUsd: null, limitReset: null }, 12)).toEqual([]);
+    expect(keyLimitAdvice({ limitUsd: null, limitReset: null }, null)).toEqual([]);
   });
   it('limite sem reset (vitalício) e reset semanal → recomenda o diário; diário → nada a recomendar', () => {
     expect(keyLimitAdvice({ limitUsd: 10, limitReset: null }, 20)[0]).toContain('SEM reset');
@@ -1117,14 +1114,14 @@ describe('CLI — 2 processos reais (tsx) contra OpenRouter falso em 127.0.0.1',
     expect(envelope(recusada).error!.code).toBe('auth.key_invalid');
   });
 
-  it('doctor com key válida SEM limite: exit 0 e recomenda limit + limit_reset=daily; com limite diário, nada a recomendar', async () => {
+  it('doctor com key válida SEM limite: exit 0 e nada a recomendar (aceite, sem cobrança de limite)', async () => {
     const home = tmp('pb-doctor-ok-');
     keyData = { label: 'fake', usage: 1, usage_daily: 0.5, limit: null, limit_remaining: null, limit_reset: null };
     const r = await cli(home, ['doctor', '--json', '--key', VALID_KEY]).done;
     expect(r.status, r.stderr).toBe(EXIT.OK);
     const d = envelope(r).data!;
     expect(d.key).toBe('ok');
-    expect((d.recommendations as string[])[0]).toContain('limit_reset=daily');
+    expect(d.recommendations).toEqual([]); // sem limite: aceite, sem recomendação
     expect(d.keyLimit).toMatchObject({ limitUsd: null, limitReset: null, usageDailyUsd: 0.5 });
 
     keyData = { label: 'fake', usage: 1, limit: 10, limit_remaining: 9, limit_reset: 'daily' };

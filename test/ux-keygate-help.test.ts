@@ -6,8 +6,11 @@
 // como "sem limite" decorativo, sem alerta acionável; e o "?" abria SEMPRE o
 // tutorial do comparar em qualquer tela.
 //
-// Critérios: (a) o texto contém os 4 itens; (b) sem limite lido de GET /key,
-// alerta com link de ação aparece; (c) "?" abre o tópico da rota atual (teste
+// 2026-09-27 (decisão do DONO): key SEM limite de crédito é ACEITE em igualdade
+// — o "alerta acionável" (b) e a recomendação "crie a key COM limite" foram
+// REMOVIDOS. Critérios hoje: (a) o texto contém os 3 itens de risco (sem
+// cobrança de limite); (b) nenhuma cobrança/aviso de limite no fluxo de
+// aceitação; (c) "?" abre o tópico da rota atual (teste
 // por rota); (d) nenhum tutorial abre automaticamente; (e) cada afirmação do
 // HelpModal é verdadeira sob o default correspondente.
 
@@ -82,9 +85,9 @@ describe.skipIf(!temWebDeps)('IMPL-111 (a) — KeyGate com os 4 pontos de risco'
       expect(texto).toContain('XSS');
       expect(texto).toContain('extensão');
       expect(texto).toMatch(/m[áa]quina partilhada/);
-      // (3) recomendação de key COM limite de crédito
-      expect(texto).toContain('Limite de crédito');
-      expect(texto).toMatch(/crie a key COM limite/i);
+      // (3) SEM cobrança de limite de crédito (decisão do dono): a key sem
+      //      limite é aceite sem aviso, sem exigência e sem bloqueio.
+      expect(texto).not.toMatch(/Limite de crédito|COM limite|defina um limite/i);
       // (4) como revogar (a key é exibida uma única vez) + página de keys
       expect(texto).toMatch(/Como revogar/);
       expect(texto).toContain('exibida uma única vez');
@@ -95,32 +98,30 @@ describe.skipIf(!temWebDeps)('IMPL-111 (a) — KeyGate com os 4 pontos de risco'
   });
 });
 
-describe.skipIf(!temWebDeps)('IMPL-111 (b) — sem limite no GET /key, alerta acionável', () => {
-  it('keyLimitWarning só dispara sem limite e o banner traz link de ação', async () => {
-    const { keyLimitWarning, KeyLimitAlert } = await import('../web/src/components/KeySetup');
-    // Sem limite (null OU ausente) → aviso; com limite → silêncio.
-    expect(keyLimitWarning({ ok: true, limitUsd: null })).not.toBeNull();
-    expect(keyLimitWarning({ ok: true })).not.toBeNull();
-    expect(keyLimitWarning({ ok: true, limitUsd: 25 })).toBeNull();
-    expect(keyLimitWarning({ ok: false, limitUsd: null })).toBeNull(); // erro não é aviso
-
-    const aviso = keyLimitWarning({ ok: true, limitUsd: null })!;
-    const { createElement } = await import(pathToFileURL(WEB_REACT).href);
-    const { renderToStaticMarkup } = await import(pathToFileURL(WEB_REACT_DOM_SERVER).href);
-    const html: string = renderToStaticMarkup(createElement(KeyLimitAlert, { warning: aviso }));
-    expect(html).toContain('role="alert"'); // anunciado, não decorativo
-    expect(accessibleText(html)).toContain('Sem limite de crédito — defina um limite na página de keys.');
-    // Link de AÇÃO (não só texto).
-    const links = openTagsOf(html, 'a');
-    expect(links.length).toBe(1);
-    expect(links[0]).toContain('href="https://openrouter.ai/keys"');
+describe.skipIf(!temWebDeps)('IMPL-111 (b) — key sem limite ACEITE, sem cobrança de limite', () => {
+  it('o fluxo de aceitação não cobra nem avisa sobre limite de crédito', async () => {
+    const restore = stubLocalStorage();
+    try {
+      const { createElement } = await import(pathToFileURL(WEB_REACT).href);
+      const { renderToStaticMarkup } = await import(pathToFileURL(WEB_REACT_DOM_SERVER).href);
+      const { KeySetup } = await import('../web/src/components/KeySetup');
+      const html: string = renderToStaticMarkup(createElement(KeySetup, {}));
+      const texto = accessibleText(html);
+      // Nada de banner/aviso/exigência de limite — com ou sem limite, a key é
+      // aceite igual (o limite da key é só informação factual na validação).
+      expect(texto).not.toMatch(/Sem limite de crédito|defina um limite|crie a key COM limite|Limite de crédito/i);
+    } finally {
+      restore();
+    }
   });
 
-  it('KeySetup liga o aviso ao resultado de GET /key (validateKey)', () => {
+  it('a fonte não tem mais keyLimitWarning/KeyLimitAlert e mantém a ACEITAÇÃO (validateKey → salvar)', () => {
     const src = read('web/src/components/KeySetup.tsx');
-    expect(src).toMatch(/keyLimitWarning\(/);
-    expect(src).toMatch(/\{avisoLimite && <KeyLimitAlert warning=\{avisoLimite\} \/>/);
-    expect(src).toMatch(/setKeyInfo\(res\)/); // o limite vem da validação real
+    expect(src).not.toMatch(/keyLimitWarning|KeyLimitAlert/);
+    expect(src).not.toMatch(/defina um limite/i);
+    // A aceitação continua: key válida (GET /key) é salva e segue para o app.
+    expect(src).toMatch(/setStoredKey\(target\)/);
+    expect(src).toMatch(/validateKey\(target\)/);
   });
 });
 

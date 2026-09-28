@@ -128,7 +128,7 @@ export const TUTORIALS: Record<HelpTutorial, Step[]> = {
     {
       kicker: 'A chave',
       title: 'Local, com limite e revogável',
-      body: 'A key vive só no localStorage deste navegador e segue direto para o OpenRouter. Crie-a COM limite de crédito; se algo parecer errado, revogue-a na página de keys e crie outra.',
+      body: 'A key vive só no localStorage deste navegador e segue direto para o OpenRouter. Qualquer key válida é aceite; se algo parecer errado, revogue-a na página de keys e crie outra.',
     },
     {
       kicker: 'Tema',

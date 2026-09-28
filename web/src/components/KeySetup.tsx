@@ -18,47 +18,19 @@ function describeKey(res: ValidateKeyResponse): string {
   const parts: string[] = ['Key válida'];
   if (res.label) parts.push(`(${res.label})`);
   if (typeof res.usageUsd === 'number') {
+    // O limite da key é INFORMAÇÃO quando existe — nunca cobrança: key sem
+    // limite é aceite como qualquer outra (decisão do dono, 2026-09-27).
     const limit =
-      res.limitUsd === null || res.limitUsd === undefined ? 'sem limite' : `limite ${usd(res.limitUsd)}`;
-    parts.push(`— uso ${usd(res.usageUsd)} / ${limit}`);
+      res.limitUsd === null || res.limitUsd === undefined ? '' : ` / limite ${usd(res.limitUsd)}`;
+    parts.push(`— uso ${usd(res.usageUsd)}${limit}`);
   }
   if (res.isFreeTier) parts.push('· tier gratuito');
   return parts.join(' ') + '.';
 }
 
-/** Aviso ACIONÁVEL quando GET /key não devolve limite (IMPL-111 critério b). */
-export function keyLimitWarning(
-  res: Pick<ValidateKeyResponse, 'ok' | 'limitUsd'>,
-): { text: string; href: string; action: string } | null {
-  if (!res.ok) return null;
-  if (res.limitUsd !== null && res.limitUsd !== undefined) return null;
-  return {
-    text: 'Sem limite de crédito — defina um limite na página de keys.',
-    href: 'https://openrouter.ai/keys',
-    action: 'definir limite ↗',
-  };
-}
-
-/** Banner do aviso acionável (extraído p/ o teste de DOM — IMPL-111 critério b). */
-export function KeyLimitAlert({
-  warning,
-}: {
-  warning: NonNullable<ReturnType<typeof keyLimitWarning>>;
-}) {
-  return (
-    <Banner tone="warn" alert className="mt-3">
-      {warning.text}{' '}
-      <a
-        className="font-medium text-primary underline-offset-4 hover:underline"
-        href={warning.href}
-        target="_blank"
-        rel="noreferrer"
-      >
-        {warning.action}
-      </a>
-    </Banner>
-  );
-}
+// (2026-09-27, decisão do DONO) Não existe mais aviso/banner de "key sem
+// limite de crédito": QUALQUER key válida é aceite em igualdade — o limite é
+// opcional do usuário e o sistema nunca cobra nem bloqueia por isso.
 
 // Rótulo e glifo do botão por estado — o MultiStateButton morfa a largura entre eles.
 const BUTTON_LABEL: Record<Status, string> = {
@@ -72,7 +44,6 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
   const [key, setKey] = useState(getStoredKey());
   const [status, setStatus] = useState<Status>(getStoredKey() ? 'valid' : 'idle');
   const [message, setMessage] = useState<string | null>(null);
-  const [keyInfo, setKeyInfo] = useState<ValidateKeyResponse | null>(null);
 
   useEffect(() => {
     setKey(getStoredKey());
@@ -93,18 +64,15 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
         setStoredKey(target);
         setStatus('valid');
         setMessage(describeKey(res));
-        setKeyInfo(res);
         onSaved?.();
       } else {
         setStoredKey('');
         setStatus('invalid');
         setMessage(res.error ?? 'Key inválida.');
-        setKeyInfo(null);
       }
     } catch (err) {
       setStatus('invalid');
       setMessage((err as Error).message);
-      setKeyInfo(null);
     }
   }
 
@@ -113,10 +81,7 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
     setKey('');
     setStatus('idle');
     setMessage(null);
-    setKeyInfo(null);
   }
-
-  const avisoLimite = status === 'valid' && keyInfo ? keyLimitWarning(keyInfo) : null;
 
   const icon =
     status === 'validating' ? (
@@ -134,8 +99,10 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
         Cole sua key do OpenRouter. Ela vai direto do navegador para o OpenRouter — nenhum outro
         servidor a recebe.
       </p>
-      {/* IMPL-111: os 4 pontos de risco concretos — localização da key, riscos
-          (XSS/extensões/máquina partilhada), limite de crédito e revogação. */}
+      {/* Pontos de risco concretos — localização da key, riscos
+          (XSS/extensões/máquina partilhada) e revogação. (O 4º ponto antigo,
+          "crie a key COM limite de crédito", foi REMOVIDO a pedido do dono em
+          2026-09-27: key sem limite é aceite sem cobrança nem aviso.) */}
       <ul className="mt-2 space-y-1.5 text-sm leading-relaxed text-muted-foreground">
         <li>
           <strong className="font-medium text-foreground">Onde ela fica:</strong> salva só no{' '}
@@ -146,10 +113,6 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
           <strong className="font-medium text-foreground">Riscos:</strong> qualquer script da página
           (XSS), extensão do navegador com acesso à página ou outra pessoa neste computador consegue
           ler a key. Em máquina partilhada, não a salve.
-        </li>
-        <li>
-          <strong className="font-medium text-foreground">Limite de crédito:</strong> crie a key COM
-          limite — um gasto acidental fica contido no teto que você definir.
         </li>
         <li>
           <strong className="font-medium text-foreground">Como revogar:</strong> a key é exibida uma
@@ -211,9 +174,6 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
         </Banner>
       )}
 
-      {/* IMPL-111: sem limite lido de GET /key o aviso é ACIONÁVEL (link para
-          definir o limite) — nunca texto decorativo. */}
-      {avisoLimite && <KeyLimitAlert warning={avisoLimite} />}
     </div>
   );
 }

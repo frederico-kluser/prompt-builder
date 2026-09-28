@@ -148,10 +148,11 @@ outro. Por isso há camadas por cima dele:
    por orçamento (exit `7`, parcial) com `dailyCapReached: true`. Vale também com
    `--budget none`. Veja/ajuste com `limits show` e `limits set --daily <usd|none>`
    (ou `$PROMPT_BUILDER_DAILY_CAP_USD`); é por diretório de dados.
-4. **Limite da key no OpenRouter** — a ÚNICA camada que vale entre máquinas e
-   contra agente desgovernado. `prompt-builder doctor` mostra `limit` e
-   `limit_reset` da key e recomenda `limit_reset=daily` (reset 00:00 UTC) quando
-   falta. `doctor` sai `4` sem key válida (e `8` sem rede).
+4. **Limite da key no OpenRouter** — opcional e do usuário: key SEM limite é
+   aceite em igualdade (sem recomendação nem bloqueio; decisão do dono
+   2026-09-27). `prompt-builder doctor` mostra `limit`/`limit_reset` quando
+   existem e só recomenda `limit_reset=daily` quando a key TEM limite com janela
+   não-diária. `doctor` sai `4` sem key válida (e `8` sem rede).
 
 ## Teto por requisição
 

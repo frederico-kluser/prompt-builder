@@ -965,10 +965,13 @@ export async function cmdConfig(argv: string[]): Promise<number> {
             // compare: eixo de competidores (>= 2) — juiz, datagen e referência
             // ficam FORA (IMPL-048: quem escreve o gabarito não compete nem julga).
             models: {
-              datagen: 'openai/gpt-5-mini',
-              judges: ['anthropic/claude-sonnet-5'],
-              reference: 'google/gemini-2.5-pro',
-              competitors: ['google/gemini-2.5-flash', 'openai/gpt-4.1-mini'],
+              // Defaults do dono (2026-09-27): o gerador NÃO pode ser
+              // competidor (runConfigSchema) e os 3 preferidos competem, daí o
+              // muse-spark (1º livre do universo preferido). Sem `reference`
+              // explícito: no compare o gabarito cai no 1º juiz (aviso de viés).
+              datagen: 'meta/muse-spark-1.3',
+              judges: ['google/gemini-3.8-flash', 'meta/muse-spark-1.3'],
+              competitors: ['deepseek/deepseek-v4.1-flash', 'z-ai/glm-5.3-flash', 'xiaomi/mimo-v2.6-pro'],
             },
           }
         : {
@@ -976,10 +979,12 @@ export async function cmdConfig(argv: string[]): Promise<number> {
             // IMPL-048: `reference` OBRIGATÓRIO em variation/training e distinto
             // de juiz e do modelo sob teste (papéis separados).
             models: {
-              datagen: 'openai/gpt-5-mini',
-              judges: ['anthropic/claude-sonnet-5'],
-              reference: 'google/gemini-2.5-pro',
-              contestant: 'openai/gpt-5-mini',
+              // Defaults do dono (2026-09-27). O gabarito (reference) não pode
+              // ser juiz nem o modelo sob teste (IMPL-048): z-ai é o 1º livre.
+              datagen: 'xiaomi/mimo-v2.6-pro',
+              judges: ['google/gemini-3.8-flash', 'meta/muse-spark-1.3'],
+              reference: 'z-ai/glm-5.3-flash',
+              contestant: 'xiaomi/mimo-v2.6-pro',
             },
             variation: { optimize: true, techniques: ['persona', 'constraints', 'format'] },
             // minGain ausente = margem prática default max(1; 50/n) (IMPL-002).
@@ -1139,22 +1144,21 @@ export async function cmdRegistry(argv: string[]): Promise<number> {
 }
 
 /**
- * Recomendações sobre o LIMITE DA KEY no OpenRouter (IMPL-031, R-12:DEC-5): é
- * a única camada anti-gasto que vale ENTRE MÁQUINAS e contra agente
- * desgovernado — o teto diário local só vê esta máquina. O OpenRouter aplica o
- * limite no servidor (`limit` em USD + `limit_reset`, o TIPO da janela:
- * daily/weekly/monthly; o diário zera às 00:00 UTC). Pura: testável sem rede.
+ * Recomendações sobre o LIMITE DA KEY no OpenRouter (IMPL-031): quando a key
+ * TEM limite, vale avisar se a janela dele não é diária (o estrago podia
+ * acumular num dia).
+ *
+ * ⚠️ Decisão do DONO (2026-09-27): key SEM limite de crédito é ACEITE em
+ * igualdade — nada de recomendação, aviso ou bloqueio por isso (o parágrafo
+ * antigo "defina limit + limit_reset=daily" foi removido). O limite é opcional
+ * do usuário. Pura: testável sem rede.
  */
 export function keyLimitAdvice(info: KeyInfo | null, localDailyCapUsd: number | null): string[] {
   if (!info) return [];
-  const sugestao = localDailyCapUsd ?? DEFAULT_DAILY_CAP_USD;
   const onde = 'em https://openrouter.ai/settings/keys';
   if (info.limitUsd === null || info.limitUsd === undefined) {
-    return [
-      `A key NÃO tem limite de crédito: defina limit + limit_reset=daily ${onde} (ex.: US$ ${sugestao}/dia; ` +
-        'o reset diário é 00:00 UTC). É a única camada que vale entre máquinas e contra um agente desgovernado — ' +
-        'o teto diário local (`prompt-builder limits`) só enxerga esta máquina.',
-    ];
+    // Sem limite: aceite, sem nada a dizer (decisão do dono).
+    return [];
   }
   const reset = info.limitReset ?? null;
   if (reset === null) {

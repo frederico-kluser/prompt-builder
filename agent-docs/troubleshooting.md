@@ -154,9 +154,9 @@ terminar; o parcial fica em `runs show`, e rodar de novo exige outra key.
 ## `doctor` com código 4
 
 Sem key válida (ausente ou recusada) o `doctor` falha com `4` e o relatório
-inteiro em `error.details.checks`. Com key boa ele sai `0` e, se a key não tem
-limite (ou não tem reset diário), recomenda `limit` + `limit_reset=daily` no
-OpenRouter — a única camada que vale entre máquinas.
+inteiro em `error.details.checks`. Com key boa ele sai `0` — key sem limite de
+crédito é aceite sem recomendação (decisão do dono 2026-09-27); a recomendação
+de `limit_reset=daily` só aparece quando a key TEM limite com janela não-diária.
 
 ## Run travada em `running`
 
