@@ -7,6 +7,13 @@
 // (react-dom/server) + a fonte; os gates de viewport e teclado num browser real
 // vivem em test/ux-nova-run-e2e.test.ts.
 //
+// SUPERFÍCIE GUIADA (2026-09-27, pedido do dono): a Nova Run ganhou uma
+// superfície GUIADA (default) — 5 passos em linguagem natural sobre o MESMO
+// estado — e mantém a COMPLETA (página única IMPL-106) num toggle. O contrato
+// agora vale por superfície: a completa continua SEM abas e com as 4
+// seções-âncora; a guiada é que tem trilho de passos, com o rodapé (pendência +
+// custo + Iniciar) sempre visível nas duas.
+//
 // IMPL-107: a lista do seletor de modelos era truncada em .slice(0, 60) (87% do
 // catálogo sumia sem contagem honesta), sem sorts nativos do catálogo e com
 // aria-selected fixo em false. Aqui se prova a VIRTUALIZAÇÃO (contagem de nós
@@ -56,6 +63,21 @@ vi.mock('@/components/motion-ui/segmented-toggle', async () => {
       createElement('div', { role: 'group', 'aria-label': p.ariaLabel }, p.children),
     SegmentedToggleOption: (p: { value?: string; children?: unknown }) =>
       createElement('button', { type: 'button', 'data-value': p.value }, p.children),
+  };
+});
+// O SmoothTabs real (Base UI + motion) vira um trilho semântico simples: o que
+// importa aqui é a ESTRUTURA do guiado (5 passos + painel por passo).
+vi.mock('@/components/motion-ui/smooth-tabs', async () => {
+  const { createElement } = await import(pathToFileURL(WEB_REACT).href);
+  return {
+    SmoothTabs: (p: { children?: unknown }) => createElement('div', null, p.children),
+    SmoothTabsList: (p: { ariaLabel?: string; children?: unknown }) =>
+      createElement('div', { role: 'tablist', 'aria-label': p.ariaLabel }, p.children),
+    SmoothTabsTab: (p: { value?: string; children?: unknown }) =>
+      createElement('button', { type: 'button', role: 'tab', 'data-passo': p.value }, p.children),
+    SmoothTabsPanels: (p: { children?: unknown }) => createElement('div', null, p.children),
+    SmoothTabsPanel: (p: { value?: string; children?: unknown }) =>
+      createElement('div', { role: 'tabpanel', 'data-passo': p.value }, p.children),
   };
 });
 vi.mock('@/components/motion-ui/multi-state-button', async () => {
@@ -111,6 +133,7 @@ async function routerStub() {
   return {
     Link: (p: { to?: string; children?: unknown }) => createElement('a', { href: p.to }, p.children),
     useNavigate: () => () => undefined,
+    useLocation: () => ({ pathname: '/new', search: '', hash: '', state: null, key: '' }),
   };
 }
 vi.mock('../web/node_modules/react-router-dom/dist/main.js', routerStub);
@@ -132,8 +155,8 @@ function catalogo(n: number) {
 
 /* ================================================================ IMPL-106 */
 
-describe('IMPL-106 — Nova Run como página única (sem abas, seções + Avançado)', () => {
-  it('fonte: sem SmoothTabs/abas e validação por SEÇÃO, nunca por aba', () => {
+describe('IMPL-106 — Nova Run: página única COMPLETA + superfície GUIADA', () => {
+  it('fonte: completa sem SmoothTabs/abas e validação por SEÇÃO, nunca por aba', () => {
     const src = readFileSync(join(ROOT, 'web', 'src', 'pages', 'NewRun.tsx'), 'utf8');
     expect(src).not.toContain('SmoothTabs');
     expect(src).not.toMatch(/role="(tab|tablist|tabpanel)"/);
@@ -143,49 +166,91 @@ describe('IMPL-106 — Nova Run como página única (sem abas, seções + Avanç
     expect(src).toMatch(/section:\s*'juizes'/);
     expect(src).toMatch(/section:\s*'sujeitos'/);
     expect(src).toMatch(/section:\s*'avancado'/);
-    // O submit nunca troca de aba: leva à seção (rolagem + foco).
+    // O submit nunca troca de aba: leva à seção (rolagem + foco) — ou, na
+    // superfície guiada, ao PASSO que resolve (SECTION_STEP).
     expect(src).toMatch(/irPara\(faltas\[0\]\.section\)/);
+    expect(src).toMatch(/SECTION_STEP\[section\]/);
   });
 
-  it.skipIf(!temWebDeps)('render: 4 seções-âncora, obrigatórios à vista, Avançado recolhido', async () => {
-    const { createElement } = await import(pathToFileURL(WEB_REACT).href);
-    const { renderToStaticMarkup } = await import(pathToFileURL(WEB_REACT_DOM_SERVER).href);
-    const { NewRun } = await import('../web/src/pages/NewRun');
-    const html: string = renderToStaticMarkup(createElement(NewRun));
+  it.skipIf(!temWebDeps)('render guiado (default): trilho de 5 passos + rodapé sempre visível', async () => {
+    const g = globalThis as { localStorage?: unknown };
+    const anterior = g.localStorage;
+    // Sem preferência gravada, o default é o GUIADO (pedido do dono).
+    g.localStorage = { getItem: () => null, setItem: () => {} };
+    try {
+      const { createElement } = await import(pathToFileURL(WEB_REACT).href);
+      const { renderToStaticMarkup } = await import(pathToFileURL(WEB_REACT_DOM_SERVER).href);
+      const { NewRun } = await import('../web/src/pages/NewRun');
+      const html: string = renderToStaticMarkup(createElement(NewRun));
 
-    // (i) página única: nenhuma semântica de aba.
-    expect(html).not.toMatch(/role="(tab|tablist|tabpanel)"/);
-
-    // (ii) as 4 seções existem como âncoras estáveis.
-    for (const sec of ['sec-cenarios', 'sec-sujeitos', 'sec-juizes', 'sec-avancado']) {
-      expect(html).toContain(`id="${sec}"`);
+      // (i) o trilho do guiado tem os 5 passos estáveis, por ordem.
+      for (const passo of ['Objetivo', 'Teste', 'Participantes', 'Limites', 'Revisão']) {
+        expect(html).toContain(passo);
+      }
+      // (ii) o passo inicial é a pergunta de ALTO NÍVEL (objetivo), não o
+      //      formulário técnico.
+      expect(html).toContain('O que você quer descobrir?');
+      // (iii) as seções clássicas NÃO convivem com o guiado (só uma superfície
+      //       por render) — nada de formulário duplicado.
+      expect(html).not.toContain('id="sec-cenarios"');
+      // (iv) o rodapé (pendência + custo + Iniciar) vale nas DUAS superfícies.
+      expect(html).toContain('data-iniciar');
+      expect(html).toContain('Iniciar');
+      expect(html).toContain('custo estimado');
+    } finally {
+      g.localStorage = anterior;
     }
+  });
 
-    // (iii) o "Avançado" nasce RECOLIDHIDO (o conteúdo fica montado em `hidden`,
-    //       fora da ordem de Tab) — 2º nível da revelação progressiva.
-    expect(html).toMatch(/id="sec-avancado-region"[^>]*\bhidden\b/);
+  it.skipIf(!temWebDeps)('render completo (pb.formStyle=complete): 4 seções-âncora, obrigatórios à vista, Avançado recolhido', async () => {
+    const g = globalThis as { localStorage?: unknown };
+    const anterior = g.localStorage;
+    g.localStorage = {
+      getItem: (k: string) => (k === 'pb.formStyle' ? 'complete' : null),
+      setItem: () => {},
+    };
+    try {
+      const { createElement } = await import(pathToFileURL(WEB_REACT).href);
+      const { renderToStaticMarkup } = await import(pathToFileURL(WEB_REACT_DOM_SERVER).href);
+      const { NewRun } = await import('../web/src/pages/NewRun');
+      const html: string = renderToStaticMarkup(createElement(NewRun));
 
-    // (iv) critério (d): NENHUM campo obrigatório escondido por default. Os
-    //      obrigatórios (tema, competidores, juízes) aparecem ANTES do bloco
-    //      recolhido — e o recolhido só leva o que é opcional (Quantos/O que
-    //      testar), nunca o conteúdo obrigatório.
-    const corte = html.indexOf('id="sec-avancado-region"');
-    expect(corte).toBeGreaterThan(0);
-    const visivel = html.slice(0, corte);
-    const recolhido = html.slice(corte);
-    expect(visivel).toContain('aria-label="Tema"');
-    expect(visivel).toContain('Competidores');
-    expect(visivel).toContain('Juízes');
-    expect(recolhido).not.toContain('aria-label="Tema"');
-    expect(recolhido).not.toContain('aria-label="Juízes"');
-    expect(recolhido).toContain('Quantos'); // opcional → Avançado
+      // (i) página única: nenhuma semântica de aba na superfície completa.
+      expect(html).not.toMatch(/role="(tab|tablist|tabpanel)"/);
 
-    // (v) rodapé fixo: pendência + custo estimado + "Iniciar", acima da barra
-    //     inferior em telas pequenas (IMPL-110).
-    expect(html).toContain('data-iniciar');
-    expect(html).toContain('Iniciar');
-    expect(html).toContain('custo estimado');
-    expect(html).toMatch(/class="[^"]*\bfixed\b[^"]*md:bottom-0/);
+      // (ii) as 4 seções existem como âncoras estáveis.
+      for (const sec of ['sec-cenarios', 'sec-sujeitos', 'sec-juizes', 'sec-avancado']) {
+        expect(html).toContain(`id="${sec}"`);
+      }
+
+      // (iii) o "Avançado" nasce RECOLIDHIDO (o conteúdo fica montado em `hidden`,
+      //       fora da ordem de Tab) — 2º nível da revelação progressiva.
+      expect(html).toMatch(/id="sec-avancado-region"[^>]*\bhidden\b/);
+
+      // (iv) critério (d): NENHUM campo obrigatório escondido por default. Os
+      //      obrigatórios (tema, competidores, juízes) aparecem ANTES do bloco
+      //      recolhido — e o recolhido só leva o que é opcional (Quantos/O que
+      //      testar), nunca o conteúdo obrigatório.
+      const corte = html.indexOf('id="sec-avancado-region"');
+      expect(corte).toBeGreaterThan(0);
+      const visivel = html.slice(0, corte);
+      const recolhido = html.slice(corte);
+      expect(visivel).toContain('aria-label="Tema"');
+      expect(visivel).toContain('Competidores');
+      expect(visivel).toContain('Juízes');
+      expect(recolhido).not.toContain('aria-label="Tema"');
+      expect(recolhido).not.toContain('aria-label="Juízes"');
+      expect(recolhido).toContain('Quantos'); // opcional → Avançado
+
+      // (v) rodapé fixo: pendência + custo estimado + "Iniciar", acima da barra
+      //     inferior em telas pequenas (IMPL-110).
+      expect(html).toContain('data-iniciar');
+      expect(html).toContain('Iniciar');
+      expect(html).toContain('custo estimado');
+      expect(html).toMatch(/class="[^"]*\bfixed\b[^"]*md:bottom-0/);
+    } finally {
+      g.localStorage = anterior;
+    }
   });
 });
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { ArrowRight, Download, LoaderCircle, Trash2, Upload } from 'lucide-react';
 import { ModelSelector, type ModelTuning } from '../components/ModelSelector';
 import { ManualVariantsEditor } from '../components/ManualVariantsEditor';
@@ -37,6 +37,7 @@ import {
 import {
   ARENA_JSON_ONLY_FIELDS,
   DEFAULT_DATAGEN,
+  DEFAULT_DATAGEN_COMPARE,
   DEFAULT_MAX_OUTPUT_TOKENS,
   applyArenaConfigToForm,
   defaultArenaFormState,
@@ -50,6 +51,8 @@ import {
   type ConfigRow,
 } from '../arenaForm';
 import { CostConfirmDialog } from '../components/CostConfirmDialog';
+import { AreaRow, LinkButton, NumRow, SwitchRow, TxtNumRow } from '../components/formRows';
+import { GuidedSetup, SECTION_STEP, type GuidedStep } from '../components/GuidedSetup';
 import {
   AREA_LIVRE,
   allowlistNotice,
@@ -70,8 +73,6 @@ import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/s
 import { MultiStateButton } from '@/components/motion-ui/multi-state-button';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Switch } from '@/components/ui/switch';
-import { Textarea } from '@/components/ui/textarea';
 import {
   Banner,
   Chip,
@@ -186,115 +187,24 @@ function EffortField(p: {
   );
 }
 
-/** Linha numérica (valor NUMBER). Sem clamp na digitação — o clamp é no envio. */
-function NumRow(p: {
-  label: string;
-  sub?: string;
-  value: number;
-  onChange: (v: number) => void;
-  min: number;
-  max: number;
-  step?: number;
-}) {
-  return (
-    <SettingRow label={p.label} sub={p.sub}>
-      <Input
-        type="number"
-        className="w-24"
-        aria-label={p.label}
-        min={p.min}
-        max={p.max}
-        step={p.step ?? 1}
-        value={p.value}
-        onChange={(e) => {
-          const v = e.target.valueAsNumber;
-          if (!Number.isNaN(v)) p.onChange(v);
-        }}
-      />
-    </SettingRow>
-  );
-}
-
-/** Linha numérica com valor TEXTO (vazio = default/sem limite). */
-function TxtNumRow(p: {
-  label: string;
-  sub?: string;
-  value: string;
-  onChange: (v: string) => void;
-  min?: number;
-  max?: number;
-  step?: number;
-  placeholder?: string;
-}) {
-  return (
-    <SettingRow label={p.label} sub={p.sub}>
-      <Input
-        type="number"
-        className="w-24"
-        aria-label={p.label}
-        min={p.min}
-        max={p.max}
-        step={p.step}
-        placeholder={p.placeholder}
-        value={p.value}
-        onChange={(e) => p.onChange(e.target.value)}
-      />
-    </SettingRow>
-  );
-}
-
-/** Linha booleana. O rótulo visível é o da linha, daí o aria-label no switch. */
-function SwitchRow(p: { label: string; sub: string; checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <SettingRow label={p.label} sub={p.sub}>
-      <Switch aria-label={p.label} checked={p.checked} onCheckedChange={(v) => p.onChange(!!v)} />
-    </SettingRow>
-  );
-}
-
-/** Linha de texto longo: a caixa ocupa a largura toda, sob o rótulo. */
-function AreaRow(p: {
-  label: string;
-  sub?: string;
-  value: string;
-  onChange: (v: string) => void;
-  rows?: number;
-  placeholder?: string;
-  children?: ReactNode;
-}) {
-  return (
-    <SettingRow label={p.label} sub={p.sub} wide>
-      <Textarea
-        rows={p.rows ?? 3}
-        aria-label={p.label}
-        value={p.value}
-        placeholder={p.placeholder}
-        onChange={(e) => p.onChange(e.target.value)}
-      />
-      {p.children}
-    </SettingRow>
-  );
-}
-
-/** Botão de texto discreto ("gerar com IA", "escrever manualmente"). */
-function LinkButton(p: { onClick: () => void; children: ReactNode; disabled?: boolean }) {
-  return (
-    <button
-      type="button"
-      disabled={p.disabled}
-      onClick={p.onClick}
-      className="self-start text-[13px] text-primary underline-offset-4 hover:underline disabled:opacity-50"
-    >
-      {p.children}
-    </button>
-  );
-}
 
 /* ------------------------------------------------------------------ página */
 
 export function NewRun() {
   const navigate = useNavigate();
-  const [mode, setMode] = useState<RunMode>(INIT.mode);
+  const location = useLocation();
+  const [mode, setModeRaw] = useState<RunMode>(INIT.mode);
+  // Modo do formulário (pedido do dono: "configuração totalmente guiada"):
+  // 'guided' é o default — uma pergunta por passo; 'complete' é a página única
+  // inteira. O ESTADO é o mesmo nos dois; só a superfície muda.
+  const [formStyle, setFormStyle] = useState<'guided' | 'complete'>(() => {
+    try {
+      return localStorage.getItem('pb.formStyle') === 'complete' ? 'complete' : 'guided';
+    } catch {
+      return 'guided';
+    }
+  });
+  const [guidedStep, setGuidedStep] = useState<GuidedStep>('objetivo');
   // "Avançado" é o 2º nível da revelação progressiva: fechado por default, e
   // aberto sozinho quando a pendência que o usuário tentou resolver mora lá.
   const [avancadoOpen, setAvancadoOpen] = useState(false);
@@ -410,6 +320,24 @@ export function NewRun() {
   // Só depois de o usuário TENTAR iniciar a pendência vira erro (vermelho) —
   // validação prematura em vermelho é anti-padrão.
   const [tried, setTried] = useState(false);
+
+  // Chegada do first-run (`/welcome`): objetivo escolhido lá vira o modo da
+  // run e o fluxo guiado entra já no passo a seguir ao objetivo.
+  useEffect(() => {
+    const q = new URLSearchParams(location.search);
+    const objetivo = q.get('objetivo');
+    if (objetivo === 'compare' || objetivo === 'variation' || objetivo === 'training') {
+      setMode(objetivo);
+      const passo = q.get('passo');
+      setGuidedStep(
+        passo === 'objetivo' || passo === 'teste' || passo === 'participantes' || passo === 'limites' || passo === 'revisao'
+          ? passo
+          : 'teste',
+      );
+    }
+    // Só na entrada (a URL de origem não muda durante a edição).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const isSingle = mode === 'variation' || mode === 'training';
   const isLivre = complianceArea === AREA_LIVRE;
@@ -787,10 +715,15 @@ export function NewRun() {
   }
 
   /**
-   * Leva à seção que resolve uma pendência: abre o "Avançado" se preciso e
-   * rola/foca a âncora. Nunca troca de aba (a página é única).
+   * Leva ao ponto que resolve uma pendência: no fluxo guiado, ao PASSO certo;
+   * no completo, abre o "Avançado" se preciso e rola/foca a âncora. Nunca troca
+   * de aba (a página é única).
    */
   function irPara(section: SectionId) {
+    if (formStyle === 'guided') {
+      setGuidedStep(SECTION_STEP[section]);
+      return;
+    }
     if (section === 'avancado') setAvancadoOpen(true);
     // Depois do render (o Avançado precisa abrir antes de existir no layout).
     requestAnimationFrame(() => {
@@ -801,6 +734,30 @@ export function NewRun() {
     });
   }
   const keyConnected = !!getStoredKey();
+
+  /**
+   * Troca o modo. Se o gerador de cenários ainda for um DEFAULT intocado, ele
+   * segue o default do modo (compare ≠ modos de papel — ver `arenaForm.ts`).
+   */
+  function setMode(m: RunMode) {
+    setModeRaw(m);
+    const alvo = m === 'compare' ? DEFAULT_DATAGEN_COMPARE : DEFAULT_DATAGEN;
+    setDatagen((atual) =>
+      atual.length === 1 && (atual[0] === DEFAULT_DATAGEN || atual[0] === DEFAULT_DATAGEN_COMPARE)
+        ? [alvo]
+        : atual,
+    );
+  }
+
+  /** Troca a superfície do formulário e grava a preferência. */
+  function mudarFormStyle(s: 'guided' | 'complete') {
+    setFormStyle(s);
+    try {
+      localStorage.setItem('pb.formStyle', s);
+    } catch {
+      // sem localStorage a preferência dura só esta sessão
+    }
+  }
 
   /**
    * Monta o RunConfig a partir do estado da tela. Sem efeitos colaterais: é a
@@ -1028,9 +985,12 @@ export function NewRun() {
           subtitle={MODE_DESCRIPTIONS[mode]}
           actions={
             <>
-              {/* Arquivo da configuração: UM parada de Tab (roving) — duas ações
-                  irmãs não podem virar duas paradas antes do "Iniciar". */}
-              <RovingToolbar label="Arquivo da configuração" count={2} className="flex items-center gap-2">
+              {/* Ações da configuração: UMA parada de Tab (roving) — ações irmãs
+                  não podem virar paradas novas antes do "Iniciar" (o orçamento
+                  IMPL-106 (c) é contrato). Aqui entram o arquivo da configuração
+                  e a SUPERFÍCIE do formulário (guiado/completo), que sem isto
+                  estourava o orçamento no modo variation. */}
+              <RovingToolbar label="Ações da configuração" count={4} className="flex items-center gap-2">
                 <RovingItem index={0}>
                   {(roving) => (
                     <Button
@@ -1053,6 +1013,39 @@ export function NewRun() {
                     </Button>
                   )}
                 </RovingItem>
+                <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
+                {/* Superfície do formulário: guiado (default) ou completo — o
+                    MESMO estado nos dois; trocar não perde o que foi preenchido. */}
+                <RovingItem index={2}>
+                  {(roving) => (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      {...roving}
+                      aria-pressed={formStyle === 'guided'}
+                      className={formStyle === 'guided' ? 'bg-muted text-foreground' : 'text-muted-foreground'}
+                      onClick={() => mudarFormStyle('guided')}
+                    >
+                      Guiado
+                    </Button>
+                  )}
+                </RovingItem>
+                <RovingItem index={3}>
+                  {(roving) => (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      {...roving}
+                      aria-pressed={formStyle === 'complete'}
+                      className={formStyle === 'complete' ? 'bg-muted text-foreground' : 'text-muted-foreground'}
+                      onClick={() => mudarFormStyle('complete')}
+                    >
+                      Completo
+                    </Button>
+                  )}
+                </RovingItem>
               </RovingToolbar>
               <input
                 ref={importRef}
@@ -1069,18 +1062,20 @@ export function NewRun() {
           }
         />
 
-        <SegmentedToggle
-          value={mode}
-          onChange={(v) => setMode(v as RunMode)}
-          ariaLabel="Modo do benchmark"
-          className="w-full"
-        >
-          {MODES.map((m) => (
-            <SegmentedToggleOption key={m.id} value={m.id} className="flex-1 justify-center">
-              {m.label}
-            </SegmentedToggleOption>
-          ))}
-        </SegmentedToggle>
+        {formStyle === 'complete' && (
+          <SegmentedToggle
+            value={mode}
+            onChange={(v) => setMode(v as RunMode)}
+            ariaLabel="Modo do benchmark"
+            className="w-full"
+          >
+            {MODES.map((m) => (
+              <SegmentedToggleOption key={m.id} value={m.id} className="flex-1 justify-center">
+                {m.label}
+              </SegmentedToggleOption>
+            ))}
+          </SegmentedToggle>
+        )}
 
         {piiImport && (
           <Banner tone="warn" className="mt-4 flex flex-col gap-3">
@@ -1167,7 +1162,43 @@ export function NewRun() {
 
         {/* Página ÚNICA (IMPL-106): 3 seções de conteúdo sempre à vista + o
             "Avançado" recolhível (2º nível da revelação progressiva). Sem abas:
-            conteúdo obrigatório nunca fica escondido em aba não-default. */}
+            conteúdo obrigatório nunca fica escondido em aba não-default.
+            O GUIADO mostra as mesmas perguntas, uma por passo. */}
+        {formStyle === 'guided' ? (
+          <GuidedSetup
+            step={guidedStep}
+            onStepChange={setGuidedStep}
+            mode={mode}
+            setMode={setMode}
+            theme={theme}
+            setTheme={setTheme}
+            basePrompt={basePrompt}
+            setBasePrompt={setBasePrompt}
+            stages={stages}
+            setStages={setStages}
+            budget={budget}
+            setBudget={setBudget}
+            competitors={competitors}
+            setCompetitors={setCompetitors}
+            contestantModel={contestantModel}
+            setContestantModel={setContestantModel}
+            datagen={datagen}
+            setDatagen={setDatagen}
+            judge={judge}
+            setJudge={setJudge}
+            duelsOn={duelsOn}
+            setDuelsOn={setDuelsOn}
+            finalists={finalists}
+            setFinalists={setFinalists}
+            models={models}
+            modelsLoading={modelsLoading}
+            tuning={tuning}
+            onTuningChange={patchTuning}
+            problems={pendencias}
+            estimate={launchEstimate ? { low: launchEstimate.low, high: launchEstimate.high } : null}
+            onOpenClassic={() => setFormStyle('complete')}
+          />
+        ) : (
         <div className="mt-6 flex flex-col gap-5">
           {/* --------------------------------------------------------- cenários */}
           <SettingGroup
@@ -1803,6 +1834,7 @@ export function NewRun() {
               </SettingGroup>
           </Disclosure>
         </div>
+        )}
       </Screen>
 
       {/* --------------------------------------------------------------- rodapé */}

@@ -1,0 +1,115 @@
+{
+  "interface_type": "form",
+  "interface_type_note": "Produto híbrido: o fluxo dominante avaliado é o formulário de configuração de benchmark (Nova Run) e a sua tela de execução/resultados (tipo dashboard). Sem UXUI_API_KEY, o audit foi feito por conhecimento interno do framework.",
+  "overall_score": 46,
+  "band": "fair",
+  "findings": [
+    {
+      "id": "finding-1",
+      "principle": {
+        "code": "F.1.1.02",
+        "slug": "cognitive-load",
+        "title": "Cognitive Load",
+        "part": "part-1"
+      },
+      "severity": "critical",
+      "message": "A abertura da app caía direto num formulário de configuração com 4 seções e ~30 controles técnicos (modelo gerador, juízes, esforço de raciocínio, concorrência) sem enquadrar o objetivo nem dividir as decisões. O utilizador tem de manter na memória de trabalho o conceito do produto, o vocabulário (cenário, gabarito, juiz, duelos) e as decisões de configuração ao mesmo tempo — sobrecarga que trava o primeiro valor e aumenta o abandono no primeiro minuto.",
+      "remediation": "Superfície guiada por default: uma pergunta por passo (Objetivo → Teste → Participantes → Limites → Revisão) sobre o mesmo estado, com linguagem natural e plano da run em frases; a superfície completa fica num toggle com o mesmo estado. Medir: time-to-first-run e conclusão do primeiro fluxo.",
+      "business_impact": null
+    },
+    {
+      "id": "finding-2",
+      "principle": {
+        "code": "F.1.1.03",
+        "slug": "mental-model",
+        "title": "Mental Model",
+        "part": "part-1"
+      },
+      "severity": "critical",
+      "message": "O pré-requisito da aplicação (a chave do OpenRouter) não era pedido no primeiro contacto: o gate vivia só na rota de criação e o resto da app deixava navegar sem explicar o que falta nem onde resolver. Quem abre a app pela primeira vez tem de adivinhar que a credencial se cola numa tela específica (Configurações/gate) — modelo mental imposto pelo sistema, não pelo objetivo do utilizador.",
+      "remediation": "First-run em tela própria (/welcome) que Pede a key diretamente ao abrir sem chave: introdução (pipeline em 4 figuras) → chave (com riscos, limite de crédito e revogação) → objetivo (3 cartões que pré-configuram o guiado). Escape 'explorar sem chave' por sessão. Medir: % de sessões com chave validada no primeiro minuto.",
+      "business_impact": null
+    },
+    {
+      "id": "finding-3",
+      "principle": {
+        "code": "D.1.1.01",
+        "slug": "progressive-disclosure",
+        "title": "Progressive Disclosure",
+        "part": "part-3"
+      },
+      "severity": "warning",
+      "message": "A revelação progressiva tinha um único nível (o bloco 'Avançado'): campos de decisão frequente (tema, participantes) conviviam com controlos de especialista (esforço de raciocínio por papel, modelos de referência, filtros de preço) na mesma superfície, exigindo que o iniciante distinga o essencial do fino antes de saber o que o produto faz.",
+      "remediation": "Dois níveis de superfície: o guiado esconde o fino por completo (só o essencial, com 'abrir a configuração completa' para o resto) e a completa mantém o 'Avançado' recolhível. Medir: interações até ao primeiro Iniciar e uso do toggle entre superfícies.",
+      "business_impact": null
+    },
+    {
+      "id": "finding-4",
+      "principle": {
+        "code": "S.1.3.01",
+        "slug": "ai-transparency",
+        "title": "AI Transparency",
+        "part": "part-5"
+      },
+      "severity": "warning",
+      "message": "Durante a execução a tela era só o heatmap de vereditos: num sistema com geração de cenários, respostas de LLM e julgamento por gabarito, o utilizador não via em que fase do pipeline a run estava (a gerar cenários? a responder? a julgar? nos duelos?), nem o andamento por fase, nem o gasto face ao teto — o processo do sistema ficava opaco num momento de ansiedade ('está a funcionar?').",
+      "remediation": "Painel de narrativa da run acima do heatmap: 4 fases do pipeline com contagem, frase do que se passa agora, placar em linguagem simples ('resolveu 3 de 5') e gasto/teto; no fim, o desfecho em uma frase. Manter o heatmap como camada de detalhe. Medir: consultas repetidas ao histórico durante a run e pedidos de suporte 'a run travou'.",
+      "business_impact": null
+    },
+    {
+      "id": "finding-5",
+      "principle": {
+        "code": "F.2.2.03",
+        "slug": "hicks-law",
+        "title": "Hick's Law",
+        "part": "part-1"
+      },
+      "severity": "warning",
+      "message": "Antes de qualquer valor entregue, a tela apresentava de uma assentada as escolhas de modo, eixo de comparação, papéis de modelo (gerador/juíz/referência/reescritor), ajustes de esforço/temperatura, contagens e limites — mais de 20 decisões para uma primeira run. Cada opção acrescenta tempo de decisão e aumenta a probabilidade de configuração errada.",
+      "remediation": "Comprometer cedo e pouco: 3 cartões de objetivo na pergunta 1, defaults sensatos por modo (variantes automáticas, gerador/juíz pré-selecionados) e as restantes decisões só nos passos seguintes ou na superfície completa. Medir: tempo até Iniciar e taxa de retrabalho (voltar atrás nos passos).",
+      "business_impact": null
+    },
+    {
+      "id": "finding-6",
+      "principle": {
+        "code": "C.1.1.01",
+        "slug": "consistency-and-standards",
+        "title": "Consistency and Standards",
+        "part": "part-2"
+      },
+      "severity": "suggestion",
+      "message": "O vocabulário próprio do produto (cenário, gabarito, veredito, duelo, finalista, controlo) e os fluxos de tela não tinham documentação de utilizador acessível — a corpus de docs tinha sido removida e o README ainda apontava para ficheiros apagados (FUNCIONAMENTO.md/TELAS.md), quebrando a continuidade entre o que a interface diz e o que a documentação explica.",
+      "remediation": "Guia do utilizador único (GUIA.md) cobrindo primeiro acesso, configuração guiada, modos, leitura do resultado, custo e problemas comuns, com glossário inline; reparar as ligações do README. Medir: consultas de ajuda in-app e regressos ao guia.",
+      "business_impact": null
+    }
+  ],
+  "strengths": [
+    {
+      "principle": {
+        "code": "C.1.4.01",
+        "slug": "error-prevention",
+        "title": "Error Prevention"
+      },
+      "message": "O gasto é prevenido, não lamentado: estimativa viva no rodapé (mesma conta do motor), teto de gasto com paragem honesta em fronteira de fase e diálogo de confirmação com a faixa e os principais responsáveis antes de qualquer gasto acima de US$ 1."
+    },
+    {
+      "principle": {
+        "code": "S.1.3.01",
+        "slug": "ai-transparency",
+        "title": "AI Transparency"
+      },
+      "message": "A entrada da credencial já diz os 4 pontos que decidem a confiança: onde a key fica (localStorage), riscos concretos (XSS/extensões/máquina partilhada), recomendação de limite de crédito e como revogar — com aviso acionável quando a key ativa não tem limite."
+    },
+    {
+      "principle": {
+        "code": "D.2.1.02",
+        "slug": "visual-hierarchy",
+        "title": "Visual Hierarchy"
+      },
+      "message": "O heatmap de vereditos é uma tabela nativa com hierarquia clara (variante × cenário → score), glifos como dado textual acessível (nunca só decoração) e clique só no cabeçalho da coluna — detalhe legível sem sobrecarregar o resultado."
+    }
+  ],
+  "priority_fixes": ["finding-1", "finding-2", "finding-4", "finding-3", "finding-5", "finding-6"],
+  "api_enriched": false,
+  "api_note": "Install the uxuiprinciples API key for enriched findings with citations and business impact data. See uxuiprinciples.com/en/checkout"
+}

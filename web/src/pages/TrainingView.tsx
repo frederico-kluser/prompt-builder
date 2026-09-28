@@ -17,6 +17,7 @@ import {
   downloadScenarioPack,
 } from '../api';
 import { applyEvent, denseStages, EvolutionHeatmap, ScoreHeatmap, FinalsPanel } from './runShared';
+import { RunNarrative } from '../components/RunNarrative';
 import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
 import { diffLines } from '../diff';
 import { formatIterationGate, formatPValue, reportPValue } from '../engine/stats';
@@ -656,6 +657,10 @@ export function TrainingView() {
             {roundLabel}
             {isRunning && ' — ao vivo'}
           </SectionHead>
+          {/* Representação de ALTO NÍVEL da rodada (o mesmo painel da run):
+              fases do pipeline, placar em linguagem simples e gasto — o heatmap
+              continua a ser a camada de detalhe logo abaixo. */}
+          <RunNarrative record={roundShown} duelProgress={isRunning ? duelProgress : null} />
           <ScoreHeatmap
             record={roundShown}
             ranked={roundShown.status === 'finished' || roundShown.status === 'inconclusive'}

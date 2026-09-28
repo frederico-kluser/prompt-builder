@@ -900,7 +900,10 @@ export function ModelSelector({
                   layout
                   initial={{ opacity: 0, transform: 'scale(0.9)' }}
                   animate={{ opacity: 1, transform: 'scale(1)' }}
-                  exit={{ opacity: 0, transform: 'scale(0.9)' }}
+                  // Saída INSTANTÂNEA: o fantasma de saída (AnimatePresence)
+                  // mantinha botões focáveis por ~½ s e estourava o orçamento de
+                  // Tab (IMPL-106 (c)) logo após trocar de modo — o chip some já.
+                  exit={{ opacity: 0, transform: 'scale(0.9)', transition: { duration: 0 } }}
                   transition={{ type: 'spring', stiffness: 700, damping: 45 }}
                   title={resumo ? `${base} · ${resumo}` : base}
                   className={cn(

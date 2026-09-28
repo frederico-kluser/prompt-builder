@@ -15,6 +15,7 @@ import {
   runMode,
 } from '../api';
 import { CancelHoldButton, OwnershipBanner, StopBanner } from '../components/RunControls';
+import { RunNarrative } from '../components/RunNarrative';
 import { StorageNotice } from '../components/StorageNotice';
 import {
   Accordion,
@@ -422,6 +423,11 @@ export function RunView() {
           ) : null}
         </Banner>
       )}
+
+      <SectionHead>Resumo</SectionHead>
+      {/* Representação de ALTO NÍVEL (pedido do dono): fases do pipeline, placar
+          em linguagem simples e o desfecho — acima do heatmap, que é o detalhe. */}
+      <RunNarrative record={record} duelProgress={duelProgress} />
 
       <SectionHead>Resultados</SectionHead>
       <ScoreHeatmap record={record} ranked={!isRunning} onStageClick={openStageFromHeatmap} />

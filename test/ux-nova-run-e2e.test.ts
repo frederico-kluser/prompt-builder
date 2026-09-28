@@ -21,6 +21,12 @@
 //      trocável na UI; "mostrando X de Y" reflete o total filtrado; preço
 //      "-1" nunca aparece como número negativo.
 //
+// SUPERFÍCIE GUIADA (2026-09-27, pedido do dono): a Nova Run abre por default
+// num fluxo GUIADO de 5 passos (Objetivo → Teste → Participantes → Limites →
+// Revisão, com plano em linguagem natural) e guarda a página única IMPL-106
+// como superfície "Completa" num toggle, com o MESMO estado e o MESMO rodapé
+// fixo. Os contratos acima medem a completa; o describe final cobre o guiado.
+//
 // Sobre o "axe sem violação de aria" do IMPL-107 (b): não há axe-core no
 // projeto (adicionar dependência está fora do lote) — a conformidade de
 // estrutura ARIA (combobox/listbox/aria-activedescendant/aria-selected) é
@@ -154,17 +160,23 @@ let servidor: Server | null = null;
 let url = '';
 
 /** Contexto novo por teste (localStorage/cache zerados) + rede interceptada. */
-async function paginaNova(viewport: { width: number; height: number }): Promise<{
+async function paginaNova(
+  viewport: { width: number; height: number },
+  // Superfície do formulário (2026-09-27): os contratos IMPL-106/107 medem a
+  // página única COMPLETA; a superfície GUIADA (default) tem o seu describe.
+  estilo: 'guided' | 'complete' = 'complete',
+): Promise<{
   contexto: BrowserContext;
   page: Page;
 }> {
   const contexto = await navegador!.newContext({ viewport });
   const page = await contexto.newPage();
   // KeyGate deixa passar com key "lembrada" — sem tocar no OpenRouter de verdade.
-  await page.addInitScript(() => {
+  await page.addInitScript((s: string) => {
     localStorage.setItem('openrouter_api_key', 'sk-or-e2e-nao-real');
     localStorage.setItem('openrouter_api_key:remember', '1');
-  });
+    localStorage.setItem('pb.formStyle', s);
+  }, estilo);
   await page.route('**/*', async (route) => {
     const alvoUrl = route.request().url();
     if (alvoUrl.includes('/api/v1/models')) {
@@ -457,4 +469,79 @@ describe.skipIf(!alvo)('IMPL-107 — seletor de modelos num browser real', () =>
       await contexto.close();
     }
   }, 120_000);
+});
+/* ================================================================ GUIADO */
+
+// Superfície GUIADA (2026-09-27, pedido do dono: "configuração totalmente
+// guiada"): 5 passos em linguagem natural, uma pergunta por vez, com o MESMO
+// rodapé fixo (pendência + custo + Iniciar) da completa. O que se guarda aqui:
+// trilho estável, pergunta única por passo, rodapé visível em todos os passos,
+// revisão com plano + pendências nomeadas, e o toggle de volta à completa.
+describe.skipIf(!alvo)('superfície GUIADA (default) — 5 passos, plano e rodapé fixo', () => {
+  it('trilho de passos, pergunta por vez, rodapé sempre visível e toggle Completo', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided');
+    try {
+      await page.goto(`${url}new`);
+      await esperarFormulario(page);
+
+      // (i) o trilho estável com os 5 passos.
+      for (const passo of ['Objetivo', 'Teste', 'Participantes', 'Limites', 'Revisão']) {
+        await page.getByRole('tab', { name: new RegExp(passo) }).first().waitFor({ timeout: 10_000 });
+      }
+
+      // (ii) começa na pergunta de ALTO NÍVEL — uma pergunta por passo.
+      expect(await page.locator('text=O que você quer descobrir?').first().isVisible()).toBe(true);
+      expect(await page.locator('textarea[aria-label="Tema"]').count()).toBe(0);
+
+      // (iii) escolher o objetivo adapta o resto (pergunta do passo seguinte).
+      await page.getByRole('button', { name: /Comparar modelos/ }).first().click();
+      await page.getByRole('tab', { name: /Teste/ }).first().click();
+      await page.locator('text=Sobre o que é o teste?').first().waitFor({ timeout: 10_000 });
+      expect(await page.locator('textarea[aria-label="Tema"]').isVisible()).toBe(true);
+
+      // (iv) o rodapé fixo (pendência + custo + Iniciar) acompanha TODOS os
+      //      passos, dentro da viewport (o CTA nunca some atrás de um passo).
+      for (const passo of ['Objetivo', 'Teste', 'Participantes', 'Limites', 'Revisão']) {
+        await page.getByRole('tab', { name: new RegExp(passo) }).first().click();
+        await page.waitForTimeout(150);
+        const r = await page.evaluate(() => {
+          const caixa = (el: Element | null | undefined) => {
+            const b = el?.getBoundingClientRect();
+            return b ? { top: b.top, bottom: b.bottom, vh: window.innerHeight } : null;
+          };
+          return {
+            botao: caixa(document.querySelector('[aria-label="Iniciar a run"]')),
+            custo: caixa(
+              [...document.querySelectorAll('span')].find((s) => s.textContent?.includes('custo estimado')),
+            ),
+          };
+        });
+        expect(r.botao, `sem "Iniciar" no passo ${passo}`).not.toBeNull();
+        expect(r.custo, `sem custo estimado no passo ${passo}`).not.toBeNull();
+        expect(r.botao!.bottom, `Iniciar cortado (${passo})`).toBeLessThanOrEqual(r.botao!.vh + 1);
+        expect(r.custo!.bottom, `custo cortado (${passo})`).toBeLessThanOrEqual(r.custo!.vh + 1);
+      }
+
+      // (v) a revisão mostra o PLANO em linguagem natural e diz o estado do
+      //      envio: "Tudo pronto" com os defaults válidos — ou o que falta,
+      //      nomeado, com link para o passo que resolve.
+      await page.getByRole('tab', { name: /Revisão/ }).first().click();
+      await page.locator('text=O plano da run').first().waitFor({ timeout: 10_000 });
+      expect(
+        await page.locator('text=/Tudo pronto|Antes de iniciar/').first().isVisible(),
+        'revisão não diz se está pronto nem o que falta',
+      ).toBe(true);
+
+      // (vi) o "Completo" leva à superfície de página única IMPL-106 — sem
+      //      abas, com as 4 seções-âncora (o estado preenchido vai junto).
+      await page.getByRole('button', { name: 'Completo', exact: true }).click();
+      await page.waitForTimeout(250);
+      expect(await page.locator('[role="tab"], [role="tablist"], [role="tabpanel"]').count()).toBe(0);
+      for (const sec of ['sec-cenarios', 'sec-sujeitos', 'sec-juizes', 'sec-avancado']) {
+        expect(await page.locator(`#${sec}`).count(), `falta ${sec} na completa`).toBe(1);
+      }
+    } finally {
+      await contexto.close();
+    }
+  }, 180_000);
 });
