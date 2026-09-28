@@ -50,6 +50,9 @@ const ROOT_META = /^(?:package\.json|readme(?:\..*)?|licen[cs]e(?:\..*)?|changel
 export function isAllowedPath(p, sources) {
   const src = new Set(sources);
   if (!p.includes('/') && ROOT_META.test(p)) return true;
+  // Instalador global da skill de agente (bash, zero dependências) — embarca para
+  // instalar por symlink a partir do checkout OU de node_modules/prompt-builder-cli.
+  if (p === 'scripts/install-agent-skill.sh') return true;
   if (p.startsWith('agent-docs/') || p.startsWith('skills/')) return true;
   if (/^src\/data\/[^/]+\.json$/u.test(p)) return true;
   const m = /^dist\/(.+)\.(js|d\.ts)$/u.exec(p);

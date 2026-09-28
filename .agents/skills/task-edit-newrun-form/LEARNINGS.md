@@ -37,3 +37,9 @@
   sem filtro) e a poda NÃO os toca. Gerador e juiz podem repetir o mesmo modelo (sem `excludeIds`
   entre eles; o check `datagen===judge` do Zod no backend foi relaxado). Filtro de preço = USD por 1M
   tokens (`pricing.prompt/completion * 1e6`).
+
+## 2026-09-27 — superfície guiada na Nova Run (fonte: sessão DSH, pedido do dono)
+- [2026-09-27] [session:dshe-premium] [ux guiado] `pb.formStyle` (`guided` default | `complete`) decide a superfície; ESTADO é compartilhado (mesmos `useState` do NewRun passados por props ao `GuidedSetup`). Trocar de superfície não pode perder nada.
+- [2026-09-27] [session:dshe-premium] [orçamento de Tab] Um `SegmentedToggle` novo de 2 opções DERRUBOU o gate IMPL-106 (c) (11 paradas no modo variation). Solução: 2 `RovingItem` no toolbar existente do PageHeader (Importar/Exportar) = custo ZERO de paradas. Controles de preferência não podem viver entre o topo do form e o Iniciar.
+- [2026-09-27] [session:dshe-premium] [testes] Os contratos SSR (`test/ux-nova-run.test.ts`) precisam de `vi.mock` de TODO import `@/…` não resolvidos pelo vitest (sem alias no vitest.config): `smooth-tabs` foi o novo. `routerStub` precisa de `useLocation` quando a página o consome.
+- [2026-09-27] [session:dshe-premium] [fantasma focável] O `AnimatePresence` dos chips do ModelSelector mantinha o chip a SAIR com botões focáveis ~½ s (`popLayout` + spring) — trocar de modo (que troca o chip do gerador default) estourava o gate IMPL-106 (c) com 11 paradas. Fix: `exit` com `transition: { duration: 0 }` (o chip some de imediato). Medir paradas de Tab com `scratchpad/tab-stops.mjs` (Tab real + descrição do foco), nunca a olho.

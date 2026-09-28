@@ -137,7 +137,8 @@
     "src/data/lgpd-allowlist.generated.json",
     "src/data/lgpd-retention.json",
     "agent-docs",
-    "skills"
+    "skills",
+    "scripts/install-agent-skill.sh"
   ],
   "scripts": {
     "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",

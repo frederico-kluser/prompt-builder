@@ -26,3 +26,7 @@
   complementado verificando se as media queries e as classes do menu hambúrguer aparecem no CSS
   gerado (`web/dist/assets/index-*.css`) e se o servidor de produção responde `200` com o
   `<meta viewport>` correto.
+
+## 2026-09-27 — verificação da superfície guiada (fonte: sessão DSH)
+- [2026-09-27] [session:dshe-premium] [e2e] `test/ux-nova-run-e2e.test.ts` já roda o SPA de verdade (vite build + playwright-core + fixture de 459 modelos) e aceita `pb.formStyle` via `addInitScript` — gates de UI headless não precisam de Playwright de fora. `páginaNova(viewport, 'guided'|'complete')`.
+- [2026-09-27] [session:dshe-premium] [armadilha] `pkill -f "dist/server.js"` MATA o próprio shell do agente (o padrão casa com a linha de comando do bash); use padrão que não casa com a própria linha (`pgrep -af "dist/server"`) e confirme o fim.
