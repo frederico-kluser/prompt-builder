@@ -189,7 +189,7 @@ router.get('/doctor', async (req, res) => {
     const model =
       typeof req.query.model === 'string' && req.query.model.trim()
         ? (req.query.model as string).trim()
-        : 'openai/gpt-5-mini';
+        : 'xiaomi/mimo-v2.6-pro'; // default do dono (2026-09-27)
     const result = await runPreflight({
       expectedVersion: '0.84.2',
       cacheKey: deep ? 'pi-0.84.2-cleanroom' : undefined,

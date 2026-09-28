@@ -34,10 +34,37 @@ import { validatePromptGroup, type PromptGroup } from '../../src/engine/promptGr
 import type { ModelTuning } from './components/ModelSelector';
 
 // Defaults da Nova Run — fonte única (o NewRun inicializa o estado daqui).
-export const DEFAULT_COMPETITORS = ['openai/gpt-5-mini', 'openai/gpt-5-nano', 'openai/gpt-5.4-mini', 'openai/gpt-5.4-nano'];
-export const DEFAULT_CONTESTANT = 'openai/gpt-5-mini';
-export const DEFAULT_DATAGEN = 'deepseek/deepseek-v4-pro';
-export const DEFAULT_JUDGE = 'moonshotai/kimi-k2.6';
+//
+// MODELOS PREFERIDOS DO DONO (2026-09-27): cada papel tem a sua LISTA por
+// ordem de preferência; o default é o início da lista (juízes = 2 primeiros,
+// compare = os 3 competidores, papéis de 1 só modelo = o 1º). Os seletores
+// continuam livres — isto é só o que vem pré-escolhido.
+export const PREFERRED_JUDGES = [
+  'google/gemini-3.8-flash',
+  'meta/muse-spark-1.3',
+  'xiaomi/mimo-v2.6-pro',
+  'z-ai/glm-5.3-flash',
+  'deepseek/deepseek-v4.1-flash',
+];
+export const PREFERRED_DATAGENS = ['xiaomi/mimo-v2.6-pro', 'z-ai/glm-5.3-flash', 'deepseek/deepseek-v4.1-flash'];
+export const PREFERRED_COMPETITORS = ['deepseek/deepseek-v4.1-flash', 'z-ai/glm-5.3-flash', 'xiaomi/mimo-v2.6-pro'];
+export const PREFERRED_CONTESTANTS = ['xiaomi/mimo-v2.6-pro', 'deepseek/deepseek-v4.1-flash', 'z-ai/glm-5.3-flash'];
+
+/** Juízes default = os 2 primeiros da lista (painel de maioria simples). */
+export const DEFAULT_JUDGES = PREFERRED_JUDGES.slice(0, 2);
+/** Competidores do compare = os 3 da lista. */
+export const DEFAULT_COMPETITORS = [...PREFERRED_COMPETITORS];
+/** Modelo sob teste (variation/training) = o 1º da lista. */
+export const DEFAULT_CONTESTANT = PREFERRED_CONTESTANTS[0];
+/**
+ * Gerador de cenários: nos modos de prompt, o 1º da lista de gerador (pode ser
+ * o próprio modelo sob teste — não há conflito). No COMPARE o gerador não pode
+ * ser competidor (`runConfigSchema`) e os 3 da lista são exatamente os 3
+ * competidores, então cai no 1º livre do universo preferido (decisão do dono
+ * 2026-09-27): `meta/muse-spark-1.3`.
+ */
+export const DEFAULT_DATAGEN = PREFERRED_DATAGENS[0];
+export const DEFAULT_DATAGEN_COMPARE = 'meta/muse-spark-1.3';
 export const DEFAULT_TECHNIQUES = ['persona', 'cot', 'constraints', 'format'];
 export const DEFAULT_THEME =
   'Assistente virtual de uma clínica de diagnósticos que orienta os pacientes no preparo para exames médicos e ' +
@@ -123,8 +150,8 @@ export function defaultArenaFormState(): ArenaFormState {
     basePrompt: '',
     taskDescription: '',
     promptImported: false,
-    datagen: [DEFAULT_DATAGEN],
-    judge: [DEFAULT_JUDGE],
+    datagen: [DEFAULT_DATAGEN_COMPARE], // mode: 'compare' neste default
+    judge: [...DEFAULT_JUDGES],
     referenceModel: [],
     contestantModel: [DEFAULT_CONTESTANT],
     competitors: [...DEFAULT_COMPETITORS],
