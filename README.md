@@ -9,6 +9,9 @@ a interface mostra **placar, heatmap, custo e o texto sendo gerado token a token
 > **Em uma frase:** "dado um tema, descubra qual modelo (ou qual prompt) responde melhor — e quais
 > respostas são boas o bastante para usar no trabalho de verdade — com evidência, ranking e custo."
 
+> **Novo por aqui?** O **[GUIA](./GUIA.md)** leva do primeiro acesso (a chave do OpenRouter) à
+> leitura do resultado — em linguagem de quem usa a interface, sem jargão do motor.
+
 ## CLI para agentes de programação (`prompt-builder`)
 
 Publicado no npm. Feito para ser dirigido por **Claude Code, Codex, opencode, Cursor, Gemini CLI** —
@@ -82,6 +85,39 @@ prompt-arena):
 
 Documentação completa: `npx prompt-builder-cli docs --list`.
 
+### Skill para agentes — instalar globalmente (symlink)
+
+A **skill de agente** do pacote ([`skills/prompt-builder/SKILL.md`](./skills/prompt-builder/SKILL.md))
+ensina o agente a operar o benchmark **sem interface web** — MCP, modo agente, orçamento, `--dry-run`,
+NDJSON, `sessions winner`, `runs reproduce`, exit codes — apontando para as docs embarcadas em vez de
+as duplicar. Dois caminhos para a instalar (não copie à mão: [`skills/`](./skills/) é fonte única):
+
+- **Global por symlink (recomendado)** — vale a partir de qualquer diretório e acompanha o repo/pacote
+  (atualizou? todos os agentes veem a skill nova):
+
+  ```bash
+  bash scripts/install-agent-skill.sh install    # todos os agentes conhecidos que existirem
+  bash scripts/install-agent-skill.sh doctor     # onde está · link íntegro · SKILL.md visível
+  bash scripts/install-agent-skill.sh uninstall  # remove só os symlinks desta skill
+  ```
+
+  Cria `<dir-de-skills>/prompt-builder` apontando para `skills/prompt-builder` (caminho absoluto) nos
+  diretórios de skills dos agentes instalados — relativos ao home: `.claude/skills` (Claude Code),
+  `.codex/skills` (Codex CLI), `.dsh/skills` (DSH), `.gemini/skills` (Gemini CLI),
+  `.config/opencode/skills` (OpenCode), `.agents/skills` (genérico) — criando o diretório quando o
+  agente está instalado; outros alvos com `--target <dir>`. O script resolve a skill a partir da
+  própria localização, por isso roda tanto deste checkout como do pacote instalado
+  (`node_modules/prompt-builder-cli/scripts/install-agent-skill.sh`). Exit codes: `0` ok · `2` uso
+  inválido · `1` operacional.
+
+- **Por projeto (cópia)** — `npx prompt-builder-cli init --agent <nome|all>` copia a skill para
+  `.claude/skills`, `.agents/skills`, … do repositório corrente e acrescenta um bloco ao `AGENTS.md`:
+  versiona com o projeto, mas não acompanha as atualizações do pacote.
+
+**Caminho alternativo via npm (sem instalar nada):** o conteúdo viaja no pacote —
+`npx prompt-builder-cli docs --list` (tópicos, com custo aprox. em tokens), `docs <tópico>` (uma doc) e
+`npx prompt-builder-cli skill` (imprime a SKILL.md); o servidor MCP é `prompt-builder mcp`.
+
 ---
 
 Convenções para **agentes de código** (Claude Code, Codex, Cursor…) estão em [`AGENTS.md`](./AGENTS.md),
@@ -93,6 +129,7 @@ foi consolidada na memória em 2026-09-26.)
 
 ## Sumário
 
+- [Guia do utilizador (GUIA.md)](./GUIA.md)
 - [Como funciona (visão geral)](#como-funciona-visão-geral)
 - [Os três modos](#os-três-modos)
 - [Os papéis dos modelos](#os-papéis-dos-modelos)
@@ -150,15 +187,19 @@ flowchart LR
    importa; ao final a run é `finished` e fica no histórico (com export JSON/CSV).
 
 Tudo é transmitido ao navegador em tempo real via **Server-Sent Events (SSE)**: durante a run a tela
-mostra um **visualizador de processo** (etapas em paralelo + previews ao vivo) e revela o **placar /
-heatmap só quando tudo termina**. Detalhes do motor em [`FUNCIONAMENTO.md`](./FUNCIONAMENTO.md).
+da run mostra um **Resumo em linguagem natural** (fases do pipeline com contagem, placar simples e
+gasto face ao teto) e o **heatmap** de vereditos por cenário × participante; os duelos finais e os
+diagnósticos entram quando tudo termina. O caminho de alto nível está no [GUIA](./GUIA.md#6-durante-a-execução);
+o motor, abaixo.
 
 ---
 
 ## Os três modos
 
-O assistente de **Nova Run** tem 5 passos (Objetivo → Tema → Participantes → Avaliação → Revisar)
-e atende três objetivos. O que muda é **quem é o "participante"** (`Contestant`):
+A **Nova Run** tem duas superfícies sobre o mesmo estado: o **fluxo guiado** (default, 5 passos em
+linguagem natural — Objetivo → Teste → Participantes → Limites → Revisão, com o plano da run em
+frases) e a **configuração completa** (página única com tudo à vista) — ver [GUIA §3–4](./GUIA.md#3-a-configuração-guiada).
+Qualquer uma delas atende três objetivos. O que muda é **quem é o "participante"** (`Contestant`):
 
 | Modo | O que compara | Participante | Endpoint | Requisito |
 |---|---|---|---|---|
@@ -450,12 +491,14 @@ prompt-builder/
 │     └─ pages/              # NewRun (assistente 5 passos), RunsList, RunView, TrainingView, PromptsPage, Settings
 │
 ├─ scripts/gen-lgpd-allowlist.mjs   # Regenera a allowlist LGPD por endpoint (npm run lgpd:allowlist)
+├─ scripts/install-agent-skill.sh  # Instala a skill globalmente por symlink (install/doctor/uninstall)
+├─ skills/prompt-builder/          # Skill de agente (SKILL.md) — fonte única, vai no tarball npm
 ├─ .agents/skills/          # Biblioteca de Knowledge Skills (fonte única) — ver seção abaixo
 ├─ .claude/skills           # symlink → ../.agents/skills (portabilidade Claude Code)
 ├─ AGENTS.md                # Instruções mínimas para agentes de código (CLAUDE.md é symlink)
 ├─ data/                    # runtime: runs/ e sessions/ (gitignored — regra /data/)
 ├─ .env.example             # Variáveis OPCIONAIS (o app roda sem .env)
-├─ README.md  ·  TELAS.md   # Este arquivo · documentação das telas
+├─ README.md  ·  GUIA.md    # Este arquivo · guia do utilizador (telas e fluxos)
 └─ package.json  ·  tsconfig.json
 ```
 
@@ -502,9 +545,10 @@ symlinks versionados. Começo: [`AGENTS.md`](./AGENTS.md) (comandos exatos + reg
 ## Configuração
 
 **Não é preciso nenhum `.env` para rodar** — todos os parâmetros têm default. A **chave do
-OpenRouter não vai em variável de ambiente**: você cola na interface (tela de **Configurações** /
-*gate* da Nova Run) e ela fica no `localStorage` do navegador, indo ao backend só no header
-`x-openrouter-key`.
+OpenRouter não vai em variável de ambiente**: a app **pede-a logo ao abrir** (first-run, com os
+pontos de risco/limite/revogação) e ela continua gerível em **Configurações** — fica no
+`localStorage` do navegador, indo ao backend só no header `x-openrouter-key`. Detalhes no
+[GUIA §2](./GUIA.md#2-primeiro-acesso-a-chave).
 
 Variáveis **opcionais** (veja `.env.example`):
 
@@ -532,7 +576,7 @@ Parâmetros da **run** (na tela de Nova Run, validados no backend):
 
 > A concorrência efetiva das chamadas ao OpenRouter é governada por um **limitador global
 > adaptativo** (`OPENROUTER_MAX_CONCURRENCY`); o campo `concurrency` por run é legado (não limita
-> mais o paralelismo). Ver [`FUNCIONAMENTO.md`](./FUNCIONAMENTO.md).
+> mais o paralelismo). O funcionamento interno do motor está descrito nesta secção e no GUIA.
 
 ---
 
@@ -751,6 +795,7 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
 ---
 
 Para o **funcionamento interno** (pipeline, os 3 modos em detalhe e oportunidades de
-otimização/paralelização), veja **[`FUNCIONAMENTO.md`](./FUNCIONAMENTO.md)**. Para entender **cada
-tela**, veja **[`TELAS.md`](./TELAS.md)**. Para trabalhar no código com um agente, comece por
-**[`AGENTS.md`](./AGENTS.md)** e a biblioteca de **[skills](./.agents/skills/catalog.md)**.
+otimização/paralelização), use a **memória CoALA** (`coala.py search "pipeline"` — a corpus antiga de
+`docs/` foi consolidada lá em 2026-09-26). Para **usar cada tela**, veja o **[GUIA](./GUIA.md)**. Para
+trabalhar no código com um agente, comece por **[`AGENTS.md`](./AGENTS.md)** e a biblioteca de
+**[skills](./.agents/skills/catalog.md)**.
