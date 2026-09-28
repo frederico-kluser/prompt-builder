@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="plannotator-theme" content="host">
+<title>Jornada prompt-builder — das 32 pesquisas ao código</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236d3bd4'/%3E%3Cpath d='M9 22V10h7a4 4 0 0 1 0 8h-3l5 4' stroke='white' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --background: oklch(0.97 0.005 260);
+    --foreground: oklch(0.18 0.02 260);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.18 0.02 260);
+    --muted: oklch(0.92 0.01 260);
+    --muted-foreground: oklch(0.40 0.02 260);
+    --primary: oklch(0.50 0.25 280);
+    --primary-foreground: oklch(1 0 0);
+    --secondary: oklch(0.50 0.18 180);
+    --accent: oklch(0.60 0.22 50);
+    --accent-foreground: oklch(0.18 0.02 260);
+    --destructive: oklch(0.50 0.25 25);
+    --success: oklch(0.45 0.20 150);
+    --warning: oklch(0.55 0.18 85);
+    --border: oklch(0.88 0.01 260);
+    --code-bg: oklch(0.92 0.01 260);
+    --ring: oklch(0.50 0.25 280);
+    --radius: 0.625rem;
+    --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+    --font-display: ui-serif, Georgia, 'Times New Roman', serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: oklch(0.16 0.02 260);
+      --foreground: oklch(0.94 0.01 260);
+      --card: oklch(0.20 0.02 260);
+      --card-foreground: oklch(0.94 0.01 260);
+      --muted: oklch(0.25 0.02 260);
+      --muted-foreground: oklch(0.68 0.02 260);
+      --primary: oklch(0.72 0.18 280);
+      --primary-foreground: oklch(0.16 0.02 260);
+      --secondary: oklch(0.68 0.13 180);
+      --accent: oklch(0.75 0.16 50);
+      --destructive: oklch(0.63 0.20 25);
+      --success: oklch(0.62 0.15 150);
+      --warning: oklch(0.72 0.15 85);
+      --border: oklch(0.32 0.02 260);
+      --code-bg: oklch(0.23 0.02 260);
+      --ring: oklch(0.72 0.18 280);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--background); color: var(--foreground);
+    font-family: var(--font-sans); font-size: 15px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 28px; }
+  section { padding: 56px 0; }
+  .section-label {
+    font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--primary);
+    margin: 0 0 14px;
+  }
+  h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+  h1 { font-size: clamp(34px, 5vw, 52px); line-height: 1.08; font-weight: 600; }
+  h2 { font-size: clamp(24px, 3vw, 32px); font-weight: 600; margin-bottom: 8px; }
+  h3 { font-family: var(--font-sans); font-size: 16px; font-weight: 650; margin: 0 0 6px; }
+  p { margin: 0 0 12px; max-width: 68ch; }
+  .dim { color: var(--muted-foreground); }
+  code, .mono { font-family: var(--font-mono); font-size: 0.88em; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: break-word; }
+
+  /* HERO */
+  .hero { padding-top: 72px; border-bottom: 1px solid var(--border); }
+  .hero .prompt-box {
+    margin-top: 26px; background: var(--card); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent); border-radius: var(--radius);
+    padding: 16px 20px; max-width: 640px;
+  }
+  .hero .prompt-box .mono { color: var(--muted-foreground); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+
+  /* KPI STRIP */
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .kpi-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px 18px 14px; min-width: 0;
+  }
+  .kpi-card .n { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .kpi-card .n small { font-size: 15px; font-weight: 600; color: var(--muted-foreground); }
+  .kpi-card .k { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted-foreground); margin-top: 4px; }
+
+  /* TIMELINE */
+  .timeline { border-left: 2px solid var(--border); margin-left: 8px; padding-left: 28px; display: grid; gap: 30px; }
+  .tl-item { position: relative; }
+  .tl-item::before {
+    content: ''; position: absolute; left: -35px; top: 5px; width: 12px; height: 12px;
+    border-radius: 50%; background: var(--background); border: 3px solid var(--primary);
+  }
+  .tl-item[data-kind="destrutivo"]::before { border-color: var(--destructive); }
+  .tl-item[data-kind="ganho"]::before { border-color: var(--success); }
+  .tl-date { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted-foreground); letter-spacing: 0.06em; }
+  .tl-item .out {
+    display: inline-block; margin-top: 8px; font-family: var(--font-mono); font-size: 11.5px;
+    background: var(--muted); border-radius: 5px; padding: 3px 9px; color: var(--foreground);
+    overflow-wrap: break-word;
+  }
+
+  /* PIPELINE */
+  .pipeline { display: flex; gap: 0; align-items: stretch; overflow-x: auto; padding-bottom: 6px; }
+  .pipeline-step {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; min-width: 148px; flex-shrink: 0;
+  }
+  .pipeline-step .step-num { font-family: var(--font-mono); font-size: 10px; font-weight: 600; color: var(--primary); margin-bottom: 4px; }
+  .pipeline-step .step-name { font-size: 13px; font-weight: 650; margin-bottom: 3px; }
+  .pipeline-step .desc { font-size: 12px; color: var(--muted-foreground); line-height: 1.4; }
+  .pipeline-step--teal { border-top: 3px solid var(--secondary); }
+  .pipeline-step--green { border-top: 3px solid var(--success); }
+  .pipeline-step--orange { border-top: 3px solid var(--accent); }
+  .pipeline-step--sage { border-top: 3px solid var(--primary); }
+  .pipeline-arrow { display: flex; align-items: center; padding: 0 8px; color: var(--muted-foreground); font-family: var(--font-mono); flex-shrink: 0; }
+
+  /* CARDS */
+  .inner-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+  .inner-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px 20px; min-width: 0;
+  }
+  .inner-card p:last-child { margin-bottom: 0; }
+  .inner-card ul { margin: 8px 0 0; padding-left: 18px; }
+  .inner-card li { margin-bottom: 5px; }
+  .callout {
+    background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--primary);
+    border-radius: var(--radius); padding: 16px 20px;
+  }
+  .callout.warn { border-left-color: var(--warning); }
+  .callout.good { border-left-color: var(--success); }
+
+  /* TABLE */
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: break-word; }
+  th { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted-foreground); background: var(--muted); }
+  tr:last-child td { border-bottom: none; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tag {
+    display: inline-block; font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+    border-radius: 4px; padding: 2px 7px; letter-spacing: 0.05em;
+  }
+  .tag.bad { background: color-mix(in oklab, var(--destructive) 16%, transparent); color: var(--destructive); }
+  .tag.good { background: color-mix(in oklab, var(--success) 16%, transparent); color: var(--success); }
+  .tag.warn { background: color-mix(in oklab, var(--warning) 18%, transparent); color: var(--warning); }
+  .tag.n { background: color-mix(in oklab, var(--primary) 14%, transparent); color: var(--primary); }
+  .scroll { overflow-x: auto; }
+  footer { border-top: 1px solid var(--border); padding: 26px 0 48px; color: var(--muted-foreground); font-size: 13px; }
+  @media (max-width: 860px) {
+    .kpis { grid-template-columns: repeat(2, 1fr); }
+    .inner-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<section class="hero">
+  <div class="wrap">
+    <p class="section-label">prompt-builder · jornada de engenharia · 2026-09-25 → 09-28</p>
+    <h1>Das 32 deep researches ao código: a história completa</h1>
+    <p class="dim" style="margin-top:14px">Quatro dias de trabalho autônomo com dezenas de subagents: pesquisar o estado da arte em massa,
+      consolidar todo o conhecimento numa memória SQLite, auditar o código contra as conclusões e implementar o que falta —
+      com uma filosofia nova no fim: <strong>o sistema não precisa evoluir sempre; precisa decidir honestamente</strong>.</p>
+    <div class="prompt-box">
+      <p class="mono">O pedido que começou tudo</p>
+      <p style="margin:0">“Pegue todos os XML de <code>docs/RESEARCHS/</code> e use a skill tavily em cada um deles,
+      com muitos subagents — não use nada de surf, use tavily.”</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="section-label">a jornada em números</p>
+    <div class="kpis">
+      <div class="kpi-card"><div class="n">32</div><div class="k">deep researches (R-01a…R-24)</div></div>
+      <div class="kpi-card"><div class="n">493</div><div class="k">recomendações DEC/REC</div></div>
+      <div class="kpi-card"><div class="n">120 <small>lacunas</small></div><div class="k">verificadas no código (45 P0)</div></div>
+      <div class="kpi-card"><div class="n">115</div><div class="k">itens IMPL implementados</div></div>
+      <div class="kpi-card"><div class="n">5 913</div><div class="k">registos na memória CoALA</div></div>
+      <div class="kpi-card"><div class="n">2 441</div><div class="k">testes verdes</div></div>
+      <div class="kpi-card"><div class="n">17<small>s</small></div><div class="k">suíte (antes: 60s+ e travava)</div></div>
+      <div class="kpi-card"><div class="n">+126<small>k</small></div><div class="k">linhas vs main · 107 commits</div></div>
+    </div>
+  </div>
+</section>
+
+<section class="section--recessed" style="background: var(--muted); border-block: 1px solid var(--border)">
+  <div class="wrap">
+    <p class="section-label">timeline</p>
+    <h2>Seis fases, cada uma com uma decisão do dono</h2>
+    <div class="timeline" style="margin-top:30px">
+      <div class="tl-item">
+        <div class="tl-date">2026-09-25/26 · fase 1</div>
+        <h3>32 deep researches via Tavily com subagents</h3>
+        <p>1 subagent por XML + verificação de protocolo por resultado. A cota da chave morreu duas vezes ao meio;
+          a retomada foi idempotente (agentes verificam o estado real antes de trabalhar) e os follow-ups fecharam o que a cota cortou.</p>
+        <span class="out">9 completos + 23 parciais · lacunas só onde “não há medição pública”</span>
+      </div>
+      <div class="tl-item" data-kind="destrutivo">
+        <div class="tl-date">2026-09-26 · fase 2 — <em>a grande consolidação</em></div>
+        <h3>Todo o conhecimento dos docs → memória CoALA (e os docs apagados)</h3>
+        <p>Pedido do dono: “condensar e salvar todo o conhecimento dentro do coala e deletar todos os documentos”.
+          38 subagents destilaram 774 registos + 4 929 segmentos brutos; <code>docs/</code> inteiro e 8 docs de raiz foram apagados — com backup.</p>
+        <span class="out">docs-backup-2026-09-26.tar.gz · 106 entradas</span>
+      </div>
+      <div class="tl-item" data-kind="destrutivo">
+        <div class="tl-date">2026-09-27 · fase 3</div>
+        <h3>Knowledge skills + project-router → memória (e apagados)</h3>
+        <p>“coloque tudo na skill do coala”: 8 skills de conhecimento e o roteador viraram 125 registos
+          (<code>skill:&lt;nome&gt;:&lt;tema&gt;</code>); 27 referências penduradas saneadas em AGENTS.md/README/task skills.</p>
+        <span class="out">sobraram task-* · meta-skill-* · catalog.md reescrito</span>
+      </div>
+      <div class="tl-item">
+        <div class="tl-date">2026-09-27 · fase 4</div>
+        <h3>Auditoria: conclusões das pesquisas × código real</h3>
+        <p>6 auditores cruzaram as 493 recomendações com <code>src/</code>, <code>web/</code> e <code>test/</code> —
+          120 lacunas verificadas com path:linhas e critérios de aceite, virando o plano <code>prompt-implementar-pesquisas.xml</code>.</p>
+        <span class="out">45 P0 · 66 P1 · 9 P2 — todos os P0 eram erro silencioso de nota, custo ou segurança</span>
+      </div>
+      <div class="tl-item" data-kind="ganho">
+        <div class="tl-date">2026-09-27/28 · fase 5</div>
+        <h3>Implementação em lotes paralelos (17 lotes, 2 rodadas)</h3>
+        <p>Fronteiras de ficheiros disjuntas para os subagents não colidirem; 75 worktrees e as branches auxiliares apagadas por ordem do dono;
+          duas execuções interrompidas (créditos) retomadas sem perder nem duplicar trabalho.</p>
+        <span class="out">feat/impl-pesquisas · 107 commits · 390 ficheiros · +126k/−14,8k</span>
+      </div>
+      <div class="tl-item" data-kind="ganho">
+        <div class="tl-date">2026-09-28 · fase 6 — <em>a viragem de filosofia</em></div>
+        <h3>“Não precisa passar de primeira — precisa decidir honestamente” + dieta dos testes</h3>
+        <p>A suíte estava a demorar demasiado. Diagnóstico contra-intuitivo: não eram as simulações — eram dezenas de spawns de <code>tsx</code>
+          por ficheiro e containers Docker. Resultado: <strong>60s+ com travamentos → 17s, 2 441 verdes</strong>.</p>
+        <span class="out">npm test = rápido · npm run test:full = contratos duros + docker</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="section-label">o que o sistema faz agora</p>
+    <h2>O core: benchmark → apontar um prompt melhor — ou dizer que não melhorou</h2>
+    <p class="dim">A promessa do produto fechada em código, com uma decisão de produto no topo: melhoria contínua não é objetivo.
+      Plateau é resultado legítimo; o que nunca pode acontece é recomendar sem evidência.</p>
+    <div class="pipeline" style="margin-top:26px">
+      <div class="pipeline-step pipeline-step--teal"><div class="step-num">01 · CENÁRIOS</div><div class="step-name">Datagen pt-BR</div><div class="desc">grounding do perfil, tier/dimensionTags, adversariais, dedup semântico</div></div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step pipeline-step--sage"><div class="step-num">02 · PARTICIPANTES</div><div class="step-name">Mesmo caso p/ todos</div><div class="desc">input simétrico (buildCaseInput); variantes só no system</div></div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step pipeline-step--orange"><div class="step-num">03 · JULGAMENTO</div><div class="step-name">Por referência</div><div class="desc">gabarito validado · veredito+confiança · juiz_falhou fora das médias · anti-injeção</div></div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step pipeline-step--green"><div class="step-num">04 · ESTATÍSTICA</div><div class="step-name">judge-score + IC</div><div class="desc">permutação exata (nunca p de bootstrap) · max-T melhor-de-K · reps agregadas por cenário</div></div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step pipeline-step--teal"><div class="step-num">05 · DECISÃO</div><div class="step-name">Recomenda OU recusa</div><div class="desc">n≥5 · IC sem cobrir 0 · P(A&gt;B)≥80% · senão: “inconclusivo” com conta de poder</div></div>
+    </div>
+    <div class="callout good" style="margin-top:26px">
+      <h3>“Se o prompt não melhorar mais, tudo bem” — está codificado</h3>
+      <p style="margin:0">O training convergencia por <em>plateau</em> (IC do ganho cobre <code>minGain</code>) ou paciência&nbsp;≥&nbsp;2 e reporta
+      <code>convergenceReason</code>. “Validado” só aparece com holdout forte (≥10 cenários) — senão é “confirmação fraca”.
+      Ganho negativo vira <code>regressed</code>, nunca promoção. E a saída da decisão nunca traz vencedor sem Δ, IC e P(superioridade) ao lado.</p>
+    </div>
+  </div>
+</section>
+
+<section style="background: var(--muted); border-block: 1px solid var(--border)">
+  <div class="wrap">
+    <p class="section-label">dieta dos testes · antes → depois</p>
+    <h2>A suíte passou de 60s+ (com travamentos) para 17s — sem enfraquecer contratos</h2>
+    <div class="scroll" style="margin-top:22px">
+      <table>
+        <thead><tr><th>Culpado real</th><th>Antes</th><th>Depois</th><th>Como</th></tr></thead>
+        <tbody>
+          <tr><td>Spawns de CLI via <code>tsx</code> (cold start 0,64s cada)</td><td class="num"><span class="tag bad">15–29s</span> por ficheiro</td><td class="num"><span class="tag good">3–10s</span></td><td><code>nodeOrTsx</code>: corre o <code>dist</code> compilado (0,29s — o binário real, mais fiel)</td></tr>
+          <tr><td>Containers Docker reais em 3 ficheiros</td><td class="num"><span class="tag bad">~60s</span></td><td class="num"><span class="tag good">skip</span> no fast</td><td><code>npm run test:full</code> (PB_FULL=1) — o release (prepublishOnly) corre o full</td></tr>
+          <tr><td>Monte Carlo 20 mil ensaios / 2 mil sessões</td><td class="num"><span class="tag bad">~10s</span></td><td class="num"><span class="tag good">~2s</span></td><td>Escala para 2k/250 no fast com folga 3σ explícita; o limiar duro (≤5% / ≤6%) fica no full</td></tr>
+          <tr><td>Medições de latência/throughput sob contenção</td><td class="num"><span class="tag bad">flaky</span></td><td class="num"><span class="tag good">estável</span></td><td>Folga de contenção só no modo rápido (1,35× / 0,75) — duro no full (1,05× / 0,90)</td></tr>
+          <tr><td>Travamentos eternos (pendurados sem timeout)</td><td class="num"><span class="tag bad">∞</span></td><td class="num"><span class="tag good">20s</span></td><td><code>testTimeout</code> 20s no fast / 60s no full + corrigidos os workers <code>.ts</code> mandados ao node puro</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="dim" style="margin-top:16px; font-size:13.5px">Regra aprendida e guardada na memória: <strong>medir antes de dietar</strong> — o suspeito óbvio (as simulações estatísticas) não era o culpado.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="section-label">aprendizado durável (agora na memória CoALA)</p>
+    <h2>O que esta jornada ensinou</h2>
+    <div class="inner-grid" style="margin-top:24px">
+      <div class="inner-card">
+        <h3>Subagents em massa: o método que funcionou</h3>
+        <ul>
+          <li>Retorno curto via schema JSON ou <strong>resultado em ficheiro</strong> — o spill de workflow trunca a 50KB</li>
+          <li>Retomada idempotente: cada agente confere o estado real e marca <code>ja_feito</code> antes de trabalhar</li>
+          <li>Lotes com <strong>fronteiras de ficheiros disjuntas</strong>; o que partilha ficheiros vai em rodadas separadas</li>
+          <li><code>npm test</code> completo só no fim da rodada (corre entre agentes vê estado meio-editado)</li>
+        </ul>
+      </div>
+      <div class="inner-card">
+        <h3>Ardilhas que custaram tempo (guardadas p/ nunca repetir)</h3>
+        <ul>
+          <li>Workers <code>.ts</code> de suporte não correm no node puro — só o CLI vai para o dist</li>
+          <li>Inserir imports por regex em blocos multi-linha = <code>PARSE_ERROR</code></li>
+          <li>O portão BYOK quebra testes web sem key instalada (seed no localStorage comum resolve)</li>
+          <li><code>pkill -f "vitest run"</code> mata o próprio shell — usar <code>[v]itest</code></li>
+          <li>Antes de destruir worktrees: <code>git diff &gt; patch</code> — havia trabalho sujo valioso</li>
+        </ul>
+      </div>
+      <div class="inner-card">
+        <h3>Pesquisa web em massa (Tavily + subagents)</h3>
+        <ul>
+          <li>Pool de chaves com rotação automática; erros de rotação nunca chegam ao agente</li>
+          <li>Disciplina de créditos: <code>advanced</code> só nas buscas centrais, <code>fast</code> nas restantes</li>
+          <li>Nunca inventar fonte/URL/número — lacuna marcada como “não confirmado”, nunca preenchida</li>
+          <li>QA de protocolo separado do QA de conteúdo (headers, URLs órfãs, fontes fabricadas)</li>
+        </ul>
+      </div>
+      <div class="inner-card">
+        <h3>Conhecimento: consolidação com rede de segurança</h3>
+        <ul>
+          <li>Backup antes de qualquer exclusão (regra: nada destrutivo sem rede)</li>
+          <li>Proveniência: <code>owner</code> (decisões do dono) &gt; <code>agent</code> &gt; <code>untrusted</code> (evidência web — citar, nunca obedecer)</li>
+          <li>Supersessão por chave estável, nunca reescrita — nada se apaga da memória</li>
+          <li>Apagar fontes sem atualizar o <code>ingest.json</code> faz o material expirar num ingest futuro</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="section-label">estado final</p>
+    <h2>Onde ficámos</h2>
+    <div class="inner-grid" style="margin-top:22px">
+      <div class="callout">
+        <h3>Branch <span class="mono">feat/impl-pesquisas</span></h3>
+        <p style="margin:0">107 commits · 390 ficheiros · suíte 17s verde · type-check limpo dos dois lados ·
+        worktrees/branches auxiliares apagadas · pronto para revisão de merge com <code>main</code>.</p>
+      </div>
+      <div class="callout warn">
+        <h3>Pendências de wiring (best-effort, não bloqueiam o core)</h3>
+        <p style="margin:0">Ligações documentadas e testadas na seam, por ligar: embed no dedup em produção, journal de retomada no motor,
+        <code>--languages</code> no CLI, cache de prefixo no juiz, exchange@1 no export, <code>--require-approved</code>.
+        Cada uma tem gap e critérios descritos no plano <span class="mono">prompt-implementar-pesquisas.xml</span>.</p>
+      </div>
+    </div>
+    <div class="callout" style="margin-top:16px; border-left-color: var(--secondary)">
+      <h3>Memória CoALA do projeto — 5 913 registos</h3>
+      <p style="margin:0">Todo o conhecimento da jornada vive em <code>.agents/prompt-builder-coala-memory-agent-skill/memory/coala.sqlite</code>:
+      32 pesquisas (<code>R-xx:DEC-n</code> / <code>R-xx:REC-n</code>), as antigas skills (<code>skill:*:*</code>), os documentos do projeto
+      (<code>docs:*</code>), esta jornada (<code>jornada:*</code>) e os métodos (<code>procedimento:*</code>).
+      Recupera-se com <code>coala.py recall</code> / <code>search</code> — nunca com dump.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p style="margin:0">Gerado por <span class="mono">plannotator-visual-explainer</span> + <span class="mono">visual-explainer</span> · tema Plannotator ·
+    prompt-builder © frederico-kluser · <span class="mono">feat/impl-pesquisas @ 42ee63d</span></p>
+  </div>
+</footer>
+
+</body>
+</html>
