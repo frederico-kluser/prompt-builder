@@ -13,6 +13,7 @@
 // Tudo offline: gateway em porta fechada, data-dir temporário.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { nodeOrTsx } from './support/cli.js';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,8 +25,7 @@ import { McpSession } from '../src/cli/commands/mcp.js';
 import { getDataDir, setDataDir } from '../src/storage.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
-const ENTRY = path.join(ROOT, 'src', 'cli', 'index.ts');
+const { cmd: TSX, entry: ENTRY } = nodeOrTsx(path.join(ROOT, 'src', 'cli', 'index.ts'));
 const DEAD_BASE = 'http://127.0.0.1:9/api/v1';
 const KEY = 'sk-or-v1-fake-key-para-teste-0000000000';
 

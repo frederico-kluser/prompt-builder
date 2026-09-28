@@ -111,14 +111,15 @@ const MODE_DESCRIPTIONS: Record<RunMode, string> = {
 };
 
 /**
- * As abas do fluxo. Os ids são ESTÁVEIS entre modos — só o rótulo de `sujeitos`
- * muda — para a aba ativa nunca sumir ao trocar de modo.
+ * As seções da página única (IMPL-106). Os ids são ESTÁVEIS entre modos — só o
+ * rótulo de `sujeitos` muda — e servem de âncora para a navegação de
+ * pendências do rodapé (rolagem + foco, nunca troca de aba).
  */
-type Tab = 'cenarios' | 'sujeitos' | 'juizes' | 'avancado';
+type SectionId = 'cenarios' | 'sujeitos' | 'juizes' | 'avancado';
 
-/** Pendência de validação, já com a aba que a resolve. */
+/** Pendência de validação, já com a seção que a resolve. */
 interface Problem {
-  tab: Tab;
+  section: SectionId;
   text: string;
 }
 
@@ -182,25 +183,6 @@ function EffortField(p: {
         ))}
       </select>
     </label>
-  );
-}
-
-function Chip(p: { on: boolean; label: string; title?: string; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      aria-pressed={p.on}
-      title={p.title}
-      onClick={p.onClick}
-      className={cn(
-        'rounded-full border px-2.5 py-1 text-[12.5px] font-medium transition-colors',
-        p.on
-          ? 'border-primary bg-primary/12 text-foreground'
-          : 'border-border bg-muted text-muted-foreground hover:text-foreground',
-      )}
-    >
-      {p.label}
-    </button>
   );
 }
 
@@ -313,10 +295,11 @@ function LinkButton(p: { onClick: () => void; children: ReactNode; disabled?: bo
 export function NewRun() {
   const navigate = useNavigate();
   const [mode, setMode] = useState<RunMode>(INIT.mode);
-  const [tab, setTab] = useState<Tab>('cenarios');
+  // "Avançado" é o 2º nível da revelação progressiva: fechado por default, e
+  // aberto sozinho quando a pendência que o usuário tentou resolver mora lá.
+  const [avancadoOpen, setAvancadoOpen] = useState(false);
   const [theme, setTheme] = useState(INIT.theme);
   const [scenarioBrief, setScenarioBrief] = useState(INIT.scenarioBrief);
-  const [briefOpen, setBriefOpen] = useState(false);
   const [stages, setStages] = useState(INIT.stages);
   const [concurrency, setConcurrency] = useState(INIT.concurrency);
   const [timeoutMs, setTimeoutMs] = useState(INIT.timeoutMs);
@@ -335,7 +318,6 @@ export function NewRun() {
   const [contestantModel, setContestantModel] = useState<string[]>(INIT.contestantModel);
   const [basePrompt, setBasePrompt] = useState(INIT.basePrompt);
   const [taskDescription, setTaskDescription] = useState(INIT.taskDescription);
-  const [genOpen, setGenOpen] = useState(false);
   const [genBaseLoading, setGenBaseLoading] = useState(false);
   const [genBaseError, setGenBaseError] = useState<string | null>(null);
   const [optimize, setOptimize] = useState(INIT.optimize);
@@ -758,48 +740,66 @@ export function NewRun() {
     }
   }
 
-  // Validação: 1 frase por problema, com a aba que resolve cada uma. O rodapé
-  // mostra a primeira e leva até lá.
+  // Validação: 1 frase por problema, com a SEÇÃO que resolve cada uma. O rodapé
+  // mostra a primeira e leva até lá (rolagem + foco — a página é única, nada
+  // fica escondido em aba). O campo exigido é sempre um que a tela está
+  // mostrando: exigir campo escondido trava o "Iniciar" sem explicação visível.
   function problems(): Problem[] {
     const out: Problem[] = [];
-    if (!theme.trim()) out.push({ tab: 'cenarios', text: 'Descreva o tema do benchmark.' });
+    if (!theme.trim()) out.push({ section: 'cenarios', text: 'Descreva o tema do benchmark.' });
     // O gerador só é exigido quando ele vai ser chamado: com os cenários já
     // prontos no arquivo, o campo nem aparece — não pode travar o botão.
     if (precisaGerar && datagen.length !== 1)
-      out.push({ tab: 'cenarios', text: 'Selecione 1 modelo gerador.' });
-    if (judge.length < 1) out.push({ tab: 'juizes', text: 'Selecione ao menos 1 juiz.' });
+      out.push({ section: 'cenarios', text: 'Selecione 1 modelo gerador.' });
+    if (judge.length < 1) out.push({ section: 'juizes', text: 'Selecione ao menos 1 juiz.' });
     if (mode === 'compare') {
       if (compareAxis === 'configs') {
         if (competitorConfigs.filter((r) => r.modelId).length < 2)
-          out.push({ tab: 'avancado', text: 'Preencha o modelo em pelo menos 2 configs (Avançado).' });
+          out.push({ section: 'sujeitos', text: 'Preencha o modelo em pelo menos 2 configs.' });
       } else if (competitors.length < 2) {
-        out.push({ tab: 'sujeitos', text: 'Selecione pelo menos 2 modelos competidores.' });
+        out.push({ section: 'sujeitos', text: 'Selecione pelo menos 2 modelos competidores.' });
       }
     } else {
       if (contestantModel.length !== 1)
-        out.push({ tab: 'sujeitos', text: 'Selecione 1 modelo sob teste.' });
+        out.push({ section: 'sujeitos', text: 'Selecione 1 modelo sob teste.' });
       if (variantCount < 2)
         out.push({
-          tab: 'sujeitos',
+          section: 'sujeitos',
           text: optimize
             ? 'Selecione ao menos 2 técnicas (ou 1 técnica + prompt base).'
             : 'Escreva ao menos 2 variantes manuais (ou 1 + prompt base).',
         });
     }
     const grupo = promptGroupProblem({ mode, promptGroup, promptId });
-    if (grupo) out.push({ tab: 'avancado', text: grupo });
+    if (grupo) out.push({ section: 'avancado', text: grupo });
     if (budget.trim() !== '' && !(parseFloat(budget) > 0))
-      out.push({ tab: 'avancado', text: 'Orçamento máximo: informe um valor em US$ maior que zero (ou deixe vazio).' });
+      out.push({
+        section: 'avancado',
+        text: 'Orçamento máximo: informe um valor em US$ maior que zero (ou deixe vazio).',
+      });
     return out;
   }
 
   const pendencias = problems();
-  const pendenciaPorAba = useMemo(() => {
-    const set = new Set<Tab>();
-    for (const p of pendencias) set.add(p.tab);
-    return set;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendencias.map((p) => p.tab).join('|')]);
+  // Ponto de pendência no cabeçalho da seção — vermelho só depois de tentar.
+  function pendenciaEm(section: SectionId): 'muted' | 'error' | undefined {
+    return pendencias.some((p) => p.section === section) ? (tried ? 'error' : 'muted') : undefined;
+  }
+
+  /**
+   * Leva à seção que resolve uma pendência: abre o "Avançado" se preciso e
+   * rola/foca a âncora. Nunca troca de aba (a página é única).
+   */
+  function irPara(section: SectionId) {
+    if (section === 'avancado') setAvancadoOpen(true);
+    // Depois do render (o Avançado precisa abrir antes de existir no layout).
+    requestAnimationFrame(() => {
+      const el = document.getElementById(`sec-${section}`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      el.focus({ preventScroll: true });
+    });
+  }
   const keyConnected = !!getStoredKey();
 
   /**
@@ -957,7 +957,7 @@ export function NewRun() {
     const faltas = problems();
     if (faltas.length) {
       setTried(true);
-      setTab(faltas[0].tab);
+      irPara(faltas[0].section);
       return setError(faltas[0].text);
     }
     let config = buildConfig();
@@ -1006,21 +1006,6 @@ export function NewRun() {
     await launch(config, false);
   }
 
-  /** Rótulo da aba, com o ponto de pendência quando ela tem alguma. */
-  function TabLabel({ id, children }: { id: Tab; children: ReactNode }) {
-    return (
-      <span className="flex items-center gap-1.5">
-        {children}
-        {pendenciaPorAba.has(id) && (
-          <span
-            className={cn('size-1.5 rounded-full', tried ? 'bg-destructive' : 'bg-muted-foreground/60')}
-            aria-label="pendência nesta etapa"
-          />
-        )}
-      </span>
-    );
-  }
-
   const primeira = pendencias[0];
   // Estimativa do rodapé: a MESMA conta do diálogo de confirmação e das portas
   // de orçamento do motor (src/estimate.ts), sobre a config que vai ser enviada.
@@ -1035,20 +1020,40 @@ export function NewRun() {
 
   return (
     <form onSubmit={submit}>
-      <Screen>
+      {/* `pb-44` em telas com barra inferior (IMPL-110): o último campo não pode
+          ficar nem sob o rodapé fixo nem sob a barra de navegação. */}
+      <Screen className="pb-44 md:pb-32">
         <PageHeader
           title="Nova run"
           subtitle={MODE_DESCRIPTIONS[mode]}
           actions={
             <>
-              <Button type="button" variant="outline" size="sm" onClick={() => importRef.current?.click()}>
-                <Upload aria-hidden="true" />
-                Importar JSON
-              </Button>
-              <Button type="button" variant="outline" size="sm" onClick={handleExport}>
-                <Download aria-hidden="true" />
-                Exportar JSON
-              </Button>
+              {/* Arquivo da configuração: UM parada de Tab (roving) — duas ações
+                  irmãs não podem virar duas paradas antes do "Iniciar". */}
+              <RovingToolbar label="Arquivo da configuração" count={2} className="flex items-center gap-2">
+                <RovingItem index={0}>
+                  {(roving) => (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      {...roving}
+                      onClick={() => importRef.current?.click()}
+                    >
+                      <Upload aria-hidden="true" />
+                      Importar JSON
+                    </Button>
+                  )}
+                </RovingItem>
+                <RovingItem index={1}>
+                  {(roving) => (
+                    <Button type="button" variant="outline" size="sm" {...roving} onClick={handleExport}>
+                      <Download aria-hidden="true" />
+                      Exportar JSON
+                    </Button>
+                  )}
+                </RovingItem>
+              </RovingToolbar>
               <input
                 ref={importRef}
                 type="file"
@@ -1160,39 +1165,21 @@ export function NewRun() {
           </div>
         )}
 
-        <SmoothTabs
-          value={tab}
-          onValueChange={(v) => setTab(v as Tab)}
-          className="mt-6 flex flex-col gap-5"
-        >
-          {/* `w-fit`: o segmentado de modo é a escolha primária e ocupa a
-              largura toda; as abas são o nível abaixo e não podem se parecer
-              com ele. */}
-          <SmoothTabsList ariaLabel="Etapas da configuração" className="w-fit">
-            <SmoothTabsTab value="cenarios">
-              <TabLabel id="cenarios">Cenários</TabLabel>
-            </SmoothTabsTab>
-            <SmoothTabsTab value="sujeitos">
-              <TabLabel id="sujeitos">{mode === 'compare' ? 'Modelos' : 'Prompts'}</TabLabel>
-            </SmoothTabsTab>
-            <SmoothTabsTab value="juizes">
-              <TabLabel id="juizes">Juízes</TabLabel>
-            </SmoothTabsTab>
-            <SmoothTabsTab value="avancado">
-              <TabLabel id="avancado">Avançado</TabLabel>
-            </SmoothTabsTab>
-          </SmoothTabsList>
-
-          <SmoothTabsPanels>
-            {/* ----------------------------------------------------- cenários */}
-            <SmoothTabsPanel value="cenarios">
-              <SettingGroup
-                status={
-                  importedCount > 0
-                    ? `${importedCount} importados${precisaGerar ? ` · +${plannedStages - seedCount} a gerar` : ''}`
-                    : `${plannedStages} a gerar`
-                }
-              >
+        {/* Página ÚNICA (IMPL-106): 3 seções de conteúdo sempre à vista + o
+            "Avançado" recolhível (2º nível da revelação progressiva). Sem abas:
+            conteúdo obrigatório nunca fica escondido em aba não-default. */}
+        <div className="mt-6 flex flex-col gap-5">
+          {/* --------------------------------------------------------- cenários */}
+          <SettingGroup
+            id="sec-cenarios"
+            title="Cenários"
+            pending={pendenciaEm('cenarios')}
+            status={
+              importedCount > 0
+                ? `${importedCount} importados${precisaGerar ? ` · +${plannedStages - seedCount} a gerar` : ''}`
+                : `${plannedStages} a gerar`
+            }
+          >
                 {importedCount > 0 ? (
                   <>
                     <SettingRow wide>
@@ -1230,18 +1217,6 @@ export function NewRun() {
                             />
                           </SettingRow>
                         )}
-                        <NumRow
-                          label="Quantos"
-                          value={stages}
-                          onChange={setStages}
-                          min={1}
-                          max={50}
-                          sub={
-                            precisaGerar
-                              ? `Serão gerados mais ${plannedStages - seedCount} para completar ${plannedStages}.`
-                              : `Os ${seedCount} cenários do arquivo já cobrem o total — nada a gerar.`
-                          }
-                        />
                       </>
                     )}
                   </>
@@ -1266,39 +1241,99 @@ export function NewRun() {
                         tuningFields={TUNE_EFFORT}
                       />
                     </SettingRow>
-                    <NumRow label="Quantos" value={stages} onChange={setStages} min={1} max={50} />
-                    {briefOpen ? (
-                      <AreaRow
-                        label="O que testar"
-                        value={scenarioBrief}
-                        onChange={setScenarioBrief}
-                        placeholder="Ex.: se respeitam as regras de jejum de cada exame e não inventam orientação médica."
-                      />
-                    ) : (
-                      <SettingRow wide>
-                        <LinkButton onClick={() => setBriefOpen(true)}>detalhar o que testar</LinkButton>
-                      </SettingRow>
-                    )}
                   </>
                 )}
-              </SettingGroup>
-            </SmoothTabsPanel>
+          </SettingGroup>
 
-            {/* -------------------------------------- modelos (compare) / prompts */}
-            <SmoothTabsPanel value="sujeitos">
+          {/* -------------------------------------- modelos (compare) / prompts */}
+          <SettingGroup
+            id="sec-sujeitos"
+            title={mode === 'compare' ? 'Modelos' : 'Prompts'}
+            pending={pendenciaEm('sujeitos')}
+            status={
+              mode === 'compare'
+                ? compareAxis === 'configs'
+                  ? `${competitorConfigs.filter((r) => r.modelId).length} configs`
+                  : `${competitors.length} competidores`
+                : `${variantCount} variações`
+            }
+          >
               {mode === 'compare' ? (
-                <SettingGroup
-                  status={
-                    compareAxis === 'configs'
-                      ? `${competitorConfigs.filter((r) => r.modelId).length} configs`
-                      : `${competitors.length} competidores`
-                  }
-                >
+                <>
+                  <SwitchRow
+                    label="Mesmo modelo, configs diferentes"
+                    sub="Compara um mesmo modelo em temperaturas e esforços diferentes. A identidade de cada concorrente passa a ser modelo + temperatura + esforço."
+                    checked={compareAxis === 'configs'}
+                    onChange={(v) => setCompareAxis(v ? 'configs' : 'models')}
+                  />
                   {compareAxis === 'configs' ? (
-                    <SettingRow sub="Comparando configs do mesmo modelo — edite as linhas em Avançado.">
-                      <Button type="button" variant="outline" size="sm" onClick={() => setTab('avancado')}>
-                        Ir para Avançado
-                      </Button>
+                    /* As configs são OBRIGATÓRIAS para a run neste eixo: ficam
+                       aqui, sempre à vista — nunca dentro do "Avançado" fechado
+                       (IMPL-106, critério d). */
+                    <SettingRow wide>
+                      <div className="flex w-full flex-col gap-3">
+                        {competitorConfigs.map((row, i) => (
+                          <div
+                            key={i}
+                            className="flex flex-wrap items-end gap-3 rounded-lg border border-border p-3"
+                          >
+                            <div className="min-w-[14rem] flex-1">
+                              <ModelSelector
+                                multi={false}
+                                title={`Config ${i + 1}`}
+                                value={row.modelId ? [row.modelId] : []}
+                                onChange={(ids) => updateConfigRow(i, { modelId: ids[0] ?? '' })}
+                                excludeIds={[...datagen, ...judge]}
+                                models={participantModels}
+                                loading={modelsLoading}
+                              />
+                            </div>
+                            <TxtNumField
+                              label="Temp."
+                              value={row.temperature}
+                              onChange={(v) => updateConfigRow(i, { temperature: v })}
+                              min={0}
+                              max={2}
+                              step={0.1}
+                              placeholder="padrão"
+                            />
+                            <EffortField
+                              label="Reasoning"
+                              value={row.reasoningLevel}
+                              onChange={(v) => updateConfigRow(i, { reasoningLevel: v })}
+                              model={models.find((m) => m.id === row.modelId)}
+                            />
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-sm"
+                              aria-label={`Remover config ${i + 1}`}
+                              disabled={competitorConfigs.length <= 2}
+                              onClick={() =>
+                                setCompetitorConfigs((rows) => rows.filter((_, idx) => idx !== i))
+                              }
+                            >
+                              <Trash2 aria-hidden="true" />
+                            </Button>
+                          </div>
+                        ))}
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="self-start"
+                          disabled={competitorConfigs.length >= 12}
+                          onClick={() =>
+                            setCompetitorConfigs((rows) => [
+                              ...rows,
+                              { modelId: '', temperature: '', reasoningLevel: '' },
+                            ])
+                          }
+                        >
+                          + config
+                        </Button>
+                        {dupConfigWarning && <Banner tone="warn">{dupConfigWarning}</Banner>}
+                      </div>
                     </SettingRow>
                   ) : (
                     <SettingRow wide>
@@ -1316,9 +1351,9 @@ export function NewRun() {
                       />
                     </SettingRow>
                   )}
-                </SettingGroup>
+                </>
               ) : (
-                <SettingGroup status={`${variantCount} variações`}>
+                <>
                   <SettingRow wide>
                     <ModelSelector
                       multi={false}
@@ -1343,54 +1378,37 @@ export function NewRun() {
                       />
                     </SettingRow>
                   ) : (
-                    <>
-                      <AreaRow
-                        label="Prompt base"
-                        value={basePrompt}
-                        onChange={setBasePrompt}
-                        rows={4}
-                        placeholder="System prompt de partida (opcional) — roda como controle."
-                      >
-                        {!genOpen && <LinkButton onClick={() => setGenOpen(true)}>gerar com IA</LinkButton>}
-                      </AreaRow>
-                      {genOpen && (
-                        <AreaRow
-                          label="Descreva a tarefa"
-                          value={taskDescription}
-                          onChange={setTaskDescription}
-                          rows={2}
-                          placeholder="O gerador redige um prompt base a partir desta descrição."
-                        >
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="self-start"
-                            disabled={!taskDescription.trim() || genBaseLoading}
-                            onClick={() => void gerarPromptBase()}
-                          >
-                            {genBaseLoading && <LoaderCircle className="animate-spin" aria-hidden="true" />}
-                            {genBaseLoading ? 'Gerando…' : 'Gerar prompt base'}
-                          </Button>
-                          {genBaseError && <span className="text-[13px] text-destructive">{genBaseError}</span>}
-                        </AreaRow>
-                      )}
-                    </>
+                    <AreaRow
+                      label="Prompt base"
+                      value={basePrompt}
+                      onChange={setBasePrompt}
+                      rows={4}
+                      placeholder="System prompt de partida (opcional) — roda como controle."
+                    />
                   )}
 
                   {optimize ? (
                     <SettingRow label="Variações" wide>
-                      <div className="flex flex-wrap gap-1.5">
+                      {/* Chips + o alternador "escrever manualmente": UMA parada de
+                          Tab (roving) — 10 técnicas não podem virar 10 paradas antes
+                          do "Iniciar" (R-11b:REC-1). */}
+                      <RovingToolbar
+                        label="Variações de prompt"
+                        count={techs.length + 2}
+                        className="flex flex-wrap items-center gap-1.5"
+                      >
                         <Chip
+                          index={0}
                           on={techs.length > 0 && techniques.length === techs.length}
                           label="Todas"
                           onClick={() =>
                             setTechniques(techniques.length === techs.length ? [] : techs.map((t) => t.id))
                           }
                         />
-                        {techs.map((t) => (
+                        {techs.map((t, i) => (
                           <Chip
                             key={t.id}
+                            index={i + 1}
                             on={techniques.includes(t.id)}
                             label={t.name}
                             title={`Bom: ${t.good} · Cuidado: ${t.bad}`}
@@ -1403,8 +1421,19 @@ export function NewRun() {
                             }
                           />
                         ))}
-                      </div>
-                      <LinkButton onClick={() => setOptimize(false)}>escrever manualmente</LinkButton>
+                        <RovingItem index={techs.length + 1}>
+                          {(roving) => (
+                            <button
+                              type="button"
+                              {...roving}
+                              onClick={() => setOptimize(false)}
+                              className="text-[13px] text-primary underline-offset-4 hover:underline"
+                            >
+                              escrever manualmente
+                            </button>
+                          )}
+                        </RovingItem>
+                      </RovingToolbar>
                     </SettingRow>
                   ) : (
                     <SettingRow wide>
@@ -1412,20 +1441,18 @@ export function NewRun() {
                       <LinkButton onClick={() => setOptimize(true)}>usar técnicas</LinkButton>
                     </SettingRow>
                   )}
-
-                  {mode === 'training' && (
-                    <NumRow label="Rodadas" value={iterations} onChange={setIterations} min={2} max={10} />
-                  )}
-                </SettingGroup>
+                </>
               )}
-            </SmoothTabsPanel>
+          </SettingGroup>
 
-            {/* ------------------------------------------------------- juízes */}
-            <SmoothTabsPanel value="juizes">
-              <SettingGroup
-                status={judge.length === 1 ? '1 juiz' : `${judge.length} juízes`}
-                footer="Gerador e juízes rodam com temperatura fixa para o resultado ser reproduzível."
-              >
+          {/* ------------------------------------------------------- juízes */}
+          <SettingGroup
+            id="sec-juizes"
+            title="Juízes"
+            pending={pendenciaEm('juizes')}
+            status={judge.length === 1 ? '1 juiz' : `${judge.length} juízes`}
+            footer="Gerador e juízes rodam com temperatura fixa para o resultado ser reproduzível."
+          >
                 <SettingRow wide>
                   <ModelSelector
                     multi
@@ -1445,12 +1472,71 @@ export function NewRun() {
                     </Banner>
                   ))}
                 </SettingRow>
-              </SettingGroup>
-            </SmoothTabsPanel>
+          </SettingGroup>
 
-            {/* ----------------------------------------------------- avançado */}
-            <SmoothTabsPanel value="avancado">
-              <SettingGroup>
+          {/* ----------------------------------------------------- avançado */}
+          {/* 2º nível da revelação progressiva: recolhido por default, abre
+              sozinho quando a pendência escolhida mora aqui. */}
+          <Disclosure
+            id="sec-avancado"
+            title="Avançado"
+            pending={pendenciaEm('avancado')}
+            open={avancadoOpen}
+            onToggle={() => setAvancadoOpen((v) => !v)}
+            footer="O que 9 em 10 runs não mexem. Os campos que decidem o resultado da run ficam nas seções acima."
+          >
+            {/* Volume de cenários + geração do prompt base: opcionais, mas com
+                valor sempre à vista quando o Avançado abre. */}
+            <SettingGroup title="Cenários e prompts">
+              {!rawStages && (
+                <NumRow
+                  label="Quantos"
+                  value={stages}
+                  onChange={setStages}
+                  min={1}
+                  max={50}
+                  sub={
+                    importedCount > 0
+                      ? precisaGerar
+                        ? `Serão gerados mais ${plannedStages - seedCount} para completar ${plannedStages}.`
+                        : `Os ${seedCount} cenários do arquivo já cobrem o total — nada a gerar.`
+                      : 'Quantos cenários o gerador cria para a run.'
+                  }
+                />
+              )}
+              {importedCount === 0 && (
+                <AreaRow
+                  label="O que testar"
+                  value={scenarioBrief}
+                  onChange={setScenarioBrief}
+                  placeholder="Ex.: se respeitam as regras de jejum de cada exame e não inventam orientação médica."
+                />
+              )}
+              {isSingle && !promptImported && (
+                <AreaRow
+                  label="Descreva a tarefa"
+                  value={taskDescription}
+                  onChange={setTaskDescription}
+                  rows={2}
+                  placeholder="O gerador redige um prompt base a partir desta descrição."
+                >
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="self-start"
+                    disabled={!taskDescription.trim() || genBaseLoading}
+                    onClick={() => void gerarPromptBase()}
+                  >
+                    {genBaseLoading && <LoaderCircle className="animate-spin" aria-hidden="true" />}
+                    {genBaseLoading ? 'Gerando…' : 'Gerar prompt base'}
+                  </Button>
+                  {genBaseError && <span className="text-[13px] text-destructive">{genBaseError}</span>}
+                </AreaRow>
+              )}
+            </SettingGroup>
+
+            <SettingGroup title="Execução">
                 <NumRow
                   label="Finalistas"
                   sub="Quantas variantes disputam o duelo final. As melhores por score entram; 0 desliga a final."
@@ -1544,86 +1630,20 @@ export function NewRun() {
                   </SettingRow>
                 )}
 
-                {mode === 'compare' && (
-                  <>
-                    <SwitchRow
-                      label="Mesmo modelo, configs diferentes"
-                      sub="Compara um mesmo modelo em temperaturas e esforços diferentes. A identidade de cada concorrente passa a ser modelo + temperatura + esforço."
-                      checked={compareAxis === 'configs'}
-                      onChange={(v) => setCompareAxis(v ? 'configs' : 'models')}
-                    />
-                    {compareAxis === 'configs' && (
-                      <SettingRow wide>
-                        <div className="flex w-full flex-col gap-3">
-                          {competitorConfigs.map((row, i) => (
-                            <div
-                              key={i}
-                              className="flex flex-wrap items-end gap-3 rounded-lg border border-border p-3"
-                            >
-                              <div className="min-w-[14rem] flex-1">
-                                <ModelSelector
-                                  multi={false}
-                                  title={`Config ${i + 1}`}
-                                  value={row.modelId ? [row.modelId] : []}
-                                  onChange={(ids) => updateConfigRow(i, { modelId: ids[0] ?? '' })}
-                                  excludeIds={[...datagen, ...judge]}
-                                  models={participantModels}
-                                  loading={modelsLoading}
-                                />
-                              </div>
-                              <TxtNumField
-                                label="Temp."
-                                value={row.temperature}
-                                onChange={(v) => updateConfigRow(i, { temperature: v })}
-                                min={0}
-                                max={2}
-                                step={0.1}
-                                placeholder="padrão"
-                              />
-                              <EffortField
-                                label="Reasoning"
-                                value={row.reasoningLevel}
-                                onChange={(v) => updateConfigRow(i, { reasoningLevel: v })}
-                                model={models.find((m) => m.id === row.modelId)}
-                              />
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon-sm"
-                                aria-label={`Remover config ${i + 1}`}
-                                disabled={competitorConfigs.length <= 2}
-                                onClick={() =>
-                                  setCompetitorConfigs((rows) => rows.filter((_, idx) => idx !== i))
-                                }
-                              >
-                                <Trash2 aria-hidden="true" />
-                              </Button>
-                            </div>
-                          ))}
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="self-start"
-                            disabled={competitorConfigs.length >= 12}
-                            onClick={() =>
-                              setCompetitorConfigs((rows) => [
-                                ...rows,
-                                { modelId: '', temperature: '', reasoningLevel: '' },
-                              ])
-                            }
-                          >
-                            + config
-                          </Button>
-                          {dupConfigWarning && <Banner tone="warn">{dupConfigWarning}</Banner>}
-                        </div>
-                      </SettingRow>
-                    )}
-                  </>
-                )}
+                {/* O eixo compare-llms e o editor de configs mudaram para a
+                    seção "Modelos" (IMPL-106): as configs são obrigatórias no
+                    eixo e não podem ficar sob um Avançado fechado. */}
 
                 {mode === 'training' && (
                   <>
+                    <NumRow
+                      label="Rodadas"
+                      sub="Quantas rodadas de evolução o treino roda (2–10)."
+                      value={iterations}
+                      onChange={setIterations}
+                      min={2}
+                      max={10}
+                    />
                     <TxtNumRow
                       label="Margem p/ promover"
                       sub={`Quanto a vencedora precisa superar a campeã atual (em pontos). Vazio = automática, max(1; 50/n): ${Number(defaultMinGain(stages).toFixed(2))} com ${stages} cenários. Além da margem, ela precisa passar no teste da melhor de K (p ajustado ≤ ${GATE_ALPHA}); sem isso, o treino para.`}
@@ -1657,18 +1677,24 @@ export function NewRun() {
                   sub="Filtra o catálogo pela área de uso. Geral é consultiva; nas áreas sensíveis só passam modelos com endpoint ZDR na allowlist (vale também para gerador, juiz e gabarito) e o desconhecido é bloqueado."
                   wide
                 >
-                  <div className="flex flex-wrap gap-1.5">
-                    <Chip on={isLivre} label="Livre" onClick={() => setComplianceArea(AREA_LIVRE)} />
-                    {lgpd?.areas.map((a) => (
+                  {/* Áreas de conformidade: UMA parada de Tab (roving). */}
+                  <RovingToolbar
+                    label="Áreas de conformidade"
+                    count={1 + (lgpd?.areas.length ?? 0)}
+                    className="flex flex-wrap gap-1.5"
+                  >
+                    <Chip index={0} on={isLivre} label="Livre" onClick={() => setComplianceArea(AREA_LIVRE)} />
+                    {lgpd?.areas.map((a, i) => (
                       <Chip
                         key={a.id}
+                        index={i + 1}
                         on={complianceArea === a.id}
                         label={a.label}
                         title={a.descricao}
                         onClick={() => setComplianceArea(a.id)}
                       />
                     ))}
-                  </div>
+                  </RovingToolbar>
                   {prunedNotice && <Banner tone="warn">{prunedNotice}</Banner>}
                   {(() => {
                     const aviso = allowlistNotice(lgpd, complianceArea);
@@ -1775,13 +1801,15 @@ export function NewRun() {
                   })}
                 </ul>
               </SettingGroup>
-            </SmoothTabsPanel>
-          </SmoothTabsPanels>
-        </SmoothTabs>
+          </Disclosure>
+        </div>
       </Screen>
 
       {/* --------------------------------------------------------------- rodapé */}
-      <div className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-[color-mix(in_srgb,var(--background)_88%,transparent)] backdrop-blur-md">
+      {/* Fixo acima da barra inferior de navegação em telas pequenas (IMPL-110);
+          `fixed` só funciona sem `transform` nos ancestrais — o wrapper de
+          transição de rota é só opacity por isso. */}
+      <div className="fixed inset-x-0 z-30 border-t border-border bg-[color-mix(in_srgb,var(--background)_88%,transparent)] backdrop-blur-md bottom-[calc(3.5rem+env(safe-area-inset-bottom))] md:bottom-0">
         <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-3 px-5 py-3 sm:px-6">
           {/* Vermelho só depois de tentar (ou erro real); antes, dica neutra. Com
               `tried` a mensagem acompanha a pendência atual, não a do clique. */}
@@ -1790,7 +1818,7 @@ export function NewRun() {
               <button
                 type="button"
                 className="text-left text-destructive underline-offset-4 hover:underline"
-                onClick={() => primeira && setTab(primeira.tab)}
+                onClick={() => primeira && irPara(primeira.section)}
               >
                 {tried && primeira ? primeira.text : error}
               </button>
@@ -1798,7 +1826,7 @@ export function NewRun() {
               <button
                 type="button"
                 className="text-left text-muted-foreground underline-offset-4 hover:underline"
-                onClick={() => setTab(primeira.tab)}
+                onClick={() => irPara(primeira.section)}
               >
                 {primeira.text}
               </button>

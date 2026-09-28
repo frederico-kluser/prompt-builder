@@ -207,7 +207,12 @@ function coletar(aba: Aba, runId: string): { eventos: any[]; parar: () => void }
 let silencio: Array<{ mockRestore(): void }> = [];
 
 beforeEach(() => {
-  vi.stubGlobal('localStorage', memoryLocalStorage());
+  const ls = memoryLocalStorage();
+  // Portão BYOK (IMPL-082): cada aba (módulo novo via resetModules) carrega a
+  // key 'lembrada' do localStorage comum no primeiro getStoredKey.
+  ls.setItem('openrouter_api_key', 'sk-or-v1-teste-locks');
+  ls.setItem('openrouter_api_key:remember', '1');
+  vi.stubGlobal('localStorage', ls);
   silencio = [
     vi.spyOn(console, 'log').mockImplementation(() => undefined),
     vi.spyOn(console, 'warn').mockImplementation(() => undefined),

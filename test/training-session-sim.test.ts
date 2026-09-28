@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import { pickWinner, type RankEntry } from '../src/rank.js';
 import { pairedSignificance, mulberry32, type PairScore } from '../src/stats.js';
 import { reevalDecision, shouldStopForPatience } from '../src/engine/trainingPolicy.js';
+import { FULL, ensaios } from './support/effort.js';
 
 /** Um par de scores (controle, candidato) de UM cenário, na escala 0–1. */
 type Draw = (rng: () => number) => { control: number; candidate: number };
@@ -133,7 +134,7 @@ function simularSessao(opts: SimOpts): SimResult {
 
 describe('IMPL-051 — sessão simulada sob H0 (10 iterações): erro controlado', () => {
   it('P(pelo menos uma promoção falsa) ≤ 6% com holdout final (2000 sessões)', () => {
-    const SESSOES = 2000;
+    const SESSOES = ensaios(2000, 250);
     let comPromocaoFalsa = 0;
     let falsaConfirmada = 0;
     for (let s = 0; s < SESSOES; s += 1) {
@@ -151,17 +152,17 @@ describe('IMPL-051 — sessão simulada sob H0 (10 iterações): erro controlado
     }
     const taxa = comPromocaoFalsa / SESSOES;
     const taxaConfirmada = falsaConfirmada / SESSOES;
-    expect(taxa, `promoções falsas: ${comPromocaoFalsa}/${SESSOES}`).toBeLessThanOrEqual(0.06);
+    expect(taxa, `promoções falsas: ${comPromocaoFalsa}/${SESSOES}`).toBeLessThanOrEqual(FULL ? 0.06 : 0.09);
     // Com o teste final (holdout, α=0,05 unilateral) a sessão que AINDA ASSIM
     // recomendar um ganho falso fica ainda mais rara.
     expect(taxaConfirmada).toBeLessThanOrEqual(taxa);
-    expect(taxaConfirmada).toBeLessThanOrEqual(0.06);
+    expect(taxaConfirmada).toBeLessThanOrEqual(FULL ? 0.06 : 0.09);
   });
 });
 
 describe('IMPL-051 — paciência 2 reduz paradas falsas ≥ 50% vs paciência 1', () => {
   it('sob H0: parada na 1ª iteração (por azar) cai ≥ 50% com paciência 2', () => {
-    const SESSOES = 1000;
+    const SESSOES = ensaios(1000, 200);
     let p1 = 0;
     let p2 = 0;
     for (let s = 0; s < SESSOES; s += 1) {
@@ -182,7 +183,7 @@ describe('IMPL-051 — paciência 2 reduz paradas falsas ≥ 50% vs paciência 1
   });
 
   it('com ganho real disponível (regime ruidoso): convergir sem nenhuma promoção cai ≥ 50%', () => {
-    const SESSOES = 600;
+    const SESSOES = ensaios(600, 150);
     let p1 = 0;
     let p2 = 0;
     for (let s = 0; s < SESSOES; s += 1) {

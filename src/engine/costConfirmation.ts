@@ -113,12 +113,20 @@ function callsPerIteration(input: EstimateInput, a: CostEstimate['assumptions'])
   const judges = input.judgeModelIds.length;
   // Etapas EXECUTADAS (repeats clona cenários no compare); gabarito segue 1×/cenário.
   const exec = a.stages * a.repeats;
+  // IMPL-013: a re-avaliação limpa do treino executa 2 contestants × minibatch
+  // (candidato + régua) — chamadas que o `usd` do papel JÁ paga em
+  // `estimateRunCost`; sem contá-las aqui o driver mostrava chamadas a menos
+  // do que o custo dele cobria (a contabilidade tem de fechar com a faixa).
+  const reeval = input.mode === 'training' ? Math.max(0, Math.floor(a.reevalStages ?? 0)) : 0;
+  const reevalJudge = input.referenceJudging ? reeval * 2 : reeval * input.judgePasses;
   return {
     datagen: a.datagenBatches,
     gabarito: input.referenceJudging ? a.stages : 0,
     rewriter: input.optimizerModelId ? (input.variantsPerIteration ?? 0) : 0,
-    competitor: exec * input.contestantModelIds.length,
-    judge: input.referenceJudging ? exec * a.contestants * judges : exec * input.judgePasses * judges,
+    competitor: exec * input.contestantModelIds.length + reeval * 2,
+    judge:
+      (input.referenceJudging ? exec * a.contestants * judges : exec * input.judgePasses * judges) +
+      reevalJudge * judges,
     duel: input.referenceJudging ? exec * a.duelPairs * 2 : 0,
     agent: input.agentRuns ?? 0,
   };

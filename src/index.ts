@@ -52,8 +52,11 @@ export {
   thinkLevelsFor,
   toExportRow,
   MODELS_EXPORT_FORMAT,
+  reasoningForRole,
+  reasoningLevelForRole,
+  REASONING_ROLE_DEFAULT,
 } from './modelCaps.js';
-export type { ModelCaps, ModelExportRow, ThinkLevels } from './modelCaps.js';
+export type { ModelCaps, ModelExportRow, ThinkLevels, JudgingRole } from './modelCaps.js';
 
 export { ensureCatalog, clearCatalog, catalogPath } from './modelsCache.js';
 export {

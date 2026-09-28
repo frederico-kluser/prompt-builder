@@ -207,6 +207,16 @@ Toda run tem **modelos de apoio** (gerador + juiz) além dos participantes:
   o mesmo vendor/família só gera **aviso** de viés em `fairnessWarnings`. `referenceModelId` é
   **obrigatório em variation/training**; em compare o default documentado (1º juiz) é denunciado
   pelo mesmo aviso, nunca escondido.
+- **esforço de raciocínio por papel (IMPL-079):** `reasoning.judge` / `reasoning.duel` /
+  `reasoning.gab` **não compartilham mais um campo só**. Defaults: juiz pointwise **`medium`**,
+  duelo **`low`** e gabarito **`high`** (acima de `low` o ganho de esforço satura ou reverte e o
+  papel juiz domina o custo). Papel sem campo próprio cai no `reasoning.judge` antigo (compat) e,
+  sem nenhum dos dois, no default do papel — sempre com `fitEffort` na allowlist do modelo. Exemplo
+  de config (judge=medium, duel=low, gab=high):
+
+  ```json
+  "reasoning": { "competitor": "low", "judge": "medium", "duel": "low", "gab": "high" }
+  ```
 
 ---
 

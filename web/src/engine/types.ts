@@ -1,5 +1,6 @@
-// Shape do rotulo esperado vem do motor compartilhado (fonte unica).
-import type { ExpectedSpec } from '../../../src/engine/groundTruth.js';
+// Shape do rotulo esperado e da validacao do gabarito vem do motor
+// compartilhado (fonte unica).
+import type { ExpectedSpec, ReferenceValidation } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
 import type { PiiRunReport } from '../../../src/engine/pii.js';
@@ -101,16 +102,29 @@ export type {
   JudgeContractComponents,
   VerdictSampleSource,
 } from '../../../src/types.js';
+// Fila `needs-human-review` + voto de cada juiz + diagnóstico de verbosidade em
+// camadas (IMPL-055/057/053): FONTE ÚNICA em src/types.ts, como acima — os
+// juízes (refJudge/judgeCalibration) já são shim/compartilhados e devolvem
+// estes shapes.
+export type {
+  HumanReviewItem,
+  HumanReviewReason,
+  JudgeVote,
+  VerbosityDiag,
+} from '../../../src/types.js';
 export { TERMINAL_RUN_STATUSES, isTerminalRunStatus } from '../../../src/types.js';
 import type {
   DuelFailure,
   DuelOrderResult,
+  HumanReviewItem,
   JudgeConfidence,
   JudgeContractComponents,
+  JudgeVote,
   VerdictError,
   VerdictIntegrity,
   VerdictSampleSource,
   VerdictSource,
+  VerbosityDiag,
 } from '../../../src/types.js';
 
 export interface OpenRouterModelPricing {
@@ -240,6 +254,10 @@ export type ReasoningLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xh
 export interface ReasoningConfig {
   competitor?: ReasoningLevel;
   judge?: ReasoningLevel;
+  /** IMPL-079: esforço do DUELO das finais (default `low`; ausente → `judge`). */
+  duel?: ReasoningLevel;
+  /** IMPL-079: esforço do GABARITO/referência (default `high`; ausente → `judge`). */
+  gab?: ReasoningLevel;
   rewriter?: ReasoningLevel;
   datagen?: ReasoningLevel;
 }
@@ -446,6 +464,13 @@ export interface StageSpec {
   /** Gabarito: resposta de referencia ideal (juiz pointwise + duelos). */
   reference?: string;
   /**
+   * Validacao do GABARITO (IMPL-055): verificacao dirigida pela rubrica +
+   * 2º gabarito de familia distinta (condicionado) + itens `needs-human-review`.
+   * Preenchida por `validateGeneratedReferences` (`src/gabarito.ts`); a fila
+   * agregada vive em `RunRecord.needsHumanReview`.
+   */
+  referenceValidation?: ReferenceValidation;
+  /**
    * Rotulo ESPERADO (ground-truth): veredito deterministico sem juiz LLM
    * (`src/engine/groundTruth.ts`, fonte unica do shape).
    */
@@ -639,6 +664,14 @@ export interface ReferenceJudgeResult {
   verdictTieByContestant?: Record<string, Verdict[]>;
   /** Canário de cada voto legítimo, 1 por juiz (IMPL-006). */
   canaryByContestant?: Record<string, string[]>;
+  /**
+   * Voto de CADA juiz por contestant (IMPL-057): veredito + explicação +
+   * confiança + canário, ou a falha do juiz (`error`, sem veredito — badge
+   * 'avaliador falhou' ≠ veredito). A UI mostra a concordância do painel
+   * ("2 de 3: resolve") com o divergente destacado. Ausente em records antigos
+   * e em vereditos determinísticos (ground-truth/auto — não há painel).
+   */
+  judgeVotesByContestant?: Record<string, JudgeVote[]>;
   judgeModelId: string;
   inconclusive?: boolean;
 }
@@ -782,6 +815,13 @@ export interface RunRecord {
   /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
   fairnessWarnings?: string[];
   /**
+   * Fila `needs-human-review` (IMPL-055): gabarito divergente da rubrica, 2º
+   * gabarito discordante ou amostra humana de auditoria (5–10%). Sai de
+   * `humanReviewQueueFromStages` (src/engine/groundTruth.ts); o re-read preserva
+   * o campo (`normalizeRunRecord` espalha `...raw`).
+   */
+  needsHumanReview?: HumanReviewItem[];
+  /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
    * `allowPii`. E o registro de que os identificadores foram pseudonimizados
@@ -814,6 +854,13 @@ export interface RunRecord {
       nPorFonte?: Record<string, number>;
       nPorCelula?: Record<string, number>;
       excluidos?: { vazios: number; truncados: number; imputados: number };
+      /**
+       * Diagnóstico de verbosidade em CAMADAS (IMPL-053): regressão ordinal +
+       * permutação dentro do cenário + sondas contrafactuais + nota LC
+       * auxiliar. Publicado por `verbosityReport`; `null`/ausente = n
+       * insuficiente para ajustar o modelo.
+       */
+      verbosityDiag?: VerbosityDiag;
     };
   };
   /**

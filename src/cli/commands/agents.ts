@@ -9,6 +9,8 @@
 //   replay   <runId> --stage N --contestant <id> [--rep N]
 //   reconcile <runId> [--generations] [--json]  custo medido (proxy) × derivado × cobrado (§20.4, IMPL-035)
 //   gc       [--older-than 30d] [--dry-run]
+//   task     validate <arq> [--repetitions N]   as 6 checagens bloqueantes de uma tarefa (IMPL-097) — SÓ aqui, nunca na run
+//   task     compile  <arq> --out-dir <dir>     compila a tarefa para o layout Harbor pinado (IMPL-098)
 //
 // Contrato de saída idêntico ao resto do CLI: stdout é PAYLOAD, stderr é narração.
 // A regra de ouro: NENHUM destes comandos interfere nos comandos existentes de
@@ -26,6 +28,9 @@ import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { runPreflight, type PreflightOpts } from '../../agent/doctor.js';
 import { agentVerdictTreeVersionOf, classifyStop } from '../../agent/verdictTree.js';
 import { defaultPiImageTag } from '../../agent/container.js';
+import { compileAgentTaskToHarbor, HARBOR_VERSION } from '../../agent/harbor.js';
+import { parseAgentTaskSpec } from '../../agent/taskSchema.js';
+import { validateAgentTask, type TaskValidationReport } from '../../agent/taskValidate.js';
 import {
   COST_FIDELITY_TOLERANCE,
   reconcileGenerations,
@@ -1294,6 +1299,206 @@ async function cmdGc(argv: string[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// task (IMPL-097/IMPL-098) — validação de tarefa e exportação Harbor
+//
+// As 6 checagens bloqueantes (build/fail-before/pass-after/flakiness/
+// trivialidade/oráculo fraco) rodam SÓ aqui (`task validate`) — nunca durante
+// uma run: validar custa várias execuções da solução e a run precisa medir o
+// agente, não a tarefa.
+// ---------------------------------------------------------------------------
+
+/** Nós `agentTask` de um arquivo de tarefa/config, com rótulo estável no relatório. */
+export function agentTaskNodesFrom(json: unknown, fallbackLabel: string): { label: string; node: unknown; question?: string }[] {
+  const obj = (typeof json === 'object' && json !== null ? json : {}) as Record<string, unknown>;
+  if (Array.isArray(obj.scenarios)) {
+    return obj.scenarios
+      .map((s, i) => ({ s: (typeof s === 'object' && s !== null ? s : {}) as Record<string, unknown>, i }))
+      .filter(({ s }) => s.agentTask !== undefined)
+      .map(({ s, i }) => ({
+        label: `scenarios[${i}].agentTask`,
+        node: s.agentTask,
+        question: typeof s.question === 'string' ? s.question : undefined,
+      }));
+  }
+  if (obj.agentTask !== undefined) return [{ label: 'agentTask', node: obj.agentTask }];
+  return [{ label: fallbackLabel, node: json }];
+}
+
+/** Carrega o arquivo e extrai os nós `agentTask` (modo validate: `solution` obrigatória). */
+async function loadTaskNodes(file: string): Promise<{ baseDir: string; entries: ReturnType<typeof agentTaskNodesFrom> }> {
+  const json = await readJsonFile(file);
+  const entries = agentTaskNodesFrom(json, path.basename(file));
+  if (entries.length === 0) {
+    throw new CliError(
+      `Nenhum \`agentTask\` no arquivo "${file}".`,
+      EXIT.CONFIG,
+      { path: file },
+      {
+        code: 'config.task_missing',
+        hint: 'O arquivo deve ser um nó `agentTask` (arena-agent-config@2) ou um arena-agent-config com `scenarios[].agentTask`.',
+      },
+    );
+  }
+  return { baseDir: path.dirname(path.resolve(file)), entries };
+}
+
+interface TaskReportEntry extends TaskValidationReport {
+  label: string;
+}
+
+function renderTaskReport(out: ReturnType<typeof buildContext>['out'], entry: TaskReportEntry): void {
+  out.line(`${entry.label}: ${entry.status}${entry.includedInStandings ? ' (entra no placar)' : ' (FORA do placar)'}`);
+  for (const c of entry.checks) {
+    const marca = c.state === 'ok' ? 'ok  ' : c.state === 'fail' ? 'FAIL' : 'skip';
+    out.line(`  [${marca}] ${c.id}: ${c.detail}`);
+  }
+  for (const e of entry.errors) out.line(`  erro: ${e}`);
+}
+
+/**
+ * `agents task validate <arq>` — as 6 checagens bloqueantes (IMPL-097).
+ * Exit 0 só com `status: 'ok'`; `invalid`/`unstable` saem com 3 (config) e o
+ * relatório completo em `error.details.tasks` — `unstable` fica FORA do placar.
+ */
+async function cmdTaskValidate(argv: string[]): Promise<number> {
+  const parsed = parse(argv, { repetitions: { type: 'string' } });
+  const ctx = buildContext(parsed);
+  const { out, positionals } = ctx;
+  const file = positionals[0];
+  if (!file) {
+    throw new CliError('Informe o arquivo da tarefa (ex.: `agents task validate tarefa.json`).', EXIT.USAGE);
+  }
+  const repetitions = n(parsed.values.repetitions, '--repetitions');
+  const { baseDir, entries } = await loadTaskNodes(file);
+
+  const tasks: TaskReportEntry[] = [];
+  for (const { label, node } of entries) {
+    const t = parseAgentTaskSpec(node, { mode: 'validate' });
+    if (!t.ok) {
+      throw new CliError(
+        `Tarefa inválida em ${label}: ${t.errors.join('; ')}`,
+        EXIT.CONFIG,
+        { label, errors: t.errors },
+        {
+          code: 'config.task_invalid',
+          hint: 'Em modo validate a `solution` (script ou diff) e ao menos um check (verify/regression) são obrigatórios.',
+        },
+      );
+    }
+    for (const w of t.warnings) out.warn(`[${label}] ${w}`);
+    out.info(`validando ${label} (build, fail-before, pass-after, flakiness, trivialidade, oráculo fraco)…`);
+    const report = await validateAgentTask(t.task, {
+      baseDir,
+      ...(repetitions !== undefined ? { repetitions } : {}),
+    });
+    const entry: TaskReportEntry = { label, ...report };
+    tasks.push(entry);
+    renderTaskReport(out, entry);
+  }
+
+  const reprovadas = tasks.filter((t) => t.status !== 'ok');
+  if (reprovadas.length > 0) {
+    throw new CliError(
+      `Tarefa reprovada na validação (${reprovadas.map((t) => `${t.label}: ${t.status}`).join('; ')}).`,
+      EXIT.CONFIG,
+      { tasks },
+      {
+        code: 'config.task_invalid',
+        hint: 'Cada checagem reprovada diz o porquê em details.tasks[].checks — corrija a tarefa e rode de novo. ' +
+          '`unstable` = os checks não são determinísticos (veredito divergente em 3 reexecuções): a tarefa fica FORA do placar.',
+      },
+    );
+  }
+  out.result(true, 'agents.task.validate', { tasks });
+  return EXIT.OK;
+}
+
+/**
+ * `agents task compile <arq> --out <dir>` — compila a tarefa para o layout
+ * Harbor pinado (`HARBOR_VERSION`): instruction.md + environment/ + solution/
+ * + tests/ (com reward.json do `tests/test.sh`). Modo validate: sem golden
+ * (solution) e sem checks não há tarefa Harbor que se sustente.
+ */
+async function cmdTaskCompile(argv: string[]): Promise<number> {
+  const parsed = parse(argv, {
+    'out-dir': { type: 'string', short: 'o' },
+    instruction: { type: 'string' },
+    'instruction-file': { type: 'string' },
+    name: { type: 'string' },
+    scenario: { type: 'string' },
+  });
+  const ctx = buildContext(parsed);
+  const { out, values, positionals } = ctx;
+  const file = positionals[0];
+  const outDir = typeof values['out-dir'] === 'string' && values['out-dir'].trim() ? values['out-dir'] : undefined;
+  if (!file || !outDir) {
+    throw new CliError(
+      'Uso: `agents task compile <arquivo.json> --out-dir <dir> [--instruction <txt> | --instruction-file <arq>]`.',
+      EXIT.USAGE,
+    );
+  }
+  const { entries } = await loadTaskNodes(file);
+  let entry = entries[0];
+  if (entries.length > 1) {
+    const idx = n(values.scenario, '--scenario');
+    if (idx === undefined || !entries.some((e) => e.label === `scenarios[${idx}].agentTask`)) {
+      throw new CliError(
+        `O arquivo tem ${entries.length} tarefas — escolha uma com \`--scenario <índice>\`.`,
+        EXIT.USAGE,
+      );
+    }
+    entry = entries.find((e) => e.label === `scenarios[${idx}].agentTask`)!;
+  }
+
+  const t = parseAgentTaskSpec(entry.node, { mode: 'validate' });
+  if (!t.ok) {
+    throw new CliError(`Tarefa inválida em ${entry.label}: ${t.errors.join('; ')}`, EXIT.CONFIG, { errors: t.errors }, {
+      code: 'config.task_invalid',
+    });
+  }
+
+  let instruction = typeof values.instruction === 'string' ? values.instruction : undefined;
+  if (!instruction && typeof values['instruction-file'] === 'string') {
+    instruction = await fs.readFile(values['instruction-file'], 'utf8');
+  }
+  instruction = instruction ?? entry.question;
+  if (!instruction?.trim()) {
+    throw new CliError(
+      'Falta o enunciado (instruction.md): use `--instruction <txt>`, `--instruction-file <arq>` ' +
+        'ou um cenário com `question`.',
+      EXIT.USAGE,
+    );
+  }
+
+  const name = typeof values.name === 'string' && values.name.trim() ? values.name : undefined;
+  const result = compileAgentTaskToHarbor(t.task, { outDir, instruction, ...(name ? { name } : {}) });
+  out.info(`árvore Harbor ${HARBOR_VERSION} escrita em ${result.outDir} (${result.files.length} arquivo(s)).`);
+  out.result(true, 'agents.task.compile', {
+    outDir: result.outDir,
+    harborVersion: HARBOR_VERSION,
+    files: result.files,
+    rewardSpec: result.rewardSpec,
+  });
+  return EXIT.OK;
+}
+
+async function cmdTask(argv: string[]): Promise<number> {
+  const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : undefined;
+  const rest = sub ? argv.slice(1) : argv;
+  switch (sub) {
+    case 'validate':
+      return cmdTaskValidate(rest);
+    case 'compile':
+      return cmdTaskCompile(rest);
+    default:
+      throw new CliError(
+        `Subcomando desconhecido de "agents task": "${sub ?? ''}". Use um de: validate, compile.`,
+        EXIT.USAGE,
+      );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // dispatcher
 // ---------------------------------------------------------------------------
 
@@ -1317,9 +1522,11 @@ export async function cmdAgents(argv: string[]): Promise<number> {
       return cmdReconcile(rest);
     case 'gc':
       return cmdGc(rest);
+    case 'task':
+      return cmdTask(rest);
     default:
       throw new CliError(
-        `Subcomando desconhecido de "agents": "${sub ?? ''}". Use um de: doctor, run, show, list, logs, replay, reconcile, gc.`,
+        `Subcomando desconhecido de "agents": "${sub ?? ''}". Use um de: doctor, run, show, list, logs, replay, reconcile, gc, task.`,
         EXIT.USAGE,
       );
   }

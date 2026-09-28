@@ -1,8 +1,10 @@
 import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { isControlSignal } from './budget.js';
-import { getTechnique } from './techniques.js';
-import { extractPlaceholders, isInfraViolation, stripFences } from './engine/contracts.js';
+import { getTechnique, filterTechniquesForTarget, TECHNIQUE_LIBRARY, type TechniqueTarget, type TargetModelInfo } from './techniques.js';
+import { modelFamily } from './llmVariants.js';
+import { modelCaps } from './modelCaps.js';
+import { extractPlaceholders, isInfraViolation, redactGuardSpans, stripFences } from './engine/contracts.js';
 import { createContractGate } from './contractGate.js';
 import type { ContractGate } from './contractGate.js';
 import { MAX_TOKENS_REWRITER } from './engine/callCaps.js';
@@ -13,10 +15,21 @@ import type { Contestant, ManualVariant, PromptTechnique, ReasoningLevel, RunCtx
 
 const variantSchema = z.object({ systemPrompt: z.string().min(1) });
 
+/**
+ * Versão do CONTRATO DO PAYLOAD do reescritor (IMPL-066/IMPL-070). Cada mudança
+ * de estrutura do payload sobe a versão — o marcador `<payload_reescritor
+ * versao="…">` viaja no próprio payload e é o que os snapshots/regexes dos
+ * testes ancoram.
+ *  - v1 = tema/técnica/lições/contrato/base (reescritor cego ao modelo-alvo);
+ *  - v2 = v1 + `<modelo_alvo>` (modelId, família, think level de produção,
+ *    capacidades do catálogo) + redação do conjunto de guarda.
+ */
+export const REWRITER_PAYLOAD_VERSION = 2;
+
 // Meta-prompt do reescritor (portado do rewriter do prompt-arena): TEXTO PURO
 // in/out, sem JSON — assim o prompt reescrito, cheio de backticks e quebras de
 // linha, nao precisa sobreviver ao escaping de JSON na ida nem na volta.
-const SYSTEM_PROMPT = `Voce e um reescritor cirurgico de system prompts. Recebe um system prompt base (ou apenas um tema, quando nao houver base) e UMA tecnica de engenharia de prompt a aplicar.
+export const REWRITER_SYSTEM_PROMPT = `Voce e um reescritor cirurgico de system prompts. Recebe um system prompt base (ou apenas um tema, quando nao houver base) e UMA tecnica de engenharia de prompt a aplicar.
 Sua reescrita sera benchmarkada contra o prompt base atual — so uma variante genuinamente melhor vence.
 
 REGRAS DURAS (violar qualquer uma torna a variante inutil — ela simplesmente pontua pior):
@@ -71,6 +84,19 @@ export interface GenerateContestantsParams {
    */
   contractJudgeReasoningLevel?: ReasoningLevel;
   contestantReasoningLevel?: ReasoningLevel;
+  /**
+   * IMPL-066 (R-20:REC-2): capacidades do modelo SOB TESTE, direto do catálogo
+   * (`supported_parameters` + `reasoning` parseados). Filtra as técnicas
+   * classe-dependentes ANTES da reescrita e informa o reescritor no payload.
+   * Ausente = sem metadados (só o think level decide).
+   */
+  targetModel?: TargetModelInfo;
+  /**
+   * IMPL-069 (R-21:REC-2/REC-3): conjunto de guarda — cenários de segurança
+   * INVISÍVEIS ao otimizador. Nenhum trecho deles pode entrar no payload do
+   * reescritor (lições/demos que os citem são redigidos antes de enviar).
+   */
+  guardScenarios?: string[];
   /**
    * Contratos never-break do prompt base (F2/P0.3 + IMPL-011): a reescrita
    * passa pelo gate de 3 camadas (`contractGate.ts`: regras locais → juiz LLM
@@ -168,6 +194,71 @@ function contractBlock(p: GenerateContestantsParams, baseText: string): string {
   return `\n<contrato_never_break>\n${linhas.join('\n')}\n</contrato_never_break>\n`;
 }
 
+/**
+ * Bloco `<modelo_alvo>` do payload (IMPL-066, R-20:REC-2/DEC-2): o reescritor
+ * deixa de ser cego ao modelo de produção — recebe o modelId, a FAMÍLIA e o
+ * THINK LEVEL de produção do modelo sob teste, mais as capacidades do catálogo
+ * (supported_parameters/reasoning: mandatory, degraus aceitos). Com isso a
+ * regra da técnica `cot` ("nao acrescente CoT se o modelo ja for de raciocinio")
+ * finalmente tem como ser cumprida. O texto reescrito continua PORTÁVEL: só o
+ * classe-dependente (cot/fewshot/selfcritique/stepback) é condicionado.
+ */
+function targetModelBlock(p: GenerateContestantsParams): string {
+  const caps = modelCaps(p.targetModel);
+  const nivel = p.contestantReasoningLevel ?? 'default-do-provedor';
+  const linhas = [
+    `Modelo em producao (o que vai rodar o prompt reescrito): ${p.modelId} (familia ${modelFamily(p.modelId)}).`,
+    `Nivel de raciocinio em producao: ${nivel}.`,
+  ];
+  if (p.targetModel) {
+    const capacidades = [
+      caps.mandatory ? 'raciocinio OBRIGATORIO (nao da para desligar)' : 'raciocinio opcional',
+      caps.supportedEfforts?.length
+        ? `degraus de esforco aceitos: ${caps.supportedEfforts.join(', ')}`
+        : 'sem allowlist de degraus declarada',
+    ];
+    if (caps.defaultEffort) capacidades.push(`esforco default do catalogo: ${caps.defaultEffort}`);
+    linhas.push(`Capacidades do catalogo: ${capacidades.join('; ')}.`);
+  }
+  linhas.push(
+    'Use este contexto APENAS para decidir o que e dependente da classe do modelo ' +
+      '(raciocinio passo a passo, exemplos, autocritica, step-back): o texto reescrito deve permanecer ' +
+      'PORTAVEL para outros modelos, sem citar o modelo nem o nivel de raciocinio no prompt final.',
+  );
+  return `<modelo_alvo>\n${linhas.join('\n')}\n</modelo_alvo>\n`;
+}
+
+/**
+ * Payload do reescritor — CONTRATO VERSIONADO (IMPL-070/IMPL-066,
+ * {@link REWRITER_PAYLOAD_VERSION}). Extraído como função pura para os
+ * snapshots de mensagem por papel (R-05:REC-3) ancorarem a montagem.
+ */
+export function buildRewriterUserPrompt(input: {
+  theme: string;
+  technique: PromptTechnique;
+  baseText: string;
+  lessonsBlock?: string;
+  siblingsBlock?: string;
+  contractBlock?: string;
+  targetModelBlock?: string;
+}): string {
+  return `<payload_reescritor versao="${REWRITER_PAYLOAD_VERSION}">
+${input.targetModelBlock ?? ''}<contexto_da_tarefa>
+${input.theme}
+</contexto_da_tarefa>
+${input.siblingsBlock ?? ''}<tecnica id="${input.technique.id}" nome="${input.technique.name}">
+<quando_ajuda>${input.technique.good}</quando_ajuda>
+<cuidado>${input.technique.bad}</cuidado>
+<instrucao>${input.technique.metaInstruction}</instrucao>
+</tecnica>
+${input.lessonsBlock ?? ''}${input.contractBlock ?? ''}<prompt_base>
+${input.baseText}
+</prompt_base>
+</payload_reescritor>
+
+Reescreva o prompt agora, aplicando a tecnica.`;
+}
+
 async function generateOneVariant(
   p: GenerateContestantsParams,
   technique: PromptTechnique,
@@ -186,29 +277,35 @@ async function generateOneVariant(
         return ctx ? `\n<fragmentos_congelados>\n${ctx}\n</fragmentos_congelados>\n` : '';
       })()
     : '';
-  const userPrompt = `<contexto_da_tarefa>
-${p.theme}
-</contexto_da_tarefa>
-${irmaosBlock}
-<tecnica id="${technique.id}" nome="${technique.name}">
-<quando_ajuda>${technique.good}</quando_ajuda>
-<cuidado>${technique.bad}</cuidado>
-<instrucao>${technique.metaInstruction}</instrucao>
-</tecnica>
-${lessonsBlock}${contractBlock(p, baseText)}
-<prompt_base>
-${baseText}
-</prompt_base>
+  // IMPL-066: payload versionado e CONSCIENTE do modelo-alvo (modelId, família,
+  // think level de produção + capacidades do catálogo).
+  const userPrompt = buildRewriterUserPrompt({
+    theme: p.theme,
+    technique,
+    baseText,
+    lessonsBlock,
+    siblingsBlock: irmaosBlock,
+    contractBlock: contractBlock(p, baseText),
+    targetModelBlock: targetModelBlock(p),
+  });
 
-Reescreva o prompt agora, aplicando a tecnica.`;
+  // IMPL-069: conjunto de guarda INVISÍVEL ao otimizador — o que vazar em
+  // lições/demos/tema é redigido ANTES de ir ao LLM (senão o reescritor passa a
+  // otimizar contra os cenários de segurança: Goodhart).
+  const { text: safeUserPrompt, redactions } = redactGuardSpans(userPrompt, p.guardScenarios ?? []);
+  if (redactions.length > 0) {
+    console.warn(
+      `[variator] tecnica ${technique.id}: ${redactions.length} trecho(s) do conjunto de guarda redigido(s) do payload do reescritor.`,
+    );
+  }
 
   try {
     const result = await chatCompletion({
       apiKey: p.apiKey,
       modelId: p.optimizerModelId,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userPrompt },
+        { role: 'system', content: REWRITER_SYSTEM_PROMPT },
+        { role: 'user', content: safeUserPrompt },
       ],
       temperature: 0.4,
       timeoutMs: p.timeoutMs ?? 90_000,
@@ -245,8 +342,8 @@ Reescreva o prompt agora, aplicando a tecnica.`;
         apiKey: p.apiKey,
         modelId: p.optimizerModelId,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userPrompt },
+          { role: 'system', content: REWRITER_SYSTEM_PROMPT },
+          { role: 'user', content: safeUserPrompt },
           { role: 'assistant', content: texto },
           {
             role: 'user',
@@ -356,9 +453,31 @@ export async function generateContestants(
   }
 
   // Toggle ON: gera uma variante por tecnica selecionada (em paralelo).
-  const techniques = (p.techniqueIds ?? [])
+  // IMPL-066 (R-20:REC-2): ANTES da reescrita, filtra as técnicas
+  // classe-dependentes pelo modelo-alvo (think level de produção + capacidades
+  // do catálogo) — nada de chamada paga para variante redundante em modelo de
+  // raciocínio (cot/fewshot/selfcritique/stepback degradam lá).
+  const alvo: TechniqueTarget = {
+    modelId: p.modelId,
+    thinkLevel: p.contestantReasoningLevel,
+    catalogModel: p.targetModel,
+  };
+  const { kept, dropped } = filterTechniquesForTarget(p.techniqueIds ?? [], alvo);
+  if (dropped.length > 0) {
+    console.warn(
+      `[variator] ${dropped.length} tecnica(s) classe-dependente(s) NAO proposta(s) para o modelo-alvo ${p.modelId}: ` +
+        dropped.map((d) => `${d.id} (${d.reason})`).join('; '),
+    );
+  }
+  const techniques = kept
     .map((id) => getTechnique(id))
     .filter((t): t is PromptTechnique => Boolean(t));
+  if (techniques.length === 0) {
+    // Nada a reescrever (tudo filtrado ou ids desconhecidos): não monta gate nem
+    // roda baseline de canário — zero custo.
+    stampRunner();
+    return contestants;
+  }
 
   // UM gate por lote: a baseline dos canários no base roda uma vez só e vale
   // para todas as técnicas (e para a correção de cada uma).
@@ -418,7 +537,7 @@ export interface GenerateBasePromptParams {
   ctx?: RunCtx;
 }
 
-const BASE_PROMPT_SYSTEM = `Voce e um engenheiro de prompts senior. Recebe a DESCRICAO de uma tarefa e produz um SYSTEM PROMPT completo e reutilizavel para um assistente que executa essa tarefa.
+export const BASE_GENERATION_SYSTEM_PROMPT = `Voce e um engenheiro de prompts senior. Recebe a DESCRICAO de uma tarefa e produz um SYSTEM PROMPT completo e reutilizavel para um assistente que executa essa tarefa.
 NAO responda a tarefa; escreva APENAS o system prompt (instrucoes para o assistente), pronto para uso, claro e conciso.
 Saida ESTRITAMENTE em JSON valido, sem markdown, sem comentarios: {"systemPrompt":"<system prompt completo>"}`;
 
@@ -434,7 +553,7 @@ export async function generateBasePrompt(p: GenerateBasePromptParams): Promise<s
     apiKey: p.apiKey,
     modelId: p.modelId,
     messages: [
-      { role: 'system', content: BASE_PROMPT_SYSTEM },
+      { role: 'system', content: BASE_GENERATION_SYSTEM_PROMPT },
       { role: 'user', content: userPrompt },
     ],
     temperature: 0.4,
@@ -467,7 +586,7 @@ export async function generateBasePrompt(p: GenerateBasePromptParams): Promise<s
 // e contada no ledger como papel 'rewriter' — dinheiro medido, nunca inferido.
 // ---------------------------------------------------------------------------
 
-const REFLECT_SYSTEM = `Voce e um meta-otimizador de prompts (reflexao estilo GEPA). Recebe as FRAQUEZAS observadas ao benchmarkar um prompt e produz um bloco de licoes ACIONAVEL e conciso para o reescritor de prompts da proxima rodada.
+export const REFLECT_SYSTEM_PROMPT = `Voce e um meta-otimizador de prompts (reflexao estilo GEPA). Recebe as FRAQUEZAS observadas ao benchmarkar um prompt e produz um bloco de licoes ACIONAVEL e conciso para o reescritor de prompts da proxima rodada.
 
 Regras:
 - Responda APENAS com o bloco de licoes (texto puro, sem preambulo, sem code fences).
@@ -523,7 +642,7 @@ Produza o bloco de licoes para a proxima rodada de reescrita.`;
     apiKey: p.apiKey,
     modelId: p.modelId,
     messages: [
-      { role: 'system', content: REFLECT_SYSTEM },
+      { role: 'system', content: REFLECT_SYSTEM_PROMPT },
       { role: 'user', content: userPrompt },
     ],
     temperature: 0.3,
@@ -539,4 +658,30 @@ Produza o bloco de licoes para a proxima rodada de reescrita.`;
   const texto = result.text.trim();
   if (!texto) throw new Error('Reflexao LLM devolveu bloco vazio.');
   return texto.slice(0, Math.max(200, Math.floor(p.maxChars ?? 4000)));
+}
+
+// ---------------------------------------------------------------------------
+// Meta-prompts embutidos POR PAPEL (IMPL-070, R-20:REC-8/M-120).
+//
+// Antes só o prompt do juiz entrava no hash de contrato da run: editar o
+// meta-prompt do reescritor, da reflexão ou as instruções das técnicas mudava o
+// comportamento de TODAS as sessões seguintes sem rastro (duas sessões de treino
+// com meta-prompts diferentes ficavam comparáveis por acaso). Este mapa é a
+// entrada do `metaPromptsFingerprint` (`src/engine/contracts.ts`) que o hash de
+// contrato da run cobre junto com o pin do juiz: qualquer edição de texto muda o
+// fingerprint (os snapshots de mensagem por papel acusam a mudança).
+// `datagen`/`gabarito`/juízes vivem nos próprios módulos e entram no mapa pelos
+// chamadores (orchestrator/trainer), que são quem monta o pin.
+// ---------------------------------------------------------------------------
+
+/** Papel → texto do meta-prompt embutido (chaves estáveis, ordenadas no hash). */
+export function metaPromptTexts(): Record<string, string> {
+  return {
+    'rewriter/system': REWRITER_SYSTEM_PROMPT,
+    'rewriter/generate-base': BASE_GENERATION_SYSTEM_PROMPT,
+    'reflection/system': REFLECT_SYSTEM_PROMPT,
+    'techniques/meta-instructions': TECHNIQUE_LIBRARY.map((t) => `${t.id}\u0001${t.metaInstruction}`).join(
+      '\u0002',
+    ),
+  };
 }

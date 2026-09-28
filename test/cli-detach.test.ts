@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { CLI, COMPARE, KEY, ROOT, ate, dormir, openRouterHttp, recordsDoDisco } from './mcpHarness.js';
+import { CLI, COMPARE, KEY, ROOT, TSX, ate, dormir, openRouterHttp, recordsDoDisco } from './mcpHarness.js';
 import { pidAlive } from '../src/procOwner.js';
 import { readJobRecord } from '../src/jobManager.js';
 import { readRecordOwner, setDataDir, sweepOrphanRecords } from '../src/storage.js';
@@ -51,7 +51,7 @@ function env(): NodeJS.ProcessEnv {
 }
 
 function iniciar(args: string[]) {
-  const child = spawn(process.execPath, ['--import', 'tsx', CLI, ...args], {
+  const child = spawn(TSX, [CLI, ...args], {
     cwd: ROOT,
     env: env(),
     stdio: ['ignore', 'pipe', 'pipe'],

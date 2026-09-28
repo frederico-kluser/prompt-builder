@@ -1,5 +1,6 @@
 import { requestPersistentStorage, type StorageSubject } from './storageHealth';
-import type { ExpectedSpec } from '../../src/engine/groundTruth.js';
+// Shape do rotulo esperado e da validacao do gabarito: fonte unica no motor.
+import type { ExpectedSpec, ReferenceValidation } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
 import type {
@@ -60,6 +61,15 @@ export type {
   VerdictSource,
 } from '../../src/types.js';
 export { isTerminalRunStatus } from '../../src/types.js';
+// Fila `needs-human-review` + voto de cada juiz + diagnóstico de verbosidade
+// (IMPL-055/057/053): fonte única em src/types.ts, como acima.
+import type { HumanReviewItem, JudgeVote } from '../../src/types.js';
+export type {
+  HumanReviewItem,
+  HumanReviewReason,
+  JudgeVote,
+  VerbosityDiag,
+} from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelLifecycleSnapshot } from '../../src/engine/modelLifecycle.js';
 export type {
@@ -68,6 +78,7 @@ export type {
   ModelLifecycleSnapshot,
 } from '../../src/engine/modelLifecycle.js';
 import type { ModelReasoningMeta } from './modelCaps';
+import { reasoningLevelForRole } from './modelCaps';
 import {
   checkImportPii,
   loadLgpdData,
@@ -146,6 +157,13 @@ export { competitorModelHint } from './engine/competitor';
 // porta única (api.ts), a regra mora em modelCaps.ts.
 export type { ModelCaps, ModelReasoningMeta } from './modelCaps';
 export { modelCaps, effortOptions, EFFORT_LABEL } from './modelCaps';
+// IMPL-079: esforço de raciocínio POR PAPEL de juízo (judge/duel/gab).
+export {
+  reasoningForRole,
+  reasoningLevelForRole,
+  REASONING_ROLE_DEFAULT,
+  type JudgingRole,
+} from './modelCaps';
 // Preço com "desconhecido" explícito (IMPL-018): fonte única em src/engine/pricing.ts.
 // IMPL-043: filtro de preço com decisão explícita p/ o variável, contagem "X de Y",
 // prévia de custo com contribuição neutra e o aviso "custo não estimável".
@@ -174,6 +192,10 @@ export type ReasoningLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xh
 export interface ReasoningConfig {
   competitor?: ReasoningLevel;
   judge?: ReasoningLevel;
+  /** IMPL-079: esforço do DUELO das finais (default `low`; ausente → `judge`). */
+  duel?: ReasoningLevel;
+  /** IMPL-079: esforço do GABARITO/referência (default `high`; ausente → `judge`). */
+  gab?: ReasoningLevel;
   rewriter?: ReasoningLevel;
   datagen?: ReasoningLevel;
 }
@@ -331,6 +353,12 @@ export interface StageSpec {
   rubric?: string;
   /** Gabarito: resposta de referencia ideal (juiz pointwise + duelos). */
   reference?: string;
+  /**
+   * Validacao do gabarito (IMPL-055): verificacao dirigida pela rubrica +
+   * 2º gabarito de familia distinta (condicionado) + itens `needs-human-review`.
+   * Preenchida por `validateGeneratedReferences` (src/gabarito.ts).
+   */
+  referenceValidation?: ReferenceValidation;
   /** Rotulo esperado (ground-truth): veredito deterministico sem juiz LLM. */
   expected?: ExpectedSpec;
   /** Todos os rotulos validos da etapa; obrigatorio com `expected` curto (IMPL-003). */
@@ -438,6 +466,13 @@ export interface ReferenceJudgeResult {
   verdictTieByContestant?: Record<string, Verdict[]>;
   /** Canário de cada voto legítimo, 1 por juiz (IMPL-006). */
   canaryByContestant?: Record<string, string[]>;
+  /**
+   * Voto de CADA juiz por contestant (IMPL-057): veredito + explicação +
+   * confiança + canário, ou a falha do juiz (`error`, sem veredito — badge
+   * 'avaliador falhou' ≠ veredito). Ausente em records antigos e em vereditos
+   * determinísticos (ground-truth/auto — não há painel).
+   */
+  judgeVotesByContestant?: Record<string, JudgeVote[]>;
   judgeModelId: string;
   inconclusive?: boolean;
 }
@@ -551,6 +586,11 @@ export interface RunRecord {
   verdictAggregation?: 'majority';
   /** Ids dos finalistas (top-N por judge-score) que disputaram os duelos. */
   finalists?: string[];
+  /**
+   * Fila `needs-human-review` (IMPL-055): gabarito divergente da rubrica, 2º
+   * gabarito discordante ou amostra humana de auditoria (5–10%).
+   */
+  needsHumanReview?: HumanReviewItem[];
   /**
    * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
    * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).
@@ -913,7 +953,7 @@ export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Pro
         // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
         contractJudgeModelId: cfg.judgeModelIds?.[0],
         // Verificações do contrato no MESMO raciocínio da run (juiz/competidor).
-        contractJudgeReasoningLevel: cfg.reasoning?.judge,
+        contractJudgeReasoningLevel: reasoningLevelForRole(cfg.reasoning, 'judge'),
         contestantReasoningLevel: cfg.reasoning?.competitor,
         // Multi-prompt (F2/P0.4): grupo + fragmento-alvo.
         promptGroup: cfg.promptGroup,

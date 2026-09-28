@@ -11,6 +11,7 @@
 // temporário, sem OPENROUTER_API_KEY.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { nodeOrTsx } from './support/cli.js';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,8 +23,7 @@ import { EXIT, Output, resetOutputState, toCliError } from '../src/cli/output.js
 import { COMMANDS, HELP_TAIL, renderCommandHelp } from '../src/cli/help.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
-const ENTRY = path.join(ROOT, 'src', 'cli', 'index.ts');
+const { cmd: TSX, entry: ENTRY } = nodeOrTsx(path.join(ROOT, 'src', 'cli', 'index.ts'));
 const DEAD_BASE = 'http://127.0.0.1:9/api/v1';
 
 let home = '';

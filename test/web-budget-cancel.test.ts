@@ -389,17 +389,27 @@ describe('IMPL-020 (iii) — confirmação de custo com faixa e drivers', () => 
   });
 
   it('treino: drivers = por rodada × rodadas + holdout, e ainda fecham com a faixa', () => {
-    const cfg = { ...TRAINING, stages: 10, holdoutRatio: 0.5, iterations: 3 } as unknown as RunConfig;
+    // 22 cenários × ratio 0,5 → holdout de 11 (>= piso de 10 do IMPL-050).
+    const cfg = { ...TRAINING, stages: 22, holdoutRatio: 0.5, iterations: 3 } as unknown as RunConfig;
     const est = estimateLaunchCost(cfg, catalogo(1e-4));
     expect(est.assumptions.iterations).toBe(3);
     expect(est.drivers.reduce((s, d) => s + d.usd, 0)).toBeCloseTo(est.high, 10);
     const rewriter = est.drivers.find((d) => d.role === 'rewriter')!;
     expect(rewriter.calls).toBe(2 * 3); // 2 técnicas × 3 rodadas
     const competitor = est.drivers.find((d) => d.role === 'competitor')!;
-    // 10 cenários × 3 variantes × 3 rodadas + re-avaliação limpa por rodada
-    // (IMPL-013: 2 contestants × minibatch de max(5; 30% dos 5 de treino) = 5)
-    // + holdout (5 cenários × 2).
-    expect(competitor.calls).toBe(10 * 3 * 3 + 3 * 2 * 5 + 5 * 2);
+    // 22 cenários × 4 contestants (base + 2 técnicas + CARRY) × 3 rodadas
+    // + re-avaliação limpa por rodada (IMPL-013: 2 contestants × minibatch de
+    // max(5; 30% dos 22) = 7) + holdout (11 cenários × 2).
+    expect(competitor.calls).toBe(22 * 4 * 3 + 3 * 2 * 7 + 11 * 2);
+  });
+
+  it('holdout ABAIXO do piso (IMPL-050) não conta chamadas: é "confirmação fraca"', () => {
+    const cfg = { ...TRAINING, stages: 10, holdoutRatio: 0.5, iterations: 3 } as unknown as RunConfig;
+    const est = estimateLaunchCost(cfg, catalogo(1e-4));
+    const competitor = est.drivers.find((d) => d.role === 'competitor')!;
+    // 10 × 4 × 3 + re-avaliação (3 × 2 × 5) + ZERO de holdout (5 < piso 10 —
+    // abaixo do piso o split não é holdout, é confirmação fraca).
+    expect(competitor.calls).toBe(10 * 4 * 3 + 3 * 2 * 5);
   });
 
   it('teto abaixo do piso da faixa é sinalizado (a run vai parar antes do fim)', () => {

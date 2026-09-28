@@ -403,6 +403,14 @@ vi.mock('@/components/motion-ui/ui-theme', () => ({
   useMotionUITransition: () => ({}),
   useMotionUITheme: () => ({}),
 }));
+// primitives.tsx (importado pelo ModelSelector) usa StaggerReveal no PageHeader;
+// sem o stub o specifier `@/…` não resolve fora do Vite do web/ — mesma receita
+// de test/ux-keygate-help.test.ts.
+vi.mock('@/components/motion-ui/stagger-reveal', () => ({
+  StaggerReveal: (p: { children?: unknown }) => p.children,
+  StaggerRevealHeadline: (p: { children?: unknown }) => p.children,
+  StaggerRevealItem: (p: { children?: unknown }) => p.children,
+}));
 vi.mock('@/components/motion-ui/overlay', () => ({
   Backdrop: () => null,
   useFocusTrap: () => undefined,

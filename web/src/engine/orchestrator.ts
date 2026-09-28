@@ -30,6 +30,7 @@ import { listModels } from './openrouter';
 import { enforceRunCompliance } from '../lgpd';
 import { BudgetLedger, isControlSignal, RunCancelled, toControlSignal } from './budget';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
+import { reasoningLevelForRole } from '../modelCaps';
 import { acquireLock } from './runLocks';
 import {
   cutDuels,
@@ -644,7 +645,8 @@ async function runLoop(
       // referência própria o gabarito sai do 1º juiz: o risco de auto-preferência
       // aparece em `fairnessWarnings`, nunca escondido.
       modelId: record.config.referenceModelId ?? record.config.judgeModelIds[0],
-      reasoningLevel: record.config.reasoning?.judge,
+      // IMPL-079: gabarito tem esforço PRÓPRIO (default high) — não mais o do juiz.
+      reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'gab'),
       timeoutMs: datagenTimeout,
       ctx,
       // stageIndex -1 = progresso AGREGADO do lote (done/total de gabaritos
@@ -812,7 +814,7 @@ async function runLoop(
               contestants: record.contestants,
               judgeModelIds: record.config.judgeModelIds,
               apiKey,
-              reasoningLevel: record.config.reasoning?.judge,
+              reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
               timeoutMs: record.config.timeoutMs,
               ctx,
             });
@@ -1052,7 +1054,8 @@ async function runLoop(
                   ? oracleScoresFromVerdicts(st.referenceJudge?.verdictByContestant)
                   : undefined,
               apiKey,
-              reasoningLevel: record.config.reasoning?.judge,
+              // IMPL-079: duelo tem esforço PRÓPRIO (default low) — não mais o do juiz.
+              reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'duel'),
               timeoutMs: record.config.timeoutMs,
               ctx,
             });
@@ -1207,7 +1210,7 @@ async function runLoop(
       referenceModelId,
       // Ausente = default (canônico vazio) — mesmo hash que o `baseline check`
       // recomputa; fora do default entra cheio e é drift visível.
-      judgeReasoningLevel: record.config.reasoning?.judge,
+      judgeReasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
       providerPolicy: ctx.sink?.sensitiveRouting?.()
         ? JSON.stringify(ctx.sink.sensitiveRouting!())
         : undefined,

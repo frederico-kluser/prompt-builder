@@ -1,4 +1,5 @@
-import type { PromptTechnique, PublicTechnique } from './types.js';
+import { modelCaps } from './modelCaps.js';
+import type { ModelReasoningMeta, PromptTechnique, PublicTechnique, ReasoningLevel } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Few-shot a partir de TRACES REAIS (IMPL-061 / R-02a:REC-3, padrao
@@ -341,4 +342,97 @@ export function listTechniques(): PublicTechnique[] {
 
 export function getTechnique(id: string): PromptTechnique | undefined {
   return TECHNIQUE_LIBRARY.find((t) => t.id === id);
+}
+
+// ---------------------------------------------------------------------------
+// Filtro por CLASSE do modelo-alvo (IMPL-066, R-20:REC-2/DEC-2).
+//
+// O reescritor era cego ao modelo de produção e acabava propondo cot/fewshot/
+// selfcritique/stepback para modelos de RACIOCÍNIO, onde elas degradam (o
+// efeito oposto da mesma instrução entre SF e CR está documentado na R-20):
+// o modelo já raciocina internamente, o passo extra só infla tokens e piora o
+// score — avaliações caras gerando ruído. Agora as capacidades vêm do CATÁLOGO
+// (supported_parameters + reasoning.supported_efforts + mandatory — nunca de
+// tabela por modelo, ver `modelCaps`) e o think level de produção do run
+// decidem ANTES da reescrita se a técnica classe-dependente é proposta.
+//
+// SÓ o classe-dependente é condicionado (regra de portabilidade, R-02a Q8/D-94):
+// o texto resultante continua um drop-in portável para outros modelos — as
+// demais técnicas (formato, restrições, persona…) valem igual para qualquer
+// classe e NUNCA são filtradas daqui.
+// ---------------------------------------------------------------------------
+
+/**
+ * Técnicas cujo ganho depende da CLASSE do modelo-alvo (as quatro que a R-20
+ * mediu degradando em modelos de raciocínio): cadeia de raciocínio, exemplos,
+ * autocrítica e step-back. As demais são classe-independentes.
+ */
+export const MODEL_CLASS_DEPENDENT_TECHNIQUE_IDS = [
+  'cot',
+  'fewshot',
+  'selfcritique',
+  'stepback',
+] as const;
+
+/** Item de catálogo do modelo-alvo (mesma forma que `modelCaps` consome). */
+export interface TargetModelInfo {
+  /** `supported_parameters` parseado do catálogo. */
+  supportedParameters?: string[];
+  /** Bloco `reasoning` parseado (supported_efforts/default_effort/mandatory). */
+  reasoning?: ModelReasoningMeta;
+}
+
+/** O modelo sob teste: id, think level de produção e capacidades do catálogo. */
+export interface TechniqueTarget {
+  modelId: string;
+  /** Think level de PRODUÇÃO do modelo sob teste (RunConfig.reasoning.competitor). */
+  thinkLevel?: ReasoningLevel;
+  /** Capacidades reais, direto do catálogo (ausente = sem metadados). */
+  catalogModel?: TargetModelInfo;
+}
+
+/**
+ * O modelo-alvo está em modo de RACIOCÍNIO? True quando (a) o catálogo marca
+ * `reasoning.mandatory` (o provedor rejeita desligar — ele SEMPRE pensa) ou
+ * (b) o think level de produção está acima de `off`. Sem think level explícito,
+ * o default do provedor decide (`reasoning.defaultEffort`/`defaultEnabled`).
+ */
+export function targetReasoningActive(target: TechniqueTarget): boolean {
+  const caps = modelCaps(target.catalogModel);
+  if (caps.mandatory) return true;
+  if (target.thinkLevel !== undefined) return target.thinkLevel !== 'off';
+  const reasoning = target.catalogModel?.reasoning;
+  return caps.reasoning && Boolean(caps.defaultEffort || reasoning?.defaultEnabled === true);
+}
+
+/**
+ * Filtra as técnicas propostas ANTES da reescrita (custo zero: nada de chamada
+ * paga para variante redundante). Em modelo de raciocínio, as técnicas
+ * classe-dependentes ({@link MODEL_CLASS_DEPENDENT_TECHNIQUE_IDS}) não são
+ * propostas — cot/fewshot à frente, por serem as com degradação medida; o
+ * motivo de cada descarte é PT-BR e vai para o log/stderr do motor.
+ */
+export function filterTechniquesForTarget(
+  techniqueIds: readonly string[] | undefined,
+  target: TechniqueTarget,
+): { kept: string[]; dropped: { id: string; reason: string }[] } {
+  const ids = techniqueIds ?? [];
+  if (!targetReasoningActive(target)) return { kept: [...ids], dropped: [] };
+  const dependent = new Set<string>(MODEL_CLASS_DEPENDENT_TECHNIQUE_IDS);
+  const kept: string[] = [];
+  const dropped: { id: string; reason: string }[] = [];
+  for (const id of ids) {
+    if (dependent.has(id)) {
+      dropped.push({
+        id,
+        reason:
+          `técnica classe-dependente (${id}) não é proposta para modelo de raciocínio ` +
+          `(${target.modelId}${target.thinkLevel ? `, think level ${target.thinkLevel}` : ', raciocínio obrigatório do catálogo'}): ` +
+          'o modelo já faz o passo internamente e a instrução extra degrada o resultado.',
+      });
+      continue;
+    }
+    kept.push(id);
+  }
+  return { kept, dropped };
 }

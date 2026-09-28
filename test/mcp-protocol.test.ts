@@ -12,16 +12,18 @@
 //
 // Suíte de contrato sem rede e sem gasto (< 30 s).
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { createGateway, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
 import {
   HARD_RESULT_TOKENS,
   LATEST_PROTOCOL_VERSION,
   LEGACY_PROTOCOL_VERSIONS,
   McpSession,
+  SOFT_RESULT_TOKENS,
   SUPPORTED_PROTOCOL_VERSIONS,
   UNSUPPORTED_PROTOCOL_VERSION,
   callTool,
@@ -31,6 +33,8 @@ import {
 } from '../src/cli/commands/mcp.js';
 import { getDataDir, saveRun, setDataDir } from '../src/storage.js';
 import type { RunConfig, RunRecord } from '../src/types.js';
+import { KEY, cenarios, fakeDoPipeline, transporte } from './mcpHarness.js';
+import { noSleep } from './fakeOpenRouter.js';
 
 type Msg = Record<string, unknown> & {
   id?: unknown;
@@ -215,6 +219,19 @@ describe('IMPL-085 — anotações e inputSchema das tools', () => {
     expect(texto).not.toMatch(ABS_PATH_RE);
     expect(texto).not.toContain('123');
   });
+
+  it('erros de DISCO (id/dossiê inexistente, tópico desconhecido) também saem sem caminho absoluto', async () => {
+    const id = '11111111-0000-4000-8000-0000000000ff'; // formato válido, nunca gravado
+    const respostas = await Promise.all([
+      callTool('get_result', { id }),
+      callTool('get_agent_dossier', { runId: id, stageIndex: 0, contestantId: 'x' }),
+      callTool('read_docs', { topic: '../../etc/passwd' }),
+    ]);
+    for (const r of respostas) {
+      const texto = (r as ToolCallResult).content[0]?.text ?? '';
+      expect(texto).not.toMatch(ABS_PATH_RE);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -362,4 +379,92 @@ describe('IMPL-086 — saídas (structuredContent, compacto, resumo/paginação)
     expect(r.structuredContent).toEqual({ a: 1, b: [2, 3], c: 'x' });
     expect(r.content[0].text).toBe(JSON.stringify(r.structuredContent));
   });
+});
+
+// ---------------------------------------------------------------------------
+// IMPL-086 (critério 4) — p95 das respostas em run REAL 8×5
+// ---------------------------------------------------------------------------
+// Pipeline real (orquestador, julgamento, duelos, ledger) contra o transporte
+// FALSO do OpenRouter (zero rede externa, zero gasto — mesmo harness do
+// cancelamento): run compare com 8 cenários × 5 contestants, e as respostas de
+// TODAS as tools com argumentos DEFAULT (o uso real) medidas na heurística de
+// 3,5 chars/token. O p95 tem de ficar ≤ 5 mil tokens; `detail:"full"` é
+// verbosidade EXPLÍCITA e vale o teto duro de 25 mil.
+
+describe('IMPL-086 — p95 das respostas das tools em run real 8×5', () => {
+  let tmp: string;
+  let anterior: string;
+  let silencio: Array<{ mockRestore(): void }> = [];
+
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(tmpdir(), 'pb-mcp-p95-'));
+    anterior = getDataDir();
+    setDataDir(tmp);
+    silencio = [
+      vi.spyOn(console, 'log').mockImplementation(() => undefined),
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined),
+      vi.spyOn(console, 'error').mockImplementation(() => undefined),
+    ];
+  });
+  afterEach(() => {
+    silencio.forEach((s) => s.mockRestore());
+    setDataDir(anterior);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('8 tools em run 8×5: nenhuma resposta default passa de 5 mil tokens (p95 incluso)', async () => {
+    const fake = fakeDoPipeline(cenarios(8));
+    const t = transporte(fake, null, 1);
+    const gwAnterior: OpenRouterGateway = setDefaultGateway(createGateway({ fetch: t.fetch, sleep: noSleep }));
+    try {
+      const config = {
+        mode: 'compare',
+        theme: 'suporte ao cliente',
+        stages: 8,
+        datagenModelId: 'fake/gen',
+        judgeModelIds: ['fake/judge'],
+        referenceModelId: 'fake/ref',
+        referenceJudging: true,
+        competitorModelIds: ['fake/a', 'fake/b', 'fake/c', 'fake/d', 'fake/e'],
+        finalists: 2,
+        timeoutMs: 30_000,
+      };
+      const chamar = (name: string, args: Record<string, unknown>): Promise<ToolCallResult | null> =>
+        callTool(name, args, async () => KEY) as Promise<ToolCallResult | null>;
+
+      const rodada = (await chamar('run_benchmark', { config, budgetUsd: 5 }))!;
+      expect(rodada.isError).toBeUndefined();
+      const saidaRun = JSON.parse(rodada.content[0].text) as { runId?: string; status?: string };
+      expect(saidaRun.status).toBe('finished');
+      const runId = saidaRun.runId!;
+      expect(fake.billedCalls()).toBeGreaterThan(0); // run REAL, chamadas de verdade (falsas)
+
+      // As 8 tools com argumentos default. `train_prompt`/`run_agent_benchmark`
+      // são medidas no caminho de recusa (o de sucesso devolve o MESMO resumo
+      // de run medido em run_benchmark — mesma função `resultadoDoJob`).
+      const amostras: Array<[string, ToolCallResult]> = [
+        ['run_benchmark', rodada],
+        ['get_result', (await chamar('get_result', { id: runId }))!],
+        ['get_agent_dossier', (await chamar('get_agent_dossier', { runId, stageIndex: 0, contestantId: 'fake/a' }))!],
+        ['read_docs', (await chamar('read_docs', {}))!],
+        ['list_models', (await chamar('list_models', {}))!],
+        ['estimate_cost', (await chamar('estimate_cost', { config }))!],
+        ['train_prompt', (await chamar('train_prompt', { config, budgetUsd: 1 }))!],
+        ['run_agent_benchmark', (await chamar('run_agent_benchmark', { config: '{}', budgetUsd: 1 }))!],
+      ];
+      const tokens = amostras.map(([nome, r]) => ({ nome, tokens: estimateTokens(r.content[0]?.text ?? '') }));
+      for (const { nome, tokens: n } of tokens) {
+        expect(n, `resposta de ${nome} passou do teto`).toBeLessThanOrEqual(SOFT_RESULT_TOKENS);
+      }
+      const ordenados = tokens.map((x) => x.tokens).sort((a, b) => a - b);
+      const p95 = ordenados[Math.ceil(0.95 * ordenados.length) - 1];
+      expect(p95).toBeLessThanOrEqual(SOFT_RESULT_TOKENS);
+
+      // verbosidade explícita: o record 8×5 inteiro cabe no teto DURO (25 mil)
+      const cheio = (await chamar('get_result', { id: runId, detail: 'full' }))!;
+      expect(estimateTokens(cheio.content[0].text)).toBeLessThanOrEqual(HARD_RESULT_TOKENS);
+    } finally {
+      setDefaultGateway(gwAnterior);
+    }
+  }, 30_000);
 });

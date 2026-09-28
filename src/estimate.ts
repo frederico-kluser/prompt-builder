@@ -21,8 +21,14 @@
 //      esforco x familia e o R-08:DEC-5.
 //   4. O HOLDOUT do treino nao era contado (uma run extra de N cenarios x 2).
 //
-// A faixa `low..high` e larga de proposito (~2.2x). Quem consome deve olhar
-// `assumptions`, nao tratar `point` como promessa.
+// A faixa `low..high` e, desde o IMPL-113 (R-08:REC-8), QUANTIS EMPÍRICOS POR
+// PAPEL (p10/p50/p90 da razão real/estimado do ledger) + predição CONFORMAL
+// (cobertura alvo 90%). O antigo `LOW_FACTOR = 0.45` (fator fixo publicado)
+// ficou para trás: sem amostras a faixa usa o PRIOR documentado abaixo (ponto e
+// topo = teto por construção; piso pela previsão de raciocínio por esforço x
+// família) e, com amostras, os quantis do papel substituem tudo. Quem consome
+// deve olhar `assumptions.range` (fonte por papel: 'empirico' | 'pool' |
+// 'prior') e `assumptions`, nao tratar `point` como promessa.
 //
 // Preco DESCONHECIDO (IMPL-018 / R-07b:REC-7): modelo com preco "-1" no
 // catalogo (roteadores — preco variavel) sai SEMPRE listado em
@@ -59,7 +65,17 @@ import {
 import { selectionMinibatchSize, TECHNIQUES_PER_ITERATION } from './engine/trainingPolicy.js';
 import { competitorModelHint } from './competitor.js';
 import { competitorMaxTokens } from './roleLimits.js';
-import type { CostRole, OpenRouterModel, ReasoningLevel, RunConfig, RunMode } from './types.js';
+import { modelFamilyOf, takeCostSamples, type CostCalibrationSample } from './openrouter.js';
+import { COST_ROLES } from './types.js';
+import type {
+  CostRole,
+  OpenRouterModel,
+  OpenRouterModelPricing,
+  ReasoningLevel,
+  RunConfig,
+  RunMode,
+  TokenPrice,
+} from './types.js';
 
 /** USD por token -> USD por milhao. A conversao 1e6 mora SO aqui e em toPerToken. */
 export const PER_MTOK = 1_000_000;
@@ -71,8 +87,6 @@ export const toPerToken = (usdPerMTok: number): number => usdPerMTok / PER_MTOK;
 const DEFAULT_CTX_IN = 500;
 /** Entrada do juiz do contrato: instrucoes + invariantes + base + reescrita + diff. */
 const CONTRACT_JUDGE_IN = 3600;
-/** Piso empirico da faixa: respostas raramente usam o teto de tokens. */
-const LOW_FACTOR = 0.45;
 /**
  * Tamanho do gabarito como ENTRADA do juiz/duelo. Nao e o teto do papel: o
  * teto (IMPL-016) inclui o raciocinio, que nao volta no texto da referencia.
@@ -128,6 +142,16 @@ export interface EstimateInput {
     canaryMaxTokens: number[];
   };
   /**
+   * IMPL-113: degrau efetivo do juiz (`reasoning.judge`) — ancora a previsão de
+   * `reasoning_tokens` por esforço x família dos papéis de juízo (pointwise,
+   * listwise, duelo e gabarito). Ausente = padrão do modelo.
+   */
+  judgeReasoningLevel?: ReasoningLevel;
+  /** IMPL-113: degrau do datagen (`reasoning.datagen`). */
+  datagenReasoningLevel?: ReasoningLevel;
+  /** IMPL-113: degrau do reescritor (`reasoning.rewriter`). */
+  optimizerReasoningLevel?: ReasoningLevel;
+  /**
    * IMPL-013 (training): cenarios do minibatch de RE-AVALIACAO LIMPA por
    * iteracao — candidato + regua respondem e sao julgados de novo, sem finais.
    * Entra em `perIteration` (e na porta de orcamento pre-iteracao) como teto:
@@ -166,11 +190,27 @@ export type UnknownPricePolicy = 'exclude' | 'worst-case';
 export interface EstimateOptions {
   /** Default `exclude`. */
   unknownPrice?: UnknownPricePolicy;
+  /**
+   * IMPL-113: calibração estimado × real do ledger (quantis por papel). Ausente
+   * = PRIOR documentado (ver `CostCalibration`): ponto/topo = teto, piso pela
+   * previsão de raciocínio. Passar `CostCalibration.live()` consome as amostras
+   * registadas pelo gateway (`recordCostSample` em openrouter.ts).
+   */
+  calibration?: CostCalibration;
 }
 
 export interface CostEstimate {
+  /**
+   * IMPL-113: centro da faixa = razão p50 real/estimado por papel (sem amostras
+   * = o teto de tokens, pior caso por construção). ⚠️ `byRole`/`perIteration`
+   * continuam o TETO (base de tokens) — é o que as portas comparam (a porta
+   * suave nunca pode ficar abaixo da reserva); a faixa calibrada serve para
+   * REPORTAR, nunca para afrouxar as portas.
+   */
   point: number;
+  /** Piso da faixa: p10 por papel − margem conformal (prior sem amostras). */
   low: number;
+  /** Topo da faixa: p90 por papel + margem conformal (= o teto sem amostras). */
   high: number;
   byRole: Record<CostRole, number>;
   /** Custo de UMA iteracao (training); igual a `point` nos outros modos. */
@@ -198,8 +238,368 @@ export interface CostEstimate {
     duelPairs: number;
     /** IMPL-013: cenarios da re-avaliacao limpa por iteracao (0 fora de training). */
     reevalStages: number;
-    lowFactor: number;
+    /**
+     * IMPL-113: como a faixa foi construída — fonte por papel ('empirico' =
+     * quantis do próprio papel; 'pool' = quantis de todas as amostras; 'prior' =
+     * sem amostras, ver `CostCalibration`), a margem conformal aplicada e o n.
+     */
+    range: {
+      /** Cobertura alvo do intervalo (predição conformal). */
+      coverage: number;
+      /** Amostras estimado × real disponíveis na calibração. */
+      n: number;
+      perRole: Partial<
+        Record<
+          CostRole,
+          {
+            low: number;
+            point: number;
+            high: number;
+            n: number;
+            source: RatioSource;
+            /** Margem conformal (≥ 0) somada/subtraída aos quantis p90/p10. */
+            conformal: number;
+            /** Previsão de `reasoning_tokens` do papel (esforço × família). */
+            predictedReasoningTokens: number;
+          }
+        >
+      >;
+    };
   };
+}
+
+// ---------------------------------------------------------------------------
+// Estimativa v2 (IMPL-113 / R-08:REC-8) — quantis empíricos por papel e
+// predição CONFORMAL da faixa.
+//
+// A faixa publicada sai da distribuição real/estimado do LEDGER: cada chamada
+// medida regista o par (estimado do catálogo, real cobrado) em
+// `recordCostSample` (openrouter.ts) e daqui saem os quantis p10/p50/p90 POR
+// PAPEL (com fallback no pool e recorte por célula esforço × família). O
+// intervalo [low, high] ainda leva a margem CONFORMAL (CQR: score = distância
+// do quantil-base; margem = quantil finito `ceil((n+1)·cobertura)/n`) — é ela
+// que sustenta cobertura ≥ 90% em amostras trocáveis, com correção de amostra
+// finita (nunca "90% porque dissemos").
+//
+// SEM amostras (ou com célula fina) vem o PRIOR documentado:
+//   - ponto e topo = 1,0 (o teto de tokens é pior caso por construção — sem
+//     dados, assumir o teto é o único número honesto);
+//   - piso = fração do teto que o real raramente fica abaixo, COM a previsão de
+//     `reasoning_tokens` por esforço × família (família empírica > budget
+//     declarado do provedor > referências effort↔budget 1.024/8.192/16.384):
+//     raciocínio quase sempre gasta o budget previsto, resposta raramente usa o
+//     teto — as constantes abaixo reproduzem o piso histórico 0,45 do custo
+//     total (R-08) quando o raciocínio ocupa ~1/3 do teto.
+// O prior NUNCA é o que se publica com dados: `assumptions.range` diz, papel a
+// papel, de onde veio cada número ('empirico' | 'pool' | 'prior'). E a faixa é
+// sempre POR PAPEL — não existe fator fixo multiplicando o total publicado.
+// ---------------------------------------------------------------------------
+
+/** Cobertura alvo do intervalo conformal (R-08:REC-8: "cobertura >= 90%"). */
+export const CALIBRATION_TARGET_COVERAGE = 0.9;
+
+/** Piso de amostras numa célula para falar em "empírico" (abaixo disso: pool/prior). */
+export const MIN_CELL_SAMPLES = 5;
+
+/** Amostras mínimas de `reasoning_tokens` numa célula para prever por ela. */
+export const MIN_REASONING_SAMPLES = 3;
+
+/** De onde veio o número de uma célula da faixa. */
+export type RatioSource = 'empirico' | 'pool' | 'prior';
+
+/** Quantis da razão real/estimado de uma célula. */
+export interface RatioQuantiles {
+  p10: number;
+  p50: number;
+  p90: number;
+  n: number;
+  source: RatioSource;
+}
+
+/** Faixa de razão publicada por papel (quantis + margem conformal). */
+export interface RatioBand extends RatioQuantiles {
+  /** Extremos finais (p10 − margem; clamp ≥ 0) multiplicados pelo teto do papel. */
+  low: number;
+  point: number;
+  /** Extremos finais (p90 + margem). */
+  high: number;
+  /** Margem conformal aplicada (≥ 0). */
+  conformal: number;
+}
+
+/** Célula da faixa/previsão: esforço × família de um papel. */
+export interface CalibrationCell {
+  /** Degrau efetivo no fio (`reasoning.effort`). */
+  effort?: ReasoningLevel | string;
+  /** Família do modelo (`modelFamilyOf` do gateway). */
+  family?: string;
+  /** Teto de saída do papel (`max_tokens`) — ancora o prior pela previsão. */
+  capTokens?: number;
+  /** Budget de raciocínio declarado pelo provedor (2º fallback da previsão). */
+  declaredReasoningBudget?: number;
+}
+
+/** Resultado da previsão de `reasoning_tokens` (esforço × família). */
+export interface ReasoningPrediction {
+  tokens: number;
+  source: 'empirico' | 'declarado' | 'referencia';
+  /** Amostras por trás da previsão empírica (0 quando não é empírica). */
+  n: number;
+}
+
+/**
+ * Referências esforço ↔ budget de raciocínio (R-08:REC-8): low = 1.024,
+ * medium = 8.192, high = 16.384 — as âncoras que os provedores usam como
+ * budget. Os degraus intermédios interpolam/extrapolam a partir delas.
+ */
+export const REASONING_BUDGET_REF: Readonly<Record<'low' | 'medium' | 'high', number>> = Object.freeze({
+  low: 1024,
+  medium: 8192,
+  high: 16384,
+});
+
+/** Previsão de raciocínio SEM dados: budget por degrau (âncoras acima). */
+export const REASONING_BUDGET_BY_EFFORT: Readonly<Record<ReasoningLevel, number>> = Object.freeze({
+  off: 0,
+  minimal: 512, // interpolação (low / 2)
+  low: REASONING_BUDGET_REF.low,
+  medium: REASONING_BUDGET_REF.medium,
+  high: REASONING_BUDGET_REF.high,
+  xhigh: 24576, // extrapolação (high x 1,5)
+  max: 32768, // extrapolação (high x 2)
+});
+
+/** Budget de referência de um degrau (desconhecido => `medium`). */
+export function reasoningBudgetRef(effort?: string): number {
+  const key = (effort ?? 'medium') as ReasoningLevel;
+  return REASONING_BUDGET_BY_EFFORT[key] ?? REASONING_BUDGET_BY_EFFORT.medium;
+}
+
+/**
+ * PRIOR do piso (sem amostras), pela fatia de raciocínio do teto. Calibrado no
+ * piso histórico 0,45 (R-08): com raciocínio em ~1/3 do teto, 0,30 + 0,45/3 =
+ * 0,45. Raciocínio no teto inteiro => 0,75 (quase tudo é budget previsto);
+ * sem raciocínio => 0,30 (resposta raramente usa o teto).
+ */
+const PRIOR_ANSWER_LOW = 0.3;
+const PRIOR_REASONING_LOW = 0.75;
+
+/** Quantil empírico (interpolação linear sobre os valores ordenados). */
+export function quantile(values: readonly number[], p: number): number {
+  if (values.length === 0) return 0;
+  const xs = [...values].sort((a, b) => a - b);
+  if (xs.length === 1) return xs[0];
+  const pos = Math.min(1, Math.max(0, p)) * (xs.length - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo);
+}
+
+/**
+ * Margem CONFORMAL (conformalized quantile regression): score de cada amostra =
+ * distância para fora do intervalo-base [p10, p90]; a margem é o quantil
+ * `ceil((n+1)·cobertura)/n` dos scores (correção de amostra finita). Com
+ * amostras trocáveis, [p10 − margem, p90 + margem] cobre ≥ `cobertura` do
+ * real. n < 2 = sem margem (não há score que sustente).
+ */
+export function conformalMargin(
+  ratios: readonly number[],
+  p10: number,
+  p90: number,
+  coverage = CALIBRATION_TARGET_COVERAGE,
+): number {
+  const n = ratios.length;
+  if (n < 2) return 0;
+  const scores = ratios.map((r) => Math.max(p10 - r, r - p90, 0));
+  const nivel = Math.min(1, Math.ceil((n + 1) * coverage) / n);
+  return quantile(scores, nivel);
+}
+
+function clamp01(v: number): number {
+  return Math.min(1, Math.max(0, v));
+}
+
+/**
+ * Calibração estimado × real do ledger (IMPL-113): quantis por papel, faixa
+ * conformal e previsão de `reasoning_tokens` por esforço × família.
+ */
+export class CostCalibration {
+  private readonly items: CostCalibrationSample[] = [];
+
+  constructor(samples: Iterable<CostCalibrationSample> = []) {
+    for (const s of samples) this.add(s);
+  }
+
+  /**
+   * Calibração viva: consome o buffer de amostras registadas pelo gateway
+   * (`recordCostSample`, uma por chamada medida). O buffer é anel (as últimas
+   * bastam para quantis); quem quer histórico acumula `toJSON()` por run.
+   */
+  static live(): CostCalibration {
+    return new CostCalibration(takeCostSamples());
+  }
+
+  /**
+   * Aceita só amostra com estimado > 0 e real medido ≥ 0 — razão não existe sem
+   * isto, e preço desconhecido ("-1", IMPL-018) NUNCA entra como valor
+   * negativo (também não entra como zero: simplesmente não é amostra).
+   */
+  add(s: CostCalibrationSample): void {
+    if (!(s.estimatedUsd > 0) || !Number.isFinite(s.actualUsd) || s.actualUsd < 0) return;
+    this.items.push({ ...s, family: s.family || modelFamilyOf(s.modelId) });
+  }
+
+  get size(): number {
+    return this.items.length;
+  }
+
+  all(): readonly CostCalibrationSample[] {
+    return this.items;
+  }
+
+  /** Serialização para persistir a calibração por run/sessão (costAccuracy). */
+  toJSON(): CostCalibrationSample[] {
+    return this.items.map((s) => ({ ...s }));
+  }
+
+  static fromJSON(samples: Iterable<CostCalibrationSample>): CostCalibration {
+    return new CostCalibration(samples);
+  }
+
+  private ratios(pred: (s: CostCalibrationSample) => boolean): number[] {
+    const out: number[] = [];
+    for (const s of this.items) {
+      if (pred(s)) out.push(s.actualUsd / s.estimatedUsd);
+    }
+    return out;
+  }
+
+  /** Cadeia de fallback: célula (esforço × família) => papel => pool => prior. */
+  private ratiosFor(role: CostRole, cell: CalibrationCell): { ratios: number[]; source: RatioSource } {
+    const mesmaCelula = (s: CostCalibrationSample): boolean =>
+      s.role === role &&
+      (!cell.effort || s.effort === cell.effort) &&
+      (!cell.family || s.family === cell.family);
+    const mesmoPapel = (s: CostCalibrationSample): boolean => s.role === role;
+    const cadeia: Array<{ pred: (s: CostCalibrationSample) => boolean; source: RatioSource }> = [
+      { pred: mesmaCelula, source: 'empirico' },
+      { pred: mesmoPapel, source: 'empirico' },
+      { pred: () => true, source: 'pool' },
+    ];
+    for (const { pred, source } of cadeia) {
+      const rs = this.ratios(pred);
+      if (rs.length >= MIN_CELL_SAMPLES) return { ratios: rs, source };
+    }
+    return { ratios: [], source: 'prior' };
+  }
+
+  /** Quantis p10/p50/p90 da razão real/estimado da célula do papel. */
+  quantilesFor(role: CostRole, cell: CalibrationCell = {}): RatioQuantiles {
+    const { ratios, source } = this.ratiosFor(role, cell);
+    if (ratios.length === 0) {
+      return { p10: this.priorLowRatio(cell), p50: 1, p90: 1, n: 0, source: 'prior' };
+    }
+    return {
+      p10: quantile(ratios, 0.1),
+      p50: quantile(ratios, 0.5),
+      p90: quantile(ratios, 0.9),
+      n: ratios.length,
+      source,
+    };
+  }
+
+  /** Faixa publicada do papel: quantis conformalizados (cobertura alvo 90%). */
+  bandFor(role: CostRole, cell: CalibrationCell = {}): RatioBand {
+    const q = this.quantilesFor(role, cell);
+    if (q.source === 'prior' || q.n < 2) {
+      return { ...q, low: q.p10, point: q.p50, high: q.p90, conformal: 0 };
+    }
+    const { ratios } = this.ratiosFor(role, cell);
+    const margem = conformalMargin(ratios, q.p10, q.p90, CALIBRATION_TARGET_COVERAGE);
+    return {
+      ...q,
+      low: Math.max(0, q.p10 - margem),
+      point: q.p50,
+      high: q.p90 + margem,
+      conformal: margem,
+    };
+  }
+
+  /**
+   * Previsão de `reasoning_tokens` por esforço × família (IMPL-113), em ordem:
+   * mediana empírica da célula (esforço × família, n ≥ 3) > budget declarado do
+   * provedor > referências effort↔budget (`REASONING_BUDGET_REF`). Família NÃO
+   * vaza para família: os budgets de raciocínio são do provedor — sem amostras
+   * da célula, o declarado/referência é mais honesto que a mediana alheia.
+   * Nunca negativa.
+   */
+  reasoningTokensFor(effort?: string, family?: string, declaredBudget?: number): ReasoningPrediction {
+    const norm = (v: string | undefined): string => v ?? 'default';
+    const mesmaCelula = this.items.filter(
+      (s) => typeof s.reasoningTokens === 'number' && norm(s.effort) === norm(effort) && (!family || s.family === family),
+    );
+    if (mesmaCelula.length >= MIN_REASONING_SAMPLES) {
+      return {
+        tokens: Math.max(0, quantile(mesmaCelula.map((s) => s.reasoningTokens!), 0.5)),
+        source: 'empirico',
+        n: mesmaCelula.length,
+      };
+    }
+    if (typeof declaredBudget === 'number' && Number.isFinite(declaredBudget) && declaredBudget >= 0) {
+      return { tokens: declaredBudget, source: 'declarado', n: 0 };
+    }
+    return { tokens: Math.max(0, reasoningBudgetRef(effort)), source: 'referencia', n: 0 };
+  }
+
+  /** Piso prior: fatia de raciocínio do teto pela previsão (ver `PRIOR_*`). */
+  private priorLowRatio(cell: CalibrationCell): number {
+    const cap = cell.capTokens ?? 0;
+    const previsto = this.reasoningTokensFor(cell.effort, cell.family, cell.declaredReasoningBudget).tokens;
+    const fatiaRaciocinio = cap > 0 ? Math.min(previsto, cap) / cap : 0;
+    return clamp01(PRIOR_ANSWER_LOW + (PRIOR_REASONING_LOW - PRIOR_ANSWER_LOW) * fatiaRaciocinio);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Precificação com variantes de lote (IMPL-113): o slug `:batch` (lote, 0,5x do
+// preço do modelo base) não vem no catálogo — resolve pelo id base AO VIVO e
+// precifica pela metade. Slug desconhecido continua imprecificável (nunca 0
+// silencioso, nunca negativo).
+// ---------------------------------------------------------------------------
+
+const BATCH_SUFFIX = ':batch';
+/** Preço da variante `:batch` (lote) como fração do preço do modelo base. */
+export const BATCH_PRICE_FACTOR = 0.5;
+
+function halfPrice(v: TokenPrice): TokenPrice {
+  return typeof v === 'number' && Number.isFinite(v) ? v * BATCH_PRICE_FACTOR : v;
+}
+
+/** Resolve um id contra o índice do catálogo, com a variante `:batch` (0,5x). */
+export function resolveModel(
+  idx: Map<string, OpenRouterModel>,
+  id: string,
+): OpenRouterModel | undefined {
+  const direto = idx.get(id);
+  if (direto) return direto;
+  const slug = id.trim();
+  if (!slug.toLowerCase().endsWith(BATCH_SUFFIX)) return undefined;
+  const base = idx.get(slug.slice(0, -BATCH_SUFFIX.length));
+  if (!base) return undefined;
+  const p: OpenRouterModelPricing = {
+    prompt: halfPrice(base.pricing.prompt),
+    completion: halfPrice(base.pricing.completion),
+    ...(base.pricing.overrides
+      ? {
+          overrides: base.pricing.overrides.map((t) => ({
+            ...t,
+            prompt: halfPrice(t.prompt),
+            completion: halfPrice(t.completion),
+          })),
+        }
+      : {}),
+  };
+  return { ...base, id: slug, pricing: p };
 }
 
 /**
@@ -256,7 +656,8 @@ export function estimateRunCost(
   const unknownPrice = new Set<string>();
   const model = (id?: string): OpenRouterModel | undefined => {
     if (!id) return undefined;
-    const m = idx.get(id);
+    // IMPL-113: slug vivo — a variante `:batch` (0,5x) resolve pelo id base.
+    const m = resolveModel(idx, id);
     if (!m) unpriced.add(id);
     return m;
   };
@@ -401,8 +802,12 @@ export function estimateRunCost(
     byRole.agent = agentRuns * agentMaxCostUsd;
   }
 
+  // Base POR PAPEL da faixa: iterações + holdout. O `byRole` publicado continua
+  // como sempre (por iteração + holdout somado): é o que os drivers e as portas
+  // comparam — a faixa calibrada serve para REPORTAR, nunca para afrouxar porta.
+  const iterShare: Record<CostRole, number> = { ...byRole };
+  const holdoutShare: Partial<Record<CostRole, number>> = {};
   const perIteration = Object.values(byRole).reduce((a, b) => a + b, 0);
-  let point = perIteration * iterations;
 
   // --- holdout (training): uma run extra, 2 contestants, sem finais ---
   const holdoutStages = input.mode === 'training' ? (input.holdoutStages ?? 0) : 0;
@@ -418,13 +823,85 @@ export function estimateRunCost(
     }
     byRole.competitor += holdoutComp;
     byRole.judge += holdoutJudge;
-    point += holdoutComp + holdoutJudge;
+    holdoutShare.competitor = holdoutComp;
+    holdoutShare.judge = holdoutJudge;
+  }
+
+  // --- faixa v2 (IMPL-113): quantis por papel + predição conformal ---
+  // Cada papel multiplica o seu teto pela banda da SUA distribuição
+  // real/estimado (p10 − margem, p50, p90 + margem); sem amostras vem o prior
+  // documentado em `CostCalibration`. Sem fator fixo sobre o total publicado.
+  const cal = opts.calibration ?? new CostCalibration();
+  const familiaDe = (id?: string): string | undefined => (id && id.trim() ? modelFamilyOf(id) : undefined);
+  const compId = input.contestantModelIds[0];
+  const juizId = input.judgeModelIds[0];
+  const refId = input.referenceModelId ?? juizId;
+  const celulas: Record<CostRole, CalibrationCell> = {
+    datagen: {
+      ...(input.datagenReasoningLevel ? { effort: input.datagenReasoningLevel } : {}),
+      family: familiaDe(input.datagenModelId),
+      capTokens: MAX_TOKENS_DATAGEN_BATCH,
+    },
+    gabarito: {
+      ...(input.judgeReasoningLevel ? { effort: input.judgeReasoningLevel } : {}),
+      family: familiaDe(refId),
+      capTokens: MAX_TOKENS_GABARITO,
+    },
+    competitor: {
+      ...(input.contestantReasoningLevels?.[0] ? { effort: input.contestantReasoningLevels[0] } : {}),
+      family: familiaDe(compId),
+      capTokens: competitorCap(idx.get(compId ?? ''), 0),
+    },
+    judge: {
+      ...(input.judgeReasoningLevel ? { effort: input.judgeReasoningLevel } : {}),
+      family: familiaDe(juizId),
+      capTokens: input.referenceJudging ? MAX_TOKENS_REF_JUDGE : MAX_TOKENS_JUDGE_LISTWISE,
+    },
+    duel: {
+      ...(input.judgeReasoningLevel ? { effort: input.judgeReasoningLevel } : {}),
+      family: familiaDe(juizId),
+      capTokens: MAX_TOKENS_DUEL,
+    },
+    rewriter: {
+      ...(input.optimizerReasoningLevel ? { effort: input.optimizerReasoningLevel } : {}),
+      family: familiaDe(input.optimizerModelId),
+      capTokens: MAX_TOKENS_REWRITER,
+    },
+    // Agente: custo declarado por construção (§20.1) — sem esforço/família a
+    // prever; entra pelo prior puro.
+    agent: {},
+  };
+  let low = 0;
+  let point = 0;
+  let high = 0;
+  const perRole: NonNullable<CostEstimate['assumptions']['range']['perRole']> = {};
+  for (const role of COST_ROLES) {
+    const total = (iterShare[role] ?? 0) * iterations + (holdoutShare[role] ?? 0);
+    if (!(total > 0)) continue;
+    const celula = celulas[role];
+    const band = cal.bandFor(role, celula);
+    low += total * band.low;
+    point += total * band.point;
+    high += total * band.high;
+    perRole[role] = {
+      low: band.low,
+      point: band.point,
+      high: band.high,
+      n: band.n,
+      source: band.source,
+      conformal: band.conformal,
+      predictedReasoningTokens: cal.reasoningTokensFor(
+        celula.effort,
+        celula.family,
+        celula.declaredReasoningBudget,
+      ).tokens,
+    };
   }
 
   return {
     point,
-    low: point * LOW_FACTOR,
-    high: point,
+    low,
+    high,
     byRole,
     perIteration,
     unpricedModelIds: [...unpriced],
@@ -441,7 +918,11 @@ export function estimateRunCost(
       datagenBatches,
       duelPairs,
       reevalStages,
-      lowFactor: LOW_FACTOR,
+      range: {
+        coverage: CALIBRATION_TARGET_COVERAGE,
+        n: cal.size,
+        perRole,
+      },
     },
   };
 }
@@ -542,6 +1023,10 @@ export function estimateInputFromConfig(
     variantsPerIteration,
     holdoutStages: opts.holdoutStages,
     contract: contractEstimateFrom(config, variantsPerIteration),
+    // IMPL-113: degraus por papel (previsão de raciocínio da faixa).
+    judgeReasoningLevel: config.reasoning?.judge,
+    datagenReasoningLevel: config.reasoning?.datagen,
+    optimizerReasoningLevel: config.reasoning?.rewriter,
     ...(reevalStages > 0 ? { reevalStages } : {}),
     ...(config.agent ? { agentRuns, agentMaxCostUsd } : {}),
     ...(referenceStages !== undefined ? { referenceStages } : {}),
@@ -587,7 +1072,8 @@ export function makeCallEstimator(
   const idx = indexModels(models);
   let pior: { prompt: number; completion: number } | null | undefined; // preguicoso: so com roteador
   return (modelId, promptTokens, maxTokens) => {
-    const m = idx.get(modelId);
+    // IMPL-113: slug vivo — `:batch` (lote, 0,5x) resolve pelo id base.
+    const m = resolveModel(idx, modelId);
     if (!m) return 0;
     const v = priceCall(m, promptTokens, maxTokens);
     if (v !== null) return v;

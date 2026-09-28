@@ -18,7 +18,9 @@ import { renderSpend, Output } from '../src/cli/output.js';
 import { emitRunEvent } from '../src/cli/ndjson.js';
 import {
   DEFAULT_MAX_TOKENS,
+  RESERVE_TOKEN_MARGIN,
   createGateway,
+  guessPromptTokens,
   setDefaultGateway,
   type FetchLike,
   type OpenRouterGateway,
@@ -41,10 +43,14 @@ const P_IN = 1e-6;
 const P_OUT = 1e-5;
 const CATALOGO = [catalogItem('m/priced', P_IN, P_OUT)];
 
-/** Reserva que o gateway faz para `msgs` com teto `maxTokens` (chars/4 + teto × preço). */
+/**
+ * Reserva que o gateway faz para `msgs` com teto `maxTokens` — o MESMO número
+ * da porta dura: tokenizer do IMPL-113 (`guessPromptTokens`) + margem de
+ * segurança (`RESERVE_TOKEN_MARGIN`, ~20%) precificado, mais o teto de saída.
+ * (Antes isto espelhava `chars/4`; o espelho segue a regra ATUAL de reserva.)
+ */
 function reservaDe(maxTokens: number, messages = msgs): number {
-  const chars = messages.reduce((s, m) => s + m.content.length, 0);
-  return Math.ceil(chars / 4) * P_IN + maxTokens * P_OUT;
+  return Math.ceil(guessPromptTokens(messages) * RESERVE_TOKEN_MARGIN) * P_IN + maxTokens * P_OUT;
 }
 
 function sse(frames: unknown[]): string {

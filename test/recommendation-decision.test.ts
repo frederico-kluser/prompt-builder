@@ -17,6 +17,7 @@ import {
   recommendationDecision,
   recommendationFromSummary,
 } from '../src/stats.js';
+import { FULL, ensaios } from './support/effort.js';
 
 /** Scores pareados a partir de Δ (controle 0, candidato = Δ). */
 function fromDiffs(diffs: readonly number[]): {
@@ -151,8 +152,8 @@ describe('IMPL-046 — texto honesto (sem rótulo verbal de probabilidade sem d�
 // --- harness Monte Carlo sob H0 (20 mil ensaios) --------------------------------
 
 describe('IMPL-046 — sob H0, recomendação falsa ≤ 5% após correção da melhor de K', () => {
-  it('20 mil ensaios, K = 4 candidatos, n = 10 pares (seed fixa)', () => {
-    const TRIALS = 20_000;
+  it('Monte Carlo sob H0, K = 4 candidatos, n = 10 pares (seed fixa)', () => {
+    const TRIALS = ensaios(20_000, 2_000);
     const K = 4;
     const N = 10;
     const rng = mulberry32(20260928);
@@ -185,7 +186,11 @@ describe('IMPL-046 — sob H0, recomendação falsa ≤ 5% após correção da m
       if (d.verdict === 'conclusivo' && d.winner === 'A') falsas += 1;
     }
     const taxa = falsas / TRIALS;
-    expect(taxa, `recomendações falsas: ${falsas}/${TRIALS}`).toBeLessThanOrEqual(0.05);
+    // Limiar duro (5%) no test:full; na versão rápida, folga 3σ do erro de
+    // Monte Carlo (EM ≈ 0,5% com 2.000 ensaios) — o contrato estatístico é o
+    // mesmo, muda a resolução da simulação.
+    const LIMIAR = FULL ? 0.05 : 0.075;
+    expect(taxa, `recomendações falsas: ${falsas}/${TRIALS}`).toBeLessThanOrEqual(LIMIAR);
     // A correção importa: sem ela (α cheio) a taxa sobe — registrada em comentário.
     expect(taxa).toBeGreaterThanOrEqual(0);
   });

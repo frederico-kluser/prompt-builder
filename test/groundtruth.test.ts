@@ -11,15 +11,19 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  checkReferenceAgainstRubric,
   extractJsonField,
+  humanReviewQueueFromStages,
   isShortLabelExpected,
   labelSetIssue,
   languageMatches,
   matchExpected,
   normalizeLabel,
+  referencesAgree,
   SHORT_LABEL_MAX_WORDS,
   stageLabelIssues,
   type ExpectedSpec,
+  type ReferenceValidation,
 } from '../src/engine/groundTruth.js';
 
 describe('normalizeLabel', () => {
@@ -759,5 +763,68 @@ describe('IMPL-003 — modo e labelSet', () => {
     const lista = 'As opções são edit, create ou delete.';
     expect(matchExpected(lista, 'edit', { labelSet: INTENT }).verdict).toBe('nao');
     expect(matchExpected(lista, 'edit').verdict).toBe('parcial');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IMPL-055 (R-03a:REC-1) — validação do gabarito: núcleo PURO (sem LLM).
+// ---------------------------------------------------------------------------
+describe('checkReferenceAgainstRubric — verificação determinística dirigida pela rubrica', () => {
+  it('com rótulo esperado, o gabarito passa pelo MESMO verificador estrito das respostas', () => {
+    const ok = checkReferenceAgainstRubric({
+      reference: 'positivo — o cliente elogiou o atendimento.',
+      expected: 'positivo',
+      labelSet: ['positivo', 'negativo'],
+    });
+    expect(ok).toMatchObject({ verdict: 'resolve', divergent: false, method: 'expected' });
+
+    // O gabarito CONTRARIA a rubrica ⇒ divergência detectada sem gastar LLM.
+    const ruim = checkReferenceAgainstRubric({
+      reference: 'negativo — o cliente reclamou do atendimento.',
+      expected: 'positivo',
+      labelSet: ['positivo', 'negativo'],
+    });
+    expect(ruim.verdict).not.toBe('resolve');
+    expect(ruim.divergent).toBe(true);
+    expect(ruim.detail.length).toBeGreaterThan(0);
+  });
+
+  it('sem rótulo esperado é INCONCLUSIVO (verdict null) — nunca aderente fabricado', () => {
+    const nenhum = checkReferenceAgainstRubric({ reference: 'qualquer resposta.' });
+    expect(nenhum.method).toBe('none');
+    expect(nenhum.verdict).toBeNull();
+    expect(nenhum.divergent).toBe(false);
+  });
+});
+
+describe('referencesAgree — concordância léxica dos dois gabaritos', () => {
+  it('redações diferentes da MESMA resposta concordam; assuntos diferentes discordam', () => {
+    expect(referencesAgree('Trinta dias, com nota fiscal.', 'O prazo é de 30 dias e exige nota fiscal.')).toBe(true);
+    expect(referencesAgree('Trinta dias, com nota fiscal.', 'O cliente elogiou o atendimento.')).toBe(false);
+    expect(referencesAgree('', 'texto qualquer')).toBe(false); // vazio = discordância
+  });
+});
+
+describe('humanReviewQueueFromStages — fila needs-human-review derivada das validações', () => {
+  it('cada motivo vira um item com stageIndex/detalhe/custo humano estimado', () => {
+    const validation: ReferenceValidation = {
+      rubric: { verdict: 'nao', divergent: true, method: 'expected', detail: 'contraria a rubrica' },
+      secondReference: { modelId: 'familia-b', text: 'outra resposta', agree: false },
+      auditSample: true,
+      reviewReasons: ['reference_rubric_divergence', 'reference_disagreement', 'reference_audit_sample'],
+    };
+    const fila = humanReviewQueueFromStages([
+      { spec: { referenceValidation: validation } },
+      { spec: {} },
+      {},
+    ]);
+    expect(fila).toHaveLength(3);
+    expect(fila.map((i) => [i.stageIndex, i.reason])).toEqual([
+      [0, 'reference_rubric_divergence'],
+      [0, 'reference_disagreement'],
+      [0, 'reference_audit_sample'],
+    ]);
+    expect(fila.every((i) => (i.estimatedCostUsd ?? 0) > 0)).toBe(true);
+    expect(fila[1].detail).toContain('familia-b');
   });
 });

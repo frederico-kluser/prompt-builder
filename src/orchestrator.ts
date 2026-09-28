@@ -37,6 +37,7 @@ import { saveRun, getDataDir } from './storage.js';
 import { contestantsFromConfig } from './normalize.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
+import { reasoningLevelForRole } from './modelCaps.js';
 import { listModels } from './openrouter.js';
 import {
   cutDuels,
@@ -649,7 +650,8 @@ async function runLoop(
       // régua e julga contra ela (erros correlacionados) — o risco NUNCA fica
       // escondido, aparece em `fairnessWarnings`.
       modelId: record.config.referenceModelId ?? record.config.judgeModelIds[0],
-      reasoningLevel: record.config.reasoning?.judge,
+      // IMPL-079: gabarito tem esforço PRÓPRIO (default high) — não mais o do juiz.
+      reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'gab'),
       timeoutMs: datagenTimeout,
       ctx,
       maxPricePerMTok,
@@ -1007,7 +1009,7 @@ async function runLoop(
                 contestants: record.contestants,
                 judgeModelIds: record.config.judgeModelIds,
                 apiKey,
-                reasoningLevel: record.config.reasoning?.judge,
+                reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
                 timeoutMs: record.config.timeoutMs,
                 ctx,
                 maxPricePerMTok,
@@ -1053,7 +1055,7 @@ async function runLoop(
                 contestants: chatContestants,
                 judgeModelIds: record.config.judgeModelIds,
                 apiKey,
-                reasoningLevel: record.config.reasoning?.judge,
+                reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
                 timeoutMs: record.config.timeoutMs,
                 ctx,
                 maxPricePerMTok,
@@ -1143,7 +1145,7 @@ async function runLoop(
               judgeModelIds: record.config.judgeModelIds,
               timeoutMs: record.config.timeoutMs,
               passes: record.config.judgePasses,
-              reasoningLevel: record.config.reasoning?.judge,
+              reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
               ctx,
               maxPricePerMTok,
             });
@@ -1367,7 +1369,8 @@ async function runLoop(
                   ? oracleScoresFromVerdicts(st.referenceJudge?.verdictByContestant)
                   : undefined),
               apiKey,
-              reasoningLevel: record.config.reasoning?.judge,
+              // IMPL-079: duelo tem esforço PRÓPRIO (default low) — não mais o do juiz.
+              reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'duel'),
               timeoutMs: record.config.timeoutMs,
               ctx,
               maxPricePerMTok,
@@ -1551,7 +1554,7 @@ async function runLoop(
       // `baseline check` recomputa para o setup (granularidade documentada em
       // `contractHashFor` do CLI). Esforço/roteamento fora do default entram
       // cheios e são o drift que `judge.contract.changed` denuncia.
-      judgeReasoningLevel: record.config.reasoning?.judge,
+      judgeReasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
       providerPolicy: ctx.sink?.sensitiveRouting?.()
         ? JSON.stringify(ctx.sink.sensitiveRouting!())
         : undefined,

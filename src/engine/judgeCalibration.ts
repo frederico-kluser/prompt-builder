@@ -14,6 +14,20 @@
 //
 // Módulo PURO (sem `node:`/fetch/fs): roda no servidor, no CLI e no bundle do
 // navegador (modo client-side) sem adaptação — os dois motores importam daqui.
+//
+// ---------------------------------------------------------------------------
+// DECISÃO NEGATIVA DOCUMENTADA (R-08:REC-6, IMPL-116) — VETO DE CACHE SEMÂNTICO
+// DE VEREDITOS.
+//
+// NENHUM caminho de avaliação pode REUSAR vereditos por similaridade semântica
+// (embeddings/vetores/cosseno/limiar de parecença). Motivo medido: 3–7% de
+// falsos positivos nos limiares úteis ("sort an array" vs "sort an array in
+// descending order" ficam a 0,94 de similaridade) = veredito reusado errado — a
+// MESMA gravidade de um estouro de orçamento: nota inventada com cara de medida.
+// O reuso só existe por IGUALDADE EXATA de conteúdo (hash do pedido/contrato —
+// item R-08:REC-3), nunca por parecença. O arch test que reprova qualquer
+// tentativa é `test/estimate-cache-veto.test.ts`.
+// ---------------------------------------------------------------------------
 
 import type {
   JudgeContractComponents,
@@ -808,7 +822,22 @@ export interface JudgeContractPin {
    * Componentes usados na serialização canônica (IMPL-049): auditoria de
    * granularidade — mostra, meses depois, o QUE entrou no hash além dos ids.
    */
-  components?: JudgeContractComponents;
+  components?: JudgeContractComponentsExt;
+}
+
+/**
+ * Componentes do contrato MAIS a temperatura de amostragem do juízo (IMPL-117,
+ * R-07b:REC-5). O contrato cobre tudo o que muda a distribuição de veredito:
+ * prompts pointwise + duelo + listwise, esforço, TEMPERATURA, modelo de
+ * referência e política de provedor — o que faltava era a temperatura (os
+ * prompts de duelo/listwise, esforço, referência e provedor entraram no
+ * IMPL-049). A extensão mora aqui (e não nos 3 espelhos de tipos) de propósito:
+ * `JudgeContractComponents` continua o contrato clássico e quem chama pode
+ * passar só ele — campo ausente entra vazio na serialização canônica.
+ */
+export interface JudgeContractComponentsExt extends JudgeContractComponents {
+  /** Temperatura de amostragem efetiva das chamadas de juízo (0 no pipeline). */
+  judgeTemperature?: number | string;
 }
 
 /**
@@ -821,16 +850,19 @@ export interface JudgeContractPin {
  * pointwise) — também o prompt do duelo, o prompt listwise, o modelo de
  * referência, o think level de julgamento e a política de provedor. Trocar
  * qualquer componente muda a distribuição de veredito ⇒ muda o hash.
+ * IMPL-117 (R-07b:REC-5): + a temperatura de amostragem do juízo. ⚠️ Isto muda
+ * o hash de TODO contrato em comparação com pins gravados por versões antigas
+ * (uma vez, de propósito: a mudança de julgamento que passava despercebida
+ * passa a denunciar-se — custo de um falso "contrato mudou" é uma recalibração
+ * a mais, o de um falso "contrato igual" é comparar instrumentos diferentes).
  * GRANULARIDADE (decisão consciente): o hash é byte a byte — mudança
- * COSMÉTICA de prompt também muda o hash e sugere recalibração; o custo de um
- * falso "contrato mudou" é uma recalibração a mais, o custo de um falso
- * "contrato igual" é comparar notas de instrumentos diferentes. Campos
+ * COSMÉTICA de prompt também muda o hash e sugere recalibração. Campos
  * ausentes de `components` entram como string vazia (formado canônico único).
  */
 function canonicalContract(
   modelIds: string[],
   judgePromptText: string,
-  components?: JudgeContractComponents,
+  components?: JudgeContractComponentsExt,
 ): string {
   const ids = [...modelIds].sort();
   const partes = [
@@ -841,6 +873,7 @@ function canonicalContract(
     components?.referenceModelId ?? '',
     components?.judgeReasoningLevel ?? '',
     components?.providerPolicy ?? '',
+    components?.judgeTemperature === undefined ? '' : String(components.judgeTemperature),
   ];
   return partes.map((p) => `${p.length}:${p}`).join('\u0000');
 }
@@ -857,7 +890,7 @@ function canonicalContract(
 export function judgeContractHash(
   modelIds: string[],
   judgePromptText: string,
-  components?: JudgeContractComponents,
+  components?: JudgeContractComponentsExt,
 ): string {
   const canonical = canonicalContract(modelIds, judgePromptText, components);
   return FNV_SEEDS.map((seed) => hex32(fnv1a32(canonical, seed))).join('');
@@ -866,14 +899,14 @@ export function judgeContractHash(
 /**
  * Monta o pin para gravar no record da run (transparência de calibration drift):
  * ao reler uma run antiga dá para conferir se o juiz de hoje é o de lá.
- * `now` fica no 3º lugar por compatibilidade histórica; `components` (IMPL-049)
- * é o que estende o hash além de (juízes + prompt pointwise).
+ * `now` fica no 3º lugar por compatibilidade histórica; `components` (IMPL-049
+ * + IMPL-117) é o que estende o hash além de (juízes + prompt pointwise).
  */
 export function pinJudgeContract(
   modelIds: string[],
   judgePromptText: string,
   now?: Date,
-  components?: JudgeContractComponents,
+  components?: JudgeContractComponentsExt,
 ): JudgeContractPin {
   return {
     hash: judgeContractHash(modelIds, judgePromptText, components),
@@ -914,9 +947,37 @@ export function noteJudgeContract(hash: string): {
     previousHash,
     message:
       `o contrato do juiz mudou (${previousHash.slice(0, 12)} → ${hash.slice(0, 12)}) — ` +
-      'recalibre antes de comparar notas com runs antigas (trocar juiz/prompt/referência/' +
-      'think level/provedor muda a distribuição de veredito).',
+      'scores não comparáveis com runs antigas: recalibre antes de comparar notas ' +
+      '(trocar juiz/prompt/referência/think level/provedor muda a distribuição de veredito).',
   };
+}
+
+/**
+ * Linha de AUDITORIA do contrato do juiz (IMPL-057, R-11a:REC-8): o que a tela
+ * de auditoria mostra em modo curto — "juiz: &lt;modelo&gt; (mesmo contrato desde a
+ * última run)" — e o `detail` (detalhe/export) que é o ÚNICO lugar onde o hash
+ * aparece, em 12 chars. Quando o contrato mudou, o aviso curto diz logo que os
+ * "scores não comparáveis" (o racional completo fica em `noteJudgeContract`).
+ */
+export function judgeContractAudit(params: {
+  modelIds: string[];
+  hash: string;
+  /** Hash da run anterior, quando conhecido (memória do processo/CLI). */
+  previousHash?: string;
+}): { line: string; detail: string } {
+  const juizes = params.modelIds.length > 0 ? params.modelIds.join('+') : '(sem juiz)';
+  const mudou = params.previousHash !== undefined && params.previousHash !== params.hash;
+  const semAnterior = params.previousHash === undefined;
+  const line = mudou
+    ? `juiz: ${juizes} (contrato mudou — scores não comparáveis com a última run)`
+    : semAnterior
+      ? `juiz: ${juizes} (primeira run — sem contrato anterior para comparar)`
+      : `juiz: ${juizes} (mesmo contrato desde a última run)`;
+  // 12 chars do hash SÓ no detalhe/export (o resumo não polui a tela).
+  const detail = `${line} · contrato ${params.hash.slice(0, 12)}${
+    params.previousHash ? ` (anterior ${params.previousHash.slice(0, 12)})` : ''
+  }`;
+  return { line, detail };
 }
 
 /** Limpa a memória de contrato (testes e fronteira de processo). */

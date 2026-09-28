@@ -172,10 +172,17 @@ export function sanitizeLlmVariants(raw: unknown): {
   return { variants, warnings };
 }
 
-/** Vendor do modelo = prefixo antes de '/' (OpenRouter: "openai/gpt-4o" → "openai"). */
-function vendorOf(modelId: string): string {
+/**
+ * Vendor/família do modelo = prefixo antes de '/' (OpenRouter: "openai/gpt-4o"
+ * → "openai"). IMPL-066: a família viaja no payload do reescritor (consciência
+ * do modelo-alvo) e alimenta os avisos de imparcialidade por família.
+ */
+export function modelFamily(modelId: string): string {
   return modelId.split('/')[0];
 }
+
+/** @deprecated alias interno — use {@link modelFamily}. */
+const vendorOf = modelFamily;
 
 /**
  * Avisos NÃO-bloqueantes de imparcialidade do painel de juízes: um juiz que

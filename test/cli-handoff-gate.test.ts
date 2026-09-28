@@ -17,6 +17,7 @@
 // para uma porta local fechada e não há OPENROUTER_API_KEY.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { nodeOrTsx } from './support/cli.js';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -161,8 +162,7 @@ describe('evaluateHandoffGuards — matriz regredido × pulado × IC95% × drift
 // --- 2. processo real ---------------------------------------------------------
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
-const ENTRY = path.join(ROOT, 'src', 'cli', 'index.ts');
+const { cmd: TSX, entry: ENTRY } = nodeOrTsx(path.join(ROOT, 'src', 'cli', 'index.ts'));
 const DEAD_BASE = 'http://127.0.0.1:9/api/v1';
 const CAMPEAO = 'Você é o prompt CAMPEÃO do treino.';
 const ORIGINAL = 'prompt de produção ORIGINAL\n';

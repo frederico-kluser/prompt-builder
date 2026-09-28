@@ -22,6 +22,7 @@
 // servidor HTTP em 127.0.0.1 (processo real).
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { nodeOrTsx } from './support/cli.js';
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -41,8 +42,7 @@ import { catalogItem, fakeOpenRouter, noSleep } from './fakeOpenRouter.js';
 import type { RunConfig, RunMode } from '../src/types.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
-const ENTRY = path.join(ROOT, 'src', 'cli', 'index.ts');
+const { cmd: TSX, entry: ENTRY } = nodeOrTsx(path.join(ROOT, 'src', 'cli', 'index.ts'));
 
 const VALID_KEY = `sk-or-v1-${'a'.repeat(48)}`;
 const BAD_KEY = `sk-or-v1-${'b'.repeat(48)}`;

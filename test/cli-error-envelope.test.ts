@@ -20,6 +20,7 @@
 // de exigir a key, então o caso "key ausente" semeia um catálogo em cache.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { nodeOrTsx } from './support/cli.js';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -49,8 +50,7 @@ import {
 import { BudgetExceeded, RunCancelled } from '../src/budget.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
-const ENTRY = path.join(ROOT, 'src', 'cli', 'index.ts');
+const { cmd: TSX, entry: ENTRY } = nodeOrTsx(path.join(ROOT, 'src', 'cli', 'index.ts'));
 
 // --- 1. processo real ---------------------------------------------------------
 

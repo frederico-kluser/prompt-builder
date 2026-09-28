@@ -482,6 +482,10 @@ export function summarizeRecord(
     kind,
     detail: 'summary',
     ...base,
+    // O parcial de um record cortado tem que dizer POR QUE parou ('budget' |
+    // 'cancelled'): sem isto o resumo nao distingue corte de orcamento de
+    // cancelamento do cliente — e o parcial so e "legivel" se denunciar o corte.
+    ...(rec.stoppedReason ? { stoppedReason: rec.stoppedReason } : {}),
     ref: recordRef(kind, rec.id),
   };
   if (kind === 'run') {

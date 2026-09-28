@@ -61,6 +61,11 @@ function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Valor TOML booleano: `true` (parse) ou `"true"` (string crua) — os dois já saíram. */
+function asBool(v: unknown): boolean {
+  return v === true || v === 'true';
+}
+
 function jsonEscape(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
@@ -172,9 +177,16 @@ export function compileAgentTaskToHarbor(
     '# Gerado por prompt-builder (IMPL-098) — layout Harbor.',
     `harbor_version = ${JSON.stringify(HARBOR_VERSION)}`,
     `name = ${JSON.stringify(opts.name ?? 'agent-task')}`,
-    `context_files = ${task.contextFiles === true ? 'true' : 'false'}`,
-    `detectors = ${JSON.stringify(task.detectors ?? 'warn')}`,
   ];
+  // `context_files`/`detectors` só saem quando DEFINIDOS — escrever o default
+  // fabricava um campo no round-trip (`readHarborTask` devolvia `false`/`warn`
+  // para um task que não os tinha) e a perda canônica deixava de ser 0.
+  if (task.contextFiles !== undefined) {
+    tomlLines.push(`context_files = ${task.contextFiles ? 'true' : 'false'}`);
+  }
+  if (task.detectors !== undefined) {
+    tomlLines.push(`detectors = ${JSON.stringify(task.detectors)}`);
+  }
   if (task.metadata) {
     tomlLines.push('[metadata]');
     if (md.origin !== undefined) tomlLines.push(`origin = ${JSON.stringify(md.origin)}`);
@@ -231,17 +243,22 @@ export function compileAgentTaskToHarbor(
 
   // --- tests/ (test.sh + reward-spec.json + material de testsDir) ------------
   write('tests/test.sh', testScriptFor(checks));
+  // Campos guardados CRUS (JSON.stringify omite o `undefined`): é o que torna o
+  // `readHarborTask` uma volta EXATA (perda canônica 0) — o `checks` fundido
+  // fica como documentação/consumo externo (a ordem canônica do test.sh).
   write(
     'tests/reward-spec.json',
     `${JSON.stringify(
       {
         format: HARBOR_REWARD_FORMAT,
         checks,
-        forbiddenPaths: task.forbiddenPaths ?? [],
-        rebuild: task.rebuild ?? null,
-        detectors: task.detectors ?? 'warn',
-        files: task.files ?? [],
-        solution: task.solution ?? null,
+        verify: task.verify,
+        regression: task.regression,
+        forbiddenPaths: task.forbiddenPaths,
+        rebuild: task.rebuild,
+        detectors: task.detectors,
+        files: task.files,
+        solution: task.solution,
       },
       null,
       2,
@@ -274,38 +291,48 @@ export function readHarborReward(dir: string): HarborReward {
 /**
  * Reconstrói o `AgentTaskSpec` a partir da árvore Harbor (leitura por arquivo).
  * É a prova da "perda 0": `readHarborTask(compile(task))` devolve os campos
- * canônicos idênticos aos do `task` original.
+ * canônicos idênticos aos do `task` original. Os campos vão e voltam CRUS
+ * (`verify`/`regression`/`files`/… no reward-spec; repo/setup/limits/tests/env/
+ * metadata no task.toml) — nada é normalizado no caminho de volta.
  */
 export function readHarborTask(outDir: string): HarborTaskRead {
   const instruction = readFileSync(path.join(outDir, 'instruction.md'), 'utf8').replace(/\n$/, '');
   const spec = JSON.parse(readFileSync(path.join(outDir, 'tests', 'reward-spec.json'), 'utf8')) as {
     checks: AgentTaskCheck[];
-    forbiddenPaths: string[];
-    rebuild: AgentTaskSpec['rebuild'] | null;
-    detectors: AgentTaskSpec['detectors'];
-    files: { path: string; content: string }[];
-    solution: AgentTaskSolution | null;
+    // Campos crus (árvores novas). Ausentes = árvore antiga → fallback do `checks`.
+    verify?: AgentTaskCheck[];
+    regression?: AgentTaskCheck[];
+    forbiddenPaths?: string[];
+    rebuild?: AgentTaskSpec['rebuild'] | null;
+    detectors?: AgentTaskSpec['detectors'];
+    files?: { path: string; content: string }[];
+    solution?: AgentTaskSolution | null;
   };
   const toml = readFileSync(path.join(outDir, 'task.toml'), 'utf8');
+
+  // Fallback de compatibilidade (árvore gerada antes dos campos crus): separa o
+  // `checks` fundido por kind e devolve `regression` sem o `kind` derivado.
+  const f2p = spec.checks.filter((c) => (c.kind ?? 'fail_to_pass') === 'fail_to_pass');
+  const p2p = spec.checks.filter((c) => c.kind === 'pass_to_pass');
+  const verify = spec.verify ?? f2p;
+  const regression =
+    spec.regression ??
+    p2p.map((c) => {
+      const { kind: _kind, ...resto } = c;
+      void _kind;
+      return resto;
+    });
+
+  const contextFilesRaw = readTomlTopKey(toml, 'context_files');
+  const detectors =
+    spec.detectors ?? (readTomlTopKey(toml, 'detectors') as AgentTaskSpec['detectors'] | undefined);
 
   const task: AgentTaskSpec = {
     ...(readTomlSection(toml, 'repo') ? { repo: readRepo(toml) } : {}),
     ...(readSetup(toml).length > 0 ? { setup: readSetup(toml) } : {}),
-    ...(spec.files.length > 0 ? { files: spec.files } : {}),
-    ...(spec.checks.filter((c) => (c.kind ?? 'fail_to_pass') === 'fail_to_pass').length > 0
-      ? { verify: spec.checks.filter((c) => (c.kind ?? 'fail_to_pass') === 'fail_to_pass') }
-      : {}),
-    ...(spec.checks.filter((c) => c.kind === 'pass_to_pass').length > 0
-      ? {
-          regression: spec.checks
-            .filter((c) => c.kind === 'pass_to_pass')
-            .map((c) => {
-              const { kind: _kind, ...resto } = c;
-              void _kind;
-              return resto;
-            }),
-        }
-      : {}),
+    ...(spec.files !== undefined ? { files: spec.files } : {}),
+    ...(spec.verify !== undefined ? { verify } : verify.length > 0 ? { verify } : {}),
+    ...(spec.regression !== undefined ? { regression } : regression.length > 0 ? { regression } : {}),
     ...(spec.solution ? { solution: spec.solution } : {}),
     ...(readTomlKey(toml, 'tests', 'tests_dir') ? { testsDir: readTomlKey(toml, 'tests', 'tests_dir') } : {}),
     ...(readTomlKey(toml, 'env', 'digest')
@@ -317,16 +344,26 @@ export function readHarborTask(outDir: string): HarborTaskRead {
         }
       : {}),
     ...(readTomlSection(toml, 'metadata') ? { metadata: readMetadata(toml) } : {}),
-    ...(spec.forbiddenPaths.length > 0 ? { forbiddenPaths: spec.forbiddenPaths } : {}),
+    ...(spec.forbiddenPaths !== undefined ? { forbiddenPaths: spec.forbiddenPaths } : {}),
     ...(spec.rebuild ? { rebuild: spec.rebuild } : {}),
-    detectors: spec.detectors,
-    ...(toml.includes('context_files = true') ? { contextFiles: true } : {}),
+    ...(detectors !== undefined ? { detectors } : {}),
+    ...(contextFilesRaw !== undefined ? { contextFiles: asBool(contextFilesRaw) } : {}),
     ...(readTomlSection(toml, 'limits') ? { limits: readLimits(toml) } : {}),
   };
   return { task, instruction };
 }
 
 // --- leitura TOML MÍNIMA (só o que o compilador escreve — sem dependência) ----
+
+/** Chave de topo (antes da primeira seção) — `context_files`, `detectors`, … */
+function readTomlTopKey(toml: string, key: string): string | boolean | undefined {
+  for (const line of toml.split('\n')) {
+    if (line.startsWith('[')) return undefined;
+    const m = line.match(/^([a-z_0-9]+)\s*=\s*(.+)$/);
+    if (m && m[1] === key) return parseTomlValue(m[2]) as string | boolean;
+  }
+  return undefined;
+}
 
 function readTomlSection(toml: string, name: string): string[] | null {
   const lines = toml.split('\n');
@@ -358,9 +395,15 @@ function parseTomlValue(raw: string): string | number | boolean | string[] {
   if (v === 'false') return false;
   if (v.startsWith('"')) return JSON.parse(v) as string;
   if (v.startsWith('[')) {
-    const inner = v.slice(1, -1);
-    if (inner.trim() === '') return [];
-    return inner.split(',').map((s) => JSON.parse(s.trim()) as string);
+    // O compilador escreve ARRAYS em JSON (`JSON.stringify`) — parse direto
+    // preserva strings com vírgula/aspas (o split por ',' as fatiaria).
+    try {
+      return JSON.parse(v) as string[];
+    } catch {
+      const inner = v.slice(1, -1);
+      if (inner.trim() === '') return [];
+      return inner.split(',').map((s) => JSON.parse(s.trim()) as string);
+    }
   }
   return Number(v);
 }
@@ -376,7 +419,7 @@ function readRepo(toml: string): NonNullable<AgentTaskSpec['repo']> {
     ...(url ? { url } : {}),
     ...(repoPath ? { path: repoPath } : {}),
     ref,
-    ...(shallowRaw !== undefined ? { shallow: shallowRaw === true || shallowRaw === 'true' } : {}),
+    ...(shallowRaw !== undefined ? { shallow: asBool(shallowRaw) } : {}),
   };
 }
 
@@ -410,7 +453,7 @@ function readMetadata(toml: string): NonNullable<AgentTaskSpec['metadata']> {
       ? { difficulty: readTomlKey(toml, 'metadata', 'difficulty') as 'easy' | 'medium' | 'hard' }
       : {}),
     ...(Array.isArray(tags) ? { tags } : {}),
-    ...(canary !== undefined ? { canary: canary === true || canary === 'true' } : {}),
+    ...(canary !== undefined ? { canary: asBool(canary) } : {}),
   };
 }
 

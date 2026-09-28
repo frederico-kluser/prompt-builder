@@ -240,25 +240,47 @@ export function SettingRow({
   );
 }
 
-/** Grupo de linhas de ajuste, com cabeçalho e rodapé opcionais. */
+/**
+ * Grupo de linhas de ajuste, com cabeçalho e rodapé opcionais.
+ * `id` torna a seção uma ÂNCORA estável (foco + scroll da navegação de
+ * pendências do formulário de Nova Run — IMPL-106).
+ */
 export function SettingGroup({
+  id,
   title,
   status,
   footer,
+  pending,
   children,
   className,
 }: {
+  /** Âncora estável da seção (id do `<section>`, focável em `tabIndex={-1}`). */
+  id?: string;
   title?: string;
   status?: ReactNode;
   footer?: ReactNode;
+  /** Ponto de pendência ao lado do título ('muted' antes de tentar, 'error' depois). */
+  pending?: 'muted' | 'error';
   children: ReactNode;
   className?: string;
 }) {
   return (
-    <section className={cn('mb-4', className)}>
+    <section
+      id={id}
+      tabIndex={id ? -1 : undefined}
+      className={cn('mb-4 scroll-mt-28 outline-none', className)}
+    >
       {title && (
         <div className="mb-2 flex items-baseline justify-between gap-3 px-1">
-          <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+          <h2 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
+            {title}
+            {pending && (
+              <span
+                className={cn('size-1.5 rounded-full', pending === 'error' ? 'bg-destructive' : 'bg-muted-foreground/60')}
+                aria-label="pendência nesta seção"
+              />
+            )}
+          </h2>
           {status && <span className="text-xs text-muted-foreground tabular">{status}</span>}
         </div>
       )}
@@ -368,6 +390,7 @@ export function Disclosure({
   id,
   title,
   status,
+  pending,
   open,
   onToggle,
   children,
@@ -377,13 +400,15 @@ export function Disclosure({
   id: string;
   title: string;
   status?: ReactNode;
+  /** Ponto de pendência ao lado do título ('muted' antes de tentar, 'error' depois). */
+  pending?: 'muted' | 'error';
   open: boolean;
   onToggle: () => void;
   children: ReactNode;
   footer?: ReactNode;
 }) {
   return (
-    <section id={id} className="mb-4">
+    <section id={id} tabIndex={-1} className="mb-4 scroll-mt-28 outline-none">
       <div className="mt-10 mb-3 flex items-center gap-3">
         <h2 className="text-xs font-semibold tracking-[0.08em] text-muted-foreground uppercase">
           <button
@@ -397,6 +422,12 @@ export function Disclosure({
             {title}
           </button>
         </h2>
+        {pending && (
+          <span
+            className={cn('size-1.5 rounded-full', pending === 'error' ? 'bg-destructive' : 'bg-muted-foreground/60')}
+            aria-label="pendência nesta seção"
+          />
+        )}
         <span className="h-px flex-1 bg-border" aria-hidden="true" />
         {status && <span className="text-xs text-muted-foreground">{status}</span>}
       </div>

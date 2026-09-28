@@ -5,6 +5,12 @@ import { classifyPrice, priceTokens, type PriceFieldKind } from './engine/pricin
 import { effortLabelOf, finishSignalsOf, isTruncated, truncationSignals } from './engine/truncation.js';
 import { createPiiGuard, type PiiGuardStats } from './engine/pii.js';
 import { applySensitiveRouting } from './engine/sensitiveRouting.js';
+import {
+  judgeContractHash,
+  VerdictCache,
+  verdictCacheKey,
+  type VerdictCacheEntry,
+} from './engine/verdictCache.js';
 import type {
   CallCost,
   CallFinishSignals,
@@ -182,6 +188,14 @@ export interface GatewayConfig {
    * conta com creditos levanta para 1.000.
    */
   freeDailyLimit?: number;
+  /**
+   * IMPL-080 (R-08:REC-3) — cache EXATO de vereditos (papéis judge/duel/
+   * gabarito): reusa vereditos de requisições idênticas entre iterações do
+   * treino (carry), com TTL e re-teste amostral obrigatório (o não-determinismo
+   * do provedor não fica escondido). Instância de `VerdictCache`; AUSENTE ou
+   * `false` = desligado (default) — quem liga é a sessão de treino.
+   */
+  verdictCache?: VerdictCache | false;
 }
 
 /** Preset do modo auditável (IMPL-075): juiz e gabarito — os papéis de REFERÊNCIA. */
@@ -267,6 +281,8 @@ function mergeConfig(base: GatewayConfig, patch: Partial<GatewayConfig>): Gatewa
   if (typeof patch.freeDailyLimit === 'number' && Number.isFinite(patch.freeDailyLimit) && patch.freeDailyLimit >= 1) {
     out.freeDailyLimit = Math.floor(patch.freeDailyLimit);
   }
+  // IMPL-080: cache de vereditos — instancia explicita; `false` desliga.
+  if (patch.verdictCache !== undefined) out.verdictCache = patch.verdictCache === false ? undefined : patch.verdictCache;
   if ('fetch' in patch) out.fetch = patch.fetch;
   if ('sleep' in patch) out.sleep = patch.sleep;
   return out;
@@ -1141,13 +1157,144 @@ function hasUsage(raw: unknown): boolean {
 }
 
 /**
- * Estimativa grosseira de tokens de prompt — so dimensiona a reserva otimista
- * (e o limite de contexto do teto do competidor, IMPL-016).
+ * Estimativa de tokens de TEXTO por classe de caractere (IMPL-113, R-08:REC-8).
+ *
+ * A régua antiga (`chars/4`) acertava só em prosa inglesa e errava bem fora
+ * dela — medido no R-08: código/JSON ≈ 3 chars/token (chars/4 subestimava ~25%)
+ * e CJK ≈ 1,5 chars/token (subestimava ~60%). Os pesos por classe replicam
+ * essas medidas; NÃO é um BPE real (o vocabulário não pode virar dependência do
+ * bundle), e a reserva ainda leva margem por cima (`RESERVE_TOKEN_MARGIN`).
+ */
+const TOKENS_PER_CHAR = {
+  /** Ideogramas/kana/hangul/fullwidth: ≈ 1,5 chars/token. */
+  cjk: 0.67,
+  /** Dígitos: tokenizam caro (≈ 2 chars/token). */
+  digit: 0.5,
+  /** Pontuação/símbolo ASCII: ≈ 2 chars/token (código/JSON pesam aqui). */
+  punct: 0.5,
+  /** Letras ASCII e espaço em branco: ≈ 4 chars/token (prosa inglesa). */
+  ascii: 0.25,
+  /** Resto (acentos latinos, símbolos não-ASCII). */
+  other: 0.4,
+} as const;
+
+function isCjkCodePoint(c: number): boolean {
+  return (
+    (c >= 0x3000 && c <= 0x30ff) || // pontuação/kana CJK
+    (c >= 0x3400 && c <= 0x4dbf) || // ideogramas extensão A
+    (c >= 0x4e00 && c <= 0x9fff) || // ideogramas unificados
+    (c >= 0xac00 && c <= 0xd7af) || // hangul
+    (c >= 0xf900 && c <= 0xfaff) || // ideogramas de compatibilidade
+    (c >= 0xff00 && c <= 0xff60) // fullwidth
+  );
+}
+
+/** Tokens de um texto pela régua por classe (ver `TOKENS_PER_CHAR`). */
+export function countTextTokens(text: string): number {
+  let tokens = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0) ?? 0;
+    if (isCjkCodePoint(c)) tokens += TOKENS_PER_CHAR.cjk;
+    else if (ch >= '0' && ch <= '9') tokens += TOKENS_PER_CHAR.digit;
+    else if (
+      (ch >= 'a' && ch <= 'z') ||
+      (ch >= 'A' && ch <= 'Z') ||
+      ch === ' ' ||
+      ch === '\n' ||
+      ch === '\t' ||
+      ch === '\r'
+    ) {
+      tokens += TOKENS_PER_CHAR.ascii;
+    } else if (c < 0x80) tokens += TOKENS_PER_CHAR.punct;
+    else tokens += TOKENS_PER_CHAR.other;
+  }
+  return Math.ceil(tokens);
+}
+
+/**
+ * Estimativa de tokens de prompt (a MESMA régua da reserva do gateway e do teto
+ * de contexto do competidor, IMPL-016/IMPL-113) — SEM margem: a margem de ~20%
+ * vive só na reserva dura (`reserveFor`), para não inflar a comparação
+ * estimado × real da calibração.
  */
 export function guessPromptTokens(messages: ChatMessage[]): number {
-  let chars = 0;
-  for (const m of messages) chars += m.content.length;
-  return Math.ceil(chars / 4);
+  return countTextTokens(messages.map((m) => m.content).join('\n'));
+}
+
+/**
+ * Margem do tokenizer na RESERVA DURA (IMPL-113): a porta dura reserva o
+ * token estimado + ~20% — subestimar tokens aqui afrouxa a porta (uma chamada
+ * reserva de menos e o estouro passa); reservar de mais só limita quantas
+ * chamadas cabem em voo.
+ */
+export const RESERVE_TOKEN_MARGIN = 1.2;
+
+// ---------------------------------------------------------------------------
+// IMPL-113 (R-08:REC-8) — registo estimado × real (costAccuracy) POR CHAMADA.
+//
+// Toda chamada MEDIDA (`usage.cost` — a única fonte exata) regista o par
+// (estimado do catálogo, real cobrado) com esforço/família/tokens de raciocínio:
+// é a matéria-prima dos quantis empíricos por papel e da predição conformal da
+// faixa (`CostCalibration` em `src/estimate.ts`, que consome este buffer).
+// Estimado ≤ 0 ou real não medido NÃO viram amostra — razão não existe e preço
+// "-1" (IMPL-018) nunca entra como número negativo.
+// ---------------------------------------------------------------------------
+
+/** Amostra estimado × real de UMA chamada medida. */
+export interface CostCalibrationSample {
+  role: CostRole;
+  modelId: string;
+  /** Família do modelo (prefixo estável do slug — ver `modelFamilyOf`). */
+  family: string;
+  /** USD estimado (catálogo, teto de tokens) — o MESMO que vai na reserva. */
+  estimatedUsd: number;
+  /** USD real cobrado (`usage.cost`). */
+  actualUsd: number;
+  /** Degrau efetivo no fio (`effort` dos sinais de fim; 'default' = padrão do provedor). */
+  effort?: string;
+  /** `reasoning_tokens` medidos (subconjunto de tokens de saída). */
+  reasoningTokens?: number;
+  /** Teto de saída enviado (`max_tokens`) — ancora a fatia de resposta/raciocínio. */
+  capTokens?: number;
+}
+
+/**
+ * Família do modelo para a previsão por esforço × família: prefixo estável do
+ * slug (`anthropic/claude-3.5-sonnet` → `anthropic/claude`, `openai/gpt-5-mini`
+ * → `openai/gpt`). Chave grossa de propósito: célula fina não tem amostras.
+ */
+export function modelFamilyOf(modelId: string): string {
+  const [prov = '', resto = ''] = modelId.trim().toLowerCase().split('/');
+  const nome = resto.split(':')[0] ?? '';
+  const familia = nome.split(/[-_.\d]/)[0] ?? '';
+  return `${prov}/${familia}`;
+}
+
+/** Amostras recentes (anel: as últimas bastam para quantis; ver `takeCostSamples`). */
+const COST_SAMPLE_LIMIT = 5000;
+const costSamples: CostCalibrationSample[] = [];
+
+/** Regista uma amostra estimado × real (IMPL-113). Só o chamador medido chega aqui. */
+export function recordCostSample(sample: CostCalibrationSample): void {
+  costSamples.push(sample);
+  if (costSamples.length > COST_SAMPLE_LIMIT) {
+    costSamples.splice(0, costSamples.length - COST_SAMPLE_LIMIT);
+  }
+}
+
+/** Espia o buffer sem consumir (diagnóstico/teste). */
+export function peekCostSamples(): readonly CostCalibrationSample[] {
+  return costSamples;
+}
+
+/** Consome (drena) o buffer — quem calibra a faixa (`CostCalibration.live`). */
+export function takeCostSamples(): CostCalibrationSample[] {
+  return costSamples.splice(0, costSamples.length);
+}
+
+/** Limpa o buffer (fronteira de processo/teste). */
+export function resetCostSamples(): void {
+  costSamples.length = 0;
 }
 
 /**
@@ -1165,6 +1312,22 @@ function applyMaxPrice(
   if (maxPrice.prompt !== undefined) cap.prompt = maxPrice.prompt;
   if (maxPrice.completion !== undefined) cap.completion = maxPrice.completion;
   body.provider = { ...provider, max_price: cap };
+}
+
+/**
+ * IMPL-114 (R-08:REC-4) — posiciona `cache_control: { type: 'ephemeral' }` na
+ * mensagem de índice `afterIndex` (o FIM do prefixo estável do layout v1 — ver
+ * `ChatCompletionParams.cacheControlAfter`). As mensagens DEPOIS da quebra mudam
+ * a cada chamada (candidatos) e ficam fora do prefixo cacheado. Índice fora do
+ * alcance = corpo intacto (fail-closed: sem cache, nunca cache no lugar errado).
+ */
+function applyCacheControl(body: Record<string, unknown>, afterIndex: number): void {
+  const msgs = body.messages;
+  if (!Array.isArray(msgs)) return;
+  if (!Number.isInteger(afterIndex) || afterIndex < 0 || afterIndex >= msgs.length) return;
+  const alvo = msgs[afterIndex];
+  if (!alvo || typeof alvo !== 'object') return;
+  msgs[afterIndex] = { ...(alvo as Record<string, unknown>), cache_control: { type: 'ephemeral' } };
 }
 
 /**
@@ -1596,6 +1759,11 @@ export interface ChatCompletionResult {
   raw: unknown;
   /** Custo da chamada. Sempre presente; a honestidade fica em `cost.source`. */
   cost: CallCost;
+  /**
+   * IMPL-080 — servido do cache EXATO de vereditos: nenhuma chamada upstream
+   * foi feita e `cost.usd` é 0 porque NADA foi cobrado (medido, não inferido).
+   */
+  cacheHit?: boolean;
   cachedTokensIn?: number;
   reasoningTokens?: number;
   /** `choices[0].finish_reason` normalizado pelo OpenRouter (stream: o ultimo nao-nulo). */
@@ -1677,6 +1845,29 @@ export interface ChatCompletionParams {
   providerLookup?: 'off' | 'missing' | 'always';
   /** IMPL-075 — modo auditável desta chamada (além do preset por papel). */
   auditable?: boolean;
+  /**
+   * IMPL-114 (R-08:REC-4) — quebra de cache de PROMPT do provedor: marca
+   * `cache_control: { type: 'ephemeral' }` na mensagem de índice
+   * `cacheControlAfter` — o FIM do prefixo estável. Tudo o que vem DEPOIS muda
+   * a cada chamada (o candidato do julgamento) e fica fora do prefixo cacheado.
+   *
+   * LAYOUT DE MENSAGENS DO JULGAMENTO — v1 (versionado; mudar = novo layout e
+   * cache invalidado nas primeiras chamadas):
+   *   [0..k] REFERENCIA → PERGUNTA → RUBRICA  ← prefixo ESTÁVEL (cacheável)
+   *   [k]    RUBRICA leva o `cache_control` (fim do prefixo)
+   *   [k+1..] CANDIDATO (muda por chamada/par) ← fora do prefixo
+   * No DUELO o prefixo útil vai só até a RÚBRICA: o cache ajuda ENTRE PARES
+   * (mesma rúbrica), não entre as duas ordens do mesmo par (o candidato entra
+   * antes da 2ª ordem). O aquecimento (1 chamada por cenário antes do
+   * `Promise.all`) e a rota estável por provedor são do chamador (refJudge).
+   *
+   * ⚠️ NENHUM ganho é prometido sem isto: só há efeito em provedor com cache de
+   * prompt (Anthropic via OpenRouter) E prefixo idêntico no mesmo provedor. A
+   * medição é `usage.prompt_tokens_details.cached_tokens` (já extraído como
+   * `cachedTokensIn`); índice fora do alcance = nada muda (sem cache, nunca
+   * cache errado).
+   */
+  cacheControlAfter?: number;
 }
 
 export interface ChatStreamParams extends ChatCompletionParams {
@@ -2207,6 +2398,12 @@ export class OpenRouterGateway {
     if (stream) body.stream = true;
     // SEMPRE com teto (IMPL-017): sem ele a reserva nao limita o estouro.
     body.max_tokens = effectiveMaxTokens(params.maxTokens);
+    // IMPL-114: cache_control no FIM do prefixo estável (layout v1 — ver o
+    // campo `cacheControlAfter`). Vai DEPOIS do `protectMessages`: o prefixo
+    // cacheado tem de ser byte a byte o que sobe no fio.
+    if (typeof params.cacheControlAfter === 'number') {
+      applyCacheControl(body, params.cacheControlAfter);
+    }
     // json_schema estrito quando o catalogo declara structured_outputs (IMPL-006).
     const responseFormat = responseFormatFor(model, params);
     if (responseFormat) body.response_format = responseFormat;
@@ -2296,6 +2493,21 @@ export class OpenRouterGateway {
   ): CallCost {
     const role = params.role ?? 'competitor';
     const cost = priceUsage(usage, this.cachedModel(params.apiKey, params.modelId));
+    // Estimado x real por chamada (IMPL-113): só o custo MEDIDO vira amostra —
+    // `catalog`/`unknown` não têm "real" e jamais entram (nem como zero).
+    const estimado = this.estimatedUsdFor(params);
+    if (cost.source === 'usage' && estimado !== null && estimado > 0 && cost.usd >= 0) {
+      recordCostSample({
+        role,
+        modelId: params.modelId,
+        family: modelFamilyOf(params.modelId),
+        estimatedUsd: estimado,
+        actualUsd: cost.usd,
+        ...(typeof finish?.effort === 'string' ? { effort: finish.effort } : {}),
+        ...(typeof usage.reasoningTokens === 'number' ? { reasoningTokens: usage.reasoningTokens } : {}),
+        capTokens: effectiveMaxTokens(params.maxTokens),
+      });
+    }
     if (reservation) {
       params.sink?.note(reservation, {
         role,
@@ -2308,7 +2520,7 @@ export class OpenRouterGateway {
         ...(typeof extra?.latencyMs === 'number' ? { latencyMs: extra.latencyMs } : {}),
         ...(extra?.provider ? { provider: extra.provider } : {}),
         // Estimado x real (IMPL-078): a MESMA conta da reserva (catálogo), contra `cost.usd`.
-        ...(this.estimatedUsdFor(params) !== null ? { estimatedUsd: this.estimatedUsdFor(params)! } : {}),
+        ...(estimado !== null ? { estimatedUsd: estimado } : {}),
         ...(finish ? { finish } : {}),
       });
     }
@@ -2331,6 +2543,11 @@ export class OpenRouterGateway {
    * reservado e o MESMO que vai no corpo (`effectiveMaxTokens`); o gateway
    * manda junto a sua propria estimativa pelo catalogo em cache (fallback do
    * ledger) e usa `admit` — o limite de 1 chamada sem preco em voo por papel.
+   *
+   * IMPL-113: a RESERVA DURA leva o tokenizer + `RESERVE_TOKEN_MARGIN` (~20%) —
+   * subestimar tokens de entrada aqui afrouxa a porta dura; a estimativa que vai
+   * ao registo estimado × real (`estimatedUsdFor`) fica SEM margem, para a
+   * calibração comparar estimativa honesta com o real.
    */
   private async reserveFor(
     params: ChatCompletionParams,
@@ -2339,7 +2556,7 @@ export class OpenRouterGateway {
     const sink = params.sink;
     if (!sink) return undefined;
     const cap = effectiveMaxTokens(params.maxTokens);
-    const promptGuess = guessPromptTokens(params.messages);
+    const promptGuess = Math.ceil(guessPromptTokens(params.messages) * RESERVE_TOKEN_MARGIN);
     const fallback = computeCost(promptGuess, cap, this.cachedModel(params.apiKey, params.modelId));
     const fb = fallback === null ? undefined : fallback;
     return sink.admit
@@ -2413,10 +2630,114 @@ export class OpenRouterGateway {
   }
 
   async chatCompletion(params: ChatCompletionParams): Promise<ChatCompletionResult> {
+    // IMPL-080: cache EXATO de vereditos ANTES de qualquer reserva/fetch.
+    return this.withVerdictCache(params, () => this.chatCompletionDirect(params));
+  }
+
+  async chatCompletionStream(params: ChatStreamParams): Promise<ChatCompletionResult> {
+    return this.withVerdictCache(params, () => this.chatCompletionStreamDirect(params));
+  }
+
+  /**
+   * Cache de vereditos desta chamada (IMPL-080), quando o reuso é LEGÍTIMO:
+   * papel de juízo (judge/duel/gabarito — é o veredito que se reusa; respostas
+   * de competidor amostram variância e nunca entram), cache ligado, SEM
+   * roteamento sensível (LGPD fail-closed: a resposta cacheada pode ter vindo
+   * de provedor fora da allowlist ZDR) e sem abort pendente (abort é CONTROLE
+   * e o caminho normal o classifica).
+   */
+  private verdictCacheFor(params: ChatCompletionParams): VerdictCache | undefined {
+    const cache = this.cfg.verdictCache;
+    if (!cache) return undefined;
+    const role = params.role;
+    if (role !== 'judge' && role !== 'duel' && role !== 'gabarito') return undefined;
+    if (params.sink?.sensitiveRouting?.()) return undefined;
+    if (params.signal?.aborted) return undefined;
+    return cache;
+  }
+
+  /**
+   * IMPL-080 (R-08:REC-3) — lookup/store do veredito com a chave EXATA
+   * {modelo + esforço + temperatura + max_tokens + hash do contrato do juiz +
+   * texto completo do prompt} (sem credenciais). Carry entre iterações +
+   * re-teste amostral (~10% dos itens): o item sorteado é RE-JULGADO de
+   * verdade, o veredito é comparado e, acima do limiar de discordância, o
+   * cache inteiro cai (`noteRetest`). Os lookups sobem ao ledger
+   * (`noteVerdictCache` → `cacheHits`/`cacheTotal` por papel no `run.spend`).
+   */
+  private async withVerdictCache(
+    params: ChatStreamParams,
+    run: () => Promise<ChatCompletionResult>,
+  ): Promise<ChatCompletionResult> {
+    const cache = this.verdictCacheFor(params);
+    if (!cache) return run();
+    const key = verdictCacheKey({
+      modelId: params.modelId,
+      effort: params.reasoningLevel ?? null,
+      temperature: params.temperature ?? null,
+      maxTokens: effectiveMaxTokens(params.maxTokens),
+      contractHash: judgeContractHash({
+        systemTexts: params.messages.filter((m) => m.role === 'system').map((m) => m.content),
+        responseSchemaName: params.responseSchema?.name ?? null,
+        responseSchema: params.responseSchema?.schema ?? null,
+        responseFormatJson: params.responseFormatJson ?? null,
+      }),
+      promptText: params.messages.map((m) => `${m.role}\u0000${m.content}`).join('\u0000'),
+    });
+    const role = params.role ?? 'competitor';
+    const hit = cache.lookup(key);
+    if (hit) {
+      params.sink?.noteVerdictCache?.({ role, hit: true });
+      if (!hit.retest) return this.cachedVerdictResult(params, hit.entry);
+      // Re-teste amostral OBRIGATÓRIO: re-julga de verdade por baixo, compara o
+      // veredito (discordância acima do limiar invalida o cache) e devolve o
+      // resultado REAL — quem serve é a nova medição, não o replay.
+      const fresh = await run();
+      cache.noteRetest(key, this.storableOf(fresh));
+      return fresh;
+    }
+    params.sink?.noteVerdictCache?.({ role, hit: false });
+    const result = await run();
+    // Só guarda o que completou SEM bloqueio do guardrail (corte de moderação
+    // não é veredito — re-julgar é sempre o caminho).
+    if (!result.blocked) cache.store(key, this.storableOf(result));
+    return result;
+  }
+
+  /** O que o cache guarda de uma resposta (texto reidratado + sinais de fim). */
+  private storableOf(result: ChatCompletionResult): Pick<VerdictCacheEntry, 'text' | 'finishReason' | 'nativeFinishReason' | 'refusal' | 'truncated'> {
+    return {
+      text: result.text,
+      ...(result.finishReason ? { finishReason: result.finishReason } : {}),
+      ...(result.nativeFinishReason ? { nativeFinishReason: result.nativeFinishReason } : {}),
+      ...(result.refusal ? { refusal: result.refusal } : {}),
+      ...(result.truncated ? { truncated: result.truncated } : {}),
+    };
+  }
+
+  /** Resposta servida do cache: zero chamada upstream, zero cobrança. */
+  private cachedVerdictResult(params: ChatStreamParams, entry: VerdictCacheEntry): ChatCompletionResult {
+    params.onDelta?.(entry.text, entry.text);
+    return {
+      text: entry.text,
+      tokensIn: 0,
+      tokensOut: 0,
+      latencyMs: 0,
+      raw: { cached: true },
+      cost: { usd: 0, source: 'usage' },
+      ...(entry.finishReason ? { finishReason: entry.finishReason } : {}),
+      ...(entry.nativeFinishReason ? { nativeFinishReason: entry.nativeFinishReason } : {}),
+      ...(entry.refusal ? { refusal: entry.refusal } : {}),
+      ...(entry.truncated ? { truncated: entry.truncated } : {}),
+      cacheHit: true,
+    };
+  }
+
+  private async chatCompletionDirect(params: ChatCompletionParams): Promise<ChatCompletionResult> {
     // IMPL-072: transporte STREAMING quando o papel/chamada pedir — o parser SSE
     // é ÚNICO (o de `chatCompletionStream`), e em abort/timeout o provedor PARA
     // de gerar em vez de concluir e cobrar a resposta inteira.
-    if (params.streamTransport ?? this.cfg.streamTransport) return this.chatCompletionStream(params);
+    if (params.streamTransport ?? this.cfg.streamTransport) return this.chatCompletionStreamDirect(params);
     const { signal: externalSignal, sink } = params;
     const maxTokens = effectiveMaxTokens(params.maxTokens);
     const role = params.role ?? 'competitor';
@@ -2561,7 +2882,7 @@ export class OpenRouterGateway {
     }
   }
 
-  async chatCompletionStream(params: ChatStreamParams): Promise<ChatCompletionResult> {
+  private async chatCompletionStreamDirect(params: ChatStreamParams): Promise<ChatCompletionResult> {
     const { signal: externalSignal, sink, onDelta } = params;
     const maxTokens = effectiveMaxTokens(params.maxTokens);
     const role = params.role ?? 'competitor';

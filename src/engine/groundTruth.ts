@@ -75,7 +75,7 @@
 // Import type de `../types.js` é seguro para o bundle do navegador: só tipos,
 // zero runtime.
 // ----------------------------------------------------------------------------
-import type { Verdict } from '../types.js';
+import type { HumanReviewItem, HumanReviewReason, Verdict } from '../types.js';
 
 // ----------------------------------------------------------------------------
 // Tipos
@@ -2002,4 +2002,231 @@ export function matchExpected(
   return mode === 'lenient'
     ? matchLabelLenient(text, rawAlts, alts)
     : matchLabelStrict(text, rawAlts, alts, opts.labelSet);
+}
+
+// ----------------------------------------------------------------------------
+// Validacao do GABARITO antes do julgamento (IMPL-055, R-03a:REC-1).
+//
+// A referencia sintetica e o ELO MAIS FRACO da run (Krumdick 2503.05061:
+// qualidade da referencia > forca do juiz) e erro de gabarito vira veredito
+// contra a resposta certa. O protocolo (R-03a DEC-2/REC-1), rodado ANTES do
+// julgamento:
+//   1) VERIFICACAO DIRIGIDA PELA RUBRICA — o gabarito satisfaz o criterio de
+//      corretude? Com rotulo esperado (`expected`) a checagem e DETERMINISTICA
+//      (o verificador estrito acima, fonte unica); sem ele, o verificador LLM
+//      de `gabarito.ts` (`validateGeneratedReferences`) devolve o veredito;
+//   2) 2o GABARITO DE FAMILIA DISTINTA, CONDICIONADO a veredito 'parcial' OU
+//      divergencia gabarito x rubrica (as duas pontas do `verdict !==
+//      'resolve'`) — o custo extra fica no teto ~8-16% da iteracao porque so
+//      os casos sinalizados disparam a chamada;
+//   3) FILA `needs-human-review` (RunRecord) + AMOSTRA HUMANA de 5-10% para a
+//      auditoria medir `taxa_de_erro_gabarito` e `deteccao_divergencia` — a
+//      taxa de erro de gabaritos temp-0 nao tem fonte publica (H3 inconclusiva)
+//      e a auditoria e o unico caminho honesto.
+//
+// Tudo aqui e PURO (sem LLM/rede): quem chama LLM e `gabarito.ts`, que grava o
+// resultado em `StageSpec.referenceValidation` — persistido junto da spec e
+// PRESERVADO no re-read (`normalizeRunRecord` espalha `...raw`).
+// ----------------------------------------------------------------------------
+
+/**
+ * Como a verificacao dirigida pela rubrica decidiu: `expected` = verificador
+ * deterministico do rotulo esperado; `llm` = verificador LLM sobre a rubrica em
+ * prosa; `none` = nada para verificar (etapa sem rubrica nem rotulo esperado).
+ */
+export type RubricCheckMethod = 'expected' | 'llm' | 'none';
+
+/** Resultado da verificacao dirigida pela rubrica sobre UM gabarito. */
+export interface RubricCheck {
+  /**
+   * resolve = o gabarito satisfaz a rubrica; parcial/nao = DIVERGE (parcial =
+   * falta parte do criterio; nao = contraria o criterio). `null` = sem checagem
+   * possivel (`method: 'none'`) — inconclusivo NUNCA e tratado como aderente.
+   */
+  verdict: Verdict | null;
+  /** true quando o gabarito diverge da rubrica (`verdict` parcial/nao). */
+  divergent: boolean;
+  method: RubricCheckMethod;
+  /** 1 frase curta em PT-BR (o que exatamente divergiu). */
+  detail: string;
+}
+
+/** 2o gabarito de FAMILIA DISTINTA (so quando a verificacao disparou). */
+export interface SecondReferenceCheck {
+  /** Modelo que escreveu o 2o gabarito (familia distinta do 1o). */
+  modelId: string;
+  text: string;
+  /** false = os gabaritos discordam (referencia incerta — revisao humana). */
+  agree: boolean;
+}
+
+/**
+ * Validacao do gabarito de UMA etapa (IMPL-055): gravada em
+ * `StageSpec.referenceValidation` por `validateGeneratedReferences`
+ * (`gabarito.ts`); a fila agregada vive em `RunRecord.needsHumanReview`
+ * (`humanReviewQueueFromStages`).
+ */
+export interface ReferenceValidation {
+  /** Verificacao dirigida pela rubrica (passo 1 do protocolo). */
+  rubric: RubricCheck;
+  /** 2o gabarito condicionado (passo 2) — ausente quando nada disparou. */
+  secondReference?: SecondReferenceCheck;
+  /** true = item sorteado (ou acionado por discordancia) para a amostra humana. */
+  auditSample?: boolean;
+  /** Motivos que enfileiram esta etapa em `RunRecord.needsHumanReview`. */
+  reviewReasons: HumanReviewReason[];
+}
+
+/**
+ * Verificacao DETERMINISTICA dirigida pela rubrica: com rotulo esperado
+ * (`expected`), o gabarito passa pelo MESMO verificador estrito das respostas —
+ * um gabarito que nem ele mesmo satisfaz o criterio e divergencia certa, sem
+ * gastar LLM. Sem `expected`, devolve `method: 'none'` (inconclusivo — quem
+ * decide e o verificador LLM de `gabarito.ts`, quando configurado).
+ */
+export function checkReferenceAgainstRubric(stage: {
+  reference?: string;
+  expected?: ExpectedSpec;
+  labelSet?: string[];
+}): RubricCheck {
+  const reference = stage.reference ?? '';
+  if (stage.expected === undefined) {
+    return {
+      verdict: null,
+      divergent: false,
+      method: 'none',
+      detail: 'sem rótulo esperado: checagem determinística não se aplica (verificador LLM decide, se configurado).',
+    };
+  }
+  const gt = matchExpected(reference, stage.expected, { labelSet: stage.labelSet });
+  return {
+    verdict: gt.verdict,
+    divergent: gt.verdict !== 'resolve',
+    method: 'expected',
+    detail: gt.explanation,
+  };
+}
+
+/** Palavras de enquadramento do pt-BR (nao carregam o conteudo da resposta). */
+const PT_STOPWORDS = new Set([
+  'a', 'o', 'as', 'os', 'um', 'uma', 'de', 'da', 'do', 'das', 'dos', 'e', 'em', 'no', 'na', 'nos',
+  'nas', 'por', 'para', 'com', 'sem', 'que', 'se', 'ao', 'à', 'ou', 'mas', 'é', 'sao', 'ser', 'era',
+  'the', 'of', 'and', 'to', 'in', 'is', 'for', 'on', 'with',
+]);
+
+/** Tokens de conteudo (normalizados, sem stopwords) de um texto. */
+function contentTokens(text: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const bruto of normalizeLabel(text).split(/\s+/)) {
+    const t = bruto.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+    if (t.length >= 2 && !PT_STOPWORDS.has(t)) tokens.add(t);
+  }
+  return tokens;
+}
+
+/**
+ * Concordancia LEXICA entre os dois gabaritos (IMPL-055). `false` = DISCORDAM:
+ * >= 40% dos tokens de conteudo do texto MENOR nao aparece no outro — dois
+ * relatos da mesma resposta repartem vocabulario; dois gabaritos sobre coisas
+ * diferentes nao. E um sinal CONSERVADOR de referencia incerta, nunca prova de
+ * equivalencia semantica (para isso ha o comparador injetado em
+ * `validateGeneratedReferences`). Texto vazio de um dos lados = discordancia.
+ */
+export function referencesAgree(a: string, b: string, threshold = 0.6): boolean {
+  const ta = contentTokens(a ?? '');
+  const tb = contentTokens(b ?? '');
+  if (ta.size === 0 || tb.size === 0) return false;
+  let comum = 0;
+  for (const t of ta) if (tb.has(t)) comum += 1;
+  const contem = comum / Math.min(ta.size, tb.size);
+  return contem >= threshold;
+}
+
+/** Fracao default da amostra humana de auditoria (dentro da banda 5-10%). */
+export const DEFAULT_AUDIT_SAMPLE_RATE = 0.08;
+/** Piso e teto da amostra humana de auditoria (R-03a:REC-1: 5-10%). */
+export const AUDIT_SAMPLE_MIN_RATE = 0.05;
+export const AUDIT_SAMPLE_MAX_RATE = 0.10;
+
+/**
+ * PRNG deterministico (mulberry32), duplicado de proposito (mesma nota de
+ * `judgeCalibration.ts`/`stats.ts`): a amostra de auditoria precisa ser a MESMA
+ * ao reprocessar a run, ou a auditoria vira sorteio novo a cada reler.
+ */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return function next() {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Amostra humana de auditoria (IMPL-055): posicoes sorteadas (deterministicas,
+ * seed fixa) entre as `n` etapas validadas, com a taxa presa na banda 5-10%.
+ * A amostra engloba itens NAO flagados de proposito — so assim a auditoria mede
+ * `deteccao_divergencia` (quanto o detector automatico apanha dos gabaritos
+ * errados) em vez de confirmar 100% por construcao.
+ */
+export function selectAuditSample(
+  n: number,
+  rate: number = DEFAULT_AUDIT_SAMPLE_RATE,
+  seed = 1337,
+): Set<number> {
+  const taxa = Math.min(AUDIT_SAMPLE_MAX_RATE, Math.max(AUDIT_SAMPLE_MIN_RATE, rate));
+  const k = Math.max(n > 0 ? 1 : 0, Math.round(n * taxa));
+  const ordem = Array.from({ length: n }, (_, i) => i);
+  const rng = mulberry32(seed);
+  for (let i = ordem.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(rng() * (i + 1));
+    [ordem[i], ordem[j]] = [ordem[j], ordem[i]];
+  }
+  return new Set(ordem.slice(0, Math.min(k, n)));
+}
+
+/** Custo humano estimado de revisao de UM item (USD) — politica R-03a:REC-1. */
+export const HUMAN_REVIEW_COST_USD = 0.025;
+
+/** Detalhe em PT-BR de cada motivo da fila `needs-human-review`. */
+function reviewDetailOf(v: ReferenceValidation, reason: HumanReviewReason): string {
+  switch (reason) {
+    case 'reference_rubric_divergence':
+      return v.rubric.detail || 'o gabarito gerado diverge da rubrica do cenário.';
+    case 'reference_disagreement':
+      return `2º gabarito (${v.secondReference?.modelId ?? 'família distinta'}) discordou do 1º — referência incerta.`;
+    case 'reference_audit_sample':
+      return 'amostra humana de auditoria (5–10%) da qualidade do gabarito.';
+    case 'low_confidence_verdict':
+      return 'veredito com confiança baixa — triagem de revisão humana.';
+    default:
+      return '';
+  }
+}
+
+/**
+ * Fila agregada `needs-human-review` (IMPL-055) a partir das validacoes ja
+ * gravadas nas specs das etapas — a mesma entrada que `RunRecord` persiste. O
+ * record pode ja trazer a fila (gravada pela run); quem reler e preferir
+ * rederivar chama isto com `record.stages`.
+ */
+export function humanReviewQueueFromStages(
+  stages: ReadonlyArray<{ spec?: { referenceValidation?: ReferenceValidation } | null | undefined }>,
+): HumanReviewItem[] {
+  const itens: HumanReviewItem[] = [];
+  stages.forEach((st, stageIndex) => {
+    const v = st.spec?.referenceValidation;
+    if (!v || !Array.isArray(v.reviewReasons)) return;
+    for (const reason of v.reviewReasons) {
+      itens.push({
+        stageIndex,
+        reason,
+        detail: reviewDetailOf(v, reason),
+        estimatedCostUsd: HUMAN_REVIEW_COST_USD,
+      });
+    }
+  });
+  return itens;
 }

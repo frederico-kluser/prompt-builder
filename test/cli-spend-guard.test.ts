@@ -24,6 +24,7 @@
 // HTTP em 127.0.0.1.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { nodeOrTsx } from './support/cli.js';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -69,8 +70,7 @@ import type { RunConfig } from '../src/types.js';
 import { duelReply, pointwiseReply } from './judgeReplies.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
-const ENTRY = path.join(ROOT, 'src', 'cli', 'index.ts');
+const { cmd: TSX, entry: ENTRY } = nodeOrTsx(path.join(ROOT, 'src', 'cli', 'index.ts'));
 const WORKER = path.join(ROOT, 'test', 'fixtures', 'spendWorker.ts');
 
 const VALID_KEY = `sk-or-v1-${'a'.repeat(48)}`;
@@ -453,7 +453,10 @@ interface ProcRun {
 }
 
 function spawnTsx(args: string[], env: NodeJS.ProcessEnv): { done: Promise<ProcRun>; stderrSoFar: () => string } {
-  const child = spawn(TSX, args, { env });
+  // Workers de suporte são .ts (correm via tsx); o entrypoint do CLI vem do
+  // nodeOrTsx (dist compilado quando existe).
+  const cmd = args[0].endsWith('.ts') ? path.join(ROOT, 'node_modules', '.bin', 'tsx') : TSX;
+  const child = spawn(cmd, args, { env });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (d: Buffer) => (stdout += d.toString('utf-8')));

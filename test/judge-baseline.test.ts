@@ -25,10 +25,11 @@ import { DUEL_HEAD } from '../src/engine/duelPrompt.js';
 import { JUDGE_LISTWISE_CONTRACT_TEXT } from '../src/judge.js';
 import { JUDGE_CONTRACT_TEXT } from '../src/refJudge.js';
 import { parseModelsPayload } from '../src/openrouter.js';
+import { nodeOrTsx } from './support/cli.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const FIXTURE = join(ROOT, 'test', 'fixtures', 'models-2026-09-27.json');
-const TSX = join(ROOT, 'node_modules', '.bin', 'tsx');
+const { cmd: TSX, entry: ENTRY } = nodeOrTsx(join(ROOT, 'src', 'cli', 'index.ts'));
 const HOJE = new Date('2026-09-27T12:00:00Z');
 
 const JUIZ = 'anthropic/claude-sonnet-5';
@@ -212,7 +213,7 @@ describe('(iii) `prompt-builder baseline` — exit code real', () => {
   let catSemJuiz: string;
 
   const cli = (...args: string[]): { status: number | null; stdout: string; stderr: string } => {
-    const r = spawnSync(TSX, ['src/cli/index.ts', 'baseline', ...args, '--data-dir', tmp], {
+    const r = spawnSync(TSX, [ENTRY, 'baseline', ...args, '--data-dir', tmp], {
       cwd: ROOT,
       encoding: 'utf-8',
       timeout: 60_000,

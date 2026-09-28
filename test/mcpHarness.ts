@@ -5,6 +5,7 @@
 // Zero rede externa, zero gasto.
 
 import { duelReply, pointwiseReply } from './judgeReplies.js';
+import { nodeOrTsx } from './support/cli.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { spawn } from 'node:child_process';
@@ -17,8 +18,9 @@ import type { RunRecord } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, type FakeOpenRouter } from './fakeOpenRouter.js';
 
 export const ROOT = fileURLToPath(new URL('..', import.meta.url));
-export const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
-export const CLI = path.join(ROOT, 'src', 'cli', 'index.ts');
+const _cli = nodeOrTsx(path.join(ROOT, 'src', 'cli', 'index.ts'));
+export const TSX = _cli.cmd;
+export const CLI = _cli.entry;
 export const KEY = 'sk-or-v1-fake-key-para-teste-0000000000';
 
 // ---------------------------------------------------------------------------

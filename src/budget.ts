@@ -488,6 +488,21 @@ export class BudgetLedger implements CostSink {
   }
 
   /**
+   * IMPL-080 (R-08:REC-3) — contagem do cache EXATO de vereditos por papel.
+   * Cada lookup (hit ou miss) sobe para `byRole[role].cacheTotal`/`cacheHits`,
+   * que o evento `run.spend` carrega pronto (`CostEntry`). Um hit NÃO é
+   * chamada upstream nem gasto: não toca `calls`/`usd` — ele só prova que o
+   * veredito foi REUSADO (o re-teste amostral é quem re-julga de verdade).
+   */
+  noteVerdictCache(entry: { role: CostRole; hit: boolean }): void {
+    for (const n of BudgetLedger.chain(this)) {
+      const slot = n.byRole[entry.role];
+      slot.cacheTotal = (slot.cacheTotal ?? 0) + 1;
+      if (entry.hit) slot.cacheHits = (slot.cacheHits ?? 0) + 1;
+    }
+  }
+
+  /**
    * Chamada despachada sem custo medido (abort/timeout/sem usage). A reserva
    * NUNCA e devolvida: o provedor pode ter cobrado a resposta inteira (no
    * nao-streaming ele segue gerando depois do abort).

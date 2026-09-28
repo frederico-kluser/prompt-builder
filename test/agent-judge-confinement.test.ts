@@ -52,15 +52,18 @@ vi.mock('../src/agent/pi.js', async (importOriginal) => {
       ...orig.piExecutor,
       id: 'pi-fake',
       prepare: async () => ({ bin: 'pi-fake', env: {} }),
-      run: async (opts: { workspaceDir: string; env: Record<string, string> }) => {
+      run: async (opts: { workspaceDir: string; env: Record<string, string>; modelId?: string; instruction?: string }) => {
         fake.calls += 1;
-        const { PI_TASK: q, PI_MODEL_ID: m } = opts.env;
+        // Contrato v2 (IMPL-095): modelo/tarefa vêm do `AgentRunOpts`; o env
+        // `PI_*` é só tolerância legada (mesma precedência do `pi.ts` real).
+        const m = opts.modelId ?? opts.env.PI_MODEL_ID;
+        const q = opts.instruction ?? opts.env.PI_TASK;
         for (const f of fake.escreve(q, m)) {
           const e = typeof f === 'string' ? { path: f, content: 'ok\n' } : f;
           write(join(opts.workspaceDir, e.path), e.content, 'utf8');
         }
         for (const f of fake.apaga(q, m)) rm(join(opts.workspaceDir, f), { force: true });
-        return fakeOutcome('completed', opts.env.PI_MODEL_ID);
+        return fakeOutcome('completed', m);
       },
     },
   };
@@ -656,7 +659,8 @@ function executorFalso(escreve: string[]): AgentGateway {
     prepare: async () => ({ bin: 'pi-fake', env: {} }),
     run: async (opts) => {
       for (const f of escreve) writeFileSync(path.join(opts.workspaceDir, f), 'ok\n', 'utf8');
-      return fakeOutcome('completed', opts.env.PI_MODEL_ID) as never;
+      // Contrato v2 (IMPL-095): o modelo vem do `AgentRunOpts` (env `PI_*` é legado).
+      return fakeOutcome('completed', opts.modelId ?? opts.env.PI_MODEL_ID) as never;
     },
   };
 }
@@ -823,7 +827,8 @@ describe('IMPL-033 — runAgentStage: juiz confinado e falha preservando o orác
         ...executorFalso(['done.txt']),
         run: async (opts) => {
           writeFileSync(path.join(opts.workspaceDir, 'done.txt'), 'ok\n', 'utf8');
-          return fakeOutcome('error', opts.env.PI_MODEL_ID) as never;
+          // Contrato v2 (IMPL-095): o modelo vem do `AgentRunOpts` (env `PI_*` é legado).
+          return fakeOutcome('error', opts.modelId ?? opts.env.PI_MODEL_ID) as never;
         },
       };
       const a = await runAgentStage(params({ verify: [fantasma] }, erro));

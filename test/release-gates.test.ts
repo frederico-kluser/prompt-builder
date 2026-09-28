@@ -36,11 +36,15 @@ const publish = workflows.get('publish-npm.yml') ?? '';
 describe('IMPL-103 prepublishOnly: os 5 gates rodam ANTES de qualquer publish', () => {
   it('prepublishOnly = build + npm test + publint + attw + allowlist + smoke, nessa ordem', () => {
     const s = pkg.scripts.prepublishOnly ?? '';
-    const ordem = ['npm run build', 'npm test', 'gate:publint', 'gate:attw', 'gate:tarball', 'gate:smoke'];
+    // O passo de teste pode ser `npm test` (rápido) OU `npm run test:full`
+    // (com docker/Monte Carlo completo — superset, o desejável no release).
+    const ordem = ['npm run build', 'TESTE', 'gate:publint', 'gate:attw', 'gate:tarball', 'gate:smoke'];
     let cursor = -1;
     for (const passo of ordem) {
-      const i = s.indexOf(passo);
-      expect(i, `falta o passo "${passo}" em prepublishOnly`).toBeGreaterThan(cursor);
+      const alvo =
+        passo === 'TESTE' ? (s.includes('npm run test:full') ? 'npm run test:full' : 'npm test') : passo;
+      const i = s.indexOf(alvo);
+      expect(i, `falta o passo "${alvo}" em prepublishOnly`).toBeGreaterThan(cursor);
       cursor = i;
     }
   });

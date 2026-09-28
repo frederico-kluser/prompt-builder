@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Plus, Search, SlidersHorizontal, X } from 'lucide-react';
 import type { ModelCaps, OpenRouterModel, ReasoningLevel } from '../api';
@@ -504,6 +504,11 @@ export interface ModelPickerProps {
   listLabel?: string;
   /** Seleção múltipla: a lista continua aberta depois de escolher. */
   multi?: boolean;
+  /**
+   * Ref do input combobox — é o foco inicial do popup (padrão W3C APG: o foco
+   * vive no input, o item ATIVO é só o `aria-activedescendant`).
+   */
+  inputRef?: RefObject<HTMLInputElement | null>;
 }
 
 /**
@@ -512,7 +517,7 @@ export interface ModelPickerProps {
  * popup listbox, `aria-activedescendant` marcando o item ATIVO). Os chips de
  * seleção múltipla ficam FORA do listbox, no corpo do seletor.
  */
-export function ModelPicker({ models, value, onPick, onClose, title, error, listLabel, multi }: ModelPickerProps) {
+export function ModelPicker({ models, value, onPick, onClose, title, error, listLabel, multi, inputRef }: ModelPickerProps) {
   const uid = useId();
   const listId = `${uid}-list`;
   const [query, setQuery] = useState('');
@@ -615,6 +620,7 @@ export function ModelPicker({ models, value, onPick, onClose, title, error, list
       <div className="flex items-center gap-2.5 border-b border-border px-4 py-3">
         <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
         <input
+          ref={inputRef}
           type="text"
           role="combobox"
           className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
@@ -976,6 +982,7 @@ export function ModelSelector({
           error={error}
           listLabel={title}
           multi={multi}
+          inputRef={searchRef}
         />
       </Modal>
     </div>

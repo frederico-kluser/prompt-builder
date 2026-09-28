@@ -1119,7 +1119,13 @@ describe('juiz do contrato e canários usam o raciocínio da run (judge/competit
       contestantModelId: ALVO,
       optimizerModelId: OTIMIZADOR,
       basePrompt: BASE,
-      techniqueIds: ['cot'],
+      // IMPL-066: 'cot' é CLASSE-DEPENDENTE e não é mais proposta quando o
+      // think level do modelo sob teste está acima de 'off' (competitor:
+      // 'minimal' aqui). Ela fica na config de PROPÓSITO: o resultado esperado
+      // ['original','v0'] prova que foi filtrada — 'persona'
+      // (classe-independente) gera o único v0 e sustenta o objeto do teste
+      // (raciocínio do judge/competitor chegam ao gate).
+      techniqueIds: ['cot', 'persona'],
       stages: 1,
       contracts: CONTRATO,
       reasoning: { judge: 'high', competitor: 'minimal', rewriter: 'low' },

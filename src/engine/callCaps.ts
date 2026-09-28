@@ -38,5 +38,12 @@ export const MAX_TOKENS_DATAGEN_BATCH = 8192;
  * preco de saida), mas o teste de contrato usa este mesmo numero.
  */
 export const REWRITER_PROMPT_TOKENS = 1200;
-/** Tokens de entrada projetados por lote de datagen (tema + regras). */
-export const DATAGEN_PROMPT_TOKENS = 400;
+/**
+ * Tokens de entrada projetados por lote de datagen (tema + regras + instruções
+ * de JSON). Re-medido com o tokenizer do IMPL-113 (`countTextTokens`, ~3,7
+ * chars/token em PT/JSON onde o `chars/4` antigo media 400) e com a margem da
+ * reserva dura (~20% — `RESERVE_TOKEN_MARGIN`): a porta suave tem de cobrir a
+ * reserva que o gateway realmente faz (`test/call-caps-contract.test.ts` vigia
+ * projeção ≥ reserva, papel a papel).
+ */
+export const DATAGEN_PROMPT_TOKENS = 550;

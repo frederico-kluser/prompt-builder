@@ -13,7 +13,12 @@
 
 import { fitEffort, REASONING_LEVELS } from './reasoning.js';
 import { exportPrice, UNKNOWN_PRICE_JSON } from './engine/pricing.js';
-import type { ModelReasoningMeta, OpenRouterModel, ReasoningLevel } from './types.js';
+import type {
+  ModelReasoningMeta,
+  OpenRouterModel,
+  ReasoningConfig,
+  ReasoningLevel,
+} from './types.js';
 
 export interface ModelCaps {
   /** Aceita `temperature`. */
@@ -57,6 +62,50 @@ export function modelCaps(m?: ModelLike): ModelCaps {
     defaultEffort: r?.defaultEffort,
     mandatory: r?.mandatory ?? false,
   };
+}
+
+/**
+ * IMPL-079 (R-08:REC-1 / DEC-1) — papéis de JUÍZO com esforço próprio. O
+ * `reasoning.judge` único mandava no juiz pointwise, no duelo e no gabarito ao
+ * mesmo tempo; acima de `low` o ganho de esforço satura ou reverte e o papel
+ * juiz domina o custo (~47%). Agora cada papel resolve o seu degrau:
+ *   judge  → medium (pointwise: acima disso satura)
+ *   duel   → low    (par curto; `low` já pega o ganho)
+ *   gab    → high   (escrever a régua é a tarefa mais exigente)
+ * Compat: papel sem campo próprio cai no `reasoning.judge` antigo (comportamento
+ * legado preservado) e, sem nenhum dos dois, no default do papel.
+ */
+export type JudgingRole = 'judge' | 'duel' | 'gab';
+
+/** Defaults por papel de juízo (IMPL-079) — só valem quando nada foi pedido. */
+export const REASONING_ROLE_DEFAULT: Record<JudgingRole, ReasoningLevel> = {
+  judge: 'medium',
+  duel: 'low',
+  gab: 'high',
+};
+
+/**
+ * Degrau EFETIVO do papel de juízo + o `effort` que vai no fio depois do
+ * `fitEffort` na allowlist do modelo (mesma regra do `applyReasoning`; `off`
+ * não é degrau — sai como `'none'`, que o gateway traduz em `enabled: false`).
+ */
+export function reasoningForRole(
+  reasoning: ReasoningConfig | undefined,
+  role: JudgingRole,
+  meta?: ModelReasoningMeta,
+): { level: ReasoningLevel; effort: string } {
+  const proprio = role === 'judge' ? reasoning?.judge : reasoning?.[role];
+  // Campo unico antigo (`reasoning.judge`) como fallback dos papeis novos.
+  const level = proprio ?? reasoning?.judge ?? REASONING_ROLE_DEFAULT[role];
+  return { level, effort: level === 'off' ? 'none' : fitEffort(level, meta) };
+}
+
+/** Atalho para os call sites: só o degrau efetivo do papel. */
+export function reasoningLevelForRole(
+  reasoning: ReasoningConfig | undefined,
+  role: JudgingRole,
+): ReasoningLevel {
+  return reasoningForRole(reasoning, role).level;
 }
 
 /** Rotulo PT-BR de cada degrau de esforco. */

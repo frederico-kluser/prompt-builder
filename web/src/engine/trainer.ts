@@ -43,6 +43,7 @@ import { meanCiSummary, pairCoverage, pairDiffs, pairedStageScores, stageScoresB
 import { formatIterationGate, pairedSignificance, VERDICT_SCORE } from './stats';
 import { BudgetLedger, isControlSignal, RunCancelled } from './budget';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
+import { reasoningLevelForRole } from '../modelCaps';
 import { mergeFailureCounts } from '../../../src/engine/verdictIntegrity.js';
 import type {
   ChampionDeclaration,
@@ -111,8 +112,9 @@ function meanPlacementOf(run: RunRecord, contestantId: string): number | undefin
  * pelo gate de 3 camadas com `contracts` ativo). Sem isso o desempate
  * "o mais curto vence" premiava quem APAGA texto — inclusive cláusulas
  * defensivas que o gate substring nao protege.
+ * Exportado para os testes de contrato (test/trainer-size-floor.test.ts).
  */
-function buildRankEntries(
+export function buildRankEntries(
   run: RunRecord,
   controlId: string,
   opts: { contractsActive?: boolean } = {},
@@ -410,6 +412,7 @@ function truncateToFit(
   });
   let truncatedFields = 0;
   const tocadas = new Set<string>();
+  const camposTocados = new Set<string>();
   while (over > 0 && alvos.length) {
     let maior = alvos[0];
     for (const a of alvos) {
@@ -417,15 +420,21 @@ function truncateToFit(
     }
     const atual = (maior.entry[maior.campo] ?? '') as string;
     const corte = Math.min(over + 1, atual.length - MIN_LESSON_FIELD_CHARS);
-    if (corte <= 0) {
+    // corte <= 1 = o campo só tem 1 char de folga acima do piso: recortá-lo não
+    // encolhe nada (o "…" repõe o char cortado) e prenderia o laço para sempre —
+    // sai dos alvos e o próximo campo mais longo assume.
+    if (corte <= 1) {
       alvos.splice(alvos.indexOf(maior), 1);
       continue;
     }
     maior.entry[maior.campo] = `${atual.slice(0, atual.length - corte).trimEnd()}…`;
     over -= corte - 1;
-    truncatedFields += 1;
+    if (!camposTocados.has(`${maior.rotulo}:${maior.campo}`)) {
+      camposTocados.add(`${maior.rotulo}:${maior.campo}`);
+      truncatedFields += 1;
+    }
     tocadas.add(maior.rotulo);
-    if ((maior.entry[maior.campo] ?? '').length <= MIN_LESSON_FIELD_CHARS) {
+    if ((maior.entry[maior.campo] ?? '').length <= MIN_LESSON_FIELD_CHARS + 1) {
       alvos.splice(alvos.indexOf(maior), 1);
     }
   }
@@ -898,7 +907,7 @@ async function trainingLoop(
           // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
           contractJudgeModelId: cfg.judgeModelIds?.[0],
           // Verificações do contrato no MESMO raciocínio da run (juiz/competidor).
-          contractJudgeReasoningLevel: cfg.reasoning?.judge,
+          contractJudgeReasoningLevel: reasoningLevelForRole(cfg.reasoning, 'judge'),
           contestantReasoningLevel: cfg.reasoning?.competitor,
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
@@ -979,7 +988,7 @@ async function trainingLoop(
           // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
           contractJudgeModelId: cfg.judgeModelIds?.[0],
           // Verificações do contrato no MESMO raciocínio da run (juiz/competidor).
-          contractJudgeReasoningLevel: cfg.reasoning?.judge,
+          contractJudgeReasoningLevel: reasoningLevelForRole(cfg.reasoning, 'judge'),
           contestantReasoningLevel: cfg.reasoning?.competitor,
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
@@ -1024,6 +1033,9 @@ async function trainingLoop(
 
       // O ledger e a fonte de verdade do gasto (todos os papeis de todas as
       // runs + reescritor); somar `runRec.totalCostUsd` contaria duas vezes.
+      // IMPL-060: guarda a run por id — o dossiê de lições de cada membro do
+      // pool vem da run DELE (lições da própria run da variante).
+      runsById.set(runRec.id, runRec);
       syncLedger();
 
       // IMPL-004: vereditos perdidos da sessao = soma das runs (iteracoes,
@@ -1059,6 +1071,12 @@ async function trainingLoop(
         const specs = runRec.stages
           .map((s) => s.spec)
           .filter((s): s is StageSpec => Boolean(s));
+        // IMPL-062/IMPL-065: os cenários da sessão congelam aqui — é deles que
+        // vêm as fatias do pool (elitismo vs Pareto) e a contagem de itens
+        // curados (âncora humana) da declaração de campeão.
+        todasSpecs = specs;
+        nInstancias = specs.length;
+        fatiasMultiplas = sliceKeysOf(specs).length > 1;
         if (cfg.holdoutRatio !== 0) {
           // IMPL-050: piso ABSOLUTO de 10 cenários + ratio default 0,3. Fatia
           // curta não é holdout: é "confirmação fraca" (`strength`), o campeão
@@ -1091,10 +1109,15 @@ async function trainingLoop(
         runRec.stages,
         runRec.contestants.map((c) => c.id),
       );
-      const pick = pickWinner(buildRankEntries(runRec, controlId), {
-        minGain,
-        scoresById,
-      });
+      // IMPL-071: o desempate por tamanho só vale entre variantes com o
+      // contrato never-break v2 verde (ver buildRankEntries).
+      const pick = pickWinner(
+        buildRankEntries(runRec, controlId, { contractsActive: Boolean(cfg.contracts) }),
+        {
+          minGain,
+          scoresById,
+        },
+      );
       // IMPL-013: passou no gate da melhor de K → re-avaliação LIMPA num
       // minibatch antes de confirmar (as avaliações da seleção não confirmam a
       // própria seleção). Sem régua (treino sem prompt base, iteração 0) não há
@@ -1179,18 +1202,33 @@ async function trainingLoop(
 
       // F4.1: promocao entra no POOL (nunca derruba o campeao unico — o pool
       // e aditivo e o champion segue sendo o melhor absoluto p/ holdout).
+      // IMPL-062 (R-02b:REC-4): o pool SÓ existe com fatias múltiplas — com
+      // fatia única a dominância de Pareto vira comparação de média e o treino
+      // roda como elitismo EXPLÍCITO (sem estado de pool/paretoFront; o record
+      // não traz `pool` e nenhum teste/consumidor deve esperar paretoFront).
+      const paretoAtivo = poolSize > 1 && fatiasMultiplas;
       if (promoted) {
-        pool = addToPool(
-          pool,
-          {
-            id: `it-${i}`,
-            label: champion.label,
-            bySlice: sliceScoresOf(runRec, championIdInLastRun),
-            text: champion.systemPrompt,
-          },
-          { maxSize: poolSize },
-        );
+        if (paretoAtivo) {
+          pool = addToPool(
+            pool,
+            {
+              id: `it-${i}`,
+              label: champion.label,
+              bySlice: sliceScoresOf(runRec, championIdInLastRun),
+              text: champion.systemPrompt,
+              // Proveniência: o dossiê de lições do membro vem DESTE run/id.
+              runId: runRec.id,
+              contestantId: championIdInLastRun,
+            },
+            { maxSize: poolSize },
+          );
+          // F4.1: o front (sem o texto — grande demais p/ o record) mostra a
+          // POPULACAO que sobreviveu, nao so o campeao.
+          record.pool = pool.map((e) => ({ id: e.id, label: e.label ?? e.id, bySlice: e.bySlice }));
+        }
+        // ...com elitismo explícito o campeão É o estado: `record.pool` não existe.
       }
+      registrarDiagnostico();
 
       prevRun = runRec;
       emitSessionEvent({
@@ -1266,6 +1304,7 @@ async function trainingLoop(
 
     // 6) Gate final: holdout + significancia. NUNCA derruba a sessao — falha
     //    aqui vira warn e o treino termina com o que se tem.
+    let scoreCi95Pp: [number, number] | null = null;
     try {
       // O holdout é uma run extra. Sem orçamento para ela o campeão fica sem
       // CONFIRMAÇÃO contra sobreajuste — e isso precisa aparecer no resultado
@@ -1279,10 +1318,11 @@ async function trainingLoop(
         if (holdoutStages.length > 0) record.holdoutSkipped = true;
         log(sessionId, holdoutConfirmationText(0, { skipped: true }));
       } else {
-        await finalizeHoldout(record, apiKey, champion, championIdInLastRun, holdoutStages, prevRun, {
+        const gateFinal = await finalizeHoldout(record, apiKey, champion, championIdInLastRun, holdoutStages, prevRun, {
           ledger,
           signal,
         });
+        scoreCi95Pp = gateFinal.scoreCi95Pp ?? null;
       }
     } catch (err) {
       if (isControlSignal(err)) {
@@ -1297,6 +1337,19 @@ async function trainingLoop(
         );
       }
     }
+
+    // IMPL-065 (R-05:REC-4): declaração de campeão sob âncora HUMANA. Com
+    // curatedItems < minCuratedItems o treino NÃO declara campeão — o dataset
+    // sintético é bootstrap/treino, não evidência — e a recusa entra no
+    // resultado citando o número de itens curados e o piso.
+    const specsDeclaracao = todasSpecs.length
+      ? todasSpecs
+      : (record.pinnedStages ?? cfg.customStages ?? cfg.scenarioSeed ?? []);
+    record.championDeclaration = championDeclarationFor(specsDeclaracao, {
+      minCuratedItems: cfg.minCuratedItems,
+      scoreCi95Pp,
+    });
+    log(sessionId, record.championDeclaration.message);
 
     syncLedger();
     // Parou cedo (orçamento/cancelamento): resultado PARCIAL, e diz isso.
@@ -1345,10 +1398,12 @@ async function finalizeHoldout(
   holdoutStages: StageSpec[],
   lastRun: RunRecord | undefined,
   ctxOpts: { ledger?: BudgetLedger; signal?: AbortSignal } = {},
-): Promise<void> {
+): Promise<{ scoreCi95Pp?: [number, number] | null }> {
   const cfg = record.config;
   const sessionId = record.id;
   const basePrompt = cfg.basePrompt ?? '';
+  // IMPL-065: IC95 do score do campeão (pareado) — reportado na declaração.
+  let scoreCi95Pp: [number, number] | null = null;
   // Multi-prompt: no holdout o systemPrompt efetivo e a composicao do grupo.
   const comporHoldout = (fragmento: string): string =>
     cfg.promptGroup ? composePrompt(cfg.promptGroup, cfg.promptId, fragmento) : fragmento;
@@ -1436,6 +1491,7 @@ async function finalizeHoldout(
       'holdout-control',
       'holdout-champion',
     );
+    scoreCi95Pp = scoreCiOf(controlScores, championScores);
     const coverage = pairCoverage(controlScores, championScores);
     const controlScore = coverage.controlMeanPp ?? 0;
     const championScore = coverage.championMeanPp ?? 0;
@@ -1480,6 +1536,7 @@ async function finalizeHoldout(
         pairingControl,
         championIdInLastRun,
       );
+      scoreCi95Pp = scoreCiOf(controlScores, championScores);
       record.pairing = {
         source: 'training',
         controlId: pairingControl,
@@ -1497,4 +1554,5 @@ async function finalizeHoldout(
     }
   }
   await saveSession(record);
+  return { scoreCi95Pp };
 }

@@ -21,11 +21,14 @@ import type {
   CompetitorResponse,
   Contestant,
   JudgeConfidence,
+  JudgeResult,
+  JudgeVote,
   ReasoningLevel,
   ReferenceJudgeResult,
   StageSpec,
   Verdict,
   VerdictError,
+  VerdictErrorKind,
   VerdictSource,
   RunCtx,
 } from './types.js';
@@ -288,6 +291,12 @@ export async function judgeStageReference(
   const canaryByContestant: Record<string, string[]> = {};
   // IMPL-047: confianca do veredito agregado (menor entre os votos — triagem).
   const confidenceByContestant: Record<string, JudgeConfidence> = {};
+  // IMPL-057 (R-11a:REC-8): o voto de CADA juiz por contestant — veredito +
+  // explicação + confiança + canário, OU a falha do juiz (`error`, sem
+  // veredito). Antes o agregado descartava os singles e era impossível mostrar
+  // "2 de 3: resolve" com o divergente destacado. Ausente em vereditos
+  // determinísticos (ground-truth/auto — não há painel).
+  const judgeVotesByContestant: Record<string, JudgeVote[]> = {};
   const result = (inconclusive?: boolean): ReferenceJudgeResult => ({
     verdictByContestant,
     explanationByContestant,
@@ -296,6 +305,7 @@ export async function judgeStageReference(
     ...(Object.keys(verdictTieByContestant).length > 0 ? { verdictTieByContestant } : {}),
     ...(Object.keys(canaryByContestant).length > 0 ? { canaryByContestant } : {}),
     ...(Object.keys(confidenceByContestant).length > 0 ? { confidenceByContestant } : {}),
+    ...(Object.keys(judgeVotesByContestant).length > 0 ? { judgeVotesByContestant } : {}),
     judgeModelId,
     ...(inconclusive ? { inconclusive: true } : {}),
   });
@@ -382,6 +392,20 @@ export async function judgeStageReference(
   let algumVeredito = false;
   for (const r of judgeable) {
     const vs = singles.filter((s) => s.contestantId === r.contestantId);
+    // IMPL-057: persiste o voto de CADA juiz (inclusive a falha — badge
+    // 'avaliador falhou' é do juiz, nunca nota do candidato).
+    judgeVotesByContestant[r.contestantId] = vs.map(
+      (s): JudgeVote =>
+        s.ok
+          ? {
+              judgeModelId: s.judgeModelId,
+              verdict: s.verdict,
+              explanation: s.explanation,
+              ...(s.confianca ? { confianca: s.confianca } : {}),
+              canary: s.canary,
+            }
+          : { judgeModelId: s.judgeModelId, error: s.error },
+    );
     const oks = vs.filter((s): s is Extract<SingleVerdict, { ok: true }> => s.ok);
     if (oks.length === 0) {
       // Saida CORTADA tem precedencia no motivo (IMPL-015): e ela que o evento
@@ -415,4 +439,177 @@ export async function judgeStageReference(
 
   // Nenhum veredito de juiz na etapa inteira: a etapa nao pontua no placar.
   return result(!algumVeredito);
+}
+
+// ----------------------------------------------------------------------------
+// Diagnostico do juiz contestavel (IMPL-057, R-11a:REC-8) — helpers PUROS sobre
+// os votos/falhas ja persistidos. Continuam aqui (e nao num modulo novo de
+// `src/engine/`) porque sao a continuacao direta do contrato deste juiz
+// pointwise; o shim do web re-exporta tudo sem terceira copia.
+// ----------------------------------------------------------------------------
+
+/** Concordancia do painel de juizes — o "2 de 3: resolve" da UI. */
+export interface PanelAgreement {
+  /** Rótulo curto em PT-BR ("2 de 3: resolve"; "sem veredito (3 juízes)"). */
+  label: string;
+  /** Veredito agregado (o que a maioria endossa). Ausente = sem veredito. */
+  verdict?: Verdict;
+  /** Votos que endossam o veredito agregado. */
+  agreeCount: number;
+  /** Total de juízes do painel (inclui os que FALHARAM). */
+  total: number;
+  /** Juízes divergentes (destacar na UI). */
+  divergentJudgeIds: string[];
+  /** Juízes que FALHARAM (badge 'avaliador falhou' — ≠ veredito do candidato). */
+  failedJudgeIds: string[];
+}
+
+/**
+ * Concordância do painel a partir dos votos persistidos
+ * (`ReferenceJudgeResult.judgeVotesByContestant`). `aggregated` é o veredito
+ * agregado gravado (voto da maioria); sem ele, deriva dos votos. Juiz que
+ * falhou CONT no denominador (o painel tinha N juízes) mas nunca conta como
+ * voto — falha não é veredito (IMPL-004).
+ */
+export function panelAgreement(
+  votes: readonly JudgeVote[] | undefined,
+  aggregated?: Verdict,
+): PanelAgreement {
+  const todos = votes ?? [];
+  const oks = todos.filter((v): v is JudgeVote & { verdict: Verdict } => v.verdict !== undefined);
+  const deriva = aggregateVerdicts(oks.map((v) => v.verdict));
+  const verdict = aggregated ?? deriva?.verdict;
+  const agreeCount = verdict === undefined ? 0 : oks.filter((v) => v.verdict === verdict).length;
+  return {
+    label:
+      verdict === undefined
+        ? `sem veredito (${todos.length} juízes)`
+        : `${agreeCount} de ${todos.length}: ${verdict}`,
+    ...(verdict === undefined ? {} : { verdict }),
+    agreeCount,
+    total: todos.length,
+    divergentJudgeIds:
+      verdict === undefined ? [] : oks.filter((v) => v.verdict !== verdict).map((v) => v.judgeModelId),
+    failedJudgeIds: todos.filter((v) => v.verdict === undefined).map((v) => v.judgeModelId),
+  };
+}
+
+/**
+ * Categoria da falha (taxonomia tipo ErrorAtlas, R-11a:REC-8): o agrupamento
+ * GROSSO por quem falhou; a causa técnica fina continua em `VerdictErrorKind`.
+ */
+export type VerdictFailureCategory =
+  | 'judge'
+  | 'reference'
+  | 'infrastructure'
+  | 'gateway'
+  | 'competitor';
+
+/** Mapeia a causa técnica na categoria do ErrorAtlas. */
+export function failureCategoryOf(kind: VerdictErrorKind): VerdictFailureCategory {
+  switch (kind) {
+    case 'judge_failed':
+    case 'invalid_output':
+    case 'truncated':
+      return 'judge';
+    case 'no_reference':
+      return 'reference';
+    case 'timeout':
+      return 'infrastructure';
+    case 'blocked':
+      return 'gateway';
+    case 'competitor_error':
+    default:
+      return 'competitor';
+  }
+}
+
+/** Uma falha de veredito (chave AUSENTE em `verdictByContestant`) da run. */
+export interface VerdictFailureEntry {
+  stageIndex: number;
+  /** Cenário (rótulo curto — a pergunta da etapa), para o facet por cenário. */
+  scenario?: string;
+  contestantId: string;
+  /** Causa técnica (taxonomia `VerdictErrorKind`). */
+  kind: VerdictErrorKind;
+  message: string;
+}
+
+/** Grupo de falhas por (cenário, categoria, causa técnica) — o ErrorAtlas. */
+export interface VerdictFailureGroup {
+  category: VerdictFailureCategory;
+  /** Causa técnica. */
+  cause: VerdictErrorKind;
+  /** Cenário do grupo (facet (i)); ausente no rollup de cenários. */
+  scenario?: string;
+  count: number;
+  items: VerdictFailureEntry[];
+}
+
+/**
+ * Coleta as falhas de veredito de uma run: as chaves AUSENTES de
+ * `verdictByContestant` (IMPL-004) de cada etapa, do pointwise e do listwise.
+ * ⚠️ `verdictSource=degraded` é veredito PRESENTE com painel reduzido — nunca é
+ * falha do candidato e nunca entra aqui (critério IMPL-057).
+ */
+export function verdictFailuresFromStages(
+  stages: ReadonlyArray<{
+    spec?: { question?: string } | null;
+    referenceJudge?: Pick<ReferenceJudgeResult, 'verdictErrorByContestant' | 'verdictSourceByContestant'> | null;
+    judge?: Pick<JudgeResult, 'verdictErrorByContestant' | 'verdictSourceByContestant'> | null;
+  }>,
+): VerdictFailureEntry[] {
+  const entradas: VerdictFailureEntry[] = [];
+  stages.forEach((st, stageIndex) => {
+    const scenario = st.spec?.question;
+    for (const res of [st.referenceJudge, st.judge]) {
+      const erros = res?.verdictErrorByContestant;
+      if (!erros) continue;
+      for (const [contestantId, error] of Object.entries(erros)) {
+        if (res?.verdictSourceByContestant?.[contestantId] === 'degraded') continue;
+        entradas.push({
+          stageIndex,
+          ...(scenario ? { scenario } : {}),
+          contestantId,
+          kind: error.kind,
+          message: error.message,
+        });
+      }
+    }
+  });
+  return entradas;
+}
+
+/**
+ * Agrupa as falhas por (cenário, categoria, causa técnica) — a compressão da
+ * lista que o ErrorAtlas promete (fixture N3: 12 falhas em run 8×4 ⇒ ≤ 4 grupos,
+ * compressão ≥ 3:1). `rollupScenarios: true` funde os cenários num grupo só por
+ * (categoria, causa). Grupos ordenados por contagem decrescente (o maior primeiro).
+ */
+export function groupVerdictFailures(
+  entries: readonly VerdictFailureEntry[],
+  opts: { rollupScenarios?: boolean } = {},
+): VerdictFailureGroup[] {
+  const grupos = new Map<string, VerdictFailureGroup>();
+  for (const e of entries) {
+    const category = failureCategoryOf(e.kind);
+    const scenario = opts.rollupScenarios ? undefined : e.scenario;
+    const chave = `${scenario ?? ''}\u0000${category}\u0000${e.kind}`;
+    const g = grupos.get(chave);
+    if (g) {
+      g.items.push(e);
+      g.count += 1;
+    } else {
+      grupos.set(chave, {
+        category,
+        cause: e.kind,
+        ...(scenario ? { scenario } : {}),
+        count: 1,
+        items: [e],
+      });
+    }
+  }
+  return [...grupos.values()].sort(
+    (a, b) => b.count - a.count || a.cause.localeCompare(b.cause) || (a.scenario ?? '').localeCompare(b.scenario ?? ''),
+  );
 }

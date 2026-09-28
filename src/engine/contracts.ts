@@ -18,6 +18,7 @@
 // `variator` (que é quem chama o LLM).
 
 import { z } from 'zod';
+import { canonicalJson, sha256Hex } from './hash.js';
 
 /**
  * Canário comportamental (camada 3): uma entrada de usuário enviada ao MODELO
@@ -636,3 +637,343 @@ export const promptContractsSchema = z.object(
   },
   'contracts deve ser um objeto { neverBreak?, placeholders?, minLengthRatio?, judgeDiff?, canaries? }',
 );
+
+// ---------------------------------------------------------------------------
+// CONTAMINAÇÃO dados→prompt (IMPL-067, R-20:REC-9/DEC-8) e VAZAMENTO de
+// conjunto de guarda (IMPL-069, R-21:REC-2/REC-3).
+//
+// O prompt campeão não pode memorizar o benchmark: cenário/gabarito/explicação
+// do juiz colados no prompt inflam a nota na seleção e somem em produção (49%
+// das runs ficam abaixo do zero-shot na literatura — super-ajuste). Duas
+// leituras da sobreposição, com limiares DIFERENTES porque pegam coisas
+// diferentes:
+//
+//   • CONTAINMENT (alerta ≥ 0,3): fração dos 8-gramas do prompt que existem no
+//     corpus protegido, comparada em minúsculas/sem acento/espaço colapsado —
+//     pega cópia com caixa e acentos trocados, paráfrase rasa e recolagem.
+//     Só ALERTA: é ruído a relatar, não prova de cópia literal.
+//   • SPAN EXATO ≥ 8 TOKENS (BLOQUEIO): trecho idêntico token a token (só
+//     espaço é tolerado) presente nos DOIS lados — cópia literal de frase do
+//     cenário para dentro do prompt. O YAML/REC-9 fixa 8 tokens (o corpo da
+//     pesquisa sugeria 12; calibrar com dados reais quando houver sessões).
+//   • STRING-CANÁRIO migrada (BLOQUEIO): canário plantado no cenário que aparece
+//     no prompt — migração de dado para instrução, sem ambiguidade.
+//
+// Aplicação (os 2 pontos do DEC-8): métrica no `pickWinner` (pré-promoção) e
+// barreira final antes do handoff (`assertNoContamination`). Tudo LOCAL e
+// determinístico — custo ~zero, zero chamada de LLM.
+// ---------------------------------------------------------------------------
+
+/** Tokens por n-grama/span da sobreposição (REC-9: ≥ 8 tokens nos dois lados). */
+export const CONTAMINATION_NGRAM = 8;
+/** Span exato mínimo (tokens) que BLOQUEIA (prompt = cópia literal do corpus). */
+export const CONTAMINATION_SPAN_TOKENS = 8;
+/** Containment de 8-gramas que DISPARA O ALERTA (0,3 = 30% do prompt é corpus). */
+export const CONTAINMENT_ALERT_RATIO = 0.3;
+
+/** Token + posição no texto original (para redigir sem tocar o resto). */
+interface RawToken {
+  t: string;
+  start: number;
+  end: number;
+}
+
+function rawTokens(text: string): RawToken[] {
+  const out: RawToken[] = [];
+  for (const m of asText(text).matchAll(/\S+/g)) {
+    const start = m.index ?? 0;
+    out.push({ t: m[0], start, end: start + m[0].length });
+  }
+  return out;
+}
+
+/** Chave de n-grama: tokens unidos por separador que nunca aparece em token. */
+const NGRAM_SEP = '\u0001';
+
+function ngramKeys(tokens: readonly string[], n: number): Set<string> {
+  const keys = new Set<string>();
+  for (let i = 0; i + n <= tokens.length; i += 1) {
+    keys.add(tokens.slice(i, i + n).join(NGRAM_SEP));
+  }
+  return keys;
+}
+
+/**
+ * Runs MÁXIMOS de janelas consecutivas que casam no corpus. Só janelas
+ * consecutivas formam span exato maior (janelas 0 e 2 com a 1 a falhar são DOIS
+ * spans de 8 tokens que se sobrepõem, nunca um span de 10). Devolve pares
+ * [índice do 1º token, índice do último token] do trecho compartilhado.
+ */
+function exactSpanRanges(
+  tokenCount: number,
+  n: number,
+  isHit: (from: number) => boolean,
+): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let runStart = -1;
+  let runEnd = -1;
+  let prevHit = -2;
+  for (let i = 0; i + n <= tokenCount; i += 1) {
+    if (!isHit(i)) continue;
+    if (i === prevHit + 1 && runStart >= 0) {
+      runEnd = i + n - 1;
+    } else {
+      if (runStart >= 0) ranges.push([runStart, runEnd]);
+      runStart = i;
+      runEnd = i + n - 1;
+    }
+    prevHit = i;
+  }
+  if (runStart >= 0) ranges.push([runStart, runEnd]);
+  return ranges;
+}
+
+/** Máximos trechos exatos (≥ `minTokens`) compartilhados entre prompt e corpus. */
+function sharedExactSpans(
+  prompt: string,
+  protectedTexts: readonly string[],
+  minTokens: number,
+): string[] {
+  const toks = rawTokens(prompt);
+  if (toks.length < minTokens) return [];
+  const corpus = new Set<string>();
+  for (const src of protectedTexts ?? []) {
+    for (const key of ngramKeys(rawTokens(src).map((k) => k.t), minTokens)) corpus.add(key);
+  }
+  const ranges = exactSpanRanges(toks.length, minTokens, (i) =>
+    corpus.has(toks.slice(i, i + minTokens).map((k) => k.t).join(NGRAM_SEP)),
+  );
+  return [...new Set(ranges.map(([a, b]) => prompt.slice(toks[a].start, toks[b].end)))];
+}
+
+/**
+ * Containment de 8-gramas: fração das janelas do prompt cujo 8-grama existe no
+ * corpus protegido (comparação NORMALIZADA — minúsculas, sem acento, espaço
+ * colapsado). 0 quando o prompt não tem 8-grama completo.
+ */
+export function ngramContainment(prompt: string, protectedTexts: readonly string[]): number {
+  const toks = rawTokens(prompt).map((k) => foldAccents(k.t.toLowerCase()));
+  if (toks.length < CONTAMINATION_NGRAM) return 0;
+  const corpus = new Set<string>();
+  for (const src of protectedTexts ?? []) {
+    for (const key of ngramKeys(rawTokens(src).map((k) => foldAccents(k.t.toLowerCase())), CONTAMINATION_NGRAM)) {
+      corpus.add(key);
+    }
+  }
+  let total = 0;
+  let hits = 0;
+  for (let i = 0; i + CONTAMINATION_NGRAM <= toks.length; i += 1) {
+    total += 1;
+    if (corpus.has(toks.slice(i, i + CONTAMINATION_NGRAM).join(NGRAM_SEP))) hits += 1;
+  }
+  return total === 0 ? 0 : hits / total;
+}
+
+/** Strings-canário que migraram para o texto (comparação normalizada, exata). */
+function canaryHitsIn(text: string, canaries: readonly string[] | undefined): string[] {
+  const alvo = foldAccents(asText(text).toLowerCase());
+  const hits: string[] = [];
+  for (const canary of canaries ?? []) {
+    const needle = foldAccents(asText(canary).trim().toLowerCase());
+    if (needle && alvo.includes(needle)) hits.push(canary);
+  }
+  return hits;
+}
+
+/** Veredito de contaminação do prompt campeão contra o corpus protegido. */
+export interface ContaminationCheck {
+  /** Fração dos 8-gramas do prompt presentes no corpus (0..1). */
+  containment: number;
+  /** `containment` ≥ {@link CONTAINMENT_ALERT_RATIO} (alerta, não bloqueio). */
+  alert: boolean;
+  /** Spans exatos de ≥ 8 tokens migrados do corpus para o prompt. */
+  exactSpans: string[];
+  /** Strings-canário do cenário migradas para o prompt. */
+  canaryHits: string[];
+  /** BLOQUEIO (barreira): span exato ≥ 8 tokens OU canário migrado. */
+  blocked: boolean;
+  /** Mensagem PT-BR curta (vazia quando o prompt está limpo). */
+  detail: string;
+}
+
+/**
+ * Mede a contaminação dados→prompt do `prompt` contra `protectedTexts`
+ * (cenários ∪ gabaritos ∪ explicações do juiz) + canários plantados. Local,
+ * determinístico e barato — roda em toda campeã (métrica no `pickWinner`) e
+ * como barreira final do handoff (`assertNoContamination`).
+ */
+export function contaminationCheck(
+  prompt: string,
+  protectedTexts: readonly string[],
+  opts?: { canaries?: readonly string[] },
+): ContaminationCheck {
+  const text = asText(prompt);
+  const containment = ngramContainment(text, protectedTexts ?? []);
+  const exactSpans = sharedExactSpans(text, protectedTexts ?? [], CONTAMINATION_SPAN_TOKENS);
+  const canaryHits = canaryHitsIn(text, opts?.canaries);
+  const alert = containment >= CONTAINMENT_ALERT_RATIO;
+  const blocked = exactSpans.length > 0 || canaryHits.length > 0;
+  const motivos: string[] = [];
+  if (exactSpans.length > 0) {
+    motivos.push(
+      `span exato de ≥ ${CONTAMINATION_SPAN_TOKENS} tokens do corpus protegido colado no prompt (${exactSpans.length}: "${exactSpans[0].slice(0, 80)}…")`,
+    );
+  }
+  if (canaryHits.length > 0) {
+    motivos.push(`string-canário migrada do cenário (${canaryHits.join(', ')})`);
+  }
+  if (alert) {
+    motivos.push(`containment de 8-gramas ${(containment * 100).toFixed(0)}% ≥ ${CONTAINMENT_ALERT_RATIO * 100}%`);
+  }
+  return {
+    containment,
+    alert,
+    exactSpans,
+    canaryHits,
+    blocked,
+    detail: motivos.join('; '),
+  };
+}
+
+/**
+ * BARRERA FINAL de contaminação (handoff `sessions winner --apply` e pré-promoção):
+ * lança erro PT-BR quando o prompt campeão carrega dado do benchmark. Devolve
+ * o veredito quando limpo (para o chamador reportar o containment).
+ */
+export function assertNoContamination(
+  prompt: string,
+  protectedTexts: readonly string[],
+  opts?: { canaries?: readonly string[] },
+): ContaminationCheck {
+  const check = contaminationCheck(prompt, protectedTexts, opts);
+  if (check.blocked) {
+    throw new Error(
+      `prompt campeão BLOQUEADO por contaminação dados→prompt (super-ajuste ao benchmark): ${check.detail}. ` +
+        'Reveja o diff antes de aplicar — o ganho medido é inseparável da memorização de cenários.',
+    );
+  }
+  return check;
+}
+
+/**
+ * Canário determinístico por cenário (IMPL-069): string exótica e estável,
+ * plantada no `productContext`/rubrica do cenário. Se ela aparecer num prompt
+ * (contaminação) ou numa resposta (vazamento de system prompt), a migração é
+ * prova — sem depender de n-grama nem de juiz.
+ */
+export function scenarioCanary(seed: string): string {
+  return `CANARIA-${sha256Hex(`canario-de-cenario:${asText(seed)}`).slice(0, 12).toUpperCase()}`;
+}
+
+/** Estados da métrica de segurança (IMPL-069) — separados do judge-score. */
+export type SecurityState = 'violation' | 'refusal' | 'response';
+
+/** Veredito de vazamento (canário exato + similaridade de n-gramas). */
+export interface LeakCheck {
+  /** true = dado do benchmark/canário vazou para a saída. */
+  leak: boolean;
+  /** O que denunciou: canário migrado, span exato do corpus ou nada. */
+  via: 'canary' | 'span' | 'none';
+  canaryHits: string[];
+  exactSpans: string[];
+  /** Mesmo containment de 8-gramas do prompt (similaridade com o corpus). */
+  containment: number;
+  /**
+   * Sobreposição alta SEM span exato (cópia recortada/recolada): suspeito —
+   * o classificador/juiz de segurança decide (fora deste módulo puro).
+   */
+  suspect: boolean;
+  /** Mensagem PT-BR curta (vazia quando limpo). */
+  detail: string;
+}
+
+/**
+ * Vazamento de dado na RESPOSTA do modelo sob teste (canário exato + similaridade
+ * de n-gramas/limiar — IMPL-069). `canaries` são as strings plantadas nos
+ * cenários; `protectedTexts` é o corpus (cenários ∪ gabaritos ∪ explicações).
+ * Repetir a POLÍTICA do app não é vazamento: sem canário e sem span exato do
+ * corpus, `leak` é false mesmo com texto defensivo parecido.
+ */
+export function checkLeak(
+  response: string,
+  opts?: { canaries?: readonly string[]; protectedTexts?: readonly string[] },
+): LeakCheck {
+  const text = asText(response);
+  const protectedTexts = opts?.protectedTexts ?? [];
+  const canaryHits = canaryHitsIn(text, opts?.canaries);
+  const exactSpans = sharedExactSpans(text, protectedTexts, CONTAMINATION_SPAN_TOKENS);
+  const containment = ngramContainment(text, protectedTexts);
+  const via: LeakCheck['via'] = canaryHits.length > 0 ? 'canary' : exactSpans.length > 0 ? 'span' : 'none';
+  const leak = via !== 'none';
+  const suspect = !leak && containment >= CONTAINMENT_ALERT_RATIO;
+  const detail = leak
+    ? `vazamento (${via === 'canary' ? 'canário migrado' : 'span exato do corpus'}): ${
+        canaryHits.length > 0 ? canaryHits.join(', ') : exactSpans[0].slice(0, 80)
+      }`
+    : suspect
+      ? `sobreposição alta com o corpus sem span exato (containment ${(containment * 100).toFixed(0)}%) — encaminhe ao classificador de segurança`
+      : '';
+  return { leak, via, canaryHits, exactSpans, containment, suspect, detail };
+}
+
+/**
+ * Redige do TEXTO os spans exatos do conjunto de guarda (IMPL-069: o conjunto de
+ * guarda é INVISÍVEL ao otimizador — se cenários de segurança entrassem em
+ * lições/demos, o reescritor passaria a otimizar contra eles, Goodhart). Usado
+ * no payload do reescritor: o que vazar de lições/demos é substituído por
+ * `[trecho do conjunto de guarda redigido]` antes de ir ao LLM.
+ */
+export function redactGuardSpans(
+  text: string,
+  guardTexts: readonly string[],
+): { text: string; redactions: string[] } {
+  const src = asText(text);
+  const toks = rawTokens(src);
+  const guard = (guardTexts ?? [])
+    .map((g) => rawTokens(g).map((k) => k.t))
+    .filter((g) => g.length >= CONTAMINATION_SPAN_TOKENS);
+  if (toks.length < CONTAMINATION_SPAN_TOKENS || guard.length === 0) {
+    return { text: src, redactions: [] };
+  }
+
+  // Índice dos n-gramas do guarda (janelas de 8 tokens — o span exato inteiro
+  // é coberto pelo run de janelas consecutivas).
+  const keys = new Set<string>();
+  for (const g of guard) {
+    for (const key of ngramKeys(g, CONTAMINATION_SPAN_TOKENS)) keys.add(key);
+  }
+
+  const ranges = exactSpanRanges(toks.length, CONTAMINATION_SPAN_TOKENS, (i) =>
+    keys.has(toks.slice(i, i + CONTAMINATION_SPAN_TOKENS).map((k) => k.t).join(NGRAM_SEP)),
+  );
+  if (ranges.length === 0) return { text: src, redactions: [] };
+
+  const redactions = ranges.map(([a, b]) => toks.slice(a, b + 1).map((k) => k.t).join(' '));
+  let out = '';
+  let cursor = 0;
+  for (const [a, b] of ranges) {
+    out += src.slice(cursor, toks[a].start) + '[trecho do conjunto de guarda redigido]';
+    cursor = toks[b].end;
+  }
+  out += src.slice(cursor);
+  return { text: out, redactions: [...new Set(redactions)] };
+}
+
+/**
+ * IMPL-070 (R-20:REC-8/M-120): fingerprint dos META-PROMPTS internos por papel
+ * (reescritor, reflexão, datagen, gabarito, juízes…). Os prompts embutidos do
+ * reescritor/reflexão/datagen mudavam sem rastro — duas sessões de treino com
+ * meta-prompts diferentes ficavam comparáveis por acaso. Este hash estável
+ * (JCS + SHA-256, idêntico nos dois runtimes) entra no hash de contrato da run
+ * junto com o pin do juiz: qualquer edição de texto de meta-prompt muda o hash
+ * e o snapshot do contrato acusa (cadência: mudança de texto, troca de modelo
+ * default de papel, mensal).
+ */
+export function metaPromptsFingerprint(roleTexts: Record<string, string>): string {
+  const ordenado: Record<string, string> = {};
+  for (const key of Object.keys(roleTexts ?? {}).sort()) {
+    const value = roleTexts[key];
+    if (typeof value === 'string') ordenado[key] = value;
+  }
+  return sha256Hex(canonicalJson(ordenado));
+}

@@ -143,7 +143,7 @@
     "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc -p tsconfig.json",
     "build:all": "npm run build && npm run web:build",
-    "prepublishOnly": "npm run build && npm test && npm run gate:publint && npm run gate:attw && npm run gate:tarball && npm run gate:smoke",
+    "prepublishOnly": "npm run build && npm run test:full && npm run gate:publint && npm run gate:attw && npm run gate:tarball && npm run gate:smoke",
     "setup": "npm --prefix web install",
     "cli": "tsx src/cli/index.ts",
     "dev": "concurrently -n bench,web -c blue,green \"tsx watch src/server.ts\" \"npm run web:dev\"",
@@ -161,7 +161,9 @@
     "gate:tarball": "node scripts/tarball-gate.mjs",
     "gate:smoke": "node scripts/tarball-smoke.mjs",
     "changeset": "changeset",
-    "version-packages": "changeset version"
+    "version-packages": "changeset version",
+    "pretest": "npm run build",
+    "test:full": "PB_FULL=1 vitest run"
   },
   "dependencies": {
     "zod": "^4.0.0"

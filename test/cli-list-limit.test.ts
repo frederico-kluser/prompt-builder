@@ -7,6 +7,7 @@
 // indentado. Zero rede: o catálogo vem do cache em disco semeado aqui.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { nodeOrTsx } from './support/cli.js';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,8 +17,7 @@ import { EXIT } from '../src/cli/output.js';
 import { DEFAULT_LIST_LIMIT, limitList, parseListLimit } from '../src/cli/context.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
-const ENTRY = path.join(ROOT, 'src', 'cli', 'index.ts');
+const { cmd: TSX, entry: ENTRY } = nodeOrTsx(path.join(ROOT, 'src', 'cli', 'index.ts'));
 const DEAD_BASE = 'http://127.0.0.1:9/api/v1';
 
 /** Catálogo semeado MAIOR que o teto: dá para ver o truncamento de verdade. */

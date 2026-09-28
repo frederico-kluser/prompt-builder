@@ -60,6 +60,10 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   roleLimits: 'shim',
   // Onda 2: identidade de conteúdo (contentHash/JCS) — fonte única em src/engine/hash.ts.
   hash: 'shim',
+  // IMPL-080 (R-08:REC-3): cache EXATO de vereditos (chave por hash de
+  // modelo+esforço+temperatura+max_tokens+contrato do juiz+prompt, TTL, carry e
+  // re-teste amostral com invalidação) — fonte única em src/engine/.
+  verdictCache: 'shim',
   // IMPL-087/IMPL-089 (R-22): curadoria por item (states/contentHash/provenance)
   // e o formato de troca prompt-builder-exchange@1 são fonte única em
   // src/engine/ — o web re-exporta por shim (nunca uma terceira cópia).
@@ -89,6 +93,7 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
 const CANONICO_EM: Record<string, string> = {
   caseInput: 'engine/caseInput',
   hash: 'engine/hash',
+  verdictCache: 'engine/verdictCache',
   libraryCore: 'engine/libraryCore',
   exchange: 'engine/exchange',
 };

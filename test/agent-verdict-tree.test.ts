@@ -52,14 +52,18 @@ vi.mock('../src/agent/pi.js', async (importOriginal) => {
       ...orig.piExecutor,
       id: 'pi-fake',
       prepare: async () => ({ bin: 'pi-fake', env: {} }),
-      run: async (opts: { workspaceDir: string; workDir: string; env: Record<string, string> }) => {
+      run: async (opts: { workspaceDir: string; workDir: string; env: Record<string, string>; modelId?: string; instruction?: string }) => {
         fake.calls += 1;
         const rep = Number(opts.workDir.split(/[\\/]/).pop());
-        const passo = fake.roteiro({ modelId: opts.env.PI_MODEL_ID, question: opts.env.PI_TASK, rep });
+        // Contrato v2 (IMPL-095): modelo/tarefa vêm do `AgentRunOpts`; o env
+        // `PI_*` é só tolerância legada (mesma precedência do `pi.ts` real).
+        const modelId = opts.modelId ?? opts.env.PI_MODEL_ID;
+        const question = opts.instruction ?? opts.env.PI_TASK;
+        const passo = fake.roteiro({ modelId, question, rep });
         passo.before?.();
         if (passo.throws) throw new Error(passo.throws);
         for (const f of passo.write ?? []) write(join(opts.workspaceDir, f), 'ok\n', 'utf8');
-        return fakeOutcome(passo.stopReason, opts.env.PI_MODEL_ID);
+        return fakeOutcome(passo.stopReason, modelId);
       },
     },
   };
@@ -437,7 +441,8 @@ function gatewayFalso(passo: ReturnType<Roteiro>, prepareFalha = false): AgentGa
     run: async (opts) => {
       if (passo.throws) throw new Error(passo.throws);
       for (const f of passo.write ?? []) writeFileSync(path.join(opts.workspaceDir, f), 'ok\n', 'utf8');
-      return fakeOutcome(passo.stopReason, opts.env.PI_MODEL_ID) as never;
+      // Contrato v2 (IMPL-095): o modelo vem do `AgentRunOpts` (env `PI_*` é legado).
+      return fakeOutcome(passo.stopReason, opts.modelId ?? opts.env.PI_MODEL_ID) as never;
     },
   };
 }

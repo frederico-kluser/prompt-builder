@@ -7,6 +7,7 @@
 // `fetch` normalizaria `%2e%2e` antes de sair e o teste não provaria nada).
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { nodeOrTsx } from './support/cli.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
@@ -50,8 +51,7 @@ import type { RunRecord, SessionRecord } from '../src/types.js';
 import type { ExecutionRecord } from '../src/agent/types.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
-const CLI = path.join(ROOT, 'src', 'cli', 'index.ts');
+const { cmd: TSX, entry: CLI } = nodeOrTsx(path.join(ROOT, 'src', 'cli', 'index.ts'));
 
 /** Caminho absoluto POSIX/Windows numa mensagem (o que NÃO pode vazar). */
 const ABS_PATH_RE = /(^|[\s'"(=])(\/[\w.-]+\/|[A-Za-z]:\\)/u;
@@ -326,7 +326,7 @@ describe('IMPL-024 — superfície HTTP (rotas + Host/Origin + bind)', () => {
 // ---------------------------------------------------------------------------
 
 describe('IMPL-024 — entrypoint real do servidor (processo tsx)', () => {
-  const SERVER = path.join(ROOT, 'src', 'server.ts');
+  const { cmd: SRV_CMD, entry: SERVER } = nodeOrTsx(path.join(ROOT, 'src', 'server.ts'));
 
   it('sem HOST: sobe em 127.0.0.1 (não em todas as interfaces) e aplica a guarda de Host', async () => {
     const home = mkdtempSync(path.join(tmpdir(), 'pb-impl024-srv-'));

@@ -43,6 +43,9 @@ let persist: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.stubGlobal('localStorage', memoryLocalStorage());
+  // O portão BYOK (IMPL-082) rejeita rotas que gastam sem key (re-prompt): o
+  // teste de persistência instala uma de teste, como a UI faria.
+  api.setStoredKey('sk-or-v1-teste-persistencia', { remember: true });
   persist = vi.fn(async () => false);
   health.setStorageManager({ persist, persisted: async () => false });
   startRun.mockClear();

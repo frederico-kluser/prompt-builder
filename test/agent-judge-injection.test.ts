@@ -35,8 +35,11 @@ vi.mock('../src/agent/pi.js', async (importOriginal) => {
       ...orig.piExecutor,
       id: 'pi-fake',
       prepare: async () => ({ bin: 'pi-fake', env: {} }),
-      run: async (opts: { workspaceDir: string; env: Record<string, string> }) => {
-        const { PI_TASK: q, PI_MODEL_ID: m } = opts.env;
+      run: async (opts: { workspaceDir: string; env: Record<string, string>; modelId?: string; instruction?: string }) => {
+        // Contrato v2 (IMPL-095): modelo/tarefa vêm do `AgentRunOpts`; o env
+        // `PI_*` é só tolerância legada (mesma precedência do `pi.ts` real).
+        const m = opts.modelId ?? opts.env.PI_MODEL_ID;
+        const q = opts.instruction ?? opts.env.PI_TASK;
         for (const f of fake.escreve(q, m)) write(join(opts.workspaceDir, f), 'ok\n', 'utf8');
         return fakeOutcome(m);
       },
@@ -524,7 +527,8 @@ function executorComPassos(): AgentGateway {
     prepare: async () => ({ bin: 'pi-fake', env: {} }),
     run: async (opts) => {
       writeFileSync(path.join(opts.workspaceDir, 'done.txt'), 'ok\n', 'utf8');
-      return fakeOutcome(opts.env.PI_MODEL_ID, TURNOS_COM_PASSOS) as never;
+      // Contrato v2 (IMPL-095): o modelo vem do `AgentRunOpts` (env `PI_*` é legado).
+      return fakeOutcome(opts.modelId ?? opts.env.PI_MODEL_ID, TURNOS_COM_PASSOS) as never;
     },
   };
 }

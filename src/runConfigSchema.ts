@@ -210,12 +210,16 @@ const baseFields = {
   // Etapas fornecidas pelo usuario (JSON): pulam o datagen. Quando presentes,
   // `stages` e forcado ao tamanho desta lista (ver preprocess do runConfigSchema).
   customStages: z.array(stageSpecSchema).min(1).max(50).optional(),
-  // Esforco de raciocinio por papel (competitor/judge/rewriter/datagen);
-  // papel ausente = default do pipeline.
+  // Esforco de raciocinio por papel (competitor/judge/duel/gab/rewriter/datagen);
+  // papel ausente = default do pipeline. IMPL-079: juiz/duelo/gabarito deixam de
+  // compartilhar o `judge` unico — papel novo sem campo cai no `judge` antigo e,
+  // sem nenhum dos dois, no default do papel (judge=medium, duel=low, gab=high).
   reasoning: z
     .object({
       competitor: reasoningLevelSchema.optional(),
       judge: reasoningLevelSchema.optional(),
+      duel: reasoningLevelSchema.optional(),
+      gab: reasoningLevelSchema.optional(),
       rewriter: reasoningLevelSchema.optional(),
       datagen: reasoningLevelSchema.optional(),
     })

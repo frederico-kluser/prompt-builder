@@ -138,6 +138,14 @@ export interface CostEntry {
    * por papel sai daqui contra `usd` (o valor efetivamente cobrado).
    */
   estimatedUsd?: number;
+  /**
+   * IMPL-080 (R-08:REC-3) — cache EXATO de vereditos, agregado por papel:
+   * `cacheTotal` = lookups de veredito (hits + misses), `cacheHits` = servidos
+   * do cache. Sobem em `run.spend` junto com `byRole`. Um hit NÃO conta em
+   * `calls` (não houve chamada upstream nem gasto).
+   */
+  cacheHits?: number;
+  cacheTotal?: number;
 }
 
 /**
@@ -307,6 +315,14 @@ export interface CostSink {
       finish?: CallFinishSignals;
     },
   ): void;
+  /**
+   * IMPL-080 (R-08:REC-3) — contagem do cache EXATO de vereditos: cada lookup
+   * de veredito (hit ou miss) passa por aqui e sobe para `byRole` (logo para o
+   * evento `run.spend`, campo `cacheHits`/`cacheTotal` do `CostEntry`). Um hit
+   * NAO e chamada upstream nem gasto — por isso o conto e proprio e nao o
+   * `note`. Opcional: sinks antigos simplesmente nao contam.
+   */
+  noteVerdictCache?(entry: { role: CostRole; hit: boolean }): void;
   /**
    * LGPD (IMPL-042): identidade do escopo do cofre de pseudonimos — a RAIZ do
    * ledger (run avulsa ou sessao de treino). Mesmo escopo = mesmos tokens em
@@ -482,6 +498,10 @@ export type ReasoningLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xh
 export interface ReasoningConfig {
   competitor?: ReasoningLevel;
   judge?: ReasoningLevel;
+  /** IMPL-079: esforço do DUELO das finais (default `low`; ausente → `judge`). */
+  duel?: ReasoningLevel;
+  /** IMPL-079: esforço do GABARITO/referência (default `high`; ausente → `judge`). */
+  gab?: ReasoningLevel;
   rewriter?: ReasoningLevel;
   datagen?: ReasoningLevel;
 }
@@ -1557,7 +1577,9 @@ export interface RunRecord {
    * amostra humana de auditoria (5–10%, acionada por discordância). A
    * referência sintética é o elo mais fraco da run — sem esta fila, erro de
    * gabarito vira veredito contra a resposta certa e ninguém fica sabendo.
-   * `normalizeRunRecord` deriva a fila das etapas quando o record não a traz.
+   * Sai de `humanReviewQueueFromStages` (`engine/groundTruth.ts`) sobre as
+   * validações gravadas em `StageRecord.spec.referenceValidation`; o re-read
+   * preserva o campo (`normalizeRunRecord` espalha `...raw`).
    */
   needsHumanReview?: HumanReviewItem[];
   /**

@@ -10,6 +10,7 @@
 // Tudo pelo PROCESSO REAL (tsx): o exit code é o contrato.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { nodeOrTsx } from './support/cli.js';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,8 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { EXIT } from '../src/cli/output.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
-const ENTRY = path.join(ROOT, 'src', 'cli', 'index.ts');
+const { cmd: TSX, entry: ENTRY } = nodeOrTsx(path.join(ROOT, 'src', 'cli', 'index.ts'));
 
 let home = '';
 

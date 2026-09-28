@@ -41,6 +41,7 @@ import { formatIterationGate, pairedSignificance, VERDICT_SCORE } from './stats.
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { mergeFailureCounts } from './engine/verdictIntegrity.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
+import { reasoningLevelForRole } from './modelCaps.js';
 import { listModels } from './openrouter.js';
 import { enforceRunCompliance } from './lgpd.js';
 import type {
@@ -111,8 +112,9 @@ function meanPlacementOf(run: RunRecord, contestantId: string): number | undefin
  * pelo gate de 3 camadas com `contracts` ativo). Sem isso o desempate
  * "o mais curto vence" premiava quem APAGA texto — inclusive cláusulas
  * defensivas que o gate substring nao protege.
+ * Exportado para os testes de contrato (test/trainer-size-floor.test.ts).
  */
-function buildRankEntries(
+export function buildRankEntries(
   run: RunRecord,
   controlId: string,
   opts: { contractsActive?: boolean } = {},
@@ -409,6 +411,7 @@ function truncateToFit(
   });
   let truncatedFields = 0;
   const tocadas = new Set<string>();
+  const camposTocados = new Set<string>();
   while (over > 0 && alvos.length) {
     let maior = alvos[0];
     for (const a of alvos) {
@@ -416,15 +419,21 @@ function truncateToFit(
     }
     const atual = (maior.entry[maior.campo] ?? '') as string;
     const corte = Math.min(over + 1, atual.length - MIN_LESSON_FIELD_CHARS);
-    if (corte <= 0) {
+    // corte <= 1 = o campo só tem 1 char de folga acima do piso: recortá-lo não
+    // encolhe nada (o "…" repõe o char cortado) e prenderia o laço para sempre —
+    // sai dos alvos e o próximo campo mais longo assume.
+    if (corte <= 1) {
       alvos.splice(alvos.indexOf(maior), 1);
       continue;
     }
     maior.entry[maior.campo] = `${atual.slice(0, atual.length - corte).trimEnd()}…`;
     over -= corte - 1;
-    truncatedFields += 1;
+    if (!camposTocados.has(`${maior.rotulo}:${maior.campo}`)) {
+      camposTocados.add(`${maior.rotulo}:${maior.campo}`);
+      truncatedFields += 1;
+    }
     tocadas.add(maior.rotulo);
-    if ((maior.entry[maior.campo] ?? '').length <= MIN_LESSON_FIELD_CHARS) {
+    if ((maior.entry[maior.campo] ?? '').length <= MIN_LESSON_FIELD_CHARS + 1) {
       alvos.splice(alvos.indexOf(maior), 1);
     }
   }
@@ -905,7 +914,7 @@ async function trainingLoop(
           // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
           contractJudgeModelId: cfg.judgeModelIds?.[0],
           // Verificações do contrato no MESMO raciocínio da run (juiz/competidor).
-          contractJudgeReasoningLevel: cfg.reasoning?.judge,
+          contractJudgeReasoningLevel: reasoningLevelForRole(cfg.reasoning, 'judge'),
           contestantReasoningLevel: cfg.reasoning?.competitor,
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
@@ -989,7 +998,7 @@ async function trainingLoop(
           // IMPL-011: juiz do diff do contrato = 1º juiz da run (não o reescritor).
           contractJudgeModelId: cfg.judgeModelIds?.[0],
           // Verificações do contrato no MESMO raciocínio da run (juiz/competidor).
-          contractJudgeReasoningLevel: cfg.reasoning?.judge,
+          contractJudgeReasoningLevel: reasoningLevelForRole(cfg.reasoning, 'judge'),
           contestantReasoningLevel: cfg.reasoning?.competitor,
           // Multi-prompt (F2/P0.4): evolui 1 fragmento, irmaos congelados.
           promptGroup: cfg.promptGroup,
