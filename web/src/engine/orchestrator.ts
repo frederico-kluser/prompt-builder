@@ -5,7 +5,7 @@ import { judgeStage, JUDGE_LISTWISE_CONTRACT_TEXT } from './judge';
 import { generateReferences } from './gabarito';
 import { judgeStageReference } from './refJudge';
 import { blindRankMap, DUEL_HEAD, pickFinalists, runStageDuels, seedFromId, VERDICT_SCORE } from './duels';
-import { oracleScoresFromVerdicts } from '../../../src/engine/duelCore.js';
+import { buildFinalStandings, oracleScoresFromVerdicts } from '../../../src/engine/duelCore.js';
 import { assessVerdictIntegrity } from '../../../src/engine/verdictIntegrity.js';
 import { VERDICT_AGGREGATION } from '../../../src/engine/verdictAggregate.js';
 import { fairnessWarningsForModels } from './llmVariants';
@@ -1109,39 +1109,16 @@ async function runLoop(
   if (stagesComDuelos.length > 0) {
     // Taxa de vitória agregada cross-estagio (IMPL-007, R-04:DEC-5): vitoria 1,
     // empate 0.5, derrota 0, dividido pelos duelos disputados. NAO e Copeland.
-    const acc = new Map(
-      record.contestants.map((c) => [c.id, { wins: 0, ties: 0, losses: 0 }]),
-    );
-    for (const s of stagesComDuelos) {
-      for (const d of s.duels!.duels) {
-        const A = acc.get(d.a);
-        const B = acc.get(d.b);
-        if (!A || !B) continue;
-        if (d.outcome === 'a') {
-          A.wins += 1;
-          B.losses += 1;
-        } else if (d.outcome === 'b') {
-          B.wins += 1;
-          A.losses += 1;
-        } else {
-          A.ties += 1;
-          B.ties += 1;
-        }
-      }
-    }
-    record.standings = [...acc.entries()]
-      .map(([id, s]) => {
-        const played = s.wins + s.ties + s.losses;
-        return {
-          id,
-          label: labelOf(id),
-          isControl: id === controlId,
-          ...s,
-          winRate: played > 0 ? Number(((s.wins + 0.5 * s.ties) / played).toFixed(4)) : 0,
-        };
-      })
-      // Estavel: empate de taxa (e de vitorias) mantem a ordem dos contestants.
-      .sort((a, b) => b.winRate - a.winRate || b.wins - a.wins);
+    // Desempate (cli#1, espelho do Node): vitorias, judge-score, rank cego —
+    // NUNCA a ordem dos contestants (o controle e sempre o 1o).
+    record.standings = buildFinalStandings({
+      contestantIds: record.contestants.map((c) => c.id),
+      duels: stagesComDuelos.flatMap((s) => s.duels!.duels),
+      labelOf,
+      controlId,
+      judgeScoreByContestant: record.judgeScoreByContestant,
+      seed: seedFromId(record.id),
+    });
   }
 
   // IMPL-005 (R-04:REC-2): n nominal × efetivo por contestant, motivo de cada

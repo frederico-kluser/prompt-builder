@@ -43,6 +43,7 @@ import {
 } from '../../stats.js';
 import { holdoutConfirmationText, holdoutStrength } from '../../holdout.js';
 import { judgeScaleWarning } from '../../engine/verdictAggregate.js';
+import { winnerFromStandings } from '../../engine/duelCore.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import {
   assertNoUnknownConfigKeys,
@@ -373,22 +374,33 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   }
 
   if (sub === 'winner') {
-    const ranking = record.standings?.length
-      ? record.standings.map((s) => s.id)
-      : Object.entries(record.judgeScoreByContestant ?? {})
-          .sort((a, b) => b[1] - a[1])
-          .map(([cid]) => cid);
-    const vencedorId = ranking[0];
+    // cli#1: empate nos duelos NUNCA sai calado — o desempate é o judge-score
+    // (a régua que escolheu os finalistas), e o vencedor nunca é "o 1º da
+    // lista" (o controle vinha 1º por ordem de cadastro). Re-ordena também os
+    // records gravados antes do desempate.
+    const w = winnerFromStandings(record);
+    const vencedorId = w.contestantId;
     const vencedor = record.contestants.find((c) => c.id === vencedorId);
+    const labelDe = (cid: string): string => record.contestants.find((c) => c.id === cid)?.label ?? cid;
+    const aviso = w.unresolved
+      ? `empate também no desempate (${w.tiedIds.map(labelDe).join(', ')}): o vencedor saiu do sorteio cego, não dos dados — rode mais cenários.`
+      : w.tie
+        ? `empate nos duelos (${w.tiedIds.map(labelDe).join(', ')}) — desempate por ${w.tieBreak === 'wins' ? 'nº de vitórias' : 'judge-score'}.`
+        : undefined;
     if (parsed.values['prompt-only'] === true) {
       // Payload puro no stdout: e o movimento final do fluxo
-      // (`… winner <id> --prompt-only > prompt.md`).
+      // (`… winner <id> --prompt-only > prompt.md`). O empate vai no stderr.
+      if (aviso) out.warn(aviso);
       out.raw(vencedor?.systemPrompt ?? '');
       return EXIT.OK;
     }
+    if (aviso) out.warn(aviso);
     if (out.isText) {
-      out.line(`vencedor: ${vencedor?.label ?? vencedorId ?? '—'}`);
-      out.line(`régua: ${record.standings?.length ? 'duelos das finais' : 'judge-score'}`);
+      const js = vencedorId !== undefined ? record.judgeScoreByContestant?.[vencedorId] : undefined;
+      out.line(`vencedor: ${vencedor?.label ?? vencedorId ?? '—'}${typeof js === 'number' ? ` · judge-score ${js.toFixed(1)}` : ''}`);
+      out.line(
+        `régua: ${w.ruler === 'judge-score' ? 'judge-score' : w.ruler === 'duels+judge-score' ? 'duelos das finais (empate desfeito pelo judge-score)' : 'duelos das finais'}`,
+      );
       if (vencedor?.systemPrompt) {
         out.line();
         out.line(vencedor.systemPrompt);
@@ -398,7 +410,12 @@ export async function cmdRuns(argv: string[]): Promise<number> {
       contestantId: vencedorId,
       label: vencedor?.label,
       systemPrompt: vencedor?.systemPrompt,
-      ruler: record.standings?.length ? 'duels' : 'judge-score',
+      ruler: w.ruler,
+      tie: w.tie,
+      tiedIds: w.tiedIds,
+      tieBreak: w.tieBreak,
+      unresolved: w.unresolved,
+      judgeScore: vencedorId !== undefined ? (record.judgeScoreByContestant?.[vencedorId] ?? null) : null,
     });
     return EXIT.OK;
   }
