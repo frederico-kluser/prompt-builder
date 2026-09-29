@@ -12,6 +12,11 @@
 //      allowlist (função pura + diff com a allowlist versionada);
 //  (3) publint e attw continuam verdes — os gates `gate:publint`/`gate:attw`
 //      entram no `prepublishOnly` (o output é verificado na release/CI).
+//
+// IMPL-103 (drift da allowlist): `skills/prompt-builder/models.md` entrou no
+// pacote sem `--update` e o `gate:tarball` em CI (strict) reprovaria a release —
+// sem nenhum teste pegar antes. Agora o `npm test` roda o MESMO `gate({strict})`
+// do CI no tarball real e confere a allowlist contra `src/` sem depender de build.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -19,12 +24,23 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { checkTarball, diffAllowlist, entryMatches, isAllowedPath } from '../scripts/tarball-gate.mjs';
+import {
+  ALLOWLIST_FILE,
+  allowlistContract,
+  checkTarball,
+  diffAllowlist,
+  entryMatches,
+  expectedDist,
+  gate,
+  isAllowedPath,
+  listSources,
+  readAllowlist,
+} from '../scripts/tarball-gate.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as { files: string[] };
 
-function packList(dir: string): string[] {
+function packListOf(dir: string): string[] {
   const out = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
     cwd: dir,
     encoding: 'utf8',
@@ -139,7 +155,18 @@ describe('IMPL-102 (1) invariantes: sem agentRoutes, sem .d.ts.map, sem negaçã
     expect(r.errors.join('\n')).toContain('entrada morta');
   });
 
-  it('módulo compilado mas fora do files vira aviso de completude', () => {
+  it('módulo de src/ compilado mas fora do files REPROVA (o CLI instalado quebraria ao importá-lo)', () => {
+    const r = checkTarball({
+      packed: CLEAN,
+      files: FILES,
+      sources: [...SOURCES, 'src/costSamplesStore.ts'],
+      built: ['dist/lgpd.js', 'dist/lgpd.d.ts', 'dist/costSamplesStore.js', 'dist/costSamplesStore.d.ts'],
+    });
+    expect(r.errors.join('\n')).toContain('dist/costSamplesStore.js');
+    expect(r.errors.join('\n')).toContain('dist/costSamplesStore.d.ts');
+  });
+
+  it('dist/ órfão (sem a fonte em src/, build velho) fica como aviso de completude', () => {
     const r = checkTarball({
       packed: CLEAN,
       files: FILES,
@@ -173,6 +200,83 @@ describe('IMPL-102 (1) invariantes: sem agentRoutes, sem .d.ts.map, sem negaçã
   });
 });
 
+/** Um único `npm pack --dry-run` do repo, reaproveitado pelos testes do tarball real. */
+let packedCache: string[] | null = null;
+function packedReal(): string[] {
+  packedCache ??= packListOf(ROOT);
+  return packedCache;
+}
+
+describe('IMPL-103 allowlist versionada: drift reprova o npm test (não só o job de release)', () => {
+  it('expectedDist: cada módulo de src/ vira .js + .d.ts; servidor e .d.ts de src/ ficam de fora', () => {
+    expect(expectedDist(['src/cli/index.ts', 'src/server.ts', 'src/agentRoutes.ts', 'src/x.d.ts', 'src/data/a.json'])).toEqual([
+      'dist/cli/index.d.ts',
+      'dist/cli/index.js',
+    ]);
+  });
+
+  it('allowlistContract pega doc nova sem --update (o caso models.md) e módulo novo sem --update', () => {
+    const sources = ['src/index.ts'];
+    const packed = ['package.json', 'dist/index.js', 'dist/index.d.ts', 'skills/prompt-builder/SKILL.md', 'skills/prompt-builder/models.md'];
+    const allowlist = ['package.json', 'dist/index.js', 'dist/index.d.ts', 'skills/prompt-builder/SKILL.md'];
+    expect(allowlistContract({ allowlist, sources, packed })).toEqual({ extra: ['skills/prompt-builder/models.md'], missing: [] });
+    // módulo novo em src/: a allowlist (e o tarball, se fora do files) não o têm
+    const comNovo = allowlistContract({ allowlist: [...allowlist, 'skills/prompt-builder/models.md'], sources: [...sources, 'src/novo.ts'], packed });
+    expect(comNovo.extra).toEqual(['dist/novo.d.ts', 'dist/novo.js']);
+  });
+
+  it('a allowlist VERSIONADA bate com src/ + o que o npm pack leva fora de dist/ (sem depender de build)', () => {
+    const allowlist = readAllowlist();
+    expect(allowlist, `${ALLOWLIST_FILE} ausente/ilegível`).not.toBeNull();
+    const r = allowlistContract({ allowlist: allowlist!, sources: listSources(), packed: packedReal() });
+    expect(r, 'rode: npm run build && node scripts/tarball-gate.mjs --update (e confira o files)').toEqual({ extra: [], missing: [] });
+  });
+
+  it('o que o pacote promete embarcar está lá: docs de agente, skill inteira e os instaladores', () => {
+    const packed = packedReal();
+    const naPasta = (dir: string): string[] =>
+      (readdirSync(path.join(ROOT, dir), { recursive: true }) as string[])
+        .map((n) => `${dir}/${String(n).split(path.sep).join('/')}`)
+        .filter((p) => statSync(path.join(ROOT, p)).isFile());
+    // toda doc de agente e todo arquivo da skill que existe no repo vai (config.md/report.md incluídos, se existirem)
+    for (const p of [...naPasta('agent-docs'), ...naPasta('skills')]) expect(packed, p).toContain(p);
+    expect(packed).toContain('agent-docs/report.md');
+    expect(packed).toContain('skills/prompt-builder/SKILL.md');
+    expect(packed).toContain('skills/prompt-builder/models.md');
+    expect(packed).toContain('scripts/agent-setup.sh');
+    expect(packed).toContain('scripts/install-agent-skill.sh');
+  });
+
+  // O gate completo precisa do dist/ compilado (o `npm test` compila no pretest).
+  it.runIf(existsSync(path.join(ROOT, 'dist', 'cli', 'index.js')))(
+    'o gate STRICT (o do CI/prepublishOnly) passa no tarball real: sem erro e sem diff',
+    () => {
+      const r = gate({ strict: true, packed: packedReal() });
+      expect(r.errors).toEqual([]);
+      expect(r.diffProblems).toEqual([]);
+      expect(r.semBuild).toEqual([]);
+      expect(r.failed).toBe(false);
+    },
+  );
+
+  it('prova negativa do strict: allowlist sem um arquivo embarcado reprova (e só avisa fora do strict)', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'pb-allowlist-'));
+    try {
+      const allowlist = readAllowlist()!.filter((p) => p !== 'skills/prompt-builder/models.md');
+      const file = path.join(dir, 'allowlist.json');
+      writeFileSync(file, JSON.stringify(allowlist));
+      const strict = gate({ strict: true, packed: packedReal(), allowlistFile: file });
+      expect(strict.failed).toBe(true);
+      expect(strict.diffProblems.join('\n')).toContain('skills/prompt-builder/models.md');
+      const local = gate({ strict: false, packed: packedReal(), allowlistFile: file });
+      expect(local.diffProblems.length).toBeGreaterThan(0);
+      expect(local.failed).toBe(local.errors.length > 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('IMPL-102 (1) npm pack real: sem agentRoutes.* e sem *.d.ts.map', () => {
   it('o MESMO files do package.json num pacote-fantasma seleciona o que deve', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'pb-pack-ghost-'));
@@ -191,7 +295,7 @@ describe('IMPL-102 (1) npm pack real: sem agentRoutes.* e sem *.d.ts.map', () =>
         writeFileSync(path.join(dir, f), 'x');
       }
       writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'pb-pack-ghost', version: '0.0.0', files: pkg.files }));
-      const packed = packList(dir);
+      const packed = packListOf(dir);
       expect(packed).toContain('dist/lgpd.js');
       expect(packed).toContain('dist/lgpd.d.ts');
       expect(packed).toContain('dist/index.js'); // topo enumerado explicitamente
@@ -209,7 +313,7 @@ describe('IMPL-102 (1) npm pack real: sem agentRoutes.* e sem *.d.ts.map', () =>
   });
 
   it('o tarball REAL do repo passa no gate (erros = []) e não leva mapas/agentRoutes', () => {
-    const packed = packList(ROOT);
+    const packed = packedReal();
     expect(packed.filter((p) => p.startsWith('dist/agentRoutes.'))).toEqual([]);
     expect(packed.filter((p) => /\.(?:d\.ts|js)\.map$/u.test(p))).toEqual([]);
     expect(packed).toContain('dist/cli/index.js'); // bin do pacote

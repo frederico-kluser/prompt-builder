@@ -90,11 +90,20 @@ interface Finding {
   match: string;
 }
 
-function scanText(file: string, text: string, kind: 'doc' | 'code'): Finding[] {
+/**
+ * Instaladores bash embarcados (`scripts/*.sh`): `~/…` e `$HOME/…` são o
+ * trabalho deles (diretórios de agente), então só o caminho de home CONCRETO
+ * (`/home/<user>`, `/Users/<user>`, `C:\Users\`) reprova; o resto das regras
+ * vale como em doc.
+ */
+const HOME_CONCRETO = /\/home\/[a-z_][\w.-]*|\/Users\/[A-Za-z][\w.-]*|[A-Z]:\\Users\\/u;
+
+function scanText(file: string, text: string, kind: 'doc' | 'code' | 'script'): Finding[] {
   const out: Finding[] = [];
   text.split(/\r?\n/u).forEach((line, i) => {
     for (const rule of RULES) {
-      const re = kind === 'code' ? rule.codeRe : rule.re;
+      const re =
+        kind === 'code' ? rule.codeRe : kind === 'script' && rule.id === 'caminho-home' ? HOME_CONCRETO : rule.re;
       if (!re) continue;
       const m = re.exec(line);
       if (m) out.push({ file, line: i + 1, rule: rule.id, match: m[0].trim() });
@@ -151,6 +160,10 @@ function auditPackage(pkgDir: string): PackageReport {
   for (const rel of packed) {
     // dist/ é varrido pela fonte (abaixo): o teste não pode depender de build.
     if (rel.startsWith('dist/')) continue;
+    if (rel.endsWith('.sh')) {
+      findings.push(...scanText(rel, fs.readFileSync(path.join(pkgDir, rel), 'utf8'), 'script'));
+      continue;
+    }
     if (!TEXT_EXT.test(path.basename(rel))) continue;
     const text = fs.readFileSync(path.join(pkgDir, rel), 'utf8');
     findings.push(...scanText(rel, text, 'doc'));
@@ -176,8 +189,10 @@ function auditPackage(pkgDir: string): PackageReport {
 describe('tarball npm: conteúdo embarcado (IMPL-044)', () => {
   const real = auditPackage(ROOT);
 
-  it('a varredura não é vazia: SKILL.md e agent-docs estão na lista do npm pack', () => {
+  it('a varredura não é vazia: SKILL.md, agent-docs e os instaladores estão na lista do npm pack', () => {
     expect(real.packed).toContain('skills/prompt-builder/SKILL.md');
+    expect(real.packed).toContain('scripts/agent-setup.sh');
+    expect(real.packed).toContain('scripts/install-agent-skill.sh');
     expect(real.packed.filter((f) => f.startsWith('agent-docs/')).length).toBeGreaterThan(5);
     expect(real.packed).toContain('package.json');
   });
@@ -214,7 +229,7 @@ describe('prova negativa: marcador plantado reprova pelo mesmo caminho', () => {
     tmpDirs.push(dir);
     fs.writeFileSync(
       path.join(dir, 'package.json'),
-      JSON.stringify({ name: 'pb-tarball-probe', version: '0.0.0', files: ['skills', 'agent-docs'] }),
+      JSON.stringify({ name: 'pb-tarball-probe', version: '0.0.0', files: ['skills', 'agent-docs', 'scripts'] }),
     );
     fs.mkdirSync(path.join(dir, 'skills/prompt-builder'), { recursive: true });
     fs.mkdirSync(path.join(dir, 'agent-docs'), { recursive: true });
@@ -270,6 +285,21 @@ describe('prova negativa: marcador plantado reprova pelo mesmo caminho', () => {
     expect(auditPackage(dir).findings).toEqual([
       expect.objectContaining({ file: probe, line: 1, rule: 'caminho-home' }),
       expect.objectContaining({ file: probe, line: 2, rule: 'rotulo-de-key' }),
+    ]);
+  });
+
+  it('instalador bash embarcado: home concreto reprova; ~/ e $HOME/ (o trabalho dele) não', () => {
+    const dir = plantPackage(`${FM}# probe\n`, {
+      'scripts/probe.sh': [
+        '#!/usr/bin/env bash',
+        'printf "%s\\n" "$HOME/.claude/skills" ~/.agents/skills', // genérico: ok
+        'NODE=/home/fulano/.nvm/versions/node/v24/bin/node', // pessoal: reprova
+        'curl http://127.0.0.1:4000/v1', // host interno com porta fora das do produto
+      ].join('\n'),
+    });
+    expect(auditPackage(dir).findings).toEqual([
+      expect.objectContaining({ file: 'scripts/probe.sh', line: 3, rule: 'caminho-home' }),
+      expect.objectContaining({ file: 'scripts/probe.sh', line: 4, rule: 'host-interno' }),
     ]);
   });
 

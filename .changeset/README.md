@@ -27,7 +27,7 @@ publisher no npmjs.com.
 
 `prepublishOnly` corre sempre (também num `npm publish` local):
 
-1. `npm test`
+1. `npm run test:full` (a suíte inteira, com Docker/Monte Carlo)
 2. `npm run gate:publint` (`publint`)
 3. `npm run gate:attw` (`attw --pack --profile esm-only` — o pacote é
    ESM-only; o perfil `strict` reprova o `require` de ESM que o pacote nunca
@@ -43,4 +43,7 @@ npm run build && node scripts/tarball-gate.mjs --update
 ```
 
 e leve a mudança de `scripts/tarball-allowlist.json` no mesmo PR — é o registo
-versionado do conteúdo do pacote.
+versionado do conteúdo do pacote. Não dá para esquecer: o `npm test`
+(`test/tarball-gate.test.ts`) roda o mesmo gate strict do CI e confere a
+allowlist contra `src/`, então módulo/doc nova sem `--update` já reprova no PR,
+não no job de release. O `--update` recusa regravar sem `dist/` compilado.
