@@ -1855,10 +1855,15 @@ async function runLoop(
     // default é o 1º juiz (`referenceModelId ?? judgeModelIds[0]`, documentado
     // na fase 1.5) e o aviso é o que denuncia esse default, não o default em si.
     const referenceModelId = record.config.referenceModelId ?? record.config.judgeModelIds[0];
+    // web-live#10: o aviso sobre "quem escreve o gabarito" só vale quando ALGUM
+    // gabarito existe (gerado ou importado) — comparando modelos sem referência
+    // ele acusava um papel que ninguém exerceu. (O pin do contrato do juiz
+    // segue com `referenceModelId`: mudar o hash seria drift falso.)
+    const autorDoGabarito = record.stages.some((s) => s.spec?.reference?.trim()) ? referenceModelId : undefined;
     record.fairnessWarnings = fairnessWarningsForModels(
       record.contestants.map((c) => c.modelId),
       record.config.judgeModelIds,
-      referenceModelId,
+      autorDoGabarito,
     );
     // IMPL-052 (R-03b:REC-2): higiene das amostras do diagnóstico de verbosidade.
     // Fontes de veredito SEGREGADAS (pointwise/rótulo/listwise/imputado — nunca

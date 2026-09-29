@@ -77,6 +77,8 @@ const comum = {
   format: 'arena-config@1',
   theme: 'Preparo para exames',
   scenarioBrief: 'Foque em jejum e medicamentos.',
+  // IMPL-056: idiomas do datagen viraram campo da tela (Avançado).
+  languages: ['pt-BR', 'en'],
   stages: 7,
   scenarios: cenarios,
   duels: false,

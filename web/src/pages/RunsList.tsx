@@ -166,19 +166,21 @@ export function RunsList() {
       <StorageNotice className="mb-4" targets="all" />
 
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        {/* 5 filtros não cabem em 390 px: o controle rola DENTRO de si (a página
-            não ganha rolagem lateral) e cada rótulo fica numa linha só. */}
+        {/* web-live#13 + web-live#16: a 390 px os 5 filtros (com "Interrompidas")
+            não cabem numa linha. Em tela estreita o controle ocupa a largura e
+            QUEBRA em linhas em vez de vazar ou rolar — tudo à vista, sem rolagem
+            escondida; cada rótulo fica numa linha só. */}
         <SegmentedToggle
           value={filter}
           onChange={(v) => setFilter(v as 'all' | Group)}
           ariaLabel="Filtrar por status"
-          className="scroll-slim max-w-full overflow-x-auto"
+          className="max-w-full flex-wrap max-sm:w-full"
         >
           {FILTERS.map((f) => (
             <SegmentedToggleOption
               key={f.key}
               value={f.key}
-              className="shrink-0 px-3 py-1.5 text-[13px] whitespace-nowrap"
+              className="px-3 py-1.5 text-[13px] whitespace-nowrap max-sm:flex-1 max-sm:justify-center"
             >
               {f.label}
               <span className="text-[11px] opacity-70 tabular">{counts[f.key]}</span>

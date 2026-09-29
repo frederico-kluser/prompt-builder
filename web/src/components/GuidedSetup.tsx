@@ -10,10 +10,11 @@ import {
 import { Button } from '@/components/ui/button';
 import { ModelSelector, type ModelTuning } from './ModelSelector';
 import { AreaRow, NumRow, SwitchRow, TxtNumRow } from './formRows';
-import { SettingGroup, SettingRow } from './primitives';
+import { Banner, SettingGroup, SettingRow } from './primitives';
 import { cn } from '@/lib/utils';
 import type { OpenRouterModel, RunMode } from '../api';
 import { MIN_SCENARIOS_FOR_HOLDOUT } from '../engine/holdout';
+import { TRAINING_DEFAULT_STAGES } from '../arenaForm';
 
 /**
  * Fluxo GUIADO da Nova Run (pedido do dono: "configuração totalmente guiada").
@@ -131,7 +132,25 @@ export interface GuidedSetupProps {
   /** Nº de cenários EFETIVO (clamp 1–50 + seeds) — o que o plano descreve. */
   plannedStages: number;
   setStages: (v: number) => void;
+  /** Cenários vindos de arquivo (pacote/seed ou etapas cruas) — web-live#14. */
+  importedCount: number;
+  /** Quantos dos importados já trazem gabarito (referência) próprio. */
+  importedRefs: number;
+  /** Etapas cruas importadas: o arquivo FIXA o total (o nº de cenários não vale). */
+  importedFixed: boolean;
+  /** O gerador vai ser chamado (ainda falta cenário para o total). */
+  precisaGerar: boolean;
+  /**
+   * Julgamento por referência efetivo (gabarito gerado por cenário). Desligado
+   * — comparar modelos, o default — o juiz ranqueia lado a lado e não há final
+   * (web-live#10), salvo nos cenários importados com referência.
+   */
+  referenceJudging: boolean;
+  /** web-live#5: aviso de poder do treino (null = suficiente). */
+  trainingPower?: { blocking: boolean; text: string } | null;
   budget: string;
+  /** Teto EFETIVO (vazio/inválido = undefined) — o plano não repete texto inválido. */
+  budgetNum?: number;
   setBudget: (v: string) => void;
   competitors: string[];
   setCompetitors: (v: string[]) => void;
@@ -229,22 +248,61 @@ function RunPlan({ p }: { p: GuidedSetupProps }) {
       ? `${competidores.slice(0, -1).join(', ')} e ${competidores.at(-1)}`
       : competidores[0] ?? '—';
 
-  const gabarito = p.referenceModel[0] ? labelOf(p.models, p.referenceModel[0]) : null;
+  const cen = (n: number) => `${n} cenário${n === 1 ? '' : 's'}`;
+  const sobreTema = tema ? `sobre “${tema.slice(0, 90)}${tema.length > 90 ? '…' : ''}”` : 'a partir do tema';
+  // web-live#14: o plano descreve o que a run VAI fazer — com cenários do
+  // arquivo o gerador cria só o que falta (ou nem é chamado).
+  // Concordância: "1 cenário vem", "2 cenários vêm".
+  const vem = (n: number) => (n === 1 ? 'vem' : 'vêm');
+  const cenarios =
+    p.importedCount > 0 && !p.precisaGerar
+      ? p.importedCount === 1
+        ? 'O cenário importado é usado como está — o gerador não é chamado.'
+        : `Os ${cen(p.importedCount)} importados são usados como estão — o gerador não é chamado.`
+      : p.importedCount > 0
+        ? `${cen(p.importedCount)} ${vem(p.importedCount)} do arquivo; o gerador ${gerador} cria mais ${p.plannedStages - p.importedCount} ${sobreTema}.`
+        : `O gerador ${gerador} cria ${cen(p.plannedStages)} ${sobreTema}.`;
+  // web-live#10: comparando modelos (default) NÃO há gabarito — o juiz ranqueia
+  // lado a lado e não há final. Só cenário importado com referência tem régua.
+  const temGabarito = p.referenceJudging || p.importedRefs > 0;
+  const quemGabarita = p.referenceModel[0]
+    ? labelOf(p.models, p.referenceModel[0])
+    : juizes[0]
+      ? `${juizes[0]} (o 1º juiz)`
+      : null;
+  const gabaritoPasso = !p.referenceJudging
+    ? null
+    : p.importedRefs >= p.plannedStages
+      ? 'Todos os cenários já trazem o gabarito — a resposta ideal — do arquivo.'
+      : quemGabarita
+        ? `O modelo ${quemGabarita} escreve o gabarito — a resposta ideal — de cada cenário${p.importedRefs > 0 ? ` que ainda não o traz (${p.importedRefs} já ${vem(p.importedRefs)} do arquivo)` : ''}.`
+        : null;
+  const juiz = `O juiz ${juizes.join(' + ') || '—'}`;
+  const julgamento = p.referenceJudging
+    ? `${juiz} compara cada resposta com o gabarito e dá um veredito: resolve, parcial ou não resolve.`
+    : p.importedRefs > 0
+      ? `${juiz} compara com o gabarito ${p.importedRefs === 1 ? 'no cenário importado que o traz' : `nos ${cen(p.importedRefs)} importados que o trazem`} (resolve, parcial ou não resolve); nos demais, compara as respostas lado a lado e as ranqueia.`
+      : `${juiz} compara as respostas lado a lado — sem gabarito — e as ranqueia em cada cenário.`;
+  const final = !temGabarito
+    ? 'Sem duelo final: os duelos exigem gabarito — o vencedor sai do ranking do juiz.'
+    : p.duelsOn && p.finalists > 0
+      ? `No fim, os ${p.finalists} melhores duelam entre si em todos os cenários${p.referenceJudging ? '' : ' com gabarito'} — o duelo final confirma o vencedor.`
+      : 'Sem duelo final: o vencedor sai do placar de vereditos.';
   const passos = [
-    `O gerador ${gerador} cria ${p.plannedStages} cenário${p.plannedStages > 1 ? 's' : ''} ${tema ? `sobre “${tema.slice(0, 90)}${tema.length > 90 ? '…' : ''}”` : 'a partir do tema'}.`,
-    gabarito ? `O modelo ${gabarito} escreve o gabarito — a resposta ideal — de cada cenário.` : null,
+    cenarios,
+    gabaritoPasso,
     isCompare
       ? `Os modelos ${lista} respondem a todos os cenários, nas mesmas condições.`
-      : `O modelo ${lista} responde a cada cenário ${p.mode === 'training' ? 'com o prompt que evolui a cada rodada' : 'com cada versão do prompt'}.`,
-    `O juiz ${juizes.join(' + ') || '—'} compara cada resposta com o gabarito e dá um veredito: resolve, parcial ou não resolve.`,
-    p.duelsOn && p.finalists > 0
-      ? `No fim, os ${p.finalists} melhores duelam entre si em todos os cenários — o duelo final confirma o vencedor.`
-      : 'Sem duelo final: o vencedor sai do placar de vereditos.',
+      : `O modelo ${lista} responde a cada cenário ${p.mode === 'training' ? 'com o prompt atual e as variantes que o desafiam, rodada a rodada' : 'com cada versão do prompt'}.`,
+    julgamento,
+    final,
     p.mode === 'training'
-      ? p.stages >= MIN_SCENARIOS_FOR_HOLDOUT
-        ? 'No treino, uma variante só vira campeã se superar a atual com margem real; a sessão termina num teste cego (holdout).'
-        : `No treino, uma variante só vira campeã se superar a atual com margem real. Com menos de ${MIN_SCENARIOS_FOR_HOLDOUT} cenários não há teste cego (holdout): o campeão sai só com confirmação fraca.`
+      ? p.plannedStages >= MIN_SCENARIOS_FOR_HOLDOUT
+        ? 'No treino, uma variante só vira campeã se superar a atual com margem e passar no teste de significância; a sessão termina num teste cego (holdout).'
+        : `No treino, uma variante só vira campeã se superar a atual com margem e passar no teste de significância. Com menos de ${MIN_SCENARIOS_FOR_HOLDOUT} cenários não há teste cego (holdout): o campeão sai só com confirmação fraca.`
       : null,
+    // web-live#5: poucos cenários = o teste de significância não deixa promover.
+    p.mode === 'training' && p.trainingPower ? p.trainingPower.text : null,
   ].filter(Boolean) as string[];
 
   return (
@@ -260,9 +318,12 @@ function RunPlan({ p }: { p: GuidedSetupProps }) {
         ))}
       </ol>
       <p className="border-t border-border pt-3 text-[13px] text-muted-foreground">
-        {p.budget.trim()
-          ? `A run para sozinha antes de passar de ${p.budget.trim()} US$.`
-          : 'Sem teto de gasto definido — recomenda-se colocar um.'}{' '}
+        {/* web-live#14: só o teto VÁLIDO vira promessa; o inválido é pendência. */}
+        {p.budgetNum !== undefined
+          ? `A run para sozinha antes de passar de ${usd(p.budgetNum)}.`
+          : p.budget.trim()
+            ? 'Teto de gasto inválido — corrija no passo Limites.'
+            : 'Sem teto de gasto definido — recomenda-se colocar um.'}{' '}
         {p.estimate ? `Estimativa desta configuração: ${usd(p.estimate.low)} – ${usd(p.estimate.high)}.` : ''}
       </p>
     </div>
@@ -441,7 +502,11 @@ export function GuidedSetup(p: GuidedSetupProps) {
                 <SettingRow
                   wide
                   label="Juízes"
-                  sub="Comparam cada resposta com o gabarito e dão o veredito. Com dois ou mais, a nota vira consenso."
+                  sub={
+                    p.referenceJudging
+                      ? 'Comparam cada resposta com o gabarito e dão o veredito. Com dois ou mais, a nota vira consenso.'
+                      : 'Sem gabarito (o padrão ao comparar modelos), comparam as respostas lado a lado e as ranqueiam. Com dois ou mais, a nota vira consenso.'
+                  }
                 >
                   <ModelSelector
                     multi
@@ -499,14 +564,37 @@ export function GuidedSetup(p: GuidedSetupProps) {
             <div className="flex flex-col gap-4">
               <h2 className="font-heading text-base font-medium">Quanto medir e até quanto gastar?</h2>
               <SettingGroup>
-                <NumRow
-                  label="Cenários"
-                  sub="Mais cenários dão mais confiança no resultado e mais chamadas. Cinco é um bom começo."
-                  value={p.stages}
-                  onChange={p.setStages}
-                  min={1}
-                  max={50}
-                />
+                {/* web-live#14: com etapas cruas importadas o arquivo FIXA o
+                    total — um campo que não age não é oferecido. */}
+                {p.importedFixed ? (
+                  <SettingRow
+                    label="Cenários"
+                    sub={`${p.importedCount === 1 ? '1 cenário importado' : `${p.importedCount} cenários importados`} — o arquivo fixa o total (o gerador não é chamado). Para mudar, importe outro arquivo ou remova-os na configuração completa.`}
+                  />
+                ) : (
+                  <NumRow
+                    label="Cenários"
+                    sub={
+                      p.importedCount > 0
+                        ? p.precisaGerar
+                          ? `${p.importedCount} ${p.importedCount === 1 ? 'vem' : 'vêm'} do arquivo; o gerador cria mais ${p.plannedStages - p.importedCount} para completar ${p.plannedStages}.`
+                          : `${p.importedCount === 1 ? 'O cenário do arquivo já cobre' : `Os ${p.importedCount} cenários do arquivo já cobrem`} o total — nada a gerar.`
+                        : p.mode === 'training'
+                          ? `No treino, poucos cenários impedem a promoção: a variante precisa passar num teste de significância. O padrão é ${TRAINING_DEFAULT_STAGES}; mais cenários, mais confiança e mais chamadas.`
+                          : 'Mais cenários dão mais confiança no resultado e mais chamadas. Cinco é um bom começo.'
+                    }
+                    value={p.stages}
+                    onChange={p.setStages}
+                    min={1}
+                    max={50}
+                  />
+                )}
+                {/* web-live#5: aviso de poder ao lado do campo que o resolve. */}
+                {p.mode === 'training' && p.trainingPower && (
+                  <SettingRow wide>
+                    <Banner tone="warn">{p.trainingPower.text}</Banner>
+                  </SettingRow>
+                )}
                 <TxtNumRow
                   label="Teto de gasto (US$)"
                   sub="A run para sozinha antes de passar deste valor. Vazio = sem teto."
@@ -516,20 +604,32 @@ export function GuidedSetup(p: GuidedSetupProps) {
                   step={0.5}
                   placeholder="sem teto"
                 />
-                <SwitchRow
-                  label="Duelo final entre os melhores"
-                  sub="Depois de julgar todos os cenários, os melhores duelam entre si em todos eles — o duelo confirma o vencedor."
-                  checked={p.duelsOn}
-                  onChange={p.setDuelsOn}
-                />
-                {p.duelsOn && (
-                  <NumRow
-                    label="Finalistas"
-                    sub="Quantos vão ao duelo final."
-                    value={p.finalists}
-                    onChange={p.setFinalists}
-                    min={0}
-                    max={12}
+                {/* web-live#10: o duelo final só roda em cenário com gabarito.
+                    Comparando modelos (sem referência importada) não há final —
+                    o switch e o nº de finalistas não agiriam, então saem. */}
+                {p.referenceJudging || p.importedRefs > 0 ? (
+                  <>
+                    <SwitchRow
+                      label="Duelo final entre os melhores"
+                      sub="Depois de julgar todos os cenários, os melhores duelam entre si em todos eles — o duelo confirma o vencedor."
+                      checked={p.duelsOn}
+                      onChange={p.setDuelsOn}
+                    />
+                    {p.duelsOn && (
+                      <NumRow
+                        label="Finalistas"
+                        sub="Quantos vão ao duelo final."
+                        value={p.finalists}
+                        onChange={p.setFinalists}
+                        min={0}
+                        max={12}
+                      />
+                    )}
+                  </>
+                ) : (
+                  <SettingRow
+                    label="Duelo final"
+                    sub="Indisponível aqui: sem gabarito (o padrão ao comparar modelos) o juiz ranqueia as respostas lado a lado e não há duelo final. Cenários importados com referência (ou comparar configurações, na configuração completa) trazem a final."
                   />
                 )}
               </SettingGroup>

@@ -38,7 +38,10 @@ export const TUTORIALS: Record<HelpTutorial, Step[]> = {
     {
       kicker: 'O que é',
       title: 'Vários modelos, os mesmos cenários',
-      body: 'Todos os modelos respondem às mesmas perguntas. Um gabarito é escrito antes, e o juiz compara cada resposta com ele: resolve, parcial ou não resolve.',
+      // web-live#10: comparando modelos (o default) NÃO há gabarito — o juiz
+      // ranqueia lado a lado; a régua só existe no eixo de configurações ou em
+      // cenário importado com referência.
+      body: 'Todos os modelos respondem às mesmas perguntas. Com gabarito (ao comparar configurações ou com cenários importados com referência), o juiz compara cada resposta com ele: resolve, parcial ou não resolve; sem gabarito, ranqueia as respostas lado a lado.',
     },
     {
       kicker: 'O que selecionar',
@@ -48,7 +51,7 @@ export const TUTORIALS: Record<HelpTutorial, Step[]> = {
     {
       kicker: 'Como ler',
       title: 'Heatmap e final',
-      body: 'Enquanto roda, o heatmap preenche cenário × modelo: ✓ resolve, ◐ parcial, ✕ não resolve. No fim, os 3 de maior score duelam entre si em cada cenário e o pódio sai em “Final”.',
+      body: 'Enquanto roda, o heatmap preenche cenário × modelo: ✓ resolve, ◐ parcial, ✕ não resolve. Havendo gabarito, no fim os 3 de maior score duelam entre si em cada cenário e o pódio sai em “Final”.',
     },
   ],
   variation: [
@@ -72,12 +75,14 @@ export const TUTORIALS: Record<HelpTutorial, Step[]> = {
     {
       kicker: 'O que é',
       title: 'O prompt evolui sozinho',
-      body: 'A cada rodada a melhor variação vira a base da próxima. Os cenários são congelados entre as rodadas, e o treino para quando não há mais ganho real.',
+      // web-live#5: a melhor variação só vira base se passar na margem E no teste
+      // de significância — que precisa de cenários (o padrão do treino é 10).
+      body: 'A cada rodada, a melhor variação só vira a base da próxima se superar a atual com margem e passar no teste de significância — por isso o treino pede mais cenários (10 por padrão; com menos de 5 nenhuma variante pode ser promovida). Os cenários são congelados entre as rodadas, e o treino para quando não há mais ganho real.',
     },
     {
       kicker: 'O que selecionar',
       title: 'Igual à variação, mais rodadas',
-      body: 'Modelo sob teste, prompt base, técnicas, juízes — e quantas rodadas de evolução. Uma fatia dos cenários fica reservada para validar o campeão no fim.',
+      body: 'Modelo sob teste, prompt base, técnicas, juízes — e quantas rodadas de evolução. Com 20 cenários ou mais, uma fatia deles fica reservada para validar o campeão no fim.',
     },
     {
       kicker: 'Como ler',

@@ -40,20 +40,25 @@ import {
   DEFAULT_DATAGEN,
   DEFAULT_DATAGEN_COMPARE,
   DEFAULT_MAX_OUTPUT_TOKENS,
+  TRAINING_DEFAULT_STAGES,
   applyArenaConfigToForm,
   defaultArenaFormState,
   exportArenaConfig,
   formatArenaWarning,
   jsonOnlyActiveValue,
   jsonOnlyRunPatch,
+  parseLanguages,
   promptGroupProblem,
+  stagesForModeChange,
+  trainingPowerNotice,
   type ArenaFieldWarning,
+  type AutoStages,
   type ArenaFormState,
   type ConfigRow,
 } from '../arenaForm';
 import { CostConfirmDialog } from '../components/CostConfirmDialog';
 import { KeySetup } from '../components/KeySetup';
-import { AreaRow, LinkButton, NumRow, SwitchRow, TxtNumRow } from '../components/formRows';
+import { AreaRow, LinkButton, NumRow, SwitchRow, TextRow, TxtNumRow } from '../components/formRows';
 import { GuidedSetup, SECTION_STEP, type GuidedStep } from '../components/GuidedSetup';
 import {
   clampStages,
@@ -118,7 +123,9 @@ const MODES: { id: RunMode; label: string }[] = [
 const MODE_DESCRIPTIONS: Record<RunMode, string> = {
   compare: 'Vários modelos respondem aos mesmos cenários; os juízes decidem quem foi melhor.',
   variation: 'Um modelo, vários system prompts — descubra qual prompt funciona melhor.',
-  training: 'O prompt evolui a cada rodada até convergir no melhor.',
+  // web-live#5: "evolui a cada rodada" prometia promoção garantida — ela só
+  // acontece com ganho acima da margem E significativo (gate da melhor de K).
+  training: 'O prompt evolui rodada a rodada: uma variante só vira campeã quando supera a atual com margem e significância.',
 };
 
 /**
@@ -231,7 +238,12 @@ export function NewRun() {
   const [avancadoOpen, setAvancadoOpen] = useState(false);
   const [theme, setTheme] = useState(INIT.theme);
   const [scenarioBrief, setScenarioBrief] = useState(INIT.scenarioBrief);
+  // IMPL-056: idiomas do datagen (texto "pt-BR, en"; '' = só pt-BR).
+  const [languages, setLanguages] = useState(INIT.languages);
   const [stages, setStages] = useState(INIT.stages);
+  // web-live#5: o nº de cenários que o modo treino SUBIU sozinho (de → para).
+  // Ao sair do treino, volta ao anterior se o usuário não mexeu no valor.
+  const autoStages = useRef<AutoStages | null>(null);
   const [concurrency, setConcurrency] = useState(INIT.concurrency);
   const [timeoutMs, setTimeoutMs] = useState(INIT.timeoutMs);
   // Máx. tokens por resposta: campo LIVRE (texto). ''/inválido cai no default
@@ -529,6 +541,14 @@ export function NewRun() {
   const plannedStages = rawStages ? rawStages.length : Math.max(stagesNum, seedCount);
   // Só chama o gerador quando ainda faltam cenários para completar `stages`.
   const precisaGerar = !rawStages && plannedStages > seedCount;
+  // Finais (duelos) só existem em etapa COM gabarito — gerado (julgamento por
+  // referência) ou importado no cenário. Sem nenhum, o duelo nunca roda
+  // (web-live#10): a tela não pode prometê-lo nem oferecer controle que não age.
+  const temGabarito = referenceJudging || importedRefs > 0;
+  // web-live#5: poder do gate de promoção do treino (null = suficiente).
+  const trainingPower = mode === 'training' ? trainingPowerNotice(plannedStages, holdoutRatio) : null;
+  // IMPL-056: idiomas da tela → `languages` da run (inválido = pendência).
+  const languagesParsed = parseLanguages(languages);
 
   // Guard-rail anti-viés de painel (consultivo): juiz da MESMA família dos
   // modelos avaliados, ou painel pouco diverso.
@@ -580,7 +600,7 @@ export function NewRun() {
   /** Recorte do estado que o arena-config descreve (ver `../arenaForm`). */
   function snapshot(): ArenaFormState {
     return {
-      mode, theme, scenarioBrief, stages, pack, customStages, basePrompt, taskDescription, promptImported,
+      mode, theme, scenarioBrief, languages, stages, pack, customStages, basePrompt, taskDescription, promptImported,
       datagen, judge, referenceModel, contestantModel, competitors, compareAxis, competitorConfigs,
       rewriterModel, tuning, optimize, techniques, manualVariants, iterations, minGain, holdoutRatio,
       feedbackDriven, duelsOn, finalists, twoPassJudge, maxOutputTokens, timeoutMs, concurrency,
@@ -591,9 +611,11 @@ export function NewRun() {
 
   /** Escreve um estado do assistente de volta na tela (um setter por campo). */
   function applyFormState(f: ArenaFormState) {
-    setMode(f.mode);
+    // O arquivo manda no nº de cenários: nada de default de treino por cima.
+    setMode(f.mode, { keepStages: true });
     setTheme(f.theme);
     setScenarioBrief(f.scenarioBrief);
+    setLanguages(f.languages);
     setStages(f.stages);
     setPack(f.pack);
     setCustomStages(f.customStages);
@@ -777,6 +799,23 @@ export function NewRun() {
     // Cenários: só quando o campo aparece (com etapas cruas, `stages` nem vale).
     const cenarios = rawStages ? null : stagesProblem(stages);
     if (cenarios) out.push({ section: 'avancado', text: cenarios });
+    // web-live#5: treino que MATEMATICAMENTE não promove nada (menor p possível
+    // > α) não sai — é sessão paga sem resultado possível. O campo que resolve é
+    // o nº de cenários (Avançado na completa, "Limites" no guiado); com etapas
+    // cruas o arquivo fixa o total e quem resolve é a seção Cenários da completa.
+    else if (trainingPower?.blocking) {
+      out.push(
+        rawStages
+          ? {
+              section: 'cenarios',
+              onlyComplete: true,
+              text: `${trainingPower.text} Importe mais cenários ou remova os importados.`,
+            }
+          : { section: 'avancado', text: trainingPower.text },
+      );
+    }
+    // IMPL-056: o campo de idiomas só existe na completa (Avançado).
+    if (!languagesParsed.ok) out.push({ section: 'avancado', text: languagesParsed.error, onlyComplete: true });
     const grupo = promptGroupProblem({ mode, promptGroup, promptId });
     if (grupo) out.push({ section: 'avancado', text: grupo, onlyComplete: true });
     if (budget.trim() !== '' && !(parseFloat(budget) > 0))
@@ -819,8 +858,13 @@ export function NewRun() {
   /**
    * Troca o modo. Se o gerador de cenários ainda for um DEFAULT intocado, ele
    * segue o default do modo (compare ≠ modos de papel — ver `arenaForm.ts`).
+   *
+   * web-live#5: entrar no TREINO com menos de {@link TRAINING_DEFAULT_STAGES}
+   * cenários sobe o nº para ele (com 5 o gate da melhor de K só promove sem
+   * nenhum empate — na prática, nunca); sair do treino devolve o valor anterior
+   * se o usuário não mexeu. `keepStages` = o import, em que o arquivo manda.
    */
-  function setMode(m: RunMode) {
+  function setMode(m: RunMode, opts: { keepStages?: boolean } = {}) {
     setModeRaw(m);
     const alvo = m === 'compare' ? DEFAULT_DATAGEN_COMPARE : DEFAULT_DATAGEN;
     setDatagen((atual) =>
@@ -828,6 +872,13 @@ export function NewRun() {
         ? [alvo]
         : atual,
     );
+    if (opts.keepStages) {
+      autoStages.current = null;
+      return;
+    }
+    const prox = stagesForModeChange({ from: mode, to: m, stages, auto: autoStages.current });
+    autoStages.current = prox.auto;
+    if (prox.stages !== stages) setStages(prox.stages);
   }
 
   /** Troca a superfície do formulário e grava a preferência. */
@@ -880,6 +931,9 @@ export function NewRun() {
       ...(isLivre ? {} : { compliance: { area: complianceArea, includeRessalvas } }),
       ...(piiMode === 'synthetic' ? { piiMode } : {}),
       ...(scenarioBrief.trim() ? { scenarioBrief: scenarioBrief.trim() } : {}),
+      // IMPL-056: opt-in de idiomas (ausente = 100% pt-BR). Inválido não sai:
+      // é pendência e o submit para antes.
+      ...(languagesParsed.ok && languagesParsed.languages ? { languages: languagesParsed.languages } : {}),
       // Seed do pacote: perde o `id` do arquivo (o engine re-rotula as etapas).
       ...(seedCount > 0 && pack ? { scenarioSeed: pack.scenarios.map(({ id, ...spec }) => spec) } : {}),
       // Explícito: o default muda por modo/eixo, então o valor efetivo vai sempre.
@@ -1002,7 +1056,12 @@ export function NewRun() {
     if (faltas.length) {
       setTried(true);
       irPara(faltas[0].section, faltas[0].step, faltas[0].onlyComplete);
-      return setError(faltas[0].text);
+      // A pendência NÃO vira `error`: com `tried` o rodapé já mostra a atual
+      // (em vermelho). Gravada aqui, ela sobrevivia à correção — trocar de
+      // modo depois de "Iniciar" com 4 cenários no treino deixava "Com 4
+      // cenários o treino…" no rodapé do compare (medido na verificação do
+      // web-live#5).
+      return;
     }
     let config = buildConfig();
 
@@ -1076,8 +1135,12 @@ export function NewRun() {
                   não podem virar paradas novas antes do "Iniciar" (o orçamento
                   IMPL-106 (c) é contrato). Aqui entram o arquivo da configuração
                   e a SUPERFÍCIE do formulário (guiado/completo), que sem isto
-                  estourava o orçamento no modo variation. */}
-              <RovingToolbar label="Ações da configuração" count={4} className="flex items-center gap-2">
+                  estourava o orçamento no modo variation.
+                  web-live#13: a 390 px a fileira passava da tela (466 px de
+                  página) — o invólucro de ações do PageHeader não encolhe. Em
+                  tela estreita Importar/Exportar ficam só com o ícone (o nome
+                  acessível e o title seguem) e a fileira pode quebrar. */}
+              <RovingToolbar label="Ações da configuração" count={4} className="flex flex-wrap items-center gap-2">
                 <RovingItem index={0}>
                   {(roving) => (
                     <Button
@@ -1085,18 +1148,28 @@ export function NewRun() {
                       variant="outline"
                       size="sm"
                       {...roving}
+                      aria-label="Importar JSON"
+                      title="Importar JSON"
                       onClick={() => importRef.current?.click()}
                     >
                       <Upload aria-hidden="true" />
-                      Importar JSON
+                      <span className="hidden sm:inline">Importar JSON</span>
                     </Button>
                   )}
                 </RovingItem>
                 <RovingItem index={1}>
                   {(roving) => (
-                    <Button type="button" variant="outline" size="sm" {...roving} onClick={handleExport}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      {...roving}
+                      aria-label="Exportar JSON"
+                      title="Exportar JSON"
+                      onClick={handleExport}
+                    >
                       <Download aria-hidden="true" />
-                      Exportar JSON
+                      <span className="hidden sm:inline">Exportar JSON</span>
                     </Button>
                   )}
                 </RovingItem>
@@ -1274,7 +1347,14 @@ export function NewRun() {
             stages={stages}
             plannedStages={plannedStages}
             setStages={setStages}
+            importedCount={importedCount}
+            importedRefs={importedRefs}
+            importedFixed={!!rawStages}
+            precisaGerar={precisaGerar}
+            referenceJudging={referenceJudging}
+            trainingPower={trainingPower}
             budget={budget}
+            budgetNum={budgetNum}
             setBudget={setBudget}
             competitors={competitors}
             setCompetitors={setCompetitors}
@@ -1646,9 +1726,18 @@ export function NewRun() {
                       ? precisaGerar
                         ? `Serão gerados mais ${plannedStages - seedCount} para completar ${plannedStages}.`
                         : `Os ${seedCount} cenários do arquivo já cobrem o total — nada a gerar.`
-                      : 'Quantos cenários o gerador cria para a run.'
+                      : mode === 'training'
+                        ? `Quantos cenários o gerador cria. No treino, poucos cenários impedem a promoção (teste de significância): o padrão é ${TRAINING_DEFAULT_STAGES}.`
+                        : 'Quantos cenários o gerador cria para a run.'
                   }
                 />
+              )}
+              {/* web-live#5: poder do gate de promoção — aviso ao lado do campo
+                  que o resolve (o bloqueante também vira pendência). */}
+              {trainingPower && (
+                <SettingRow wide>
+                  <Banner tone="warn">{trainingPower.text}</Banner>
+                </SettingRow>
               )}
               {importedCount === 0 && (
                 <AreaRow
@@ -1658,6 +1747,16 @@ export function NewRun() {
                   placeholder="Ex.: se respeitam as regras de jejum de cada exame e não inventam orientação médica."
                 />
               )}
+              {/* IMPL-056: idioma é opt-in — vazio = 100% pt-BR (o default do
+                  motor). Vale para o gerador E para o aviso de cenário
+                  importado fora da lista (RunRecord.languageWarnings). */}
+              <TextRow
+                label="Idiomas dos cenários"
+                sub="Vazio = só português (pt-BR). Com uma lista (ex.: pt-BR, en), o gerador distribui os cenários entre esses idiomas; cenário importado fora da lista vira aviso na run."
+                value={languages}
+                onChange={setLanguages}
+                placeholder="pt-BR"
+              />
               {isSingle && !promptImported && (
                 <AreaRow
                   label="Descreva a tarefa"
@@ -1683,14 +1782,24 @@ export function NewRun() {
             </SettingGroup>
 
             <SettingGroup title="Execução">
-                <NumRow
-                  label="Finalistas"
-                  sub="Quantas variantes disputam o duelo final. As melhores por score entram; 0 desliga a final."
-                  value={finalists}
-                  onChange={setFinalists}
-                  min={0}
-                  max={12}
-                />
+                {/* web-live#10: finais só existem em etapa com gabarito — sem
+                    nenhum (comparar modelos, sem referência importada) o campo
+                    não age, então não é oferecido: a linha diz o porquê. */}
+                {temGabarito ? (
+                  <NumRow
+                    label="Finalistas"
+                    sub="Quantas variantes disputam o duelo final. As melhores por score entram; 0 desliga a final."
+                    value={finalists}
+                    onChange={setFinalists}
+                    min={0}
+                    max={12}
+                  />
+                ) : (
+                  <SettingRow
+                    label="Finalistas"
+                    sub="Sem duelo final nesta run: os duelos só acontecem em cenários com gabarito, e nesta configuração nenhum tem — o juiz ranqueia as respostas lado a lado. Importe cenários com referência (ou compare configurações) para ter a final."
+                  />
+                )}
                 <TxtNumRow
                   label="Orçamento máx. (US$)"
                   sub={
@@ -2006,8 +2115,10 @@ export function NewRun() {
             )}
           </div>
 
+          {/* web-live#13: `shrink-0` fazia a linha dos drivers (~410 px) passar
+              da tela a 390 px; em tela estreita o bloco encolhe e a linha quebra. */}
           <span
-            className="shrink-0 text-right text-[12px] text-muted-foreground tabular"
+            className="max-w-full min-w-0 text-right text-[12px] text-muted-foreground tabular sm:shrink-0"
             title={
               launchEstimate
                 ? `Estimativa pelo teto de tokens; inclui gabaritos, finais e o holdout do treino.\n${launchEstimate.drivers
