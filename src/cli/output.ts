@@ -571,6 +571,17 @@ export function renderSpend(
         `lançadas pela reserva inteira (limite superior, já no gasto)`,
     );
   }
+  const byok = ledger?.byok;
+  if (byok && byok.calls > 0) {
+    // Só chamadas com `is_byok: true`: o "Gasto" acima tem apenas a taxa do
+    // OpenRouter delas; a inferência saiu da key BYOK, fora dos créditos e do
+    // teto. (O `upstream_inference_cost` de chamada NÃO-BYOK já está no gasto.)
+    const semCusto = byok.upstreamUnknownCalls > 0 ? ` (${byok.upstreamUnknownCalls} sem custo informado)` : '';
+    linhas.push(
+      `BYOK       ${fmtUsd(byok.upstreamUsd)} cobrados pelo provedor na sua key em ${byok.calls} chamada(s)${semCusto} ` +
+        `— fora dos créditos do OpenRouter e fora do orçamento`,
+    );
+  }
   if (accuracy) {
     const partes = [`${accuracy.exact} exatas`];
     if (accuracy.estimated) partes.push(`${accuracy.estimated} estimadas`);

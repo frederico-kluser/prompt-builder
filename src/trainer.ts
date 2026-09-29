@@ -821,7 +821,6 @@ async function trainingLoop(
     record.costByRole = snap.byRole;
     record.costAccuracy = snap.accuracy;
     record.costLedger = ledger.summary(); // IMPL-017: spent/committed/pending
-    if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
   };
 
   await saveSession(record);

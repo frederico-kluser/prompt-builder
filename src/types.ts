@@ -104,10 +104,22 @@ export const COST_ROLES: readonly CostRole[] = [
 export type CostSource = 'usage' | 'catalog' | 'agent-derived' | 'unknown';
 
 export interface CallCost {
+  /** O que saiu dos creditos do OpenRouter (`usage.cost`). Numa chamada BYOK e so a taxa. */
   usd: number;
   source: CostSource;
-  /** BYOK: cobrado direto pelo provedor upstream, fora dos creditos. */
-  upstreamUsd?: number;
+  /**
+   * true = o OpenRouter disse `usage.is_byok: true`: a chamada rodou numa key
+   * do PROVEDOR cadastrada na conta (BYOK) e `usd` e so a taxa do OpenRouter.
+   * Ausente = nao-BYOK (ou nao informado) — nunca inferir BYOK.
+   */
+  byok?: boolean;
+  /**
+   * So com `byok`: `cost_details.upstream_inference_cost`, cobrado pelo
+   * provedor direto na key BYOK — FORA dos creditos e FORA de `usd`.
+   * ⚠️ O OpenRouter devolve esse campo em TODA chamada; na nao-BYOK ele ja
+   * esta dentro de `usd` e e descartado na extracao (somar dobraria o gasto).
+   */
+  byokUpstreamUsd?: number;
   /**
    * Chamada despachada sem custo medido e com id de geracao (IMPL-017): a
    * reserva ficou PENDENTE no ledger — fora de `usd`/`totalCostUsd` ate a
@@ -193,6 +205,12 @@ export interface CallLogEntry {
   generationTimeMs?: number;
   /** Do GET /generation: `upstream_id` no provedor. */
   upstreamId?: string;
+  /**
+   * Chamada BYOK (`is_byok: true`): `usd` é só a taxa do OpenRouter e
+   * `byokUpstreamUsd` (quando informado) foi cobrado pelo provedor na key BYOK.
+   */
+  byok?: boolean;
+  byokUpstreamUsd?: number;
 }
 
 /**
@@ -292,6 +310,14 @@ export interface CostLedgerSummary {
     /** Falha de rede/HTTP: seguem pendentes (conciliáveis depois). */
     failed: number;
   };
+  /**
+   * Chamadas BYOK (`usage.is_byok: true`) — presente só quando houve alguma.
+   * `upstreamUsd` foi cobrado pelo PROVEDOR direto nas keys BYOK: fica FORA
+   * de `spentUsd`/`totalCostUsd` (que são créditos do OpenRouter — nelas, só a
+   * taxa) e fora do orçamento. `upstreamUnknownCalls` = BYOK cujo custo do
+   * provedor não veio na resposta: não medido, NÃO é "custou zero".
+   */
+  byok?: { calls: number; upstreamUsd: number; upstreamUnknownCalls: number };
 }
 
 /**
@@ -1863,7 +1889,13 @@ export interface RunRecord {
   callLog?: CallLogEntry[];
   /** Entradas que passaram do teto do `callLog` (não registadas). */
   callLogDropped?: number;
-  /** BYOK: cobrado pelo provedor upstream, fora dos creditos do OpenRouter. */
+  /**
+   * @deprecated LEGADO — não é mais escrito. Records antigos somavam aqui o
+   * `upstream_inference_cost` de TODA chamada, e o OpenRouter o devolve também
+   * nas não-BYOK (onde já está dentro de `totalCostUsd`): semântica
+   * desconhecida. Nunca somar ao gasto nem rotular de BYOK. O gasto BYOK
+   * medido vive em `costLedger.byok`.
+   */
   upstreamCostUsd?: number;
   /**
    * Desfechos nao-ok dos competidores, SEPARADOS (IMPL-010): `blocked` =
@@ -2316,8 +2348,9 @@ export interface SessionRecord {
   /** Soma do `failureCountByRole` de todas as runs da sessao (IMPL-004). */
   failureCountByRole?: Partial<Record<CostRole, number>>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
-  /** Ledger da sessao: spent/committed/pending (IMPL-017). */
+  /** Ledger da sessao: spent/committed/pending (IMPL-017). Gasto BYOK em `costLedger.byok`. */
   costLedger?: CostLedgerSummary;
+  /** @deprecated LEGADO, semântica desconhecida — ver `RunRecord.upstreamCostUsd`. Não é mais escrito. */
   upstreamCostUsd?: number;
   budgetUsd?: number;
   budgetExhausted?: boolean;

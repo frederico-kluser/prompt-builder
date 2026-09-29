@@ -164,7 +164,6 @@ function syncLedger(record: RunRecord, ledger: BudgetLedger): void {
   // IMPL-074 (espelho do Node): registo por chamada (id de geração/provedor/conciliação).
   record.callLog = ledger.callLog();
   if (ledger.callLogDropped > 0) record.callLogDropped = ledger.callLogDropped;
-  if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
   // IMPL-014 (espelho do Node): sinais de fim por papel + taxa de truncamento
   // da run, do MESMO ponto unico do custo — 100% das chamadas, juiz inclusive.
   Object.assign(record, truncationRecordFields(snap.finishByRole));

@@ -142,7 +142,7 @@ describe('IMPL-072 — streaming é o default de RUNTIME em todos os papéis', (
     });
     expect(r.text).toBe('ola');
     expect(r.finishReason).toBe('stop');
-    expect(r.cost).toEqual({ usd: 0.0003, source: 'usage', upstreamUsd: undefined });
+    expect(r.cost).toEqual({ usd: 0.0003, source: 'usage' });
     expect(r.provider?.name).toBe('OpenAI');
     expect(deltas).toEqual(['ola']);
     expect(ledger.spentUsd).toBeCloseTo(0.0003, 12);

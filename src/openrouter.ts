@@ -1193,7 +1193,22 @@ export interface UsageInfo {
   tokensOut: number;
   /** Creditos EFETIVAMENTE cobrados. Fonte primaria de custo. */
   cost?: number;
-  upstreamCost?: number;
+  /**
+   * `usage.is_byok`, quando booleano. `true` = a chamada rodou numa key do
+   * PROVEDOR cadastrada na conta OpenRouter (BYOK): `cost` e so a taxa do
+   * OpenRouter e a inferencia e cobrada pelo provedor direto nessa key.
+   * Ausente = a resposta nao disse — nunca inferir BYOK.
+   */
+  isByok?: boolean;
+  /**
+   * `cost_details.upstream_inference_cost` SO de chamada BYOK (`is_byok === true`):
+   * o que o provedor cobrou direto na key BYOK, FORA dos creditos e FORA de
+   * `cost`. ⚠️ O OpenRouter devolve o MESMO campo em TODA chamada: na nao-BYOK
+   * (`is_byok: false`) ele e o custo do provedor JA CONTIDO em `cost` (medido
+   * numa run paga: upstream == cost) — soma-lo dobraria o gasto. Por isso ele
+   * so e lido com `is_byok === true`; sem isso fica de fora.
+   */
+  byokUpstreamCost?: number;
   cachedTokensIn?: number;
   reasoningTokens?: number;
 }
@@ -1213,11 +1228,16 @@ export function extractUsage(u: unknown): UsageInfo {
   const costDetails = (usage.cost_details ?? {}) as Record<string, unknown>;
   const num = (v: unknown): number | undefined =>
     typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+  const isByok = typeof usage.is_byok === 'boolean' ? usage.is_byok : undefined;
+  // `upstream_inference_cost` vem em TODA resposta; so e gasto FORA de `cost`
+  // quando o proprio OpenRouter diz que a chamada foi BYOK (ver `UsageInfo`).
+  const byokUpstreamCost = isByok === true ? num(costDetails.upstream_inference_cost) : undefined;
   return {
     tokensIn: num(usage.prompt_tokens) ?? 0,
     tokensOut: num(usage.completion_tokens) ?? 0,
     cost: num(usage.cost),
-    upstreamCost: num(costDetails.upstream_inference_cost),
+    ...(isByok !== undefined ? { isByok } : {}),
+    ...(byokUpstreamCost !== undefined ? { byokUpstreamCost } : {}),
     cachedTokensIn: num(promptDetails.cached_tokens),
     reasoningTokens: num(completionDetails.reasoning_tokens),
   };
@@ -1230,7 +1250,14 @@ export function extractUsage(u: unknown): UsageInfo {
  */
 export function priceUsage(u: UsageInfo, model: OpenRouterModel | undefined): CallCost {
   if (typeof u.cost === 'number' && Number.isFinite(u.cost)) {
-    return { usd: u.cost, source: 'usage', upstreamUsd: u.upstreamCost };
+    // BYOK so com `is_byok === true` na resposta: `usd` segue sendo o que saiu
+    // dos creditos (a taxa); o provedor cobrou `byokUpstreamUsd` a parte.
+    return {
+      usd: u.cost,
+      source: 'usage',
+      ...(u.isByok === true ? { byok: true } : {}),
+      ...(u.isByok === true && typeof u.byokUpstreamCost === 'number' ? { byokUpstreamUsd: u.byokUpstreamCost } : {}),
+    };
   }
   // Catalogo so vale com preco CONHECIDO: um roteador ("-1") sem usage.cost e
   // 'unknown', nunca um custo derivado (antes saia negativo). IMPL-018.
@@ -1239,6 +1266,19 @@ export function priceUsage(u: UsageInfo, model: OpenRouterModel | undefined): Ca
     return { usd: doCatalogo, source: 'catalog' };
   }
   return { usd: 0, source: 'unknown' };
+}
+
+/**
+ * Dinheiro REAL de uma chamada medida, comparável ao preço do catálogo — a
+ * matéria-prima da calibração estimado × real (IMPL-113). Não-BYOK: `usd`
+ * (o `upstream_inference_cost` da resposta já está dentro dele). BYOK: `usd` é
+ * só a taxa do OpenRouter, então o real é taxa + o que o provedor cobrou na key
+ * BYOK; sem esse valor na resposta o real NÃO foi medido (`null` — nunca a taxa
+ * sozinha, que ensinaria à calibração um preço ~20× menor que o do catálogo).
+ */
+export function measuredCallUsd(cost: CallCost): number | null {
+  if (!cost.byok) return cost.usd;
+  return typeof cost.byokUpstreamUsd === 'number' ? cost.usd + cost.byokUpstreamUsd : null;
 }
 
 /** A resposta trouxe bloco `usage`? Sem ele o custo NAO foi medido (IMPL-017). */
@@ -2164,6 +2204,14 @@ export interface GenerationInfo {
   provider?: CallProviderInfo;
   /** `total_cost` — o valor da FATURA desta geração. */
   totalCostUsd?: number;
+  /**
+   * `is_byok === true` na ficha: `total_cost` é só a taxa do OpenRouter e o
+   * provedor cobrou `byokUpstreamUsd` direto na key BYOK. Ausente = não-BYOK
+   * ou não informado (nunca inferir).
+   */
+  byok?: boolean;
+  /** `upstream_inference_cost` SÓ de geração BYOK (na não-BYOK ele já está em `total_cost`). */
+  byokUpstreamUsd?: number;
   cancelled?: boolean;
   /** `generation_time` (ms) no provedor. */
   generationTimeMs?: number;
@@ -2183,10 +2231,15 @@ export function parseGenerationInfo(id: string, json: unknown): GenerationInfo |
   const totalCostUsd = num(r.total_cost) ?? num(r.cost);
   const tokensIn = num(r.tokens_prompt) ?? num(r.native_tokens_prompt);
   const tokensOut = num(r.tokens_completion) ?? num(r.native_tokens_completion);
+  // Mesma regra do `extractUsage`: o upstream só é gasto à parte com `is_byok`.
+  const byok = r.is_byok === true;
+  const byokUpstreamUsd = byok ? num(r.upstream_inference_cost) : undefined;
   return {
     generationId: id,
     ...(provider ? { provider } : {}),
     ...(typeof totalCostUsd === 'number' ? { totalCostUsd } : {}),
+    ...(byok ? { byok: true } : {}),
+    ...(byokUpstreamUsd !== undefined ? { byokUpstreamUsd } : {}),
     ...(typeof r.cancelled === 'boolean' ? { cancelled: r.cancelled } : {}),
     ...(num(r.generation_time) !== undefined ? { generationTimeMs: num(r.generation_time) } : {}),
     ...(num(r.latency) !== undefined ? { latencyMs: num(r.latency) } : {}),
@@ -2838,13 +2891,14 @@ export class OpenRouterGateway {
     // Estimado x real por chamada (IMPL-113): só o custo MEDIDO vira amostra —
     // `catalog`/`unknown` não têm "real" e jamais entram (nem como zero).
     const estimado = this.estimatedUsdFor(params);
-    if (cost.source === 'usage' && estimado !== null && estimado > 0 && cost.usd >= 0) {
+    const real = measuredCallUsd(cost);
+    if (cost.source === 'usage' && estimado !== null && estimado > 0 && real !== null && real >= 0) {
       recordCostSample({
         role,
         modelId: params.modelId,
         family: modelFamilyOf(params.modelId),
         estimatedUsd: estimado,
-        actualUsd: cost.usd,
+        actualUsd: real,
         ...(typeof finish?.effort === 'string' ? { effort: finish.effort } : {}),
         ...(typeof usage.reasoningTokens === 'number' ? { reasoningTokens: usage.reasoningTokens } : {}),
         capTokens: effectiveMaxTokens(params.maxTokens),
@@ -3595,9 +3649,15 @@ export class OpenRouterGateway {
             ...(typeof r.info.generationTimeMs === 'number' ? { generationTimeMs: r.info.generationTimeMs } : {}),
             ...(typeof r.info.latencyMs === 'number' ? { latencyMs: r.info.latencyMs } : {}),
           };
+          const cost: CallCost = {
+            usd: r.info.totalCostUsd,
+            source: 'usage',
+            ...(r.info.byok ? { byok: true } : {}),
+            ...(r.info.byok && typeof r.info.byokUpstreamUsd === 'number' ? { byokUpstreamUsd: r.info.byokUpstreamUsd } : {}),
+          };
           ledger.settlePending(
             p.generationId,
-            { usd: r.info.totalCostUsd, source: 'usage' },
+            cost,
             { tokensIn: r.info.tokensIn, tokensOut: r.info.tokensOut },
             details,
           );

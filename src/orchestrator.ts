@@ -547,7 +547,6 @@ async function runLoop(
     // IMPL-074: registo por chamada (id de geração/provedor/conciliação).
     record.callLog = ledger.callLog();
     if (ledger.callLogDropped > 0) record.callLogDropped = ledger.callLogDropped;
-    if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
     Object.assign(record, truncationRecordFields(snap.finishByRole));
   };
   saver.bindLedger(syncLedger, () => reconcileAtRunEnd(ledger, apiKey));

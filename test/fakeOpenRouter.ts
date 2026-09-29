@@ -28,7 +28,17 @@ export interface FakeUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   cost?: number;
-  cost_details?: { upstream_inference_cost?: number };
+  /**
+   * O OpenRouter manda `is_byok` e `cost_details` em TODA resposta (medido
+   * 2026-09-29): na não-BYOK `upstream_inference_cost` == `cost` (já contido
+   * nele); na BYOK `cost` é só a taxa e o upstream foi cobrado na key do provedor.
+   */
+  is_byok?: boolean;
+  cost_details?: {
+    upstream_inference_cost?: number;
+    upstream_inference_prompt_cost?: number;
+    upstream_inference_completions_cost?: number;
+  };
   prompt_tokens_details?: { cached_tokens?: number };
   completion_tokens_details?: { reasoning_tokens?: number };
 }
@@ -135,7 +145,15 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
     const usage: FakeUsage | undefined =
       reply.usage === null
         ? undefined
-        : (reply.usage ?? { prompt_tokens: 10, completion_tokens: 5, cost: 0.001 });
+        : (reply.usage ?? {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            cost: 0.001,
+            // Forma REAL de uma chamada não-BYOK: o upstream repete o custo que
+            // JÁ está em `cost` — quem somá-lo dobra o gasto (extra#1).
+            is_byok: false,
+            cost_details: { upstream_inference_cost: 0.001 },
+          });
     if (typeof usage?.cost === 'number') billed += usage.cost;
     billedCalls += 1;
     const text = reply.text ?? '';

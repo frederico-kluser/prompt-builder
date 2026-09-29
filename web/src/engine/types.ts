@@ -989,7 +989,13 @@ export interface RunRecord {
   /** IMPL-074: registo por chamada (id de geração/provedor/conciliação), fora do ledger enxuto. */
   callLog?: import('../../../src/types.js').CallLogEntry[];
   callLogDropped?: number;
-  /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
+  /**
+   * @deprecated LEGADO — não é mais escrito. Records antigos somavam aqui o
+   * `upstream_inference_cost` de TODA chamada, e o OpenRouter o devolve também
+   * nas não-BYOK (onde já está dentro de `totalCostUsd`): semântica
+   * desconhecida. Nunca somar ao gasto nem rotular de BYOK. O gasto BYOK
+   * medido vive em `costLedger.byok`.
+   */
   upstreamCostUsd?: number;
   /** Teto de gasto configurado (ausente = sem limite). */
   budgetUsd?: number;
@@ -1087,8 +1093,9 @@ export interface SessionRecord {
   /** Soma do `failureCountByRole` de todas as runs da sessão (IMPL-004). */
   failureCountByRole?: Partial<Record<CostRole, number>>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
-  /** Ledger da sessão: spent/committed/pending (IMPL-017). */
+  /** Ledger da sessão: spent/committed/pending (IMPL-017). Gasto BYOK em `costLedger.byok`. */
   costLedger?: import('../../../src/types.js').CostLedgerSummary;
+  /** @deprecated LEGADO, semântica desconhecida — ver `RunRecord.upstreamCostUsd`. Não é mais escrito. */
   upstreamCostUsd?: number;
   budgetUsd?: number;
   budgetExhausted?: boolean;

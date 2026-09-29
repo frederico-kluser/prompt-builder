@@ -109,7 +109,7 @@ describe('llmVariants.ts — identidade da tripla e fairness', () => {
 });
 
 describe('budget.ts — teto honesto e sinais de controle', () => {
-  const call = (usd: number) => ({ usd, source: 'usage' as const, upstreamUsd: 0 });
+  const call = (usd: number) => ({ usd, source: 'usage' as const });
 
   it('contabilidade é por papel e o snapshot soma todos os papéis', () => {
     const ledger = new BudgetLedger({ budgetUsd: 10 });
