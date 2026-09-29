@@ -132,13 +132,28 @@ const USO: Record<string, string> = {
   runs winner <id> [--prompt-only]
   runs reproduce <id>      config reconstruído + comando p/ re-rodar
   runs reproduce <id> --replay  re-pontua as respostas gravadas a US$ 0 (exit 3 se divergir)
-  runs export <id> [-o <arq>]
+  runs export <id> [-o <arq>]  artefato auditável (record + gabaritos + vereditos)
+  runs export <id> --format exchange [-o <dir|arq.json>]
+                           pacote prompt-builder-exchange@1 (record VERBATIM)
+  runs import <dir|arq.json> [--overwrite]
+                           importa runs/sessões de um pacote exchange@1; conflito
+                           (mesmo id, outro conteúdo) recusa (exit 3) sem --overwrite
+  runs delete <id…>        apaga de verdade: record + job + journal + chaves +
+                           agent-runs/<id>/ (zero resíduo)
+  runs prune [--older-than 30d] [--dry-run]
+                           TTL agora; o TTL (90 dias, PB_RETENTION_DAYS; 0 desliga)
+                           também roda sozinho no \`runs list\` e antes de cada run
   runs status|wait|cancel <id>  job (--detach), run ou sessão`,
   sessions: `  sessions list            lista sessões (teto 50; --all/--limit N)
   sessions show <id>
   sessions winner <id> [--prompt-only | --apply <arq> [--commit] [--override "<motivo>"]]
            handoff com backup + diff; holdout regredido BLOQUEIA (exit 10)
            salvo --override com motivo (gravado na auditoria + trailer)
+  sessions export <id> [-o <dir|arq.json>]
+           pacote prompt-builder-exchange@1 com a sessão E as runs dela
+  sessions import <dir|arq.json> [--overwrite]
+  sessions delete <id…> [--keep-runs]
+           apaga a sessão (e as runs dela, salvo --keep-runs)
   sessions report <id> [--html <arq>] [--markdown <arq>] [--calls-per-month N] [--annotate]
            relatório de ciclos: quanto melhorou (original × campeão, por ciclo
            e no holdout) e quanto a mudança muda o custo por chamada; --html
