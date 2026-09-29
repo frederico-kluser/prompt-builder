@@ -29,6 +29,7 @@ import {
 import { cmdLibrary } from './commands/library.js';
 import { cmdBaseline } from './commands/baseline.js';
 import { cmdLimits } from './commands/limits.js';
+import { cmdCalib } from './commands/calib.js';
 
 const VERSION = pkgVersion();
 
@@ -102,6 +103,14 @@ OUTROS
                            sem re-baseline declarada (ver: docs lifecycle)
   baseline declare --reason "…" [--judge a,b] [--reference x]
   mcp                      servidor MCP por stdio (mesmo binário)
+
+CALIBRAÇÃO DO JUIZ (juiz × humano; só disco, sem key)
+  calib report --file <arq.jsonl> [--pilot]
+                           α ordinal de Krippendorff + AC2 de Gwet + IC95%;
+                           humano × humano primeiro (--pilot), juiz só com
+                           α humano ≥ 0,667; exit 10 se reprovar (ver: docs calibration)
+  calib template [-o <arq.jsonl>]
+                           exemplo comentado do formato (itens SINTÉTICOS)
 
 AGENTES (modo agente — mesmo motor, executor pi)
   agents doctor [--deep] [--container] [--config <arq>]
@@ -184,6 +193,8 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdRegistry(argv);
     case 'baseline':
       return cmdBaseline(argv);
+    case 'calib':
+      return cmdCalib(argv);
     case 'doctor':
       return cmdDoctor(argv);
     case 'limits':

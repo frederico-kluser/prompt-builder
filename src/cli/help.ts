@@ -29,6 +29,7 @@ export const COMMANDS = [
   'config',
   'registry',
   'baseline',
+  'calib',
   'doctor',
   'limits',
   'mcp',
@@ -77,6 +78,7 @@ const RESUMO: Record<string, string> = {
   config: 'valida, exemplifica e explica configs de run',
   registry: 'guarda de drift dos prompts de produção',
   baseline: 'pina e confere juiz/gabarito/contrato de uma run',
+  calib: 'calibração juiz × humano (α de Krippendorff, AC2 de Gwet, IC95%)',
   doctor: 'diagnostica key, limites e o ambiente do modo agente',
   limits: 'teto diário de gasto da máquina',
   mcp: 'servidor MCP por stdio (mesmo binário)',
@@ -148,6 +150,17 @@ const USO: Record<string, string> = {
   baseline check [--file <arq>] [--config <arq>] [--catalog <models.json>]
            gate de CI: sai 3 se juiz/gabarito mudou ou sumiu sem re-baseline
   baseline declare --reason "…" [--judge a,b] [--reference x]`,
+  calib: `  calib report --file <arq.jsonl> [--pilot] [--strict] [--seed N] [--resamples N]
+           α ordinal de Krippendorff + AC2 de Gwet (pesos ordinais) + IC95%
+           (bootstrap por item, semeado). Humano × humano PRIMEIRO; juiz ×
+           humano só fora do --pilot e com α humano ≥ 0,667; sensibilidade/
+           especificidade quando há "gold". Reprovado (α < 0,667 ou juiz fora
+           da faixa humana) = exit 10, relatório em error.details.report.
+           --strict: pendência de prontidão (< 150 itens, estrato < 30, IC > 0,2,
+           item sintético) também reprova
+  calib template [-o <arq.jsonl>]
+           exemplo comentado do formato calibration-jsonl@1 (itens SINTÉTICOS)
+  Formato e protocolo do piloto: \`prompt-builder docs calibration\``,
   doctor: `  doctor [--deep] [--container] [--config <arq>]
            key (exit 4 se ausente/recusada), teto diário, runs ativas e a
            sala do modo agente (canário real com --deep)`,
