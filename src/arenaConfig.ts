@@ -329,6 +329,8 @@ export function arenaAgentConfigToRunConfig(
         ...common,
         // TODOS os contestants rodam como agentes (runner preso em 'agent').
         competitorConfigs: file.models.competitors.map((id) => ({ modelId: id })),
+        // Lista de MODELOS (não configs do mesmo modelo): ninguém é controle (web-code#16).
+        competitorAnchor: false,
       }
     : {
         mode: file.mode,

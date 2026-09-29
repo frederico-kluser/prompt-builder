@@ -220,7 +220,11 @@ function compareContestants(config: RunConfig): Contestant[] {
     else {
       for (const w of sane.warnings) console.warn(`[compare-llms] ${w}`);
       contestants = variantsToContestants(sane.variants);
-      if (contestants[0]) contestants[0] = { ...contestants[0], isOriginal: true };
+      // web-code#16: só o eixo compare-llms tem âncora; lista de MODELOS
+      // (competitorAnchor: false) não tem controle.
+      if (contestants[0] && config.competitorAnchor !== false) {
+        contestants[0] = { ...contestants[0], isOriginal: true };
+      }
     }
   }
   // F5: em modo agente (config.agent presente), TODO contestant do compare roda

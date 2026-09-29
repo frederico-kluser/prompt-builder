@@ -26,6 +26,14 @@ import { MIN_SCENARIOS_FOR_HOLDOUT } from '../engine/holdout';
  * `SmoothTabs` faz de trilho de passos: 5 painéis estáveis (os MESMOS em todos
  * os modos — nada de painel condicional), navegação livre (voltar/avançar e
  * clique direto no trilho), pois nada aqui é obrigatório antes do envio.
+ *
+ * IMPL-106 (d) na superfície GUIADA (decisão do dono, ef07ce2: o guiado é o
+ * default e é um assistente — os campos de um passo não ficam à vista nos
+ * outros). O critério "nenhum obrigatório oculto" vira aqui "nenhum obrigatório
+ * oculto SEM pista visível": o passo com pendência ganha um ponto no TRILHO
+ * (sempre à vista, com "pendente" no nome acessível), o rodapé fixo nomeia a
+ * 1ª pendência e leva ao passo, e a Revisão lista todas com link. Contrato E2E
+ * em test/ux-nova-run-e2e.test.ts (superfície guiada).
  */
 
 /** As 5 seções da página única (IMPL-106) — mesmo vocabulário do NewRun. */
@@ -35,6 +43,10 @@ export type FormSection = 'cenarios' | 'sujeitos' | 'juizes' | 'avancado';
 export interface GuidedProblem {
   section: FormSection;
   text: string;
+  /** Passo que mostra o campo, quando não é o da seção (ver `stepOfProblem`). */
+  step?: GuidedStep;
+  /** O campo só existe na configuração completa: o link a abre. */
+  onlyComplete?: boolean;
 }
 
 export type GuidedStep = 'objetivo' | 'teste' | 'participantes' | 'limites' | 'revisao';
@@ -56,6 +68,15 @@ export const SECTION_STEP: Record<FormSection, GuidedStep> = {
   juizes: 'participantes',
   avancado: 'limites',
 };
+
+/**
+ * Passo que RESOLVE a pendência: o explícito (campo que mora num passo diferente
+ * do da sua seção — ex.: o gabarito, no Avançado da completa e em
+ * "Participantes" aqui) ou o da seção.
+ */
+export function stepOfProblem(pr: GuidedProblem): GuidedStep {
+  return pr.step ?? SECTION_STEP[pr.section];
+}
 
 /* ---------------------------------------------------------------- objetivos */
 
@@ -107,6 +128,8 @@ export interface GuidedSetupProps {
   basePrompt: string;
   setBasePrompt: (v: string) => void;
   stages: number;
+  /** Nº de cenários EFETIVO (clamp 1–50 + seeds) — o que o plano descreve. */
+  plannedStages: number;
   setStages: (v: number) => void;
   budget: string;
   setBudget: (v: string) => void;
@@ -118,6 +141,9 @@ export interface GuidedSetupProps {
   setDatagen: (v: string[]) => void;
   judge: string[];
   setJudge: (v: string[]) => void;
+  /** Gabarito (IMPL-048): obrigatório em teste/treino, distinto de juízes e do modelo sob teste. */
+  referenceModel: string[];
+  setReferenceModel: (v: string[]) => void;
   duelsOn: boolean;
   setDuelsOn: (v: boolean) => void;
   finalists: number;
@@ -131,6 +157,8 @@ export interface GuidedSetupProps {
   estimate: { low: number; high: number } | null;
   /** Sai para o formulário completo (mesmo estado). */
   onOpenClassic: () => void;
+  /** Já tentou iniciar: o ponto de pendência do trilho fica vermelho (como nas seções). */
+  tried?: boolean;
 }
 
 function usd(v: number): string {
@@ -201,8 +229,10 @@ function RunPlan({ p }: { p: GuidedSetupProps }) {
       ? `${competidores.slice(0, -1).join(', ')} e ${competidores.at(-1)}`
       : competidores[0] ?? '—';
 
+  const gabarito = p.referenceModel[0] ? labelOf(p.models, p.referenceModel[0]) : null;
   const passos = [
-    `O gerador ${gerador} cria ${p.stages} cenário${p.stages > 1 ? 's' : ''} ${tema ? `sobre “${tema.slice(0, 90)}${tema.length > 90 ? '…' : ''}”` : 'a partir do tema'}.`,
+    `O gerador ${gerador} cria ${p.plannedStages} cenário${p.plannedStages > 1 ? 's' : ''} ${tema ? `sobre “${tema.slice(0, 90)}${tema.length > 90 ? '…' : ''}”` : 'a partir do tema'}.`,
+    gabarito ? `O modelo ${gabarito} escreve o gabarito — a resposta ideal — de cada cenário.` : null,
     isCompare
       ? `Os modelos ${lista} respondem a todos os cenários, nas mesmas condições.`
       : `O modelo ${lista} responde a cada cenário ${p.mode === 'training' ? 'com o prompt que evolui a cada rodada' : 'com cada versão do prompt'}.`,
@@ -248,7 +278,7 @@ export function GuidedSetup(p: GuidedSetupProps) {
   const pendentes = useMemo(() => {
     const por = new Map<GuidedStep, GuidedProblem[]>();
     for (const pr of p.problems) {
-      const s = SECTION_STEP[pr.section];
+      const s = stepOfProblem(pr);
       por.set(s, [...(por.get(s) ?? []), pr]);
     }
     return por;
@@ -256,6 +286,11 @@ export function GuidedSetup(p: GuidedSetupProps) {
 
   function resolvido(step: GuidedStep): boolean {
     return step !== 'revisao' && step !== 'objetivo' && !(pendentes.get(step)?.length);
+  }
+
+  /** Passo com campo obrigatório pendente (a Revisão só lista, não pisca). */
+  function pendente(step: GuidedStep): boolean {
+    return step !== 'revisao' && !!pendentes.get(step)?.length;
   }
 
   function go(delta: number) {
@@ -280,6 +315,17 @@ export function GuidedSetup(p: GuidedSetupProps) {
                 <span className="font-mono text-[11px] tabular opacity-70">{i + 1}</span>
                 {STEP_LABEL[s]}
                 {resolvido(s) && <Check className="size-3.5 text-resolve" aria-hidden="true" />}
+                {pendente(s) && (
+                  <>
+                    {/* Pista VISÍVEL de obrigatório pendente neste passo (IMPL-106 d). */}
+                    <span
+                      data-pendente=""
+                      aria-hidden="true"
+                      className={cn('size-1.5 rounded-full', p.tried ? 'bg-destructive' : 'bg-muted-foreground/60')}
+                    />
+                    <span className="sr-only">(pendente)</span>
+                  </>
+                )}
               </span>
             </SmoothTabsTab>
           ))}
@@ -365,7 +411,9 @@ export function GuidedSetup(p: GuidedSetupProps) {
                     hint={isCompare ? 'Selecione 2 ou mais.' : 'Selecione 1.'}
                     value={isCompare ? p.competitors : p.contestantModel}
                     onChange={(ids) => (isCompare ? p.setCompetitors(ids) : p.setContestantModel(ids))}
-                    excludeIds={isCompare ? [...p.datagen, ...p.judge] : undefined}
+                    excludeIds={
+                      isCompare ? [...p.datagen, ...p.judge, ...p.referenceModel] : [...p.judge, ...p.referenceModel]
+                    }
                     models={p.models}
                     loading={p.modelsLoading}
                     tuning={p.tuning}
@@ -401,7 +449,11 @@ export function GuidedSetup(p: GuidedSetupProps) {
                     hint="Selecione 1 ou mais."
                     value={p.judge}
                     onChange={p.setJudge}
-                    excludeIds={p.datagen}
+                    excludeIds={[
+                      ...p.datagen,
+                      ...(isCompare ? p.competitors : p.contestantModel),
+                      ...p.referenceModel,
+                    ]}
                     models={p.models}
                     loading={p.modelsLoading}
                     tuning={p.tuning}
@@ -409,6 +461,35 @@ export function GuidedSetup(p: GuidedSetupProps) {
                     tuningFields={['effort']}
                   />
                 </SettingRow>
+                {/* Gabarito (IMPL-048): obrigatório em teste/treino e distinto de
+                    juízes e do modelo sob teste — por isso mora AQUI, à vista.
+                    No compare é opcional (vazio = 1º juiz) e só aparece se já
+                    vier escolhido (import/completa), para poder ser corrigido. */}
+                {(!isCompare || p.referenceModel.length > 0) && (
+                  <SettingRow
+                    wide
+                    label="Gabarito"
+                    sub={
+                      isCompare
+                        ? 'Escreve a resposta ideal de cada cenário. Opcional aqui (vazio = o primeiro juiz), mas nunca juiz nem competidor.'
+                        : 'Escreve a resposta ideal de cada cenário — a régua do juiz. Obrigatório, e diferente dos juízes e do modelo sob teste.'
+                    }
+                  >
+                    <ModelSelector
+                      multi={false}
+                      title="Gabarito"
+                      hint="Selecione 1."
+                      value={p.referenceModel}
+                      onChange={p.setReferenceModel}
+                      excludeIds={[...p.judge, ...(isCompare ? p.competitors : p.contestantModel)]}
+                      models={p.models}
+                      loading={p.modelsLoading}
+                      tuning={p.tuning}
+                      onTuningChange={p.onTuningChange}
+                      tuningFields={['effort']}
+                    />
+                  </SettingRow>
+                )}
               </SettingGroup>
             </div>
           </SmoothTabsPanel>
@@ -470,9 +551,10 @@ export function GuidedSetup(p: GuidedSetupProps) {
                         <button
                           type="button"
                           className="text-left text-[13px] text-primary underline-offset-4 hover:underline"
-                          onClick={() => p.onStepChange(SECTION_STEP[pr.section])}
+                          onClick={() => (pr.onlyComplete ? p.onOpenClassic() : p.onStepChange(stepOfProblem(pr)))}
                         >
                           {pr.text}
+                          {pr.onlyComplete && ' — na configuração completa'}
                         </button>
                       </li>
                     ))}

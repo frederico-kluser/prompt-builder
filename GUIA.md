@@ -29,11 +29,13 @@ só aparece a introdução na primeira vez). A chave é do **OpenRouter**:
 2. **Qualquer key válida serve** — com ou sem limite de crédito. O sistema aceita as duas em
    igualdade e não avisa nem bloqueia nada por causa disso. (Se quiser, o OpenRouter deixa
    definir `limit`/`limit_reset` na key — é opcional e só seu.)
-3. Cole na tela e clique **Validar e salvar** (ou cole direto — a validação corre no paste).
+3. Cole na tela e clique **Validar e conectar** (ou cole direto — a validação corre no paste).
 
-**Onde a chave fica:** só no `localStorage` do seu navegador, e segue direto para o OpenRouter —
-nenhum outro servidor a recebe. **Riscos:** qualquer script da página (XSS), extensões do
-navegador ou outra pessoa neste computador conseguem lê-la; em máquina partilhada, não a salve.
+**Onde a chave fica:** por padrão, só na memória da aba — recarregar ou fechar a aba a apaga e a
+app pede de novo. Com **Lembrar neste dispositivo** ligado, fica no `localStorage` do seu navegador
+até você a remover. Nos dois casos segue direto para o OpenRouter — nenhum outro servidor a
+recebe. **Riscos:** qualquer script da página (XSS), extensões do navegador ou outra pessoa neste
+computador conseguem lê-la; em máquina partilhada, não a lembre.
 **Como revogar:** na [página de keys](https://openrouter.ai/keys) — revogue e crie outra se algo
 parecer errado.
 

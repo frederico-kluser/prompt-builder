@@ -40,6 +40,8 @@ vi.mock('@/components/motion-ui/stagger-reveal', () => ({
 }));
 vi.mock('@/components/ui/button', () => ({ Button: (p: { children?: unknown }) => p.children }));
 vi.mock('@/components/ui/input', () => ({ Input: () => null }));
+// «Lembrar neste dispositivo» (IMPL-082) usa o Switch do shadcn.
+vi.mock('@/components/ui/switch', () => ({ Switch: () => null }));
 vi.mock('@/lib/utils', () => ({ cn: (...a: unknown[]) => a.filter(Boolean).join(' ') }));
 vi.mock('@/components/motion-ui/smooth-tabs', () => ({
   SmoothTabs: (p: { children?: unknown }) => p.children,
@@ -119,8 +121,9 @@ describe.skipIf(!temWebDeps)('IMPL-111 (b) — key sem limite ACEITE, sem cobran
     const src = read('web/src/components/KeySetup.tsx');
     expect(src).not.toMatch(/keyLimitWarning|KeyLimitAlert/);
     expect(src).not.toMatch(/defina um limite/i);
-    // A aceitação continua: key válida (GET /key) é salva e segue para o app.
-    expect(src).toMatch(/setStoredKey\(target\)/);
+    // A aceitação continua: key válida (GET /key) é guardada — com a escolha
+    // «Lembrar neste dispositivo» (IMPL-082) — e segue para o app.
+    expect(src).toMatch(/store\(target, remember\)/);
     expect(src).toMatch(/validateKey\(target\)/);
   });
 });

@@ -734,6 +734,15 @@ export interface CompareConfig extends RunConfigBase {
   competitorModelIds: string[];
   /** compare-llms: variantes de config {modelo, temperatura, reasoning} no eixo de contestants (identidade = tripla). */
   competitorConfigs?: { modelId: string; temperature?: number; reasoningLevel?: ReasoningLevel }[];
+  /**
+   * Ancora (web-code#16): com `competitorConfigs`, o 1º concorrente vira o
+   * controle (`isOriginal` — "base" no heatmap, "controlo" na narrativa). Vale
+   * para o eixo compare-llms (configs do MESMO modelo). `false` = ninguém é
+   * controle: a lista é de MODELOS diferentes promovida a configs só para
+   * carregar o ajuste por competidor (Nova Run) ou os agentes do compare.
+   * Ausente = ancorado (comportamento de sempre).
+   */
+  competitorAnchor?: boolean;
 }
 export interface VariationConfig extends RunConfigBase, SingleModelFields {
   mode: 'variation';

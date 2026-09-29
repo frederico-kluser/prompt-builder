@@ -9,6 +9,7 @@ import {
   createSession,
   estimateConfigCost,
   isCostConfirmationRequired,
+  isKeyMissing,
   fetchLgpd,
   fetchModels,
   fetchTechniques,
@@ -51,8 +52,17 @@ import {
   type ConfigRow,
 } from '../arenaForm';
 import { CostConfirmDialog } from '../components/CostConfirmDialog';
+import { KeySetup } from '../components/KeySetup';
 import { AreaRow, LinkButton, NumRow, SwitchRow, TxtNumRow } from '../components/formRows';
 import { GuidedSetup, SECTION_STEP, type GuidedStep } from '../components/GuidedSetup';
+import {
+  clampStages,
+  defaultReferenceFor,
+  effortOfTuning,
+  reasoningFromTuning,
+  referenceProblemTexts,
+  stagesProblem,
+} from '../newRunRules';
 import {
   AREA_LIVRE,
   allowlistNotice,
@@ -122,6 +132,17 @@ type SectionId = 'cenarios' | 'sujeitos' | 'juizes' | 'avancado';
 interface Problem {
   section: SectionId;
   text: string;
+  /**
+   * Passo do GUIADO que mostra o campo, quando não é o da seção (ex.: o
+   * gabarito mora no Avançado da completa mas em "Participantes" no guiado).
+   */
+  step?: GuidedStep;
+  /**
+   * O campo NÃO existe no guiado (técnicas/variantes manuais, eixo de configs,
+   * grupo multi-prompt): no guiado a pendência abre a configuração COMPLETA na
+   * seção — nunca um passo que não mostra o campo (IMPL-106 d).
+   */
+  onlyComplete?: boolean;
 }
 
 function fmtUsd(x: number): string {
@@ -317,6 +338,12 @@ export function NewRun() {
   const [modelsLoading, setModelsLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Key sumida" no meio da configuração (IMPL-082 crit. iv): a key vive só na
+  // memória da aba por default e o navegador pode apagar a lembrada. O que
+  // gasta recusa com `KeyMissingError` ANTES de qualquer fetch — aqui isso vira
+  // RE-PROMPT (o KeySetup no topo, com tudo o que foi preenchido intacto),
+  // nunca um erro genérico no rodapé.
+  const [needKey, setNeedKey] = useState(false);
   // Só depois de o usuário TENTAR iniciar a pendência vira erro (vermelho) —
   // validação prematura em vermelho é anti-padrão.
   const [tried, setTried] = useState(false);
@@ -344,6 +371,32 @@ export function NewRun() {
   // Default do julgamento por referência muda com o modo/eixo — sem pisar em
   // escolha vinda de arquivo (refJudgingChoice !== null).
   const referenceJudging = refJudgingChoice ?? (mode !== 'compare' || compareAxis === 'configs');
+
+  // IMPL-048: nos modos de prompt o gabarito é OBRIGATÓRIO e distinto dos
+  // juízes e do modelo sob teste (o schema do Node e o portão da SPA recusam
+  // sem ele). Ao entrar num desses modos sem gabarito, ele ganha um default —
+  // o 1º juiz preferido LIVRE, como os demais papéis têm default —, visível no
+  // passo "Participantes" do guiado e no Avançado (citado em Juízes) da
+  // completa. Ao voltar ao compare, o default INTOCADO sai: lá o gabarito é
+  // opcional (vazio = 1º juiz) e o id poderia colidir com um competidor.
+  const autoReference = useRef<string | null>(null);
+  useEffect(() => {
+    if (isSingle) {
+      if (referenceModel.length === 0) {
+        const id = defaultReferenceFor(judge, contestantModel);
+        if (id) {
+          autoReference.current = id;
+          setReferenceModel([id]);
+        }
+      }
+    } else if (autoReference.current && referenceModel[0] === autoReference.current) {
+      autoReference.current = null;
+      setReferenceModel([]);
+    }
+    // Só na troca de modo (inclusive a que vem de um import): depois disso o
+    // gabarito é do usuário — até removê-lo (vira pendência, nunca re-default).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSingle]);
 
   useEffect(() => {
     let active = true;
@@ -466,8 +519,11 @@ export function NewRun() {
   const importedList: StageSpec[] = rawStages ?? pack?.scenarios ?? [];
   const importedCount = rawStages ? rawStages.length : seedCount;
   const importedRefs = importedList.filter((s) => s.reference?.trim()).length;
+  // Nº de cenários efetivo (inteiro 1–50): o input aceita qualquer coisa na
+  // digitação — o clamp mora AQUI, uma vez, e envio/estimativa/textos leem ele.
+  const stagesNum = clampStages(stages);
   // O orchestrator só gera o que falta p/ `stages`; garante etapas >= seed.
-  const plannedStages = rawStages ? rawStages.length : Math.max(stages, seedCount);
+  const plannedStages = rawStages ? rawStages.length : Math.max(stagesNum, seedCount);
   // Só chama o gerador quando ainda faltam cenários para completar `stages`.
   const precisaGerar = !rawStages && plannedStages > seedCount;
 
@@ -509,8 +565,7 @@ export function NewRun() {
 
   /** Esforço ajustado no modelo ('' / ausente = padrão do provedor, não envia). */
   function effortOf(modelId?: string): ReasoningLevel | undefined {
-    const level = modelId ? tuning[modelId]?.effort : undefined;
-    return level ? level : undefined;
+    return effortOfTuning(tuning, modelId);
   }
 
   /** Temperatura ajustada no modelo (texto → número, com clamp). */
@@ -662,7 +717,10 @@ export function NewRun() {
         ),
       );
     } catch (err) {
-      setGenBaseError((err as Error).message);
+      if (isKeyMissing(err)) {
+        setNeedKey(true);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else setGenBaseError((err as Error).message);
     } finally {
       setGenBaseLoading(false);
     }
@@ -678,12 +736,13 @@ export function NewRun() {
     // O gerador só é exigido quando ele vai ser chamado: com os cenários já
     // prontos no arquivo, o campo nem aparece — não pode travar o botão.
     if (precisaGerar && datagen.length !== 1)
-      out.push({ section: 'cenarios', text: 'Selecione 1 modelo gerador.' });
+      // No guiado o seletor do gerador mora em "Participantes" (não em "Teste").
+      out.push({ section: 'cenarios', step: 'participantes', text: 'Selecione 1 modelo gerador.' });
     if (judge.length < 1) out.push({ section: 'juizes', text: 'Selecione ao menos 1 juiz.' });
     if (mode === 'compare') {
       if (compareAxis === 'configs') {
         if (competitorConfigs.filter((r) => r.modelId).length < 2)
-          out.push({ section: 'sujeitos', text: 'Preencha o modelo em pelo menos 2 configs.' });
+          out.push({ section: 'sujeitos', text: 'Preencha o modelo em pelo menos 2 configs.', onlyComplete: true });
       } else if (competitors.length < 2) {
         out.push({ section: 'sujeitos', text: 'Selecione pelo menos 2 modelos competidores.' });
       }
@@ -693,13 +752,30 @@ export function NewRun() {
       if (variantCount < 2)
         out.push({
           section: 'sujeitos',
+          // Técnicas e variantes manuais só existem na completa.
+          onlyComplete: true,
           text: optimize
             ? 'Selecione ao menos 2 técnicas (ou 1 técnica + prompt base).'
             : 'Escreva ao menos 2 variantes manuais (ou 1 + prompt base).',
         });
     }
+    // Papéis separados (IMPL-048): a mesma regra do schema/portão da SPA. O
+    // gabarito mora no Avançado da completa (o irPara abre) e em
+    // "Participantes" no guiado.
+    for (const text of referenceProblemTexts({
+      mode,
+      reference: referenceModel[0],
+      judges: judge,
+      competitors: compareAxis === 'configs' ? competitorConfigs.map((r) => r.modelId).filter(Boolean) : competitors,
+      contestant: contestantModel[0],
+    })) {
+      out.push({ section: 'avancado', step: 'participantes', text });
+    }
+    // Cenários: só quando o campo aparece (com etapas cruas, `stages` nem vale).
+    const cenarios = rawStages ? null : stagesProblem(stages);
+    if (cenarios) out.push({ section: 'avancado', text: cenarios });
     const grupo = promptGroupProblem({ mode, promptGroup, promptId });
-    if (grupo) out.push({ section: 'avancado', text: grupo });
+    if (grupo) out.push({ section: 'avancado', text: grupo, onlyComplete: true });
     if (budget.trim() !== '' && !(parseFloat(budget) > 0))
       out.push({
         section: 'avancado',
@@ -719,11 +795,13 @@ export function NewRun() {
    * no completo, abre o "Avançado" se preciso e rola/foca a âncora. Nunca troca
    * de aba (a página é única).
    */
-  function irPara(section: SectionId) {
-    if (formStyle === 'guided') {
-      setGuidedStep(SECTION_STEP[section]);
+  function irPara(section: SectionId, step?: GuidedStep, onlyComplete?: boolean) {
+    if (formStyle === 'guided' && !onlyComplete) {
+      setGuidedStep(step ?? SECTION_STEP[section]);
       return;
     }
+    // Campo que o guiado não tem: abre a completa (mesmo estado) na seção.
+    if (formStyle === 'guided') setFormStyle('complete');
     if (section === 'avancado') setAvancadoOpen(true);
     // Depois do render (o Avançado precisa abrir antes de existir no layout).
     requestAnimationFrame(() => {
@@ -767,18 +845,16 @@ export function NewRun() {
   function buildConfig(): RunConfig {
     // Reasoning por papel: sai do ajuste do modelo daquele papel (o esforço mora
     // no modelo). No compare por modelos ele é POR competidor — vai lá embaixo,
-    // em competitorConfigs.
-    const reasoning: ReasoningConfig = {};
-    const competitorEffort = isSingle ? effortOf(contestantModel[0]) : undefined;
-    if (competitorEffort) reasoning.competitor = competitorEffort;
-    // O engine usa um nível só para juiz e gabarito (`reasoning.judge`); com o
-    // juiz no padrão, o ajuste do modelo de gabarito é quem manda.
-    const judgeEffort = effortOf(judge[0]) ?? effortOf(referenceModel[0]);
-    if (judgeEffort) reasoning.judge = judgeEffort;
-    const datagenEffort = effortOf(datagen[0]);
-    if (datagenEffort) reasoning.datagen = datagenEffort;
-    const rewriterEffort = effortOf(rewriterModel[0]);
-    if (rewriterEffort) reasoning.rewriter = rewriterEffort;
+    // em competitorConfigs. Gabarito em `gab`, nunca vazando no juiz/duelo.
+    const reasoning: ReasoningConfig = reasoningFromTuning({
+      tuning,
+      isSingle,
+      contestant: contestantModel[0],
+      judge: judge[0],
+      reference: referenceModel[0],
+      datagen: datagen[0],
+      rewriter: rewriterModel[0],
+    });
     // Temperatura do modelo sob teste: vale para TODAS as variantes (o que se
     // compara são os prompts, não as configs).
     const contestantTemp = isSingle ? tempOf(contestantModel[0]) : undefined;
@@ -843,10 +919,13 @@ export function NewRun() {
         };
       } else if (competitors.some((id) => effortOf(id) || tempOf(id) !== undefined)) {
         // Ajuste por competidor: uma lista de ids não representa mais a run —
-        // promove para competitorConfigs, NA ORDEM dos chips.
+        // promove para competitorConfigs, NA ORDEM dos chips. Continua sendo
+        // uma lista de MODELOS: `competitorAnchor: false` impede o 1º de virar
+        // "base/controlo" (regra do eixo compare-llms — web-code#16).
         config = {
           mode,
           ...common,
+          competitorAnchor: false,
           competitorConfigs: competitors.map((id) => {
             const t = tempOf(id);
             const e = effortOf(id);
@@ -904,6 +983,11 @@ export function NewRun() {
         setPendingLaunch({ config, estimate: err.estimate });
         return;
       }
+      if (isKeyMissing(err)) {
+        setNeedKey(true);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
       setError((err as Error).message);
     }
   }
@@ -914,7 +998,7 @@ export function NewRun() {
     const faltas = problems();
     if (faltas.length) {
       setTried(true);
-      irPara(faltas[0].section);
+      irPara(faltas[0].section, faltas[0].step, faltas[0].onlyComplete);
       return setError(faltas[0].text);
     }
     let config = buildConfig();
@@ -1077,6 +1161,16 @@ export function NewRun() {
           </SegmentedToggle>
         )}
 
+        {needKey && (
+          <div className="mt-4 flex flex-col gap-3">
+            <Banner tone="warn">
+              A chave da OpenRouter não está mais nesta aba (recarregou sem «Lembrar neste dispositivo», ou o
+              navegador apagou os dados do site). Conecte-a de novo — o que você preencheu continua aqui.
+            </Banner>
+            <KeySetup onSaved={() => setNeedKey(false)} />
+          </div>
+        )}
+
         {piiImport && (
           <Banner tone="warn" className="mt-4 flex flex-col gap-3">
             <p>{piiImport.message}</p>
@@ -1175,6 +1269,7 @@ export function NewRun() {
             basePrompt={basePrompt}
             setBasePrompt={setBasePrompt}
             stages={stages}
+            plannedStages={plannedStages}
             setStages={setStages}
             budget={budget}
             setBudget={setBudget}
@@ -1186,6 +1281,8 @@ export function NewRun() {
             setDatagen={setDatagen}
             judge={judge}
             setJudge={setJudge}
+            referenceModel={referenceModel}
+            setReferenceModel={setReferenceModel}
             duelsOn={duelsOn}
             setDuelsOn={setDuelsOn}
             finalists={finalists}
@@ -1197,6 +1294,7 @@ export function NewRun() {
             problems={pendencias}
             estimate={launchEstimate ? { low: launchEstimate.low, high: launchEstimate.high } : null}
             onOpenClassic={() => setFormStyle('complete')}
+            tried={tried}
           />
         ) : (
         <div className="mt-6 flex flex-col gap-5">
@@ -1314,7 +1412,7 @@ export function NewRun() {
                                 title={`Config ${i + 1}`}
                                 value={row.modelId ? [row.modelId] : []}
                                 onChange={(ids) => updateConfigRow(i, { modelId: ids[0] ?? '' })}
-                                excludeIds={[...datagen, ...judge]}
+                                excludeIds={[...datagen, ...judge, ...referenceModel]}
                                 models={participantModels}
                                 loading={modelsLoading}
                               />
@@ -1373,7 +1471,7 @@ export function NewRun() {
                         title="Competidores"
                         value={competitors}
                         onChange={setCompetitors}
-                        excludeIds={[...datagen, ...judge]}
+                        excludeIds={[...datagen, ...judge, ...referenceModel]}
                         models={participantModels}
                         loading={modelsLoading}
                         tuning={tuning}
@@ -1391,7 +1489,7 @@ export function NewRun() {
                       title="Modelo sob teste"
                       value={contestantModel}
                       onChange={setContestantModel}
-                      excludeIds={[...datagen, ...judge]}
+                      excludeIds={[...datagen, ...judge, ...referenceModel]}
                       models={participantModels}
                       loading={modelsLoading}
                       tuning={tuning}
@@ -1482,7 +1580,21 @@ export function NewRun() {
             title="Juízes"
             pending={pendenciaEm('juizes')}
             status={judge.length === 1 ? '1 juiz' : `${judge.length} juízes`}
-            footer="Gerador e juízes rodam com temperatura fixa para o resultado ser reproduzível."
+            footer={
+              <>
+                {isSingle && (
+                  // O gabarito é obrigatório aqui (IMPL-048) mas mora no Avançado
+                  // (orçamento de Tab do IMPL-106): fica CITADO à vista, sem
+                  // virar parada de Tab — trocá-lo é no Avançado.
+                  <span className="mb-1 block">
+                    Gabarito: <span className="font-mono text-[12px] text-foreground">{referenceModel[0] ?? '—'}</span>{' '}
+                    — escreve a resposta ideal de cada cenário e não pode ser juiz nem o modelo sob teste. Troque
+                    em Avançado.
+                  </span>
+                )}
+                Gerador e juízes rodam com temperatura fixa para o resultado ser reproduzível.
+              </>
+            }
           >
                 <SettingRow wide>
                   <ModelSelector
@@ -1490,7 +1602,7 @@ export function NewRun() {
                     title="Juízes"
                     value={judge}
                     onChange={setJudge}
-                    excludeIds={mode === 'compare' ? competitors : contestantModel}
+                    excludeIds={[...(mode === 'compare' ? competitors : contestantModel), ...referenceModel]}
                     models={models}
                     loading={modelsLoading}
                     tuning={tuning}
@@ -1626,13 +1738,25 @@ export function NewRun() {
 
                 <SettingRow
                   wide
-                  sub="Escreve a resposta ideal de cada cenário; o juiz compara as respostas com ela. Vazio = o primeiro juiz."
+                  sub={
+                    isSingle
+                      ? 'Escreve a resposta ideal de cada cenário; o juiz compara as respostas com ela. Obrigatório em teste e treino — e diferente dos juízes e do modelo sob teste (quem escreve a régua não julga nem compete contra ela).'
+                      : 'Escreve a resposta ideal de cada cenário; o juiz compara as respostas com ela. Vazio = o primeiro juiz. Não pode ser juiz nem competidor.'
+                  }
                 >
                   <ModelSelector
                     multi={false}
                     title="Gabarito"
                     value={referenceModel}
                     onChange={setReferenceModel}
+                    excludeIds={[
+                      ...judge,
+                      ...(mode === 'compare'
+                        ? compareAxis === 'configs'
+                          ? competitorConfigs.map((r) => r.modelId).filter(Boolean)
+                          : competitors
+                        : contestantModel),
+                    ]}
                     models={models}
                     loading={modelsLoading}
                     tuning={tuning}
@@ -1677,7 +1801,7 @@ export function NewRun() {
                     />
                     <TxtNumRow
                       label="Margem p/ promover"
-                      sub={`Quanto a vencedora precisa superar a campeã atual (em pontos). Vazio = automática, max(1; 50/n): ${Number(defaultMinGain(stages).toFixed(2))} com ${stages} cenários. Além da margem, ela precisa passar no teste da melhor de K (p ajustado ≤ ${GATE_ALPHA}); sem isso, o treino para.`}
+                      sub={`Quanto a vencedora precisa superar a campeã atual (em pontos). Vazio = automática, max(1; 50/n): ${Number(defaultMinGain(plannedStages).toFixed(2))} com ${plannedStages} cenários. Além da margem, ela precisa passar no teste da melhor de K (p ajustado ≤ ${GATE_ALPHA}); sem isso, o treino para.`}
                       value={minGain}
                       onChange={setMinGain}
                       min={0}
@@ -1850,7 +1974,7 @@ export function NewRun() {
               <button
                 type="button"
                 className="text-left text-destructive underline-offset-4 hover:underline"
-                onClick={() => primeira && irPara(primeira.section)}
+                onClick={() => primeira && irPara(primeira.section, primeira.step, primeira.onlyComplete)}
               >
                 {tried && primeira ? primeira.text : error}
               </button>
@@ -1858,7 +1982,7 @@ export function NewRun() {
               <button
                 type="button"
                 className="text-left text-muted-foreground underline-offset-4 hover:underline"
-                onClick={() => irPara(primeira.section)}
+                onClick={() => irPara(primeira.section, primeira.step, primeira.onlyComplete)}
               >
                 {primeira.text}
               </button>
