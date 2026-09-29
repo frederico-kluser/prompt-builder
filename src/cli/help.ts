@@ -94,11 +94,15 @@ const RESUMO: Record<string, string> = {
 const USO: Record<string, string> = {
   docs: `  docs [tópico]            imprime um tópico da documentação
   docs --list              todos os tópicos, com custo aproximado em tokens`,
-  skill: `  skill                    imprime o SKILL.md deste pacote`,
-  init: `  init --agent <nome>      instala a skill em .claude/skills, .agents/skills, …`,
+  skill: `  skill [models]           imprime o SKILL.md (ou o models.md ao lado dele)`,
+  init: `  init --agent <nome>      copia a pasta da skill (SKILL.md + models.md) para
+                           .claude/skills, .agents/skills, … (--dry-run, --force)
+  init --global            o mesmo no HOME; não mexe em AGENTS.md/CLAUDE.md e
+                           mantém pasta instalada por symlink`,
   models: `  models list [filtros]    lista o catálogo (teto 50; --all/--limit N)
   models show <id>         o que aquele modelo aceita (think levels, temperatura)
-  models export -o <arq>   exporta o catálogo com capacidades de ajuste
+  models export -o <arq>   exporta o catálogo INTEIRO com capacidades de ajuste
+                           (export e -o não levam o teto de 50; --limit vale)
   models allowlist --check idade/contagem da allowlist LGPD por endpoint (sem key)
 
   Filtros de list: --search --provider --effort --supports --reasoning

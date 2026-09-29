@@ -301,8 +301,8 @@ async function configFromJsonUnchecked(
 ): Promise<RunConfig> {
   let json = input;
 
-  // Detecta o dialeto pela chave `format`: arena-config@1 (declarativo, o que a
-  // ARENA-CONFIG.md documenta) vs RunConfig cru.
+  // Detecta o dialeto pela chave `format`: arena-config@1 (declarativo, o que o
+  // agent-docs/config.md documenta — `docs config`) vs RunConfig cru.
   // As flags de dado pessoal valem sobre o arquivo (o dialeto cru e o arena).
   if (pii.piiMode && json && typeof json === 'object') {
     json = { ...(json as Record<string, unknown>), piiMode: pii.piiMode };
