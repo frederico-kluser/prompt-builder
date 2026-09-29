@@ -152,7 +152,11 @@ describe('IMPL-030 — parada graciosa (SIGTERM / runs cancel)', () => {
     expect(isControlSignal(ac.signal.reason)).toBe(true);
     expect(saidas).toEqual([]);
     process.emit('SIGTERM');
-    await new Promise((res) => setTimeout(res, 50));
+    // "Na hora" = sem esperar a graça (60 s): a saída só espera a escrita do
+    // parcial (fsync). Janela fixa de 50 ms flakava com o disco ocupado pela
+    // suíte inteira em paralelo — espera a saída com folga, bem abaixo da graça.
+    const t0 = Date.now();
+    while (saidas.length === 0 && Date.now() - t0 < 5_000) await new Promise((res) => setTimeout(res, 10));
     expect(saidas).toEqual([EXIT.SIGINT]);
     const lida = await loadRun(r.id);
     expect(lida?.status).toBe('aborted');
