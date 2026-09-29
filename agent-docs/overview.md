@@ -35,8 +35,9 @@ HTTP 429) — não existe cap por comando.
 - **Iteração 0** — gera variantes do prompt base aplicando técnicas de
   engenharia de prompt. O prompt base entra como **controle**.
 - **Split de holdout** — depois da iteração 0, uma fatia dos cenários
-  (`holdoutRatio`, padrão 0,2) é **reservada** e fica fora do treino. Com menos
-  de 5 cenários reservados, o holdout é descartado e tudo treina.
+  (`holdoutRatio`, padrão 0,3) é **reservada** e fica fora do treino. Piso
+  absoluto de 10 cenários reservados (seleção ≥ 20): abaixo disso não há
+  holdout — é "confirmação fraca" (`holdoutSkipped`) e tudo treina.
 - **Promoção com margem E teste** — a melhor variante só vira campeã se superar
   o controle por pelo menos `minGain` pontos de judge-score (padrão
   `max(1; 50/n)`, meia granularidade) E passar no teste da **melhor de K**: max-T

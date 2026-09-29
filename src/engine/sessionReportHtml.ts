@@ -17,6 +17,7 @@ import {
   fmtDuration,
   fmtInt,
   fmtPct,
+  cycleReevalText,
   fmtPp,
   fmtSignedNumber,
   fmtSignedUsd,
@@ -306,13 +307,7 @@ function cyclesSection(r: SessionReport): string {
           c.gainPp,
         )}${c.gainCorrectedPp != null ? `, corrigido ${fmtPp(c.gainCorrectedPp)}` : ''}${
           c.minGainPp != null ? `, margem exigida ${fmtPp(c.minGainPp)}` : ''
-        }${
-          c.reeval
-            ? c.reeval.runStatus
-              ? `; re-avaliação limpa interrompida (run ${c.reeval.runStatus}) — sem evidência`
-              : `; re-avaliação limpa ${fmtPp(c.reeval.gainPp)} em ${c.reeval.size} cenário(s) — ${c.reeval.confirmed ? 'confirmada' : 'não confirmada'}`
-            : ''
-        }.`.replace(/\.\.$/, '.'),
+        }${c.reeval ? `; ${cycleReevalText(c.reeval)}` : ''}.`.replace(/\.\.$/, '.'),
       )}</p><div class="tags"><span class="tag">custo ${e(fmtUsd(c.costUsd))}</span>${
         c.technique ? `<span class="tag highlight">${e(c.technique)}</span>` : ''
       }<span class="tag">run ${e(c.runId.slice(0, 8))}</span></div></div></div>`,

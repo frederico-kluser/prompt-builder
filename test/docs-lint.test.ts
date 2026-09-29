@@ -177,3 +177,50 @@ describe('IMPL-119 (3) — snapshot de --help: cobertura 100% e gerado ≠ commi
     expect(helpSnapshotFindings(comMorto).map((f) => f.kind)).toEqual(['help-extra']);
   });
 });
+describe('agent-docs — os números do holdout batem com src/holdout.ts (fonte única)', () => {
+  it('padrão do holdoutRatio, piso de cenários reservados e seleção mínima', async () => {
+    const { readdirSync, readFileSync, statSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { HOLDOUT_RATIO_DEFAULT, MIN_HOLDOUT_SCENARIOS, MIN_SCENARIOS_FOR_HOLDOUT } = await import('../src/holdout.js');
+    const md: string[] = [];
+    const varrer = (dir: string): void => {
+      for (const nome of readdirSync(dir)) {
+        const p = join(dir, nome);
+        if (statSync(p).isDirectory()) varrer(p);
+        else if (p.endsWith('.md')) md.push(p);
+      }
+    };
+    for (const raiz of ['agent-docs', 'skills']) varrer(join(process.cwd(), raiz));
+    expect(md.length).toBeGreaterThan(5);
+    const razao = String(HOLDOUT_RATIO_DEFAULT).replace('.', ',');
+    const achados: string[] = [];
+    let conferidos = 0;
+    for (const arq of md) {
+      // Parágrafo = bloco entre linhas em branco, item de lista ou linha de tabela.
+      const blocos = readFileSync(arq, 'utf-8').split(/\n\s*\n|\n(?=\s*(?:[-*|]|\d+\.)\s)/u);
+      for (const bloco of blocos) {
+        const texto = bloco.replace(/\s+/gu, ' ');
+        if (!/holdout/iu.test(texto)) continue;
+        if (/holdout[-_]?ratio/iu.test(texto)) {
+          for (const m of texto.matchAll(/padr[ãa]o:? (\d+[.,]\d+)/giu)) {
+            conferidos += 1;
+            if (m[1].replace('.', ',') !== razao) achados.push(`${arq}: holdoutRatio "padrão ${m[1]}" ≠ ${razao}`);
+          }
+        }
+        for (const m of texto.matchAll(/(\d+) cen[áa]rios reservados|piso absoluto de (\d+) cen[áa]rios/giu)) {
+          conferidos += 1;
+          const n = Number(m[1] ?? m[2]);
+          if (n !== MIN_HOLDOUT_SCENARIOS) achados.push(`${arq}: piso "${m[0]}" ≠ ${MIN_HOLDOUT_SCENARIOS}`);
+        }
+        for (const m of texto.matchAll(/sele[çc][ãa]o (?:com menos de|≥) (\d+) cen[áa]rios|sele[çc][ãa]o ≥ (\d+)/giu)) {
+          conferidos += 1;
+          const n = Number(m[1] ?? m[2]);
+          if (n !== MIN_SCENARIOS_FOR_HOLDOUT) achados.push(`${arq}: seleção mínima "${m[0]}" ≠ ${MIN_SCENARIOS_FOR_HOLDOUT}`);
+        }
+      }
+    }
+    expect(achados).toEqual([]);
+    // A checagem viu os números de verdade (overview + train), não passou no vazio.
+    expect(conferidos).toBeGreaterThanOrEqual(4);
+  });
+});

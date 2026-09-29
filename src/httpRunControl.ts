@@ -19,7 +19,7 @@
 
 import { RunCancelled } from './budget.js';
 import { subscribe, subscribeSession } from './events.js';
-import { startRun } from './orchestrator.js';
+import { getLiveRun, startRun } from './orchestrator.js';
 import type { StartRunOpts, StartRunResult } from './orchestrator.js';
 import { abortOwnedRecords, loadRun, loadSession, ownedRecords } from './storage.js';
 import { startTraining } from './trainer.js';
@@ -127,6 +127,19 @@ export async function cancelControlled(
     return {
       status: 202,
       body: kind === 'run' ? { runId: id, aborted: true } : { sessionId: id, aborted: true },
+    };
+  }
+
+  // O registro solta a entrada NO evento terminal; o record VIVO (memória do
+  // orquestrador, solto só depois da escrita terminal) diz a verdade nessa
+  // janela — sem ele, um cancel que chegasse entre o evento e o disco lia
+  // 'running' e respondia "não roda neste servidor" para uma run que este
+  // servidor acabou de terminar.
+  const live = kind === 'run' ? getLiveRun(id) : undefined;
+  if (live && isTerminalRunStatus(live.status)) {
+    return {
+      status: 409,
+      body: { error: `A run já terminou (status "${live.status}") — nada a cancelar.` },
     };
   }
 

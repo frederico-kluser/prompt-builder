@@ -92,18 +92,23 @@ afterAll(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-async function contestantsDe(
-  run: (c: RunConfig) => Promise<{ contestants?: { id: string; isOriginal?: boolean }[] }>,
-  cfg: object,
-) {
+type RecAncora = {
+  contestants?: { id: string; isOriginal?: boolean }[];
+  standings?: { id: string; isControl?: boolean }[];
+};
+
+async function rodar(run: (c: RunConfig) => Promise<RecAncora>, cfg: object): Promise<RecAncora> {
   const f = fake();
   const anterior = setDefaultGateway(createGateway({ fetch: f.fetch, sleep: noSleep }));
   try {
-    const rec = await run(cfg as unknown as RunConfig);
-    return rec.contestants ?? [];
+    return await run(cfg as unknown as RunConfig);
   } finally {
     setDefaultGateway(anterior);
   }
+}
+
+async function contestantsDe(run: (c: RunConfig) => Promise<RecAncora>, cfg: object) {
+  return (await rodar(run, cfg)).contestants ?? [];
 }
 
 describe('web-code#16 (i) — competitorAnchor nos DOIS motores', () => {
@@ -115,6 +120,19 @@ describe('web-code#16 (i) — competitorAnchor nos DOIS motores', () => {
       const cs = await contestantsDe(run, PROMOVIDO);
       expect(cs).toHaveLength(2);
       expect(cs.some((c) => c.isOriginal), 'nenhum "base" num comparar de modelos').toBe(false);
+    });
+
+    it(`${nome}: sem âncora, NENHUMA linha do standings gravado é controle (nada de fallback posicional)`, async () => {
+      // O standings só existe com finais (duelos): liga-as só aqui.
+      const rec = await rodar(run, { ...PROMOVIDO, finalists: 2, duels: true });
+      expect(rec.standings?.length, 'standings gravado').toBe(2);
+      expect(rec.standings!.filter((s) => s.isControl)).toEqual([]);
+    });
+
+    it(`${nome}: compare-llms (sem o campo) continua ancorado no 1º — e o standings marca esse controle`, async () => {
+      const rec = await rodar(run, { ...COMPARE_LLMS, finalists: 2, duels: true });
+      const primeiro = rec.contestants?.[0]?.id;
+      expect(rec.standings!.filter((s) => s.isControl).map((s) => s.id)).toEqual([primeiro]);
     });
 
     it(`${nome}: compare-llms (sem o campo) continua ancorado no 1º`, async () => {

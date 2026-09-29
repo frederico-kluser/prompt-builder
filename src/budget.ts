@@ -291,7 +291,12 @@ export class BudgetLedger implements CostSink {
   }
 
   // IMPL-075: modo AUDITAVEL por run/sessao (mesmo padrao do modo sensivel:
-  // so liga, nunca desliga; vale para a cadeia abaixo).
+  // so liga, nunca desliga; vale para a cadeia abaixo). ⚠️ GANCHO SEM
+  // CHAMADOR DE PRODUCAO: nenhum campo de RunConfig/sessao chama
+  // `setAuditableRoles` ainda — o unico interruptor real hoje e o env
+  // OPENROUTER_AUDITABLE (config do gateway). Ligar por run exige o campo no
+  // schema + whitelists (normalize/variationConfigFrom) e a chamada nos
+  // orquestradores/trainers.
   private auditable?: CostRole[];
 
   /** Liga o modo auditavel para `roles` (vazio/`undefined` = no-op). */

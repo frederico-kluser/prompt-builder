@@ -762,10 +762,15 @@ async function runLoop(
 
   // Contestants ja sao finais aqui (opts.prepare rodou). Controle = ancora do
   // standings: o prompt original (isOriginal), o 'carry' do treino, ou o 1o
-  // contestant como fallback.
+  // contestant como fallback. web-code#16: lista de MODELOS sem âncora
+  // (`competitorAnchor: false`) não tem controle — sem o fallback posicional,
+  // senão o `standings[].isControl` gravado/exportado apontaria um modelo
+  // qualquer como controle.
   const controlId =
     record.contestants.find((c) => c.isOriginal || c.id === 'carry')?.id ??
-    record.contestants[0]?.id;
+    ((record.config as { competitorAnchor?: boolean }).competitorAnchor === false
+      ? undefined
+      : record.contestants[0]?.id);
   const labelOf = (id: string): string => record.contestants.find((c) => c.id === id)?.label ?? id;
 
   // === FASE 2+3: G2 — respostas E julgamento são UM grupo indivisível. ===

@@ -229,20 +229,32 @@ export async function writePrivateFileAtomic(target: string, data: string | Buff
 //   5. POSIX que não seja parte de URL (`https://x/y`) nem de relativo (`a/b`,
 //      `./x`, `../x`): a barra inicial não pode vir depois de palavra, `:`,
 //      `/`, `.`, `~` ou `-`.
-// Rotas DESTA API (`/v1/...`, `/health`) não são caminho de disco: a dica
-// "use POST /v1/benchmark/sessions" de um 400 saía como "POST <caminho>/sessions"
-// (http-api#4). Só o PRIMEIRO segmento exato conta — `/v1x/a` e
-// `<home>/v1/a` continuam redigidos.
+// Rotas DESTA API não são caminho de disco: a dica "use POST
+// /v1/benchmark/sessions" de um 400 saía como "POST <caminho>/sessions"
+// (http-api#4). Mas a isenção vale SÓ para a forma EXATA de uma rota, casada
+// INTEIRA (`API_ROUTE_RE`): `/v1/benchmark/…` ou `/v1/agents/…` com segmentos
+// `[A-Za-z0-9_-]`, marcador `<id>`/`:id` (nunca `.`/`..`), `/v1` e `/health` —
+// e o token TERMINA ali (espaço, aspa, pontuação final). A rota é protegida
+// antes da redação e devolvida depois; a isenção antiga (qualquer 1º segmento
+// `v1`/`health` + qualquer barra depois de `<x>`) deixava passar
+// `/health/../etc/passwd`, `/v1/secret/.ssh/id_rsa` e `<x>/etc/shadow`.
+const API_ROUTE_RE = new RegExp(
+  String.raw`(?<![\w:/.~-])\/(?:v1\/(?:benchmark|agents)(?:\/(?:[A-Za-z0-9_-]+|<[\w-]+>|:[\w-]+))*\/?|v1\/?|health)` +
+    String.raw`(?=$|[\s'"\x60|),;!?\]]|[.:](?:\s|$))`,
+  'gu',
+);
+/** Marcadores (uso privado do Unicode) que guardam a rota durante a redação. */
+const ROUTE_OPEN = '\uE000';
+const ROUTE_CLOSE = '\uE001';
+const ROUTE_TOKEN_RE = /\uE000(\d+)\uE001/gu;
+
 const PATH_END = String.raw`[^\s'"\x60<>|]*`;
-const NOT_API_ROUTE = String.raw`(?!(?:v1|health)(?![^\s'"\x60<>|/]))`;
-const QUOTED_ABS = String.raw`(['"\x60])((?:file:\/\/|\\\\|[A-Za-z]:[\\/]|\/${NOT_API_ROUTE})[^'"\x60\r\n]*)\1`;
+const QUOTED_ABS = String.raw`(['"\x60])((?:file:\/\/|\\\\|[A-Za-z]:[\\/]|\/)[^'"\x60\r\n]*)\1`;
 const GENERIC_ABS = [
   String.raw`file:\/\/[^\s'"\x60<>]*`,
   String.raw`\\\\[^\s'"\x60<>|]+`,
   String.raw`(?<![\w])[A-Za-z]:[\\/]${PATH_END}`,
-  // `(?<!<[\w-]+>)`: a barra depois de um marcador (`runs/<id>/cancel`) é
-  // continuação de rota, não a raiz do disco.
-  String.raw`(?<![\w:/.~-])(?<!<[\w-]+>)\/${NOT_API_ROUTE}(?:[^\s'"\x60<>|/]+\/)*[^\s'"\x60<>|/]*`,
+  String.raw`(?<![\w:/.~-])\/(?:[^\s'"\x60<>|/]+\/)*[^\s'"\x60<>|/]*`,
 ];
 
 function escapeRegExp(s: string): string {
@@ -296,9 +308,20 @@ function redactOne(p: string): string {
  * `knownRoots` (default: a home) são reconhecidas mesmo sem aspas.
  */
 export function redactPaths(message: string, knownRoots: readonly string[] = defaultKnownRoots()): string {
-  return message.replace(absPathRegex(knownRoots), (m: string, aspa?: string, entreAspas?: string) =>
+  // 1) rotas EXATAS da API ficam guardadas (nunca viram "<caminho>/…");
+  const rotas: string[] = [];
+  API_ROUTE_RE.lastIndex = 0;
+  const guardada = message.replace(API_ROUTE_RE, (rota: string) => {
+    rotas.push(rota);
+    return `${ROUTE_OPEN}${rotas.length - 1}${ROUTE_CLOSE}`;
+  });
+  // 2) todo o resto que parece caminho absoluto é redigido;
+  const redigida = guardada.replace(absPathRegex(knownRoots), (m: string, aspa?: string, entreAspas?: string) =>
     aspa !== undefined && entreAspas !== undefined ? `${aspa}${redactOne(entreAspas)}${aspa}` : redactOne(m),
   );
+  // 3) as rotas voltam.
+  if (rotas.length === 0) return redigida;
+  return redigida.replace(ROUTE_TOKEN_RE, (_m: string, i: string) => rotas[Number(i)] ?? '');
 }
 
 /** Mensagem pública de um erro qualquer (sem caminho absoluto). */

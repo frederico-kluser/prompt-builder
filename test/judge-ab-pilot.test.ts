@@ -118,6 +118,50 @@ describe('IMPL-047 — métricas do A/B (juízes falsos injetados)', () => {
     const r = await runPilot({ items, anterior: caro, atual: caro });
     expect(r.partial).toBe(true);
     expect(r.criteria.falsoNaoAbaixoDe50).toBe(false);
+    // O que JÁ foi pago e medido sai: 10 vereditos (5 itens × 2 perguntas) do
+    // ANTERIOR — antes o corte jogava tudo fora e as duas variantes saíam n=0.
+    expect(r.anterior.falsoNaoGabaritoErrado).toMatchObject({ k: 5, n: 5 });
+    expect(r.anterior.falsoResolve).toMatchObject({ k: 0, n: 5 });
+    expect(r.atual.falsoNaoGabaritoErrado.n).toBe(0);
+  });
+
+  it('corte no meio do juiz ATUAL: o anterior sai inteiro E o atual sai com o que mediu', async () => {
+    let n = 0;
+    const limite = items.length * 2 + 6; // anterior inteiro + 3 itens do atual
+    const juiz: PilotJudge = async (item, _reference, candidate) => {
+      n += 1;
+      if (n > limite) throw new BudgetExceeded(1, 1, 'judge');
+      return candidate === item.correctAnswer ? 'resolve' : 'nao';
+    };
+    const r = await runPilot({ items, anterior: juiz, atual: juiz });
+    expect(r.partial).toBe(true);
+    expect(r.anterior.falsoResolve.n).toBe(items.length);
+    expect(r.atual.falsoResolve).toMatchObject({ k: 0, n: 3 });
+    expect(r.atual.falsoNaoGabaritoErrado).toMatchObject({ k: 0, n: 3 });
+    // Com as duas medições, o delta existe (antes: null — o atual saía vazio).
+    expect(r.deltaFalsoResolvePp).toBe(0);
+  });
+
+  it('sinal de controle reconhecido por FORMA (isControlSignal), não por instanceof', async () => {
+    const forma = Object.assign(new Error('orçamento'), { benchControl: 'budget' });
+    const r = await runPilot({
+      items: items.slice(0, 2),
+      anterior: async () => {
+        throw forma;
+      },
+      atual: async () => 'nao',
+    });
+    expect(r.partial).toBe(true);
+    // Erro que NÃO é controle continua subindo.
+    await expect(
+      runPilot({
+        items: items.slice(0, 1),
+        anterior: async () => {
+          throw new Error('bug');
+        },
+        atual: async () => 'nao',
+      }),
+    ).rejects.toThrow('bug');
   });
 
   it('fiação REAL offline: o juiz ANTERIOR (src/refJudge.ts do git) e o ATUAL rodam no gateway falso', async () => {

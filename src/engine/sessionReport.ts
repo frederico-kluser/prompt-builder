@@ -115,9 +115,14 @@ export interface CycleRow {
   gainCorrectedPp: number | null;
   pAdjusted: number | null;
   minGainPp: number | null;
-  /** Re-avaliação limpa do candidato (quando houve). */
-  /** `runStatus` (cli#8): a run da re-avaliação NÃO terminou — sem evidência, Δ/size não valem. */
-  reeval?: { gainPp: number; confirmed: boolean; size: number; runStatus?: string };
+  /**
+   * Re-avaliação limpa do candidato (quando houve). `runStatus` (cli#8): a run
+   * dela NÃO terminou — sem evidência, Δ/n não valem. `ran: false` = nunca
+   * rodou (sem régua/candidato/cenário: o Δ 0 é o default, não medida). `n` =
+   * pares completos que de fato entraram (`pairing.nEfetivo`), nunca o `size`
+   * PLANEJADO do minibatch. Texto: `cycleReevalText` (fonte única HTML/SPA/MD).
+   */
+  reeval?: { gainPp: number; confirmed: boolean; size: number; ran: boolean; n: number; runStatus?: string };
   /** Custo MEDIDO deste ciclo (run de seleção + re-avaliação, quando carregada). */
   costUsd: number;
   cumulativeCostUsd: number;
@@ -515,6 +520,9 @@ export function buildSessionReport(
               gainPp: round(gate.reeval.gainPp, 2),
               confirmed: gate.reeval.confirmed,
               size: gate.reeval.size,
+              // A MESMA régua do `formatReevalHold` (src/stats.ts): sem run = não rodou.
+              ran: Boolean(gate.reeval.runId),
+              n: gate.reeval.pairing?.nEfetivo ?? gate.reeval.size,
               ...(gate.reeval.runStatus ? { runStatus: gate.reeval.runStatus } : {}),
             },
           }
@@ -945,6 +953,18 @@ function verdictOf(q: QualitySummary, changed: boolean): ReportVerdict {
 // formatação (compartilhada por CLI, HTML e web)
 // ---------------------------------------------------------------------------
 
+/**
+ * Texto da re-avaliação limpa de um ciclo — FONTE ÚNICA do relatório (HTML,
+ * Markdown e a página /training/:id/report da SPA), com a regra do
+ * `formatReevalHold` (cli#8): interrompida ou que nunca rodou NÃO tem Δ nem n
+ * ("sem evidência"); a que rodou mostra o n de pares completos (nEfetivo).
+ */
+export function cycleReevalText(r: NonNullable<CycleRow['reeval']>): string {
+  if (r.runStatus) return `re-avaliação limpa interrompida (run ${r.runStatus}) — sem evidência`;
+  if (!r.ran) return 're-avaliação limpa não rodou (sem régua, candidato ou cenário de treino) — sem evidência';
+  return `re-avaliação limpa ${fmtPp(r.gainPp)} em ${r.n} cenário(s) — ${r.confirmed ? 'confirmada' : 'não confirmada'}`;
+}
+
 export function fmtUsd(x: number | null | undefined, digits?: number): string {
   if (x == null || !Number.isFinite(x)) return '—';
   const abs = Math.abs(x);
@@ -1073,6 +1093,11 @@ export function renderSessionReportMarkdown(r: SessionReport): string {
     L.push(
       `| ${cy.label} | ${fmtPp(cy.controlScorePp, false)} | ${fmtPp(cy.bestScorePp, false)} | ${fmtPp(cy.gainPp)} | ${fmtPp(cy.gainCorrectedPp)} | ${cy.pAdjusted == null ? '—' : cy.pAdjusted.toFixed(3).replace('.', ',')} | ${DECISION_LABEL[cy.decision]}${cy.heldBy?.length ? ` (${cy.heldBy.join(', ')})` : ''} | ${fmtUsd(cy.costUsd)} | ${fmtUsd(cy.cumulativeCostUsd)} |`,
     );
+  }
+  const reevals = r.cycles.filter((cy) => cy.reeval);
+  if (reevals.length > 0) {
+    L.push('');
+    for (const cy of reevals) L.push(`- ${cy.label}: ${cycleReevalText(cy.reeval!)}`);
   }
   L.push('');
   L.push('## Quanto a mudança mexe no custo de uso');

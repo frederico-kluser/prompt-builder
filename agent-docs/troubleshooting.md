@@ -230,6 +230,18 @@ manifesto dos `testsDir`) fica pinado em `<data-dir>/exec-config-approvals.json`
 (ou um teste do `testsDir`) mudou desde a aprovação: revise o que mudou e aprove de
 novo. O `--dry-run` recusa com o **mesmo** código (e nunca grava o pin).
 
+## `config.agent_requires_agents_run` (código 3)
+
+Uma RunConfig **crua** com `agent` ou `agentTask` (os `setup[]`/`verify[]` executam
+nesta máquina) foi entregue a um caminho **sem** o portão de execução: o `--config`
+de `compare`/`vary`/`train`, as tools MCP `start_run`/`run_benchmark`/`train_prompt`
+com RunConfig crua, ou `POST /v1/benchmark/{runs,sessions}` (HTTP 400, mesmo `code`).
+Nada roda. Modo agente entra só por `agents run --config <arena-agent-config@1>`
+(revisão + SHA-256), pelo MCP com `arena-agent-config@1` (`run_agent_benchmark`/
+`start_run`) ou por `POST /v1/agents/runs` (token + isolamento). `estimate` e
+`estimate_cost` não executam nada e continuam aceitando a config. O `testsDir` de uma
+RunConfig crua também nunca é caminho de host: absoluto ou com `../` é recusado.
+
 ## Modo container — `docker: comando não encontrado` / daemon indisponível
 
 Quando `isolation.kind` é `"container"`, o run precisa do Docker **CLI** no PATH e de um

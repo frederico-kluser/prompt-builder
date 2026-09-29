@@ -171,6 +171,20 @@ describe('http-api#4 — redação de caminho não mutila rota da API', () => {
     // a home continua redigida mesmo depois de um marcador <x>
     expect(redactPaths('arquivo <x>/home/fulano/a.json', ['/home/fulano'])).toBe('arquivo <x><caminho>/a.json');
   });
+
+  it('a isenção é só da forma EXATA de rota: travessia, dotfile e marcador solto continuam redigidos', () => {
+    // Antes: 1º segmento `v1`/`health` isentava o caminho INTEIRO, e qualquer
+    // barra depois de `<x>` passava — a mensagem vazava o caminho do host.
+    expect(redactPaths('erro /health/../etc/passwd', [])).toBe('erro <caminho>/passwd');
+    expect(redactPaths('falhou em /v1/secret/.ssh/id_rsa', [])).toBe('falhou em <caminho>/id_rsa');
+    expect(redactPaths('<x>/etc/shadow', [])).toBe('<x><caminho>/shadow');
+    expect(redactPaths('POST /v1/benchmark/runs/<id>/../../etc/passwd', [])).not.toContain('/etc/');
+    expect(redactPaths('ver /v1/benchmark/runs/abc.json', [])).toBe('ver <caminho>/abc.json');
+    // …e as rotas de verdade seguem intactas (inclusive `:id` e barra final).
+    expect(redactPaths('veja /v1/agents/runs (token + isolamento).', [])).toBe('veja /v1/agents/runs (token + isolamento).');
+    expect(redactPaths('/v1/benchmark/runs/:id/cancel', [])).toBe('/v1/benchmark/runs/:id/cancel');
+    expect(redactPaths('GET /v1/benchmark/ ok', [])).toBe('GET /v1/benchmark/ ok');
+  });
 });
 
 describe('http-api#5/#6/#7/#8/#9 — servidor', () => {

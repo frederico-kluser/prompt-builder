@@ -9,7 +9,7 @@ import { prepareOptsFor } from '../../prepareRun.js';
 import { subscribe, subscribeSession } from '../../events.js';
 import { loadRun, loadSession } from '../../storage.js';
 import { makeCallEstimator } from '../../estimate.js';
-import { parseRunConfig } from '../../runConfigSchema.js';
+import { agentExecFields, agentExecRefusalMessage, parseRunConfig } from '../../runConfigSchema.js';
 import { parseArenaConfig, type ArenaConfigFile } from '../../configFile.js';
 import { checkRunPii, describeRunPii } from '../../engine/pii.js';
 import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
@@ -251,8 +251,17 @@ export async function resolveArenaLibrary(file: ArenaConfigFile, config: RunConf
 export async function readConfigFile(
   file: string,
   pii: { allowPii?: boolean; piiMode?: 'redact' | 'synthetic' } = {},
+  opts: ConfigFromJsonOptions = {},
 ): Promise<RunConfig> {
-  return configFromJson(await readJsonFile(file), pii);
+  return configFromJson(await readJsonFile(file), pii, opts);
+}
+
+export interface ConfigFromJsonOptions {
+  /**
+   * Só LÊ/estima (nada executa): aceita config de modo agente. Default false —
+   * quem vai RODAR a config recusa `agent`/`agentTask` (ver `agentExecFields`).
+   */
+  inspectOnly?: boolean;
 }
 
 /**
@@ -264,6 +273,31 @@ export async function readConfigFile(
 export async function configFromJson(
   input: unknown,
   pii: { allowPii?: boolean; piiMode?: 'redact' | 'synthetic' } = {},
+  opts: ConfigFromJsonOptions = {},
+): Promise<RunConfig> {
+  // Modo agente EXECUTA comando nesta máquina (setup[]/verify[]): pelo
+  // `--config` de compare/vary/train (e pelo MCP, que usa este caminho) ele
+  // pulava o portão de config executável do `agents run` (IMPL-099). A recusa
+  // olha o JSON cru ANTES do parse (a mensagem não depende de a config agente
+  // ser válida — arena-agent-config@1 também cai aqui) e o resultado depois.
+  if (!opts.inspectOnly) refuseAgentExec(input);
+  const config = await configFromJsonUnchecked(input, pii);
+  if (!opts.inspectOnly) refuseAgentExec(config);
+  return config;
+}
+
+function refuseAgentExec(config: unknown): void {
+  const campos = agentExecFields(config);
+  if (campos.length === 0) return;
+  throw new CliError(agentExecRefusalMessage(campos), EXIT.CONFIG, { fields: campos }, {
+    code: 'config.agent_requires_agents_run',
+    hint: 'Use `prompt-builder agents run --config <arena-agent-config@1>` — o portão revisa e pina o SHA-256 do que vai executar.',
+  });
+}
+
+async function configFromJsonUnchecked(
+  input: unknown,
+  pii: { allowPii?: boolean; piiMode?: 'redact' | 'synthetic' },
 ): Promise<RunConfig> {
   let json = input;
 

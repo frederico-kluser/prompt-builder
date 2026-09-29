@@ -22,6 +22,7 @@ import type { SessionRecord } from '../src/types.js';
 import { CHAMP, ORIG, fixture } from './support/sessionReportFixture.js';
 import {
   buildSessionReport,
+  cycleReevalText,
   renderSessionReportMarkdown,
   SESSION_REPORT_FORMAT,
 } from '../src/engine/sessionReport.js';
@@ -77,7 +78,7 @@ describe('buildSessionReport — holdout presente', () => {
       ['Ciclo 2', 'held'],
     ]);
     expect(r.cycles[0]).toMatchObject({ controlId: 'original', championId: 'v1', technique: 'persona', variants: 2, costUsd: 0.14 });
-    expect(r.cycles[0].reeval).toEqual({ gainPp: 40, confirmed: true, size: 5 });
+    expect(r.cycles[0].reeval).toEqual({ gainPp: 40, confirmed: true, size: 5, ran: true, n: 5 });
     expect(r.cycles[0].pAdjusted).toBe(0.031);
     expect(r.cycles[1]).toMatchObject({ controlId: 'carry', heldBy: ['min-gain'], costUsd: 0.1, cumulativeCostUsd: 0.24 });
     expect(r.cycles[0].originalScorePp).toBe(25);
@@ -192,6 +193,63 @@ describe('buildSessionReport — degradações honestas', () => {
     const r = buildSessionReport(s, runs);
     expect(r.cycles.length).toBeGreaterThan(0);
     expect(r.cycles.every((c) => c.decision === 'stopped')).toBe(true);
+  });
+});
+
+describe('cli#8 — re-avaliação que NÃO terminou/NÃO rodou não inventa Δ nem n (MD, HTML e SPA)', () => {
+  type Reeval = NonNullable<NonNullable<SessionRecord['bestPromptByIteration'][number]['gate']>['reeval']>;
+  const comReeval = (reeval: Reeval) => {
+    const { session, runs } = fixture();
+    const it0 = session.bestPromptByIteration[0];
+    const s = {
+      ...session,
+      bestPromptByIteration: [{ ...it0, gate: { ...it0.gate!, decision: 'held', reeval } }, ...session.bestPromptByIteration.slice(1)],
+    } as SessionRecord;
+    const r = buildSessionReport(s, runs);
+    return { r, md: renderSessionReportMarkdown(r), html: renderSessionReportHtml(r) };
+  };
+  const base = { candidateId: 'v1', controlId: 'original', size: 5, poolSize: 6, gainPp: 0, confirmed: false };
+
+  it('interrompida (run aborted): "interrompida … sem evidência", nenhum Δ +0.0 nem "em 5 cenário(s)"', () => {
+    const { r, md, html } = comReeval({ ...base, runId: 'rr0', runStatus: 'aborted' } as Reeval);
+    expect(r.cycles[0].reeval).toMatchObject({ runStatus: 'aborted', ran: true });
+    const texto = cycleReevalText(r.cycles[0].reeval!);
+    expect(texto).toBe('re-avaliação limpa interrompida (run aborted) — sem evidência');
+    for (const saida of [md, html]) {
+      expect(saida).toContain('re-avaliação limpa interrompida (run aborted) — sem evidência');
+      expect(saida).not.toMatch(/re-avaliação limpa \+0[.,]0/u);
+      expect(saida).not.toContain('em 5 cenário(s)');
+    }
+  });
+
+  it('nunca rodou (sem runId): "não rodou … sem evidência" — o Δ 0 e o size eram default/planejado', () => {
+    const { r, md, html } = comReeval({ ...base } as Reeval);
+    expect(r.cycles[0].reeval).toMatchObject({ ran: false });
+    for (const saida of [md, html]) {
+      expect(saida).toContain('re-avaliação limpa não rodou');
+      expect(saida).not.toMatch(/re-avaliação limpa \+0[.,]0/u);
+    }
+  });
+
+  it('rodou com pares excluídos: o n é o de pares completos (nEfetivo), não o size planejado', () => {
+    const { r, md, html } = comReeval({
+      ...base,
+      runId: 'rr0',
+      gainPp: -10,
+      pairing: { n: 5, nEfetivo: 4, excludedPairs: 1, completeness: 0.8 },
+    } as Reeval);
+    expect(r.cycles[0].reeval).toMatchObject({ ran: true, n: 4, size: 5 });
+    for (const saida of [md, html]) {
+      expect(saida).toContain('em 4 cenário(s) — não confirmada');
+      expect(saida).not.toContain('em 5 cenário(s)');
+    }
+  });
+
+  it('a página da SPA (/training/:id/report) usa o MESMO formatador — nada de montar o texto à mão', () => {
+    const pagina = readFileSync(path.join(ROOT, 'web', 'src', 'pages', 'TrainingReport.tsx'), 'utf-8');
+    expect(pagina).toContain('cycleReevalText(cy.reeval)');
+    expect(pagina).not.toMatch(/cy\.reeval\.(size|gainPp)/u);
+    expect(webShim.cycleReevalText).toBe(cycleReevalText);
   });
 });
 

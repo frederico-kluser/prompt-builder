@@ -31,6 +31,7 @@ import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { isControlSignal } from '../src/budget.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const DEFAULT_FIXTURE = join(ROOT, 'test', 'fixtures', 'judge-wrong-reference.json');
@@ -135,26 +136,40 @@ export interface PilotReport {
   partial: boolean;
 }
 
-async function medir(items: WrongReferenceItem[], judge: PilotJudge): Promise<VariantReport> {
-  let kNao = 0;
-  let nNao = 0;
-  let kRes = 0;
-  let nRes = 0;
+/** Contagens de UMA variante — do chamador, para sobreviverem ao BudgetExceeded. */
+interface Tally {
+  kNao: number;
+  nNao: number;
+  kRes: number;
+  nRes: number;
+}
+
+const novaContagem = (): Tally => ({ kNao: 0, nNao: 0, kRes: 0, nRes: 0 });
+
+const relatorioDe = (t: Tally): VariantReport => ({
+  falsoNaoGabaritoErrado: taxa(t.kNao, t.nNao),
+  falsoResolve: taxa(t.kRes, t.nRes),
+});
+
+/**
+ * Mede uma variante acumulando em `t` (do CHAMADOR) veredito a veredito: se o
+ * teto do --budget cortar no meio, o que já foi pago e medido continua lá.
+ */
+async function medir(items: WrongReferenceItem[], judge: PilotJudge, t: Tally): Promise<void> {
   for (const it of items) {
     // (3) gabarito ERRADO × candidato CORRETO: condenar = falso 'nao'.
     const v1 = await judge(it, it.wrongReference, it.correctAnswer);
     if (v1) {
-      nNao += 1;
-      if (v1 === 'nao') kNao += 1;
+      t.nNao += 1;
+      if (v1 === 'nao') t.kNao += 1;
     }
     // (4) gabarito CORRETO × candidato ERRADO: aprovar = falso 'resolve'.
     const v2 = await judge(it, it.correctAnswer, it.wrongReference);
     if (v2) {
-      nRes += 1;
-      if (v2 === 'resolve') kRes += 1;
+      t.nRes += 1;
+      if (v2 === 'resolve') t.kRes += 1;
     }
   }
-  return { falsoNaoGabaritoErrado: taxa(kNao, nNao), falsoResolve: taxa(kRes, nRes) };
 }
 
 /** Roda o A/B com os juízes INJETADOS (o main liga os reais; o teste, falsos). */
@@ -164,17 +179,19 @@ export async function runPilot(opts: {
   atual: PilotJudge;
 }): Promise<PilotReport> {
   let partial = false;
-  const vazio: VariantReport = { falsoNaoGabaritoErrado: taxa(0, 0), falsoResolve: taxa(0, 0) };
-  let anterior = vazio;
-  let atual = vazio;
+  const contagemAnterior = novaContagem();
+  const contagemAtual = novaContagem();
   try {
-    anterior = await medir(opts.items, opts.anterior);
-    atual = await medir(opts.items, opts.atual);
+    await medir(opts.items, opts.anterior, contagemAnterior);
+    await medir(opts.items, opts.atual, contagemAtual);
   } catch (err) {
-    // Teto do --budget (sinal de CONTROLE): o que já foi medido sai, marcado parcial.
-    if ((err as { benchControl?: unknown })?.benchControl) partial = true;
+    // Teto do --budget (sinal de CONTROLE, por FORMA — nunca instanceof): o
+    // que já foi medido sai, marcado parcial — as contagens são do chamador.
+    if (isControlSignal(err)) partial = true;
     else throw err;
   }
+  const anterior = relatorioDe(contagemAnterior);
+  const atual = relatorioDe(contagemAtual);
   const ra = anterior.falsoResolve.rate;
   const rb = atual.falsoResolve.rate;
   const delta = ra !== null && rb !== null ? Number(((rb - ra) * 100).toFixed(2)) : null;

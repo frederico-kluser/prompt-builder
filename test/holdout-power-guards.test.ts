@@ -9,7 +9,7 @@
 //      motivo (platão vs paciência), no record e no evento `session.converged`;
 //   4. `patience` é exposta no config (schema) com default 2.
 
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -337,6 +337,15 @@ describe('IMPL-051 — config `patience` exposta, default 2', () => {
 // --- integração: o laço real (dois motores) --------------------------------------
 
 describe('IMPL-050/051 — o laço do treino respeita as guardas', () => {
+  // Estado dos dublês (vi.hoisted) é COMPARTILHADO: cada teste parte dos
+  // defaults. Restaurar no fim do próprio teste falhava junto com a asserção
+  // e contaminava os seguintes (paciência/convergência) com outro holdout.
+  beforeEach(() => {
+    dubles.estado.treino = () => 'nao';
+    dubles.estado.holdout = () => 'nao';
+    dubles.estado.nCenarios = 20;
+  });
+
   for (const [nome, treinar] of MOTORES) {
     it(`${nome}: holdout < 10 ⇒ holdoutSkipped + confirmação fraca, SEM "validado"`, async () => {
       dubles.estado.nCenarios = 12;
@@ -354,7 +363,6 @@ describe('IMPL-050/051 — o laço do treino respeita as guardas', () => {
       expect(confirma).not.toContain('validado');
       // Nem no record inteiro.
       expect(JSON.stringify(rec)).not.toContain('validado');
-      dubles.estado.nCenarios = 20;
     });
 
     it(`${nome}: holdout forte (n ≥ 10) ⇒ teste final rotulado como holdout`, async () => {
@@ -384,7 +392,6 @@ describe('IMPL-050/051 — o laço do treino respeita as guardas', () => {
       const texto = sessionConfirmationText(rec);
       expect(texto).toContain('REGREDIU');
       expect(texto).not.toContain('validado');
-      dubles.estado.holdout = (_i, id) => (id === 'holdout-champion' ? 'resolve' : 'parcial');
     });
 
     it(`${nome}: paciência default 2 + motivo da convergência (platão vs paciência)`, async () => {

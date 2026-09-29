@@ -5,7 +5,7 @@
 // para ser testado direto (test/newrun-rules.test.ts) — as duas superfícies
 // (guiada e completa) leem o MESMO estado e chamam as MESMAS regras.
 
-import { roleSeparationIssues, type ReasoningConfig, type ReasoningLevel, type RunMode } from './api';
+import { roleConflictMessage, roleSeparationIssues, type ReasoningConfig, type ReasoningLevel, type RunMode } from './api';
 import { PREFERRED_JUDGES } from './arenaForm';
 import type { ModelTuning } from './components/ModelSelector';
 
@@ -110,6 +110,9 @@ export function referenceProblemTexts(p: {
       return 'Escolha o modelo do gabarito — em teste e treino ele é obrigatório e diferente dos juízes e do modelo sob teste.';
     if (c.kind === 'reference-is-judge')
       return `O gabarito (${c.ref}) não pode ser também juiz: o mesmo modelo escreveria a régua e julgaria contra ela.`;
-    return `O gabarito (${c.ref}) não pode ser também ${p.mode === 'compare' ? 'competidor' : 'o modelo sob teste'}: quem escreve a régua não compete contra ela.`;
+    if (c.kind === 'reference-is-competitor')
+      return `O gabarito (${c.ref}) não pode ser também ${p.mode === 'compare' ? 'competidor' : 'o modelo sob teste'}: quem escreve a régua não compete contra ela.`;
+    // 2º gabarito (IMPL-055): o formulário não o escolhe hoje, mas a regra é a mesma.
+    return roleConflictMessage(c);
   });
 }

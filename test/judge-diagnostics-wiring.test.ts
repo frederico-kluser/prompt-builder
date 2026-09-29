@@ -26,6 +26,9 @@ import { runToCompletion as runNode } from '../src/orchestrator.js';
 import { runToCompletion as runWeb } from '../web/src/engine/orchestrator.js';
 import { getDataDir, loadRun, setDataDir } from '../src/storage.js';
 import { subscribe } from '../src/events.js';
+import { subscribeRun as subscribeWeb } from '../web/src/engine/events.js';
+
+type WebRunEvent = { type: string };
 import { normalizeRunRecord } from '../src/normalize.js';
 import { BudgetExceeded, isControlSignal } from '../src/budget.js';
 import {
@@ -40,12 +43,20 @@ import type { RunConfig, RunEvent, RunRecord, StageSpec } from '../src/types.js'
 import { catalogItem, fakeOpenRouter, noSleep, type FakeRequest } from './fakeOpenRouter.js';
 import { canaryOf, candidateOf, duelReply, questionOf } from './judgeReplies.js';
 
+// Storage da SPA: vazio por padrão (= IndexedDB indisponível); o IMPL-049 da
+// SPA liga `persist` para simular o IndexedDB que SOBREVIVE ao reload.
+const webStore = vi.hoisted(() => ({ persist: false, runs: new Map<string, Record<string, unknown>>() }));
 vi.mock('../web/src/engine/storage', () => ({
-  saveRun: async () => undefined,
+  saveRun: async (r: Record<string, unknown>) => {
+    if (webStore.persist) webStore.runs.set(String(r.id), JSON.parse(JSON.stringify(r)) as Record<string, unknown>);
+  },
   saveSession: async () => undefined,
-  loadRun: async () => null,
+  loadRun: async (id: string) => (webStore.persist ? (webStore.runs.get(id) ?? null) : null),
   loadSession: async () => null,
-  listRuns: async () => [],
+  listRuns: async () =>
+    webStore.persist
+      ? [...webStore.runs.values()].map((r) => ({ id: r.id, status: r.status, startedAt: r.startedAt }))
+      : [],
   listSessions: async () => [],
 }));
 
@@ -372,6 +383,9 @@ describe('IMPL-057/055/112 — `runs show` mostra o que a run gravou', () => {
           reference: 'R',
         })),
       } as unknown as RunConfig;
+      // Data dir novo = processo novo do CLI: sem run gravada NEM memória de
+      // contrato (a memória do processo é a âncora de reserva — IMPL-049).
+      resetJudgeContractMemory();
       const rec = await comGateway(fakeCli.fetch, () => runNode(cfg, KEY, {}));
       const { spawnSync } = await import('node:child_process');
       const { fileURLToPath } = await import('node:url');
@@ -467,5 +481,58 @@ describe('IMPL-049 — drift do contrato entre PROCESSOS (âncora gravada)', () 
       setDataDir(antes);
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('SPA: storage persistido (IndexedDB) + memória zerada entre runs (= reload) — o evento AINDA dispara', async () => {
+    webStore.persist = true;
+    webStore.runs.clear();
+    try {
+      const rodarWeb = async (cfg: RunConfig, runId?: string) =>
+        (await comGateway(fake().fetch, () => runWeb(cfg as never, KEY, runId ? { runId } : {}))) as unknown as RunRecord;
+      resetJudgeContractMemory();
+      const r1 = await rodarWeb(CFG);
+      // 1 cenário: 'inconclusive' (n efetivo < 5) — terminal e âncora válida.
+      expect(['finished', 'inconclusive'], r1.error).toContain(r1.status);
+      expect(r1.judgeDiagnostics?.contractAudit?.line).toContain('primeira run');
+
+      resetJudgeContractMemory(); // "reload" da aba: só o IndexedDB sobrevive
+      const eventos: WebRunEvent[] = [];
+      const runId = '00000000-0000-4000-8000-000000000493';
+      const off = subscribeWeb(runId, (e) => eventos.push(e));
+      let r2: RunRecord;
+      try {
+        r2 = await rodarWeb({ ...CFG, reasoning: { judge: 'high' } } as RunConfig, runId);
+      } finally {
+        off();
+      }
+      expect(eventos.filter((e) => e.type === 'judge.contract.changed')).toHaveLength(1);
+      expect(r2!.judgeDiagnostics?.contractAudit).toMatchObject({
+        changed: true,
+        previousHash: r1.judgeDiagnostics!.contract.hash,
+        previousRunId: r1.id,
+      });
+
+      resetJudgeContractMemory();
+      const r3 = await rodarWeb({ ...CFG, reasoning: { judge: 'high' } } as RunConfig);
+      expect(r3.judgeDiagnostics?.contractAudit).toMatchObject({ changed: false, previousRunId: r2!.id });
+      expect(r3.judgeDiagnostics?.contractAudit?.line).toContain('mesmo contrato desde a última run');
+    } finally {
+      webStore.persist = false;
+      webStore.runs.clear();
+    }
+  });
+
+  it('sem run gravada legível (IndexedDB indisponível): a memória do processo é a reserva — MESMO contrato ⇒ "mesmo contrato"', async () => {
+    // Storage da SPA vazio (listRuns → []): a âncora só pode vir da memória.
+    resetJudgeContractMemory();
+    const r1 = (await comGateway(fake().fetch, () => runWeb(CFG as never, KEY, {}))) as unknown as RunRecord;
+    expect(r1.judgeDiagnostics?.contractAudit?.line).toContain('primeira run');
+    const r2 = (await comGateway(fake().fetch, () => runWeb(CFG as never, KEY, {}))) as unknown as RunRecord;
+    expect(r2.judgeDiagnostics?.contractAudit).toMatchObject({
+      changed: false,
+      previousHash: r1.judgeDiagnostics!.contract.hash,
+    });
+    expect(r2.judgeDiagnostics?.contractAudit?.line).toContain('mesmo contrato desde a última run');
+    expect(r2.judgeDiagnostics?.contractAudit?.line).not.toContain('primeira run');
   });
 });

@@ -423,6 +423,30 @@ function clamp01(v: number): number {
  * Calibração estimado × real do ledger (IMPL-113): quantis por papel, faixa
  * conformal e previsão de `reasoning_tokens` por esforço × família.
  */
+/**
+ * Amostra estimado × real PERSISTIDA (JSONL do Node, `pb.costSamples` da SPA)
+ * só é aceita com a forma certa — papel conhecido, modelo, estimado > 0 e real
+ * ≥ 0, ambos finitos. Fonte ÚNICA dos dois leitores: o da SPA aceitava qualquer
+ * objeto, e amostra velha/corrompida (estimado 0 ou ausente, modelo ausente)
+ * virava razão Infinity/NaN — ou derrubava o `modelFamilyOf` na carga.
+ */
+export function isCostCalibrationSample(v: unknown): v is CostCalibrationSample {
+  if (!v || typeof v !== 'object') return false;
+  const s = v as Record<string, unknown>;
+  return (
+    typeof s.role === 'string' &&
+    (COST_ROLES as readonly string[]).includes(s.role) &&
+    typeof s.modelId === 'string' &&
+    s.modelId.length > 0 &&
+    typeof s.estimatedUsd === 'number' &&
+    Number.isFinite(s.estimatedUsd) &&
+    s.estimatedUsd > 0 &&
+    typeof s.actualUsd === 'number' &&
+    Number.isFinite(s.actualUsd) &&
+    s.actualUsd >= 0
+  );
+}
+
 export class CostCalibration {
   private readonly items: CostCalibrationSample[] = [];
 
@@ -445,7 +469,8 @@ export class CostCalibration {
    * negativo (também não entra como zero: simplesmente não é amostra).
    */
   add(s: CostCalibrationSample): void {
-    if (!(s.estimatedUsd > 0) || !Number.isFinite(s.actualUsd) || s.actualUsd < 0) return;
+    // A MESMA régua dos leitores persistidos: nada de razão Infinity/NaN.
+    if (!isCostCalibrationSample(s)) return;
     this.items.push({ ...s, family: s.family || modelFamilyOf(s.modelId) });
   }
 

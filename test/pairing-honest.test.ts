@@ -11,7 +11,7 @@
 // Zero rede: fixtures montadas à mão + transporte falso do OpenRouter.
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -35,6 +35,7 @@ import { pickWinner, type RankEntry } from '../src/rank.js';
 import { normalizeRunRecord } from '../src/normalize.js';
 import { getDataDir, saveRun, saveSession, setDataDir } from '../src/storage.js';
 import { cmdRuns, cmdSessions } from '../src/cli/commands/misc.js';
+import { convergenceReasonText } from '../src/engine/sessionDecision.js';
 import { createGateway, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
 import { runToCompletion as runNode } from '../src/orchestrator.js';
 import { runToCompletion as runWeb } from '../web/src/engine/orchestrator.js';
@@ -590,5 +591,30 @@ describe('IMPL-005 — `runs show` mostra n nominal × efetivo', () => {
     expect(stdout).toContain('pareamento (training): n efetivo 8 de 10 (2 pares excluídos, completude 80%)');
     expect(stdout).toContain('significância: ');
     expect(stdout).toContain('n=8 de 10 (2 sem observação)');
+  });
+
+  it('IMPL-051: sessão LEGADA sem `convergenceReason` — CLI e TrainingView dizem o MESMO texto', async () => {
+    const legado: SessionRecord = {
+      id: 'sessao-impl051-legado',
+      status: 'finished',
+      config: { mode: 'training', theme: 'suporte', stages: 10, datagenModelId: 'fake/gen', judgeModelIds: ['fake/judge'], contestantModelId: 'fake/a', iterations: 3 },
+      runIds: [],
+      bestPromptByIteration: [],
+      totalCostUsd: 0,
+      startedAt: '2026-09-27T00:00:00.000Z',
+      convergedAtIteration: 1,
+    };
+    await saveSession(legado);
+    const { stdout } = await capturar(() => cmdSessions(cli(['show', legado.id, '--output-format', 'text'])));
+    // A TrainingView chama o helper com o campo CRU (web/src/pages/TrainingView.tsx).
+    const daTela = convergenceReasonText(legado.convergenceReason, legado.config.patience);
+    expect(daTela).toBe('motivo não registrado');
+    expect(stdout).toContain(`convergência: iteração 2 (${daTela})`);
+    // O record antigo não tinha a paciência de hoje: nada de "paciência — 2" inventado.
+    expect(stdout).not.toContain('paciência');
+    // Os DOIS chamadores passam o campo cru — o default mora só no helper.
+    const fonte = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf-8');
+    expect(fonte('web/src/pages/TrainingView.tsx')).toMatch(/convergenceReasonText\(\s*session\.convergenceReason,/);
+    expect(fonte('src/cli/commands/misc.ts')).toMatch(/convergenceReasonText\(\s*record\.convergenceReason,/);
   });
 });

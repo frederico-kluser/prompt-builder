@@ -96,6 +96,14 @@ describe('IMPL-048 (i) — regra única: o schema do Node diz o que a função p
       'compare-llms ref = config',
       { ...COMPARE, competitorModelIds: undefined, competitorConfigs: [{ modelId: 'fake/a' }, { modelId: 'fake/b' }], referenceModelId: 'fake/a' },
     ],
+    // IMPL-055: o 2º gabarito (validação por família distinta) sob a MESMA regra.
+    ['2º gabarito = referência', { ...COMPARE, referenceModelId: 'fake/ref', validateReferences: true, secondReferenceModelId: 'fake/ref' }],
+    ['2º gabarito = juiz (verificador)', { ...COMPARE, referenceModelId: 'fake/ref', validateReferences: true, secondReferenceModelId: 'fake/judge' }],
+    ['2º gabarito = competidor', { ...COMPARE, referenceModelId: 'fake/ref', validateReferences: true, secondReferenceModelId: 'fake/b' }],
+    [
+      '2º gabarito = modelo sob teste',
+      { ...VARIATION, referenceModelId: 'fake/ref', validateReferences: true, secondReferenceModelId: 'fake/a' },
+    ],
   ];
   for (const [nome, cfg] of casos) {
     it(`${nome}: cada conflito da função pura sai no schema com a MESMA mensagem`, () => {
@@ -113,6 +121,7 @@ describe('IMPL-048 (i) — regra única: o schema do Node diz o que a função p
       { ...TRAINING, referenceModelId: 'fake/ref' },
       COMPARE, // compare sem referência = default documentado (1º juiz)
       { ...COMPARE, referenceModelId: 'fake/ref' },
+      { ...COMPARE, referenceModelId: 'fake/ref', validateReferences: true, secondReferenceModelId: 'fake/ref2' },
     ]) {
       expect(roleSeparationIssues(cfg)).toEqual([]);
       expect(parseRunConfig(cfg).ok).toBe(true);
@@ -138,6 +147,8 @@ describe('IMPL-048 (ii)+(iii) — portão da SPA: recusa antes do motor e de qua
       [{ ...VARIATION, referenceModelId: 'fake/judge' }, /n[ãa]o pode ser tamb[ée]m juiz/],
       [{ ...VARIATION, referenceModelId: 'fake/a' }, /n[ãa]o pode ser tamb[ée]m competidor/],
       [{ ...COMPARE, referenceModelId: 'fake/b' }, /n[ãa]o pode ser tamb[ée]m competidor/],
+      [{ ...COMPARE, referenceModelId: 'fake/ref', secondReferenceModelId: 'fake/ref' }, /2º gabarito .* a própria referência/],
+      [{ ...COMPARE, referenceModelId: 'fake/ref', secondReferenceModelId: 'fake/judge' }, /2º gabarito .* tamb[ée]m juiz/],
     ] as const) {
       const err = await api.createRun(cfg as never, { costConfirmed: true }).catch((e: unknown) => e);
       expect(err, JSON.stringify(cfg)).toBeInstanceOf(Error);

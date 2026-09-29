@@ -988,13 +988,15 @@ export function contractDrift(previousHash: string | undefined, hash: string): C
 /**
  * Registra o hash do contrato desta run e devolve o aviso de drift quando ele
  * difere do último visto no processo. `changed: false` na primeira run (não há
- * anterior) e quando o contrato é o mesmo.
+ * anterior) e quando o contrato é o mesmo — mas o `previousHash` vem SEMPRE que
+ * houve run anterior no processo, inclusive com o MESMO contrato: é a âncora de
+ * reserva dos orquestradores quando não há run gravada legível (IndexedDB
+ * indisponível, listagem vazia). Sem ele a 2ª run igual dizia "primeira run".
  */
 export function noteJudgeContract(hash: string): ContractDrift {
   const previousHash = ultimoContractHash;
   ultimoContractHash = hash;
-  const d = contractDrift(previousHash, hash);
-  return d.changed ? d : { changed: false, message: '' };
+  return contractDrift(previousHash, hash);
 }
 
 /** Resumo de run que a busca da âncora lê (o `RunSummary` dos dois storages serve). */

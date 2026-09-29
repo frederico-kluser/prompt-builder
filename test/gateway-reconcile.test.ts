@@ -7,8 +7,10 @@
 //     registro sobrevive a normalizeRunRecord (JSON de ida e volta);
 //   IMPL-075 (i/iii): provedor que serviu contado por papel no ledger real —
 //     cobertura (Σ providers / calls) = 1,0 em TODOS os papéis; modo auditável
-//     ligável por ambiente (OPENROUTER_AUDITABLE) e pela política da run no
-//     ledger, visível no registro (`auditableCalls`, `callLog[].auditable`);
+//     ligável por ambiente (OPENROUTER_AUDITABLE — o único interruptor de
+//     produção hoje) e pelo gancho do ledger (`setAuditableRoles`, ainda sem
+//     campo de RunConfig que o chame), visível no registro (`auditableCalls`,
+//     `callLog[].auditable`);
 //   IMPL-074 (i): TODA chamada 200 deixa o id de geração no registro por
 //     chamada, com a validade do formato `gen-…`;
 //   IMPL-074 (ii): GET /generation 404 → retry com backoff → sucesso;
@@ -23,6 +25,7 @@ import { BudgetLedger, CALL_LOG_LIMIT, isGenerationId } from '../src/budget.js';
 import {
   AUDITABLE_ROLES,
   createGateway,
+  reconcileAtRunEnd,
   setDefaultGateway,
   type FetchLike,
   type OpenRouterGateway,
@@ -30,12 +33,34 @@ import {
 import { gatewayConfigFromEnv } from '../src/gatewayEnv.js';
 import { normalizeRunRecord } from '../src/normalize.js';
 import { getDataDir, setDataDir } from '../src/storage.js';
-import { runToCompletion } from '../src/orchestrator.js';
+import { runToCompletion as runNode } from '../src/orchestrator.js';
+import { runToCompletion as runWebEngine } from '../web/src/engine/orchestrator.js';
 import { COST_ROLES, type RunConfig, type RunRecord } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep } from './fakeOpenRouter.js';
 import { duelReply, pointwiseReply } from './judgeReplies.js';
 
+// O motor da SPA grava no IndexedDB; aqui não há navegador — storage no-op.
+vi.mock('../web/src/engine/storage', () => ({
+  saveRun: async () => undefined,
+  saveSession: async () => undefined,
+  loadRun: async () => null,
+  loadSession: async () => null,
+  listRuns: async () => [],
+  listSessions: async () => [],
+}));
+
 const KEY = 'sk-or-v1-fake-key-reconcile-000000000000';
+
+/**
+ * IMPL-017 (iv) nos DOIS orquestradores: o da SPA tem os próprios pontos de
+ * conciliação (saída cedo, catch com a regra do Cancelar, fim normal) — um
+ * teste só do Node deixaria uma regressão no espelho passar.
+ */
+type Rodar = (config: RunConfig, opts?: { signal?: AbortSignal }) => Promise<RunRecord>;
+const MOTORES: ReadonlyArray<readonly [string, Rodar]> = [
+  ['Node', (c, o) => runNode(c, KEY, o ?? {})],
+  ['SPA', (c, o) => runWebEngine(c as never, KEY, (o ?? {}) as never) as unknown as Promise<RunRecord>],
+];
 const msgs = [
   { role: 'system' as const, content: 'Voce e um juiz.' },
   { role: 'user' as const, content: 'Julgue.' },
@@ -280,163 +305,196 @@ describe('IMPL-074 (ii) — GET /generation: 404 transitório → retry com back
     expect(ledger.conservativeCalls).toBe(2);
     expect(ledger.spentUsd).toBeCloseTo(0.02, 12); // nunca zero: a reserva inteira
   });
+
+  it('FIM DE RUN: 404×3 de um id `gen-…` NÃO vira conservador — segue pendente, conciliável depois', async () => {
+    // As últimas chamadas da run têm segundos de idade: o /generation ainda
+    // dá 404 até indexar. Antes, ~1,5 s de 404 trocava a fatura pela reserva
+    // para sempre (saía do conjunto de pendentes).
+    const recente = gid(3);
+    const chat = fakeOpenRouter({ chat: () => ({ text: 'x', id: recente, usage: null }) });
+    const t = comGeneration(chat.fetch, () => new Response('not found', { status: 404 }));
+    const gw = createGateway({ fetch: t.fetch, sleep: noSleep, providerLookup: 'off' });
+    anterior = setDefaultGateway(gw);
+    const ledger = new BudgetLedger({ estimateCall: () => 0.01 });
+    await gw.chatCompletion({ apiKey: KEY, modelId: 'm/x', messages: msgs, role: 'duel', sink: ledger });
+    expect(ledger.pendingEntries()).toHaveLength(1);
+
+    await reconcileAtRunEnd(ledger, KEY);
+    expect(t.gets).toEqual([recente, recente, recente]); // as 3 tentativas do fim de run
+    expect(ledger.pendingEntries().map((p) => p.generationId)).toEqual([recente]);
+    expect(ledger.conservativeCalls).toBe(0);
+    const resumo = ledger.summary();
+    expect(resumo.pendingUsd).toBeGreaterThan(0);
+    expect(resumo.pendingEntries?.map((p) => p.generationId)).toEqual([recente]);
+    expect(resumo.reconciliation).toEqual({ attempted: 1, settled: 0, notFound: 0, failed: 1 });
+    expect(ledger.callLog()[0]).toMatchObject({ generationId: recente, status: 'pending' });
+
+    // A fatura aparece depois: uma conciliação posterior a encontra.
+    const depois = comGeneration(chat.fetch, (id) => ficha(id, 0.0042));
+    const gw2 = createGateway({ fetch: depois.fetch, sleep: noSleep, providerLookup: 'off' });
+    expect(await gw2.reconcilePending(ledger, KEY)).toMatchObject({ settled: 1 });
+    expect(ledger.pendingUsd).toBe(0);
+    expect(ledger.spentUsd).toBeCloseTo(0.0042, 12);
+  });
 });
 
 describe('IMPL-017 (iv) — a run concilia SOZINHA no fim: |ledger − Σ fatura| ≤ 1%', () => {
-  let dir = '';
-  let dirAnterior = '';
-  afterEach(() => {
-    if (dir) {
-      setDataDir(dirAnterior);
-      rmSync(dir, { recursive: true, force: true });
-      dir = '';
-    }
-  });
-
-  it('compare com competidores sem usage (pendentes pelo id): o record fecha com a fatura', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'pb-reconcile-'));
-    dirAnterior = getDataDir();
-    setDataDir(dir);
-    const silencio = [
-      vi.spyOn(console, 'log').mockImplementation(() => undefined),
-      vi.spyOn(console, 'warn').mockImplementation(() => undefined),
-      vi.spyOn(console, 'error').mockImplementation(() => undefined),
-    ];
-    const fatura = new Map<string, number>();
-    let n = 0;
-    const fake = fakeOpenRouter({
-      catalog: ['fake/gen', 'fake/ref', 'fake/judge', 'fake/a', 'fake/b'].map((id) => catalogItem(id, 1e-6, 1e-6)),
-      chat: (req) => {
-        const id = gid(n++);
-        const custo = Number((0.0001 * n).toFixed(6));
-        fatura.set(id, custo);
-        const usage = { prompt_tokens: 50, completion_tokens: 10, cost: custo };
-        if (req.model === 'fake/gen') {
-          return {
-            id,
-            usage,
-            text: JSON.stringify({
-              stages: [
-                { question: 'Qual o prazo de troca de um tenis?', productContext: 'Troca em 30 dias com nota.', maxTokens: 200, rubric: '30 dias.' },
-                { question: 'Como calcular juros compostos mensais?', productContext: 'M = C (1 + i)^n.', maxTokens: 200, rubric: 'Formula.' },
-              ],
-            }),
-          };
-        }
-        if (req.model === 'fake/ref') return { id, usage, text: `Gabarito: ${req.user.slice(0, 30)}` };
-        if (req.model === 'fake/judge') {
-          if (req.system.includes('DUELO')) return { id, usage, text: duelReply(req, 'A', 'A') };
-          return { id, usage, text: pointwiseReply(req, 'resolve') };
-        }
-        // Competidores: metade SEM bloco usage (cobrado, mas sem custo medido).
-        return n % 2 ? { id, text: `Resposta de ${req.model}`, usage: null } : { id, usage, text: `Resposta de ${req.model}` };
-      },
-    });
-    const t = comGeneration(fake.fetch, (id) => (fatura.has(id) ? ficha(id, fatura.get(id)!) : new Response('', { status: 404 })));
-    anterior = setDefaultGateway(createGateway({ fetch: t.fetch, sleep: noSleep, providerLookup: 'off' }));
-    try {
-      const config = {
-        mode: 'compare',
-        theme: 'suporte',
-        stages: 2,
-        datagenModelId: 'fake/gen',
-        judgeModelIds: ['fake/judge'],
-        referenceModelId: 'fake/ref',
-        referenceJudging: true,
-        competitorModelIds: ['fake/a', 'fake/b'],
-        finalists: 2,
-        timeoutMs: 5_000,
-        budgetUsd: 5,
-      } as unknown as RunConfig;
-      const rec = await runToCompletion(config, KEY);
-      expect(rec.status, rec.error).not.toBe('error');
-      const totalFatura = [...fatura.values()].reduce((s, v) => s + v, 0);
-      // Houve pendentes de verdade (competidores sem usage) — e NENHUM ficou.
-      expect(rec.costLedger?.reconciliation?.settled).toBeGreaterThan(0);
-      expect(rec.costLedger?.pendingUsd).toBe(0);
-      expect(rec.costLedger?.pendingEntries).toBeUndefined();
-      expect(Math.abs(rec.totalCostUsd - totalFatura) / totalFatura).toBeLessThanOrEqual(0.01);
-      // Registro por chamada: um id válido por chamada 200, reconciliadas marcadas.
-      expect(rec.callLog?.length).toBe(fatura.size);
-      expect(rec.callLog?.every((c) => c.generationIdValid === true)).toBe(true);
-      expect(rec.callLog?.some((c) => c.status === 'reconciled')).toBe(true);
-      // Nada foi cobrado em dobro: um id por geração no registro.
-      const ids = rec.callLog!.map((c) => c.generationId);
-      expect(new Set(ids).size).toBe(ids.length);
-      const porPapel = Object.values(rec.costByRole ?? {}) as { usd: number }[];
-      expect(porPapel.reduce((s, e) => s + e.usd, 0)).toBeCloseTo(rec.totalCostUsd, 10);
-    } finally {
-      silencio.forEach((s) => s.mockRestore());
-    }
-  });
-
-  it('Cancelar NÃO espera a conciliação: sai na hora e as pendentes ficam no record para depois', async () => {
-    dir = mkdtempSync(join(tmpdir(), 'pb-reconcile-cancel-'));
-    dirAnterior = getDataDir();
-    setDataDir(dir);
-    const silencio = [
-      vi.spyOn(console, 'log').mockImplementation(() => undefined),
-      vi.spyOn(console, 'warn').mockImplementation(() => undefined),
-      vi.spyOn(console, 'error').mockImplementation(() => undefined),
-    ];
-    let n = 0;
-    let competidoresNoAr = 0;
-    const base = fakeOpenRouter({
-      catalog: ['fake/gen', 'fake/ref', 'fake/judge', 'fake/a', 'fake/b'].map((id) => catalogItem(id, 1e-6, 1e-6)),
-      chat: (req) => {
-        if (req.model === 'fake/gen') {
-          return {
-            text: JSON.stringify({
-              stages: [{ question: 'Qual o prazo de troca de um tenis?', productContext: 'Troca em 30 dias.', maxTokens: 200 }],
-            }),
-          };
-        }
-        return { text: `Gabarito: ${req.user.slice(0, 20)}` };
-      },
-    });
-    // Competidor: 200 + 1 chunk COM id e depois trava até o abort (stream cortado).
-    const chat: FetchLike = async (url, init) => {
-      const body = JSON.parse(String(init?.body ?? '{}')) as { model?: string };
-      if (!new URL(url).pathname.endsWith('/chat/completions') || !String(body.model).match(/^fake\/[ab]$/)) {
-        return base.fetch(url, init);
+  for (const [motor, runToCompletion] of MOTORES) {
+    let dir = '';
+    let dirAnterior = '';
+    afterEach(() => {
+      if (dir) {
+        setDataDir(dirAnterior);
+        rmSync(dir, { recursive: true, force: true });
+        dir = '';
       }
-      const id = gid(100 + n++);
-      competidoresNoAr += 1;
-      const signal = init?.signal;
-      const enc = new TextEncoder();
-      const corpo = new ReadableStream<Uint8Array>({
-        start(ctrl) {
-          ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ id, choices: [{ delta: { content: 'meia' } }] })}\n\n`));
-          signal?.addEventListener('abort', () => ctrl.error(signal.reason), { once: true });
+    });
+
+    it(`${motor}: compare com competidores sem usage (pendentes pelo id): o record fecha com a fatura`, async () => {
+      dir = mkdtempSync(join(tmpdir(), 'pb-reconcile-'));
+      dirAnterior = getDataDir();
+      setDataDir(dir);
+      const silencio = [
+        vi.spyOn(console, 'log').mockImplementation(() => undefined),
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined),
+        vi.spyOn(console, 'error').mockImplementation(() => undefined),
+      ];
+      const fatura = new Map<string, number>();
+      let n = 0;
+      const fake = fakeOpenRouter({
+        catalog: ['fake/gen', 'fake/ref', 'fake/judge', 'fake/a', 'fake/b'].map((id) => catalogItem(id, 1e-6, 1e-6)),
+        chat: (req) => {
+          const id = gid(n++);
+          const custo = Number((0.0001 * n).toFixed(6));
+          fatura.set(id, custo);
+          const usage = { prompt_tokens: 50, completion_tokens: 10, cost: custo };
+          if (req.model === 'fake/gen') {
+            return {
+              id,
+              usage,
+              text: JSON.stringify({
+                stages: [
+                  { question: 'Qual o prazo de troca de um tenis?', productContext: 'Troca em 30 dias com nota.', maxTokens: 200, rubric: '30 dias.' },
+                  { question: 'Como calcular juros compostos mensais?', productContext: 'M = C (1 + i)^n.', maxTokens: 200, rubric: 'Formula.' },
+                ],
+              }),
+            };
+          }
+          if (req.model === 'fake/ref') return { id, usage, text: `Gabarito: ${req.user.slice(0, 30)}` };
+          if (req.model === 'fake/judge') {
+            if (req.system.includes('DUELO')) return { id, usage, text: duelReply(req, 'A', 'A') };
+            return { id, usage, text: pointwiseReply(req, 'resolve') };
+          }
+          // Competidores: metade SEM bloco usage (cobrado, mas sem custo medido).
+          return n % 2 ? { id, text: `Resposta de ${req.model}`, usage: null } : { id, usage, text: `Resposta de ${req.model}` };
         },
       });
-      return new Response(corpo, { status: 200, headers: { 'content-type': 'text/event-stream' } });
-    };
-    const t = comGeneration(chat, (id) => ficha(id, 0.001));
-    anterior = setDefaultGateway(createGateway({ fetch: t.fetch, sleep: noSleep, providerLookup: 'off' }));
-    const ctl = new AbortController();
-    try {
-      const config = {
-        mode: 'compare',
-        theme: 'suporte',
-        stages: 1,
-        datagenModelId: 'fake/gen',
-        judgeModelIds: ['fake/judge'],
-        referenceModelId: 'fake/ref',
-        referenceJudging: true,
-        competitorModelIds: ['fake/a', 'fake/b'],
-        timeoutMs: 60_000,
-      } as unknown as RunConfig;
-      const fim = runToCompletion(config, KEY, { signal: ctl.signal });
-      const t0 = Date.now();
-      while (competidoresNoAr < 2 && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 5));
-      ctl.abort(new Error('Cancelar'));
-      const rec = await fim;
-      expect(rec.stoppedReason).toBe('cancelled');
-      expect(t.gets).toEqual([]); // nenhuma consulta depois do Cancelar
-      expect(rec.costLedger?.pendingEntries?.length).toBe(2); // conciliáveis depois
-    } finally {
-      silencio.forEach((s) => s.mockRestore());
-    }
-  });
+      const t = comGeneration(fake.fetch, (id) => (fatura.has(id) ? ficha(id, fatura.get(id)!) : new Response('', { status: 404 })));
+      anterior = setDefaultGateway(createGateway({ fetch: t.fetch, sleep: noSleep, providerLookup: 'off' }));
+      try {
+        const config = {
+          mode: 'compare',
+          theme: 'suporte',
+          stages: 2,
+          datagenModelId: 'fake/gen',
+          judgeModelIds: ['fake/judge'],
+          referenceModelId: 'fake/ref',
+          referenceJudging: true,
+          competitorModelIds: ['fake/a', 'fake/b'],
+          finalists: 2,
+          timeoutMs: 5_000,
+          budgetUsd: 5,
+        } as unknown as RunConfig;
+        const rec = await runToCompletion(config);
+        expect(rec.status, rec.error).not.toBe('error');
+        const totalFatura = [...fatura.values()].reduce((s, v) => s + v, 0);
+        // Houve pendentes de verdade (competidores sem usage) — e NENHUM ficou.
+        expect(rec.costLedger?.reconciliation?.settled).toBeGreaterThan(0);
+        expect(rec.costLedger?.pendingUsd).toBe(0);
+        expect(rec.costLedger?.pendingEntries).toBeUndefined();
+        expect(Math.abs(rec.totalCostUsd - totalFatura) / totalFatura).toBeLessThanOrEqual(0.01);
+        // Registro por chamada: um id válido por chamada 200, reconciliadas marcadas.
+        expect(rec.callLog?.length).toBe(fatura.size);
+        expect(rec.callLog?.every((c) => c.generationIdValid === true)).toBe(true);
+        expect(rec.callLog?.some((c) => c.status === 'reconciled')).toBe(true);
+        // Nada foi cobrado em dobro: um id por geração no registro.
+        const ids = rec.callLog!.map((c) => c.generationId);
+        expect(new Set(ids).size).toBe(ids.length);
+        const porPapel = Object.values(rec.costByRole ?? {}) as { usd: number }[];
+        expect(porPapel.reduce((s, e) => s + e.usd, 0)).toBeCloseTo(rec.totalCostUsd, 10);
+      } finally {
+        silencio.forEach((s) => s.mockRestore());
+      }
+    });
+
+    it(`${motor}: Cancelar NÃO espera a conciliação: sai na hora e as pendentes ficam no record para depois`, async () => {
+      dir = mkdtempSync(join(tmpdir(), 'pb-reconcile-cancel-'));
+      dirAnterior = getDataDir();
+      setDataDir(dir);
+      const silencio = [
+        vi.spyOn(console, 'log').mockImplementation(() => undefined),
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined),
+        vi.spyOn(console, 'error').mockImplementation(() => undefined),
+      ];
+      let n = 0;
+      let competidoresNoAr = 0;
+      const base = fakeOpenRouter({
+        catalog: ['fake/gen', 'fake/ref', 'fake/judge', 'fake/a', 'fake/b'].map((id) => catalogItem(id, 1e-6, 1e-6)),
+        chat: (req) => {
+          if (req.model === 'fake/gen') {
+            return {
+              text: JSON.stringify({
+                stages: [{ question: 'Qual o prazo de troca de um tenis?', productContext: 'Troca em 30 dias.', maxTokens: 200 }],
+              }),
+            };
+          }
+          return { text: `Gabarito: ${req.user.slice(0, 20)}` };
+        },
+      });
+      // Competidor: 200 + 1 chunk COM id e depois trava até o abort (stream cortado).
+      const chat: FetchLike = async (url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { model?: string };
+        if (!new URL(url).pathname.endsWith('/chat/completions') || !String(body.model).match(/^fake\/[ab]$/)) {
+          return base.fetch(url, init);
+        }
+        const id = gid(100 + n++);
+        competidoresNoAr += 1;
+        const signal = init?.signal;
+        const enc = new TextEncoder();
+        const corpo = new ReadableStream<Uint8Array>({
+          start(ctrl) {
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ id, choices: [{ delta: { content: 'meia' } }] })}\n\n`));
+            signal?.addEventListener('abort', () => ctrl.error(signal.reason), { once: true });
+          },
+        });
+        return new Response(corpo, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      };
+      const t = comGeneration(chat, (id) => ficha(id, 0.001));
+      anterior = setDefaultGateway(createGateway({ fetch: t.fetch, sleep: noSleep, providerLookup: 'off' }));
+      const ctl = new AbortController();
+      try {
+        const config = {
+          mode: 'compare',
+          theme: 'suporte',
+          stages: 1,
+          datagenModelId: 'fake/gen',
+          judgeModelIds: ['fake/judge'],
+          referenceModelId: 'fake/ref',
+          referenceJudging: true,
+          competitorModelIds: ['fake/a', 'fake/b'],
+          timeoutMs: 60_000,
+        } as unknown as RunConfig;
+        const fim = runToCompletion(config, { signal: ctl.signal });
+        const t0 = Date.now();
+        while (competidoresNoAr < 2 && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 5));
+        ctl.abort(new Error('Cancelar'));
+        const rec = await fim;
+        expect(rec.stoppedReason).toBe('cancelled');
+        expect(t.gets).toEqual([]); // nenhuma consulta depois do Cancelar
+        expect(rec.costLedger?.pendingEntries?.length).toBe(2); // conciliáveis depois
+      } finally {
+        silencio.forEach((s) => s.mockRestore());
+      }
+    });
+  }
 });

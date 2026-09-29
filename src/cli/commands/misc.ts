@@ -219,7 +219,8 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   // ANTES da rede: config inválida sai com exit 3 sem baixar o catálogo. O
   // data-dir (onde mora a biblioteca) é fixado antes, como o buildContext faria.
   setDataDir(resolveHome(parsed.values));
-  const config = await readConfigFile(file);
+  // Estimar não executa nada: config de modo agente é aceita (só roda pelo portão).
+  const config = await readConfigFile(file, {}, { inspectOnly: true });
   // Estimar e ler preco do catalogo PUBLICO: nao exige key (IMPL-029).
   const ctx = await buildCatalogContext(parsed);
   const { out } = ctx;
@@ -912,11 +913,15 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     out.line(`${record.id}  ${record.status}`);
     out.line(`tema: ${record.config.theme}`);
     out.line(`iterações: ${record.bestPromptByIteration.length}/${record.config.iterations}`);
-    // IMPL-051: convergência com iteração E motivo (platão vs paciência).
+    // IMPL-051: convergência com iteração E motivo (platão vs paciência). O
+    // campo vai CRU: o default de record legado (sem `convergenceReason`) mora
+    // SÓ em `convergenceReasonText` — a TrainingView passa o mesmo campo, e o
+    // mesmo record tem a mesma explicação nas duas telas. (Record antigo não
+    // tinha a paciência de hoje — "paciência — 2 iterações" seria inventado.)
     if (record.convergedAtIteration !== undefined) {
       out.line(
         `convergência: iteração ${record.convergedAtIteration + 1} (${convergenceReasonText(
-          record.convergenceReason ?? 'patience',
+          record.convergenceReason,
           record.config.patience,
         )})`,
       );

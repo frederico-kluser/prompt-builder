@@ -22,7 +22,7 @@ import {
   type CostCalibrationSample,
   type GatewayConfig,
 } from '../../../src/openrouter.js';
-import { CostCalibration, setCostCalibrationProvider } from '../../../src/estimate.js';
+import { CostCalibration, isCostCalibrationSample, setCostCalibrationProvider } from '../../../src/estimate.js';
 
 export * from '../../../src/openrouter.js';
 
@@ -82,12 +82,16 @@ export function setAttributionEnabled(enabled: boolean, store: StorageLike | und
   configureGateway({ attribution: enabled });
 }
 
-/** Amostras salvas (lixo/ausente = nenhuma — nunca derruba a página). */
+/**
+ * Amostras salvas (lixo/ausente = nenhuma — nunca derruba a página). Cada item
+ * passa pela MESMA régua do leitor do Node (`isCostCalibrationSample`): entrada
+ * velha/corrompida (estimado 0, modelo ausente) não vira razão Infinity/NaN.
+ */
 export function loadStoredCostSamples(store: StorageLike | undefined = storage()): CostCalibrationSample[] {
   try {
     const raw = store?.getItem(COST_SAMPLES_STORAGE_KEY);
     const arr = raw ? (JSON.parse(raw) as unknown) : [];
-    return Array.isArray(arr) ? (arr.filter((s) => s && typeof s === 'object') as CostCalibrationSample[]) : [];
+    return Array.isArray(arr) ? arr.filter(isCostCalibrationSample) : [];
   } catch {
     return [];
   }

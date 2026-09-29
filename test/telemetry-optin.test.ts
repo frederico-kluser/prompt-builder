@@ -208,3 +208,49 @@ describe('IMPL-120 (4) — flag PROMPT_BUILDER_NO_ATTRIBUTION suprime os headers
     for (const h of ATTRIBUTION_HEADER_NAMES) expect(suprimido[h]).toBeUndefined();
   });
 });
+describe('IMPL-120 — honestidade dos contadores: a flag `hooksWired` bate com o código', () => {
+  it('TELEMETRY_FUNNEL_HOOKS_WIRED é true SE E SÓ SE algum comando chama recordTelemetryEvent', async () => {
+    const { readdirSync, readFileSync, statSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { TELEMETRY_FUNNEL_HOOKS_WIRED } = await import('../src/cli/commands/telemetry.js');
+    const raiz = join(process.cwd(), 'src');
+    const chamadores: string[] = [];
+    const varrer = (dir: string): void => {
+      for (const nome of readdirSync(dir)) {
+        const p = join(dir, nome);
+        if (statSync(p).isDirectory()) varrer(p);
+        else if (p.endsWith('.ts') && !p.endsWith(join('commands', 'telemetry.ts'))) {
+          if (/\brecordTelemetryEvent\s*\(/u.test(readFileSync(p, 'utf-8'))) chamadores.push(p);
+        }
+      }
+    };
+    varrer(raiz);
+    // Hoje nenhum gancho: o comentário e o `telemetry counters` dizem isso.
+    expect(TELEMETRY_FUNNEL_HOOKS_WIRED).toBe(chamadores.length > 0);
+  });
+
+  it('`telemetry counters` devolve hooksWired e avisa que zero não é medida', async () => {
+    const { cmdTelemetry } = await import('../src/cli/commands/telemetry.js');
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'pb-telemetry-counters-'));
+    const saida: string[] = [];
+    const erro: string[] = [];
+    const wOut = process.stdout.write.bind(process.stdout);
+    const wErr = process.stderr.write.bind(process.stderr);
+    process.stdout.write = ((c: string) => (saida.push(String(c)), true)) as typeof process.stdout.write;
+    process.stderr.write = ((c: string) => (erro.push(String(c)), true)) as typeof process.stderr.write;
+    try {
+      const code = await cmdTelemetry(['counters', '--json', '--data-dir', dir]);
+      expect(code).toBe(0);
+    } finally {
+      process.stdout.write = wOut;
+      process.stderr.write = wErr;
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const payload = JSON.parse(saida.join('').trim().split('\n').at(-1)!) as { data: { hooksWired: boolean } };
+    expect(payload.data.hooksWired).toBe(false);
+    expect(erro.join('')).toContain('ganchos de funil ainda não ligados');
+  });
+});

@@ -300,7 +300,10 @@ interface Saver {
   bindLedger(sync: () => void, settle?: () => Promise<void>): void;
   /**
    * IMPL-074 / IMPL-017 (iv): concilia as pendentes do ledger pela fatura
-   * (GET /generation) ANTES da escrita terminal. Nunca lança.
+   * (GET /generation) ANTES da escrita terminal. Nunca lança. IDEMPOTENTE: a
+   * conciliação roda UMA vez por run (o runLoop e o `executeRun` a pedem nos
+   * seus desfechos) — uma 2ª rodada depois do `run.finished` re-tentaria as
+   * pendentes de falha de rede e o record gravado divergiria do emitido.
    */
   settle(): Promise<void>;
 }
@@ -310,13 +313,18 @@ function createSaver(record: RunRecord): Saver {
   let lastSave = 0;
   let syncLedger: (() => void) | undefined;
   let settleLedger: (() => Promise<void>) | undefined;
+  let settled: Promise<void> | undefined;
   return {
     bindLedger(sync: () => void, settle?: () => Promise<void>): void {
       syncLedger = sync;
       settleLedger = settle;
     },
-    async settle(): Promise<void> {
-      await settleLedger?.().catch(() => undefined);
+    settle(): Promise<void> {
+      // Sem ledger ligado (run que falhou antes dele) não há o que conciliar —
+      // e não memoriza: o ledger ainda pode ser ligado depois.
+      if (!settleLedger) return Promise.resolve();
+      settled ??= settleLedger().catch(() => undefined);
+      return settled;
     },
     schedule(): void {
       if (saveTimer) return;
@@ -356,6 +364,10 @@ async function executeRun(
     if (record.status === 'running') {
       record.status = record.stoppedReason ? 'aborted' : 'finished';
       record.finishedAt = nowIso();
+      // IMPL-074 (espelho do web): concilia e grava ANTES de emitir — o
+      // `run.finished` (NDJSON, SSE, registro do httpRunControl) carrega os
+      // MESMOS totais que o disco e o `--json` do CLI.
+      await closeTerminal(record, saver);
       emitEvent({ type: 'run.finished', runId: record.id, record });
       log(record.id, `run encerrada cedo (${record.stoppedReason ?? 'sem fase executavel'})`, {
         totalCostUsd: record.totalCostUsd,
@@ -370,6 +382,8 @@ async function executeRun(
       record.stoppedReason = err.benchControl === 'budget' ? 'budget' : 'cancelled';
       if (err.benchControl === 'budget') record.budgetExhausted = true;
       record.finishedAt = nowIso();
+      // Depois do `stoppedReason` (o Cancelar não concilia) e ANTES do evento.
+      await closeTerminal(record, saver);
       log(record.id, `run interrompida (${record.stoppedReason})`, {
         totalCostUsd: record.totalCostUsd,
       });
@@ -382,19 +396,30 @@ async function executeRun(
       // no record — o CLI sai com 4/5 em vez de 1 (`internal`).
       Object.assign(record, gatewayErrorFields(err));
       record.finishedAt = nowIso();
+      await closeTerminal(record, saver);
       emitEvent({ type: 'run.error', runId: record.id, error: record.error });
     }
   } finally {
-    // IMPL-074: pendentes conciliadas pela fatura antes da escrita terminal —
-    // menos no Cancelar (o usuário pediu para parar: sai na hora; as
-    // pendentes ficam no record, conciliáveis depois).
-    if (record.stoppedReason !== 'cancelled') await saver.settle();
-    // UMA escrita terminal, sem timer orfao — vale para os tres desfechos.
+    // Rede de segurança (a escrita terminal já saiu antes do evento em todo
+    // desfecho): sem timer órfão e com o record final no disco. A conciliação
+    // é idempotente — não roda de novo aqui.
     await saver.flush();
     // So DEPOIS da escrita terminal: quem chega agora le o record final do disco.
     if (liveRuns.get(record.id) === record) liveRuns.delete(record.id);
   }
   return record;
+}
+
+/**
+ * Fechamento terminal comum aos desfechos do `executeRun`: pendentes
+ * conciliadas pela fatura (IMPL-074) — menos no Cancelar (o usuário pediu para
+ * parar: sai na hora; as pendentes ficam no record, conciliáveis depois) — e a
+ * escrita terminal (com o ledger sincronizado no record). Roda ANTES do evento
+ * terminal: quem reage a ele (NDJSON, SSE, `cancel` HTTP) vê o disco final.
+ */
+async function closeTerminal(record: RunRecord, saver: Saver): Promise<void> {
+  if (record.stoppedReason !== 'cancelled') await saver.settle();
+  await saver.flush();
 }
 
 /**
@@ -841,10 +866,15 @@ async function runLoop(
 
   // Contestants ja sao finais aqui (opts.prepare rodou). Controle = ancora do
   // standings: o prompt original (isOriginal), o 'carry' do treino, ou o 1o
-  // contestant como fallback.
+  // contestant como fallback. web-code#16: lista de MODELOS sem âncora
+  // (`competitorAnchor: false`) não tem controle — sem o fallback posicional,
+  // senão o `standings[].isControl` gravado/exportado apontaria um modelo
+  // qualquer como controle.
   const controlId =
     record.contestants.find((c) => c.isOriginal || c.id === 'carry')?.id ??
-    record.contestants[0]?.id;
+    ((record.config as { competitorAnchor?: boolean }).competitorAnchor === false
+      ? undefined
+      : record.contestants[0]?.id);
   const labelOf = (id: string): string => record.contestants.find((c) => c.id === id)?.label ?? id;
 
   // === FASE 2+3: G2 — respostas E julgamento sao UM grupo indivisivel. ===

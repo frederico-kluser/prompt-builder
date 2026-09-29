@@ -158,14 +158,17 @@ async function resetToSeed(workspaceDir: string, seedCommit: string, runner: Com
 }
 
 /**
- * IMPL-098 — resolve o `testsDir` de uma tarefa. Relativo = ao diretório da
+ * IMPL-098 — resolve o `testsDir` de uma tarefa. SÓ relativo = ao diretório da
  * configuração (`baseDir`) e SEM sair dele (`../` recusado: o material de teste
  * vai para o verificador e entra no hash do portão — um `testsDir` que escapa
- * levaria qualquer arquivo da máquina junto). Absoluto só chega aqui já
- * resolvido pelo CLI (o schema do arquivo recusa absoluto).
+ * levaria qualquer arquivo da máquina junto). Absoluto é RECUSADO: todo
+ * chamador passa o valor do arquivo (os schemas recusam absoluto), e um atalho
+ * "absoluto passa direto" era a porta para `/home/<user>/.ssh` sem contenção.
  */
 export function resolveTestsDir(testsDir: string, baseDir: string): string {
-  if (path.isAbsolute(testsDir)) return path.resolve(testsDir);
+  if (path.isAbsolute(testsDir) || path.win32.isAbsolute(testsDir)) {
+    throw new Error(`testsDir "${testsDir}" deve ser relativo ao diretório da configuração`);
+  }
   const base = path.resolve(baseDir);
   const abs = path.resolve(base, testsDir);
   const fora = (from: string, to: string): boolean => {

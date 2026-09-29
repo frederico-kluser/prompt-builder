@@ -2768,8 +2768,10 @@ export class OpenRouterGateway {
 
   /**
    * IMPL-075 — esta chamada vai no modo auditável? Flag da chamada, preset do
-   * gateway (`auditableRoles`, env `OPENROUTER_AUDITABLE`) ou a política da
-   * run/sessão no ledger (`sink.auditableRoles`).
+   * gateway (`auditableRoles`, env `OPENROUTER_AUDITABLE`) ou a política no
+   * ledger (`sink.auditableRoles`). ⚠️ Hoje só o ENV liga o modo em produção:
+   * o gancho do ledger (`BudgetLedger.setAuditableRoles`) existe e é testado,
+   * mas nenhum campo de RunConfig/sessão o alimenta ainda (IMPL-075 pendente).
    */
   private auditableFor(params: ChatCompletionParams): boolean {
     if (params.auditable === true) return true;
@@ -3547,11 +3549,24 @@ export class OpenRouterGateway {
    * medido não é "custou zero". Falha de rede => segue pendente (a conciliação
    * pode rodar de novo depois). Concorrência pequena de propósito: o endpoint
    * tem rate limit próprio. Não é chamada de LLM: não passa pelo ledger.
+   *
+   * `notFoundAsPending` (o FIM DE RUN usa): o 404 de um id `gen-…` NÃO é
+   * definitivo — as últimas chamadas da run (finais, juiz) têm segundos de
+   * idade e o /generation costuma dar 404 até indexar a geração. Converter em
+   * conservador ali trocaria a fatura real pela reserva PARA SEMPRE (sai do
+   * conjunto de pendentes); com a opção a chamada segue pendente no record
+   * (`costLedger.pendingEntries`), conciliável depois, e conta em `failed`.
    */
   async reconcilePending(
     ledger: ReconcilableLedger,
     apiKey: string,
-    opts: { attempts?: number; baseDelayMs?: number; concurrency?: number; signal?: AbortSignal } = {},
+    opts: {
+      attempts?: number;
+      baseDelayMs?: number;
+      concurrency?: number;
+      signal?: AbortSignal;
+      notFoundAsPending?: boolean;
+    } = {},
   ): Promise<NonNullable<CostLedgerSummary['reconciliation']>> {
     const pendentes = ledger.pendingEntries();
     const out = { attempted: pendentes.length, settled: 0, notFound: 0, failed: 0 };
@@ -3587,10 +3602,11 @@ export class OpenRouterGateway {
             details,
           );
           out.settled += 1;
-        } else if (r.status === 'not_found') {
+        } else if (r.status === 'not_found' && !opts.notFoundAsPending) {
           ledger.settlePending(p.generationId, null);
           out.notFound += 1;
         } else {
+          // Rede/erro — ou 404 recente no fim da run: segue PENDENTE.
           out.failed += 1;
         }
       }
@@ -3713,12 +3729,13 @@ export function reconcilePendingGenerations(
 
 /**
  * Conciliação do FIM DE RUN (os dois orquestradores): poucas tentativas
- * curtas — no fim da run as pendentes já têm segundos de idade e o 404
- * transitório passou; o que seguir sem resposta fica pendente no record
- * (`costLedger.pendingEntries`, conciliável depois). Nunca lança: falha aqui
- * não pode transformar uma run concluída em erro.
+ * curtas; o que seguir sem resposta — falha de rede OU 404 (a geração pode
+ * ainda não estar indexada: as últimas chamadas têm segundos de idade) — fica
+ * PENDENTE no record (`costLedger.pendingEntries`, conciliável depois), nunca
+ * vira a reserva conservadora em definitivo. Nunca lança: falha aqui não pode
+ * transformar uma run concluída em erro.
  */
-export const RUN_END_RECONCILE = { attempts: 3, baseDelayMs: 500, concurrency: 4 } as const;
+export const RUN_END_RECONCILE = { attempts: 3, baseDelayMs: 500, concurrency: 4, notFoundAsPending: true } as const;
 
 export async function reconcileAtRunEnd(ledger: ReconcilableLedger, apiKey: string): Promise<void> {
   if (ledger.pendingEntries().length === 0) return;

@@ -16,28 +16,15 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { subscribeCostSamples, type CostCalibrationSample } from './openrouter.js';
-import { CostCalibration, setCostCalibrationProvider } from './estimate.js';
-import { COST_ROLES } from './types.js';
+import { CostCalibration, isCostCalibrationSample, setCostCalibrationProvider } from './estimate.js';
 
 /** Nome do arquivo de amostras dentro do diretório de dados. */
 export const COST_SAMPLES_FILE = 'cost-samples.jsonl';
 /** Teto de amostras mantidas (arquivo e memória). */
 export const COST_SAMPLES_KEEP = 2000;
 
-/** Amostra lida do disco é aceita só com a forma certa (linha lixo = ignorada). */
-function isSample(v: unknown): v is CostCalibrationSample {
-  if (!v || typeof v !== 'object') return false;
-  const s = v as Record<string, unknown>;
-  return (
-    typeof s.role === 'string' &&
-    (COST_ROLES as readonly string[]).includes(s.role) &&
-    typeof s.modelId === 'string' &&
-    typeof s.estimatedUsd === 'number' &&
-    Number.isFinite(s.estimatedUsd) &&
-    typeof s.actualUsd === 'number' &&
-    Number.isFinite(s.actualUsd)
-  );
-}
+/** Amostra lida do disco é aceita só com a forma certa (linha lixo = ignorada) — régua ÚNICA com a SPA. */
+const isSample = isCostCalibrationSample;
 
 /** Lê as amostras salvas (as últimas `keep`); arquivo ausente/ilegível = nenhuma. */
 export function loadCostSamples(file: string, keep = COST_SAMPLES_KEEP): CostCalibrationSample[] {

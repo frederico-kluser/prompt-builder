@@ -558,6 +558,36 @@ describe('web-code#8/cli#9 — holdoutSkipReason gravado pelos dois motores', ()
         holdoutSkipReason: 'budget',
       });
     });
+
+    it(`${nome}: run de holdout CANCELADA ⇒ sessão aborted/cancelled com motivo 'cancelled'`, async () => {
+      dubles.estado.politica = (c, id) => (id === 'v0' ? 'resolve' : 'parcial');
+      dubles.estado.desfecho = { holdout: { status: 'aborted', stoppedReason: 'cancelled' } };
+      const { rec } = await treinar(config());
+      expect(doTipo('holdout')).toHaveLength(1);
+      expect(rec.holdout).toBeUndefined();
+      expect(rec).toMatchObject({
+        status: 'aborted',
+        stoppedReason: 'cancelled',
+        holdoutSkipped: true,
+        holdoutSkipReason: 'cancelled',
+      });
+      // Cancelar não é orçamento: nada de budgetExhausted/fase de orçamento.
+      expect(rec.budgetExhausted).toBeFalsy();
+      expect(rec.stoppedAtPhase).toBeUndefined();
+      expect(sessionConfirmationText(rec)).not.toMatch(/orçamento/u);
+    });
+
+    it(`${nome}: sem prompt base ⇒ 'no-base' (não há controle para o holdout), sem holdoutSkipped`, async () => {
+      // A variante é promovida (há campeão e fatia forte), mas sem prompt base
+      // não existe o que o holdout re-testaria contra.
+      dubles.estado.politica = (c, id) => (id === 'v0' ? 'resolve' : 'parcial');
+      const { rec } = await treinar(config({ basePrompt: '' }));
+      expect(rec.status, rec.error).toBe('finished');
+      expect(doTipo('holdout')).toHaveLength(0);
+      expect(rec.holdout).toBeUndefined();
+      expect(rec.holdoutSkipReason).toBe('no-base');
+      expect(rec.holdoutSkipped).toBeFalsy();
+    });
   }
 });
 

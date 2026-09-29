@@ -10,6 +10,7 @@ import {
   fmtDuration,
   fmtInt,
   fmtPct,
+  cycleReevalText,
   fmtPp,
   fmtSignedNumber,
   fmtSignedUsd,
@@ -466,8 +467,8 @@ export function TrainingReport() {
                   {fmtPp(cy.gainPp)}
                   {cy.gainCorrectedPp != null && `, corrigido ${fmtPp(cy.gainCorrectedPp)}`}
                   {cy.minGainPp != null && `, margem exigida ${fmtPp(cy.minGainPp)}`}
-                  {cy.reeval &&
-                    `; re-avaliação limpa ${fmtPp(cy.reeval.gainPp)} em ${cy.reeval.size} cenário(s) — ${cy.reeval.confirmed ? 'confirmada' : 'não confirmada'}`}
+                  {/* cli#8: interrompida/não rodou não mostra Δ nem n — régua única do relatório. */}
+                  {cy.reeval && `; ${cycleReevalText(cy.reeval)}`}
                 </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <Chip>custo {fmtUsd(cy.costUsd)}</Chip>

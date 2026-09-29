@@ -11,7 +11,8 @@ import { validatePromptGroup } from './engine/promptGroup.js';
 import { promptContractsSchema } from './engine/contracts.js';
 import { checkRunPii, runPiiMessage, runPiiRefusal } from './engine/pii.js';
 import { stageLabelIssues } from './engine/groundTruth.js';
-import { roleConflictMessage, roleSeparationIssues } from './engine/roleSeparation.js';
+import { roleConflictField, roleConflictMessage, roleSeparationIssues } from './engine/roleSeparation.js';
+import { testsDirProblem } from './agent/taskSchema.js';
 import type { RunConfig } from './types.js';
 
 // Nivel de esforco de raciocinio (ReasoningLevel de types.ts / REASONING_LEVELS
@@ -96,8 +97,21 @@ const agentTaskSchema = z.object({
       z.object({ kind: z.literal('diff'), diff: z.string().min(1) }),
     ])
     .optional(),
-  // Na RunConfig ja chega ABSOLUTO (o CLI resolve pelo diretorio do arquivo).
-  testsDir: z.string().min(1).optional(),
+  // IMPL-098: a RunConfig CRUA (HTTP /v1/agents, MCP, `--config` do CLI) NUNCA
+  // carrega caminho de host — mesma regra do arquivo (`testsDirProblem`:
+  // relativo e sem `../`). Um absoluto aqui levaria arquivos da maquina
+  // (as chaves SSH da home, o diretorio de dados) para o verificador, onde o verify[] do
+  // chamador os le. O absoluto so existe DEPOIS do parse, posto pelo proprio
+  // CLI a partir do diretorio do arquivo (`resolveConfigTestsDirs`, agents.ts);
+  // relativo sem diretorio de origem a etapa recusa antes de executar.
+  testsDir: z
+    .string()
+    .min(1)
+    .superRefine((v, ctx) => {
+      const problema = testsDirProblem(v);
+      if (problema) ctx.addIssue({ code: 'custom', message: `testsDir ${problema}` });
+    })
+    .optional(),
   env: z.object({ digest: z.string().min(1), path: z.string().optional() }).optional(),
   metadata: z
     .object({
@@ -509,7 +523,7 @@ export const runConfigSchema = z
     // A regra é FONTE ÚNICA em src/engine/roleSeparation.ts (a SPA recusa com
     // ela no createRun/createSession e o formulário a mostra como pendência).
     for (const conflito of roleSeparationIssues(cfg)) {
-      ctx.addIssue({ code: 'custom', path: ['referenceModelId'], message: roleConflictMessage(conflito) });
+      ctx.addIssue({ code: 'custom', path: [roleConflictField(conflito)], message: roleConflictMessage(conflito) });
     }
 
     // Gerador e juiz PODEM repetir o mesmo modelo (repeticao permitida).
@@ -617,6 +631,44 @@ export type ParseRunConfigResult =
  * CLI nao deveria precisar importar o encanamento de erros do zod so para
  * imprimir "o que esta errado".
  */
+/**
+ * Campos de uma RunConfig que EXECUTAM comando nesta máquina (modo agente):
+ * `agent` (o executor) e todo `agentTask` de etapa (setup[]/verify[]/rebuild/
+ * solution — scripts do host). Lista vazia = config de chat, sem execução.
+ *
+ * As portas de entrada que aceitam RunConfig CRUA sem portão de execução
+ * (`POST /v1/benchmark/{runs,sessions}`, MCP start_run/run_benchmark/
+ * train_prompt, `--config` de compare/vary/train) RECUSAM config com qualquer
+ * um destes: antes elas rodavam comando arbitrário do host sem o token/
+ * isolamento do `/v1/agents` (§21.5) nem o pin SHA-256 do `agents run`
+ * (IMPL-099). Modo agente entra SÓ pelos caminhos com portão.
+ */
+export function agentExecFields(config: unknown): string[] {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return [];
+  const c = config as Record<string, unknown>;
+  const out: string[] = [];
+  if (c.agent !== undefined && c.agent !== null) out.push('agent');
+  for (const [key, value] of Object.entries(c)) {
+    if (!Array.isArray(value)) continue;
+    value.forEach((item, i) => {
+      if (item && typeof item === 'object' && (item as Record<string, unknown>).agentTask != null) {
+        out.push(`${key}[${i}].agentTask`);
+      }
+    });
+  }
+  return out;
+}
+
+/** Mensagem canônica da recusa (HTTP/MCP/CLI citam o caminho com portão). */
+export function agentExecRefusalMessage(fields: readonly string[]): string {
+  return (
+    `Config de MODO AGENTE (${fields.slice(0, 3).join(', ')}${fields.length > 3 ? ', …' : ''}) não roda por aqui: ` +
+    'setup[]/verify[] executam comandos nesta máquina e só entram pelo portão de execução — ' +
+    '`prompt-builder agents run --config <arena-agent-config@1>` (revisão + SHA-256), a tool MCP ' +
+    'run_agent_benchmark/start_run com arena-agent-config@1, ou POST /v1/agents/runs (token + isolamento).'
+  );
+}
+
 export function parseRunConfig(input: unknown): ParseRunConfigResult {
   const parsed = runConfigSchema.safeParse(input);
   if (parsed.success) return { ok: true, config: parsed.data as RunConfig };

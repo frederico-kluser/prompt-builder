@@ -394,6 +394,29 @@ describe('IMPL-113 — estimado × real persiste entre processos e calibra a fai
       desliga2();
     }
   });
+
+  it('SPA: amostra velha/corrompida no `pb.costSamples` fica de fora — a MESMA régua do leitor do Node', async () => {
+    const web = await import('../web/src/engine/openrouter.js');
+    const { CostCalibration, isCostCalibrationSample } = await import('../src/estimate.js');
+    const lixo = [
+      { ...amostra(1), estimatedUsd: 0 }, // razão Infinity
+      { ...amostra(2), estimatedUsd: undefined }, // razão NaN
+      { ...amostra(3), modelId: undefined, family: undefined }, // derrubava o modelFamilyOf
+      { ...amostra(4), role: 'nada' },
+      { ...amostra(5), actualUsd: 'caro' },
+      { ...amostra(6), estimatedUsd: '0.5' }, // string coagida na divisão
+    ];
+    const store = { getItem: () => JSON.stringify([amostra(7), ...lixo, amostra(8)]), setItem: () => undefined, removeItem: () => undefined };
+    const lidas = web.loadStoredCostSamples(store);
+    expect(lidas).toEqual([amostra(7), amostra(8)]);
+    // Node e SPA: régua idêntica (a do Node virou a mesma função).
+    for (const s of lixo) expect(isCostCalibrationSample(s), JSON.stringify(s)).toBe(false);
+    // E a calibração, mesmo recebendo lixo direto, não produz razão não finita.
+    const cal = new CostCalibration([...(lixo as never[]), amostra(7), amostra(8)]);
+    expect(cal.size).toBe(2);
+    const band = cal.bandFor('judge');
+    for (const v of [band.low, band.point, band.high]) expect(Number.isFinite(v)).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

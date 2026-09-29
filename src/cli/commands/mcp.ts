@@ -837,8 +837,10 @@ function configObject(config: unknown, dialeto = ''): Record<string, unknown> {
  * item sem gabarito ou sem labelSet são RECUSADOS). Antes o MCP refazia só o
  * parse: a biblioteca era ignorada e a run caía em cenários GERADOS (mcp#0).
  */
-async function toRunConfig(config: unknown): Promise<RunConfig> {
-  return configFromJson(configObject(config));
+async function toRunConfig(config: unknown, opts: { inspectOnly?: boolean } = {}): Promise<RunConfig> {
+  // Config CRUA com `agent`/`agentTask` é RECUSADA aqui (config.agent_requires_agents_run):
+  // modo agente só entra por arena-agent-config@1 + `execConfigGateForTool`.
+  return configFromJson(configObject(config), {}, opts);
 }
 
 /**
@@ -1055,7 +1057,8 @@ const TOOLS: McpTool[] = [
     // como o `estimate` do CLI.
     optionalKey: true,
     run: async (args, apiKey) => {
-      const cfg = await toRunConfig(args.config);
+      // Estimar não executa nada: aceita também a config crua de modo agente.
+      const cfg = await toRunConfig(args.config, { inspectOnly: true });
       const cat = await ensureCatalog(apiKey);
       return estimateRunCost(estimateInputFromConfig(cfg), cat.models);
     },

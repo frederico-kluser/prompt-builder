@@ -14,7 +14,7 @@ import { listTechniques } from './techniques.js';
 import { getLgpdData } from './lgpd.js';
 import { listRuns, loadRun, listSessions, loadSession } from './storage.js';
 import { subscribe, subscribeSession } from './events.js';
-import { runConfigSchema } from './runConfigSchema.js';
+import { agentExecFields, agentExecRefusalMessage, runConfigSchema } from './runConfigSchema.js';
 import { prepareOptsFor } from './prepareRun.js';
 import { isTerminalRunStatus } from './types.js';
 import { isValidRecordId, publicErrorMessage } from './pathSafety.js';
@@ -101,12 +101,32 @@ router.get('/models', requireKey, ah(async (req, res) => {
   }
 }));
 
+/**
+ * Modo agente (setup[]/verify[] executam no host) NÃO entra por /v1/benchmark:
+ * aqui não há token, portão de isolamento (§21.5) nem PROMPT_BUILDER_AGENTS —
+ * só por /v1/agents/runs. Responde 400 (e nada é iniciado) quando a config
+ * crua traz `agent` ou `agentTask`. `true` = já respondeu.
+ */
+function refuseAgentExec(body: unknown, res: Response): boolean {
+  const campos = agentExecFields(body);
+  if (campos.length === 0) return false;
+  res.status(400).json({
+    error: agentExecRefusalMessage(campos),
+    code: 'config.agent_requires_agents_run',
+    fields: campos,
+  });
+  return true;
+}
+
 router.post('/runs', requireKey, ah(async (req, res) => {
+  // Antes do parse: a recusa não pode depender de a config agente ser válida.
+  if (refuseAgentExec(req.body, res)) return;
   const parsed = runConfigSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Config invalida', details: parsed.error.flatten() });
     return;
   }
+  if (refuseAgentExec(parsed.data, res)) return;
   const apiKey = (req as Request & { apiKey: string }).apiKey;
 
   // Pre-flight: valida a key ANTES de iniciar a run, pra falhar rapido com
@@ -342,11 +362,13 @@ router.post('/sessions/:id/cancel', ah(async (req, res) => {
 // ---------------------------------------------------------------------------
 
 router.post('/sessions', requireKey, ah(async (req, res) => {
+  if (refuseAgentExec(req.body, res)) return;
   const parsed = runConfigSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Config invalida', details: parsed.error.flatten() });
     return;
   }
+  if (refuseAgentExec(parsed.data, res)) return;
   if (parsed.data.mode !== 'training') {
     res.status(400).json({ error: 'POST /v1/benchmark/sessions exige mode "training".' });
     return;

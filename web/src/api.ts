@@ -32,6 +32,7 @@ export { COST_CONFIRM_THRESHOLD_USD, costConfirmationReason } from '../../src/en
 import { assertRoleSeparation } from '../../src/engine/roleSeparation.js';
 export {
   competingModelIds,
+  roleConflictMessage,
   roleSeparationIssues,
   type RoleConflict,
 } from '../../src/engine/roleSeparation.js';

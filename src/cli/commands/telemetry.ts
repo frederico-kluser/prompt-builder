@@ -27,10 +27,14 @@
 // (gatewayEnv); este módulo re-exporta. Documentada em `--help` (AMBIENTE),
 // `telemetry --help` e `docs troubleshooting`.
 //
-// Funis que os contadores medem (os que a auditoria achou invisíveis):
+// Funis que os contadores medirão (os que a auditoria achou invisíveis):
 // `docs.list`, `run.first_completed`, `budget.exhausted` (exit 7) e
-// `runs.export`. Os comandos chamam `recordTelemetryEvent`, que é NO-OP sem o
-// opt-in (nada contado, nada gravado, zero requisições).
+// `runs.export`. ⚠️ Os GANCHOS AINDA NÃO ESTÃO LIGADOS: nenhum comando chama
+// `recordTelemetryEvent` hoje (quem os incrementará são os comandos do CLI,
+// fora desta fronteira) — `telemetry counters` mostra zeros e diz isso
+// (`hooksWired: false`). `recordTelemetryEvent` é NO-OP sem o opt-in (nada
+// contado, nada gravado, zero requisições). Ao ligar um gancho, vire
+// `TELEMETRY_FUNNEL_HOOKS_WIRED` — o teste confere a flag contra o código.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -306,6 +310,13 @@ export function attributionHeadersFor(
 export const TELEMETRY_COUNTERS_FILE = 'telemetry-counters.json';
 
 /**
+ * Os comandos do CLI já chamam `recordTelemetryEvent` nos funis da allowlist?
+ * Hoje NÃO (IMPL-120 pendente): os contadores ficam em zero mesmo com opt-in.
+ * `test/telemetry-optin.test.ts` confere a flag contra o código.
+ */
+export const TELEMETRY_FUNNEL_HOOKS_WIRED = false;
+
+/**
  * Conta UM evento de funil — NO-OP sem opt-in explícito (default): nada é
  * contado, nada é gravado, nenhuma requisição sai. Com opt-in, soma no
  * contador de processo e persiste em `<dataDir>/telemetry-counters.json`.
@@ -353,8 +364,13 @@ export async function cmdTelemetry(argv: string[]): Promise<number> {
     // Os contadores persistidos (só existem com opt-in) — o de processo nasce vazio.
     const persistido = new TelemetryCounters();
     persistido.load(join(ctx.dataDir, TELEMETRY_COUNTERS_FILE));
+    if (!TELEMETRY_FUNNEL_HOOKS_WIRED) {
+      out.info('ganchos de funil ainda não ligados: nenhum comando conta eventos hoje (zeros não são medida).');
+    }
     out.result(true, 'telemetry.counters', {
       enabled: isTelemetryEnabled(env),
+      // Honestidade: com `false`, zero é "não medido", não "não aconteceu".
+      hooksWired: TELEMETRY_FUNNEL_HOOKS_WIRED,
       counters: persistido.snapshot(),
       droppedUnknown: persistido.droppedUnknown,
     });
