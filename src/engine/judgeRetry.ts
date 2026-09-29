@@ -5,7 +5,7 @@
 // de erro, nos dois motores. Puro (sem Node): o web importa direto daqui.
 //
 // A política, e por quê:
-//   • transientes (429/5xx/rede) — JÁ re-tentados pelo gateway (até 6× com
+//   • transientes (429/5xx/rede) — JÁ re-tentados pelo gateway (`MAX_RETRIES`, 4, com
 //     backoff) e preservam a validade: nada a fazer aqui;
 //   • timeout — re-tenta UMA vez. Timeout pode ser informativo (resposta longa
 //     → juiz lento), então insistir mais viesaria a amostra contra respostas
