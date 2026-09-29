@@ -88,12 +88,21 @@ import {
   ensureHandoffAuditWritable,
   handoffAuditPath,
   overrideTrailers,
+  type HandoffAuditEntry,
 } from '../handoff.js';
 import type { RunRecord, SessionRecord } from '../../types.js';
 import { buildSessionReport, renderSessionReportMarkdown } from '../../engine/sessionReport.js';
 import { renderSessionReportHtml } from '../../engine/sessionReportHtml.js';
 import { readConfigFile, resolveArenaLibrary, type LibraryCuration } from './run.js';
 import { loadPilot } from '../pilot.js';
+import {
+  approvalTrailers,
+  buildPromptApproval,
+  PROMPT_APPROVAL_FORMAT,
+  resolveApprover,
+  writePromptApproval,
+  type PromptApproval,
+} from '../approval.js';
 import {
   importRecords,
   retentionSweep,
@@ -719,7 +728,13 @@ function gitNoIndexDiff(antes: string, depois: string): GitResult {
  * `trailers` (ex.: `Override-Reason:`) viram o último parágrafo da mensagem —
  * o formato que `git interpret-trailers --parse` lê.
  */
-function commitAppliedFile(file: string, sessionId: string, out: Output, trailers: string[] = []): boolean {
+function commitAppliedFile(
+  file: string,
+  sessionId: string,
+  out: Output,
+  trailers: string[] = [],
+  extraFiles: string[] = [],
+): boolean {
   const dir = path.dirname(file);
   const base = path.basename(file);
   const top = git(['-C', dir, 'rev-parse', '--show-toplevel']);
@@ -727,14 +742,16 @@ function commitAppliedFile(file: string, sessionId: string, out: Output, trailer
     out.warn('destino fora de um repositório git — commit pulado.');
     return false;
   }
-  const add = git(['-C', dir, 'add', '--', base]);
+  // IMPL-088: o registro prompt-approval@1 vai no MESMO commit do prompt.
+  const caminhos = [base, ...extraFiles];
+  const add = git(['-C', dir, 'add', '--', ...caminhos]);
   if (!add.ok) {
     out.warn(`git add falhou (${add.error}) — commit pulado.`);
     return false;
   }
   const assunto = `prompt: atualiza ${base} (sessão ${sessionId})`;
   const mensagem = trailers.length > 0 ? `${assunto}\n\n${trailers.join('\n')}` : assunto;
-  const commit = git(['-C', dir, 'commit', '-m', mensagem, '--', base]);
+  const commit = git(['-C', dir, 'commit', '-m', mensagem, '--', ...caminhos]);
   if (!commit.ok) {
     out.warn(`git commit falhou (${commit.error}) — o prompt já está aplicado em ${file}.`);
     return false;
@@ -783,7 +800,14 @@ function handoffBlockedError(record: SessionRecord, file: string, guards: Handof
 async function applyPromptFile(
   destino: string,
   prompt: string,
-  opts: { commit: boolean; record: SessionRecord; guards: HandoffGuardReport; out: Output },
+  opts: {
+    commit: boolean;
+    record: SessionRecord;
+    guards: HandoffGuardReport;
+    out: Output;
+    /** IMPL-088: registro versionado (vai no commit) e os trailers dele. */
+    approval?: { file: string | null; trailers: string[] };
+  },
 ): Promise<ApplyReport> {
   const { out } = opts;
   const file = path.resolve(destino);
@@ -817,7 +841,13 @@ async function applyPromptFile(
   }
 
   const committed = opts.commit
-    ? commitAppliedFile(file, opts.record.id, out, overrideTrailers(opts.guards.override))
+    ? commitAppliedFile(
+        file,
+        opts.record.id,
+        out,
+        [...(opts.approval?.trailers ?? []), ...overrideTrailers(opts.guards.override)],
+        opts.approval?.file ? [opts.approval.file] : [],
+      )
     : false;
   return { applied: true, file, backup, committed };
 }
@@ -851,6 +881,9 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     overwrite: { type: 'boolean' },
     // IMPL-100: `sessions delete <id> --keep-runs` preserva as runs da sessão.
     'keep-runs': { type: 'boolean' },
+    // IMPL-088: registro prompt-approval@1 versionado no repo (o --commit implica).
+    record: { type: 'boolean' },
+    approver: { type: 'string' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -912,6 +945,14 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     if (wantCommit && !applyTo) {
       throw new CliError('--commit só faz sentido junto de --apply <arquivo>.', EXIT.USAGE);
     }
+    const wantRecord = parsed.values.record === true;
+    const approverRaw = typeof parsed.values.approver === 'string' ? parsed.values.approver : undefined;
+    if ((wantRecord || approverRaw !== undefined) && !applyTo) {
+      throw new CliError('--record/--approver só fazem sentido junto de --apply <arquivo>.', EXIT.USAGE, undefined, {
+        code: 'usage.record_without_apply',
+        hint: 'Use `sessions winner <id> --apply <arquivo> --record [--approver "Nome <email>"]`.',
+      });
+    }
     if (typeof overrideRaw === 'string' && !applyTo) {
       throw new CliError('--override só faz sentido junto de --apply <arquivo>.', EXIT.USAGE, undefined, {
         code: 'usage.override_without_apply',
@@ -963,6 +1004,32 @@ export async function cmdSessions(argv: string[]): Promise<number> {
       // Override sem registro não passa: a trilha precisa ser gravável ANTES
       // de o destino ser tocado.
       if (guards.override) await ensureHandoffAuditWritable();
+      // IMPL-088: prompt-approval@1. O `--commit` IMPLICA o registro versionado
+      // (o commit leva `Approved-by:` e o arquivo); sem aprovador identificável
+      // recusa ANTES de tocar o destino.
+      const versionar = wantRecord || wantCommit;
+      const approver = resolveApprover(approverRaw, path.dirname(destino));
+      if (versionar && !approver) {
+        throw new CliError(
+          'Registro de aprovação sem aprovador: não há `--approver` nem identidade git (user.name/user.email) aqui.',
+          EXIT.USAGE,
+          { file: destino },
+          {
+            code: 'usage.approver_required',
+            hint: 'Passe `--approver "Nome <email>"` (ou configure user.name/user.email no repo do destino).',
+          },
+        );
+      }
+      const primeiraRun = record.runIds[0] ? await loadRun(record.runIds[0]).catch(() => null) : null;
+      const approval = buildPromptApproval({
+        record,
+        firstRun: primeiraRun,
+        prompt,
+        destino,
+        approver,
+        override: guards.override,
+      });
+      const approvalFile = versionar ? await writePromptApproval(destino, approval) : null;
       for (const w of guards.warnings) {
         // O override é parte do RESULTADO (quem lê só o stdout tem de vê-lo);
         // o resto é narração no stderr. Sob --json/ndjson ele vai no payload.
@@ -974,20 +1041,26 @@ export async function cmdSessions(argv: string[]): Promise<number> {
         record,
         guards,
         out,
+        approval: { file: approvalFile, trailers: approvalFile ? approvalTrailers(approval) : [] },
       });
-      const auditLog = await appendHandoffAudit(
-        buildHandoffAuditEntry(record, guards, {
+      // A trilha local leva o registro INTEIRO em toda aplicação (100%), com ou
+      // sem a cópia versionada no repo.
+      const entrada: HandoffAuditEntry & { approval: PromptApproval; approvalFile: string | null } = {
+        ...buildHandoffAuditEntry(record, guards, {
           outcome: 'applied',
           file: report.file,
           backup: report.backup,
           committed: report.committed,
           prompt,
         }),
-        out,
-      );
+        approval,
+        approvalFile,
+      };
+      const auditLog = await appendHandoffAudit(entrada, out);
       out.info(
         `prompt aplicado em ${report.file}${report.backup ? ` (backup: ${report.backup})` : ''}`,
       );
+      if (approvalFile) out.info(`registro ${PROMPT_APPROVAL_FORMAT} ${approval.approvalId} em ${approvalFile}`);
       if (wantCommit) out.info(report.committed ? 'commit criado.' : 'commit não criado (ver aviso).');
       out.result(true, 'sessions.winner', {
         applied: report.applied,
@@ -999,6 +1072,9 @@ export async function cmdSessions(argv: string[]): Promise<number> {
         blocks: guards.blocks,
         warnings: guards.warnings,
         auditLog,
+        // IMPL-088: o registro de aprovação (hashes + evidência) e onde ficou.
+        approval,
+        approvalFile,
       });
       return EXIT.OK;
     }

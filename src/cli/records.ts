@@ -38,6 +38,7 @@ import {
 import { contentHash } from '../engine/hash.js';
 import { isExchangeReadError, readExchangeDir, writeExchangeDir } from '../library.js';
 import { pkgVersion } from '../paths.js';
+import { sessionRunIds } from './approval.js';
 import { readJsonFile } from './context.js';
 import { CliError, EXIT, type Output } from './output.js';
 import type { SessionRecord } from '../types.js';
@@ -143,15 +144,9 @@ async function exigirApagavel(kind: RecordKind, id: string): Promise<{ status: s
   };
 }
 
-/** Runs de uma sessão: iterações + re-avaliações limpas (ids válidos, sem repetir). */
+/** Runs de uma sessão (iterações + re-avaliações), só ids válidos — a MESMA lista do registro de aprovação. */
 function runIdsOfSession(s: SessionRecord): string[] {
-  const ids = new Set<string>(s.runIds ?? []);
-  for (const it of s.bestPromptByIteration ?? []) {
-    const rid = it.gate?.reeval?.runId;
-    if (rid) ids.add(rid);
-  }
-  for (const rid of s.reevalRunIds ?? []) ids.add(rid);
-  return [...ids].filter((x) => isValidRecordId(x));
+  return sessionRunIds(s).filter((x) => isValidRecordId(x));
 }
 
 /** `runs delete <id…>`: valida TODOS antes de apagar qualquer um (tudo ou nada no uso). */
