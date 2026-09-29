@@ -237,7 +237,7 @@ describe.skipIf(!alvo)('IMPL-100 (3) E2E browser: deleteDatabase + storage.estim
     expect(r.runsDepois).toBe(0);
   }, 60_000);
 
-  it('wipe NÃO some com o que está fora do IndexedDB — daí as instruções de "limpar dados do site"', async () => {
+  it('wipe remove o banco E a credencial persistida; as preferências ficam — daí as instruções de "limpar dados do site"', async () => {
     const r = await page.evaluate(async () => {
       const { lgpd, idb } = (window as unknown as {
         __harness: {
@@ -246,10 +246,15 @@ describe.skipIf(!alvo)('IMPL-100 (3) E2E browser: deleteDatabase + storage.estim
         };
       }).__harness;
       localStorage.setItem('pb.retentionDays', '30');
+      // credencial persistida: o wipe tem de levá-la junto (LGPD).
+      localStorage.setItem('openrouter_api_key', 'sk-or-fake');
+      localStorage.setItem('openrouter_api_key:remember', '1');
       await idb.idbPut('runs', { id: 'e2e-run-3' });
       const res = await lgpd.wipeLocalData();
       return {
         localStorageApos: localStorage.getItem('pb.retentionDays'),
+        keyApos: localStorage.getItem('openrouter_api_key'),
+        keyRememberApos: localStorage.getItem('openrouter_api_key:remember'),
         runsApos: (await idb.idbGetAll('runs')).length,
         instrucoes: lgpd.siteWipeInstructions().join('\n'),
         deleted: res.deleted,
@@ -257,8 +262,11 @@ describe.skipIf(!alvo)('IMPL-100 (3) E2E browser: deleteDatabase + storage.estim
     });
     expect(r.deleted).toBe(true);
     expect(r.runsApos).toBe(0);
-    // honestidade do produto: localStorage/caches ficam ⇒ a tela de apagar
-    // TEM de mostrar o passo "limpar dados do site" (3 navegadores)
+    // credencial persistida NÃO sobrevive ao "apagar todos os dados locais"
+    expect(r.keyApos).toBeNull();
+    expect(r.keyRememberApos).toBeNull();
+    // honestidade do produto: as PREFERÊNCIAS (e caches) ficam ⇒ a tela de
+    // apagar TEM de mostrar o passo "limpar dados do site" (3 navegadores)
     expect(r.localStorageApos).toBe('30');
     expect(r.instrucoes).toMatch(/limpar dados do site/iu);
     expect(r.instrucoes).toMatch(/Chrome/u);

@@ -318,4 +318,13 @@ describe('journal no IndexedDB + record/resumo numa transação (IMPL-081)', () 
     expect(await cj.loadIdbCallJournal('x')).toEqual([]);
     await expect(cj.clearIdbCallJournal('x')).resolves.toBeUndefined();
   });
+
+  it('falha REAL de leitura SOBE (não vira []): calada, a retomada repagaria chamadas já pagas', async () => {
+    const cj = await import('../web/src/engine/callJournal.js');
+    const id = 'run-leitura-falha';
+    expect(await cj.idbCallJournalStore(id).append(entrada(0, 'paga'))).toBe(true);
+    // 'UnknownError' NÃO é 'unavailable': é falha real numa base que existe.
+    fake.failNextRead('UnknownError', 1);
+    await expect(cj.loadIdbCallJournal(id)).rejects.toThrow();
+  });
 });

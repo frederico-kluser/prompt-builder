@@ -120,8 +120,10 @@ export function allowlistNotice(
 // LevelDB continuam recuperáveis (crbug 40418460). O "apagar tudo" da SPA
 // derruba o banco INTEIRO (`indexedDB.deleteDatabase`) e reporta antes/depois
 // via `navigator.storage.estimate()`. O que o navegador guarda fora do
-// IndexedDB (localStorage, Cache Storage) só some em "limpar dados do site" —
-// por isso `siteWipeInstructions()` entrega o passo a passo.
+// IndexedDB (preferências no localStorage, Cache Storage, service workers) só
+// some em "limpar dados do site" — por isso `siteWipeInstructions()` entrega o
+// passo a passo. Exceção: a credencial persistida (key da OpenRouter) é
+// removida pelo wipe, junto com o banco.
 //
 // O TTL/prune do lado servidor é `src/lgpd.ts` (`pruneExpiredRuns`); aqui fica
 // a MESMA semântica de corte para o histórico local (`isOlderThan`), casada
@@ -129,6 +131,15 @@ export function allowlistNotice(
 
 /** Nome do banco: espelha `DB_NAME` de `web/src/idb.ts` (o contrato é testado: apagar tem de apagar o MESMO banco que o idb abre). */
 const DB_NAME = 'prompt-builder';
+
+/**
+ * Onde a key da OpenRouter "lembrada" vive no localStorage (a API da key em
+ * `api.ts` importa estes nomes — fonte única). São as ÚNICAS credenciais que
+ * o app guarda fora do IndexedDB: o "apagar todos os dados locais" as remove
+ * (credencial não sobrevive a um wipe), a key só em memória da sessão fica.
+ */
+export const KEY_STORAGE = 'openrouter_api_key';
+export const KEY_REMEMBER = 'openrouter_api_key:remember';
 
 /** Override do TTL no navegador (dias); fora do padrão ⇒ o default do JSON. */
 export const RETENTION_DAYS_KEY = 'pb.retentionDays';
@@ -220,11 +231,13 @@ export interface WipeLocalOptions {
 }
 
 /**
- * "Apagar banco": fecha as conexões desta aba, derruba o IndexedDB INTEIRO
+ * "Apagar dados locais": fecha as conexões desta aba, remove a credencial
+ * persistida (key "lembrada" no localStorage), derruba o IndexedDB INTEIRO
  * (`deleteDatabase` — remove até os tombstones que o `delete` lógico deixa) e
  * devolve `navigator.storage.estimate()` antes/depois (o critério é ≈ 0).
  * `blocked: true` = outra aba ainda segura conexão; o navegador completa o
- * apagamento quando ela fechar.
+ * apagamento quando ela fechar. Ficam fora: preferências (ex. TTL de retenção)
+ * e caches — para isso serve "limpar dados do site" (`siteWipeInstructions`).
  */
 export function wipeLocalData(opts: WipeLocalOptions = {}): Promise<SiteWipeResult> {
   const factory = opts.indexedDB === undefined ? globalThis.indexedDB : opts.indexedDB;
@@ -233,6 +246,16 @@ export function wipeLocalData(opts: WipeLocalOptions = {}): Promise<SiteWipeResu
   return (async (): Promise<SiteWipeResult> => {
     const estimateBefore = await settledSiteEstimate(opts.storage);
     close();
+    // A credencial persistida sai mesmo sem IndexedDB (modo privado/iframe):
+    // "apagar todos os dados locais" não deixa a key para trás.
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(KEY_STORAGE);
+        localStorage.removeItem(KEY_REMEMBER);
+      }
+    } catch {
+      /* storage bloqueado (modo privado/iframe) */
+    }
     if (!factory) {
       // Sem IndexedDB não há banco a derrubar: o "antes" já é o "depois".
       return { estimateBefore, estimateAfter: estimateBefore, deleted: true, blocked: false };
@@ -265,13 +288,13 @@ export function wipeLocalData(opts: WipeLocalOptions = {}): Promise<SiteWipeResu
 
 /**
  * Instrução de "limpar dados do site" (o que o navegador guarda FORA do
- * IndexedDB — localStorage com a key, Cache Storage, service workers). Texto
- * puro: a tela de Configurações só o apresenta.
+ * IndexedDB e FORA do alcance do wipe — preferências no localStorage, Cache
+ * Storage, service workers). Texto puro: a tela de Configurações só o apresenta.
  */
 export function siteWipeInstructions(): string[] {
   return [
-    'O apagamento acima remove o banco local do app (runs, sessões e biblioteca).',
-    'Para apagar TUDO que este site guardou no navegador (inclusive a chave da OpenRouter e caches) use "limpar dados do site":',
+    'O apagamento acima remove o banco local do app (runs, sessões e biblioteca) e a chave da OpenRouter guardada neste navegador.',
+    'Para apagar TUDO que este site guardou no navegador (preferências e caches) use "limpar dados do site":',
     '• Chrome/Edge: Configurações → Privacidade e segurança → Dados de sites → ver todos os sites e dados → procure por este site → Excluir.',
     '• Firefox: Configurações → Privacidade e segurança → Cookies e dados de sites → Dados guardados → Gerir dados → procure por este site → Remover.',
     '• Safari: Safari → Definições → Privacidade → Gerir dados de sites → procure por este site → Remover.',

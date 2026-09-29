@@ -95,6 +95,8 @@ import type { ModelReasoningMeta } from './modelCaps';
 import { reasoningLevelForRole } from './modelCaps';
 import {
   checkImportPii,
+  KEY_REMEMBER,
+  KEY_STORAGE,
   loadLgpdData,
   sensitiveRoutingFor,
   type LgpdData,
@@ -661,6 +663,12 @@ export interface CompetitorLiveState {
   done: boolean;
 }
 
+/**
+ * ATENÇÃO (sincronia com `src/types.ts`): os campos do modo agente
+ * (`agent*`/`infraErrorRate`) são SÓ do Node de propósito — o modo agente não
+ * roda no navegador. O dado de records importados sobrevive em runtime
+ * (`normalizeRunRecord` espalha `...raw`).
+ */
 export interface RunRecord {
   id: string;
   status: 'running' | 'finished' | 'inconclusive' | 'error' | 'aborted';
@@ -846,8 +854,8 @@ export function normalizeContestants(record: RunRecord): Contestant[] {
 //  • migração: key gravada por versões antigas (sem flag) é tratada como
 //    "lembrada" — o usuário a salvou explicitamente; apagá-la em silêncio no
 //    upgrade seria perda surpresa. A UI a declara como persistida.
-const KEY_STORAGE = 'openrouter_api_key';
-const KEY_REMEMBER = 'openrouter_api_key:remember';
+// `KEY_STORAGE`/`KEY_REMEMBER` vêm de `./lgpd` (fonte única: o "apagar todos os
+// dados locais" os remove junto com o banco).
 
 let memoryKey: string | null = null; // null = ainda não resolvido (reload)
 

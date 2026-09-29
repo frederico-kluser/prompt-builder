@@ -32,7 +32,7 @@ export function keyHandlingFacts(persistence: KeyPersistence): KeyFact[] {
       title: 'Onde ela fica',
       text:
         persistence === 'remembered'
-          ? 'no localStorage deste navegador, até você a remover — apagar os dados do site apaga também a key.'
+          ? 'no localStorage deste navegador, até você a remover — «Apagar todos os dados locais» (Configurações) ou limpar os dados do site apaga também a key.'
           : 'só na memória desta aba — recarregar ou fechar a aba apaga a key. Marque «Lembrar neste dispositivo» para não precisar colá-la de novo.',
     },
     {

@@ -260,3 +260,39 @@ describe('left#11 (7) o que a SPA exporta, o `runs import` do terminal importa',
     expect(resto).toEqual(run('run-spa'));
   }, 60_000);
 });
+
+// --- (8) revisão: redação de segredos e ids duplicados no pacote ---------------
+
+describe('revisão (8) credencial não viaja; id repetido no pacote', () => {
+  it('record cru com apiKey embutida não exporta nem persiste a credencial', async () => {
+    const cru = run('run-segredo', {
+      apiKey: 'sk-or-fake-topo',
+      config: { theme: 'suporte', stages: 1, competitorModelIds: ['fake/a'], authorization: 'Bearer x' },
+    });
+    // export: a credencial não sai
+    expect(runExchangeJson(cru)).not.toMatch(/sk-or-fake-topo|Bearer x/);
+    // import de record cru: a credencial não fica
+    const res = await importRecordFiles([arquivo('cru.json', JSON.stringify(cru))]);
+    expect(res.imported.runs).toEqual(['run-segredo']);
+    const gravado = await idbGet<Record<string, unknown>>('runs', 'run-segredo');
+    expect(JSON.stringify(gravado)).not.toMatch(/sk-or-fake-topo|Bearer x/);
+    // campo desconhecido segue sobrevivendo (a redação só tira credenciais)
+    expect(gravado?.campoDoFuturo).toEqual({ x: [1, 2, 3] });
+  });
+
+  it('mesma run DUAS vezes no pacote: idêntico fica uma; conteúdo diferente recusa o pacote', async () => {
+    const duploIgual = toSingleFileBundle(
+      buildExchangeBundle({ producer: 'x', runs: [run('run-d'), run('run-d')] }),
+    );
+    const ok = await importRecordFiles([arquivo('d.json', JSON.stringify(duploIgual))]);
+    expect(ok.imported.runs).toEqual(['run-d']); // só UMA vez — sem sobrescrever em silêncio
+
+    const duploDiferente = toSingleFileBundle(
+      buildExchangeBundle({ producer: 'x', runs: [run('run-e'), run('run-e', { totalCostUsd: 9 })] }),
+    );
+    const err = await importRecordFiles([arquivo('e.json', JSON.stringify(duploDiferente))]).catch((e: unknown) => e);
+    expect(isRecordImportError(err)).toBe(true);
+    expect((err as { problems: string[] }).problems.join(' | ')).toMatch(/DUAS vezes/);
+    expect(await idbGet('runs', 'run-e')).toBeUndefined(); // nada gravado pela metade
+  });
+});

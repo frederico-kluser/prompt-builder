@@ -880,6 +880,14 @@ export interface StageRecord {
 /** `inconclusive` (IMPL-004): terminou, mas a evidência não sustenta conclusão. É TERMINAL. */
 export type RunStatus = 'running' | 'finished' | 'inconclusive' | 'error' | 'aborted';
 
+/**
+ * ATENÇÃO (sincronia com `src/types.ts`): os campos do modo agente
+ * (`agentVerdictTreeVersion`, `agentJudgeErrorCount`, `agentUnscoredRepsBy…`,
+ * `agentInfra`, `infraErrorRate`, …) são SÓ do Node de propósito — o modo
+ * agente não roda no navegador. Records de agente importados para cá não têm
+ * declaração de tipo aqui, mas o dado sobrevive em runtime (`normalizeRunRecord`
+ * espalha `...raw`).
+ */
 export interface RunRecord {
   id: string;
   status: RunStatus;

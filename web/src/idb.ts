@@ -312,17 +312,48 @@ export async function idbGet<T>(store: Store, key: string): Promise<T | undefine
  */
 export async function idbGetAllKeys(store: Store): Promise<string[]> {
   try {
-    const db = await openDb();
-    const os = db.transaction(store, 'readonly').objectStore(store);
-    if (typeof (os as { getAllKeys?: unknown }).getAllKeys === 'function') {
-      const keys = (await reqProm(os.getAllKeys())) ?? [];
-      return keys.filter((k): k is string => typeof k === 'string');
-    }
-    const all = (await reqProm<{ id?: unknown }[]>(os.getAll() as IDBRequest<{ id?: unknown }[]>)) ?? [];
-    return all.map((r) => r?.id).filter((k): k is string => typeof k === 'string');
+    return await idbGetAllKeysRaw(store);
   } catch (err) {
     warnRead(store, err);
     return [];
+  }
+}
+
+async function idbGetAllKeysRaw(store: Store): Promise<string[]> {
+  const db = await openDb();
+  const os = db.transaction(store, 'readonly').objectStore(store);
+  if (typeof (os as { getAllKeys?: unknown }).getAllKeys === 'function') {
+    const keys = (await reqProm(os.getAllKeys())) ?? [];
+    return keys.filter((k): k is string => typeof k === 'string');
+  }
+  const all = (await reqProm<{ id?: unknown }[]>(os.getAll() as IDBRequest<{ id?: unknown }[]>)) ?? [];
+  return all.map((r) => r?.id).filter((k): k is string => typeof k === 'string');
+}
+
+/**
+ * Leituras que NÃO degradam em silêncio — o journal da retomada (IMPL-081):
+ * calar um erro de leitura faria a retomada pagar de novo chamadas já pagas.
+ * 'unavailable' (sem IndexedDB no ambiente: Node dos testes, modo privado)
+ * devolve vazio/undefined, como na gravação; falha real SOBE.
+ */
+export async function idbGetAllKeysStrict(store: Store): Promise<string[]> {
+  try {
+    return await idbGetAllKeysRaw(store);
+  } catch (err) {
+    if (classifyIdbError(err) === 'unavailable') return [];
+    throw err;
+  }
+}
+
+/** `idbGet` com a mesma disciplina de `idbGetAllKeysStrict`. */
+export async function idbGetStrict<T>(store: Store, key: string): Promise<T | undefined> {
+  try {
+    const db = await openDb();
+    const tx = db.transaction(store, 'readonly');
+    return await reqProm<T>(tx.objectStore(store).get(key) as IDBRequest<T>);
+  } catch (err) {
+    if (classifyIdbError(err) === 'unavailable') return undefined;
+    throw err;
   }
 }
 

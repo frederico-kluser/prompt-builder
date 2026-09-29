@@ -50,11 +50,44 @@ const RECORD_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v);
 
-/** O record sem o carimbo local de importação (export e comparação de conteúdo). */
-function semImportedAt<T>(r: T): T {
-  if (!isObj(r) || !('importedAt' in r)) return r;
+/**
+ * Chaves que NUNCA podem viajar num record: credenciais que um record cru
+ * importado pudesse trazer coladas à mão. Não são campos de domínio
+ * (`RunConfig`/`RunRecord` não têm `apiKey`/`authorization`) — se aparecerem,
+ * não saem na exportação nem ficam na importação. O padrão `x-.*key` cobre o
+ * nome do header de key do modo servidor SEM escrever o literal, que
+ * `key-handling.test.ts` proíbe em fonte web (a SPA nunca manda key por header).
+ */
+const RE_SEGREDO = /^(?:api[-_]?key|openrouter[-_]?api[-_]?key|authorization|x-.*key)$/iu;
+
+/** Remove credenciais em qualquer profundidade; devolve o MESMO objeto quando não há nenhuma. */
+function semSegredos<T>(v: T): T {
+  if (Array.isArray(v)) {
+    const arr = v.map(semSegredos);
+    return (arr.every((x, i) => x === (v as unknown[])[i]) ? v : (arr as unknown)) as T;
+  }
+  if (!isObj(v)) return v;
+  let out: Obj | null = null;
+  for (const [k, val] of Object.entries(v)) {
+    if (RE_SEGREDO.test(k)) {
+      if (!out) out = { ...v };
+      delete out[k];
+      continue;
+    }
+    const novo = semSegredos(val);
+    if (novo !== val) {
+      if (!out) out = { ...v };
+      out[k] = novo;
+    }
+  }
+  return (out ?? v) as T;
+}
+
+/** O record sem dados locais: o carimbo `importedAt` e credenciais (export e comparação de conteúdo). */
+function semDadosLocais<T>(r: T): T {
+  if (!isObj(r)) return semSegredos(r);
   const { importedAt: _local, ...resto } = r;
-  return resto as T;
+  return semSegredos(resto as T);
 }
 
 function asJson(bundle: ReturnType<typeof buildExchangeBundle>): string {
@@ -67,7 +100,7 @@ function asJson(bundle: ReturnType<typeof buildExchangeBundle>): string {
 
 /** Uma run em exchange@1 (arquivo único) — o botão "JSON" da tela de run. */
 export function runExchangeJson(record: RunRecord): string {
-  return asJson(buildExchangeBundle({ producer: WEB_EXCHANGE_PRODUCER, runs: [semImportedAt(record)] }));
+  return asJson(buildExchangeBundle({ producer: WEB_EXCHANGE_PRODUCER, runs: [semDadosLocais(record)] }));
 }
 
 /** Runs de uma sessão: iterações + re-avaliações limpas (ids no gate) — a lista do `sessions export`. */
@@ -96,8 +129,8 @@ export function sessionExchangeJson(
   const json = asJson(
     buildExchangeBundle({
       producer: WEB_EXCHANGE_PRODUCER,
-      sessions: [semImportedAt(session)],
-      runs: incluidas.map((r) => semImportedAt(r)),
+      sessions: [semDadosLocais(session)],
+      runs: incluidas.map((r) => semDadosLocais(r)),
     }),
   );
   return { json, runs: incluidas.length, missingRunIds: ids.filter((id) => !porId.has(id)) };
@@ -115,8 +148,8 @@ export async function historyExchangeJson(): Promise<{ json: string; runs: numbe
   const json = asJson(
     buildExchangeBundle({
       producer: WEB_EXCHANGE_PRODUCER,
-      runs: records.map((r) => semImportedAt(r)),
-      sessions: sess.map((s) => semImportedAt(s)),
+      runs: records.map((r) => semDadosLocais(r)),
+      sessions: sess.map((s) => semDadosLocais(s)),
     }),
   );
   return { json, runs: records.length, sessions: sess.length };
@@ -279,7 +312,8 @@ export function isRecordImportError(err: unknown): err is RecordImportError {
 /**
  * Importa runs/sessões para o IndexedDB desta aba. Valida TUDO antes de
  * gravar; conflito sem `overwrite` recusa com a lista (a UI pergunta e
- * repete). Grava verbatim + `importedAt`.
+ * repete). Grava o record como veio (sem `importedAt` antigo nem credenciais)
+ * + `importedAt` novo.
  */
 export async function importRecordFiles(
   files: readonly { name: string; text: string }[],
@@ -288,12 +322,33 @@ export async function importRecordFiles(
   const pacote = readRecordPackage(files);
   if (!pacote.ok) throw new RecordImportError(pacote.error);
 
-  const entradas: Array<{ kind: RecordKind; record: Obj }> = [
+  const brutos: Array<{ kind: RecordKind; record: Obj }> = [
     ...pacote.runs.map((r) => ({ kind: 'run' as const, record: r as Obj })),
     ...pacote.sessions.map((r) => ({ kind: 'session' as const, record: r as Obj })),
   ];
-  if (entradas.length === 0 && pacote.library.length === 0) throw new RecordImportError('o pacote não tem run nem sessão.');
-  const problemas: string[] = [];
+  if (brutos.length === 0 && pacote.library.length === 0) throw new RecordImportError('o pacote não tem run nem sessão.');
+  // Um id só pode aparecer UMA vez por pacote: duas versões com conteúdo
+  // diferente são ambíguas (qual delas?), e o 2º sobrescreveria o 1º em
+  // silêncio; duplicado IDÊNTICO é o mesmo registro duas vezes — fica a 1ª.
+  const hashPorId = new Map<string, string>();
+  const entradas: typeof brutos = [];
+  const ambiguidades: string[] = [];
+  for (const e of brutos) {
+    const chave = typeof e.record?.id === 'string' ? `${e.kind}:${e.record.id}` : '';
+    const h = chave ? contentHash(semDadosLocais(e.record)) : '';
+    const h0 = chave ? hashPorId.get(chave) : undefined;
+    if (h0 !== undefined) {
+      if (h0 !== h) {
+        ambiguidades.push(
+          `${e.kind === 'run' ? 'run' : 'sessão'} (${String(e.record.id)}): aparece DUAS vezes no pacote com conteúdo diferente`,
+        );
+      }
+      continue;
+    }
+    if (chave) hashPorId.set(chave, h);
+    entradas.push(e);
+  }
+  const problemas: string[] = [...ambiguidades];
   entradas.forEach((e, i) => {
     const p = recordShapeProblem(e.kind, e.record);
     const rotulo = `${e.kind === 'run' ? 'run' : 'sessão'} #${i + 1}${typeof e.record?.id === 'string' ? ` (${e.record.id})` : ''}`;
@@ -312,7 +367,7 @@ export async function importRecordFiles(
     const atual = await idbGet<Obj>(e.kind === 'run' ? 'runs' : 'sessions', e.record.id as string);
     const acao = !atual
       ? 'novo'
-      : contentHash(semImportedAt(atual)) === contentHash(semImportedAt(e.record))
+      : contentHash(semDadosLocais(atual)) === contentHash(semDadosLocais(e.record))
         ? 'identico'
         : 'conflito';
     plano.push({ ...e, acao });
@@ -342,9 +397,10 @@ export async function importRecordFiles(
       res.skipped.push(id);
       continue;
     }
-    // Verbatim + `importedAt` (o TTL conta da importação). Object.assign: o
-    // campo desconhecido do pacote sobrevive — nada de reconstruir o record.
-    const gravado = Object.assign({}, p.record, { importedAt: agora });
+    // Sem dados locais + `importedAt` (o TTL conta da importação). Object.assign:
+    // o campo desconhecido do pacote sobrevive (só `importedAt` e credenciais
+    // são removidos) — nada de reconstruir o record.
+    const gravado = Object.assign({}, semDadosLocais(p.record), { importedAt: agora });
     const ok = p.kind === 'run' ? await saveRun(gravado as never) : await saveSession(gravado as never);
     if (!ok) {
       res.failed.push(id);

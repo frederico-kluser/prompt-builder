@@ -16,7 +16,7 @@
 //    (Node dos testes, modo privado) fica calado — a gravação do record já
 //    avisa por `storageHealth`.
 
-import { classifyIdbError, idbGetAll, idbWrite } from '../idb';
+import { classifyIdbError, idbGetAllKeysStrict, idbGetStrict, idbWrite } from '../idb';
 import {
   JOURNAL_STORE_UNAVAILABLE,
   journalEntryId,
@@ -58,12 +58,19 @@ export function idbCallJournalStore(runId: string): JournalStore {
 /** Entradas VÁLIDAS do journal da run (o que a retomada pode replayar). */
 export async function loadIdbCallJournal(runId: string): Promise<JournalEntry[]> {
   const prefixo = prefixoDe(runId);
-  const todos = await idbGetAll<IdbJournalRow>('runs').catch(() => [] as IdbJournalRow[]);
+  // Só as CHAVES da store 'runs' (o histórico de records pode ter centenas de
+  // MB; as entradas do journal são poucas e pequenas — materializar tudo aqui
+  // derrubava a aba em histórico grande). Leitura ESTRITA: 'unavailable' = não
+  // há journal (como na gravação); falha real SOBE — calada, a retomada pagaria
+  // de novo chamadas já pagas.
+  const chaves = await idbGetAllKeysStrict('runs');
   const out: JournalEntry[] = [];
-  for (const r of todos) {
-    if (r?.t !== 'call' || typeof r.id !== 'string' || !r.id.startsWith(prefixo)) continue;
+  for (const k of chaves) {
+    if (!k.startsWith(prefixo)) continue;
+    const r = await idbGetStrict<IdbJournalRow>('runs', k);
+    if (r?.t !== 'call') continue;
     const e = parseJournalEntry(r.entry);
-    if (e && r.id === idDe(runId, e)) out.push(e);
+    if (e && k === idDe(runId, e)) out.push(e);
   }
   return out;
 }
@@ -71,17 +78,15 @@ export async function loadIdbCallJournal(runId: string): Promise<JournalEntry[]>
 /**
  * Apaga o journal da run (concluída, ou record apagado). Idempotente; nunca
  * rejeita — é limpeza. Com `entryIds` (os do `CallJournal` da run — carregados
- * + gravados) apaga por id, SEM ler a store 'runs' inteira (o histórico de
- * records pode ter centenas de MB); sem eles, varre pelo prefixo.
+ * + gravados) apaga por id direto; sem eles, varre as CHAVES pelo prefixo (a
+ * store 'runs' tem os records inteiros — centenas de MB — que não interessam).
  */
 export async function clearIdbCallJournal(runId: string, entryIds?: readonly string[]): Promise<void> {
   try {
     const prefixo = prefixoDe(runId);
     const apagar = entryIds
       ? entryIds.map((id) => `${prefixo}call:${id}`)
-      : (await idbGetAll<{ id: string }>('runs'))
-          .filter((r) => typeof r?.id === 'string' && r.id.startsWith(prefixo))
-          .map((r) => r.id);
+      : (await idbGetAllKeysStrict('runs')).filter((k) => k.startsWith(prefixo));
     if (!apagar.length) return;
     await idbWrite(apagar.map((id) => ({ store: 'runs' as const, delete: id })), { durability: 'relaxed' });
   } catch (err) {
