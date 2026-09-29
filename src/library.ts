@@ -350,7 +350,14 @@ export async function exportProfilePackDeclared(
   prompt: ScenarioPack['prompt'] = { text: '', source: 'base' },
 ): Promise<{ pack: ScenarioPack; lostFields: string[] }> {
   const [perfil, itens] = await Promise.all([getProfile(profileId), listItems(profileId)]);
-  const scenarios = itens.map((it) => toStageSpec(it) as StageSpec & { id: string });
+  // A aprovação (IMPL-065) é fato da CURADORIA do banco, não do pacote de seed:
+  // `state`/`reviewer`/`contentHash` já saem como perda declarada — o carimbo
+  // derivado deles também fica de fora (o formato pack@1 não muda).
+  const scenarios = itens.map((it) => {
+    const { humanApproval: _aprovacao, ...spec } = toStageSpec(it);
+    void _aprovacao;
+    return spec as StageSpec & { id: string };
+  });
   return {
     pack: {
       format: SCENARIO_PACK_FORMAT,

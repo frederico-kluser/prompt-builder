@@ -368,6 +368,18 @@ export function labelIssue(item: Pick<LibraryItem, 'expected' | 'labelSet'>): st
   return labelSetIssue(item);
 }
 
+/**
+ * IMPL-065 — a spec carrega aprovação HUMANA vigente? (item da biblioteca
+ * `aprovado` com o `contentHash` do conteúdo atual — ver `toStageSpec`). É a
+ * régua única de "gente verificou pergunta + gabarito" que a âncora do treino
+ * (`trainingPolicy`) e as demos reais (`techniques`) aceitam mesmo quando o
+ * item nasceu de IA (`origin: 'ai'`).
+ */
+export function stageHasHumanApproval(spec: Pick<StageSpec, 'humanApproval'> | undefined): boolean {
+  const a = spec?.humanApproval;
+  return Boolean(a && typeof a.contentHash === 'string' && a.contentHash.trim());
+}
+
 /** Converte o item enriquecido no `StageSpec` executável do pipeline. */
 export function toStageSpec(item: LibraryItem): StageSpec & { id: string } {
   return {
@@ -383,6 +395,21 @@ export function toStageSpec(item: LibraryItem): StageSpec & { id: string } {
     expected: item.expected,
     ...(item.labelSet !== undefined ? { labelSet: item.labelSet } : {}),
     origin: item.origin === 'ai' ? 'ai' : 'import',
+    // IMPL-065: a curadoria chega à run. Só a aprovação VIGENTE (estado
+    // `aprovado` + hash do conteúdo atual — `isApproved`): antes o estado era
+    // descartado aqui e um item de IA aprovado por gente nunca contava como
+    // âncora humana. Aprovação velha (conteúdo editado depois) não viaja.
+    // Mesma régua do `curationStatus` (k de n curados = âncoras aprovadas).
+    // QUEM aprovou fica no item (o hash liga os dois): nome/e-mail do revisor
+    // em config/record da run cairia no pré-voo LGPD e vazaria para exports.
+    ...(isApproved(item)
+      ? {
+          humanApproval: {
+            ...(item.reviewedAt !== undefined ? { reviewedAt: item.reviewedAt } : {}),
+            contentHash: item.contentHash!,
+          },
+        }
+      : {}),
     // Metadados do datagen v2 (IMPL-064/056/068): chegam à run para o relatório
     // de idioma (`languageWarnings`) e de cobertura adversarial do record.
     ...(item.persona !== undefined ? { persona: item.persona } : {}),

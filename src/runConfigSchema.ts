@@ -211,6 +211,12 @@ const stageSpecSchema = z.object({
   labelSet: z.array(z.string().min(1)).min(1).max(200).optional(),
   // Proveniencia da etapa: gerada pela IA ou importada de pacote JSON.
   origin: z.enum(['ai', 'import']).optional(),
+  // IMPL-065: aprovacao HUMANA vigente do item da biblioteca (`toStageSpec`) —
+  // item de IA revisado por gente conta como ancora. Sem esta linha o zod a
+  // stripava e o fail-closed recusava o proprio config reproduzido.
+  humanApproval: z
+    .object({ reviewedAt: z.string().optional(), contentHash: z.string().min(1) })
+    .optional(),
   // Metadados de curriculo/idioma/seguranca do StageSpec (IMPL-064/056/068):
   // sem eles o zod os stripava de customStages/scenarioSeed e o fail-closed
   // (IMPL-093) recusava o proprio cenario exportado pela biblioteca/datagen.

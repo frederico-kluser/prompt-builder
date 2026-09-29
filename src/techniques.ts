@@ -1,4 +1,5 @@
 import { modelCaps } from './modelCaps.js';
+import { stageHasHumanApproval } from './engine/libraryCore.js';
 import type { ModelReasoningMeta, PromptTechnique, PublicTechnique, ReasoningLevel, StageSpec } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -239,7 +240,8 @@ export function labeledScenariosFrom(
 ): LabeledScenario[] {
   const out: LabeledScenario[] = [];
   for (const spec of specs) {
-    if (!spec || spec.origin === 'ai' || spec.adversarialCategory) continue;
+    // IMPL-065: item de IA APROVADO por gente (biblioteca) é demo legítima.
+    if (!spec || (spec.origin === 'ai' && !stageHasHumanApproval(spec)) || spec.adversarialCategory) continue;
     const refHumana = spec.reference?.trim() && !opts.aiReference?.(spec) ? spec.reference.trim() : undefined;
     const label = labelOfExpected(spec.expected);
     if (!refHumana && !label) continue;
