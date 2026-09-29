@@ -222,11 +222,13 @@ describe('IMPL-005 — holdout com 2 etapas sem veredito (critério de aceite)',
       const rec = await treinar(config({ holdoutRatio: 0.5 }));
       expect(rec.status, rec.error).toBe('finished');
 
-      // Gate da iteração 0: pareado e completo (20 de 20 — o split do holdout
-      // acontece DEPOIS da run 0).
+      // Gate da iteração 0: pareado e completo SÓ na fatia de treino (10 de
+      // 10). A run 0 cobre os 20 cenários — o split acontece depois dela —,
+      // mas a seleção nunca lê a fatia de holdout (web-code#1: antes eram 20
+      // de 20 e o campeão era escolhido em parte nos cenários do teste cego).
       const gate = rec.bestPromptByIteration[0].gate;
       expect(gate).toMatchObject({ controlId: 'original', bestId: 'v1', decision: 'promoted', gainPp: 100 });
-      expect(gate?.pairing).toMatchObject({ n: 20, nEfetivo: 20, excludedPairs: 0, completeness: 1 });
+      expect(gate?.pairing).toMatchObject({ n: 10, nEfetivo: 10, excludedPairs: 0, completeness: 1 });
 
       // Holdout: médias SÓ sobre os 8 pares completos (parcial 50 × resolve 100).
       expect(rec.holdout).toMatchObject({

@@ -24,6 +24,8 @@ import type {
   StoredSignificance,
 } from '../types.js';
 import { pairCoverage, stageScoresByContestant, type PairScore } from '../stats.js';
+import { holdoutSkipReasonText } from '../holdout.js';
+import { holdoutSkipReasonOf } from './sessionDecision.js';
 
 export const SESSION_REPORT_FORMAT = 'prompt-builder-session-report@1';
 
@@ -114,7 +116,8 @@ export interface CycleRow {
   pAdjusted: number | null;
   minGainPp: number | null;
   /** Re-avaliação limpa do candidato (quando houve). */
-  reeval?: { gainPp: number; confirmed: boolean; size: number };
+  /** `runStatus` (cli#8): a run da re-avaliação NÃO terminou — sem evidência, Δ/size não valem. */
+  reeval?: { gainPp: number; confirmed: boolean; size: number; runStatus?: string };
   /** Custo MEDIDO deste ciclo (run de seleção + re-avaliação, quando carregada). */
   costUsd: number;
   cumulativeCostUsd: number;
@@ -512,6 +515,7 @@ export function buildSessionReport(
               gainPp: round(gate.reeval.gainPp, 2),
               confirmed: gate.reeval.confirmed,
               size: gate.reeval.size,
+              ...(gate.reeval.runStatus ? { runStatus: gate.reeval.runStatus } : {}),
             },
           }
         : {}),
@@ -567,7 +571,11 @@ export function buildSessionReport(
     );
   }
   if (session.holdoutSkipped) {
-    warnings.push('Holdout pulado ou fraco (fatia reservada pequena ou orçamento): o campeão NÃO foi validado contra sobreajuste.');
+    // web-code#8: o MOTIVO gravado (piso de cenários ≠ orçamento ≠ cancelamento).
+    const motivo = holdoutSkipReasonOf(session);
+    warnings.push(
+      `Holdout pulado (${motivo ? holdoutSkipReasonText(motivo) : 'motivo não registrado'}): o campeão NÃO foi validado contra sobreajuste.`,
+    );
   }
   if (session.holdout?.regressed) {
     warnings.push('O campeão REGREDIU no holdout — não aplique sem revisar (o handoff bloqueia sem --override).');

@@ -24,6 +24,7 @@ import {
   splitHoldout,
 } from '../src/holdout.js';
 import { TRAINING_PATIENCE } from '../src/engine/trainingPolicy.js';
+import { sessionConfirmationText } from '../src/engine/sessionDecision.js';
 
 type Politica = (stageIdx: number, contestantId: string) => Verdict | undefined;
 
@@ -264,8 +265,9 @@ describe('IMPL-050 — piso de 10 cenários de holdout + ratio 0,3', () => {
     expect(a.train).toHaveLength(15);
   });
 
-  it('a palavra "validado" SÓ aparece com holdout forte e rodado', () => {
-    const forte = holdoutConfirmationText(10);
+  it('a palavra "validado" SÓ aparece com holdout forte, rodado E confirmado', () => {
+    const confirmou = { regressed: false, gainPp: 25, pValue: 0.01, pOrigin: 'holdout' as const };
+    const forte = holdoutConfirmationText(10, { outcome: confirmou });
     expect(forte).toContain('validado');
     expect(forte).toContain('n=10');
     for (const fraco of [
@@ -277,6 +279,22 @@ describe('IMPL-050 — piso de 10 cenários de holdout + ratio 0,3', () => {
       expect(fraco, fraco).toContain('confirmação fraca');
       expect(fraco, fraco).not.toContain('validado');
     }
+    // IMPL-050 (gap 1): holdout forte que RODOU mas regrediu, não bateu α ou
+    // não tem p do próprio holdout NUNCA diz "validado" — antes dizia só por n ≥ 10.
+    for (const naoConfirmou of [
+      holdoutConfirmationText(10, { outcome: { ...confirmou, regressed: true, gainPp: -30, pValue: 0.99 } }),
+      holdoutConfirmationText(10, { outcome: { ...confirmou, gainPp: -5 } }),
+      holdoutConfirmationText(10, { outcome: { ...confirmou, gainPp: 5, pValue: 0.2 } }),
+      holdoutConfirmationText(10, { outcome: { ...confirmou, pOrigin: 'selecao' } }),
+      holdoutConfirmationText(10, { outcome: { ...confirmou, pValue: null } }),
+      holdoutConfirmationText(10),
+    ]) {
+      expect(naoConfirmou, naoConfirmou).not.toContain('validado');
+    }
+    expect(
+      holdoutConfirmationText(10, { outcome: { ...confirmou, regressed: true, gainPp: -30, pValue: 0.99 } }),
+    ).toContain('REGREDIU');
+    expect(holdoutConfirmationText(10, { outcome: { ...confirmou, gainPp: 5, pValue: 0.2 } })).toContain('NÃO confirmado');
   });
 });
 
@@ -350,7 +368,23 @@ describe('IMPL-050/051 — o laço do treino respeita as guardas', () => {
       // IMPL-051: UM teste final em holdout intocado (α=0,05 unilateral) é o
       // único p de confirmação — e a origem vem gravada.
       expect(rec.significance?.pOrigin).toBe('holdout');
-      expect(holdoutConfirmationText(rec.holdout!.n)).toContain('validado em holdout');
+      // A frase da sessão (CLI/UI) lê o RESULTADO: campeão 100 × controle 50
+      // em 10 pares, p unilateral ≤ 0,05 → "validado".
+      expect(sessionConfirmationText(rec)).toContain('validado em holdout');
+      expect(rec.holdoutSkipReason).toBeUndefined();
+    });
+
+    it(`${nome}: holdout forte que REGREDIU ⇒ "NÃO confirmado", nunca "validado" (IMPL-050)`, async () => {
+      dubles.estado.nCenarios = 20;
+      dubles.estado.treino = (_i, id) => (id === 'v1' ? 'resolve' : 'nao');
+      dubles.estado.holdout = (_i, id) => (id === 'holdout-champion' ? 'nao' : 'resolve');
+      const { rec } = await treinar(config({ holdoutRatio: 0.5, iterations: 1 }));
+      expect(rec.status, rec.error).toBe('finished');
+      expect(rec.holdout).toMatchObject({ n: 10, regressed: true });
+      const texto = sessionConfirmationText(rec);
+      expect(texto).toContain('REGREDIU');
+      expect(texto).not.toContain('validado');
+      dubles.estado.holdout = (_i, id) => (id === 'holdout-champion' ? 'resolve' : 'parcial');
     });
 
     it(`${nome}: paciência default 2 + motivo da convergência (platão vs paciência)`, async () => {

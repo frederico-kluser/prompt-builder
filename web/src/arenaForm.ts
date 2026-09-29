@@ -21,6 +21,7 @@ import {
   type ArenaConfigScenario,
 } from './engine/configFile';
 import { AREA_LIVRE, type PiiMode } from './lgpd';
+import { HOLDOUT_RATIO_DEFAULT } from './engine/holdout';
 import type {
   ManualVariant,
   PromptContracts,
@@ -170,7 +171,9 @@ export function defaultArenaFormState(): ArenaFormState {
     ],
     iterations: 3,
     minGain: '',
-    holdoutRatio: 0.2,
+    // web-code#17: o default canônico do trainer (0,3 — IMPL-050); 0,2 aqui
+    // mandava a SPA reservar menos holdout que o CLI e a documentação.
+    holdoutRatio: HOLDOUT_RATIO_DEFAULT,
     feedbackDriven: true,
     duelsOn: true,
     finalists: DEFAULT_FINALISTS,

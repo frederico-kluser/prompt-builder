@@ -2106,12 +2106,50 @@ export interface SessionRecord {
   /** Iteracao em que o orcamento/cancelamento interrompeu a sessao. */
   stoppedAtIteration?: number;
   /**
-   * true = o campeao NAO passou pelo gate de holdout (pulado por orcamento).
-   * Sem holdout o campeao esta nao-validado contra sobreajuste — quem le o
-   * resultado precisa saber disso.
+   * true = o campeao NAO passou pelo gate de holdout: seleção pequena demais
+   * para reservar o piso de 10 cenários, orçamento, cancelamento ou run de
+   * holdout sem veredito. Sem holdout o campeao esta nao-validado contra
+   * sobreajuste — quem le o resultado precisa saber disso. O PORQUÊ vem em
+   * `holdoutSkipReason` (o texto de CLI/UI/handoff sai dele, nunca adivinhado).
    */
   holdoutSkipped?: boolean;
+  /**
+   * Por que a sessão terminou SEM resultado de holdout (ver
+   * {@link HoldoutSkipReason}). Presente sempre que `holdout` falta numa sessão
+   * terminada; `holdoutSkipped` é true só para os motivos que deixam o campeão
+   * não validado (`min-scenarios`/`budget`/`cancelled`/`run-failed`). Ausente em
+   * sessões antigas — derive com `holdoutSkipReasonOf` (engine/sessionDecision).
+   */
+  holdoutSkipReason?: HoldoutSkipReason;
+  /**
+   * Runs de RE-AVALIAÇÃO LIMPA (IMPL-013) da sessão, na ordem em que rodaram.
+   * Ficam FORA de `runIds` de propósito: consumidores tratam `runIds` como
+   * "uma run por iteração (+ holdout)"; a re-avaliação é paga e persistida, e
+   * esta lista a deixa alcançável (UI, relatório, aviso de gravação).
+   */
+  reevalRunIds?: string[];
 }
+
+/**
+ * Motivo de a sessão não ter resultado de holdout:
+ * - `min-scenarios`: a seleção tem < 20 cenários — a fatia reservada ficaria
+ *   abaixo do piso de 10 (IMPL-050) e tudo treina ("confirmação fraca");
+ * - `disabled`: `holdoutRatio: 0`;
+ * - `budget` / `cancelled`: a sessão parou (ou o teto não cobria a run de
+ *   holdout) antes do gate final;
+ * - `no-change`: o campeão final é o próprio prompt base — nada a validar;
+ * - `no-base`: sem prompt base não há controle para o holdout;
+ * - `run-failed`: a run de holdout terminou sem veredito válido
+ *   (erro/inconclusiva).
+ */
+export type HoldoutSkipReason =
+  | 'min-scenarios'
+  | 'disabled'
+  | 'budget'
+  | 'cancelled'
+  | 'no-change'
+  | 'no-base'
+  | 'run-failed';
 
 // ----------------------------------------------------------------------------
 // Biblioteca de prompts (IndexedDB, client-only) e pacote JSON de cenarios

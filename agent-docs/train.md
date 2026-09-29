@@ -58,7 +58,9 @@ referência rápida é esta (α=0,05 unilateral, poder 80%, σd=0,5):
 | 50 | 17,6 | | | |
 
 - ⚠️ σd=0,5 é **estimativa não calibrada** (tabela): calibre com uma run-piloto —
-  o `estimate` aceita o IC do piloto e usa o **limite superior** do IC.
+  o `estimate` ainda NÃO lê a run-piloto (só `--config`): calcule à mão
+  σd ≈ (meia-amplitude do IC95 do piloto ÷ 1,96)·√n e planeje pelo **limite
+  superior** do IC desse σd (conservador com n pequeno).
 - `stages ≤ 5` = **modo econômico**: com 5 cenários só se decide Δ ≥ 45 p.p.
 - **Repetição ≠ observação independente** (ICC/design effect): com `repeats`/`repetitions`
   ≥ 2, `runs show` reporta ICC, DE=1+(m−1)·ICC e nEfetivo = n·m/DE (no texto **e**
@@ -108,19 +110,34 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
   dos vereditos ausentes (> 10% dos pares); o gate não promove (conta para a
   paciência: 2 iterações seguidas sem promoção encerram o treino).
   Investigue as falhas do juiz antes de rodar de novo.
-- `holdoutSkipped: true` — **o campeão não passou pelo gate de holdout** (pulado,
-  ou fatia abaixo do piso de 10 cenários). O resultado vem como "confirmação
-  fraca" — sem confirmação contra sobreajuste; a palavra "validado" não aparece.
-  O `significance` nesse caso tem `pOrigin: "selecao"` (p medido na própria run de
-  seleção — anti-conservador); o p de confirmação só existe com holdout
-  (`pOrigin: "holdout"`, α=0,05 unilateral).
+- `holdoutSkipped: true` — **o campeão não passou pelo gate de holdout**. O
+  MOTIVO vem em `holdoutSkipReason`: `min-scenarios` (seleção com < 20 cenários —
+  a fatia reservada ficaria abaixo do piso de 10; **suba `--stages`**, não o
+  orçamento), `budget` (o teto não cobria o holdout ou a sessão parou por
+  orçamento), `cancelled` ou `run-failed` (a run de holdout terminou sem veredito).
+  Sem holdout por desenho, `holdoutSkipped` fica falso e o motivo é `disabled`
+  (`holdoutRatio: 0`), `no-change` (campeão = prompt base) ou `no-base`. O
+  resultado vem como "confirmação fraca" — sem confirmação contra sobreajuste; a
+  palavra "validado" não aparece. O `significance` nesse caso tem
+  `pOrigin: "selecao"` (p medido na própria run de seleção — anti-conservador); o
+  p de confirmação só existe com holdout (`pOrigin: "holdout"`, α=0,05 unilateral).
+- "validado em holdout" só aparece quando o holdout (≥ 10 cenários) RODOU, o
+  campeão não regrediu e o p unilateral do próprio holdout ficou ≤ 0,05. Holdout
+  que rodou sem confirmar sai "NÃO confirmado" com Δ e p (ou "REGREDIU").
+- A fatia de holdout **nunca** entra na seleção: a run da iteração 0 cobre todos
+  os cenários (é nela que eles nascem), mas o gate, a re-avaliação e as lições
+  leem só os cenários de treino (`gate.pairing.n` da iteração 0 = `pinnedStages`).
 - `holdout.regressed: true` — o campeão foi **pior** que a base nos cenários
   reservados. `sessions winner <id> --apply <arq>` **recusa** (exit `10`,
   destino intocado); só passa com `--override "<motivo>"`, que fica gravado
   (`docs results`).
 - `bestPromptByIteration[].gate.heldBy: ["reeval"]` — a melhor variante passou
   no gate, mas a re-avaliação limpa (`gate.reeval`: minibatch, Δ limpo) não
-  confirmou a melhora. Promoção por acaso barrada — não é falha.
+  confirmou a melhora. Promoção por acaso barrada — não é falha. Com
+  `gate.reeval.runStatus` a re-avaliação NÃO terminou (cancelada/sem orçamento/
+  erro): não há Δ a ler, e a sessão para ali (`stoppedReason`). As runs de
+  re-avaliação ficam em `reevalRunIds` (fora de `runIds`, que é uma run por
+  iteração + a do holdout).
 - `convergedAtIteration` — o treino parou por falta de ganho, não por falta de
   iterações. Isso é um bom sinal, não uma falha. `convergenceReason` diz o porquê:
   `"patience"` (2 iterações seguidas sem promoção — configurável via `patience`)

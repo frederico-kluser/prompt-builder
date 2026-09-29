@@ -36,8 +36,10 @@ import { judgeScoreFromVerdicts, pickWinner, promotionEventFields, type RankEntr
 import {
   holdoutConfirmationText,
   HOLDOUT_RATIO_DEFAULT,
+  holdoutSkipLeavesUnvalidated,
   MIN_HOLDOUT_SCENARIOS,
   splitHoldout,
+  trainOnlyView,
 } from './holdout';
 import { meanCiSummary, pairCoverage, pairDiffs, pairedStageScores, stageScoresByContestant, type PairScore } from './stats';
 import { formatIterationGate, pairedSignificance, VERDICT_SCORE } from './stats';
@@ -48,6 +50,7 @@ import { mergeFailureCounts } from '../../../src/engine/verdictIntegrity.js';
 import type {
   ChampionDeclaration,
   Contestant,
+  HoldoutSkipReason,
   IterationGate,
   PromotionReeval,
   RunCtx,
@@ -565,6 +568,16 @@ export interface StartTrainingOpts {
   signal?: AbortSignal;
 }
 
+/**
+ * Registra POR QUE a sessão fica sem holdout (web-code#8/cli#9, espelho de
+ * src/trainer.ts): o 1º motivo vence e `holdoutSkipped` liga só para os
+ * motivos que deixam o campeão NÃO validado.
+ */
+function markHoldoutSkip(record: SessionRecord, reason: HoldoutSkipReason): void {
+  record.holdoutSkipReason ??= reason;
+  if (holdoutSkipLeavesUnvalidated(record.holdoutSkipReason)) record.holdoutSkipped = true;
+}
+
 // Cancelamento da SESSÃO (IMPL-020): um AbortController raiz por sessão; as
 // runs de cada iteração (e o holdout) herdam o sinal — abortar a raiz aborta a
 // run em voo e impede a próxima iteração de começar.
@@ -693,11 +706,13 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
  * max(5, ceil(0,3·n)) cenários de TREINO (o holdout nunca entra), sem finais.
  * Confirma só com melhora ESTRITA. O custo entra no ledger da sessão
  * (`parentLedger`) e na estimativa pré-iteração (`estimateInputFromConfig`).
+ * A run é paga e persistida: o id entra em `record.reevalRunIds` ANTES de ela
+ * começar (web-code#18) — fora de `runIds`, que é "uma run por iteração".
  */
 async function reevaluateCandidate(args: {
   cfg: TrainingConfig;
   apiKey: string;
-  sessionId: string;
+  record: SessionRecord;
   iteration: number;
   selectionRun: RunRecord;
   controlId: string;
@@ -706,8 +721,9 @@ async function reevaluateCandidate(args: {
   ledger: BudgetLedger;
   signal?: AbortSignal;
 }): Promise<{ reeval: PromotionReeval; run?: RunRecord }> {
-  const { cfg, selectionRun, controlId, candidateId, trainStages } = args;
-  const minibatch = pickReevalMinibatch(trainStages, seedFromId(`reeval:${args.sessionId}:${args.iteration}`));
+  const { cfg, selectionRun, controlId, candidateId, trainStages, record } = args;
+  const sessionId = record.id;
+  const minibatch = pickReevalMinibatch(trainStages, seedFromId(`reeval:${sessionId}:${args.iteration}`));
   const base = { candidateId, controlId, size: minibatch.length, poolSize: trainStages.length };
   const control = selectionRun.contestants.find((c) => c.id === controlId);
   const candidate = selectionRun.contestants.find((c) => c.id === candidateId);
@@ -716,6 +732,8 @@ async function reevaluateCandidate(args: {
     return { reeval: { ...base, gainPp: 0, confirmed: false } };
   }
   const runId = randomUUID();
+  (record.reevalRunIds ??= []).push(runId);
+  await saveSession(record);
   const run = await runToCompletion(
     {
       ...variationConfigFrom(cfg),
@@ -730,7 +748,7 @@ async function reevaluateCandidate(args: {
       runId,
       contestants: [{ ...control }, { ...candidate }],
       pinnedStages: minibatch,
-      sessionId: args.sessionId,
+      sessionId,
       iteration: args.iteration,
       parentRunId: selectionRun.id,
       parentLedger: args.ledger,
@@ -798,6 +816,10 @@ async function trainingLoop(
   // Fatia de holdout (split anti-overfit na iteracao 0): fica so EM MEMORIA —
   // sessoes nao resumem entre processos hoje, entao nao precisa ir para o disco.
   let holdoutStages: StageSpec[] = [];
+  // Holdout ainda devido: há fatia reservada sem resultado, ou a sessão parou
+  // antes de os cenários congelarem (fatia não decidida, holdout ligado).
+  const holdoutPendente = (): boolean =>
+    !record.holdout && (holdoutStages.length > 0 || (!record.pinnedStages && cfg.holdoutRatio !== 0));
   let prevRun: RunRecord | undefined;
   // F4.1: pool Pareto (populacao diversa). maxSize 1 = elitismo classico.
   const poolSize = Math.max(1, Math.round(cfg.paretoPool ?? 1));
@@ -1071,12 +1093,10 @@ async function trainingLoop(
         const specs = runRec.stages
           .map((s) => s.spec)
           .filter((s): s is StageSpec => Boolean(s));
-        // IMPL-062/IMPL-065: os cenários da sessão congelam aqui — é deles que
-        // vêm as fatias do pool (elitismo vs Pareto) e a contagem de itens
-        // curados (âncora humana) da declaração de campeão.
+        // IMPL-065: os cenários da sessão congelam aqui — é deles que vem a
+        // contagem de itens curados (âncora humana) da declaração de campeão.
+        // As fatias do pool (IMPL-062) saem só do TREINO, logo abaixo.
         todasSpecs = specs;
-        nInstancias = specs.length;
-        fatiasMultiplas = sliceKeysOf(specs).length > 1;
         if (cfg.holdoutRatio !== 0) {
           // IMPL-050: piso ABSOLUTO de 10 cenários + ratio default 0,3. Fatia
           // curta não é holdout: é "confirmação fraca" (`strength`), o campeão
@@ -1086,14 +1106,30 @@ async function trainingLoop(
           pinnedStages = split.train;
           holdoutStages = split.holdout;
           if (split.strength === 'confirmacao-fraca') {
-            record.holdoutSkipped = true;
+            // web-code#8/cli#9: o MOTIVO fica gravado — sessão pequena não é
+            // "pulada por orçamento".
+            markHoldoutSkip(record, 'min-scenarios');
             log(sessionId, holdoutConfirmationText(split.reserved.length, { strength: split.strength }));
           }
         } else {
           pinnedStages = specs;
+          markHoldoutSkip(record, 'disabled');
         }
         record.pinnedStages = pinnedStages;
+        // O pool/diagnóstico Pareto medem a SELEÇÃO: instâncias e fatias do
+        // TREINO (a fatia de holdout não entra na matriz candidato × cenário).
+        nInstancias = pinnedStages.length;
+        fatiasMultiplas = sliceKeysOf(pinnedStages).length > 1;
       }
+
+      // web-code#1 (espelho de src/trainer.ts): a SELEÇÃO nunca vê a fatia de
+      // holdout. A run da iteração 0 cobriu todos os cenários (é nela que eles
+      // nascem); daqui em diante o gate, a re-avaliação, as medalhas, o pool e
+      // as lições da próxima iteração leem só as etapas de TREINO. Só na
+      // iteração 0: as seguintes já rodam pinadas no treino (e o orchestrator
+      // clona as specs pinadas — a identidade de objeto só vale aqui).
+      const selRun = i === 0 && holdoutStages.length > 0 ? trainOnlyView(runRec, pinnedStages ?? []) : runRec;
+      runsById.set(selRun.id, selRun);
 
       // 4) Gate de promocao (port do evolve.mjs + IMPL-002): a melhor variante
       //    so vira campea se superar a REGUA desta iteracao por >= minGain
@@ -1106,13 +1142,13 @@ async function trainingLoop(
       // lados; ausente nunca vira 'nao') e, com >10% de pares excluidos, a
       // promocao so vale se sobreviver ao pior/melhor caso (ver pickWinner).
       const scoresById = stageScoresByContestant(
-        runRec.stages,
-        runRec.contestants.map((c) => c.id),
+        selRun.stages,
+        selRun.contestants.map((c) => c.id),
       );
       // IMPL-071: o desempate por tamanho só vale entre variantes com o
       // contrato never-break v2 verde (ver buildRankEntries).
       const pick = pickWinner(
-        buildRankEntries(runRec, controlId, { contractsActive: Boolean(cfg.contracts) }),
+        buildRankEntries(selRun, controlId, { contractsActive: Boolean(cfg.contracts) }),
         {
           minGain,
           scoresById,
@@ -1123,20 +1159,22 @@ async function trainingLoop(
       // própria seleção). Sem régua (treino sem prompt base, iteração 0) não há
       // contra quem re-avaliar: a melhor vence por definição, como antes.
       let gate: IterationGate | undefined = pick.gate;
+      let reevalRun: RunRecord | undefined;
       let confirmed = pick.isWinner && Boolean(pick.best);
       if (confirmed && pick.best && pick.control) {
         const r = await reevaluateCandidate({
           cfg,
           apiKey,
-          sessionId,
+          record,
           iteration: i,
-          selectionRun: runRec,
+          selectionRun: selRun,
           controlId,
           candidateId: pick.best.id,
           trainStages: pinnedStages ?? [],
           ledger,
           signal,
         });
+        reevalRun = r.run;
         syncLedger();
         confirmed = r.reeval.confirmed;
         if (gate) {
@@ -1184,7 +1222,7 @@ async function trainingLoop(
       //    promocao e do gate por margem, nao do quadro de medalhas).
       // Cast: o RunRecord do web aceita stoppedReason 'orphan' (IMPL-023, só
       // SPA) e o de src/ ainda não — uma run desta aba nunca é órfã aqui.
-      const medalRow = computeMedals(runRec as Parameters<typeof computeMedals>[0]).find(
+      const medalRow = computeMedals(selRun as Parameters<typeof computeMedals>[0]).find(
         (r) => r.contestantId === championIdInLastRun,
       );
       record.bestPromptByIteration.push({
@@ -1214,7 +1252,7 @@ async function trainingLoop(
             {
               id: `it-${i}`,
               label: champion.label,
-              bySlice: sliceScoresOf(runRec, championIdInLastRun),
+              bySlice: sliceScoresOf(selRun, championIdInLastRun),
               text: champion.systemPrompt,
               // Proveniência: o dossiê de lições do membro vem DESTE run/id.
               runId: runRec.id,
@@ -1230,7 +1268,9 @@ async function trainingLoop(
       }
       registrarDiagnostico();
 
-      prevRun = runRec;
+      // web-code#1: as lições da próxima iteração (e a significância de
+      // fallback) leem a visão de SELEÇÃO — sem as perguntas do holdout.
+      prevRun = selRun;
       emitSessionEvent({
         type: 'iteration.finished',
         sessionId,
@@ -1256,6 +1296,19 @@ async function trainingLoop(
         );
       }
       await saveSession(record);
+
+      // IMPL-013 (web-code#0, espelho de src/trainer.ts): a re-avaliação parou
+      // por orçamento/cancelamento → a sessão para também (o candidato NÃO foi
+      // promovido: faltou a evidência limpa). Sem isto o treino seguia para a
+      // paciência e terminava 'finished' + 'converged' depois de cancelado.
+      if (reevalRun?.status === 'aborted' && reevalRun.stoppedReason) {
+        record.budgetExhausted = reevalRun.stoppedReason === 'budget';
+        record.stoppedReason = reevalRun.stoppedReason;
+        record.stoppedAtPhase = reevalRun.stoppedAtPhase;
+        record.stoppedAtIteration = i;
+        await saveSession(record);
+        break;
+      }
 
       // IMPL-013/IMPL-051 — paciência configurável (default 2): uma iteração
       // sem promoção NÃO encerra a sessão (antes encerrava: paciência implícita
@@ -1314,9 +1367,19 @@ async function trainingLoop(
       const estHoldout =
         holdoutStages.length > 0 ? estIter * (holdoutStages.length / Math.max(1, cfg.stages)) : 0;
       if (record.stoppedReason || (estHoldout > 0 && !ledger.canAfford(estHoldout))) {
-        // Só há o que "pular" se havia fatia de holdout reservada.
-        if (holdoutStages.length > 0) record.holdoutSkipped = true;
-        log(sessionId, holdoutConfirmationText(0, { skipped: true }));
+        // Só há o que "pular" se havia fatia de holdout reservada — ou se a
+        // sessão parou antes de os cenários congelarem (sem fatia decidida, o
+        // motivo já foi gravado na iteração 0: piso de cenários ou desligado).
+        if (holdoutPendente()) {
+          markHoldoutSkip(record, record.stoppedReason && record.stoppedReason !== 'budget' ? 'cancelled' : 'budget');
+        }
+        log(
+          sessionId,
+          holdoutConfirmationText(holdoutStages.length, {
+            skipped: true,
+            skipReason: record.holdoutSkipReason,
+          }),
+        );
       } else {
         const gateFinal = await finalizeHoldout(record, apiKey, champion, championIdInLastRun, holdoutStages, prevRun, {
           ledger,
@@ -1326,15 +1389,16 @@ async function trainingLoop(
       }
     } catch (err) {
       if (isControlSignal(err)) {
-        record.holdoutSkipped = true;
         record.stoppedReason ??= err.benchControl === 'budget' ? 'budget' : 'cancelled';
         if (err.benchControl === 'budget') record.budgetExhausted = true;
+        if (holdoutPendente()) markHoldoutSkip(record, err.benchControl === 'budget' ? 'budget' : 'cancelled');
       } else {
         console.warn(
           `[train ${sessionId}] gate de holdout/significancia falhou (sessao segue): ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
+        if (holdoutStages.length > 0 && !record.holdout) markHoldoutSkip(record, 'run-failed');
       }
     }
 
@@ -1367,6 +1431,8 @@ async function trainingLoop(
       record.stoppedReason = err.benchControl === 'budget' ? 'budget' : 'cancelled';
       if (err.benchControl === 'budget') record.budgetExhausted = true;
       record.stoppedAtIteration ??= iterAtual;
+      // A fatia reservada nunca chegou ao teste final: o motivo é a parada.
+      if (holdoutPendente()) markHoldoutSkip(record, record.stoppedReason);
       record.finishedAt = nowIso();
       await saveSession(record);
       emitSessionEvent({ type: 'session.finished', sessionId, record });
@@ -1412,6 +1478,11 @@ async function finalizeHoldout(
   // So ha o que re-testar se a fatia de holdout e confiavel, existe um prompt
   // base p/ servir de controle e o campeao final e uma VARIANTE (se o treino
   // convergiu sem ganho, campeao == base e a run compararia ele consigo mesmo).
+  // web-code#8: quando não roda, o MOTIVO fica gravado.
+  if (champion && holdoutStages.length >= MIN_HOLDOUT_SCENARIOS) {
+    if (!basePrompt.trim()) markHoldoutSkip(record, 'no-base');
+    else if (champion.systemPrompt === basePrompt) markHoldoutSkip(record, 'no-change');
+  }
   if (
     champion &&
     holdoutStages.length >= MIN_HOLDOUT_SCENARIOS &&
@@ -1465,12 +1536,12 @@ async function finalizeHoldout(
     // Holdout cortado por orçamento/cancelamento: o gate não aconteceu — o
     // campeão fica sem confirmação, e o motivo sobe para a sessão.
     if (holdoutRun.stoppedReason) {
-      record.holdoutSkipped = true;
       record.stoppedReason ??= holdoutRun.stoppedReason;
       if (holdoutRun.stoppedReason === 'budget') {
         record.budgetExhausted = true;
         record.stoppedAtPhase ??= 'holdout';
       }
+      markHoldoutSkip(record, holdoutRun.stoppedReason === 'budget' ? 'budget' : 'cancelled');
     }
     record.failureCountByRole = mergeFailureCounts(record.failureCountByRole, holdoutRun.failureCountByRole);
     // `inconclusive` (IMPL-004) tambem descarta o gate: holdout com vereditos
@@ -1479,6 +1550,8 @@ async function finalizeHoldout(
       console.warn(
         `[train ${sessionId}] run de holdout terminou com status ${holdoutRun.status}; gate descartado`,
       );
+      // Erro/inconclusiva (sem parada): run sem veredito — o motivo fica gravado.
+      markHoldoutSkip(record, 'run-failed');
       holdoutRun = undefined; // cai no fallback de significancia abaixo
     }
   }
@@ -1515,7 +1588,18 @@ async function finalizeHoldout(
     // IMPL-051/IMPL-050: UM teste final em holdout intocado (α=0,05 unilateral)
     // é o ÚNICO p de confirmação da sessão — rotulado com a origem ('holdout').
     record.significance = pairedSignificance(controlScores, championScores, { pOrigin: 'holdout' });
-    log(sessionId, holdoutConfirmationText(holdoutStages.length));
+    // IMPL-050: "validado" só se o holdout CONFIRMOU (sem regressão, p ≤ α).
+    log(
+      sessionId,
+      holdoutConfirmationText(holdoutStages.length, {
+        outcome: {
+          regressed: record.holdout.regressed,
+          gainPp: record.holdout.gain,
+          pValue: record.significance?.pValue ?? null,
+          pOrigin: 'holdout',
+        },
+      }),
+    );
   } else if (lastRun && champion) {
     // Sem run de holdout (split invalido, campeao == base ou run falhou): a
     // significancia vem da ultima run de treino, pareando a BASE ('original',

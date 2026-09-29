@@ -29,11 +29,12 @@ export { COST_CONFIRM_THRESHOLD_USD, costConfirmationReason } from '../../src/en
 // Significância pareada: fonte única em src/types.ts (IMPL-001), como os tipos de custo.
 export type { PairedSignificance, SignificanceMethod, StoredSignificance } from '../../src/types.js';
 // Pareamento honesto (IMPL-005): fonte única em src/types.ts, como a significância.
-import type { IterationGate, RunCompleteness, SessionPairing } from '../../src/types.js';
+import type { HoldoutSkipReason, IterationGate, RunCompleteness, SessionPairing } from '../../src/types.js';
 export type {
   BestOfKEntry,
   BestOfKTest,
   GateHoldReason,
+  HoldoutSkipReason,
   IterationGate,
   MultiplicityMethod,
   ObservationCoverage,
@@ -1064,6 +1065,10 @@ export interface SessionRecord {
   stoppedAtIteration?: number;
   /** true = o campeão NÃO passou pelo holdout (pulado): não validado contra sobreajuste. */
   holdoutSkipped?: boolean;
+  /** Por que a sessão terminou sem resultado de holdout (fonte: src/types.ts). */
+  holdoutSkipReason?: HoldoutSkipReason;
+  /** Runs de re-avaliação limpa (IMPL-013) — fora de `runIds` de propósito. */
+  reevalRunIds?: string[];
   startedAt: string;
   finishedAt?: string;
   error?: string;

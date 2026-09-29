@@ -102,6 +102,8 @@ investigue o papel que falhou antes de confiar no ranking.
 | `pairing` | o pareamento final (`source`: `holdout` \| `training`): `n`, `nEfetivo`, `excludedPairs`, `completeness`, Δ — presente mesmo quando `significance` é `null` |
 | `significance` | teste pareado exato (troca de sinais): `pValue` (unilateral, o do gate), `pValueTwoSided` (o do relatório), `ci95Pp` (IC95 por inversão), `n`/`nEfetivo`/`excludedPairs`, `pMinUnilateral`, `signTest`, `sensitivity` (exclusões > 10%) — ou `null` (< 5 pares) |
 | `holdoutSkipped` | **campeão não validado** contra sobreajuste |
+| `holdoutSkipReason` | por que não houve holdout: `min-scenarios` (< 20 cenários) \| `budget` \| `cancelled` \| `run-failed` \| `disabled` \| `no-change` \| `no-base` |
+| `reevalRunIds` | runs da re-avaliação limpa (fora de `runIds`) |
 | `stoppedAtIteration` | onde o orçamento interrompeu |
 | `pool` | front Pareto final (com `paretoPool` > 1) |
 | `judgeDrift` | `true` = o **contrato do juiz mudou** no meio da sessão (calibration drift — deltas podem ser do juiz) |

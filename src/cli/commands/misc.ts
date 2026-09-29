@@ -41,7 +41,7 @@ import {
   runCompleteness,
   type ContestantRepetitionReport,
 } from '../../stats.js';
-import { holdoutConfirmationText, holdoutStrength } from '../../holdout.js';
+import { convergenceReasonText, sessionConfirmationText } from '../../engine/sessionDecision.js';
 import { judgeScaleWarning } from '../../engine/verdictAggregate.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import {
@@ -91,10 +91,9 @@ function sessionDecisionOf(record: SessionRecord): {
   confirmation: string;
   recommendation: ReturnType<typeof recommendationFromStored>;
 } {
-  const confirmation = holdoutConfirmationText(record.holdout?.n ?? 0, {
-    skipped: Boolean(record.holdoutSkipped) && !record.holdout,
-    strength: record.holdout ? holdoutStrength(record.holdout.n) : 'nenhum',
-  });
+  // IMPL-050: "validado" só com holdout forte que RODOU e CONFIRMOU (sem
+  // regressão, p do próprio holdout ≤ 0,05); sem holdout, a frase traz o motivo.
+  const confirmation = sessionConfirmationText(record);
   const recommendation = recommendationFromStored(record.significance, {
     labels: {
       candidate: record.pairing?.championId ?? 'campeão',
@@ -203,6 +202,19 @@ export async function cmdKey(argv: string[]): Promise<number> {
 
 // --- estimate ----------------------------------------------------------------
 
+/** Premissa da estimativa em texto (a faixa por papel resumida às fontes). */
+function fmtAssumption(k: string, v: unknown): string {
+  if (v === null || typeof v !== 'object') return String(v);
+  if (k === 'range') {
+    const r = v as { coverage?: number; n?: number; perRole?: Record<string, { source?: string } | undefined> };
+    const fontes = Object.entries(r.perRole ?? {})
+      .map(([role, x]) => `${role}=${x?.source ?? '?'}`)
+      .join(', ');
+    return `cobertura ${Math.round((r.coverage ?? 0) * 100)}% · n=${r.n ?? 0}${fontes ? ` · fontes: ${fontes}` : ''}`;
+  }
+  return JSON.stringify(v);
+}
+
 export async function cmdEstimate(argv: string[]): Promise<number> {
   const parsed = parse(argv, { config: { type: 'string', short: 'c' } });
   const file = parsed.values.config;
@@ -255,7 +267,8 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
     );
     out.line();
     out.line('Premissas:');
-    for (const [k, v] of Object.entries(est.assumptions)) out.line(`  ${k.padEnd(18)} ${v}`);
+    // IMPL-050: `range` é objeto — antes saía "[object Object]".
+    for (const [k, v] of Object.entries(est.assumptions)) out.line(`  ${k.padEnd(18)} ${fmtAssumption(k, v)}`);
     if (est.unpricedModelIds.length) {
       out.warn(`sem preço no catálogo: ${est.unpricedModelIds.join(', ')}`);
     }
@@ -816,11 +829,10 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     // IMPL-051: convergência com iteração E motivo (platão vs paciência).
     if (record.convergedAtIteration !== undefined) {
       out.line(
-        `convergência: iteração ${record.convergedAtIteration + 1} (${
-          record.convergenceReason === 'plateau'
-            ? 'platão — IC95 do ganho abaixo de minGain'
-            : 'paciência — iterações seguidas sem promoção'
-        })`,
+        `convergência: iteração ${record.convergedAtIteration + 1} (${convergenceReasonText(
+          record.convergenceReason ?? 'patience',
+          record.config.patience,
+        )})`,
       );
     }
     // IMPL-002: gate de cada iteração — bruto × corrigido × p ajustado (max-T).

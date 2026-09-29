@@ -46,7 +46,8 @@ Mais o melhor resultado obtido até ali — e **qual régua foi usada**:
 judge-score. As duas não são intercambiáveis.
 
 Em `train`, o campeão da última iteração promovida é entregue, com
-`holdoutSkipped: true` se o gate final não coube no orçamento.
+`holdoutSkipped: true` (e `holdoutSkipReason: "budget"`) se o gate final não
+coube no orçamento.
 
 ## Contabilidade por papel
 

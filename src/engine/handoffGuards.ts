@@ -15,6 +15,15 @@
 // Puro (sem node:*, sem I/O): serve ao CLI hoje e ao SPA quando ele passar a
 // promover campeões. A entrada é ESTRUTURAL (subconjunto do SessionRecord) de
 // propósito: campos novos em `significance` (cluster stats) não quebram nada.
+//
+// cli#9: o aviso de holdout diz o MOTIVO real (`holdoutSkipReason`, derivado
+// dos campos antigos em record legado) — antes toda sessão com < 20 cenários
+// lia "pulado por orçamento/cancelamento" e o agente ia subir o --budget quando
+// o remédio era ter mais cenários.
+
+import { holdoutSkipReasonText } from '../holdout.js';
+import { holdoutSkipReasonOf } from './sessionDecision.js';
+import type { HoldoutSkipReason } from '../types.js';
 
 /** Identificador estável de cada sinal (vai no JSON, no log de auditoria e no trailer). */
 export type HandoffIssueCode =
@@ -53,6 +62,11 @@ export interface HandoffGuardInput {
     regressed: boolean;
   };
   holdoutSkipped?: boolean;
+  /** Por que não houve holdout (ausente em record antigo — derivado dos campos abaixo). */
+  holdoutSkipReason?: HoldoutSkipReason;
+  /** Parada da sessão: distingue orçamento/cancelamento do piso de cenários em record antigo. */
+  stoppedReason?: string | null;
+  budgetExhausted?: boolean;
   significance?: { ci95Pp: [number, number]; n?: number; meanDiffPp?: number; pValue?: number } | null;
   judgeDrift?: boolean;
 }
@@ -114,19 +128,24 @@ export function evaluateHandoffGuards(
     });
   }
 
+  // O motivo só vale sem resultado de holdout (com `holdout` não há o que explicar).
+  const motivo = h ? undefined : holdoutSkipReasonOf({ ...input, significance: undefined });
   if (input.holdoutSkipped) {
     warnings.push({
       code: 'holdout.skipped',
       severity: 'warn',
-      message: 'campeão NÃO validado em holdout (pulado por orçamento/cancelamento) — pode estar sobreajustado.',
+      message: `campeão NÃO validado em holdout (${
+        motivo ? holdoutSkipReasonText(motivo) : 'pulado'
+      }) — pode estar sobreajustado.`,
     });
   } else if (!h) {
     warnings.push({
       code: 'holdout.missing',
       severity: 'warn',
-      message:
-        'sessão sem resultado de holdout (fatia < 5 cenários, holdoutRatio 0, campeão = base ou run de ' +
-        'holdout falhou) — campeão não validado contra sobreajuste.',
+      message: motivo
+        ? `sessão sem resultado de holdout (${holdoutSkipReasonText(motivo)}) — campeão não validado contra sobreajuste.`
+        : 'sessão sem resultado de holdout (seleção < 20 cenários, holdoutRatio 0, campeão = base ou run de ' +
+          'holdout falhou) — campeão não validado contra sobreajuste.',
     });
   }
 

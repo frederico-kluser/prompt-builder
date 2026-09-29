@@ -54,8 +54,9 @@ HTTP 429) — não existe cap por comando.
   significância estatística (teste pareado exato por troca de sinais). É o que
   separa "melhorou" de "sobreajustou aos cenários de treino".
 
-Se o holdout for pulado (orçamento), o resultado traz `holdoutSkipped: true` e
-um aviso: **o campeão não está validado contra sobreajuste**.
+Se o holdout for pulado (poucos cenários, orçamento, cancelamento), o resultado
+traz `holdoutSkipped: true`, o motivo em `holdoutSkipReason` e um aviso: **o
+campeão não está validado contra sobreajuste**.
 
 ## Onde ficam os dados
 

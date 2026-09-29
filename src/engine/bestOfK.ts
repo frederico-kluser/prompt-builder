@@ -39,6 +39,17 @@
 // boas e pessimista (nunca otimista) quando só uma é real. O shrinkage empírico
 // de Bayes (MoM, τ² truncado em 0) foi testado e ficou enviesado para CIMA em
 // n = 5 (+1,3 p.p.): o τ² espúrio espalha as estimativas. Números na memória.
+//
+// CALIBRAÇÃO (IMPL-002, critério |viés| ≤ 1 p.p. sob H1 de +10 p.p.): a troca
+// de sinais dos resíduos SOBRE-corrige ~2,5% da inflação com ruído alto (flip
+// 0,30) e K grande — na grade de 20.000 ensaios, n = 5 K = 8 dava −1,02 p.p. e
+// n = 5 K = 7 −0,87, com flip 0,15 quase sem viés (+0,3 a +0,4). O excesso é
+// PROPORCIONAL à inflação e quase constante em n (5, 8 e 10 pedem o mesmo
+// fator), então a correção é um multiplicador único, {@link
+// WINNERS_CURSE_CALIBRATION} = 0,975, e não um ajuste no √(n/(n−1)) (tirar o
+// fator inteiro levava n = 5 K = 2 para +1,2 p.p.). Com ele a grade n 5–10 ×
+// K 2–8 × flip {0,15; 0,30} fica em |viés| ≤ 0,8 p.p. (ver `npm run stats:sim`
+// e as células de regressão em test/stats-sim.test.ts).
 
 import type { MultiplicityMethod, SignificanceMethod } from '../types.js';
 import { EXACT_ENUM_CAP, MONTE_CARLO_B, halfBinomialPmf, mulberry32, type PairScore } from '../stats.js';
@@ -51,6 +62,13 @@ export const GATE_SEED = 1337;
 export const MIN_GAIN_FLOOR_PP = 1;
 /** Meia granularidade: um cenário resolve→parcial move a média em 50/n p.p. */
 export const MIN_GAIN_HALF_STEP_PP = 50;
+
+/**
+ * Calibração empírica da inflação do winner's curse (ver o cabeçalho): a troca
+ * de sinais dos resíduos sobre-estima a inflação em ~2,5% (medido na grade do
+ * `stats:sim`, 20.000 ensaios por célula).
+ */
+export const WINNERS_CURSE_CALIBRATION = 0.975;
 
 /** Tolerância das comparações T* ≥ T_obs (somas em ordens diferentes diferem ~1e-16). */
 const EPS = 1e-9;
@@ -373,7 +391,8 @@ export interface WinnersCurse {
  * ancorada em efeitos iguais: E*[máx_k Σᵢ sᵢ·rₖᵢ/nₖ]. A parte comum a todas as
  * variantes no cenário (a régua) tem o MESMO sinal nas K e sai do máximo; o que
  * sobra é o ruído próprio de cada variante — exatamente o que a seleção infla.
- * Ganho corrigido = ganho bruto − inflação (ver o cabeçalho do módulo).
+ * Ganho corrigido = ganho bruto − inflação; a inflação sai multiplicada por
+ * {@link WINNERS_CURSE_CALIBRATION} (calibração do `stats:sim`, ver o cabeçalho).
  */
 export function winnersCurseInflation(
   control: readonly PairScore[],
@@ -400,7 +419,7 @@ export function winnersCurseInflation(
     },
     opts,
   );
-  const inflation = walk.method === 'exact' ? acc : acc / walk.permutations;
+  const inflation = (walk.method === 'exact' ? acc : acc / walk.permutations) * WINNERS_CURSE_CALIBRATION;
   // E[máx] ≥ máx E = 0 (Jensen); o piso só apara arredondamento.
   return { inflation: Math.max(0, inflation), k: used.length, enumeration: walk.method, permutations: walk.permutations };
 }
