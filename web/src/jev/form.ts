@@ -109,13 +109,34 @@ export function draftFromJson(json: unknown): DraftFromJson {
   return { ok: true, draft: cfg as JevDraft, ...(notice ? { notice } : {}) };
 }
 
+/** Tira as linhas vazias de `examples` (o editor mantém a última enquanto se digita). */
+function limparRubricas(questions: Record<string, QuestionInput> | undefined): void {
+  const limpar = (v: unknown): void => {
+    if (v && typeof v === 'object' && !Array.isArray(v) && Array.isArray((v as { examples?: unknown }).examples)) {
+      const o = v as { examples: unknown[] };
+      o.examples = o.examples.filter((x) => typeof x !== 'string' || x.trim() !== '');
+    }
+  };
+  for (const q of Object.values(questions ?? {})) {
+    const c = q.criteria;
+    if (Array.isArray(c)) c.forEach(limpar);
+    else if (c && typeof c === 'object') Object.values(c as Record<string, unknown>).forEach(limpar);
+  }
+}
+
 /** Rascunho → `jev-config@1` limpo (o que "Exportar JSON" grava). */
 export function draftToConfig(d: JevDraft): Record<string, unknown> {
   const out: Record<string, unknown> = { format: JEV_CONFIG_FORMAT, mode: d.mode };
   if (d.theme?.trim()) out.theme = d.theme.trim();
   if (d.language) out.language = d.language;
-  out.spec = clone(d.spec);
-  if (d.variants?.length) out.variants = clone(d.variants);
+  const spec = clone(d.spec);
+  limparRubricas(spec.questions);
+  out.spec = spec;
+  if (d.variants?.length) {
+    const vs = clone(d.variants);
+    for (const v of vs) limparRubricas(v.spec.questions);
+    out.variants = vs;
+  }
   out.cases = clone(d.cases);
   const models: Record<string, unknown> = {};
   if (d.models.decision?.length) models.decision = [...d.models.decision];
@@ -215,7 +236,7 @@ export function setQuestionType(qs: QMap, id: string, type: JevPrimitive): QMap 
 type Crit = Record<string, unknown>;
 
 export function renameOption(c: Crit, from: string, to: string): Crit {
-  if (from === to) return c;
+  if (from === to || to in c) return c;
   const out: Crit = {};
   for (const [k, v] of Object.entries(c)) out[k === from ? to : k] = v;
   return out;

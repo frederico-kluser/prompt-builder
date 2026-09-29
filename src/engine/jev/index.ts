@@ -22,3 +22,4 @@ export * from './rewriter.js';
 export * from './train.js';
 export * from './report.js';
 export * from './handoff.js';
+export * from './reportHtml.js';

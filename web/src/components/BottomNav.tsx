@@ -37,7 +37,8 @@ export const NAV_DESTINATIONS: NavDestination[] = [
 export function activeNavTarget(pathname: string): string {
   if (pathname.startsWith('/settings')) return '/settings';
   if (pathname.startsWith('/prompts')) return '/prompts';
-  if (pathname.startsWith('/runs') || pathname.startsWith('/training')) return '/runs';
+  // Modo JEV: /jev/runs/:id e /jev/training/:id também voltam ao Histórico.
+  if (pathname.startsWith('/runs') || pathname.startsWith('/training') || pathname.startsWith('/jev')) return '/runs';
   return '/new';
 }
 

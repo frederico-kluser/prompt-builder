@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { Search } from 'lucide-react';
 import type { RunMode, RunSummary, SessionSummary } from '../api';
 import { fetchRuns, fetchSessions } from '../api';
@@ -8,6 +8,7 @@ import { SkeletonResolveList, SkeletonResolveRow, Skeleton } from '@/components/
 import { Input } from '@/components/ui/input';
 import { Banner, EmptyState, PageHeader, Screen, StatusPill, Tag } from '../components/primitives';
 import { StorageNotice } from '../components/StorageNotice';
+import { JevHistory } from '../components/jev/JevHistory';
 
 const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 
@@ -93,6 +94,9 @@ function Row({
 }
 
 export function RunsList() {
+  // Modo JEV (chunk 2): aba "LLM | JEV" sobre a lista; `?tipo=jev` abre direto nela.
+  const location = useLocation();
+  const [tipo, setTipo] = useState<'llm' | 'jev'>(() => (new URLSearchParams(location.search).get('tipo') === 'jev' ? 'jev' : 'llm'));
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -149,6 +153,27 @@ export function RunsList() {
           na lista, então o aviso (e a persistência negada) aparece aqui. */}
       <StorageNotice className="mb-4" targets="all" />
 
+      <SegmentedToggle value={tipo} onChange={(v) => setTipo(v as 'llm' | 'jev')} ariaLabel="Tipo de run" className="mb-4">
+        <SegmentedToggleOption value="llm" className="px-4 py-1.5 text-[13px]">
+          LLM
+        </SegmentedToggleOption>
+        <SegmentedToggleOption value="jev" className="px-4 py-1.5 text-[13px]">
+          JEV (decisões)
+        </SegmentedToggleOption>
+      </SegmentedToggle>
+      {tipo === 'jev' ? (
+        <>
+          <div className="mb-4 relative min-w-[14rem] sm:max-w-xs">
+            <Search
+              className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
+              aria-hidden="true"
+            />
+            <Input className="pl-8" placeholder="Buscar por tema…" aria-label="Buscar por tema" value={query} onChange={(e) => setQuery(e.target.value)} />
+          </div>
+          <JevHistory query={query} />
+        </>
+      ) : (
+      <>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <SegmentedToggle
           value={filter}
@@ -227,6 +252,8 @@ export function RunsList() {
           )
         )}
       </div>
+      </>
+      )}
     </Screen>
   );
 }
