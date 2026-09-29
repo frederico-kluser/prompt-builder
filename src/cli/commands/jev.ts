@@ -15,8 +15,9 @@ import {
   JEV_EXAMPLE_KINDS,
   JEV_OPERATORS,
   JEV_TECHNIQUE_MAP,
-  buildDecisionsRequest,
+  buildJevHandoff,
   buildJevRunReport,
+  isHandoffBlocked,
   buildJevSessionReport,
   estimateJev,
   estimateJevTrain,
@@ -746,57 +747,29 @@ async function cmdExport(argv: string[]): Promise<number> {
   const ctx = buildContext(parsed);
   const { out, values } = ctx;
   const r = await achar(parsed.positionals[0], 'prompt-builder jev export <id> [--request] [-o <arq>] [--override "<motivo>"]');
-  let spec;
-  let model: string;
-  let resolvedModel: string | null = null;
-  let policy: Record<string, unknown> = {};
-  let evidence: Record<string, unknown>;
-  if (r.kind === 'session') {
-    const s = r.rec;
-    if (s.holdout?.regressed && typeof values.override !== 'string') {
-      throw new CliError('A definição campeã REGREDIU no holdout: o handoff foi recusado.', EXIT.GATE_BLOCKED, { sessionId: s.id, holdout: s.holdout }, {
-        code: 'gate.holdout_regressed',
-        hint: 'Não use esta definição. Só sobreponha por decisão humana: `--override "<motivo>"`.',
-      });
+  const override = typeof values.override === 'string' ? values.override : undefined;
+  let handoff;
+  try {
+    handoff = buildJevHandoff(
+      r.kind === 'session'
+        ? { kind: 'session', rec: r.rec }
+        : { kind: 'run', rec: r.rec, ...(typeof values.contestant === 'string' ? { contestantId: values.contestant } : {}) },
+      { ...(override ? { override } : {}) },
+    );
+  } catch (err) {
+    if (r.kind === 'run') {
+      throw new CliError((err as Error).message, EXIT.USAGE, { contestants: r.rec.contestants.map((c) => c.id) }, { code: 'usage.invalid_flag_value' });
     }
-    spec = s.championSpec;
-    model = s.modelId;
-    resolvedModel = s.resolvedModels[0] ?? null;
-    policy = s.policy;
-    evidence = {
-      sessionId: s.id,
-      verdict: sessionVerdict(s),
-      holdout: s.holdout ? { n: s.holdout.n, strength: s.holdout.strength, pValue: s.holdout.comparison?.pValue ?? null, regressed: s.holdout.regressed } : null,
-      ...(typeof values.override === 'string' ? { override: values.override } : {}),
-    };
-  } else {
-    const rec = r.rec;
-    const ctId = typeof values.contestant === 'string' ? values.contestant : rec.contestants.find((c) => c.kind === 'decision')?.id;
-    const ct = rec.contestants.find((c) => c.id === ctId);
-    if (!ct) throw new CliError(`competidor "${String(ctId)}" não existe na run.`, EXIT.USAGE, { contestants: rec.contestants.map((c) => c.id) }, { code: 'usage.invalid_flag_value' });
-    spec = rec.specs.find((s) => s.id === ct.specId)!;
-    model = ct.modelId;
-    resolvedModel = rec.resolvedModels[ct.modelId]?.[0] ?? null;
-    policy = rec.policy?.[ct.id] ?? {};
-    evidence = { runId: rec.id, contestantId: ct.id, metrics: rec.metrics[ct.id] ? summarizeJevRun(rec).contestants : null };
+    throw err;
   }
-  const request = buildDecisionsRequest(spec, '<<STATE>>', { model });
-  const keyMap = Object.fromEntries(spec.questions.filter((q) => q.type === 'choice' && q.keyMap).map((q) => [q.id, (q as { keyMap?: Record<string, string> }).keyMap]));
-  const handoff = {
-    format: 'jev-handoff@1',
-    model,
-    resolvedModel,
-    request,
-    ...(spec.stateView ? { stateView: spec.stateView } : {}),
-    ...(Object.keys(keyMap).length ? { keyMap } : {}),
-    policy,
-    evidence,
-    notes: [
-      'Troque "<<STATE>>" pelo estado real (aplique o stateView antes, se houver).',
-      'A política é POR PERGUNTA (temperatura + limiares). O `jev.mjs` da jev-agent-skill aplica UM par de limiares a todas e não aplica temperatura.',
-      'Fixe o modelo (não use alias ~…-latest): a política foi ajustada no snapshot em resolvedModel.',
-    ],
-  };
+  if (isHandoffBlocked(handoff)) {
+    const s = r.rec as JevSessionRecord;
+    throw new CliError('A definição campeã REGREDIU no holdout: o handoff foi recusado.', EXIT.GATE_BLOCKED, { sessionId: s.id, holdout: s.holdout }, {
+      code: 'gate.holdout_regressed',
+      hint: 'Não use esta definição. Só sobreponha por decisão humana: `--override "<motivo>"`.',
+    });
+  }
+  const request = handoff.request;
   const payload = values.request === true ? request : handoff;
   const texto = `${JSON.stringify(payload, null, 2)}\n`;
   if (typeof values.output === 'string') {
