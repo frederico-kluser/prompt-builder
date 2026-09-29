@@ -312,6 +312,31 @@ describe('decide() × registo por chamada (merge com ciclos: IMPL-074/075)', () 
   });
 });
 
+describe('L6: na SPA o Retry-After não é legível (CORS) — o AIMD é a proteção', () => {
+  it('429 sem Retry-After (o que o JavaScript do navegador enxerga): recua, corta a janela AIMD e repete', async () => {
+    // O preflight de /alpha/decisions expõe só X-Generation-Id, X-Provider-Name,
+    // request-id e cf-ray: o 429 chega à aba SEM header de espera legível.
+    const fake = fakeOpenRouter({
+      decisionCatalog: DECISION_CATALOG,
+      decisions: (_req, n) => (n === 0 ? { status: 429, bodyText: JSON.stringify({ error: { message: 'rate limited', code: 429 } }) } : {}),
+    });
+    const esperas: number[] = [];
+    const g = createGateway({ fetch: fake.fetch, sleep: async (ms) => void esperas.push(ms) });
+    const antes = g.currentConcurrency(KEY, 'typesafe/jev-1.13').limit;
+    const r = await g.decide({ apiKey: KEY, modelId: 'typesafe/jev-1.13', state: 'x', questions: QUESTIONS });
+    expect(Object.keys(r.answers).sort()).toEqual(['is_bug', 'team']);
+    expect(fake.decisionRequests()).toHaveLength(2);
+    expect(esperas).toHaveLength(1);
+    expect(esperas[0]).toBeGreaterThan(0);
+    expect(g.currentConcurrency(KEY, 'typesafe/jev-1.13').limit).toBeLessThan(antes);
+  });
+
+  it('a doc da SPA não promete backoff pelo Retry-After', () => {
+    const fonte = readFileSync(join(ROOT, 'web', 'src', 'jev', 'api.ts'), 'utf8');
+    expect(fonte).toMatch(/Retry-After[\s\S]{0,200}NÃO os lê/);
+  });
+});
+
 describe('prova ESTÁTICA do ponto único de decisões', () => {
   it('só src/openrouter.ts fala com o endpoint de decisões (Node e SPA)', () => {
     const quem = [...arquivosTs(join(ROOT, 'src')), ...arquivosTs(join(ROOT, 'web', 'src'))]

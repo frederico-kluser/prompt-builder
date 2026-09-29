@@ -114,6 +114,27 @@ describe('parseJevRecordFile — o que o terminal entrega', () => {
     expect(erro(JSON.stringify(semCelulas))).toMatch(/`cells`/);
     expect(erro(JSON.stringify({ format: 'arena-run@1' }))).toMatch(/arena-run@1/);
   });
+
+  it('L7: record à mão/antigo sem o que as telas desreferenciam é recusado no import (não quebra ao abrir)', async () => {
+    const run = await runDoTerminal();
+    const erro = (rec: unknown): string => {
+      const r = parseJevRecordFile(JSON.stringify(rec));
+      return r.ok ? '' : r.error;
+    };
+    for (const campo of ['confusion', 'byQuestion', 'byType', 'cost', 'incompleteCaseIds', 'warnings', 'resolvedModels'] as const) {
+      const { [campo]: _fora, ...sem } = run;
+      expect(erro(sem)).toContain(`\`${campo}\``);
+    }
+    expect(erro({ ...run, cost: { totalUsd: 0 } })).toContain('`cost.byKind`');
+    expect(erro({ ...run, incompleteCaseIds: {} })).toContain('`incompleteCaseIds`');
+    const s = sessaoDoTerminal(run);
+    const { cost: _c, ...sessaoSemCusto } = s;
+    expect(erro(sessaoSemCusto)).toContain('`cost`');
+    expect(erro({ ...s, resolvedModels: {} })).toContain('`resolvedModels`');
+    // o record íntegro segue aceito
+    expect(parseJevRecordFile(JSON.stringify(run)).ok).toBe(true);
+    expect(parseJevRecordFile(JSON.stringify(s)).ok).toBe(true);
+  });
 });
 
 describe('importJevRecordFiles — a SPA mostra o que rodou no terminal', () => {

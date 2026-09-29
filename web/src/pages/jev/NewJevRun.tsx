@@ -57,6 +57,7 @@ import {
   draftProblems,
   draftToConfig,
   emptyDraft,
+  jevUsesLlm,
   lintDraftSpec,
   specOfDraft,
   type JevDraft,
@@ -545,7 +546,7 @@ export function NewJevRun() {
           onChange={(v) => patch({ budgetUsd: v === '' ? undefined : Number(v) })}
           min={0}
           step={0.01}
-          placeholder="sem teto"
+          placeholder={jevUsesLlm(draft) ? 'obrigatório com LLM' : 'sem teto'}
         />
         <TxtNumRow
           label="Precisão-alvo da banda auto"
@@ -872,6 +873,12 @@ export function NewJevRun() {
                 Esta {draft.mode === 'train' ? 'sessão de treino' : 'run'} pode custar até {fmtUsd(confirmar.usdHigh)} (faixa ~{fmtUsd(confirmar.usdLow)} – {fmtUsd(confirmar.usdHigh)}). O
                 custo real sai de <code className="font-mono">usage.cost</code> de cada resposta.
               </p>
+              {confirmar.unknownPriceModelIds.length > 0 && (
+                <p className="mt-2 text-sm text-destructive">
+                  Sem preço no catálogo para {confirmar.unknownPriceModelIds.join(', ')}: a faixa acima NÃO conta o gasto desse modelo. Quem limita é o teto
+                  {draft.budgetUsd !== undefined ? ` de ${fmtUsd(draft.budgetUsd)}` : ''}.
+                </p>
+              )}
             </div>
             <ul className="flex flex-col gap-1 rounded-lg border border-border px-4 py-3 text-[13px] tabular">
               {confirmar.byContestant.map((c) => (

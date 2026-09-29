@@ -404,6 +404,23 @@ export function stepOfIssue(i: Pick<JevLintIssue, 'code'>): JevStep {
   return 'decisao';
 }
 
+/**
+ * A run/sessão chama um LLM PAGO (competidor LLM ou proponente do treino)? É a
+ * MESMA condição com que `startJev` busca o catálogo de chat.
+ */
+export function jevUsesLlm(cfg: { models?: { llm?: readonly unknown[] }; train?: { rewriterModelId?: unknown } | Record<string, unknown> }): boolean {
+  const rw = (cfg.train as { rewriterModelId?: unknown } | undefined)?.rewriterModelId;
+  return (cfg.models?.llm?.length ?? 0) > 0 || (typeof rw === 'string' && rw.trim() !== '');
+}
+
+/** Teto válido (número finito > 0). */
+export function hasBudget(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0;
+}
+
+export const JEV_BUDGET_REQUIRED_MESSAGE =
+  'Com LLM na run, defina o teto de gasto (US$): o preço de um LLM pode faltar no catálogo e o raciocínio pode gastar bem mais que a estimativa.';
+
 /** Pendências que BLOQUEIAM o Iniciar, na ordem dos passos. */
 export function draftProblems(d: JevDraft, issues: readonly JevLintIssue[], opts: { hasKey: boolean }): JevProblem[] {
   const out: JevProblem[] = [];
@@ -417,6 +434,8 @@ export function draftProblems(d: JevDraft, issues: readonly JevLintIssue[], opts
     vistos.add(k);
     out.push({ step: stepOfIssue(i), text: `${i.questionId ? `${i.questionId}: ` : ''}${i.message}`, code: i.code });
   }
+  // M2: LLM na run sem teto = gasto ilimitado se o preço faltar (a faixa sai 0).
+  if (jevUsesLlm(d) && !hasBudget(d.budgetUsd)) out.push({ step: 'limites', text: JEV_BUDGET_REQUIRED_MESSAGE, code: 'budget.required' });
   if (!opts.hasKey) out.push({ step: 'limites', text: 'Conecte a sua chave da OpenRouter em Configurações.' });
   const ordem: JevStep[] = ['objetivo', 'decisao', 'casos', 'participantes', 'limites'];
   return out.sort((a, b) => ordem.indexOf(a.step) - ordem.indexOf(b.step));

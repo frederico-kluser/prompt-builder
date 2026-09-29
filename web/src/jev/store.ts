@@ -103,9 +103,23 @@ export async function saveJevRun(rec: JevRunRecord): Promise<boolean> {
   return true;
 }
 
-/** Grava record + resumo da sessão de treino numa transação só. Nunca rejeita. */
+/** Nº de casos do resumo JÁ gravado (o record da sessão não guarda os casos). */
+async function casosDoResumo(id: string): Promise<number> {
+  try {
+    const r = await idbGet<JevSummary>('jevSummaries', id);
+    return r && r.kind === 'session' && typeof r.cases === 'number' ? r.cases : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Grava record + resumo da sessão de treino numa transação só. Nunca rejeita.
+ * Sem `cases` (marcar órfã, marcação manual) o resumo MANTÉM o nº de casos já
+ * gravado — antes zerava a coluna "casos" do histórico a cada órfã marcada.
+ */
 export async function saveJevSession(s: JevSessionRecord, cases?: number): Promise<boolean> {
-  const resumo = jevSessionSummary(s, cases ?? 0);
+  const resumo = jevSessionSummary(s, cases ?? (await casosDoResumo(s.id)));
   try {
     await idbWrite(
       [

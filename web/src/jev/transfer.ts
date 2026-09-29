@@ -25,15 +25,22 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/** Primeiro campo ausente/de tipo errado (`a.b` = caminho aninhado), ou `null`. */
 function faltando(o: Record<string, unknown>, campos: readonly (readonly [string, 'array' | 'object' | 'string'])[]): string | null {
   for (const [k, t] of campos) {
-    const v = o[k];
+    let v: unknown = o;
+    for (const parte of k.split('.')) v = isObj(v) ? v[parte] : undefined;
     const ok = t === 'array' ? Array.isArray(v) : t === 'object' ? isObj(v) : typeof v === 'string';
     if (!ok) return k;
   }
   return null;
 }
 
+/**
+ * Tudo que as telas e os relatórios DESREFERENCIAM sem checar (`confusionTable`,
+ * `rec.cost.byKind`, `incompleteCaseIds.length`…): um record à mão ou antigo
+ * sem um deles passaria no import e derrubaria a tela ao abrir.
+ */
 const RUN_FIELDS = [
   ['id', 'string'],
   ['status', 'string'],
@@ -45,8 +52,16 @@ const RUN_FIELDS = [
   ['questionIds', 'array'],
   ['specs', 'array'],
   ['metrics', 'object'],
+  ['byQuestion', 'object'],
+  ['byType', 'object'],
+  ['confusion', 'object'],
   ['config', 'object'],
   ['progress', 'object'],
+  ['cost', 'object'],
+  ['cost.byKind', 'object'],
+  ['incompleteCaseIds', 'array'],
+  ['warnings', 'array'],
+  ['resolvedModels', 'object'],
 ] as const;
 
 const SESSION_FIELDS = [
@@ -58,6 +73,10 @@ const SESSION_FIELDS = [
   ['originalSpec', 'object'],
   ['championSpec', 'object'],
   ['config', 'object'],
+  ['cost', 'object'],
+  ['cost.byKind', 'object'],
+  ['warnings', 'array'],
+  ['resolvedModels', 'array'],
 ] as const;
 
 /**

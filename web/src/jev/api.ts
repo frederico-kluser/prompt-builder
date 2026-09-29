@@ -5,6 +5,13 @@
 // gateway do Node (shim `../engine/openrouter`): limitador AIMD, reserva,
 // `usage.cost` e a contabilidade num ponto só.
 //
+// Proteção contra 429 NA ABA = só o limitador AIMD (recuo exponencial +
+// janela de concorrência). O preflight do endpoint expõe apenas
+// `X-Generation-Id`, `X-Provider-Name`, `request-id` e `cf-ray`
+// (`Access-Control-Expose-Headers`): `Retry-After`/`retry-after-ms` chegam ao
+// navegador mas o JavaScript NÃO os lê — o piso de backoff pelo header só vale
+// no Node (CLI/MCP).
+//
 // O que este arquivo acrescenta ao motor (fonte única em `src/engine/jev/`):
 //  • os SEAMS do navegador: key (`requireKey`), pré-voo LGPD/PII
 //    (`web/src/lgpd.ts`), persistência IndexedDB (`./store`), barramento em
@@ -14,7 +21,8 @@
 //    record `running` com o lock LIVRE é órfão (a aba fechou/recarregou) e
 //    vira `aborted` com o parcial preservado — a mesma semântica do Node
 //    (`src/jev/store.ts`: dono morto → `aborted`/`cancelled` + erro "órfã");
-//  • o portão de custo (acima de US$ 1 na faixa alta, iniciar exige "sim").
+//  • o portão de custo (acima de US$ 1 na faixa alta, ou LLM sem preço no
+//    catálogo, iniciar exige "sim") e o teto OBRIGATÓRIO com LLM na run.
 
 import '../engine/openrouter';
 import {
@@ -43,6 +51,7 @@ import { requestPersistentStorage } from '../storageHealth';
 import { COST_CONFIRM_THRESHOLD_USD, requireKey } from '../api';
 import { listJevSummaries, loadJevRun, loadJevSession, saveJevRun, saveJevSession, type JevSummary } from './store';
 import { parseJevRecordFile } from './transfer';
+import { JEV_BUDGET_REQUIRED_MESSAGE, hasBudget, jevUsesLlm } from './form';
 
 export type JevRecordKind = 'run' | 'session';
 export type JevAnyRecord = JevRunRecord | JevSessionRecord;
@@ -163,11 +172,15 @@ export function prepareJev(
   return { ok: true, value: { resolved: r.resolved, issues: [...r.issues, ...lint], estimate: est } };
 }
 
-/** Recusa de iniciar: a faixa alta passa do limiar e o usuário ainda não disse "sim". */
+/** Recusa de iniciar: a faixa alta passa do limiar (ou há LLM sem preço) e o usuário ainda não disse "sim". */
 export class JevCostConfirmationRequired extends Error {
   readonly code = 'jev-cost-confirmation-required' as const;
   constructor(readonly estimate: JevEstimate) {
-    super(`Custo estimado de até US$ ${estimate.usdHigh.toFixed(2)}: confirme antes de iniciar.`);
+    super(
+      estimate.unknownPriceModelIds.length
+        ? `Sem preço no catálogo para ${estimate.unknownPriceModelIds.join(', ')}: a estimativa (até US$ ${estimate.usdHigh.toFixed(2)}) não conta esse gasto — confirme antes de iniciar.`
+        : `Custo estimado de até US$ ${estimate.usdHigh.toFixed(2)}: confirme antes de iniciar.`,
+    );
     this.name = 'JevCostConfirmationRequired';
   }
 }
@@ -177,9 +190,13 @@ export function isJevCostConfirmationRequired(err: unknown): err is JevCostConfi
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'jev-cost-confirmation-required';
 }
 
-/** Exige "sim" explícito acima do limiar (mesmo limiar das runs LLM). */
+/**
+ * Exige "sim" explícito acima do limiar (mesmo limiar das runs LLM) OU com
+ * LLM sem preço no catálogo — a parte dele sai 0 na faixa, e custo que não dá
+ * para estimar pede um "sim" (a regra de `costConfirmation` das runs LLM).
+ */
 export function jevRequiresConfirmation(est: JevEstimate): boolean {
-  return est.usdHigh > COST_CONFIRM_THRESHOLD_USD;
+  return est.usdHigh > COST_CONFIRM_THRESHOLD_USD || est.unknownPriceModelIds.length > 0;
 }
 
 export interface StartJevOpts {
@@ -205,8 +222,16 @@ export async function startJev(cfg: JevConfigFile, opts: StartJevOpts = {}): Pro
   // persist() na ativação do clique (antes de qualquer await): mesma regra das runs LLM.
   void requestPersistentStorage();
   const apiKey = requireKey();
+  const precisaChat = jevUsesLlm(cfg);
+  // M2: com LLM, o teto é OBRIGATÓRIO na SPA — o catálogo de chat pode falhar
+  // (vira []), o preço pode faltar, e um LLM com raciocínio reserva até 8192
+  // tokens por chamada. Sem teto, nada limitaria o gasto. Recusa antes da rede.
+  if (precisaChat && !hasBudget(cfg.budgetUsd)) {
+    throw new JevConfigError(`teto obrigatório: ${JEV_BUDGET_REQUIRED_MESSAGE}`, [
+      { level: 'error', code: 'budget.required', path: 'budgetUsd', message: JEV_BUDGET_REQUIRED_MESSAGE },
+    ]);
+  }
   const decision = await fetchDecisionModels(apiKey).catch(() => [] as OpenRouterModel[]);
-  const precisaChat = (cfg.models.llm?.length ?? 0) > 0 || Boolean(cfg.train?.rewriterModelId);
   const chat = precisaChat ? await fetchChatModels(apiKey).catch(() => [] as OpenRouterModel[]) : [];
   const prep = prepareJev(cfg, { decision, chat });
   if (!prep.ok) throw erroDeConfig(prep.issues);

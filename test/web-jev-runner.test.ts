@@ -158,6 +158,43 @@ describe('JEV no navegador — run de exemplo na aba', () => {
     expect(disco.data.get('jevRuns')?.size ?? 0).toBe(0);
   });
 
+  it('(ii-b) M2: com LLM o teto é obrigatório; LLM sem preço exige "sim" mesmo com a faixa baixa', async () => {
+    const disco = new FakeIdb();
+    const broker = new FakeLockBroker();
+    const base = { ...jevExample('triagem', 'eval'), budgetUsd: 0.05 };
+    const fake = jevFake(base);
+    const aba = await abrirAba(disco, broker.context('A'), fake);
+    aba.api.setStoredKey(KEY);
+    // LLM FORA do catálogo de chat (preço desconhecido: a parte dele sairia 0 na faixa).
+    const semPreco = { ...base, mode: 'compare', models: { decision: ['typesafe/jev-1.13'], llm: [{ modelId: 'sem/preco', reasoning: 'high' }] } } as Record<string, unknown>;
+
+    // Sem teto: recusa ANTES de qualquer rede, como erro de config (passo "limites").
+    const { budgetUsd: _b, ...semTeto } = semPreco;
+    const e1 = await aba.jev.startJev(semTeto as never).catch((e: unknown) => e);
+    expect(e1).toMatchObject({ code: 'JEV_CONFIG' });
+    expect((e1 as { issues: { code: string }[] }).issues.map((i) => i.code)).toEqual(['budget.required']);
+
+    // Com teto, mas sem preço: a faixa fica abaixo de US$ 1 e MESMO ASSIM pede "sim".
+    const e2 = await aba.jev.startJev(semPreco as never).catch((e: unknown) => e);
+    expect(aba.jev.isJevCostConfirmationRequired(e2)).toBe(true);
+    const est = (e2 as { estimate: { usdHigh: number; unknownPriceModelIds: string[] } }).estimate;
+    expect(est.usdHigh).toBeLessThan(1);
+    expect(est.unknownPriceModelIds).toEqual(['sem/preco']);
+    expect(String((e2 as Error).message)).toMatch(/sem\/preco/);
+
+    expect(fake.decisionRequests()).toHaveLength(0);
+    expect(fake.chatRequests()).toHaveLength(0);
+    expect(disco.data.get('jevRuns')?.size ?? 0).toBe(0);
+
+    // O formulário bloqueia o Iniciar pelo mesmo motivo (rodapé + passo "limites").
+    const form = await import('../web/src/jev/form.js');
+    const draft = form.draftFromJson(semTeto);
+    if (!draft.ok) throw new Error(draft.error);
+    const probs = form.draftProblems(draft.draft, [], { hasKey: true });
+    expect(probs.find((x) => x.code === 'budget.required')).toMatchObject({ step: 'limites' });
+    expect(form.draftProblems({ ...draft.draft, budgetUsd: 2 }, [], { hasKey: true }).some((x) => x.code === 'budget.required')).toBe(false);
+  });
+
   it('(iii) cancelar: nenhuma decisão nova sai; record aborted/cancelled com o parcial', async () => {
     const disco = new FakeIdb();
     const broker = new FakeLockBroker();

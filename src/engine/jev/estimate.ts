@@ -46,6 +46,12 @@ export interface JevEstimate {
   reserveUsd: number;
   byContestant: JevContestantEstimate[];
   byKind: { decision: number; llm: number; rewriter: number };
+  /**
+   * LLMs SEM preço no catálogo (ou catálogo de chat ilegível): a parte deles
+   * entra 0 em `usd`/`usdHigh` — a faixa é limite INFERIOR. Não-vazio = quem
+   * inicia tem de exigir confirmação explícita (e a SPA, um teto).
+   */
+  unknownPriceModelIds: string[];
   /** Menor Δ (p.p. de 1−Brier) detectável com os casos avaliados (σ prior declarado). */
   detectableDeltaPp: number | null;
   notes: string[];
@@ -119,8 +125,11 @@ export function estimateJev(r: ResolvedJevConfig, opts: EstimateJevOptions = {})
   if (fallbackUsado) {
     notes.push(`preço de decisão fora do catálogo: estimativa com US$ ${(JEV_FALLBACK_PROMPT_PRICE * 1e6).toFixed(3)}/Mtok (o custo real vem de usage.cost).`);
   }
-  if (out.some((o) => o.kind === 'llm' && o.priceSource === 'unknown')) {
-    notes.push('LLM sem preço no catálogo: a estimativa dele sai 0 (a porta dura serializa chamadas sem preço).');
+  const semPreco = [...new Set(r.contestants.filter((ct) => ct.kind === 'llm' && out.find((o) => o.id === ct.id)?.priceSource === 'unknown').map((ct) => ct.modelId))];
+  if (semPreco.length) {
+    notes.push(
+      `LLM sem preço no catálogo (${semPreco.join(', ')}): a parte dele sai 0 e a faixa é limite INFERIOR — defina um teto (a porta dura serializa chamadas sem preço).`,
+    );
   }
   const decision = out.filter((o) => o.kind === 'decision').reduce((s, o) => s + o.usd, 0);
   const llm = out.filter((o) => o.kind === 'llm').reduce((s, o) => s + o.usd, 0);
@@ -135,6 +144,7 @@ export function estimateJev(r: ResolvedJevConfig, opts: EstimateJevOptions = {})
     reserveUsd: reserve,
     byContestant: out,
     byKind: { decision, llm, rewriter: 0 },
+    unknownPriceModelIds: semPreco,
     detectableDeltaPp: nCasos >= 2 ? Number(deltaDetectavelPp(nCasos, JEV_SIGMA_PRIOR).toFixed(1)) : null,
     notes,
   };
@@ -171,6 +181,7 @@ export function estimateJevTrain(
     reserveUsd: Math.max(umaAvaliacao.reserveUsd, holdout.reserveUsd * 2),
     byContestant: umaAvaliacao.byContestant,
     byKind: { decision, llm: 0, rewriter },
+    unknownPriceModelIds: umaAvaliacao.unknownPriceModelIds,
     detectableDeltaPp: umaAvaliacao.detectableDeltaPp,
     notes,
   };

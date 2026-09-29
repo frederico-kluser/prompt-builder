@@ -137,4 +137,27 @@ describe('IndexedDB v3 (modo JEV)', () => {
     // Record de outro formato na store não é devolvido como JEV.
     expect(await store.loadJevRun('s-1')).toBeNull();
   });
+
+  it('L4: regravar a sessão SEM `cases` (marcar órfã) mantém o nº de casos do histórico', async () => {
+    const disco = new FakeIdb();
+    const { store } = await modulos(disco);
+    const s = {
+      format: 'jev-session@1',
+      id: 's-orfa',
+      status: 'running',
+      theme: 'Triagem',
+      config: { train: { iterations: 3 } },
+      iterations: [{ iteration: 0 }],
+      runIds: [],
+      totalCostUsd: 0.001,
+      startedAt: '2026-09-29T00:00:00.000Z',
+    } as unknown as JevSessionRecord;
+    expect(await store.saveJevSession(s, 40)).toBe(true);
+    // o caminho de `markJevOrphaned` + `gravar()` em web/src/jev/api.ts: sem o 2º argumento
+    expect(await store.saveJevSession({ ...s, status: 'aborted', stoppedReason: 'cancelled' } as JevSessionRecord)).toBe(true);
+    expect(disco.get('jevSummaries', 's-orfa')).toMatchObject({ status: 'aborted', cases: 40 });
+    // sessão nova (sem resumo anterior) e sem `cases`: 0, não lança
+    expect(await store.saveJevSession({ ...s, id: 's-nova' } as JevSessionRecord)).toBe(true);
+    expect(disco.get('jevSummaries', 's-nova')).toMatchObject({ cases: 0 });
+  });
 });
