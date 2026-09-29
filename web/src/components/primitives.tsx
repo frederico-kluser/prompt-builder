@@ -156,6 +156,18 @@ const STATUS_TONE: Record<string, string> = {
   aborted: 'border-border bg-muted text-muted-foreground',
 };
 
+/**
+ * Rótulo PT-BR do status (web-live#16): o valor gravado é o enum em inglês
+ * (dado — continua a chave do tom), a tela fala a língua dela.
+ */
+export const STATUS_LABEL: Record<string, string> = {
+  running: 'em andamento',
+  finished: 'concluída',
+  inconclusive: 'inconclusiva',
+  error: 'erro',
+  aborted: 'interrompida',
+};
+
 export function StatusPill({ status }: { status: string }) {
   return (
     <span
@@ -167,7 +179,7 @@ export function StatusPill({ status }: { status: string }) {
       {status === 'running' && (
         <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden="true" />
       )}
-      {status}
+      {STATUS_LABEL[status] ?? status}
     </span>
   );
 }
