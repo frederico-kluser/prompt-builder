@@ -29,7 +29,9 @@
 //
 // Negociação dual-era (IMPL-084, R-13:REC-2): o mesmo processo atende as duas
 // revisões implementadas (2026-07-28 + 2025-11-25) e ACEITA as antigas
-// (2025-06-18/2025-03-26) pela regra legacy. `server/discover` responde sempre
+// (2025-06-18/2025-03-26/2024-11-05) pela regra legacy. Batches JSON-RPC (que
+// a 2025-03-26 manda RECEBER) são atendidos: a resposta sai num array só.
+// `server/discover` responde sempre
 // (antes/depois de initialize) listando as suportadas; a versão pedida NUNCA é
 // ecoada sem checar — desconhecida numa requisição moderna vira -32022
 // (UnsupportedProtocolVersion) com data.supported/data.requested, e numa
@@ -102,8 +104,11 @@ export const SUPPORTED_PROTOCOL_VERSIONS = ['2026-07-28', '2025-11-25'] as const
  * Revisões antigas ACEITAS pela regra legacy: a sessão funciona (dialecto de
  * tools é compatível) e a resposta ecoa a pedida — isto NÃO é "eco cego":
  * são versões reconhecidas, o eco proibido é o de versão desconhecida.
+ * `2024-11-05` entra pelo mesmo motivo: initialize + tools/list + tools/call
+ * com conteúdo de texto são o mesmo dialecto (campo a mais é ignorado), e o
+ * SDK antigo que só fala ela DESCONECTA se receber outra versão.
  */
-export const LEGACY_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26'] as const;
+export const LEGACY_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'] as const;
 
 /** A mais recente implementada — resposta à versão desconhecida (regra legacy). */
 export const LATEST_PROTOCOL_VERSION: string = SUPPORTED_PROTOCOL_VERSIONS[0];
@@ -1333,6 +1338,11 @@ export async function callTool(
 export interface McpSessionOptions {
   /** Escreve UMA mensagem JSON-RPC (uma linha) no transporte. */
   write: (msg: Record<string, unknown>) => void;
+  /**
+   * Escreve a resposta de um BATCH (array, uma linha). Ausente, cada resposta
+   * sai avulsa por `write` (o id casa do mesmo jeito).
+   */
+  writeBatch?: (msgs: Record<string, unknown>[]) => void;
   /** Resolvida preguiçosamente: `read_docs` funciona sem key. */
   getKey?: () => Promise<string>;
   log?: (msg: string) => void;
@@ -1352,6 +1362,13 @@ export interface ShutdownResult {
   forced: boolean;
   /** Chamadas ainda pendentes quando a espera terminou. */
   pending: number;
+}
+
+/** Destino das respostas de UMA mensagem: o transporte ou o coletor de um batch. */
+interface Saida {
+  write: (msg: Record<string, unknown>) => void;
+  /** Trabalho assíncrono cuja resposta ainda vai sair (tools/call, tasks/*). */
+  track: (p: Promise<void>) => void;
 }
 
 interface InflightCall {
@@ -1417,7 +1434,11 @@ export class McpSession {
    */
   private tasksNaSessao = false;
 
+  /** Mensagem avulsa: a resposta vai direto ao transporte. */
+  private readonly direta: Saida;
+
   constructor(private readonly opts: McpSessionOptions) {
+    this.direta = { write: (m) => this.opts.write(m), track: () => undefined };
     this.log = opts.log ?? (() => undefined);
     this.jobs = opts.jobs ?? new JobManager({ lane: opts.lane, log: this.log });
   }
@@ -1443,15 +1464,46 @@ export class McpSession {
     try {
       msg = JSON.parse(trimmed);
     } catch {
-      this.replyError(null, -32700, 'JSON inválido');
+      this.replyError(this.direta, null, -32700, 'JSON inválido');
       return;
     }
     this.handleMessage(msg);
   }
 
+  /**
+   * Uma mensagem JSON-RPC — ou um BATCH (array não vazio). A 2025-03-26, que
+   * esta sessão aceita, manda RECEBER batches: cada elemento é atendido pelo
+   * caminho normal e as respostas saem juntas num array só, depois que todas
+   * assentam (notificação não responde; batch só de notificações não escreve
+   * nada — nunca um array vazio). `[]` é UMA requisição inválida (-32600) e
+   * array dentro de batch é um elemento inválido, sem recursão.
+   */
   handleMessage(msg: unknown): void {
+    if (Array.isArray(msg) && msg.length > 0) {
+      this.handleBatch(msg);
+      return;
+    }
+    this.dispatch(msg, this.direta);
+  }
+
+  private handleBatch(itens: unknown[]): void {
+    const respostas: Record<string, unknown>[] = [];
+    const pendentes: Promise<void>[] = [];
+    const coletor: Saida = {
+      write: (m) => respostas.push(m),
+      track: (p) => pendentes.push(p),
+    };
+    for (const item of itens) this.dispatch(item, coletor);
+    void Promise.allSettled(pendentes).then(() => {
+      if (respostas.length === 0) return;
+      if (this.opts.writeBatch) this.opts.writeBatch(respostas);
+      else for (const r of respostas) this.opts.write(r);
+    });
+  }
+
+  private dispatch(msg: unknown, out: Saida): void {
     if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
-      this.replyError(null, -32600, 'Requisição inválida');
+      this.replyError(out, null, -32600, 'Requisição inválida');
       return;
     }
     const req = msg as JsonRpcRequest & { result?: unknown; error?: unknown };
@@ -1460,7 +1512,7 @@ export class McpSession {
     if (typeof req.method !== 'string') {
       // Resposta do cliente (este servidor nunca pede nada) ou lixo sem método.
       if (!isNotification && !('result' in req) && !('error' in req)) {
-        this.replyError(req.id, -32600, 'Requisição inválida');
+        this.replyError(out, req.id, -32600, 'Requisição inválida');
       }
       return;
     }
@@ -1476,7 +1528,7 @@ export class McpSession {
             : { tools: {} };
           if (pedido === undefined || VERSOES_ACEITAS.has(pedido)) {
             // Suportada (ou aceita pela regra legacy): ecoar é o correto nas duas eras.
-            this.reply(req.id, {
+            this.reply(out, req.id, {
               protocolVersion: pedido ?? LATEST_PROTOCOL_VERSION,
               // A extensão só é anunciada a quem a declarou: cliente legacy sem
               // ela não vê campo desconhecido em `capabilities`.
@@ -1490,13 +1542,13 @@ export class McpSession {
           // regra antiga: responder com uma versão suportada (a mais recente
           // implementada) e NOMEAR as suportadas no diagnóstico.
           if (requestDeclaresModernEra(params)) {
-            this.replyError(req.id, UNSUPPORTED_PROTOCOL_VERSION, 'UnsupportedProtocolVersion', {
+            this.replyError(out, req.id, UNSUPPORTED_PROTOCOL_VERSION, 'UnsupportedProtocolVersion', {
               supported: [...SUPPORTED_PROTOCOL_VERSIONS],
               requested: pedido,
             });
             return;
           }
-          this.reply(req.id, {
+          this.reply(out, req.id, {
             protocolVersion: LATEST_PROTOCOL_VERSION,
             capabilities,
             serverInfo: SERVER_INFO,
@@ -1514,7 +1566,7 @@ export class McpSession {
           // MUST da era moderna (IMPL-084): sempre disponível, antes/depois de
           // qualquer initialize, listando as duas revisões implementadas.
           if (!isNotification) {
-            this.reply(req.id, {
+            this.reply(out, req.id, {
               resultType: 'complete',
               supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
               capabilities: { tools: {}, extensions: { [TASKS_EXTENSION]: {} } },
@@ -1528,11 +1580,11 @@ export class McpSession {
           this.cancel(req.params);
           return;
         case 'ping':
-          if (!isNotification) this.reply(req.id, {});
+          if (!isNotification) this.reply(out, req.id, {});
           return;
         case 'tools/list':
           if (!isNotification) {
-            this.reply(req.id, {
+            this.reply(out, req.id, {
               tools: (this.opts.tools ?? TOOLS).map((t) => ({
                 name: t.name,
                 title: t.annotations?.title,
@@ -1563,20 +1615,20 @@ export class McpSession {
             this.log('[mcp] tools/call sem id ignorado (notificação não pode disparar ferramenta)');
             return;
           }
-          this.startCall(req.id as string | number, req.params);
+          this.startCall(req.id as string | number, req.params, out);
           return;
         case 'tasks/get':
         case 'tasks/cancel':
         case 'tasks/update':
-          if (!isNotification) this.handleTask(req.id as string | number, req.method, req.params);
+          if (!isNotification) this.handleTask(req.id as string | number, req.method, req.params, out);
           return;
         default:
           if (!isNotification) {
-            this.replyError(req.id, -32601, `Método não suportado: ${umaLinha(req.method, 80)}`);
+            this.replyError(out, req.id, -32601, `Método não suportado: ${umaLinha(req.method, 80)}`);
           }
       }
     } catch (err) {
-      if (!isNotification) this.replyError(req.id, -32603, publicErrorMessage(err));
+      if (!isNotification) this.replyError(out, req.id, -32603, publicErrorMessage(err));
     }
   }
 
@@ -1612,16 +1664,16 @@ export class McpSession {
 
   // --- interno ---------------------------------------------------------------
 
-  private startCall(id: string | number, params: unknown): void {
+  private startCall(id: string | number, params: unknown, out: Saida): void {
     if (this.closing) {
-      this.replyError(id, -32000, 'Servidor MCP encerrando: chamada recusada.');
+      this.replyError(out, id, -32000, 'Servidor MCP encerrando: chamada recusada.');
       return;
     }
     const key = requestKey(id);
     if (this.inflight.has(key)) {
       // Ids precisam ser únicos na sessão; reusar um em voo tornaria o
       // cancelamento ambíguo (qual das duas parar?).
-      this.replyError(id, -32600, 'id de requisição já em uso por uma chamada em andamento.');
+      this.replyError(out, id, -32600, 'id de requisição já em uso por uma chamada em andamento.');
       return;
     }
     const p = (params ?? {}) as { name?: unknown; arguments?: unknown };
@@ -1658,17 +1710,18 @@ export class McpSession {
           return;
         }
         if (!result) {
-          this.replyError(id, -32602, `Ferramenta desconhecida: ${call.tool}`);
+          this.replyError(out, id, -32602, `Ferramenta desconhecida: ${call.tool}`);
           return;
         }
-        this.reply(id, result);
+        this.reply(out, id, result);
       } catch (err) {
         // callTool não rejeita (erro de ferramenta vira isError); rede de segurança.
-        if (!call.cancelled) this.replyError(id, -32603, publicErrorMessage(err));
+        if (!call.cancelled) this.replyError(out, id, -32603, publicErrorMessage(err));
       } finally {
         this.inflight.delete(key);
       }
     })();
+    out.track(call.done);
   }
 
   private cancel(params: unknown): void {
@@ -1694,51 +1747,52 @@ export class McpSession {
    * não declarou a extensão recebe -32021 com `data.requiredCapabilities`
    * (MUST da spec). Assíncrono (lê disco), mas nunca prende o laço de leitura.
    */
-  private handleTask(id: string | number, method: string, params: unknown): void {
+  private handleTask(id: string | number, method: string, params: unknown, out: Saida): void {
     if (!this.tasksNaSessao && !requestDeclaresTasks(params)) {
-      this.replyError(id, MISSING_CAPABILITY, 'Missing required client capability', {
+      this.replyError(out, id, MISSING_CAPABILITY, 'Missing required client capability', {
         requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } },
       });
       return;
     }
     const taskId = (params as { taskId?: unknown } | null | undefined)?.taskId;
-    void (async () => {
+    const trabalho = (async () => {
       try {
         if (method === 'tasks/update') {
           // Nenhum job daqui pede input (nunca fica em input_required).
-          this.replyError(id, -32602, 'A task não está aguardando input (input_required).');
+          this.replyError(out, id, -32602, 'A task não está aguardando input (input_required).');
           return;
         }
         if (!isValidRecordId(taskId)) {
-          this.replyError(id, -32602, 'taskId inválido.');
+          this.replyError(out, id, -32602, 'taskId inválido.');
           return;
         }
         if (method === 'tasks/cancel') {
           // Cooperativo: reconhece o pedido; o estado vira 'cancelled' quando a
           // run gravar o parcial (tasks/get mostra).
           const v = await this.jobs.cancel(taskId, 'tasks/cancel do cliente');
-          if (!v) this.replyError(id, -32602, 'Failed to retrieve task: Task not found');
-          else this.reply(id, { resultType: 'complete' });
+          if (!v) this.replyError(out, id, -32602, 'Failed to retrieve task: Task not found');
+          else this.reply(out, id, { resultType: 'complete' });
           return;
         }
         const job = await this.jobs.status(taskId, { progress: false });
         if (!job) {
-          this.replyError(id, -32602, 'Failed to retrieve task: Task not found');
+          this.replyError(out, id, -32602, 'Failed to retrieve task: Task not found');
           return;
         }
-        this.reply(id, taskGetResult(job));
+        this.reply(out, id, taskGetResult(job));
       } catch (err) {
-        this.replyError(id, -32603, publicErrorMessage(err));
+        this.replyError(out, id, -32603, publicErrorMessage(err));
       }
     })();
+    out.track(trabalho);
   }
 
-  private reply(id: unknown, result: unknown): void {
-    this.opts.write({ jsonrpc: '2.0', id, result });
+  private reply(out: Saida, id: unknown, result: unknown): void {
+    out.write({ jsonrpc: '2.0', id, result });
   }
 
-  private replyError(id: unknown, code: number, message: string, data?: unknown): void {
-    this.opts.write({ jsonrpc: '2.0', id, error: data === undefined ? { code, message } : { code, message, data } });
+  private replyError(out: Saida, id: unknown, code: number, message: string, data?: unknown): void {
+    out.write({ jsonrpc: '2.0', id, error: data === undefined ? { code, message } : { code, message, data } });
   }
 }
 
@@ -1786,6 +1840,9 @@ export async function cmdMcp(argv: string[]): Promise<number> {
   const session = new McpSession({
     write: (msg) => {
       if (!stdoutQuebrado) process.stdout.write(`${JSON.stringify(msg)}\n`);
+    },
+    writeBatch: (msgs) => {
+      if (!stdoutQuebrado) process.stdout.write(`${JSON.stringify(msgs)}\n`);
     },
     getKey,
     log: (m) => {
