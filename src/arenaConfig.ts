@@ -140,6 +140,12 @@ export function arenaConfigToRunConfig(
     ...(file.allowPii ? { allowPii: true } : {}),
     // IMPL-075: modo auditável (juiz + duelo + gabarito com provedor travado).
     ...(file.judging?.auditable ? { auditable: true } : {}),
+    // IMPL-063/IMPL-115 (left#4): dedup semântico e modo econômico do juiz —
+    // sem estas linhas o arquivo os validaria e a run rodaria sem eles.
+    ...(file.scenarioDedup ? { scenarioDedup: { ...file.scenarioDedup } } : {}),
+    ...(file.judgeCascade
+      ? { judgeCascade: { cheap: [...file.judgeCascade.cheap], strong: file.judgeCascade.strong } }
+      : {}),
     // Contratos never-break (F2/P0.3): vivem no perfil do prompt, valem para
     // toda reescrita do variator.
     ...(file.prompt?.contracts ? { contracts: file.prompt.contracts } : {}),

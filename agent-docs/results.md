@@ -62,7 +62,9 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 | `finalists` | ids que disputaram a final |
 | `verdictAggregation` | `"majority"` = painel por maioria simples (IMPL-007); ausente = escala antiga |
 | `stages[].referenceJudge.verdictTieByContestant` | empates técnicos do painel: id → votos |
-| `judgeDiagnostics` | pin do **contrato do juiz** (hash do prompt + modelos) + viés de verbosidade medido (correlação score×comprimento) |
+| `judgeDiagnostics` | pin do **contrato do juiz** (hash do prompt + modelos) + viés de verbosidade medido (correlação score×comprimento); `contractAudit.line` = "mesmo contrato desde a última run" ou "scores não comparáveis" |
+| `itemSaturation` | taxa de acerto por item × contestant; `reviewQueue` = **fila de revisão humana** (100% `resolve` ou 100% `nao` em ≥ k execuções: revise o GABARITO, nunca descarte). `runs show` lista item a item |
+| `datagenReport` / `judgeCascade` | geração (entregues/pedidos, descartes exato/semântico, reposição, falta) e modo econômico (fração ao juiz forte, gatilhos) — `runs show` imprime os dois |
 | `fairnessWarnings` | avisos de imparcialidade (juiz da família do competidor) — não-bloqueantes |
 | `repeats` (compare) | `record.stages.length === cenários × repeats` — cópias são observações independentes |
 
@@ -128,7 +130,8 @@ e a vista `arena-config@1`; com `--replay` ele roda o pipeline de HOJE sobre as
 respostas e saídas de juiz GRAVADAS (nenhuma chamada sai para a rede, custo $0)
 e compara o judge-score por cenário — divergência = drift de pontuação (exit 3,
 `config.replay_mismatch`); run de agente não tem replay. O `runs export` produz `prompt-builder-run@1` —
-auditoria completa sem o disco original. O `--apply` nunca perde o prompt de
+auditoria completa sem o disco original, com o bloco `audit` explícito (linha do
+contrato do juiz e as filas de revisão humana do gabarito). O `--apply` nunca perde o prompt de
 produção: backup `<destino>.bak-<ts>` antes de sobrescrever, diff sempre.
 
 ### Gate do handoff (`--apply`)

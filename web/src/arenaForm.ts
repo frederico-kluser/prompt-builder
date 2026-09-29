@@ -340,6 +340,15 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
     note: 'revisão de PII do arquivo (dados sintéticos) — vale só para o dado deste arquivo; não é exportado',
     oneShot: true,
   },
+  // IMPL-063/IMPL-115 (left#4, onda 3): aceitos pelo schema e aplicados pelo
+  // CLI/servidor (`--config`); a tela ainda não os repassa — `ignorado` com
+  // aviso no import, como o `judging.auditable`, até ganharem controle próprio.
+  'scenarioDedup.semantic': { kind: 'json-only', status: 'ignorado', note: 'dedup semântico dos cenários gerados (embeddings) — aplicado pelo CLI; a tela não repassa' },
+  'scenarioDedup.embedModelId': { kind: 'json-only', status: 'ignorado', note: 'modelo de embeddings do dedup — aplicado pelo CLI; a tela não repassa' },
+  'scenarioDedup.cosineThreshold': { kind: 'json-only', status: 'ignorado', note: 'limiar de cosseno do dedup (0.5–1) — aplicado pelo CLI; a tela não repassa' },
+  'scenarioDedup.echoThreshold': { kind: 'json-only', status: 'ignorado', note: 'limiar do eco de template (0.5–1) — aplicado pelo CLI; a tela não repassa' },
+  'judgeCascade.cheap': { kind: 'json-only', status: 'ignorado', note: 'modo econômico: os 2 juízes baratos — aplicado pelo CLI; a tela não repassa' },
+  'judgeCascade.strong': { kind: 'json-only', status: 'ignorado', note: 'modo econômico: o juiz forte da escalada — aplicado pelo CLI; a tela não repassa' },
 };
 
 /** A lista visível "só pelo arquivo JSON" (Avançado). */

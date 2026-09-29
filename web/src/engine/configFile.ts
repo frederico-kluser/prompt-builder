@@ -150,6 +150,18 @@ export interface ArenaConfigFile {
    * botão "Revisei" da SPA) — que o grava aqui para a run herdar a revisão.
    */
   allowPii?: boolean;
+  /**
+   * IMPL-063 (left#4): dedup SEMÂNTICO dos cenários gerados — `semantic: true`
+   * liga embeddings (mesmo gateway/ledger, custo no papel datagen). Ausente =
+   * só a passe exata do par. Aplicado pelo CLI/servidor; a SPA avisa no import.
+   */
+  scenarioDedup?: { semantic?: boolean; embedModelId?: string; cosineThreshold?: number; echoThreshold?: number };
+  /**
+   * IMPL-115 (left#4): modo ECONÔMICO do julgamento — 2 juízes baratos em
+   * paralelo e o forte só nos vereditos em dúvida. 3 modelos distintos.
+   * Aplicado pelo CLI/servidor; a SPA avisa no import.
+   */
+  judgeCascade?: { cheap: string[]; strong: string };
 }
 
 // ----------------------------------------------------------------------------
@@ -433,11 +445,44 @@ export const arenaConfigSchema = z
         .optional(),
       piiMode: z.enum(['redact', 'synthetic'], "piiMode deve ser 'redact' ou 'synthetic'").optional(),
       allowPii: z.boolean('allowPii deve ser true ou false').optional(),
+      // IMPL-063/IMPL-115 (left#4): antes só o RunConfig cru e as flags
+      // (`--semantic-dedup`, `--judge-cascade`) os expressavam.
+      scenarioDedup: z
+        .object(
+          {
+            semantic: z.boolean('deve ser boolean').optional(),
+            embedModelId: z.string('deve ser texto').min(1, 'não pode ser vazio').optional(),
+            cosineThreshold: z.number('deve ser número').min(0.5, 'mínimo 0.5').max(1, 'máximo 1').optional(),
+            echoThreshold: z.number('deve ser número').min(0.5, 'mínimo 0.5').max(1, 'máximo 1').optional(),
+          },
+          'scenarioDedup deve ser um objeto',
+        )
+        .optional(),
+      judgeCascade: z
+        .object(
+          {
+            cheap: z
+              .array(z.string('ids de juiz devem ser texto').min(1, 'id de juiz não pode ser vazio'), 'deve ser uma lista de ids de modelo')
+              .length(2, 'informe exatamente 2 juízes baratos'),
+            strong: z.string('obrigatório').min(1, 'obrigatório'),
+          },
+          'judgeCascade deve ser { cheap: [2 ids], strong }',
+        )
+        .optional(),
     },
     'O arquivo deve ser um objeto de configuração',
   )
   .superRefine((cfg, ctx) => {
     const { mode, models, variation } = cfg;
+
+    // IMPL-115: o forte não pode ser um dos baratos (nem os baratos iguais).
+    if (cfg.judgeCascade && new Set([...cfg.judgeCascade.cheap, cfg.judgeCascade.strong]).size !== 3) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['judgeCascade'],
+        message: 'os 2 baratos e o forte precisam ser modelos distintos',
+      });
+    }
 
     // Rótulo esperado curto sem `labelSet` = erro de config (IMPL-003,
     // R-03b:DEC-4): sem o conjunto de rótulos o verificador estrito não

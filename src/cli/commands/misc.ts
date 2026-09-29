@@ -543,6 +543,15 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     } else if (out.isText) {
       out.raw(texto);
     }
+    // left#10: a auditoria (bloco `audit` do artefato) também narrada no stderr.
+    const { judgeContract, itemReviewQueue, needsHumanReview } = artifact.audit;
+    if (judgeContract?.line) out.info(judgeContract.line);
+    if (itemReviewQueue.length || needsHumanReview.length) {
+      out.info(
+        `revisão humana do gabarito: ${itemReviewQueue.length} item(ns) saturado(s) + ` +
+          `${needsHumanReview.length} na fila needs-human-review (audit no artefato)`,
+      );
+    }
     out.result(true, 'runs.export', { runId: record.id, file: alvo ?? null, artifact });
     recordTelemetryEvent('runs.export', ctx.dataDir); // IMPL-120: funil (no-op sem opt-in)
     return EXIT.OK;
@@ -646,10 +655,52 @@ export async function cmdRuns(argv: string[]): Promise<number> {
       out.line(`! revisão humana: ${record.needsHumanReview.length} item(ns) na fila needs-human-review (${motivos})`);
     }
     if (record.itemSaturation?.reviewQueue.length) {
+      const fila = record.itemSaturation.reviewQueue;
       out.line(
-        `! saturação: ${record.itemSaturation.reviewQueue.length} item(ns) com 100% 'resolve' ou 100% 'nao' em ` +
+        `! saturação: ${fila.length} item(ns) com 100% 'resolve' ou 100% 'nao' em ` +
           `≥${record.itemSaturation.minExecutions} execuções — revise o GABARITO (nunca descarte o item)`,
       );
+      // IMPL-112 (left#10): a FILA de revisão humana, item a item (teto de 5 no
+      // texto; inteira em --json/`runs export`).
+      for (const it of fila.slice(0, 5)) {
+        out.line(
+          `  ${it.saturated === 'all-nao' ? "100% 'nao'    " : "100% 'resolve'"} ${String(it.executions).padStart(3)} exec · ` +
+            `etapa(s) ${it.stageIndexes.join(',')} — ${it.question.replace(/\s+/g, ' ').slice(0, 70)}`,
+        );
+      }
+      if (fila.length > 5) out.line(`  … +${fila.length - 5} item(ns) em --json (itemReviewQueue)`);
+    }
+    // IMPL-063 / web-live#7 (left#4): o relatório da geração de cenários.
+    const dg = record.datagenReport;
+    if (dg) {
+      out.line(
+        `datagen: ${dg.final}/${dg.requested} cenário(s) gerado(s) entregue(s) · descartes: ${dg.dedupedExact} exato(s) + ` +
+          `${dg.dedupedSemantic} semântico(s)${dg.droppedVsSeed ? ` (${dg.droppedVsSeed} repetindo o seed)` : ''} · ` +
+          `${dg.backfillRounds}/${dg.maxBackfillRounds} reposição(ões)` +
+          (dg.semantic ? ` · embeddings ${dg.embedModelId ?? '(injetado)'} (cosseno ${dg.effectiveCosineThreshold})` : ''),
+      );
+      if (dg.warning) out.line(`! ${dg.warning}`);
+      else if (dg.alert) out.line(`! dedup removeu ${(dg.rate * 100).toFixed(0)}% dos gerados — o gerador repete o molde`);
+      if (dg.semanticError) out.line(`! embeddings falharam (${dg.semanticError}) — o dedup seguiu só com a passe exata`);
+      if (dg.rubricUnanswerable > 0) {
+        out.line(`! ${dg.rubricUnanswerable} rubrica(s) exigem fatos ausentes do caso — revise o cenário/contexto`);
+      }
+    }
+    // IMPL-115 (left#4): o modo econômico — quanto foi ao juiz forte e por quê.
+    const cc = record.judgeCascade;
+    if (cc) {
+      const motivos = Object.entries(cc.reasons)
+        .filter(([, n]) => n > 0)
+        .map(([k, n]) => `${k}=${n}`)
+        .join(' ');
+      out.line(
+        `modo econômico: ${cc.escalatedVerdicts}/${cc.verdicts} veredito(s) ao juiz forte ` +
+          `(${(cc.escalatedFraction * 100).toFixed(0)}%) em ${cc.escalatedStages}/${cc.stages} etapa(s) · ` +
+          `baratos ${cc.cheapJudgeIds.join(' + ')} → forte ${cc.strongJudgeId}${motivos ? ` · gatilhos: ${motivos}` : ''}`,
+      );
+      if (cc.strongFailedStages > 0) {
+        out.line(`! o juiz forte falhou em ${cc.strongFailedStages} etapa(s): valeu o consenso dos baratos (degradado)`);
+      }
     }
     for (const aviso of record.fairnessWarnings ?? []) out.line(`! ${aviso}`);
     // IMPL-056/068: política dos cenários gravada no início da run (todas as fontes).
@@ -680,6 +731,14 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     // `--json` vê exatamente o que o texto mostra (null sem repetição).
     repetition: repeticao ? { repeats: repeticao.repeats, contestants: repeticao.contestants } : null,
     judgeDiagnostics: record.judgeDiagnostics ?? null,
+    // IMPL-057 (left#10): a linha de auditoria do contrato do juiz, explícita.
+    judgeContractAudit: record.judgeDiagnostics?.contractAudit ?? null,
+    // IMPL-112/IMPL-055 (left#10): as filas de revisão HUMANA do gabarito.
+    itemReviewQueue: record.itemSaturation?.reviewQueue ?? [],
+    needsHumanReview: record.needsHumanReview ?? [],
+    // IMPL-063/IMPL-115 (left#4): relatório da geração e do modo econômico.
+    datagenReport: record.datagenReport ?? null,
+    judgeCascade: record.judgeCascade ?? null,
     // IMPL-057: falhas agrupadas (cenário × categoria × causa) no mesmo payload do texto.
     verdictFailureGroups: gruposDeFalha,
     fairnessWarnings: record.fairnessWarnings ?? [],
