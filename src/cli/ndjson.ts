@@ -16,6 +16,7 @@ import {
 } from '../engine/truncation.js';
 import { agentVerdictTreeVersionOf, classifyStop } from '../agent/verdictTree.js';
 import { infraSummaryFields } from '../agent/infraError.js';
+import { holdoutSkipReasonOf } from '../engine/sessionDecision.js';
 
 /**
  * Ledger SEM a lista de pendentes: no stream vao so os 6 numeros (um run com
@@ -455,6 +456,8 @@ export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {
         // IMPL-005: n nominal × efetivo do pareamento final (mesmo sem significância).
         ...(e.record.pairing ? { pairing: e.record.pairing } : {}),
         ...(e.record.holdoutSkipped ? { holdoutSkipped: true } : {}),
+        // cli#9: motivo do holdout pulado (também em sessões antigas, derivado).
+        ...(holdoutSkipReasonOf(e.record) ? { holdoutSkipReason: holdoutSkipReasonOf(e.record) } : {}),
         ...(e.record.budgetExhausted ? { budgetExhausted: true } : {}),
       });
       break;

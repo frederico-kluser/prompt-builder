@@ -73,6 +73,7 @@ import { trainToCompletion } from './trainer.js';
 import { agentVerdictTreeVersionOf, classifyStop } from './agent/verdictTree.js';
 import { infraSummaryFields, type AgentInfraCounts } from './agent/infraError.js';
 import { winnerFromStandings, type StandingsWinner } from './engine/duelCore.js';
+import { holdoutSkipReasonOf } from './engine/sessionDecision.js';
 // IMPL-031 (revisão): as tools que GASTAM passam pelas mesmas camadas do CLI —
 // ledger da máquina (teto diário somando processos) e lock por config.
 import { withSpendGuards } from './cli/spendGuards.js';
@@ -340,6 +341,8 @@ export function trainingSummary(rec: SessionRecord): Record<string, unknown> {
     significance: rec.significance,
     // Sem o holdout o ganho NÃO está validado contra sobreajuste.
     holdoutSkipped: Boolean(rec.holdoutSkipped),
+    // cli#9: o PORQUÊ (cenários de menos ≠ orçamento ≠ cancelamento) — o remédio muda.
+    ...(holdoutSkipReasonOf(rec) ? { holdoutSkipReason: holdoutSkipReasonOf(rec) } : {}),
     budgetExhausted: Boolean(rec.budgetExhausted),
   };
 }
