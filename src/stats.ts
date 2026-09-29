@@ -996,14 +996,32 @@ export function formatIterationGate(gate: IterationGate): string {
       : r === 'min-gain'
         ? `Δ abaixo da margem`
         : r === 'reeval'
-          ? `re-avaliação limpa não confirmou (Δ ${gate.reeval ? fmtSignedPp(gate.reeval.gainPp) : '?'} em ${gate.reeval?.size ?? '?'} cenários)`
+          ? formatReevalHold(gate.reeval)
           : `p ajustado > ${gate.test?.alpha ?? 0.05}`,
   );
   // IMPL-013: promoção só vale depois da re-avaliação limpa — o Δ dela fica visível.
   const reeval = gate.reeval?.confirmed
-    ? ` — confirmado na re-avaliação limpa (Δ ${fmtSignedPp(gate.reeval.gainPp)} em ${gate.reeval.size} cenários)`
+    ? ` — confirmado na re-avaliação limpa (Δ ${fmtSignedPp(gate.reeval.gainPp)} em ${gate.reeval.pairing?.nEfetivo ?? gate.reeval.size} cenários)`
     : '';
-  return `${GATE_DECISION_LABEL[gate.decision]}: ${summary}${why.length && gate.decision !== 'inconclusive' ? ` — segurou: ${why.join(', ')}` : ''}${reeval}`;
+  // cli#8: re-avaliação que NÃO terminou não é evidência — a decisão segue
+  // 'held' (nada promovido), mas o rótulo diz que ela foi interrompida.
+  const label = gate.reeval?.runStatus ? `${GATE_DECISION_LABEL[gate.decision]} (re-avaliação interrompida)` : GATE_DECISION_LABEL[gate.decision];
+  return `${label}: ${summary}${why.length && gate.decision !== 'inconclusive' ? ` — segurou: ${why.join(', ')}` : ''}${reeval}`;
+}
+
+/**
+ * Por que a re-avaliação limpa segurou (IMPL-013). cli#8: quando a run dela
+ * NÃO terminou (`runStatus` — cancelada, sem orçamento, erro) não houve
+ * comparação nenhuma: nada de "Δ +0.0pp em 5 cenários" inventado (o 0 é o
+ * default e o 5 era o tamanho PLANEJADO do minibatch). O n exibido é o de
+ * pares completos que de fato entraram (`pairing.nEfetivo`).
+ */
+function formatReevalHold(r: IterationGate['reeval']): string {
+  if (!r) return 're-avaliação limpa não confirmou';
+  if (r.runStatus) return `re-avaliação limpa interrompida (run ${r.runStatus}) — sem evidência`;
+  if (!r.runId) return 're-avaliação limpa não rodou (sem régua, candidato ou cenário de treino) — sem evidência';
+  const n = r.pairing?.nEfetivo ?? r.size;
+  return `re-avaliação limpa não confirmou (Δ ${fmtSignedPp(r.gainPp)} em ${n} cenários)`;
 }
 
 /** `80%` / `62.5%` — completude e frações no relatório. */

@@ -66,12 +66,19 @@ export type {
   StoredSignificance,
 } from '../../../src/types.js';
 // Pareamento honesto (IMPL-005): FONTE ÚNICA em src/types.ts, como a significância.
-import type { IterationGate, MultiplicityMethod, RunCompleteness, SessionPairing } from '../../../src/types.js';
+import type {
+  HoldoutSkipReason,
+  IterationGate,
+  MultiplicityMethod,
+  RunCompleteness,
+  SessionPairing,
+} from '../../../src/types.js';
 export type {
   BestOfKEntry,
   BestOfKTest,
   GateConclusion,
   GateHoldReason,
+  HoldoutSkipReason,
   IterationGate,
   MultiplicityMethod,
   ObservationCoverage,
@@ -999,10 +1006,16 @@ export interface SessionRecord {
   /** Iteracao em que o orcamento/cancelamento interrompeu a sessao. */
   stoppedAtIteration?: number;
   /**
-   * true = o campeao NAO passou pelo gate de holdout (pulado por orcamento ou
-   * cancelamento): nao validado contra sobreajuste — a UI precisa dizer isso.
+   * true = o campeao NAO passou pelo gate de holdout (seleção < 20 cenários,
+   * orçamento, cancelamento ou run de holdout sem veredito): nao validado
+   * contra sobreajuste — a UI precisa dizer isso, com o MOTIVO de
+   * `holdoutSkipReason` (espelho de src/types.ts).
    */
   holdoutSkipped?: boolean;
+  /** Por que a sessão terminou sem resultado de holdout (espelho de src/types.ts). */
+  holdoutSkipReason?: HoldoutSkipReason;
+  /** Runs de re-avaliação limpa (IMPL-013) — fora de `runIds` de propósito (espelho de src/types.ts). */
+  reevalRunIds?: string[];
   startedAt: string;
   finishedAt?: string;
   error?: string;

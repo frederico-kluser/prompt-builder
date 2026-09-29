@@ -181,6 +181,8 @@
   "dist/engine/scenarioRules.js",
   "dist/engine/sensitiveRouting.d.ts",
   "dist/engine/sensitiveRouting.js",
+  "dist/engine/sessionDecision.d.ts",
+  "dist/engine/sessionDecision.js",
   "dist/engine/trainingPolicy.d.ts",
   "dist/engine/trainingPolicy.js",
   "dist/engine/truncation.d.ts",
