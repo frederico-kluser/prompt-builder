@@ -13,6 +13,7 @@ import { JUDGE_CONTRACT_TEXT } from './refJudge';
 import {
   noteJudgeContract,
   pinJudgeContract,
+  pipelineContractComponents,
   verbosityReport,
   verbositySamples,
   type VerbositySampleRow,
@@ -869,6 +870,10 @@ async function runLoop(
               judgeModelIds: record.config.judgeModelIds,
               timeoutMs: record.config.timeoutMs,
               passes: record.config.judgePasses,
+              // web-code#2: o esforço do juiz ia só para o pointwise — o
+              // listwise (default do compare por modelos na SPA) rodava sem ele
+              // enquanto o contrato gravado dizia o contrário. Espelho do Node.
+              reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
               ctx,
             });
             throwIfCancelled();
@@ -1181,17 +1186,17 @@ async function runLoop(
     // IMPL-049 (R-03a:REC-9, espelho de src/orchestrator.ts): o contrato cobre
     // juízes + prompts (pointwise/duelo/listwise) + modelo de referência +
     // think level + provedor; drift dispara `judge.contract.changed`.
-    const components: JudgeContractComponents = {
+    // cli#0 + IMPL-117 (espelho do Node): fonte única dos componentes — think
+    // level EFETIVO (default incluso) e a temperatura que os juízes enviam.
+    const components: JudgeContractComponents = pipelineContractComponents({
       duelPromptText: DUEL_HEAD,
       listwisePromptText: JUDGE_LISTWISE_CONTRACT_TEXT,
       referenceModelId,
-      // Ausente = default (canônico vazio) — mesmo hash que o `baseline check`
-      // recomputa; fora do default entra cheio e é drift visível.
       judgeReasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
       providerPolicy: ctx.sink?.sensitiveRouting?.()
         ? JSON.stringify(ctx.sink.sensitiveRouting!())
         : undefined,
-    };
+    });
     const contract = pinJudgeContract(
       record.config.judgeModelIds,
       JUDGE_CONTRACT_TEXT,

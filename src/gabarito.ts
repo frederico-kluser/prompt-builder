@@ -12,7 +12,7 @@ import {
   parseStrictJudgeJson,
   strictObjectSchema,
 } from './engine/judgeGuard.js';
-import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
+import { callJudgeWithRetry, JUDGE_TEMPERATURE, withReminder } from './engine/judgeRetry.js';
 import {
   DEFAULT_AUDIT_SAMPLE_RATE,
   checkReferenceAgainstRubric,
@@ -283,7 +283,7 @@ export async function verifyReferenceAgainstRubric(params: {
           { role: 'system', content: `Você é o VERIFICADOR de gabaritos deste benchmark: confere, com a rubrica da etapa como régua, se o gabarito gerado a satisfaz. ${DATA_BLOCKS_NOTICE} Responde APENAS com o JSON pedido.` },
           { role: 'user', content: withReminder(user, reminder) },
         ],
-        temperature: 0,
+        temperature: JUDGE_TEMPERATURE,
         maxTokens: ROLE_MAX_TOKENS.judge,
         responseFormatJson: true,
         responseSchema: { name: 'verificacao_gabarito', schema: RUBRIC_CHECK_SCHEMA },

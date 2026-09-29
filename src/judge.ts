@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { ROLE_MAX_TOKENS } from './roleLimits.js';
-import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
+import { callJudgeWithRetry, JUDGE_TEMPERATURE, withReminder } from './engine/judgeRetry.js';
 import { isJudgeCutKind } from './engine/truncation.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
 import { aggregateVerdicts } from './engine/verdictAggregate.js';
@@ -267,7 +267,7 @@ async function rankOnePass(
           { role: 'system', content: prompt.system },
           { role: 'user', content: withReminder(prompt.user, reminder) },
         ],
-        temperature: 0,
+        temperature: JUDGE_TEMPERATURE,
         // Antes SEM teto nenhum (IMPL-016): o ledger reservava 1024 as cegas e o
         // raciocinio nao tinha limite. Teto TOTAL do juiz, o mesmo do pointwise.
         maxTokens: ROLE_MAX_TOKENS.judge,

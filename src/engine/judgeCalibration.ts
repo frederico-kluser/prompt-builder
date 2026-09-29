@@ -39,6 +39,8 @@ import type {
   VerdictSource,
   VerbosityDiag,
 } from '../types.js';
+import { isControlSignal } from '../budget.js';
+import { JUDGE_TEMPERATURE } from './judgeRetry.js';
 
 /** Par observado (uma resposta julgada): score do juiz × tamanho da resposta. */
 export interface CalibrationSample {
@@ -783,7 +785,10 @@ export async function runCounterfactualProbes(params: {
     let verdict: Verdict | null = null;
     try {
       verdict = await params.rejudge(probeText, row);
-    } catch {
+    } catch (err) {
+      // Orçamento/cancelamento são CONTROLE (AGENTS.md): engolir aqui viraria
+      // sonda "falhou" e a run seguiria gastando depois do teto.
+      if (isControlSignal(err)) throw err;
       verdict = null;
     }
     pares.push({
@@ -838,6 +843,32 @@ export interface JudgeContractPin {
 export interface JudgeContractComponentsExt extends JudgeContractComponents {
   /** Temperatura de amostragem efetiva das chamadas de juízo (0 no pipeline). */
   judgeTemperature?: number | string;
+}
+
+/**
+ * Componentes do contrato do PIPELINE — fonte ÚNICA para o pin da run (Node e
+ * SPA) e para o `baseline check` do CLI (cli#0): antes cada lado montava os
+ * seus e o CLI deixava de fora o think level efetivo (o default do papel,
+ * IMPL-079) — o check recalculava um hash que NENHUMA run produz e o gate de CI
+ * ficava vermelho logo depois do `baseline pin` da mesma run. A temperatura
+ * (IMPL-117) é a constante que os juízes realmente enviam.
+ */
+export function pipelineContractComponents(input: {
+  duelPromptText: string;
+  listwisePromptText: string;
+  referenceModelId: string;
+  /** Degrau EFETIVO do juiz (`reasoningLevelForRole(config.reasoning, 'judge')` — default incluso). */
+  judgeReasoningLevel: string;
+  providerPolicy?: string;
+}): JudgeContractComponentsExt {
+  return {
+    duelPromptText: input.duelPromptText,
+    listwisePromptText: input.listwisePromptText,
+    referenceModelId: input.referenceModelId,
+    judgeReasoningLevel: input.judgeReasoningLevel,
+    ...(input.providerPolicy ? { providerPolicy: input.providerPolicy } : {}),
+    judgeTemperature: JUDGE_TEMPERATURE,
+  };
 }
 
 /**

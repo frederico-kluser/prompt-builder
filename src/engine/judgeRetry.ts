@@ -49,6 +49,14 @@ export interface JudgeRetryOptions<T> {
 /** Máximo de chamadas por veredito: original + 1 timeout + 1 lembrete de formato. */
 export const MAX_JUDGE_CALLS = 3;
 
+/**
+ * Temperatura de amostragem de TODA chamada de juízo (pointwise, listwise,
+ * duelo e verificador de gabarito) — fonte ÚNICA (IMPL-117, R-07b:REC-5). É ela
+ * que entra no hash do contrato do juiz (`judgeTemperature`): um número
+ * espalhado em cada papel podia mudar sem o contrato perceber.
+ */
+export const JUDGE_TEMPERATURE = 0;
+
 /** Timeout do gateway (`abort(new Error('timeout'))`) ou `TimeoutError` do runtime. */
 export function isTimeoutError(err: unknown): boolean {
   if (typeof err !== 'object' || err === null) return false;

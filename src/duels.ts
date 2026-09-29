@@ -10,7 +10,7 @@
 
 import { chatCompletion } from './openrouter.js';
 import { ROLE_MAX_TOKENS } from './roleLimits.js';
-import { callJudgeWithRetry, withReminder, type JudgeAttempt } from './engine/judgeRetry.js';
+import { callJudgeWithRetry, JUDGE_TEMPERATURE, withReminder, type JudgeAttempt } from './engine/judgeRetry.js';
 import { isJudgeCutKind } from './engine/truncation.js';
 import { buildDuelPrompt, DUEL_HEAD, DUEL_SCHEMA, parseDuelVerdict, type DuelPrompt } from './engine/duelPrompt.js';
 import { formatReminderFor, instructionsBlock, markedBlock, newJudgeGuard, styleRuleFor } from './engine/judgeGuard.js';
@@ -308,7 +308,7 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
             { role: 'system', content: prompt.system },
             { role: 'user', content: withReminder(prompt.user, reminder) },
           ],
-          temperature: 0,
+          temperature: JUDGE_TEMPERATURE,
           // Teto TOTAL com sala p/ raciocinio (IMPL-016): 512 virava `length` vazio => empate.
           maxTokens: ROLE_MAX_TOKENS.duel,
           timeoutMs,

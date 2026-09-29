@@ -996,6 +996,11 @@ export interface JudgeContractComponents {
   judgeReasoningLevel?: string;
   /** Política de provedor das chamadas de juiz (ex.: roteamento ZDR forçado). */
   providerPolicy?: string;
+  /**
+   * Temperatura de amostragem das chamadas de juízo (IMPL-117, R-07b:REC-5) —
+   * `JUDGE_TEMPERATURE` (0) no pipeline. Ausente em pins anteriores ao IMPL-117.
+   */
+  judgeTemperature?: number | string;
 }
 
 /**

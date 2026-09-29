@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { matchExpected } from './engine/groundTruth.js';
-import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
+import { callJudgeWithRetry, JUDGE_TEMPERATURE, withReminder } from './engine/judgeRetry.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
 import { isJudgeCutKind } from './engine/truncation.js';
 import { aggregateVerdicts, tieLabel } from './engine/verdictAggregate.js';
@@ -241,7 +241,7 @@ async function judgeOne(params: {
           { role: 'system', content: prompt.system },
           { role: 'user', content: withReminder(prompt.user, reminder) },
         ],
-        temperature: 0,
+        temperature: JUDGE_TEMPERATURE,
         // Teto TOTAL com sala p/ raciocinio (IMPL-016): 1024 virava `length` vazio.
         maxTokens: ROLE_MAX_TOKENS.judge,
         responseFormatJson: true,

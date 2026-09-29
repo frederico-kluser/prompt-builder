@@ -22,6 +22,7 @@ import { JUDGE_CONTRACT_TEXT } from './refJudge.js';
 import {
   noteJudgeContract,
   pinJudgeContract,
+  pipelineContractComponents,
   verbosityReport,
   verbositySamples,
   type VerbositySampleRow,
@@ -1524,19 +1525,19 @@ async function runLoop(
     // pointwise + prompt do duelo + prompt listwise + modelo de referência +
     // think level + provedor — trocar QUALQUER um muda a distribuição de
     // veredito, muda o hash e sugere recalibração (`judge.contract.changed`).
-    const components: JudgeContractComponents = {
+    // cli#0 + IMPL-117: fonte ÚNICA dos componentes (a mesma que o `baseline
+    // check` recomputa): o think level EFETIVO do juiz (o default do papel
+    // incluso — trocar REASONING_ROLE_DEFAULT é drift) e a temperatura que os
+    // juízes enviam. Roteamento sensível entra cheio.
+    const components: JudgeContractComponents = pipelineContractComponents({
       duelPromptText: hasAgent ? `${DUEL_HEAD}\n\n${DUEL_AGENT_TRUST}` : DUEL_HEAD,
       listwisePromptText: JUDGE_LISTWISE_CONTRACT_TEXT,
       referenceModelId,
-      // Ausente = default do pipeline (canônico vazio) — é o mesmo hash que o
-      // `baseline check` recomputa para o setup (granularidade documentada em
-      // `contractHashFor` do CLI). Esforço/roteamento fora do default entram
-      // cheios e são o drift que `judge.contract.changed` denuncia.
       judgeReasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
       providerPolicy: ctx.sink?.sensitiveRouting?.()
         ? JSON.stringify(ctx.sink.sensitiveRouting!())
         : undefined,
-    };
+    });
     const contract = pinJudgeContract(
       record.config.judgeModelIds,
       judgePromptText,
