@@ -23,7 +23,7 @@ import type {
   StageRecord,
   StoredSignificance,
 } from '../types.js';
-import { pairCoverage, stageScoresByContestant, type PairScore } from '../stats.js';
+import { pairCoverage, reportPValue, stageScoresByContestant, type PairScore } from '../stats.js';
 import { holdoutSkipReasonText } from '../holdout.js';
 import { holdoutSkipReasonOf } from './sessionDecision.js';
 
@@ -150,7 +150,17 @@ export interface QualitySummary {
   n: number;
   nEfetivo: number;
   ci95Pp: [number, number] | null;
+  /**
+   * O p que o RELATÓRIO exibe (web-live#17, R-04 DEC-1): o BILATERAL do teste
+   * exato (`reportPValue`) — o mesmo número da tela de Treino e do
+   * `sessions show`. Sessão anterior ao IMPL-001 só tem o p do bootstrap
+   * (`pKind: 'legacy'`). O unilateral do gate fica em `pValueGate`.
+   */
   pValue: number | null;
+  /** Natureza de `pValue`: 'two-sided' (exato bilateral) | 'legacy' (bootstrap antigo). */
+  pKind: 'two-sided' | 'legacy' | null;
+  /** p UNILATERAL do gate (o que decide `significant`); null sem significância. */
+  pValueGate: number | null;
   /** 'holdout' = confirmação; 'selecao' = mesmo dado que escolheu (anti-conservador). */
   pOrigin: 'holdout' | 'selecao' | null;
   significant: boolean | null;
@@ -739,9 +749,15 @@ function qualityOf(
         : session.pairing?.source === 'training'
           ? 'selecao'
           : null;
+  // web-live#17: o relatório mostra o p BILATERAL (reportPValue), rotulado —
+  // antes exibia o unilateral do gate sem rótulo e a mesma sessão aparecia com
+  // p=0,002 na TrainingView e 0,001 aqui.
+  const rep = sig ? reportPValue(sig) : null;
   const base = {
     ci95Pp: sig?.ci95Pp ?? null,
-    pValue: sig?.pValue ?? null,
+    pValue: rep?.p ?? null,
+    pKind: rep?.kind ?? null,
+    pValueGate: typeof sig?.pValue === 'number' ? sig.pValue : null,
     pOrigin: sig ? pOrigin : null,
   };
 
@@ -808,6 +824,8 @@ function qualityOf(
     nEfetivo: originalScores?.filter((s) => typeof s === 'number').length ?? 0,
     ci95Pp: null,
     pValue: null,
+    pKind: null,
+    pValueGate: null,
     pOrigin: null,
     significant: null,
     regressed: false,
@@ -834,6 +852,7 @@ function pairedScores(
   return { controlScores: m[controlId], championScores: m[championId] };
 }
 
+/** Espelha o gate de promoção: p UNILATERAL ≤ 0,05 (não o bilateral exibido). */
 function isSignificant(sig: StoredSignificance): boolean {
   if (typeof sig.pValue !== 'number') return false;
   const lo = Array.isArray(sig.ci95Pp) ? sig.ci95Pp[0] : null;
@@ -965,6 +984,32 @@ export function cycleReevalText(r: NonNullable<CycleRow['reeval']>): string {
   return `re-avaliação limpa ${fmtPp(r.gainPp)} em ${r.n} cenário(s) — ${r.confirmed ? 'confirmada' : 'não confirmada'}`;
 }
 
+/**
+ * p do relatório em PT-BR — mesma régua do `formatPValue` da TrainingView e do
+ * CLI (3 casas; abaixo de 0,001 vira "<0,001"), só com a vírgula decimal.
+ */
+export function fmtReportP(p: number | null | undefined): string {
+  if (p == null || !Number.isFinite(p)) return '—';
+  return p < 0.001 ? '<0,001' : p.toFixed(3).replace('.', ',');
+}
+
+/** Rótulo do p exibido (web-live#17): bilateral (exato) × legado (bootstrap). */
+export function reportPLabel(q: Pick<QualitySummary, 'pKind'>): string {
+  return q.pKind === 'legacy' ? 'p-valor (legado)' : 'p-valor bilateral';
+}
+
+/**
+ * Linha do p no relatório (HTML, Markdown e a página da SPA): o BILATERAL
+ * rotulado + o unilateral do gate entre parênteses — a mesma leitura do
+ * `formatSignificance` ("p=0.063 bilateral (gate unilateral p=0.031)").
+ */
+export function fmtReportPLine(q: Pick<QualitySummary, 'pValue' | 'pKind' | 'pValueGate'>): string {
+  if (q.pValue == null) return 'p —';
+  if (q.pKind === 'legacy') return `p ${fmtReportP(q.pValue)} (bootstrap, legado)`;
+  const gate = q.pValueGate != null ? ` (gate unilateral ${fmtReportP(q.pValueGate)})` : '';
+  return `p ${fmtReportP(q.pValue)} bilateral${gate}`;
+}
+
 export function fmtUsd(x: number | null | undefined, digits?: number): string {
   if (x == null || !Number.isFinite(x)) return '—';
   const abs = Math.abs(x);
@@ -1079,7 +1124,7 @@ export function renderSessionReportMarkdown(r: SessionReport): string {
   L.push('');
   L.push(`- Base: ${q.basis}`);
   L.push(`- Original: ${fmtPp(q.originalScorePp, false)} · Campeão: ${fmtPp(q.championScorePp, false)} · Δ ${fmtPp(q.gainPp)} (${fmtPct(q.relativeGainPct)} relativo)`);
-  L.push(`- n = ${q.n} (efetivo ${q.nEfetivo}) · IC95 ${q.ci95Pp ? `[${fmtPp(q.ci95Pp[0])}; ${fmtPp(q.ci95Pp[1])}]` : '—'} · p ${q.pValue == null ? '—' : q.pValue.toFixed(4).replace('.', ',')}${q.pOrigin ? ` (${q.pOrigin === 'holdout' ? 'confirmação no holdout' : 'da própria seleção — anti-conservador'})` : ''}`);
+  L.push(`- n = ${q.n} (efetivo ${q.nEfetivo}) · IC95 ${q.ci95Pp ? `[${fmtPp(q.ci95Pp[0])}; ${fmtPp(q.ci95Pp[1])}]` : '—'} · ${fmtReportPLine(q)}${q.pOrigin ? ` (${q.pOrigin === 'holdout' ? 'confirmação no holdout' : 'da própria seleção — anti-conservador'})` : ''}`);
   if (q.verdicts) {
     const v = q.verdicts;
     L.push(`- Vereditos original: ${v.original.resolve} resolve · ${v.original.parcial} parcial · ${v.original.nao} não — campeão: ${v.champion.resolve} · ${v.champion.parcial} · ${v.champion.nao}`);
