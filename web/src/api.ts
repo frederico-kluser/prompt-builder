@@ -315,6 +315,8 @@ export interface RunConfig {
   duels?: boolean;
   /** Descricao detalhada do que testar — guia o datagen. */
   scenarioBrief?: string;
+  /** Idiomas permitidos no datagen (IMPL-056) — opt-in; ausente = só pt-BR. */
+  languages?: string[];
   /** Contratos never-break do prompt base (pos-rewriter rejeita o que quebrar). */
   contracts?: PromptContracts;
   /** Multi-prompt (F2/P0.4): grupo de fragmentos; evolui-se `promptId` por sessao. */
@@ -640,6 +642,16 @@ export interface RunRecord {
    * gabarito discordante ou amostra humana de auditoria (5–10%).
    */
   needsHumanReview?: HumanReviewItem[];
+  /** Cenários com idioma fora da política da run (IMPL-056) — todas as fontes. */
+  languageWarnings?: string[];
+  /** Cobertura adversarial por categoria (IMPL-068); ausente = sem item adversarial. */
+  adversarialCoverage?: {
+    byCategory: Record<string, number>;
+    gaps: string[];
+    minPerCategory: number;
+    total: number;
+    turnLabel: string;
+  };
   /**
    * IMPL-112 (R-05:REC-8) — taxa de acerto POR ITEM × contestants da run e a
    * fila de REVISÃO HUMANA do gabarito (100% 'resolve' ou 100% 'nao' em k

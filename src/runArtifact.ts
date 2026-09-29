@@ -214,6 +214,8 @@ export function runConfigToArenaConfig(config: RunConfig): ArenaConfigFile {
   };
 
   if (config.scenarioBrief) arena.scenarioBrief = config.scenarioBrief;
+  // IMPL-056: sem isto a política de idioma da run sumia na vista arena.
+  if (config.languages?.length) arena.languages = [...config.languages];
   arena.stages = config.stages;
 
   // Cenários pinados: `customStages` (o que de fato rodou) tem prioridade sobre

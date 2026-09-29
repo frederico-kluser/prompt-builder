@@ -111,13 +111,17 @@ const USO: Record<string, string> = {
   compare: `  compare --models a,b     compara modelos no mesmo desafio
   compare --config <arq>   usa um arena-config@1 (ver: docs config)
   Comuns: --theme --stages --judge --budget <usd|none> --dry-run
-  --output-format ndjson --idempotency-key <k> --allow-concurrent --detach`,
+  --output-format ndjson --idempotency-key <k> --allow-concurrent --detach
+  --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR —
+                           cenário fora da política vira aviso no record)`,
   vary: `  vary --model <id>        testa variações de prompt num modelo
   vary --config <arq>      usa um arena-config@1 (ver: docs config)
-  Comuns: --theme --stages --judge --techniques --budget --dry-run --detach`,
+  Comuns: --theme --stages --judge --techniques --budget --dry-run --detach
+  --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR)`,
   train: `  train --model <id>       treina um prompt ao longo de iterações
   train --config <arq>     usa um arena-config@1 (ver: docs config)
-  Comuns: --iterations --holdout-ratio --budget --dry-run --detach`,
+  Comuns: --iterations --holdout-ratio --budget --dry-run --detach
+  --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR)`,
   runs: `  runs list [--status X]   lista runs (teto 50; --all/--limit N)
   runs show <id>           record completo + diagnóstico do juiz
   runs winner <id> [--prompt-only]
@@ -134,10 +138,56 @@ const USO: Record<string, string> = {
            relatório de ciclos: quanto melhorou (original × campeão, por ciclo
            e no holdout) e quanto a mudança muda o custo por chamada; --html
            grava a página no tema do Plannotator, --annotate abre na UI dele`,
-  library: `  library list [--profile <id>]
-          perfis (ou itens de um perfil; teto 50; --all/--limit N)
-  library init|show|add|seed|verify|coverage|export|rm|drop
-          veja \`prompt-builder library --help\` e \`docs quickstart\``,
+  library: `  library list [--profile <id>]      perfis (ou itens de um perfil; teto 50; --all/--limit N)
+  library init --profile <id> [--name <n>] [--description <d>]
+               [--rules <arq.json>] [--targets <arq.json>]
+                                     cria/atualiza o perfil (regras de geração com
+                                     grounding e matriz de cobertura)
+  library show <itemId> --profile <id>
+                                     item completo (JSON)
+  library add --profile <id> --file <arq|dir> [--origin official|ai|manual|import]
+              [--allow-pii]          importa itens: lista, {items:[…]}, pacote pack@1
+                                     ou prompt-builder-exchange@1 (diretório ou .json);
+                                     campo desconhecido é PRESERVADO e toda perda sai
+                                     em lostFields (stderr e resultado)
+  library seed --profile <id> --file <arq|dir> [--allow-pii]
+                                     seed IDEMPOTENTE por id (o que existe não é
+                                     sobrescrito)
+  library seed --profile <id> --generate <N> --theme <t> --model <id>
+               [--budget <usd|none>] [--languages pt-BR,en]
+                                     gera N itens via datagen + gabarito por item
+                                     (tier, dimensionTags, persona… preservados);
+                                     sem --languages, 100% pt-BR
+  library seed --profile <id> --generate <N> --tier adversarial
+               --base-prompt-file <arq> --model <id> [--budget <usd|none>]
+                                     cenários adversariais condicionados ao prompt-
+                                     base: 6 categorias, ≥ 4 cada (N mínimo 24),
+                                     single-turn (ASR@1 = limite inferior); cobertura
+                                     por categoria e custo por cenário no resultado
+  library verify --profile <id>      itens SEM gabarito ou rótulo curto sem labelSet
+                                     (recusados no evolve; exit 3)
+  library coverage --profile <id>    cobertura tier × dimensão + lacunas
+  library export --profile <id> [-o <dir|arq.json>] [--format exchange|pack]
+                                     exchange (default): prompt-builder-exchange@1
+                                     (manifest.json + library.jsonl; -o *.json = um
+                                     arquivo só), reimportável por \`library add\`
+                                     sem perda; pack: prompt-builder-pack@1 (seed de
+                                     run, lossy — o que se perde sai em lostFields)
+  library rm --profile <id> <itemId> remove um item
+  library drop --profile <id>        remove o perfil inteiro
+
+  A biblioteca mora em <data-dir>/library/<profileId>/ (um JSON por item).
+  --generate gasta LLM: fora de um terminal exige --budget <usd|none>.
+  Regras de geração (--rules): { templates: { system, user? }, grounding?: {
+  context?, fewShot?, setupKeys?[] } } — placeholders {{context}}, {{fewShot}},
+  {{setupKeys}}, {{theme}}, {{count}}. Grounding que nenhum template usa NÃO
+  chega ao gerador (o init e o seed avisam).
+  Item: title, tier (mft|invariance|adversarial|edge|benign-twin), persona,
+  context, successCriteria[], rationale, dimensionTags[], question,
+  productContext, maxTokens, rubric, reference | expected (+ labelSet), origin.
+  Rótulo curto em expected (≤ 5 palavras) exige labelSet com TODOS os rótulos
+  válidos da etapa (ex.: "labelSet": ["positivo","negativo","neutro"]).
+  Veja também: \`docs quickstart\``,
   techniques: `  techniques               lista as técnicas de variação (id — o que faz)`,
   lgpd: `  lgpd                     áreas de dado pessoal, allowlist LGPD e cobertura
            da pseudonimização (IMPL-042)`,

@@ -244,3 +244,74 @@ export function undeclaredLoss(
   }
   return [...faltando].sort();
 }
+
+// ---------------------------------------------------------------------------
+// Pacote em ARQUIVO ÚNICO (IMPL-089): o mesmo manifesto + os mesmos textos dos
+// JSONL, embrulhados num JSON só — é o que sai no stdout e em `-o <arq>.json`
+// do `library export`. O conteúdo é byte a byte o do diretório: quem lê passa
+// `files` a `parseExchangeBundle` e cai na MESMA validação.
+// ---------------------------------------------------------------------------
+
+export interface ExchangeSingleFile extends ExchangeManifestFile {
+  /** Nome do arquivo → conteúdo (manifest.json + um JSONL por entidade). */
+  files: Record<string, string>;
+}
+
+/** Embrulha o pacote num objeto JSON único (stdout / `-o <arq>.json`). */
+export function toSingleFileBundle(bundle: ExchangeBundle): ExchangeSingleFile {
+  return { ...bundle.manifest, files: { ...bundle.files } };
+}
+
+function isRecordOfStrings(v: unknown): v is Record<string, string> {
+  return (
+    !!v &&
+    typeof v === 'object' &&
+    !Array.isArray(v) &&
+    Object.values(v as Record<string, unknown>).every((x) => typeof x === 'string')
+  );
+}
+
+/** É um pacote `prompt-builder-exchange@1` em arquivo único? */
+export function isSingleFileBundle(raw: unknown): raw is ExchangeSingleFile {
+  return (
+    !!raw &&
+    typeof raw === 'object' &&
+    (raw as { format?: unknown }).format === EXCHANGE_FORMAT &&
+    isRecordOfStrings((raw as { files?: unknown }).files)
+  );
+}
+
+/**
+ * É SÓ o manifesto (o `manifest.json` do diretório, sem os JSONL)? Quem
+ * importa aponta o diretório — o chamador lê os arquivos ao lado.
+ */
+export function isExchangeManifestOnly(raw: unknown): raw is ExchangeManifestFile {
+  return (
+    !!raw &&
+    typeof raw === 'object' &&
+    (raw as { format?: unknown }).format === EXCHANGE_FORMAT &&
+    Array.isArray((raw as { manifest?: unknown }).manifest) &&
+    (raw as { files?: unknown }).files === undefined
+  );
+}
+
+/**
+ * Campos de `source` que o mapeamento PERDEU ou ALTEROU (valor diferente no
+ * resultado), por índice — a régua de um formato lossy (ex.: `pack@1`, que
+ * reescreve `origin: 'manual'` como 'import'). Ordenado; é o `lostFields` que
+ * o exportador declara.
+ */
+export function alteredOrLostFields(source: readonly unknown[], mapped: readonly unknown[]): string[] {
+  const campos = new Set<string>();
+  for (let i = 0; i < source.length; i++) {
+    const antes = source[i];
+    const depois = mapped[i];
+    if (!antes || typeof antes !== 'object') continue;
+    const d = depois && typeof depois === 'object' ? (depois as Record<string, unknown>) : {};
+    for (const [chave, valor] of Object.entries(antes as Record<string, unknown>)) {
+      if (valor === undefined) continue;
+      if (!(chave in d) || JSON.stringify(d[chave]) !== JSON.stringify(valor)) campos.add(chave);
+    }
+  }
+  return [...campos].sort();
+}

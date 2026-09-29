@@ -17,7 +17,7 @@ import {
   coverageReport,
   hasGabarito,
   mergeSeedItems,
-  normalizeLibraryItem,
+  normalizeLibraryItemPreserving,
   toStageSpec,
   type CoverageReport,
   type CoverageTargets,
@@ -26,7 +26,18 @@ import {
   type ScenarioRules,
   type SeedResult,
 } from './engine/libraryCore.js';
-import { SCENARIO_PACK_FORMAT } from './scenarioPack.js';
+import {
+  EXCHANGE_FORMAT,
+  EXCHANGE_MANIFEST_FILE,
+  alteredOrLostFields,
+  buildExchangeBundle,
+  isSingleFileBundle,
+  parseExchangeBundle,
+  type ExchangeBundle,
+  type ExchangeManifestFile,
+  type ExchangeSingleFile,
+} from './engine/exchange.js';
+import { SCENARIO_PACK_FORMAT, SCENARIO_PACK_FORMAT_LEGACY } from './scenarioPack.js';
 import { checkImportPii } from './engine/pii.js';
 import type { ScenarioPack, StageSpec } from './types.js';
 
@@ -188,11 +199,41 @@ export async function deleteItem(profileId: string, itemId: string): Promise<boo
 // Importação/seed/exportação
 // ----------------------------------------------------------------------------
 
+/** De onde vieram os itens importados (o CLI reporta). */
+export type ImportFormat = 'exchange' | 'pack' | 'list';
+
+export interface PreparedImport {
+  items: LibraryItem[];
+  errors: string[];
+  /**
+   * Campos declarados PERDIDOS (IMPL-089): os do manifesto de um pacote
+   * `prompt-builder-exchange@1` + o que a normalização não conseguiu
+   * representar. A régua: 100% preservado OU declarado aqui — nunca calado.
+   */
+  lostFields: string[];
+  format: ImportFormat;
+}
+
+function isScenarioPack(raw: unknown): raw is { scenarios: unknown[] } {
+  const f = raw && typeof raw === 'object' ? (raw as { format?: unknown }).format : undefined;
+  return (
+    (f === SCENARIO_PACK_FORMAT || f === SCENARIO_PACK_FORMAT_LEGACY) &&
+    Array.isArray((raw as { scenarios?: unknown }).scenarios)
+  );
+}
+
 /**
- * Lista crua (JSON de arquivo — lista solta, {items:[...]} ou pacote de
- * cenários) → itens válidos + erros PT-BR, item a item. É o funil ÚNICO de
- * entrada de arquivo na biblioteca (`library add` e `library seed --file`):
- * formato E LGPD.
+ * Lista crua (JSON de arquivo — lista solta, {items:[...]}, pacote de
+ * cenários `prompt-builder-pack@1` ou pacote de troca
+ * `prompt-builder-exchange@1` em arquivo único) → itens válidos + erros PT-BR,
+ * item a item. É o funil ÚNICO de entrada de arquivo na biblioteca (`library
+ * add` e `library seed --file`): formato E LGPD.
+ *
+ * IMPL-089: a validação PRESERVA campo desconhecido (`normalizeLibraryItemPreserving`)
+ * — antes o zod o removia em silêncio — e o que se perde é devolvido em
+ * `lostFields`. Pacote `pack@1` (sem título/metadados de curadoria) ganha
+ * `title` derivado da pergunta e `tier: 'mft'` quando faltam: é o formato
+ * lossy do próprio `library export --format pack`, reimportável.
  *
  * LGPD (IMPL-042): item com dado pessoal de aparência real é RECUSADO com aviso
  * nomeando o campo (nunca corrigido em silêncio). `allowPii` = revisão humana
@@ -201,26 +242,52 @@ export async function deleteItem(profileId: string, itemId: string): Promise<boo
 export function prepareImportItems(
   raw: unknown,
   opts: { origin?: LibraryItem['origin']; allowPii?: boolean } = {},
-): { items: LibraryItem[]; errors: string[] } {
-  const lista: unknown[] = Array.isArray(raw)
-    ? raw
-    : raw && typeof raw === 'object' && Array.isArray((raw as { items?: unknown[] }).items)
-      ? (raw as { items: unknown[] }).items
-      : raw && typeof raw === 'object' && Array.isArray((raw as { scenarios?: unknown[] }).scenarios)
-        ? (raw as { scenarios: unknown[] }).scenarios
-        : [];
+): PreparedImport {
   const errors: string[] = [];
   const items: LibraryItem[] = [];
+  const perdidos = new Set<string>();
+  let format: ImportFormat = 'list';
+  let lista: unknown[];
+  let defaults: (cru: Record<string, unknown>) => Record<string, unknown> = () => ({});
+
+  if (isSingleFileBundle(raw)) {
+    format = 'exchange';
+    const lido = parseExchangeBundle(raw.files);
+    if (!lido.ok) {
+      return { items, errors: [`pacote ${EXCHANGE_FORMAT} inválido: ${lido.error}`], lostFields: [], format };
+    }
+    lista = lido.library;
+    for (const campo of lido.lostFields.library ?? []) perdidos.add(campo);
+  } else if (isScenarioPack(raw)) {
+    format = 'pack';
+    lista = raw.scenarios;
+    defaults = (cru) => ({
+      tier: 'mft',
+      ...(typeof cru.question === 'string' ? { title: cru.question.trim().slice(0, 80) } : {}),
+    });
+  } else {
+    lista = Array.isArray(raw)
+      ? raw
+      : raw && typeof raw === 'object' && Array.isArray((raw as { items?: unknown[] }).items)
+        ? (raw as { items: unknown[] }).items
+        : raw && typeof raw === 'object' && Array.isArray((raw as { scenarios?: unknown[] }).scenarios)
+          ? (raw as { scenarios: unknown[] }).scenarios
+          : [];
+  }
+
   lista.forEach((cru, i) => {
-    const r = normalizeLibraryItem({
+    const objeto = (cru ?? {}) as Record<string, unknown>;
+    const r = normalizeLibraryItemPreserving({
       origin: opts.origin ?? 'import',
       createdAt: nowIso(),
-      ...((cru ?? {}) as Record<string, unknown>),
+      ...defaults(objeto),
+      ...objeto,
     });
     if (!r.ok) {
       errors.push(`item ${i + 1}: ${r.error}`);
       return;
     }
+    for (const campo of r.lostFields) perdidos.add(campo);
     // IMPL-024: o id vira nome de arquivo — nada de separador nem `..`.
     if (!isSafePathSegment(r.item.id)) {
       errors.push(`item ${i + 1}: id inválido (sem "/", "\\", ":" ou "..")`);
@@ -230,7 +297,7 @@ export function prepareImportItems(
     if (pii && !pii.ok) errors.push(`item ${i + 1}: ${pii.message}`);
     else items.push(r.item);
   });
-  return { items, errors };
+  return { items, errors, lostFields: [...perdidos].sort(), format };
 }
 
 /**
@@ -242,10 +309,13 @@ export async function importItems(
   profileId: string,
   raw: unknown,
   opts: { origin?: LibraryItem['origin']; seed?: string; allowPii?: boolean } = {},
-): Promise<{ added: number; updated: number; errors: string[] }> {
-  const { items: validos, errors } = prepareImportItems(raw, opts);
-  const { added, updated } = await saveItems(profileId, validos.map((it) => ({ ...it, seed: it.seed ?? opts.seed })));
-  return { added, updated, errors };
+): Promise<{ added: number; updated: number; errors: string[]; lostFields: string[]; format: ImportFormat }> {
+  const { items: validos, errors, lostFields, format } = prepareImportItems(raw, opts);
+  const { added, updated } = await saveItems(
+    profileId,
+    validos.map((it) => (it.seed === undefined && opts.seed !== undefined ? { ...it, seed: opts.seed } : it)),
+  );
+  return { added, updated, errors, lostFields, format };
 }
 
 /**
@@ -261,20 +331,109 @@ export async function seedItems(profileId: string, incoming: LibraryItem[]): Pro
 
 /**
  * Exporta o perfil como `ScenarioPack` (`prompt-builder-pack@1`) — interop com
- * o formato já existente de pacote (importável como seed numa run).
+ * o formato já existente de pacote (importável como seed numa run). LOSSY:
+ * use `exportProfileExchangePack` para declarar o que se perde.
  */
 export async function exportProfilePack(
   profileId: string,
   prompt: ScenarioPack['prompt'] = { text: '', source: 'base' },
 ): Promise<ScenarioPack> {
+  return (await exportProfilePackDeclared(profileId, prompt)).pack;
+}
+
+/**
+ * `pack@1` + a perda DECLARADA (IMPL-089): cada campo do item que o pacote
+ * descarta ou reescreve (`title`, curadoria, `origin: 'manual'`→'import', …).
+ */
+export async function exportProfilePackDeclared(
+  profileId: string,
+  prompt: ScenarioPack['prompt'] = { text: '', source: 'base' },
+): Promise<{ pack: ScenarioPack; lostFields: string[] }> {
   const [perfil, itens] = await Promise.all([getProfile(profileId), listItems(profileId)]);
+  const scenarios = itens.map((it) => toStageSpec(it) as StageSpec & { id: string });
   return {
-    format: SCENARIO_PACK_FORMAT,
-    theme: perfil?.name ?? profileId,
-    exportedAt: nowIso(),
-    prompt,
-    scenarios: itens.map((it) => toStageSpec(it) as StageSpec & { id: string }),
+    pack: {
+      format: SCENARIO_PACK_FORMAT,
+      theme: perfil?.name ?? profileId,
+      exportedAt: nowIso(),
+      prompt,
+      scenarios,
+    },
+    lostFields: alteredOrLostFields(itens, scenarios),
   };
+}
+
+/**
+ * Exporta o perfil em `prompt-builder-exchange@1` (IMPL-089): os itens vão
+ * VERBATIM como estão no disco (campo desconhecido incluso) — ida e volta pelo
+ * `library add` é identidade, sem `lostFields`.
+ */
+export async function exportProfileExchange(
+  profileId: string,
+  producer: string,
+): Promise<{ bundle: ExchangeBundle; count: number }> {
+  const itens = await listItems(profileId);
+  return { bundle: buildExchangeBundle({ producer, library: itens }), count: itens.length };
+}
+
+/** Grava o pacote como DIRETÓRIO (manifest.json + um JSONL por entidade). */
+export async function writeExchangeDir(dir: string, bundle: ExchangeBundle): Promise<string[]> {
+  await fs.mkdir(dir, { recursive: true });
+  const escritos: string[] = [];
+  for (const [nome, conteudo] of Object.entries(bundle.files)) {
+    const alvo = resolveInside(dir, segmento(nome, 'item'));
+    await fs.writeFile(alvo, conteudo, 'utf-8');
+    escritos.push(alvo);
+  }
+  return escritos;
+}
+
+const EXCHANGE_READ = 'EXCHANGE_READ';
+
+/** Erro de leitura do diretório de troca — o CLI o traduz em exit 3. */
+export class ExchangeReadError extends Error {
+  readonly code = EXCHANGE_READ;
+}
+
+/** Por `code`, nunca `instanceof` (instância dupla de módulo ESM daria false). */
+export function isExchangeReadError(err: unknown): err is ExchangeReadError {
+  return (err as { code?: unknown } | null)?.code === EXCHANGE_READ;
+}
+
+/**
+ * Lê um pacote de troca gravado como DIRETÓRIO e o devolve no formato de
+ * arquivo único (mesma validação a jusante). Os nomes de arquivo do manifesto
+ * são DADO de terceiro: só segmento seguro, contido no diretório.
+ */
+export async function readExchangeDir(dir: string): Promise<ExchangeSingleFile> {
+  let manifestoTexto: string;
+  try {
+    manifestoTexto = await fs.readFile(path.join(dir, EXCHANGE_MANIFEST_FILE), 'utf-8');
+  } catch {
+    throw new ExchangeReadError(`"${dir}" não é um pacote ${EXCHANGE_FORMAT}: falta ${EXCHANGE_MANIFEST_FILE}.`);
+  }
+  let manifesto: ExchangeManifestFile;
+  try {
+    manifesto = JSON.parse(manifestoTexto) as ExchangeManifestFile;
+  } catch {
+    throw new ExchangeReadError(`${EXCHANGE_MANIFEST_FILE} em "${dir}" não é JSON válido.`);
+  }
+  if (manifesto?.format !== EXCHANGE_FORMAT || !Array.isArray(manifesto.manifest)) {
+    throw new ExchangeReadError(`${EXCHANGE_MANIFEST_FILE} em "${dir}" não é de ${EXCHANGE_FORMAT}.`);
+  }
+  const files: Record<string, string> = { [EXCHANGE_MANIFEST_FILE]: manifestoTexto };
+  for (const entrada of manifesto.manifest) {
+    const nome = entrada?.file;
+    if (!isSafePathSegment(nome)) {
+      throw new ExchangeReadError(`manifesto aponta arquivo com nome inválido: ${JSON.stringify(nome)}.`);
+    }
+    try {
+      files[nome] = await fs.readFile(resolveInside(dir, nome), 'utf-8');
+    } catch {
+      throw new ExchangeReadError(`falta o arquivo ${nome} declarado no manifesto de "${dir}".`);
+    }
+  }
+  return { ...manifesto, files };
 }
 
 /** Relatório de cobertura do perfil (usa a matriz alvo declarada no perfil). */

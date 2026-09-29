@@ -123,6 +123,8 @@ export function arenaConfigToRunConfig(
     ...(file.mode === 'compare' && file.repeats ? { repeats: file.repeats } : {}),
     ...(scenarioSeed.length ? { scenarioSeed } : {}),
     ...(file.scenarioBrief?.trim() ? { scenarioBrief: file.scenarioBrief.trim() } : {}),
+    // IMPL-056: idiomas do datagen (opt-in; ausente = só pt-BR).
+    ...(file.languages?.length ? { languages: [...file.languages] } : {}),
     ...(file.models.reference ? { referenceModelId: file.models.reference } : {}),
     ...(Object.keys(reasoning).length ? { reasoning } : {}),
     ...(file.compliance ? { compliance: file.compliance } : {}),
