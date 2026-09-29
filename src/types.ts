@@ -2389,7 +2389,10 @@ export interface SavedPrompt {
     sessionId?: string;
     runId?: string;
     techniqueId?: string;
+    /** Iteração 0-based da rodada (a UI mostra "rodada N+1"). */
     iteration?: number;
+    /** Salvo da run de HOLDOUT (não é rodada de treino — web-code#14). */
+    holdout?: boolean;
   };
   createdAt: string;
   updatedAt: string;
