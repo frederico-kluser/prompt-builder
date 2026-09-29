@@ -37,6 +37,7 @@ import {
   judgeScoreFromVerdicts,
   pickWinner,
   promotionEventFields,
+  safetyInputFromRun,
   type RankEntry,
 } from './rank';
 import {
@@ -1174,6 +1175,9 @@ async function trainingLoop(
           // IMPL-067: campeã que cola span ≥ 8 tokens de cenário/gabarito/
           // explicação do juiz NÃO é promovida; o containment vai no gate.
           contamination: contaminationInputFromRun(selRun, controlId),
+          // IMPL-069: nova violação em âncora crítica (adversarial) = fora da
+          // disputa antes da utilidade (segurança → utilidade).
+          safety: safetyInputFromRun(selRun),
         },
       );
       // IMPL-013: passou no gate da melhor de K → re-avaliação LIMPA num

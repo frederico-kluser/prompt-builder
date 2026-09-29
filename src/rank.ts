@@ -92,6 +92,18 @@ export interface PickResult {
   gate?: IterationGate;
   /** IMPL-067: contaminação dados→prompt do `best` (com `opts.contamination`). */
   contamination?: NonNullable<IterationGate['contamination']>;
+  /** IMPL-069: variantes excluídas da disputa por NOVA violação de segurança. */
+  safety?: NonNullable<IterationGate['safety']>;
+}
+
+/**
+ * Restrição dura de SEGURANÇA no gate (IMPL-069): âncoras críticas (ids dos
+ * cenários adversariais) que cada contestant VIOLOU. Variante com violação que
+ * a régua não tinha = nova falha = fora da disputa (segurança antes da
+ * utilidade), qualquer que seja o judge-score.
+ */
+export interface PickWinnerSafety {
+  failuresById: Readonly<Record<string, readonly string[] | undefined>>;
 }
 
 /**
@@ -132,6 +144,35 @@ export interface PickWinnerOpts {
    * de 8-gramas vai no gate — reportado para toda campeã.
    */
   contamination?: PickWinnerContamination;
+  /** IMPL-069: restrição dura de segurança (ver {@link PickWinnerSafety}). */
+  safety?: PickWinnerSafety;
+}
+
+/**
+ * Âncoras críticas violadas por contestant, a partir de `stage.security` da run
+ * (IMPL-069): a chave da âncora é o índice da etapa adversarial.
+ */
+export function safetyInputFromRun(run: {
+  stages: readonly { index?: number; security?: Record<string, { state: string; tier?: string }> | null }[];
+}): PickWinnerSafety {
+  const failuresById: Record<string, string[]> = {};
+  (run.stages ?? []).forEach((st, i) => {
+    for (const [id, sec] of Object.entries(st.security ?? {})) {
+      if (sec.state === 'violation') (failuresById[id] ??= []).push(String(st.index ?? i));
+    }
+  });
+  return { failuresById };
+}
+
+/** Variantes com violação em âncora crítica que a RÉGUA não violou. */
+function newSafetyFailures(entries: RankEntry[], safety: PickWinnerSafety | undefined): string[] {
+  if (!safety) return [];
+  const control = entries.find((e) => e.isControl);
+  const daRegua = new Set(control ? (safety.failuresById[control.id] ?? []) : []);
+  return entries
+    .filter((e) => !e.isControl)
+    .filter((e) => (safety.failuresById[e.id] ?? []).some((ancora) => !daRegua.has(ancora)))
+    .map((e) => e.id);
 }
 
 /**
@@ -229,7 +270,35 @@ function withContamination(r: PickResult, c: PickWinnerContamination | undefined
  * sem os scores por etapa não há teste possível.
  */
 export function pickWinner(entries: RankEntry[], opts?: PickWinnerOpts): PickResult {
-  return withContamination(pickWinnerCore(entries, opts), opts?.contamination);
+  return withContamination(withSafety(entries, opts), opts?.contamination);
+}
+
+/**
+ * IMPL-069 — ordem LEXICOGRÁFICA segurança → utilidade: variantes com nova
+ * violação em âncora crítica saem da disputa ANTES do gate de utilidade. Se
+ * nenhuma variante segura sobra, o gate roda com todas só para o laudo e NÃO
+ * promove (`heldBy: ['safety']`).
+ */
+function withSafety(entries: RankEntry[], opts?: PickWinnerOpts): PickResult {
+  const excluidas = newSafetyFailures(entries, opts?.safety);
+  if (excluidas.length === 0) return pickWinnerCore(entries, opts);
+  const fora = new Set(excluidas);
+  const safety = { excludedIds: excluidas };
+  const seguras = entries.filter((e) => e.isControl || !fora.has(e.id));
+  if (seguras.some((e) => !e.isControl)) {
+    const r = pickWinnerCore(seguras, opts);
+    return { ...r, safety, ...(r.gate ? { gate: { ...r.gate, safety } } : {}) };
+  }
+  const r = pickWinnerCore(entries, opts);
+  const gate: IterationGate | undefined = r.gate
+    ? {
+        ...r.gate,
+        safety,
+        heldBy: [...(r.gate.heldBy ?? []), 'safety'],
+        decision: r.gate.decision === 'inconclusive' ? 'inconclusive' : 'held',
+      }
+    : undefined;
+  return { ...r, isWinner: false, safety, ...(gate ? { gate } : {}) };
 }
 
 function pickWinnerCore(entries: RankEntry[], opts?: PickWinnerOpts): PickResult {

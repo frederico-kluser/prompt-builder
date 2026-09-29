@@ -355,6 +355,19 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         // IMPL-014: taxa de truncamento + alerta acima de 2%.
         ...truncationFields(e.record),
         ...(e.record.failureCountByRole ? { failureCountByRole: e.record.failureCountByRole } : {}),
+        // IMPL-069: métrica de segurança SEPARADA do judge-score (contagens por
+        // contestant — ataques, violações, recusas, recusa excessiva).
+        ...(e.record.securitySummary ? { securitySummary: e.record.securitySummary } : {}),
+        // IMPL-115: fração escalonada do modo econômico (números, cabem no stream).
+        ...(e.record.judgeCascade
+          ? {
+              judgeCascade: {
+                verdicts: e.record.judgeCascade.verdicts,
+                escalatedVerdicts: e.record.judgeCascade.escalatedVerdicts,
+                escalatedFraction: e.record.judgeCascade.escalatedFraction,
+              },
+            }
+          : {}),
         ...(e.record.status === 'inconclusive'
           ? { inconclusiveReasons: e.record.verdictIntegrity?.reasons ?? [] }
           : {}),

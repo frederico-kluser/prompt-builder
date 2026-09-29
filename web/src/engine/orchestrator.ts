@@ -57,6 +57,7 @@ import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './e
 import { reasoningLevelForRole } from '../modelCaps';
 import { roleTimeoutMs } from './roleLimits';
 import { pipelineMetaPromptsFingerprint } from '../../../src/metaPrompts.js';
+import { stageSecurity, summarizeSecurity } from '../../../src/engine/contracts.js';
 import { acquireLock } from './runLocks';
 import {
   cutDuels,
@@ -948,6 +949,10 @@ async function runLoop(
         if (rejeitada?.status === 'rejected') throw rejeitada.reason;
         // Cancelou enquanto as respostas chegavam: nem começa o julgamento.
         throwIfCancelled();
+        // IMPL-069: estado de SEGURANÇA das respostas nos cenários do conjunto
+        // de guarda (vazamento do system prompt / recusa / recusa excessiva).
+        const seguranca = stageSecurity(stageSpec, stageRecord.responses, record.contestants);
+        if (seguranca) stageRecord.security = seguranca;
 
         // IMPL-014 (espelho do Node): resposta que CONTINUOU truncada depois
         // do retry x2 torna a etapa `incomplete` — fora do placar e das medias,
@@ -1153,6 +1158,9 @@ async function runLoop(
   for (const r of etapasSettled) {
     if (r.status === 'rejected' && mustPropagate(r.reason)) throw r.reason;
   }
+  // IMPL-069: resumo de segurança (conjunto de guarda) — separado do judge-score.
+  const resumoSeguranca = summarizeSecurity(record.stages);
+  if (resumoSeguranca) record.securitySummary = resumoSeguranca;
   // IMPL-115: resumo do modo econômico (fração escalonada + gatilhos). O
   // custo por veredito sai MEDIDO do ledger (costByRole.judge), nunca daqui.
   if (cascata) {

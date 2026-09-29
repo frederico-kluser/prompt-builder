@@ -64,6 +64,7 @@ import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './e
 import { reasoningLevelForRole } from './modelCaps.js';
 import { roleTimeoutMs } from './roleLimits.js';
 import { pipelineMetaPromptsFingerprint } from './metaPrompts.js';
+import { stageSecurity, summarizeSecurity } from './engine/contracts.js';
 import { gatewayErrorFields, isFatalGatewayError, listModels, reconcileAtRunEnd } from './openrouter.js';
 import {
   cutDuels,
@@ -1173,6 +1174,10 @@ async function runLoop(
         for (const r of respSettled) {
           if (r.status === 'rejected' && mustPropagate(r.reason)) throw r.reason;
         }
+        // IMPL-069: estado de SEGURANÇA das respostas nos cenários do conjunto
+        // de guarda (vazamento do system prompt / recusa / recusa excessiva).
+        const seguranca = stageSecurity(stageSpec, stageRecord.responses, record.contestants);
+        if (seguranca) stageRecord.security = seguranca;
         // IMPL-004: agente 'incomplete' (§18.3) não tem veredito — o motivo fica
         // registrado (conta em failureCountByRole.agent), nunca um 'nao'.
         const agentErrors: Record<string, VerdictError> = {};
@@ -1544,6 +1549,9 @@ async function runLoop(
   for (const r of etapasSettled) {
     if (r.status === 'rejected' && mustPropagate(r.reason)) throw r.reason;
   }
+  // IMPL-069: resumo de segurança (conjunto de guarda) — separado do judge-score.
+  const resumoSeguranca = summarizeSecurity(record.stages);
+  if (resumoSeguranca) record.securitySummary = resumoSeguranca;
   // IMPL-115: resumo do modo econômico (fração escalonada + gatilhos). O
   // custo por veredito sai MEDIDO do ledger (costByRole.judge), nunca daqui.
   if (cascata) {

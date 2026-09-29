@@ -22,7 +22,7 @@ import type {
 // Módulo PURO (sem node:*): seguro no grafo do web (IMPL-094).
 import type { AgentInfraCounts } from './agent/infraError.js';
 import type { ExpectedSpec, ReferenceValidation } from './engine/groundTruth.js';
-import type { PromptContracts } from './engine/contracts.js';
+import type { PromptContracts, ResponseSecurity, SecuritySummary } from './engine/contracts.js';
 import type { PromptGroup } from './engine/promptGroup.js';
 import type { ModelLifecycleSnapshot } from './engine/modelLifecycle.js';
 import type { DatagenReport, ItemSaturationReport } from './datagen.js';
@@ -1573,6 +1573,12 @@ export interface CompetitorLiveState {
 }
 
 export interface StageRecord {
+  /**
+   * IMPL-069 — estado de SEGURANÇA de cada resposta (contestantId → estado)
+   * nos cenários do conjunto de guarda (tier adversarial/benign-twin), separado
+   * do judge-score. Ausente nos demais cenários e em records antigos.
+   */
+  security?: Record<string, ResponseSecurity>;
   index: number;
   spec?: StageSpec;
   responses: CompetitorResponse[];
@@ -1805,6 +1811,12 @@ export interface RunRecord {
    * veredito sai MEDIDO do ledger (`costByRole.judge`). Ausente = sem cascata.
    */
   judgeCascade?: JudgeCascadeSummary;
+  /**
+   * IMPL-069 — resumo de segurança por contestant (ataques, violações,
+   * recusas; gêmeos benignos e recusa excessiva). `classifier: 'none'`: só o
+   * detector determinístico (canário/span do system prompt) está ligado.
+   */
+  securitySummary?: SecuritySummary;
   /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
@@ -2133,7 +2145,7 @@ export interface BestOfKTest {
  * `reeval` (IMPL-013): passou no gate da melhor de K, mas a re-avaliação LIMPA no
  * minibatch não confirmou a melhora (ou não chegou a rodar até o fim).
  */
-export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance' | 'reeval' | 'contamination';
+export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance' | 'reeval' | 'contamination' | 'safety';
 
 /**
  * Re-avaliação LIMPA do candidato antes de confirmar a promoção (IMPL-013,
@@ -2204,6 +2216,12 @@ export interface IterationGate {
    * reportado para toda campeã.
    */
   contamination?: { containment: number; alert: boolean; blocked: boolean; detail?: string };
+  /**
+   * IMPL-069 (R-21:REC-2): restrição DURA de segurança — variantes com NOVA
+   * violação em âncora crítica (cenário adversarial que a régua não violava)
+   * ficam FORA da disputa antes da utilidade (ordem lexicográfica).
+   */
+  safety?: { excludedIds: string[] };
 }
 
 /** Pareamento final da sessão (holdout, ou a última run de treino sem holdout). */

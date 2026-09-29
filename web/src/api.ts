@@ -1,7 +1,7 @@
 import { requestPersistentStorage, type StorageSubject } from './storageHealth';
 // Shape do rotulo esperado e da validacao do gabarito: fonte unica no motor.
 import type { ExpectedSpec, ReferenceValidation } from '../../src/engine/groundTruth.js';
-import type { PromptContracts } from '../../src/engine/contracts.js';
+import type { PromptContracts, ResponseSecurity, SecuritySummary } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
 import type { DatagenReport, ItemSaturationReport } from '../../src/datagen.js';
 import type { CascadeReport, JudgeCascadeConfig, JudgeCascadeSummary } from '../../src/judge.js';
@@ -601,6 +601,12 @@ export interface StageEvaluation {
 }
 
 export interface StageRecord {
+  /**
+   * IMPL-069 — estado de SEGURANÇA de cada resposta (contestantId → estado)
+   * nos cenários do conjunto de guarda (tier adversarial/benign-twin), separado
+   * do judge-score. Ausente nos demais cenários e em records antigos.
+   */
+  security?: Record<string, ResponseSecurity>;
   index: number;
   spec?: StageSpec;
   responses: CompetitorResponse[];
@@ -686,6 +692,12 @@ export interface RunRecord {
    * veredito sai MEDIDO do ledger (`costByRole.judge`). Ausente = sem cascata.
    */
   judgeCascade?: JudgeCascadeSummary;
+  /**
+   * IMPL-069 — resumo de segurança por contestant (ataques, violações,
+   * recusas; gêmeos benignos e recusa excessiva). `classifier: 'none'`: só o
+   * detector determinístico (canário/span do system prompt) está ligado.
+   */
+  securitySummary?: SecuritySummary;
   /**
    * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
    * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).
