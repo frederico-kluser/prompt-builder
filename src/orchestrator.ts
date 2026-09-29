@@ -67,6 +67,13 @@ import {
   type RepCounts,
 } from './agent/verdictTree.js';
 import type { AgentRepResult } from './agent/runAgentStage.js';
+import {
+  assessInfraErrorRate,
+  emptyInfraCounts,
+  mergeInfraCounts,
+  stageInfraDefect,
+  tallyInfra,
+} from './agent/infraError.js';
 import type {
   CallFinishSignals,
   Contestant,
@@ -732,6 +739,8 @@ async function runLoop(
     record.agentJudgeErrorCount = 0;
     record.agentJudgeErrorsByContestant = {};
     record.agentUnscoredRepsByContestant = {};
+    // IMPL-094: tentativas/retentativas/infra_error/defeitos — presentes desde já.
+    record.agentInfra = emptyInfraCounts();
   }
   const custoG2 = est.byRole.competitor + est.byRole.judge + (hasAgent ? est.byRole.agent : 0);
   if (custoG2 > 0 && !gate('competitors', custoG2)) {
@@ -925,8 +934,32 @@ async function runLoop(
         // No 2º caso a etapa sai do placar para todos — agentes E chat —, com
         // `error` explícito; tirar só de quem falhou recriaria o viés de
         // sobrevivência (quem quebra o verificador escaparia do denominador).
+        // IMPL-094 (R-14a DEC-2): DEFEITO da tarefa/ambiente (setup/clone/
+        // fixture, executor/sandbox que não sobe, testsDir inválido) também
+        // invalida a CÉLULA para TODOS — antes virava 'nao' de quem o encontrou.
+        const repsDaEtapa = Object.values(agentRepsById).flat();
+        const defeitoInfra = agentContestants.length > 0 ? stageInfraDefect(repsDaEtapa) : null;
         const defeito =
-          agentContestants.length > 0 ? oracleCellDefect(Object.values(agentRepsById).flat()) : null;
+          agentContestants.length > 0 && !defeitoInfra ? oracleCellDefect(repsDaEtapa) : null;
+        // Tentativas SEMPRE contam (houve gasto); execuções/infra_error só das
+        // etapas que valem (a inválida já está fora de todos os denominadores).
+        if (agentContestants.length > 0) {
+          record.agentInfra = mergeInfraCounts(
+            record.agentInfra,
+            tallyInfra(repsDaEtapa, { stageInvalid: Boolean(defeitoInfra || defeito), defect: Boolean(defeitoInfra) }),
+          );
+        }
+        if (defeitoInfra) {
+          const msg =
+            `etapa inválida para TODOS os contestants: defeito da tarefa/ambiente (${defeitoInfra.message}) — ` +
+            'não é desempenho de ninguém (R-14a DEC-2)';
+          stageRecord.error = msg;
+          stageRecord.finishedAt = nowIso();
+          scheduleSave();
+          emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
+          log(runId, `stage ${i + 1} ${msg}`);
+          return;
+        }
         if (defeito) {
           const msg =
             `etapa inválida para TODOS os contestants: o verificador (${defeito.labels.join(', ')}) ` +
@@ -1616,9 +1649,18 @@ async function runLoop(
   });
   record.failureCountByRole = integridade.failureCountByRole;
   record.verdictIntegrity = integridade.integrity;
+  // IMPL-094: taxa de infra_error das execuções de agente — alerta acima de 5%;
+  // acima de 10% a run é INVÁLIDA (mede a infraestrutura, não os agentes): fica
+  // `inconclusive` com o motivo gravado (exit 6 `run.infra_invalid` no CLI).
+  const infraRate = assessInfraErrorRate(record.agentInfra);
+  if (infraRate) {
+    record.infraErrorRate = infraRate.rate;
+    if (infraRate.invalid) integridade.integrity.reasons.push(infraRate.message);
+    else if (infraRate.warn) log(runId, `ALERTA infra_error: ${infraRate.message}`);
+  }
   for (const motivo of integridade.integrity.reasons) log(runId, `inconclusiva: ${motivo}`);
 
-  record.status = integridade.inconclusive ? 'inconclusive' : 'finished';
+  record.status = integridade.inconclusive || infraRate?.invalid ? 'inconclusive' : 'finished';
   record.finishedAt = nowIso();
   await saver.flush();
   emitEvent({ type: 'run.finished', runId, record });

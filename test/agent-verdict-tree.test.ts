@@ -509,16 +509,24 @@ describe('IMPL-032 — runAgentStage: corte por limite vira nao sem juiz; incomp
     });
   });
 
-  it('A5: executor lança (infra) → nao pelo caminho error, no denominador (taxonomia = IMPL-094)', async () => {
+  // IMPL-094 (fim do A5): falha que NÃO é do agente nunca vira 'nao'. Contrato
+  // detalhado por classe em test/agent-infra-taxonomy.test.ts.
+  it('A5 encerrado: executor lança ECONNRESET (transitória) → 2 retentativas cegas e SEM veredito (nunca nao)', async () => {
     await comGateway(async () => {
       const res = await runAgentStage(params({}, gatewayFalso({ stopReason: 'completed', throws: 'ECONNRESET do provedor' })));
       expect(res.incomplete).toBe(false);
-      expect(res.repResults[0]).toMatchObject({ verdict: 'nao', path: 'error', stopReason: 'error' });
+      expect(res.repResults[0]).toMatchObject({
+        verdict: null,
+        path: 'error',
+        stopReason: 'error',
+        infraClass: 'transient',
+        attempts: 3,
+      });
       expect(res.response.status).toBe('error');
     });
   });
 
-  it('falha de preparação do executor → nao em TODAS as reps (antes: incomplete e fora do denominador)', async () => {
+  it('falha de preparação do executor → DEFEITO em todas as reps (sem veredito; a etapa sai para todos)', async () => {
     await comGateway(async () => {
       const res = await runAgentStage(
         params({}, gatewayFalso({ stopReason: 'completed' }, true), {
@@ -526,19 +534,19 @@ describe('IMPL-032 — runAgentStage: corte por limite vira nao sem juiz; incomp
         }),
       );
       expect(res.incomplete).toBe(false);
-      expect(res.repResults.map((r) => [r.verdict, r.path])).toEqual([
-        ['nao', 'error'],
-        ['nao', 'error'],
-        ['nao', 'error'],
+      expect(res.repResults.map((r) => [r.verdict, r.path, r.infraClass])).toEqual([
+        [null, 'error', 'defect'],
+        [null, 'error', 'defect'],
+        [null, 'error', 'defect'],
       ]);
     });
   });
 
-  it('etapa sem agentTask → nao (caminho error), nunca incomplete', async () => {
+  it('etapa sem agentTask → DEFEITO (sem veredito), nunca incomplete', async () => {
     await comGateway(async () => {
       const res = await runAgentStage(params(undefined, gatewayFalso({ stopReason: 'completed' })));
       expect(res.incomplete).toBe(false);
-      expect(res.repResults[0]).toMatchObject({ verdict: 'nao', path: 'error' });
+      expect(res.repResults[0]).toMatchObject({ verdict: null, path: 'error', infraClass: 'defect' });
     });
   });
 

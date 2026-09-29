@@ -27,6 +27,7 @@ import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { runPreflight, type PreflightOpts } from '../../agent/doctor.js';
 import { agentVerdictTreeVersionOf, classifyStop } from '../../agent/verdictTree.js';
+import { assessInfraErrorRate } from '../../agent/infraError.js';
 import { defaultPiImageTag } from '../../agent/container.js';
 import { compileAgentTaskToHarbor, HARBOR_VERSION } from '../../agent/harbor.js';
 import { parseAgentTaskSpec } from '../../agent/taskSchema.js';
@@ -430,6 +431,16 @@ export interface AgentRunSummary {
   judgeErrors?: number;
   /** IMPL-033: reps sem veredito (execução inválida / juiz falho sem oráculo). */
   unscoredReps?: number;
+  /** IMPL-094: tentativas feitas (inclui retentativas cegas e etapas invalidadas). */
+  attempts?: number;
+  /** IMPL-094: retentativas CEGAS por falha transitória (429/5xx/rede/sandbox morto). */
+  retries?: number;
+  /** IMPL-094: execuções SEM veredito por infraestrutura (fora dos denominadores). */
+  infraErrors?: number;
+  /** IMPL-094: infraErrors / execuções que valem (0..1) — > 5% alerta, > 10% run inválida. */
+  infraErrorRate?: number;
+  /** IMPL-094: etapas invalidadas para TODOS por defeito da tarefa/ambiente. */
+  defectStages?: number;
 }
 
 function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
@@ -472,6 +483,15 @@ function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
     ...(record.agentUnscoredRepsByContestant
       ? { unscoredReps: Object.values(record.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0) }
       : {}),
+    ...(record.agentInfra
+      ? {
+          attempts: record.agentInfra.attempts,
+          retries: record.agentInfra.retries,
+          infraErrors: record.agentInfra.infraErrors,
+          defectStages: record.agentInfra.defectStages,
+        }
+      : {}),
+    ...(record.infraErrorRate !== undefined ? { infraErrorRate: record.infraErrorRate } : {}),
   };
 }
 
@@ -909,10 +929,16 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
           `${summary.limitCut} cortadas por limite (contam 'nao') · ${summary.incomplete} canceladas · ` +
           `média ${summary.avgTurns.toFixed(1)} turnos · ${fmtUsd(summary.avgCostUsd)} · oráculo ${(summary.oracleRate * 100).toFixed(0)}%` +
           (summary.judgeErrors ? ` · ${summary.judgeErrors} falha(s) do juiz (nota do oráculo)` : '') +
-          (summary.unscoredReps ? ` · ${summary.unscoredReps} sem veredito (fora do placar)` : ''),
+          (summary.unscoredReps ? ` · ${summary.unscoredReps} sem veredito (fora do placar)` : '') +
+          (summary.retries ? ` · ${summary.retries} retentativa(s) cega(s)` : '') +
+          (summary.infraErrors ? ` · ${summary.infraErrors} infra_error` : '') +
+          (summary.defectStages ? ` · ${summary.defectStages} etapa(s) inválida(s) por defeito da tarefa` : ''),
       );
     }
   }
+  // IMPL-094: taxa de infra_error acima de 5% = alerta (acima de 10% a run é inválida — exit 6).
+  const infraRate = assessInfraErrorRate(record.agentInfra);
+  if (infraRate?.warn && !infraRate.invalid) out.warn(`infra_error: ${infraRate.message}`);
   const resumo = {
     runId: record.id,
     status: record.status,
@@ -946,16 +972,28 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
     );
   }
   // IMPL-004 × IMPL-028: inconclusiva (6) também sai pelo envelope — há
-  // resultado (em `details`), mas ele não sustenta conclusão.
+  // resultado (em `details`), mas ele não sustenta conclusão. IMPL-094: com
+  // infra_error > 10% a run é INVÁLIDA — o MESMO exit 6, código próprio
+  // (`run.infra_invalid`): o conserto é a infraestrutura, não a tarefa/prompt.
   if (code === EXIT.INCONCLUSIVE) {
+    const infraInvalida = infraRate?.invalid === true;
     throw new CliError(
-      `Run de agentes ${record.id} inconclusiva: ${(record.verdictIntegrity?.reasons ?? []).join('; ') || 'o resultado não sustenta conclusão'}.`,
+      infraInvalida
+        ? `Run de agentes ${record.id} INVÁLIDA: ${infraRate!.message}.`
+        : `Run de agentes ${record.id} inconclusiva: ${(record.verdictIntegrity?.reasons ?? []).join('; ') || 'o resultado não sustenta conclusão'}.`,
       code,
       resumo,
-      {
-        code: 'run.inconclusive',
-        hint: `Não promova com base nela; veja \`prompt-builder agents show ${record.id} --json\` (verdictIntegrity, failureCountByRole).`,
-      },
+      infraInvalida
+        ? {
+            code: 'run.infra_invalid',
+            hint:
+              'Falhas de provedor/rede/sandbox passaram de 10% das execuções (mesmo após 2 retentativas cegas): ' +
+              `conserte a infraestrutura (\`prompt-builder agents doctor --deep\`) e rode de novo; veja \`prompt-builder agents show ${record.id} --json\` (agentInfra).`,
+          }
+        : {
+            code: 'run.inconclusive',
+            hint: `Não promova com base nela; veja \`prompt-builder agents show ${record.id} --json\` (verdictIntegrity, failureCountByRole).`,
+          },
     );
   }
   out.result(true, 'agents.run', resumo);
