@@ -32,7 +32,7 @@ import { isValidRecordId } from './pathSafety.js';
 import { csvCell } from './engine/csv.js';
 import { normalizeRunRecord } from './normalize.js';
 import { subscribe } from './events.js';
-import { startRun } from './orchestrator.js';
+import { cancelControlled, startControlledRun } from './httpRunControl.js';
 import { parseRunConfig } from './runConfigSchema.js';
 import { parseArenaAgentConfig } from './configFile.js';
 import { arenaAgentConfigToRunConfig } from './arenaConfig.js';
@@ -221,8 +221,9 @@ router.get('/doctor', async (req, res) => {
 // Início e listagem de runs
 // ---------------------------------------------------------------------------
 
-// Controllers de abort por runId (§21.3 cancelamento).
-const abortControllers = new Map<string, AbortController>();
+// Controllers de abort por runId (§21.3 cancelamento): o registro é o MESMO
+// de /v1/benchmark (httpRunControl.ts) — o SIGTERM do servidor aborta as runs
+// de agente também, e o terminal solta a entrada sem listener órfão.
 
 /**
  * POST /runs — inicia uma run de agente. Aceita OU `arena-agent-config@1`
@@ -286,16 +287,7 @@ router.post('/runs', async (req, res) => {
   }
 
   try {
-    const controller = new AbortController();
-    const { runId } = startRun(config, apiKey, { signal: controller.signal });
-    abortControllers.set(runId, controller);
-    // Limpa o controller quando a run fecha em evento terminal (sem listener órfão).
-    const off = subscribe(runId, (event) => {
-      if (event.type === 'run.finished' || event.type === 'run.error') {
-        off();
-        abortControllers.delete(runId);
-      }
-    });
+    const { runId } = startControlledRun(config, apiKey);
     res.status(202).json({ runId });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
@@ -408,32 +400,16 @@ router.get('/runs/:id/events', async (req, res) => {
   });
 });
 
-/** POST /runs/:id/cancel — aborta a run via AbortController (sinal de controle). */
+/**
+ * POST /runs/:id/cancel — aborta a run com `RunCancelled` (sinal de controle).
+ * 202 {runId, aborted} · 404 inexistente · 409 já terminal (inclui
+ * 'inconclusive', IMPL-004) ou iniciada fora deste processo (CLI) — nunca
+ * finge que abortou. Idempotente até o terminal.
+ */
 router.post('/runs/:id/cancel', async (req, res) => {
-  const runId = req.params.id;
   try {
-    const record = await loadRun(runId);
-    if (!record) {
-      res.status(404).json({ error: 'Run não encontrada' });
-      return;
-    }
-    const terminal = isTerminalRunStatus(record.status); // inclui 'inconclusive' (IMPL-004)
-    if (terminal) {
-      res.status(409).json({ error: 'Run já terminou — nada a cancelar.' });
-      return;
-    }
-    const controller = abortControllers.get(runId);
-    if (!controller) {
-      // Sem controller, a run pode ter sido iniciada por outro processo (CLI):
-      // não conseguimos sinalizá-la aqui — não finge que abortou.
-      res.status(409).json({
-        error: 'Sem controle de abort para esta run (iniciada fora deste processo).',
-      });
-      return;
-    }
-    controller.abort();
-    abortControllers.delete(runId);
-    res.status(202).json({ runId, aborted: true });
+    const out = await cancelControlled('run', req.params.id);
+    res.status(out.status).json(out.body);
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

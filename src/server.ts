@@ -8,6 +8,7 @@ import benchmarkRouter from './routes.js';
 import agentRouter from './agentRoutes.js';
 import { markOrphansAsAborted, setDataDir } from './storage.js';
 import { configureGatewayFromEnv } from './gatewayEnv.js';
+import { shutdownControlled } from './httpRunControl.js';
 import { isUnsafePathError, publicErrorMessage, redactPaths } from './pathSafety.js';
 
 // Servidor HTTP de dev/self-host (NÃO viaja no pacote: `!dist/server.*`).
@@ -398,6 +399,50 @@ async function main(): Promise<void> {
   void markOrphansAsAborted().catch((err) => {
     console.warn('[bench] markOrphansAsAborted failed:', publicErrorMessage(err));
   });
+  installGracefulShutdown(server);
+}
+
+/** Graça do encerramento: runs abortadas têm até isto para gravar o terminal. */
+const SERVER_SHUTDOWN_GRACE_MS = 5_000;
+
+/**
+ * SIGTERM/SIGINT (Ctrl-C, `docker stop`, `kill`): antes o processo morria na
+ * hora, a run ficava 'running' em disco até o próximo boot e o SSE caía sem
+ * evento terminal. Agora toda run/sessão deste servidor é abortada com
+ * `RunCancelled` (fecha 'aborted' com o parcial; o SSE recebe run.finished) e
+ * o processo sai quando as escritas terminais acabam — teto de
+ * SERVER_SHUTDOWN_GRACE_MS. Segundo sinal = saída imediata.
+ */
+function installGracefulShutdown(server: Server): void {
+  let stopping = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (stopping) {
+      console.error(`[bench] ${signal} de novo — saindo sem esperar.`);
+      process.exit(130);
+    }
+    stopping = true;
+    console.error(`[bench] ${signal}: abortando as runs deste servidor e encerrando…`);
+    // Para de aceitar conexões; o SSE de cada run fecha sozinho no terminal.
+    server.close();
+    server.closeIdleConnections?.();
+    void shutdownControlled(SERVER_SHUTDOWN_GRACE_MS)
+      .then(({ aborted, forced }) => {
+        const forcadas = forced.runs.length + forced.sessions.length;
+        if (aborted > 0 || forcadas > 0) {
+          console.error(
+            `[bench] ${aborted} run(s)/sessão(ões) abortada(s)` +
+              (forcadas > 0 ? `; ${forcadas} gravada(s) 'aborted' à força (graça esgotada)` : '') +
+              '.',
+          );
+        }
+      })
+      .catch((err: unknown) => {
+        console.error('[bench] falha no encerramento gracioso:', publicErrorMessage(err));
+      })
+      .finally(() => process.exit(0));
+  };
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
 }
 
 /** Entrypoint real (`node dist/server.js` / `tsx src/server.ts`), não import de teste. */

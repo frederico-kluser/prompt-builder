@@ -1,8 +1,14 @@
 import { Router } from 'express';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { listModels, validateKey } from './openrouter.js';
-import { startRun } from './orchestrator.js';
-import { startTraining } from './trainer.js';
+// `startRun`/`startTraining` daqui são os do motor COM AbortController
+// registrado (mesma assinatura): toda run/sessão iniciada por esta API é
+// cancelável por POST /runs/:id/cancel e /sessions/:id/cancel (http-api#2).
+import {
+  cancelControlled,
+  startControlledRun as startRun,
+  startControlledTraining as startTraining,
+} from './httpRunControl.js';
 import { listTechniques } from './techniques.js';
 import { getLgpdData } from './lgpd.js';
 import { listRuns, loadRun, listSessions, loadSession } from './storage.js';
@@ -303,6 +309,22 @@ router.get('/runs/:id/export.csv', ah(async (req, res) => {
     'Content-Disposition': `attachment; filename="run-${record.id}.csv"`,
   });
   res.send(rows.join('\n'));
+}));
+
+// ---------------------------------------------------------------------------
+// Cancelamento (http-api#2) — só o que ESTE processo iniciou; o resto é 409
+// com o caminho certo (CLI/MCP). Não exige key: parar não gasta nada, e o
+// hostGuard já barra Origin de fora (CSRF).
+// ---------------------------------------------------------------------------
+
+router.post('/runs/:id/cancel', ah(async (req, res) => {
+  const out = await cancelControlled('run', req.params.id);
+  res.status(out.status).json(out.body);
+}));
+
+router.post('/sessions/:id/cancel', ah(async (req, res) => {
+  const out = await cancelControlled('session', req.params.id);
+  res.status(out.status).json(out.body);
 }));
 
 // ---------------------------------------------------------------------------
