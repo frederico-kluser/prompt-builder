@@ -121,11 +121,16 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
 - Sem `CostRole` novo: decisão e LLM sob teste = `competitor`; proponente do treino = `rewriter`.
 - `jev-config@1` fica FORA do `arena-config`/`RunConfigBase` e dos dois whitelists silenciosos.
 - O Jev NÃO é ZDR: em área LGPD sensível o modo fica indisponível (fail-closed no pré-voo).
-- Métrica: ECE/Brier sobre a probabilidade top-label; o `confidence` da API é opaco e só decide a
-  banda. Estatística pareada por `caseId`, valores 0–1 (nunca `brierScore` em p.p. no teste).
+- Métrica: o PREVISTO é a resposta declarada (`choice` da API; `answer`/`level` do LLM) — nunca o
+  argmax das probabilidades de 2 casas; ECE sobre a p da classe prevista; o `confidence` da API é
+  opaco e só decide a banda. Inválida = errada e PIOR caso (Brier 1) em placar, comparação e gate;
+  `nScored = 0` → métricas `null`. Estatística pareada por `caseId`, valores 0–1 (nunca
+  `brierScore` em p.p. no teste).
 - Web: `/new` é o wrapper `NewBenchmark` (seletor LLM | JEV; `NewRun`/`GuidedSetup` intocados) e o
   motor JEV roda NA ABA (CORS do `/alpha/decisions` é aberto; sem rota `/v1/jev`). O reserva é o
   terminal: mesmo `jev-config@1`, e o record volta por «Importar do terminal» (`web/src/jev/transfer.ts`).
+  ⚠️ O CORS NÃO expõe `Retry-After`: na aba só o AIMD protege de 429. Com LLM na run a SPA exige
+  teto (`budgetUsd`), e LLM sem preço exige o "sim" do custo mesmo com a faixa baixa.
 - Docs para agentes: `agent-docs/jev.md` (`prompt-builder docs jev`).
 
 ## CLI (`src/cli/`, publicado como `prompt-builder`)

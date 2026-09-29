@@ -147,14 +147,18 @@ intencional.
 As métricas cobrem as perguntas × casos com ouro. Casos **incompletos** (corte
 por orçamento ou cancelamento) ficam FORA de tudo. Célula com erro de
 infraestrutura fica **sem nota** e sai dos dois lados do pareamento. Resposta
-fora do contrato conta **errada**, com p uniforme.
+fora do contrato conta **errada** e no **pior caso** (Brier 1, log-loss
+`−ln 0,001`) — a mesma regra no placar, na comparação pareada e no gate do
+treino. O **previsto** é a resposta **declarada**: o `choice` da API, o
+`answer`/`level` do LLM (noul do Jev: `p ≥ 0,5`); as probabilidades servem às
+métricas. Sem nada pontuado, acurácia/ECE/log-loss/AURC saem `null` ("—").
 
 | métrica | definição |
 |---|---|
-| acurácia | noul `p ≥ 0,5`; choice argmax; score `\|E[ŝ] − y\| ≤ 0,5` |
+| acurácia | noul `p ≥ 0,5` (LLM: `answer`); choice = `choice` declarado; score `\|E[ŝ] − y\| ≤ 0,5` |
 | macro-F1 | média das classes (noul/choice) |
 | Brier (`brierScore` = 100·(1−Brier)) | noul `(p−y)²`; choice `½Σ(p−1[k=y])²`; score = RPS normalizado |
-| Brier pior-caso | igual, com resposta inválida = 1 (o LLM que falha no parse não sai "melhor") |
+| Brier pior-caso | igual (inválida já é 1 no Brier), e 1 também na pergunta degenerada |
 | log-loss | `−ln max(0,001, p_ouro)` (o fio arredonda em 2 casas) |
 | ECE top-label | 10 bins de largura igual e de massa igual, sobre **p da classe prevista** (nunca o `confidence` opaco) |
 | bandas | `auto` ≥ limiar auto; `hitl` ≥ limiar hitl; senão `abstain`. Cobertura e precisão em auto, e "errado com confiança" |
@@ -268,6 +272,7 @@ de decisão.
 ## Interface web (SPA)
 
 - Em `/new`, o seletor **LLM | JEV** fica no topo (`/new?tipo=jev` abre direto no JEV). O formulário tem as mesmas duas superfícies do LLM, guiado em 5 passos e completo. «Importar/Exportar JSON» troca o **mesmo** `jev-config@1` do CLI, sem conversão.
-- O motor roda **na aba**, sem servidor. O `/api/alpha/decisions` tem CORS aberto: o preflight responde 204 com `Access-Control-Allow-Origin: *`, e `X-Generation-Id`/`X-Provider-Name` vêm expostos. As chamadas saem pelo mesmo gateway, com o mesmo limitador, a mesma reserva e o mesmo `usage.cost`. Os records ficam no IndexedDB do navegador (stores `jevRuns`/`jevSessions`/`jevSummaries`).
+- O motor roda **na aba**, sem servidor. O `/api/alpha/decisions` tem CORS aberto: o preflight responde 204 com `Access-Control-Allow-Origin: *`, e `X-Generation-Id`/`X-Provider-Name` vêm expostos. As chamadas saem pelo mesmo gateway, com o mesmo limitador, a mesma reserva e o mesmo `usage.cost`. Os records ficam no IndexedDB do navegador (stores `jevRuns`/`jevSessions`/`jevSummaries`). O `Retry-After` de um 429 **não** é exposto pelo CORS: na aba, a proteção é só o limitador AIMD.
+- Com LLM na run (competidor ou proponente), a SPA **exige** o teto de gasto; LLM sem preço no catálogo exige o "sim" do custo mesmo com a faixa baixa (a parte dele sai 0 na estimativa).
 - Quando a aba não alcança o endpoint (rede corporativa, bloqueador, VPN), a run mostra o diagnóstico e o caminho reserva: rodar o mesmo JSON no terminal (`jev run -c`) e trazer o record com «Histórico → JEV → Importar do terminal». Esse botão aceita o arquivo de `~/.prompt-builder/jev-runs/` ou `jev-sessions/` e a saída de `jev show <id> --full --json`. O resumo sem `--full` e records ainda `running` são recusados.
 - Telas: `/jev/runs/<id>` (métricas, calibração, bandas, matriz de confusão, caso a caso, cascata, handoff/cURL), `/jev/training/<id>` (ciclos, gate, diff, política, holdout) e `/jev/training/<id>/report` (relatório de ciclos em Markdown/HTML/JSON).
