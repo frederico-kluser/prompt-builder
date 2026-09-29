@@ -51,6 +51,8 @@
     "dist/configFile.d.ts",
     "dist/contractGate.js",
     "dist/contractGate.d.ts",
+    "dist/costSamplesStore.js",
+    "dist/costSamplesStore.d.ts",
     "dist/datagen.js",
     "dist/datagen.d.ts",
     "dist/dedup.js",

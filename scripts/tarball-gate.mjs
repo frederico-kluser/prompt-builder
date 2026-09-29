@@ -36,9 +36,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const ALLOWLIST_FILE = path.join(ROOT, 'scripts', 'tarball-allowlist.json');
 
 /** Fontes que NÃO viram pacote (servidor/express — só dev/self-host). */
-export const NOT_SHIPPED = ['src/server.ts', 'src/routes.ts', 'src/agentRoutes.ts'];
+export const NOT_SHIPPED = ['src/server.ts', 'src/routes.ts', 'src/agentRoutes.ts', 'src/httpRunControl.ts'];
 /** Nomes compilados proibidos em dist/ (derivados de NOT_SHIPPED). */
-export const FORBIDDEN_DIST_STEMS = ['server', 'routes', 'agentRoutes'];
+export const FORBIDDEN_DIST_STEMS = ['server', 'routes', 'agentRoutes', 'httpRunControl'];
 
 // ---------------------------------------------------------------------------
 // Regras positivas (puras — testadas em test/tarball-gate.test.ts)
