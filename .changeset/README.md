@@ -23,6 +23,17 @@ publish manual (notebook, outro workflow) não autentica. Ver o cabeçalho do
 workflow para o teste negativo documentado e para o registo do trusted
 publisher no npmjs.com.
 
+## Pré-requisitos (uma vez, humanos — fora do alcance do código)
+
+1. **Trusted Publisher** no npmjs.com (`prompt-builder-cli` → GitHub Actions →
+   `frederico-kluser/prompt-builder`, workflow `publish-npm.yml`).
+2. **Actions pode abrir PR**: Settings → Actions → General → "Allow GitHub
+   Actions to create and approve pull requests" (ou a secret `RELEASE_PR_TOKEN`).
+   Sem isto o job `version-pr` falha em todo push no main com
+   `GitHub Actions is not permitted to create or approve pull requests` e o PR
+   "Version Packages" nunca aparece. Detalhes e o comando `gh api` no cabeçalho
+   do workflow.
+
 ## Gates
 
 `prepublishOnly` corre sempre (também num `npm publish` local):

@@ -26,6 +26,26 @@
 #   repository `frederico-kluser/prompt-builder`, workflow `publish-npm.yml`.
 #   Depois: `npm view prompt-builder-cli@<versão> --json` tem de exibir
 #   `dist.attestations` (o passo final do job verifica isto sozinho).
+#
+# ⚠️ OPERAÇÃO (uma vez, humana, admin do repositório) — SEM ISTO O `version-pr`
+#   FALHA EM TODO PUSH NO MAIN com
+#     "HttpError: GitHub Actions is not permitted to create or approve pull requests."
+#   (run 36413306500, 2026-09-28): o repo nasce com a opção desligada.
+#   Uma das duas:
+#   (a) Settings → Actions → General → Workflow permissions → marcar
+#       "Allow GitHub Actions to create and approve pull requests", ou:
+#         gh api -X PUT repos/frederico-kluser/prompt-builder/actions/permissions/workflow \
+#           -f default_workflow_permissions=read -F can_approve_pull_request_reviews=true
+#       (o default de leitura continua; cada job pede o que precisa em `permissions:`);
+#   (b) criar a secret `RELEASE_PR_TOKEN` (GitHub App ou PAT fine-grained só deste
+#       repo: contents + pull-requests write). O changesets/action passa a abrir o
+#       PR com ela, e a abertura dispara os workflows de `pull_request` (PR aberto
+#       pelo GITHUB_TOKEN não dispara nenhum). O push da branch e da tag continua
+#       com o GITHUB_TOKEN do checkout — por isso a tag NÃO dispara o `publish`
+#       sozinha e o release-tag.mjs faz o dispatch (sem publish duplo). Não é token npm.
+#   Conferir: `gh api repos/frederico-kluser/prompt-builder/actions/permissions/workflow`
+#   → `can_approve_pull_request_reviews: true` (ou a secret listada em
+#   `gh secret list`); depois re-rode o último run do `version-pr`.
 
 name: publish-npm
 
@@ -64,7 +84,10 @@ jobs:
           version: npm run version-packages
           publish: node scripts/release-tag.mjs
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PR: token próprio se existir (ver OPERAÇÃO (b) no cabeçalho), senão o do Actions.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PR_TOKEN || secrets.GITHUB_TOKEN }}
+          # Dispatch do publish na tag (release-tag.mjs): sempre o token do Actions (`actions: write`).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------------------------------
   # Publicação (IMPL-104): SÓ na tag, por OIDC, com os gates e provenance.
