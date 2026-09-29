@@ -214,6 +214,14 @@ aprovados quando o perfil usa curadoria (algum item selecionado tem `state`):
 senão exit 3 (`library.unapproved_holdout`, ids em `details.holdoutIds`); perfil
 sem curadoria nenhuma só avisa.
 
+A revisão é pelo CLI: `library review --profile X` lista a fila (o que não
+conta e por quê); `library review --profile X --approve a,b --reviewer "Nome
+<email>"` aprova (também `--reject <ids> --reason <tipo>`, `--adjust`,
+`--reopen`). Tudo ou nada: id ruim = exit 2, aprovar sem gabarito = exit 3.
+Sem TTY o `--reviewer` é obrigatório — aprovar afirma que uma PESSOA conferiu
+pergunta e gabarito. Item aprovado conta como âncora humana do
+`minCuratedItems` mesmo gerado por IA (o revisor fica no item, não na run).
+
 **Idioma.** O datagen gera 100% em pt-BR. Variar idioma é opt-in:
 `--languages pt-BR,en` (em `compare`/`vary`/`train` e no `library seed`) ou
 `"languages": ["pt-BR","en"]` no arena-config@1. Cenário de qualquer fonte com

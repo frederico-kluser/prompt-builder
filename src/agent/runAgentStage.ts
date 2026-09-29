@@ -71,7 +71,7 @@ import { isDigestRef, sandboxCommandRunner, sandboxProfile } from './container.j
 import { BudgetExceeded, isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
 import { blindRankMap, seedFromId } from '../duels.js';
-import { getGateway, tierFor } from '../openrouter.js';
+import { getGateway, isFatalGatewayError, tierFor } from '../openrouter.js';
 import { isKnownPrice } from '../engine/pricing.js';
 import type {
   AgentCostSource,
@@ -536,7 +536,9 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
   } catch (err) {
     // Falha fora de uma rep (bug do produto): o contestant NÃO pode sumir da
     // etapa em silêncio (o orquestrador descarta rejeição que não é controle).
-    if (isControlSignal(err)) throw err;
+    // cli#3 (left#5): 401/402 do gateway sobe — o orquestrador o propaga e a
+    // run sai 4/5 (não é bug do produto nem falha deste contestant).
+    if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
     const errorMsg = `Falha inesperada na etapa do agente: ${(err as Error)?.message ?? String(err)}`;
     return { response: responseError(contestant, modelId, errorMsg, 0), repResults: [], incomplete: true, errorMsg };
   } finally {
@@ -1192,8 +1194,9 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         // pelo tipo (429/5xx/rede/sandbox morto = transitória, refeita às cegas;
         // comando ausente = defeito; resto = infra); coleta/oráculo/escrita =
         // infra. Controle (orçamento/cancelamento) SOBE: é o único caminho para
-        // `incomplete`.
-        if (isControlSignal(err)) throw err;
+        // `incomplete`. cli#3 (left#5): 401/402 do NOSSO gateway (juiz) também
+        // sobe — derruba a run com o exit 4/5, não vira infra_error da célula.
+        if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         const failure = classifyAgentFailure({ phase, error: err, container }) ?? { class: 'infra' as const, reason: msg };
         // Dinheiro é medido: o que o proxy já anotou desta tentativa (no ledger,
@@ -1420,7 +1423,8 @@ async function callJudge(opts: {
       ...(j.rubric ? { rubric: j.rubric } : {}),
     };
   } catch (err) {
-    if (isControlSignal(err)) throw err;
+    // cli#3 (left#5): 401/402 não é "falha do juiz" — é a run que não pode seguir.
+    if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
     if (ctx.signal?.aborted) throw new RunCancelled(ctx.signal.reason);
     const message = (err instanceof Error ? err.message : String(err)).slice(0, 160);
     return { status: 'failed', error: { kind: 'judge_failed', message }, attempts: 1 };

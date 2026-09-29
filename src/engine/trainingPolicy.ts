@@ -28,6 +28,7 @@
 import { mulberry32, pairCoverage, type PairScore } from '../stats.js';
 import { HOLDOUT_RATIO_DEFAULT, holdoutSplitSize, holdoutStrength } from '../holdout.js';
 import { FEWSHOT_MAX_DEMOS, fewShotDemosOf, labeledScenariosFrom, type LabeledScenario } from '../techniques.js';
+import { stageHasHumanApproval } from './libraryCore.js';
 import { GATE_ALPHA } from './bestOfK.js';
 import type { ChampionDeclaration, PairCoverage, StageSpec } from '../types.js';
 
@@ -294,6 +295,17 @@ export function trainingPromotionPower(input: {
 // curados (âncora humana)" com gabaritos de IA. O gabarito só é humano quando
 // veio da CONFIG (customStages/scenarioSeed — o que o usuário trouxe) com o
 // mesmo texto: {@link humanReferenceIndex}.
+// IMPL-065 (onda 3): item da BIBLIOTECA nascido de IA e APROVADO por gente
+// (`humanApproval`, carimbado por `toStageSpec` só com o `contentHash` vigente)
+// também é proveniência humana — a revisão cobre pergunta + gabarito.
+
+/**
+ * Proveniência HUMANA da spec: não gerada por IA, OU gerada por IA e aprovada
+ * por gente na biblioteca (aprovação vigente — {@link stageHasHumanApproval}).
+ */
+export function humanProvenance(spec: StageSpec): boolean {
+  return spec.origin !== 'ai' || stageHasHumanApproval(spec);
+}
 
 /** IMPL-065: piso DEFAULT de itens curados (âncora humana). Proposta sem fonte — calibrar. */
 export const DEFAULT_MIN_CURATED_ITEMS = 20;
@@ -317,7 +329,7 @@ export function humanReferenceIndex(
   const out = new Map<string, string>();
   for (const lista of sources) {
     for (const s of lista ?? []) {
-      if (!s || s.origin === 'ai') continue;
+      if (!s || !humanProvenance(s)) continue;
       const ref = s.reference?.trim();
       if (ref) out.set(questionKey(s.question), ref);
     }
@@ -332,7 +344,7 @@ export function humanReferenceIndex(
  */
 export function hasHumanReference(spec: StageSpec, index?: HumanReferenceIndex): boolean {
   const ref = spec.reference?.trim();
-  if (!ref || spec.origin === 'ai') return false;
+  if (!ref || !humanProvenance(spec)) return false;
   if (!index) return true;
   return index.get(questionKey(spec.question)) === ref;
 }
@@ -352,7 +364,7 @@ function hasExpected(spec: StageSpec): boolean {
  * verificação humana mesmo com dados sintéticos (IFEval/IFBench).
  */
 export function isCuratedItem(spec: StageSpec, humanReferences?: HumanReferenceIndex): boolean {
-  if (spec.origin === 'ai') return false;
+  if (!humanProvenance(spec)) return false;
   return hasExpected(spec) || hasHumanReference(spec, humanReferences);
 }
 

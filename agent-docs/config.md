@@ -68,6 +68,8 @@ run real teria (`docs budget`). O `config example` é o esqueleto de cada modo.
 | `compliance` | objeto | não | sem filtro | Área LGPD (3.11). |
 | `piiMode` | string | não | `redact` | `redact` (pseudonimiza identificadores no envio) ou `synthetic` (recusa dado de aparência real). |
 | `allowPii` | bool | não | `false` | "Revisei o dado pessoal apontado" (= `--allow-pii`). |
+| `scenarioDedup` | objeto | não | só exato | `{ semantic?, embedModelId?, cosineThreshold? (0.9), echoThreshold? (0.85) }` (limiares 0.5..1); `semantic: true` = embeddings (custo datagen). Só CLI. |
+| `judgeCascade` | objeto | não | — | Modo econômico: `{ cheap: [2 slugs], strong }` — o forte só na dúvida; 3 distintos. Só CLI. |
 
 `duels`/`finalists` dentro de `training` ainda são aceitos (arquivos antigos),
 mas a raiz vence.

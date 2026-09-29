@@ -62,7 +62,9 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 | `finalists` | ids que disputaram a final |
 | `verdictAggregation` | `"majority"` = painel por maioria simples (IMPL-007); ausente = escala antiga |
 | `stages[].referenceJudge.verdictTieByContestant` | empates técnicos do painel: id → votos |
-| `judgeDiagnostics` | pin do **contrato do juiz** (hash do prompt + modelos) + viés de verbosidade medido (correlação score×comprimento) |
+| `judgeDiagnostics` | pin do **contrato do juiz** (hash do prompt + modelos) + viés de verbosidade medido (correlação score×comprimento); `contractAudit.line` = "mesmo contrato desde a última run" ou "scores não comparáveis" |
+| `itemSaturation` | taxa de acerto por item × contestant; `reviewQueue` = **fila de revisão humana** (100% `resolve` ou 100% `nao` em ≥ k execuções: revise o GABARITO, nunca descarte). `runs show` lista item a item |
+| `datagenReport` / `judgeCascade` | geração (entregues/pedidos, descartes exato/semântico, reposição, falta) e modo econômico (fração ao juiz forte, gatilhos) — `runs show` imprime os dois |
 | `fairnessWarnings` | avisos de imparcialidade (juiz da família do competidor) — não-bloqueantes |
 | `repeats` (compare) | `record.stages.length === cenários × repeats` — cópias são observações independentes |
 
@@ -128,7 +130,8 @@ e a vista `arena-config@1`; com `--replay` ele roda o pipeline de HOJE sobre as
 respostas e saídas de juiz GRAVADAS (nenhuma chamada sai para a rede, custo $0)
 e compara o judge-score por cenário — divergência = drift de pontuação (exit 3,
 `config.replay_mismatch`); run de agente não tem replay. O `runs export` produz `prompt-builder-run@1` —
-auditoria completa sem o disco original. O `--apply` nunca perde o prompt de
+auditoria completa sem o disco original, com o bloco `audit` explícito (linha do
+contrato do juiz e as filas de revisão humana do gabarito). O `--apply` nunca perde o prompt de
 produção: backup `<destino>.bak-<ts>` antes de sobrescrever, diff sempre.
 
 ### Gate do handoff (`--apply`)
@@ -205,8 +208,10 @@ de cenários: ordem e formatação não mudam o hash), `configHash`, sessão, ru
 aprovador, instante, evidência (holdout n/Δ/regressed, IC95%/p e a origem do p,
 custo, k de n curados) e o override. Ele vai **sempre** na linha da trilha
 local (`handoffs.jsonl`); com `--record` também em
-`<repo>/.prompt-approvals/<approvalId>.json`, e o `--commit` (que implica
-`--record`) commita o registro junto do prompt com os trailers
+`<repo>/.prompt-approvals/<approvalId>.json` (`--record-dir <dir>` escolhe
+outro diretório e implica `--record`), e o `--commit` (que implica
+`--record`; com `--record-dir`, ele tem de ficar dentro do repo do destino,
+senão exit `2`) commita o registro junto do prompt com os trailers
 `Approved-by:`, `Prompt-Approval:`, `Prompt-Hash:` e `Dataset-Hash:`
 (`git interpret-trailers --parse`). O aprovador é `--approver` ou a identidade
 que o git usaria no commit; sem nenhum dos dois, `--record`/`--commit` recusam

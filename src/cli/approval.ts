@@ -14,14 +14,16 @@
 //
 // Onde vive: SEMPRE embutido na linha da trilha local (`handoffs.jsonl`) — 100%
 // das aplicações com o registro; com `--record` ou `--commit`, também
-// versionado no repo do usuário em `.prompt-approvals/<approvalId>.json`, e o
+// versionado no repo do usuário em `.prompt-approvals/<approvalId>.json` (ou
+// no diretório de `--record-dir <dir>`, que implica `--record`), e o
 // `--commit` leva os trailers `Approved-by:` / `Prompt-Approval:` (parseáveis
 // por `git interpret-trailers --parse`) com o arquivo do registro no MESMO
-// commit do prompt.
+// commit do prompt — por isso, com `--commit`, o `--record-dir` tem de ficar
+// DENTRO do repo do destino (`recordDirOutsideRepo`).
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { contentHash } from '../engine/hash.js';
 import { configHash } from './runLock.js';
@@ -257,16 +259,58 @@ export function buildPromptApproval(input: {
   return { format, approvalId, ...resto };
 }
 
-/** Onde o registro versionado mora: `<raiz do repo | dir do destino>/.prompt-approvals/<id>.json`. */
-export function approvalFilePath(destino: string, approvalId: string): string {
+/**
+ * Onde o registro versionado mora: `<recordDir>/<id>.json` quando o usuário
+ * escolheu (`--record-dir`, relativo ao cwd), senão
+ * `<raiz do repo | dir do destino>/.prompt-approvals/<id>.json`.
+ */
+export function approvalFilePath(destino: string, approvalId: string, recordDir?: string): string {
+  if (recordDir !== undefined) return path.join(path.resolve(recordDir), `${approvalId}.json`);
   const dir = path.dirname(destino);
   const raiz = gitTopLevel(dir) ?? dir;
   return path.join(raiz, PROMPT_APPROVALS_DIR, `${approvalId}.json`);
 }
 
+/**
+ * Caminho canônico mesmo para o que ainda não existe: `realpath` do ancestral
+ * mais fundo que existe + o resto. O git devolve a raiz do repo JÁ canônica
+ * (`/tmp` → `/private/tmp` no macOS); comparar com o caminho cru mentiria.
+ */
+function canonicoFrouxo(p: string): string {
+  const resto: string[] = [];
+  let atual = path.resolve(p);
+  for (;;) {
+    try {
+      return path.join(realpathSync(atual), ...resto.reverse());
+    } catch {
+      const pai = path.dirname(atual);
+      if (pai === atual) return path.resolve(p);
+      resto.push(path.basename(atual));
+      atual = pai;
+    }
+  }
+}
+
+/**
+ * `--record-dir` + `--commit`: o registro vai no MESMO commit do prompt, então
+ * o diretório tem de estar dentro do repo do destino. Devolve a raiz do repo
+ * quando está FORA (o chamador recusa antes de tocar em nada), ou `null` (ok,
+ * ou destino fora de repo — aí o commit já é pulado com aviso).
+ */
+export function recordDirOutsideRepo(destino: string, recordDir: string): string | null {
+  // O diretório do destino pode ainda não existir (o `--apply` o cria): o repo
+  // é o do ancestral mais fundo que existe — o mesmo em que o commit cairá.
+  let dirDestino = path.dirname(path.resolve(destino));
+  while (!existsSync(dirDestino) && path.dirname(dirDestino) !== dirDestino) dirDestino = path.dirname(dirDestino);
+  const top = gitTopLevel(dirDestino);
+  if (!top) return null;
+  const rel = path.relative(canonicoFrouxo(top), canonicoFrouxo(recordDir));
+  return rel.startsWith('..') || path.isAbsolute(rel) ? top : null;
+}
+
 /** Grava o registro (JSON com 2 espaços + `\n`). Devolve o caminho absoluto. */
-export async function writePromptApproval(destino: string, approval: PromptApproval): Promise<string> {
-  const file = approvalFilePath(destino, approval.approvalId);
+export async function writePromptApproval(destino: string, approval: PromptApproval, recordDir?: string): Promise<string> {
+  const file = approvalFilePath(destino, approval.approvalId, recordDir);
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, `${JSON.stringify(approval, null, 2)}\n`, 'utf-8');
   return file;

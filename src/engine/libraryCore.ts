@@ -368,6 +368,18 @@ export function labelIssue(item: Pick<LibraryItem, 'expected' | 'labelSet'>): st
   return labelSetIssue(item);
 }
 
+/**
+ * IMPL-065 — a spec carrega aprovação HUMANA vigente? (item da biblioteca
+ * `aprovado` com o `contentHash` do conteúdo atual — ver `toStageSpec`). É a
+ * régua única de "gente verificou pergunta + gabarito" que a âncora do treino
+ * (`trainingPolicy`) e as demos reais (`techniques`) aceitam mesmo quando o
+ * item nasceu de IA (`origin: 'ai'`).
+ */
+export function stageHasHumanApproval(spec: Pick<StageSpec, 'humanApproval'> | undefined): boolean {
+  const a = spec?.humanApproval;
+  return Boolean(a && typeof a.contentHash === 'string' && a.contentHash.trim());
+}
+
 /** Converte o item enriquecido no `StageSpec` executável do pipeline. */
 export function toStageSpec(item: LibraryItem): StageSpec & { id: string } {
   return {
@@ -383,6 +395,21 @@ export function toStageSpec(item: LibraryItem): StageSpec & { id: string } {
     expected: item.expected,
     ...(item.labelSet !== undefined ? { labelSet: item.labelSet } : {}),
     origin: item.origin === 'ai' ? 'ai' : 'import',
+    // IMPL-065: a curadoria chega à run. Só a aprovação VIGENTE (estado
+    // `aprovado` + hash do conteúdo atual — `isApproved`): antes o estado era
+    // descartado aqui e um item de IA aprovado por gente nunca contava como
+    // âncora humana. Aprovação velha (conteúdo editado depois) não viaja.
+    // Mesma régua do `curationStatus` (k de n curados = âncoras aprovadas).
+    // QUEM aprovou fica no item (o hash liga os dois): nome/e-mail do revisor
+    // em config/record da run cairia no pré-voo LGPD e vazaria para exports.
+    ...(isApproved(item)
+      ? {
+          humanApproval: {
+            ...(item.reviewedAt !== undefined ? { reviewedAt: item.reviewedAt } : {}),
+            contentHash: item.contentHash!,
+          },
+        }
+      : {}),
     // Metadados do datagen v2 (IMPL-064/056/068): chegam à run para o relatório
     // de idioma (`languageWarnings`) e de cobertura adversarial do record.
     ...(item.persona !== undefined ? { persona: item.persona } : {}),
@@ -688,6 +715,103 @@ export function markItemReviewed(item: LibraryItem, review: ItemReviewInput): Li
     contentHash: computeContentHash(item),
     ...(review.rejectReason ? { rejectReason: review.rejectReason } : {}),
   };
+}
+
+/** Um pedido de revisão em lote: os ids e o estado que eles passam a ter. */
+export interface ItemReviewRequest {
+  ids: readonly string[];
+  state: LibraryItemState;
+  /** Obrigatório com `state: 'rejeitado'`. */
+  rejectReason?: RejectReason;
+}
+
+/**
+ * Problema de um pedido de revisão. `kind` separa USO (id que não existe, id
+ * pedido duas vezes, transição ilegal — exit 2 no CLI) de CONTEÚDO (aprovar
+ * item sem gabarito ou com rótulo sem labelSet — exit 3, a mesma régua do
+ * `library verify`).
+ */
+export interface ItemReviewIssue {
+  id: string;
+  kind: 'not_found' | 'duplicate' | 'transition' | 'no_gabarito' | 'label_set';
+  error: string;
+}
+
+export interface ItemReviewPlan {
+  /** As versões revisadas (só dos ids pedidos), na ordem do pedido. */
+  items: LibraryItem[];
+  changes: { id: string; from: LibraryItemState | 'sem_estado'; to: LibraryItemState; contentHash: string }[];
+  issues: ItemReviewIssue[];
+}
+
+/**
+ * `library review` (IMPL-090/IMPL-087, left#7) — planeja uma revisão em lote
+ * SEM gravar nada: quem chama só persiste quando `issues` vem vazio (tudo ou
+ * nada). Aprovar certifica pergunta + GABARITO, então item sem gabarito (ou
+ * com rótulo curto sem labelSet) não pode ser aprovado; rejeitar exige motivo;
+ * a transição segue `LIBRARY_STATE_TRANSITIONS`.
+ */
+export function planItemReviews(
+  existing: readonly LibraryItem[],
+  requests: readonly ItemReviewRequest[],
+  review: { reviewer: string; now?: string },
+): ItemReviewPlan {
+  const porId = new Map(existing.map((i) => [i.id, i]));
+  const vistos = new Set<string>();
+  const items: LibraryItem[] = [];
+  const changes: ItemReviewPlan['changes'] = [];
+  const issues: ItemReviewIssue[] = [];
+  for (const req of requests) {
+    for (const id of req.ids) {
+      if (vistos.has(id)) {
+        issues.push({ id, kind: 'duplicate', error: `item "${id}" pedido em mais de uma ação` });
+        continue;
+      }
+      vistos.add(id);
+      const item = porId.get(id);
+      if (!item) {
+        issues.push({ id, kind: 'not_found', error: `item "${id}" não existe no perfil` });
+        continue;
+      }
+      if (req.state === 'aprovado') {
+        if (!hasGabarito(item)) {
+          issues.push({ id, kind: 'no_gabarito', error: 'sem gabarito (reference ou expected): nada a aprovar' });
+          continue;
+        }
+        const rotulo = labelIssue(item);
+        if (rotulo) {
+          issues.push({ id, kind: 'label_set', error: rotulo });
+          continue;
+        }
+      }
+      try {
+        const revisado = markItemReviewed(item, {
+          state: req.state,
+          reviewer: review.reviewer,
+          ...(req.rejectReason ? { rejectReason: req.rejectReason } : {}),
+          ...(review.now !== undefined ? { now: review.now } : {}),
+        });
+        // Motivo de rejeição de uma revisão ANTERIOR não sobrevive a outro estado.
+        if (req.state !== 'rejeitado') delete revisado.rejectReason;
+        items.push(revisado);
+        changes.push({ id, from: item.state ?? 'sem_estado', to: req.state, contentHash: revisado.contentHash! });
+      } catch (err) {
+        issues.push({ id, kind: 'transition', error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  }
+  return { items, changes, issues };
+}
+
+/**
+ * Motivo de um item NÃO contar como curado (fila de revisão): sem estado,
+ * estado ≠ aprovado, ou aprovação velha (conteúdo mudou depois). `null` =
+ * aprovado de verdade.
+ */
+export function curationIssue(item: LibraryItem): string | null {
+  if (item.state === undefined) return 'sem estado (nunca revisado)';
+  if (item.state !== 'aprovado') return `estado ${item.state}`;
+  return contentHashIssue(item);
 }
 
 /**

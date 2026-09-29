@@ -176,10 +176,13 @@ const USO: Record<string, string> = {
   sessions winner <id> [--prompt-only | --apply <arq> [--commit] [--override "<motivo>"]]
            handoff com backup + diff; holdout regredido BLOQUEIA (exit 10)
            salvo --override com motivo (gravado na auditoria + trailer)
-  sessions winner <id> --apply <arq> [--record] [--commit] [--approver "Nome <email>"]
+  sessions winner <id> --apply <arq> [--record] [--record-dir <dir>] [--commit]
+           [--approver "Nome <email>"]
            registro prompt-approval@1 (hashes do prompt/dataset/config +
-           evidência) em <repo>/.prompt-approvals/; --commit implica --record e
-           leva os trailers Approved-by:/Prompt-Approval: no mesmo commit
+           evidência) em <repo>/.prompt-approvals/ (ou em --record-dir, que
+           implica --record); --commit implica --record e leva os trailers
+           Approved-by:/Prompt-Approval: no mesmo commit (--record-dir, então,
+           dentro do repo do destino)
   sessions export <id> [-o <dir|arq.json>]
            pacote prompt-builder-exchange@1 com a sessão E as runs dela
   sessions import <dir|arq.json> [--overwrite]
@@ -205,10 +208,13 @@ const USO: Record<string, string> = {
                                      seed IDEMPOTENTE por id (o que existe não é
                                      sobrescrito)
   library seed --profile <id> --generate <N> --theme <t> --model <id>
-               [--budget <usd|none>] [--languages pt-BR,en]
+               [--budget <usd|none>] [--languages pt-BR,en] [--semantic-dedup]
                                      gera N itens via datagen + gabarito por item
                                      (tier, dimensionTags, persona… preservados);
-                                     sem --languages, 100% pt-BR
+                                     sem --languages, 100% pt-BR. O banco atual é
+                                     âncora do dedup (par exato; --semantic-dedup
+                                     liga embeddings, custo no papel datagen);
+                                     o relatório sai em datagenReport
   library seed --profile <id> --generate <N> --tier adversarial
                --base-prompt-file <arq> --model <id> [--budget <usd|none>]
                                      cenários adversariais condicionados ao prompt-
@@ -217,6 +223,14 @@ const USO: Record<string, string> = {
                                      por categoria e custo por cenário no resultado
   library verify --profile <id>      itens SEM gabarito ou rótulo curto sem labelSet
                                      (recusados no evolve; exit 3)
+  library review --profile <id>      fila de curadoria: k de n curados e o que não
+                                     conta (sem estado, rejeitado, aprovação velha)
+  library review --profile <id> --approve <ids> [--reject <ids> --reason <tipo>
+               [--note <t>]] [--adjust <ids>] [--reopen <ids>] --reviewer "Nome <email>"
+                                     revisão amarrada ao contentHash (editou, caduca);
+                                     aprovado conta como âncora humana no treino.
+                                     Sem TTY, --reviewer é obrigatório. Tudo ou nada:
+                                     id ruim = exit 2, aprovar sem gabarito = exit 3
   library coverage --profile <id>    cobertura tier × dimensão + lacunas
   library export --profile <id> [-o <dir|arq.json>] [--format exchange|pack]
                                      exchange (default): prompt-builder-exchange@1
@@ -297,6 +311,9 @@ const USO: Record<string, string> = {
   agents task validate <arq> [--repetitions N] [--allow-exec-config]
            as 6 checagens da tarefa — EXECUTA setup[]/solution/checks no
            host: passa pelo MESMO portão (pin SHA-256 inclui o testsDir)
+  agents task compile <arq> --out-dir <dir> [--instruction <txt>] [--scenario N]
+           layout Harbor (task.toml, solution/, tests/test.sh → reward.json);
+           o material do testsDir vai em tests/files/ e entra depois do agente
   agents show <runId> | list (teto 50; --all/--limit N) | logs | replay | gc`,
   telemetry: `  telemetry [status]       estado do opt-in e da atribuição (padrão)
   telemetry schema         schema PÚBLICO do payload + allowlist de eventos

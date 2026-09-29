@@ -79,6 +79,49 @@ export interface RunArtifact {
     judgeModelIds: string[];
     verdictsPorEtapa: RunArtifactJudgeStage[];
   };
+  /**
+   * Auditoria EXPLÍCITA (IMPL-057/IMPL-112, left#10): o record já traz tudo,
+   * mas enterrado — quem audita sem o disco lê aqui a linha do contrato do
+   * juiz (comparado com a última run; hash de 12 chars no `detail`) e as filas
+   * de revisão HUMANA do gabarito (saturação 100%/0% e needs-human-review).
+   * `judgeContract: null` = run sem diagnóstico do juiz (listwise/antiga).
+   */
+  audit: RunArtifactAudit;
+}
+
+/** Bloco `audit` do artefato (IMPL-057/IMPL-112). */
+export interface RunArtifactAudit {
+  judgeContract: {
+    hash: string;
+    modelIds: string[];
+    /** `null` = record anterior à auditoria entre runs (sem comparação gravada). */
+    changed: boolean | null;
+    line: string | null;
+    detail: string | null;
+    previousHash: string | null;
+  } | null;
+  itemReviewQueue: NonNullable<RunRecord['itemSaturation']>['reviewQueue'];
+  needsHumanReview: NonNullable<RunRecord['needsHumanReview']>;
+}
+
+/** O bloco `audit` do artefato — puro, a partir do record. */
+export function runArtifactAudit(record: RunRecord): RunArtifactAudit {
+  const diag = record.judgeDiagnostics;
+  const a = diag?.contractAudit;
+  return {
+    judgeContract: diag
+      ? {
+          hash: diag.contract.hash,
+          modelIds: [...diag.contract.modelIds],
+          changed: a ? a.changed : null,
+          line: a?.line ?? null,
+          detail: a?.detail ?? null,
+          previousHash: a?.previousHash ?? null,
+        }
+      : null,
+    itemReviewQueue: record.itemSaturation?.reviewQueue ?? [],
+    needsHumanReview: record.needsHumanReview ?? [],
+  };
 }
 
 /**
@@ -123,6 +166,7 @@ export function buildRunArtifact(record: RunRecord, exportedAt = new Date().toIS
       judgeModelIds: [...record.config.judgeModelIds],
       verdictsPorEtapa,
     },
+    audit: runArtifactAudit(record),
   };
 }
 
@@ -277,6 +321,9 @@ export function runConfigToArenaConfig(config: RunConfig): ArenaConfigFile {
 
   if (config.duels !== undefined) arena.duels = config.duels;
   if (config.finalists !== undefined) arena.finalists = config.finalists;
+  // IMPL-063/IMPL-115 (left#4): o arena-config@1 agora os expressa.
+  if (config.scenarioDedup) arena.scenarioDedup = { ...config.scenarioDedup };
+  if (config.judgeCascade) arena.judgeCascade = { cheap: [...config.judgeCascade.cheap], strong: config.judgeCascade.strong };
   if (config.compliance) arena.compliance = { ...config.compliance };
   // LGPD (IMPL-042): sem isto uma run "só sintético" reproduzida pelo dialeto
   // arena voltava ao "redigir" (e a revisão `allowPii` se perdia).

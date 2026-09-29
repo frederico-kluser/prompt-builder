@@ -38,7 +38,7 @@
 // ⚠️ ESPELHO CLIENT-SIDE: NÃO existe — o navegador não executa agente (§7.3).
 // ----------------------------------------------------------------------------
 import { z } from 'zod';
-import { chatCompletion } from '../openrouter.js';
+import { chatCompletion, isFatalGatewayError } from '../openrouter.js';
 import type { ChatMessage } from '../openrouter.js';
 import { ROLE_MAX_TOKENS } from '../roleLimits.js';
 import { isControlSignal, RunCancelled } from '../budget.js';
@@ -389,7 +389,9 @@ async function judgeOneDossier(opts: {
     } catch (err) {
       // ESTE catch degrada: sem o rethrow, um estouro de orcamento viraria
       // falha do juiz e a run sairia 'concluida' com notas do oráculo (§29.3).
-      if (isControlSignal(err)) throw err;
+      // cli#3 (left#5): key recusada/sem crédito também sobe — nenhuma
+      // retentativa conserta, e degradar trocava o exit 4/5 por 'inconclusiva'.
+      if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
       if (ctx?.signal?.aborted) throw new RunCancelled(ctx.signal.reason);
       lastError = describeFailure(err);
     }

@@ -974,6 +974,16 @@ export interface StageSpec {
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
   /**
+   * Aprovacao HUMANA vigente do item de origem (biblioteca — IMPL-065/087):
+   * presente so quando o item estava `aprovado` E o `contentHash` gravado ainda
+   * era o do conteudo (a aprovacao cobre pergunta + gabarito). E o que faz um
+   * item gerado por IA (`origin: 'ai'`) e revisado por gente contar como
+   * ANCORA humana (`trainingPolicy.isCuratedItem`). Ausente = sem aprovacao.
+   * QUEM aprovou fica na biblioteca (o `contentHash` liga os dois): o nome/
+   * e-mail do revisor nao viaja para config/record da run (LGPD).
+   */
+  humanApproval?: { reviewedAt?: string; contentHash: string };
+  /**
    * Metadados de CURRICULO (F1/F4.1): tier curatorial e dimensoes medidas.
    * Sobrevivem da biblioteca (`toStageSpec`) e alimentam a selecao Pareto por
    * fatia — sem eles a populacao nao sabe onde cada prompt e especialista.
