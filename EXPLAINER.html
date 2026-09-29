@@ -7,7 +7,7 @@
 <!-- A página nasce escura (sem flash branco). Tema fixo e autocontido: os
      diagramas usam cores embutidas, sem depender de tokens externos. -->
 <meta name="color-scheme" content="dark">
-<title>EXPLAINER — Agent Arena · isolamento por container Docker (Fase 5)</title>
+<title>[Histórico 2026-08-23] EXPLAINER — Agent Arena · container Docker (Fase 5)</title>
 <style>
   /* ── Paleta do deep-orchestrator/Plannotator (dark) ─────────────────────
      Reproduz a linguagem visual do EXPLAINER anterior (#1a1a2e, ciano #00d4ff,
@@ -159,6 +159,13 @@
   /* Footer */
   footer { color: var(--muted); font-size: .82rem; border-top: 1px solid var(--border); margin-top: 2.5rem; padding-top: 1rem; }
 
+  /* Aviso de instantâneo histórico (acrescentado em 2026-09-29) */
+  .historical { margin: .5rem 0 1.25rem; padding: .9rem 1.1rem; border: 1px solid var(--warning);
+    border-left-width: 4px; border-radius: .6rem; background: rgba(255,170,0,.08); color: var(--body-color);
+    font-size: .9rem; line-height: 1.55; }
+  .historical strong { color: var(--warning); }
+  .historical ul { margin: .4rem 0 0 1.1rem; padding: 0; }
+
   @media print {
     .tabs, .hero { display: none !important; }
     .pane { display: block !important; }
@@ -180,6 +187,20 @@
 </nav>
 
 <main class="container">
+
+<aside class="historical" role="note" aria-label="Instantâneo histórico">
+  <strong>Instantâneo histórico — não é mantido.</strong> Esta página registra a entrega da
+  Fase 5 do modo agente (isolamento por container Docker) como ela era em <strong>2026-08-23</strong>.
+  Versões, comandos, custos e limitações citados aqui podem estar desatualizados. A documentação
+  viva está em:
+  <ul>
+    <li><code>prompt-builder docs agents</code> e <code>prompt-builder docs agent-task</code>
+      (<code>agent-docs/agents.md</code>, <code>agent-docs/agent-task.md</code>) — o modo agente e o contrato
+      <code>arena-agent-config@1|@2</code> atuais;</li>
+    <li><code>README.md</code> (visão geral, começo rápido, API) e <code>GUIA.md</code> (as telas);</li>
+    <li>a memória CoALA do projeto (<code>coala.py search "container"</code>) — o histórico das decisões.</li>
+  </ul>
+</aside>
 
   <header class="hero">
     <span class="badge badge-accent mb-2">Relatório · Agent Arena · Fase 5</span>
