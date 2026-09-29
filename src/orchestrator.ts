@@ -141,6 +141,30 @@ class AgentSemaphore {
 export interface StartRunResult {
   runId: string;
   record: RunRecord;
+  /**
+   * A 1ª gravação do record ('running') — http-api#0. Quem responde `202
+   * {runId}` aguarda ISTO antes: sem ele o cliente que seguia o README ("acompanhe
+   * em /runs/:id/events") recebia 404 enquanto o catálogo esquentava, e o
+   * EventSource do navegador desiste de vez num 404. Nunca rejeita.
+   */
+  persisted: Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Registro VIVO das runs deste processo (http-api#1). O disco é uma cópia
+// THROTTLED (SAVE_INTERVAL_MS + marcos): o snapshot do SSE lido de lá perdia
+// tudo o que aconteceu desde a última gravação, e o que era emitido durante o
+// `await loadRun` (antes do subscribe) sumia do stream — o cliente só via as
+// respostas/vereditos no `run.finished`. Com o record VIVO, a rota lê o
+// snapshot e assina o barramento no MESMO tick (espelho do `getRunRecord` do
+// motor do navegador). A entrada sai depois da gravação terminal (o disco já
+// tem o record final).
+// ---------------------------------------------------------------------------
+const liveRuns = new Map<string, RunRecord>();
+
+/** Record VIVO (em memória) de uma run em execução neste processo; `undefined` fora dele. */
+export function getLiveRun(runId: string): RunRecord | undefined {
+  return liveRuns.get(runId);
 }
 
 export interface StartRunOpts {
@@ -333,15 +357,24 @@ async function executeRun(
   } finally {
     // UMA escrita terminal, sem timer orfao — vale para os tres desfechos.
     await saver.flush();
+    // So DEPOIS da escrita terminal: quem chega agora le o record final do disco.
+    if (liveRuns.get(record.id) === record) liveRuns.delete(record.id);
   }
   return record;
 }
 
-/** Dispara a run em background e retorna imediatamente. */
+/**
+ * Dispara a run em background e retorna imediatamente. O record fica VIVO no
+ * registro do processo desde ja e a 1a gravacao SAI JA (`persisted`): a fila de
+ * `saveRun` e por ordem de chamada, e o executeRun ainda esta suspenso no
+ * catalogo — a gravacao dele entra depois desta.
+ */
 export function startRun(config: RunConfig, apiKey: string, opts: StartRunOpts = {}): StartRunResult {
   const record = buildRecord(config, opts);
+  liveRuns.set(record.id, record);
+  const persisted = saveRun(record).catch(() => undefined);
   void executeRun(record, apiKey, opts);
-  return { runId: record.id, record };
+  return { runId: record.id, record, persisted };
 }
 
 /** Roda ate o fim e resolve com o record final (usado pelo trainer). */
@@ -351,6 +384,7 @@ export function runToCompletion(
   opts: StartRunOpts = {},
 ): Promise<RunRecord> {
   const record = buildRecord(config, opts);
+  liveRuns.set(record.id, record);
   return executeRun(record, apiKey, opts);
 }
 

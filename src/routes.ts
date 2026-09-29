@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { listModels, validateKey } from './openrouter.js';
-import { startRun } from './orchestrator.js';
+import { getLiveRun, startRun } from './orchestrator.js';
 import { startTraining } from './trainer.js';
 import { listTechniques } from './techniques.js';
 import { getLgpdData } from './lgpd.js';
@@ -117,7 +117,9 @@ router.post('/runs', requireKey, ah(async (req, res) => {
     if (cfg.mode === 'variation') {
       // A geracao das variantes mora em prepareRun.ts — servidor e CLI passam
       // pelo mesmo lugar. Sem ela, a run sai com ZERO contestants e sem erro.
-      const { runId } = startRun(cfg, apiKey, prepareOptsFor(cfg, apiKey));
+      const { runId, persisted } = startRun(cfg, apiKey, prepareOptsFor(cfg, apiKey));
+      // http-api#0: o 202 so sai com a run JA no disco (GET/SSE logo em seguida nao dao 404).
+      await persisted;
       res.status(202).json({ runId });
       return;
     }
@@ -125,7 +127,8 @@ router.post('/runs', requireKey, ah(async (req, res) => {
     // compare — o superRefine garantiu competitorModelIds OU competitorConfigs
     // (>= 2 competidores efetivos); esse XOR nao e expressavel no tipo estatico
     // (CompareConfig exige competitorModelIds), dai o cast pontual.
-    const { runId } = startRun(cfg as CompareConfig, apiKey);
+    const { runId, persisted } = startRun(cfg as CompareConfig, apiKey);
+    await persisted; // http-api#0
     res.status(202).json({ runId });
   } catch (err) {
     fail500(res, err);
@@ -154,7 +157,8 @@ router.get('/runs', ah(async (_req, res) => {
 
 router.get('/runs/:id', ah(async (req, res) => {
   try {
-    const record = await loadRun(req.params.id);
+    // http-api#1: run viva deste processo = o record em memória (o disco é throttled).
+    const record = getLiveRun(req.params.id) ?? (await loadRun(req.params.id));
     if (!record) {
       res.status(404).json({ error: 'Run nao encontrada' });
       return;
@@ -168,8 +172,11 @@ router.get('/runs/:id', ah(async (req, res) => {
 // SSE: nao exige key (a key so e necessaria para INICIAR a run, nao para acompanhar)
 router.get('/runs/:id/events', ah(async (req, res) => {
   const runId = req.params.id;
+  // http-api#1: run VIVA deste processo — snapshot do record em memória e
+  // subscribe no MESMO tick (nada de `await` entre os dois): o disco é uma
+  // cópia throttled e o que era emitido durante o `loadRun` sumia do stream.
   // Lança (EISDIR…) ANTES dos headers de SSE: o `ah` responde 500 em JSON.
-  const record = await loadRun(runId);
+  const record = getLiveRun(runId) ?? (await loadRun(runId));
   if (!record) {
     res.status(404).json({ error: 'Run nao encontrada' });
     return;

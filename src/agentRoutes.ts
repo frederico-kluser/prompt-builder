@@ -31,7 +31,7 @@ import { ensurePrivateDataDir, getDataDir, listRuns, loadRun } from './storage.j
 import { isValidRecordId } from './pathSafety.js';
 import { normalizeRunRecord } from './normalize.js';
 import { subscribe } from './events.js';
-import { startRun } from './orchestrator.js';
+import { getLiveRun, startRun } from './orchestrator.js';
 import { parseRunConfig } from './runConfigSchema.js';
 import { parseArenaAgentConfig } from './configFile.js';
 import { arenaAgentConfigToRunConfig } from './arenaConfig.js';
@@ -274,7 +274,7 @@ router.post('/runs', async (req, res) => {
 
   try {
     const controller = new AbortController();
-    const { runId } = startRun(config, apiKey, { signal: controller.signal });
+    const { runId, persisted } = startRun(config, apiKey, { signal: controller.signal });
     abortControllers.set(runId, controller);
     // Limpa o controller quando a run fecha em evento terminal (sem listener órfão).
     const off = subscribe(runId, (event) => {
@@ -283,6 +283,8 @@ router.post('/runs', async (req, res) => {
         abortControllers.delete(runId);
       }
     });
+    // http-api#0: o 202 só sai com a run JÁ no disco (GET/SSE logo em seguida não dão 404).
+    await persisted;
     res.status(202).json({ runId });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
@@ -322,7 +324,8 @@ router.get('/runs', async (_req, res) => {
 /** GET /runs/:id — o RunRecord completo (normalizado; campos novos aditivos). */
 router.get('/runs/:id', async (req, res) => {
   try {
-    const record = await loadRun(req.params.id);
+    // http-api#1: run viva deste processo = o record em memória (o disco é throttled).
+    const record = getLiveRun(req.params.id) ?? (await loadRun(req.params.id));
     if (!record) {
       res.status(404).json({ error: 'Run não encontrada' });
       return;
@@ -339,9 +342,11 @@ router.get('/runs/:id', async (req, res) => {
  */
 router.get('/runs/:id/events', async (req, res) => {
   const runId = req.params.id;
-  let record;
+  // http-api#1: run VIVA deste processo — snapshot em memória + subscribe no
+  // MESMO tick (sem `await` entre os dois); só fora dela o disco.
+  let record = getLiveRun(runId);
   try {
-    record = await loadRun(runId);
+    record ??= (await loadRun(runId)) ?? undefined;
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
     return;
