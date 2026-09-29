@@ -304,7 +304,11 @@ const VERIFICADORES: Record<string, Verificador> = {
     // A UI transforma isso em pedir a key: o gate (com rota de volta) e o form.
     const main = read('web/src/main.tsx');
     expect(main).toMatch(/!getStoredKey\(\) && !keyAskSkipped\(\)/);
-    expect(main).toMatch(/<Navigate to="\/welcome" replace state=\{\{ from:/);
+    // A rota de volta (`from`) vai num `state` ESTÁVEL (useMemo): o gate mora
+    // dentro das <Routes> da transição (web-live#9) e um objeto novo por render
+    // redispararia o <Navigate> durante a animação de saída.
+    expect(main).toMatch(/const state = React\.useMemo\(\(\) => \(\{ from \}\), \[from\]\)/);
+    expect(main).toMatch(/<Navigate to="\/welcome" replace state=\{state\} \/>/);
     const newRun = read('web/src/pages/NewRun.tsx');
     expect(newRun).toMatch(/if \(isKeyMissing\(err\)\) \{\s*setNeedKey\(true\)/);
     expect(newRun).toMatch(/\{needKey && \(/);

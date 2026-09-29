@@ -421,6 +421,9 @@ export function NewRun() {
       const data = JSON.parse(raw) as { text?: unknown; name?: unknown };
       if (typeof data.text === 'string' && data.text.trim()) {
         setBasePrompt(data.text);
+        // web-live#9: prompt base só existe nos modos de PROMPT — em 'compare'
+        // o campo nem aparece e o rascunho sumiria no envio sem aviso.
+        if (mode === 'compare') setMode('variation');
         const name = typeof data.name === 'string' && data.name.trim() ? data.name : 'sem nome';
         setDraftNotice(`Prompt '${name}' carregado da biblioteca.`);
       }
