@@ -41,6 +41,12 @@ export interface ModelCaps {
   defaultEffort?: string;
   /** true = não oferecer "Sem raciocínio": o provedor rejeita. */
   mandatory: boolean;
+  /**
+   * cli#2 — o catálogo DECLARA que o modelo não raciocina: o gateway não
+   * envia `reasoning` nenhum (`catalogDeniesReasoning`), então a tela não
+   * oferece degrau (só "Padrão"). Ausente = aceita ou desconhecido.
+   */
+  reasoningDenied?: boolean;
 }
 
 interface ModelLike {
@@ -62,6 +68,9 @@ export function modelCaps(m?: ModelLike): ModelCaps {
   // `[]` = declarado vazio (roteadores) ou fail-closed de campo malformado
   // (IMPL-018): o gateway não envia nada opcional, então nada é oferecido.
   const effort = supported.includes('reasoning_effort');
+  // Espelha `catalogDeniesReasoning` do gateway: lista presente, nenhum
+  // parâmetro de raciocínio e nenhum objeto `reasoning` = nada vai no fio.
+  const denied = !r && !supported.some((p) => p === 'reasoning' || p === 'reasoning_effort' || p === 'include_reasoning');
   return {
     temperature: supported.includes('temperature'),
     reasoning: effort || supported.includes('reasoning'),
@@ -69,6 +78,7 @@ export function modelCaps(m?: ModelLike): ModelCaps {
     supportedEfforts: r?.supportedEfforts,
     defaultEffort: r?.defaultEffort,
     mandatory: r?.mandatory ?? false,
+    ...(denied ? { reasoningDenied: true } : {}),
   };
 }
 
@@ -143,6 +153,8 @@ export function effortOptions(caps: ModelCaps): { value: '' | ReasoningLevel; la
     ? `Padrão (${(EFFORT_LABEL[caps.defaultEffort] ?? caps.defaultEffort).toLowerCase()})`
     : 'Padrão';
   const out: { value: '' | ReasoningLevel; label: string }[] = [{ value: '', label: padrao }];
+  // cli#2: modelo sem raciocínio — qualquer degrau seria ignorado no fio.
+  if (caps.reasoningDenied) return out;
   if (!caps.mandatory) out.push({ value: 'off', label: EFFORT_LABEL.none });
   const allow = caps.supportedEfforts;
   for (const level of EFFORT_ASC) {

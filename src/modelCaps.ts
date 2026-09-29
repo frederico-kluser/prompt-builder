@@ -13,6 +13,7 @@
 
 import { fitEffort, REASONING_LEVELS } from './reasoning.js';
 import { exportPrice, UNKNOWN_PRICE_JSON } from './engine/pricing.js';
+import { catalogDeniesReasoning } from './openrouter.js';
 import type {
   ModelReasoningMeta,
   OpenRouterModel,
@@ -33,6 +34,13 @@ export interface ModelCaps {
   defaultEffort?: string;
   /** true = nao oferecer "sem raciocinio": o provedor rejeita. */
   mandatory: boolean;
+  /**
+   * cli#2 — o catalogo DECLARA que o modelo nao raciocina (lista de parametros
+   * sem `reasoning`/`reasoning_effort`/`include_reasoning` e sem objeto
+   * `reasoning`): o gateway NAO envia `reasoning` nenhum (`catalogDeniesReasoning`),
+   * entao nenhum think level vale. Ausente = aceita ou desconhecido.
+   */
+  reasoningDenied?: boolean;
 }
 
 interface ModelLike {
@@ -61,6 +69,8 @@ export function modelCaps(m?: ModelLike): ModelCaps {
     supportedEfforts: r?.supportedEfforts,
     defaultEffort: r?.defaultEffort,
     mandatory: r?.mandatory ?? false,
+    // A MESMA regra do fio (`buildBody`): negado = nada de `reasoning` enviado.
+    ...(catalogDeniesReasoning({ supportedParameters: supported, reasoning: r }) ? { reasoningDenied: true } : {}),
   };
 }
 
@@ -129,6 +139,10 @@ const EFFORT_ASC: ReasoningLevel[] = ['minimal', 'low', 'medium', 'high', 'xhigh
  * - `mandatory` → sem a opcao `off` (o provedor rejeita 'none').
  */
 export function effortOptions(caps: ModelCaps): ReasoningLevel[] {
+  // cli#2: modelo que o catalogo declara SEM raciocinio nao aceita nivel
+  // nenhum — o gateway ignora o pedido (nada vai no fio). Antes a lista
+  // ausente de allowlist virava "todos os 7" e o agente lia um mapa falso.
+  if (caps.reasoningDenied) return [];
   const out: ReasoningLevel[] = [];
   if (!caps.mandatory) out.push('off');
   const allow = caps.supportedEfforts;
@@ -159,10 +173,77 @@ export interface ThinkLevels {
   fit: Record<ReasoningLevel, string>;
 }
 
+/** O que vai no fio para QUALQUER nivel pedido a um modelo sem raciocinio. */
+export const REASONING_IGNORED_FIT = '(ignorado: modelo sem raciocínio — nada vai no fio)';
+
+/** Um nivel PEDIDO na config que o gateway vai ignorar (modelo sem raciocinio). */
+export interface IgnoredReasoningLevel {
+  modelId: string;
+  /** Papel na config (`competitor`, `judge`, `duel`, `gab`, `datagen`, `rewriter`). */
+  role: keyof ReasoningConfig;
+  level: ReasoningLevel;
+}
+
+/**
+ * cli#2 — niveis de raciocinio PEDIDOS explicitamente na config que caem num
+ * modelo que o catalogo declara sem raciocinio: o gateway nao envia nada, e o
+ * pre-voo avisa em vez de deixar o esforco sumir em silencio. `off` nao entra
+ * (desligar o que nao existe nao muda nada); defaults do papel tambem nao.
+ */
+export function ignoredReasoningLevels(
+  config: {
+    reasoning?: ReasoningConfig;
+    competitorConfigs?: { modelId: string; reasoningLevel?: ReasoningLevel }[];
+    competitorModelIds?: string[];
+    contestantModelId?: string;
+    judgeModelIds?: string[];
+    referenceModelId?: string;
+    datagenModelId?: string;
+    optimizerModelId?: string;
+  },
+  models: readonly (ModelLike & { id: string })[],
+): IgnoredReasoningLevel[] {
+  const byId = new Map(models.map((m) => [m.id, m]));
+  const out: IgnoredReasoningLevel[] = [];
+  const vistos = new Set<string>();
+  const conferir = (modelId: string | undefined, role: keyof ReasoningConfig, level: ReasoningLevel | undefined): void => {
+    if (!modelId || !level || level === 'off') return;
+    const chave = `${modelId}\u0000${role}\u0000${level}`;
+    if (vistos.has(chave)) return;
+    if (!modelCaps(byId.get(modelId)).reasoningDenied) return;
+    vistos.add(chave);
+    out.push({ modelId, role, level });
+  };
+  const r = config.reasoning;
+  const porModelo = new Map((config.competitorConfigs ?? []).map((c) => [c.modelId, c.reasoningLevel]));
+  const competidores = [
+    ...(config.competitorModelIds ?? []),
+    ...(config.competitorConfigs ?? []).map((c) => c.modelId),
+    ...(config.contestantModelId ? [config.contestantModelId] : []),
+  ];
+  for (const id of competidores) conferir(id, 'competitor', porModelo.get(id) ?? r?.competitor);
+  for (const id of config.judgeModelIds ?? []) {
+    conferir(id, 'judge', r?.judge);
+    conferir(id, 'duel', r?.duel);
+  }
+  conferir(config.referenceModelId, 'gab', r?.gab);
+  conferir(config.datagenModelId, 'datagen', r?.datagen);
+  conferir(config.optimizerModelId ?? config.datagenModelId, 'rewriter', r?.rewriter);
+  return out;
+}
+
 export function thinkLevelsFor(m?: ModelLike): ThinkLevels {
   const caps = modelCaps(m);
   const meta = m?.reasoning;
   const fit = {} as Record<ReasoningLevel, string>;
+  if (caps.reasoningDenied) {
+    // Espelha o gateway EXATAMENTE (`catalogDeniesReasoning` em buildBody):
+    // nenhum nivel e aceito e nenhum vai no fio. Nao dependa de
+    // `!caps.reasoning`: sem `supported_parameters` (fora do catalogo) o
+    // gateway AINDA envia `reasoning`.
+    for (const level of REASONING_LEVELS) fit[level] = REASONING_IGNORED_FIT;
+    return { accepted: [], default: undefined, canDisable: false, fit };
+  }
   for (const level of REASONING_LEVELS) {
     if (level === 'off') {
       // Espelha `applyReasoning`: em modelo `mandatory` nada e enviado (o
