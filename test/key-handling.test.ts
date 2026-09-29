@@ -218,7 +218,7 @@ const VERIFICADORES: Record<string, Verificador> = {
     expect(browserGatewayConfig().baseUrl).toBe('https://openrouter.ai/api/v1');
   },
   // "nenhum servidor do Prompt Builder recebe a key".
-  servidor() {
+  async servidor() {
     const arquivos: string[] = [];
     const walk = (dir: string) => {
       for (const n of readdirSync(dir)) {
@@ -231,15 +231,50 @@ const VERIFICADORES: Record<string, Verificador> = {
     const fontes = arquivos.map((f) => [f.slice(ROOT.length + 1), readFileSync(f, 'utf8')] as const);
     // Nenhum header da key para um backend (o modo servidor HTTP não é a SPA).
     expect(fontes.filter(([, s]) => s.includes('x-openrouter-key')).map(([f]) => f)).toEqual([]);
-    // Nenhuma rota do backend (/v1…) chamada pela SPA.
+    // Nenhuma rota do backend (/v1…) chamada por fetch literal espalhado pela SPA.
     expect(fontes.filter(([, s]) => /fetch\(\s*['"`]\/v1/.test(s)).map(([f]) => f)).toEqual([]);
-    // Fora do gateway, o ÚNICO fetch direto é o ranking PÚBLICO do catálogo — sem key.
+    // Fora do gateway, os ÚNICOS fetch diretos são o ranking PÚBLICO do
+    // catálogo e o cliente SOMENTE-LEITURA do self-host (http-api#3,
+    // web/src/backend.ts) — nenhum dos dois com key.
     const diretos = fontes.filter(([f, s]) => !f.startsWith('web/src/engine/') && /\bfetch\(/.test(s)).map(([f]) => f);
-    expect(diretos).toEqual(['web/src/components/ModelSelector.tsx']);
+    expect([...diretos].sort()).toEqual(['web/src/backend.ts', 'web/src/components/ModelSelector.tsx']);
     const sel = fontes.find(([f]) => f === 'web/src/components/ModelSelector.tsx')![1];
     const linha = sel.split('\n').find((l) => /\bfetch\(/.test(l))!;
     expect(linha).toContain('DEFAULT_OPENROUTER_BASE_URL');
     expect(linha).not.toMatch(/getStoredKey|Authorization|apiKey/);
+    // O cliente do self-host não toca na key: só GET com `accept`, sem
+    // Authorization/header de key, e nenhuma função dele recebe a key.
+    const back = fontes.find(([f]) => f === 'web/src/backend.ts')![1];
+    expect(back).not.toMatch(/getStoredKey|Authorization|apiKey|sk-or-|method\s*:/);
+    expect(back).toMatch(/headers: \{ accept: 'application\/json' \}/);
+    // E em execução: backend "presente" (probe /health OK) e key conectada —
+    // nenhuma chamada ao servidor leva a key (url nem headers).
+    const rede = gravarRede();
+    const fetchBase = globalThis.fetch as unknown as (u: unknown, i?: unknown) => Promise<Response>;
+    vi.stubGlobal('fetch', async (u: unknown, i?: unknown) => {
+      const url = String(u);
+      if (url.endsWith('/health')) {
+        await fetchBase(u, i); // registra a chamada
+        return new Response(JSON.stringify({ service: 'prompt-builder' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return fetchBase(u, i);
+    });
+    vi.stubGlobal('location', new URL('http://127.0.0.1:3001/runs'));
+    const api = await abrirApi();
+    api.setStoredKey('sk-or-v1-servidor');
+    const back2 = (await import('../web/src/backend.js')) as typeof import('../web/src/backend.js');
+    back2.resetBackendProbe();
+    await back2.fetchBackendRuns();
+    await back2.fetchBackendSessions();
+    await back2.fetchBackendRun('r1');
+    const aoServidor = rede.filter((c) => c.url.startsWith('http://127.0.0.1:3001/'));
+    expect(aoServidor.length, 'o modo self-host estava ligado').toBeGreaterThan(1);
+    for (const c of aoServidor) {
+      expect(c.url + c.headers, `sem key: ${c.url}`).not.toContain('sk-or-v1-servidor');
+    }
   },
   // "qualquer script da página consegue ler a key" — não prometemos proteção.
   async riscos() {
