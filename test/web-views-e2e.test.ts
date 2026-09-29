@@ -200,9 +200,14 @@ function buildSpa(outDir: string): void {
   const viteBin = join(ROOT, 'web', 'node_modules', 'vite', 'bin', 'vite.js');
   // outDir PRÓPRIO: o web/dist é de outros testes (e do deploy) — build
   // concorrente no mesmo diretório corromperia os dois.
+  // `NODE_ENV: 'production'` é obrigatório: o vitest põe NODE_ENV=test e o
+  // build herdado sai com o bundle de DESENVOLVIMENTO do React (não é o
+  // artefacto que a Vercel publica) — mesmo cuidado do buildWeb do
+  // test/ux-nova-run-e2e.test.ts.
   const r = spawnSync(process.execPath, [viteBin, 'build', '--outDir', outDir, '--emptyOutDir'], {
     cwd: join(ROOT, 'web'),
     encoding: 'utf8',
+    env: { ...process.env, NODE_ENV: 'production' },
   });
   if (r.status !== 0) throw new Error(`vite build falhou:\n${r.stdout}\n${r.stderr}`);
 }

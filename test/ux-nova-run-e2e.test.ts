@@ -42,6 +42,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -135,9 +136,14 @@ async function axeNoPopup(page: Page): Promise<AxeViolacao[]> {
 /** Build atual do SPA (o teste mede o código de HOJE, não um dist velho). */
 function buildWeb(): void {
   const viteBin = join(ROOT, 'web', 'node_modules', 'vite', 'bin', 'vite.js');
+  // ⚠️ `NODE_ENV: 'production'` é OBRIGATÓRIO: o vitest põe NODE_ENV=test e o
+  // `vite build` herdado dele sai com o bundle de DESENVOLVIMENTO do React —
+  // chunk de entrada 1,42 MB em vez de 1,07 MB, e os gates mediriam o
+  // artefacto errado (não é o que a Vercel publica).
   const r = spawnSync(process.execPath, [viteBin, 'build'], {
     cwd: join(ROOT, 'web'),
     encoding: 'utf8',
+    env: { ...process.env, NODE_ENV: 'production' },
   });
   if (r.status !== 0) throw new Error(`vite build falhou:\n${r.stdout}\n${r.stderr}`);
 }
@@ -1017,6 +1023,35 @@ describe.skipIf(!alvo)('left#16 — 390 px: sem rolagem horizontal escondida', (
       await contexto.close();
     }
   }, 120_000);
+});
+
+/* ============================================ left#15 — orçamento do build === */
+
+// left#15 tirou o chunk de entrada de 1,73 MB para 1,07 MB, mas o tamanho só
+// estava registado em comentário: uma regressão de code-splitting passava em
+// silêncio. O artefacto SÓ se mede depois de um `vite build` real — por isso o
+// gate mora aqui (o `beforeAll` desta suíte constrói; sem browser, o teste
+// constrói sozinho antes de medir).
+describe('left#15 — o chunk de entrada do build real fica no orçamento', () => {
+  const viteBin = join(ROOT, 'web', 'node_modules', 'vite', 'bin', 'vite.js');
+  if (!existsSync(viteBin)) {
+    console.warn('[left#15] web/node_modules sem vite — orçamento do chunk de entrada NÃO medido.');
+  }
+
+  it.skipIf(!existsSync(viteBin))('chunk de entrada ≤ 1,20 MB (gzip ≤ 420 kB)', () => {
+    if (!alvo) buildWeb(); // sem browser o beforeAll não construiu: mede um build fresco
+    const html = readFileSync(join(DIST, 'index.html'), 'utf8');
+    const m =
+      /<script[^>]*type="module"[^>]*src="([^"]+)"/.exec(html) ??
+      /<script[^>]*src="([^"]+)"[^>]*type="module"/.exec(html);
+    expect(m, 'script de entrada não encontrado no index.html').not.toBeNull();
+    const bytes = readFileSync(join(DIST, m![1].replace(/^\/+/, '')));
+    const gz = gzipSync(bytes).length;
+    // Teto com folga sobre o medido no fechamento do left#15 (1.069.480 B /
+    // gzip 350.950 B) — e MUITO abaixo do bundle único antigo (1.734.870 B).
+    expect(bytes.length, `chunk de entrada ${bytes.length} B`).toBeLessThanOrEqual(1_200_000);
+    expect(gz, `gzip do chunk de entrada ${gz} B`).toBeLessThanOrEqual(420_000);
+  }, 180_000);
 });
 
 /**
