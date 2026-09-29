@@ -159,6 +159,33 @@ describe('buildSessionReport — degradações honestas', () => {
     expect(r2.warnings.join(' ')).toMatch(/custo 0/);
   });
 
+  it('recusa conta como chamada paga; retry por truncamento e pendente viram aviso; gasto fora das runs', () => {
+    const { session, runs } = fixture();
+    const rh = runs.find((r) => r.id === 'rh')!;
+    const st = rh.stages[0].responses.find((x) => x.contestantId === 'holdout-champion')!;
+    st.status = 'refused';
+    const st2 = rh.stages[1].responses.find((x) => x.contestantId === 'holdout-champion')!;
+    st2.truncationRetried = true;
+    const s = { ...session, costLedger: { spentUsd: 0.32, committedUsd: 0, pendingUsd: 0.01, pendingCalls: 1, conservativeUsd: 0, conservativeCalls: 0 } } as unknown as SessionRecord;
+    const r = buildSessionReport(s, runs);
+    expect(r.cost.pairs).toBe(6);
+    expect(r.cost.champion.refusedCalls).toBe(1);
+    expect(r.cost.champion.retriedCalls).toBe(1);
+    expect(r.warnings.join(' ')).toMatch(/teto ×2/);
+    expect(r.warnings.join(' ')).toMatch(/pendentes/);
+    expect(r.optimization.pendingUsd).toBe(0.01);
+    // 0,32 − (0,12 + 0,10 + 0,02 + 0,08) = 0 → sem gasto fora das runs neste fixture.
+    expect(r.optimization.sessionOverheadUsd).toBe(0);
+  });
+
+  it('latência: Δ é a MEDIANA dos pares (robusta a um outlier)', () => {
+    const { session, runs } = fixture();
+    const rh = runs.find((r) => r.id === 'rh')!;
+    rh.stages[0].responses.find((x) => x.contestantId === 'holdout-champion')!.latencyMs = 60_000;
+    const r = buildSessionReport(session, runs);
+    expect(r.cost.deltaLatencyMs).toBe(200);
+  });
+
   it('sessão sem linhagem (interrompida) não quebra', () => {
     const { session, runs } = fixture();
     const s = { ...session, bestPromptByIteration: [], holdout: undefined, pairing: undefined, significance: undefined } as unknown as SessionRecord;

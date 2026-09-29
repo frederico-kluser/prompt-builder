@@ -44,6 +44,13 @@ export interface CallCostStats {
   totalCostUsd: number;
   /** Chamadas com custo 0: preço desconhecido OU modelo gratuito — nunca "de graça" por inferência. */
   zeroCostCalls: number;
+  /**
+   * Chamadas que truncaram e foram refeitas com teto ×2: o `costUsd` delas soma
+   * as DUAS tentativas (em produção não há esse retry) — infla o custo medido.
+   */
+  retriedCalls: number;
+  /** Recusas do modelo (`refused`): contam como chamada paga, sem resposta útil. */
+  refusedCalls: number;
 }
 
 export type ComparisonSource = 'holdout' | 'training' | 'none';
@@ -63,6 +70,7 @@ export interface CostComparison {
   deltaTokensIn: number | null;
   deltaTokensOut: number | null;
   deltaReasoningTokens: number | null;
+  /** MEDIANA dos Δ pareados de latência (robusta ao ruído de concorrência). */
   deltaLatencyMs: number | null;
   deltaLatencyPct: number | null;
   per1kCalls: { originalUsd: number; championUsd: number; deltaUsd: number } | null;
@@ -195,6 +203,15 @@ export interface SessionReport {
   cost: CostComparison;
   optimization: {
     totalUsd: number;
+    /** Chamadas sem custo apurado (timeout/abort): o gasto real pode ir até total + pendente. */
+    pendingUsd: number;
+    /** BYOK: custo cobrado pelo provedor FORA dos créditos do OpenRouter. */
+    upstreamUsd: number;
+    /**
+     * Gasto de nível de sessão que não pertence a nenhuma run (reescritor,
+     * reflexão, contract gate) = total − Σ runs carregadas. null se faltou run.
+     */
+    sessionOverheadUsd: number | null;
     byRole: RoleCost[];
     budgetUsd?: number;
     budgetUsedPct: number | null;
@@ -250,13 +267,20 @@ interface CallSample {
   tokensOut: number;
   reasoningTokens: number | null;
   latencyMs: number;
+  retried: boolean;
+  refused: boolean;
 }
 
-/** Resposta `ok` do contestant na etapa (etapa cortada fica fora, como no placar). */
-function sampleOf(stage: StageRecord, contestantId: string): CallSample | null {
-  if (stage.incomplete) return null;
-  const r = stage.responses.find((x) => x.contestantId === contestantId);
-  if (!r || r.status !== 'ok') return null;
+/**
+ * Chamada do contestant na etapa que representa USO REAL: `ok` ou `refused`
+ * (a recusa também é paga). `error`/`blocked` ficam fora (sem resposta, tokens
+ * zerados). O custo de etapas cortadas (`incomplete`) é real — elas entram aqui
+ * mesmo fora do placar de qualidade.
+ */
+function sampleOf(stage: StageRecord | null | undefined, contestantId: string): CallSample | null {
+  if (!stage) return null;
+  const r = (stage.responses ?? []).find((x) => x && x.contestantId === contestantId);
+  if (!r || (r.status !== 'ok' && r.status !== 'refused')) return null;
   if (!Number.isFinite(r.costUsd)) return null;
   return {
     costUsd: r.costUsd,
@@ -264,7 +288,16 @@ function sampleOf(stage: StageRecord, contestantId: string): CallSample | null {
     tokensOut: r.tokensOut,
     reasoningTokens: typeof r.reasoningTokens === 'number' ? r.reasoningTokens : null,
     latencyMs: r.latencyMs,
+    retried: r.truncationRetried === true,
+    refused: r.status === 'refused',
   };
+}
+
+function median(xs: readonly number[]): number | null {
+  if (xs.length === 0) return null;
+  const v = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
 }
 
 function statsOf(samples: readonly CallSample[]): CallCostStats {
@@ -280,6 +313,8 @@ function statsOf(samples: readonly CallSample[]): CallCostStats {
     meanLatencyMs: m((s) => s.latencyMs),
     totalCostUsd: round(total, 6),
     zeroCostCalls: samples.filter((s) => s.costUsd === 0).length,
+    retriedCalls: samples.filter((s) => s.retried).length,
+    refusedCalls: samples.filter((s) => s.refused).length,
   };
 }
 
@@ -295,7 +330,7 @@ function pairedSamples(
   const a: CallSample[] = [];
   const b: CallSample[] = [];
   if (runA === runB) {
-    for (const st of runA.stages) {
+    for (const st of runA.stages ?? []) {
       const x = sampleOf(st, idA);
       const y = sampleOf(st, idB);
       if (x && y) {
@@ -306,11 +341,13 @@ function pairedSamples(
     return { a, b };
   }
   const byKey = new Map<string, StageRecord>();
-  for (const st of runB.stages) {
+  for (const st of runB.stages ?? []) {
+    if (!st) continue;
     const k = stageKey(st);
     if (k && !byKey.has(k)) byKey.set(k, st);
   }
-  for (const st of runA.stages) {
+  for (const st of runA.stages ?? []) {
+    if (!st) continue;
     const k = stageKey(st);
     const other = k ? byKey.get(k) : undefined;
     if (!other) continue;
@@ -560,6 +597,26 @@ export function buildSessionReport(
       `${cost.original.zeroCostCalls + cost.champion.zeroCostCalls} chamada(s) com custo 0 na comparação (preço desconhecido ou modelo gratuito) — o Δ de custo pode estar subestimado.`,
     );
   }
+  if (cost.original.retriedCalls + cost.champion.retriedCalls > 0) {
+    warnings.push(
+      `${cost.original.retriedCalls + cost.champion.retriedCalls} chamada(s) da comparação truncaram e foram refeitas com teto ×2 — o custo medido delas soma as duas tentativas (em produção não há esse retry).`,
+    );
+  }
+  if ((session.costLedger?.pendingUsd ?? 0) > 0) {
+    warnings.push(
+      `US$ ${(session.costLedger?.pendingUsd ?? 0).toFixed(4)} em chamadas pendentes (sem custo apurado): o gasto real da otimização pode chegar a total + pendente.`,
+    );
+  }
+  if ((session.upstreamCostUsd ?? 0) > 0) {
+    warnings.push(
+      `BYOK: US$ ${(session.upstreamCostUsd ?? 0).toFixed(4)} cobrados pelo provedor fora dos créditos do OpenRouter — some ao custo da otimização.`,
+    );
+  }
+  if (runs.some((r) => r.contestants?.some((c) => c.runner === 'agent'))) {
+    warnings.push(
+      'Modo agente: o custo por "chamada" é o custo de uma execução inteira do agente (derivado), não de uma chamada de LLM — compare com cautela.',
+    );
+  }
   if (session.costAccuracy && session.costAccuracy.unknown > 0) {
     warnings.push(
       `${session.costAccuracy.unknown} chamada(s) da sessão com custo DESCONHECIDO (fora do total) — o gasto real pode ser maior.`,
@@ -631,6 +688,12 @@ export function buildSessionReport(
     cost,
     optimization: {
       totalUsd: optimizationUsd,
+      pendingUsd: round(session.costLedger?.pendingUsd ?? 0, 6),
+      upstreamUsd: round(session.upstreamCostUsd ?? 0, 6),
+      sessionOverheadUsd:
+        missingRuns.length > 0
+          ? null
+          : round(Math.max(0, optimizationUsd - runs.reduce((a, r) => a + (r.totalCostUsd ?? 0), 0)), 6),
       byRole,
       ...(session.budgetUsd != null ? { budgetUsd: session.budgetUsd } : {}),
       budgetUsedPct:
@@ -815,6 +878,7 @@ function costComparisonOf(args: {
   const o = statsOf(pair.a);
   const c = statsOf(pair.b);
   const dCost = sub(c.meanCostUsd, o.meanCostUsd);
+  const latDelta = median(pair.a.map((x, i) => pair.b[i].latencyMs - x.latencyMs));
   const per1k =
     o.meanCostUsd != null && c.meanCostUsd != null
       ? {
@@ -853,8 +917,8 @@ function costComparisonOf(args: {
       sub(c.meanReasoningTokens, o.meanReasoningTokens) == null
         ? null
         : round(sub(c.meanReasoningTokens, o.meanReasoningTokens)!, 1),
-    deltaLatencyMs: sub(c.meanLatencyMs, o.meanLatencyMs) == null ? null : Math.round(sub(c.meanLatencyMs, o.meanLatencyMs)!),
-    deltaLatencyPct: pct(sub(c.meanLatencyMs, o.meanLatencyMs), o.meanLatencyMs),
+    deltaLatencyMs: latDelta == null ? null : Math.round(latDelta),
+    deltaLatencyPct: pct(latDelta, median(pair.a.map((x) => x.latencyMs))),
     per1kCalls: per1k,
     projection,
     paybackCalls,
@@ -1021,6 +1085,11 @@ export function renderSessionReportMarkdown(r: SessionReport): string {
   L.push('## Custo da otimização');
   L.push('');
   L.push(`- Total: ${fmtUsd(r.optimization.totalUsd)}${r.optimization.budgetUsd != null ? ` de ${fmtUsd(r.optimization.budgetUsd)} (${fmtPct(r.optimization.budgetUsedPct, false)})` : ''}`);
+  if (r.optimization.pendingUsd > 0) L.push(`- Pendente (sem custo apurado): ${fmtUsd(r.optimization.pendingUsd)}`);
+  if (r.optimization.upstreamUsd > 0) L.push(`- BYOK (fora dos créditos): ${fmtUsd(r.optimization.upstreamUsd)}`);
+  if (r.optimization.sessionOverheadUsd != null && r.optimization.sessionOverheadUsd > 0) {
+    L.push(`- Fora das runs (reescritor/reflexão): ${fmtUsd(r.optimization.sessionOverheadUsd)}`);
+  }
   for (const role of r.optimization.byRole) {
     L.push(`- ${ROLE_LABEL[role.role] ?? role.role}: ${fmtUsd(role.usd)} (${fmtPct(role.pct, false)}, ${fmtInt(role.calls)} chamada(s))`);
   }

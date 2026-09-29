@@ -354,7 +354,13 @@ function optimizationSection(r: SessionReport): string {
           `${fmtUsd(o.totalUsd)} de ${fmtUsd(o.budgetUsd)} (${fmtPct(o.budgetUsedPct, false)} do teto)`,
         )}</p>`
       : `<p class="muted">${e(`Total gasto: ${fmtUsd(o.totalUsd)} (sessão sem teto registrado).`)}</p>`;
-  return `${budget}${roleBars(r)}${acc}`;
+  const extra = [
+    o.pendingUsd > 0 ? `pendente sem custo apurado: ${fmtUsd(o.pendingUsd)}` : '',
+    o.upstreamUsd > 0 ? `BYOK fora dos créditos: ${fmtUsd(o.upstreamUsd)}` : '',
+    o.sessionOverheadUsd != null && o.sessionOverheadUsd > 0 ? `fora das runs (reescritor/reflexão): ${fmtUsd(o.sessionOverheadUsd)}` : '',
+  ].filter(Boolean);
+  const extraHtml = extra.length ? `<div class="tags">${extra.map((t) => `<span class="tag">${e(t)}</span>`).join('')}</div>` : '';
+  return `${budget}${roleBars(r)}${acc}${extraHtml}`;
 }
 
 function promptSection(r: SessionReport): string {

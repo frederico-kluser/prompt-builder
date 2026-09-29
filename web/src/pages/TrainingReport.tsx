@@ -636,6 +636,13 @@ export function TrainingReport() {
             })}
           </div>
         )}
+        {(o.pendingUsd > 0 || o.upstreamUsd > 0 || (o.sessionOverheadUsd ?? 0) > 0) && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {o.pendingUsd > 0 && <Chip>pendente sem custo apurado: {fmtUsd(o.pendingUsd)}</Chip>}
+            {o.upstreamUsd > 0 && <Chip>BYOK fora dos créditos: {fmtUsd(o.upstreamUsd)}</Chip>}
+            {(o.sessionOverheadUsd ?? 0) > 0 && <Chip>fora das runs (reescritor/reflexão): {fmtUsd(o.sessionOverheadUsd)}</Chip>}
+          </div>
+        )}
         {o.accuracy && (
           <div className="mt-3 flex flex-wrap gap-1.5">
             <Chip>{o.accuracy.exact} chamada(s) com custo exato</Chip>
