@@ -16,7 +16,7 @@
 
 import { BudgetLedger, isBudgetSignal, isControlSignal } from '../../budget.js';
 import { makeCallEstimator } from '../../estimate.js';
-import { getGateway, type OpenRouterGateway } from '../../openrouter.js';
+import { getGateway, isFatalGatewayError, type OpenRouterGateway } from '../../openrouter.js';
 import { pairedSignificance } from '../../stats.js';
 import { GATE_ALPHA, bestOfKTest, resolveMinGain, winnersCurseInflation } from '../bestOfK.js';
 import { shouldStopForPatience } from '../trainingPolicy.js';
@@ -388,7 +388,9 @@ export async function trainJev(resolved: ResolvedJevConfig, deps: JevTrainDeps):
               filha = { ...filha, label: rotulo };
             } else motivo = r.reason;
           } catch (err) {
-            if (isControlSignal(err)) throw err;
+            // Onda 2 (cli#3): 401/402 é falha de CONTA, fatal em todo papel —
+            // o reescritor não pode degradá-la a "variante a menos".
+            if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
             motivo = `proponente falhou: ${(err as Error).message}`.slice(0, 300);
           }
         } else motivo = 'sem rewriterModelId';

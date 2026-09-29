@@ -67,6 +67,7 @@ import {
 import { jevGuardConfig } from '../../jev/job.js';
 import type { OpenRouterModel } from '../../types.js';
 import {
+  assertKnownSubcommand,
   buildContext,
   isAgentContext,
   limitList,
@@ -787,6 +788,15 @@ async function cmdExport(argv: string[]): Promise<number> {
 export async function cmdJev(argv: string[]): Promise<number> {
   const sub = argv[0];
   const rest = argv.slice(1);
+  // Onda 2 (cli#13): subcomando desconhecido sai pelo MESMO contrato das outras
+  // famílias — exit 2 `usage.unknown_subcommand` ANTES de parse/disco/rede, com
+  // os aceitos em `details` e "você quis dizer".
+  if (sub && !sub.startsWith('-')) {
+    assertKnownSubcommand('jev', sub, JEV_SUBCOMMANDS, {
+      usage: `jev ${JEV_SUBCOMMANDS.join('|')} (ver \`prompt-builder jev --help\`)`,
+      aliases: { ls: 'list', get: 'show', lint: 'validate', evaluate: 'eval', catalog: 'models' },
+    });
+  }
   switch (sub) {
     case 'validate':
       return cmdValidate(rest);

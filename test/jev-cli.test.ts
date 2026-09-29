@@ -241,7 +241,14 @@ describe('jev — help e descoberta', () => {
     expect(JSON.parse(t.stdout).data.techniques.length).toBe(19);
     const x = await run(['jev', 'voar', '--json']);
     expect(x.code).toBe(2);
-    expect(JSON.parse(x.stdout).error.code).toBe('usage.unknown_command');
+    // Onda 2 (cli#13): mesmo contrato das outras famílias.
+    const erro = JSON.parse(x.stdout).error;
+    expect(erro.code).toBe('usage.unknown_subcommand');
+    expect(erro.details.subcommand).toBe('voar');
+    expect(erro.details.accepted).toContain('train');
+    const y = await run(['jev', 'ls', '--json']);
+    expect(y.code).toBe(2);
+    expect(JSON.parse(y.stdout).error.hint).toMatch(/jev list/);
   });
 
   it('`jev models` lê o catálogo PÚBLICO de decisões sem key', async () => {

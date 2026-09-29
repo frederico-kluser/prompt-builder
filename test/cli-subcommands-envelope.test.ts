@@ -64,6 +64,9 @@ describe('cli#13 — subcomando desconhecido é exit 2 em toda família', { time
     { argv: ['config', 'explain', 'f.json'], sugestao: /config validate/ },
     { argv: ['registry', 'bogus'] },
     { argv: ['limits', 'bogus'] },
+    // Modo JEV (merge sobre a onda 2): a família nova segue o mesmo contrato.
+    { argv: ['jev', 'bogus'] },
+    { argv: ['jev', 'ls'], sugestao: /jev list/ },
   ];
   for (const c of casos) {
     it(`${c.argv.join(' ')} → exit 2 usage.unknown_subcommand (nada roda)`, () => {
