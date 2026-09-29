@@ -58,6 +58,7 @@ import { judgeScoreFromVerdicts } from './rank.js';
 import { runCompleteness } from './stats.js';
 import { emitEvent } from './events.js';
 import { saveRun, getDataDir, listRuns, loadRun } from './storage.js';
+import { withStageCountInRange } from './engine/stageCount.js';
 import { contestantsFromConfig } from './normalize.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
@@ -65,7 +66,7 @@ import { reasoningLevelForRole } from './modelCaps.js';
 import { roleTimeoutMs } from './roleLimits.js';
 import { pipelineMetaPromptsFingerprint } from './metaPrompts.js';
 import { stageSecurity, summarizeSecurity } from './engine/contracts.js';
-import { judgingModelIds } from './engine/roleSeparation.js';
+import { assertRoleSeparation, judgingModelIds } from './engine/roleSeparation.js';
 import { AUDITABLE_ROLES, gatewayErrorFields, isFatalGatewayError, listModels, reconcileAtRunEnd } from './openrouter.js';
 import {
   cutDuels,
@@ -284,11 +285,18 @@ function buildRecord(config: RunConfig, opts: StartRunOpts): RunRecord {
   const concurrency = Math.max(1, config.concurrency ?? 8);
   const timeoutMs = config.timeoutMs ?? 60_000;
   const contestants = opts.contestants ?? compareContestants(config);
+  // left#13 (web-code#15): nº de cenários na faixa documentada (inteiro 1–50)
+  // também aqui — o schema barra na entrada, mas quem chama o motor direto
+  // mandava 0 ou 2.5 cru. O clamp avisa (stderr), nunca corrige calado.
+  const noIntervalo = withStageCountInRange(config);
+  if (noIntervalo !== config) {
+    console.error(`[bench ${runId}] stages ${String(config.stages)} fora da faixa (inteiro 1–50): usando ${noIntervalo.stages}`);
+  }
 
   return {
     id: runId,
     status: 'running',
-    config: { ...config, concurrency, timeoutMs },
+    config: { ...noIntervalo, concurrency, timeoutMs },
     mode: config.mode,
     contestants,
     stages: [],
@@ -486,6 +494,12 @@ async function runLoop(
 ): Promise<void> {
   const { id: runId } = record;
   const scheduleSave = (): void => saver.schedule();
+
+  // left#13 (IMPL-048): papéis separados — referência/2º gabarito × juiz ×
+  // competidores — ANTES de qualquer chamada (a do catálogo inclusive). O
+  // schema do servidor/CLI/MCP e o portão da SPA já barram; isto é a defesa
+  // para quem chama o motor sem eles (a run sai 'error', nada gasto).
+  assertRoleSeparation(record.config);
 
   // Catalogo QUENTE antes do primeiro gasto. Sem isto `computeCost` devolve 0 e
   // `fitEffort` ignora a allowlist de esforco (HTTP 400 em 83 modelos). Antes o

@@ -49,6 +49,7 @@ import { judgeScoreFromVerdicts } from './rank';
 import { runCompleteness } from './stats';
 import { emitEvent } from './events';
 import { listRuns, loadRun, saveRun } from './storage';
+import { withStageCountInRange } from '../../../src/engine/stageCount.js';
 import { contestantsFromConfig } from './normalize';
 import { AUDITABLE_ROLES, gatewayErrorFields, isFatalGatewayError, listModels, reconcileAtRunEnd } from './openrouter';
 import { enforceRunCompliance } from '../lgpd';
@@ -58,7 +59,7 @@ import { reasoningLevelForRole } from '../modelCaps';
 import { roleTimeoutMs } from './roleLimits';
 import { pipelineMetaPromptsFingerprint } from '../../../src/metaPrompts.js';
 import { stageSecurity, summarizeSecurity } from '../../../src/engine/contracts.js';
-import { judgingModelIds } from '../../../src/engine/roleSeparation.js';
+import { assertRoleSeparation, judgingModelIds } from '../../../src/engine/roleSeparation.js';
 import { acquireLock } from './runLocks';
 import {
   cutDuels,
@@ -229,11 +230,17 @@ function buildRecord(config: RunConfig, opts: StartRunOpts): RunRecord {
   const concurrency = Math.max(1, config.concurrency ?? 8);
   const timeoutMs = config.timeoutMs ?? 60_000;
   const contestants = opts.contestants ?? compareContestants(config);
+  // left#13 (web-code#15, espelho do Node): nº de cenários na faixa documentada
+  // (inteiro 1–50) também no motor — a SPA não tem zod na frente do startRun.
+  const noIntervalo = withStageCountInRange(config);
+  if (noIntervalo !== config) {
+    console.warn(`[bench ${runId}] stages ${String(config.stages)} fora da faixa (inteiro 1–50): usando ${noIntervalo.stages}`);
+  }
 
   return {
     id: runId,
     status: 'running',
-    config: { ...config, concurrency, timeoutMs },
+    config: { ...noIntervalo, concurrency, timeoutMs },
     mode: config.mode,
     contestants,
     stages: [],
@@ -392,6 +399,11 @@ async function runLoop(
   state: RunState,
 ): Promise<void> {
   const { id: runId } = record;
+
+  // left#13 (IMPL-048, espelho do Node): papéis separados ANTES de qualquer
+  // chamada. O portão da SPA (api.ts) já barra; isto é a defesa para quem
+  // chama o motor direto (a run sai 'error', nada gasto).
+  assertRoleSeparation(record.config);
 
   // --- Persistencia com THROTTLE: as etapas paralelas geram MUITAS escritas;
   // coalescemos em no max. 1x/SAVE_INTERVAL_MS (trailing) e damos flush nos

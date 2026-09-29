@@ -715,7 +715,10 @@ describe('revisão w2 — juízes da cascata (IMPL-115) no pré-voo LGPD', () =>
       const fake = fakePipeline();
       const anterior = nodeGw.setDefaultGateway(nodeGw.createGateway({ fetch: fake.fetch, sleep: noSleep }));
       restaurar.push(() => nodeGw.setDefaultGateway(anterior));
-      const rec = await run({ ...COMPARE, judgeCascade: CASCATA } as never, KEY, {});
+      // left#13: o motor também aplica a separação de papéis (IMPL-048/115) — o
+      // juiz barato M.b não pode competir; sem isto a recusa seria de PAPEL,
+      // não do pré-voo LGPD que este teste mede.
+      const rec = await run({ ...COMPARE, competitorModelIds: [M.a, M.opt], judgeCascade: CASCATA } as never, KEY, {});
       expect(rec.status).toBe('error');
       expect(rec.error).toMatch(/LGPD/);
       expect(rec.error).toContain(FORA);
