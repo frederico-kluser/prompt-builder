@@ -63,6 +63,7 @@ import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { reasoningLevelForRole } from './modelCaps.js';
 import { roleTimeoutMs } from './roleLimits.js';
+import { pipelineMetaPromptsFingerprint } from './metaPrompts.js';
 import { gatewayErrorFields, isFatalGatewayError, listModels, reconcileAtRunEnd } from './openrouter.js';
 import {
   cutDuels,
@@ -1928,11 +1929,14 @@ async function runLoop(
     const juizesDoContrato = cascata
       ? [...new Set([...record.config.judgeModelIds, ...cascata.cheap, cascata.strong])]
       : record.config.judgeModelIds;
+    // IMPL-070: o pin carrega o fingerprint dos meta-prompts do pipeline e o
+    // hash de contrato DA RUN (juiz + meta-prompts) — o hash do juiz não muda.
     const contract = pinJudgeContract(
       juizesDoContrato,
       judgePromptText,
       undefined,
       components,
+      { metaPromptsFingerprint: pipelineMetaPromptsFingerprint() },
     );
     // IMPL-049: âncora do drift = o pin da última run GRAVADA antes desta (vale
     // entre processos do CLI e com runs concorrentes no servidor); a memória do

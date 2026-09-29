@@ -30,6 +30,7 @@ export const COMMANDS = [
   'registry',
   'baseline',
   'calib',
+  'prompts',
   'doctor',
   'limits',
   'mcp',
@@ -80,6 +81,7 @@ const RESUMO: Record<string, string> = {
   registry: 'guarda de drift dos prompts de produção',
   baseline: 'pina e confere juiz/gabarito/contrato de uma run',
   calib: 'calibração juiz × humano (α de Krippendorff, AC2 de Gwet, IC95%)',
+  prompts: 'regressão dos meta-prompts internos (reescritor, reflexão, datagen, gabarito, juiz)',
   doctor: 'diagnostica key, limites e o ambiente do modo agente',
   limits: 'teto diário de gasto da máquina',
   mcp: 'servidor MCP por stdio (mesmo binário)',
@@ -221,6 +223,14 @@ const USO: Record<string, string> = {
   calib template [-o <arq.jsonl>]
            exemplo comentado do formato calibration-jsonl@1 (itens SINTÉTICOS)
   Formato e protocolo do piloto: \`prompt-builder docs calibration\``,
+  prompts: `  prompts regression --model <id> --judge <id> [--roles a,b] [--budget <usd|none>] [--dry-run]
+           roda a suíte FIXA dos meta-prompts: 80 reescritas × técnicas + 40
+           canários de contrato + reflexão, datagen, gabarito e juiz rotulados.
+           Limiares: inválidas ≤ 10%, diversidade (1 − 8-gramas) ≥ 0,4, juiz
+           ≥ 85%, κ do gabarito ≥ 0,6 — abaixo = exit 10 (gate), relatório em
+           error.details.report. --dry-run estima o TETO pelo catálogo (sem
+           key); rodada ≤ US$ 2. Ganho por técnica NÃO é medido (use \`vary\`).
+           Rode de novo quando o fingerprint dos prompts mudar.`,
   doctor: `  doctor [--deep] [--container] [--config <arq>]
            key (exit 4 se ausente/recusada), teto diário, runs ativas e a
            sala do modo agente (canário real com --deep)`,

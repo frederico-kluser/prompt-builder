@@ -56,6 +56,7 @@ import { BudgetLedger, isControlSignal, RunCancelled, toControlSignal } from './
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
 import { reasoningLevelForRole } from '../modelCaps';
 import { roleTimeoutMs } from './roleLimits';
+import { pipelineMetaPromptsFingerprint } from '../../../src/metaPrompts.js';
 import { acquireLock } from './runLocks';
 import {
   cutDuels,
@@ -1453,11 +1454,14 @@ async function runLoop(
     const juizesDoContrato = cascata
       ? [...new Set([...record.config.judgeModelIds, ...cascata.cheap, cascata.strong])]
       : record.config.judgeModelIds;
+    // IMPL-070: o pin carrega o fingerprint dos meta-prompts do pipeline e o
+    // hash de contrato DA RUN (juiz + meta-prompts) — o hash do juiz não muda.
     const contract = pinJudgeContract(
       juizesDoContrato,
       JUDGE_CONTRACT_TEXT,
       undefined,
       components,
+      { metaPromptsFingerprint: pipelineMetaPromptsFingerprint() },
     );
     // IMPL-049 (espelho do Node): âncora = pin da última run GRAVADA (sobrevive
     // ao reload da aba); a memória do módulo é a reserva.
