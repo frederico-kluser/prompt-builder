@@ -1268,10 +1268,15 @@ async function runLoop(
     // IMPL-048: a REFERÊNCIA entra na conta de imparcialidade (default do
     // compare = 1º juiz — o aviso denuncia o default, ele não fica escondido).
     const referenceModelId = record.config.referenceModelId ?? record.config.judgeModelIds[0];
+    // web-live#10: o aviso sobre "quem escreve o gabarito" só vale quando ALGUM
+    // gabarito existe (gerado ou importado) — comparando modelos sem referência
+    // ele acusava um papel que ninguém exerceu. (O pin do contrato do juiz
+    // segue com `referenceModelId`: mudar o hash seria drift falso.)
+    const autorDoGabarito = record.stages.some((s) => s.spec?.reference?.trim()) ? referenceModelId : undefined;
     record.fairnessWarnings = fairnessWarningsForModels(
       record.contestants.map((c) => c.modelId),
       record.config.judgeModelIds,
-      referenceModelId,
+      autorDoGabarito,
     );
     // IMPL-052 (R-03b:REC-2, espelho de src/orchestrator.ts): higiene das
     // amostras — fontes segregadas, vazios/imputados/truncados excluídos e
