@@ -26,6 +26,7 @@ import { contaminationCheck, contaminationCorpus } from '../src/engine/contracts
 import { contaminationInputFromRun, pickWinner, type RankEntry } from '../src/rank.js';
 import { evaluateHandoffGuards, type HandoffGuardInput } from '../src/engine/handoffGuards.js';
 import { EXIT } from '../src/cli/output.js';
+import { applyFewShotDemos } from '../src/techniques.js';
 import { nodeOrTsx } from './support/cli.js';
 
 const CENARIO = {
@@ -170,6 +171,47 @@ describe('IMPL-067 (3) — barreira do handoff', () => {
     const com = evaluateHandoffGuards(sessaoInput(CONTAMINADO), { overrideReason: 'revisado pelo time' });
     expect(com.blocked).toBe(false);
     expect(com.override?.bypassed).toEqual(['contamination.blocked']);
+  });
+
+  // Integração w2 (IMPL-061 × IMPL-067): a campeã few-shot carrega demos REAIS
+  // do conjunto rotulado (bloco canônico `<exemplos_reais>`), e o treino tira
+  // esses cenários da seleção e do holdout (leave-demos-out). O handoff aplica
+  // a mesma regra: o cenário-demo sai do corpus; os demais seguem protegidos.
+  const DEMOS = [
+    {
+      question: 'O fone de ouvido parou de funcionar depois de duas semanas de uso, ainda consigo trocar?',
+      productContext: 'Garantia legal de 90 dias para produtos duráveis.',
+      reference: 'Sim: produto durável tem garantia legal de 90 dias; abra a solicitação com a nota fiscal em mãos.',
+    },
+    {
+      question: 'Recebi a cafeteira na cor errada e ela ainda está lacrada na caixa original, posso devolver?',
+      productContext: 'Arrependimento: 7 dias do recebimento, produto sem uso.',
+      reference: 'Pode: em até 7 dias do recebimento, sem uso e na embalagem original, a devolução é gratuita.',
+    },
+    {
+      question: 'O pedido chegou faltando o cabo de energia da impressora que aparece na foto do anúncio',
+      productContext: 'Itens faltantes: reenvio sem custo mediante abertura de chamado.',
+      reference: 'Abra um chamado de item faltante: o cabo é reenviado sem custo, sem devolver a impressora.',
+    },
+  ];
+  const comDemos = (texto: string) =>
+    applyFewShotDemos(
+      texto,
+      DEMOS.map((d) => ({ question: d.question, response: d.reference })),
+    );
+
+  it('campeã few-shot com demos reais do treino NÃO é barrada pelo próprio exemplo (leave-demos-out)', () => {
+    const campea = comDemos(PARAFRASE);
+    expect(campea).toContain('<exemplos_reais>');
+    const r = evaluateHandoffGuards(sessaoInput(campea, { pinnedStages: [CENARIO, ...DEMOS] }));
+    expect(r.blocks.map((b) => b.code)).not.toContain('contamination.blocked');
+    expect(r.contamination?.blocked).toBe(false);
+  });
+
+  it('…mas a campeã few-shot que TAMBÉM cola um cenário que não é demo continua barrada', () => {
+    const r = evaluateHandoffGuards(sessaoInput(comDemos(CONTAMINADO), { pinnedStages: [CENARIO, ...DEMOS] }));
+    expect(r.blocked).toBe(true);
+    expect(r.blocks.map((b) => b.code)).toContain('contamination.blocked');
   });
 
   it('sessão sem cenários pinados nem veredito do treino: nada a medir (não bloqueia)', () => {

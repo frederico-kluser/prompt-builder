@@ -31,6 +31,7 @@
 import { holdoutSkipReasonText } from '../holdout.js';
 import { holdoutSkipReasonOf } from './sessionDecision.js';
 import { contaminationCheck, contaminationCorpus, type ContaminationStage } from './contracts.js';
+import { demoQuestionsOf, questionKey } from './trainingPolicy.js';
 import type { HoldoutSkipReason } from '../types.js';
 
 /** Identificador estável de cada sinal (vai no JSON, no log de auditoria e no trailer). */
@@ -126,12 +127,24 @@ export interface HandoffGuardReport {
  * Contaminação do campeão (IMPL-067): o veredito do TREINO (gate da última
  * iteração) prevalece quando bloqueou — ele viu também as explicações do juiz;
  * senão, recomputa sobre os cenários pinados. Sem campeão ou sem corpus = null.
+ *
+ * IMPL-061 × IMPL-067 — leave-demos-out: o cenário cuja pergunta o campeão
+ * carrega como demo REAL (bloco canônico `<exemplos_reais>`, anexado pelo
+ * variator a partir do conjunto rotulado) sai do corpus, pela MESMA regra do
+ * treino — lá ele já saiu da seleção (gate, re-avaliação) e do holdout para
+ * todos, então o ganho medido nunca passou por ele. Sem isso, toda campeã
+ * few-shot com demos seria barrada no handoff por "colar" o próprio exemplo que
+ * o framework inseriu. Os demais cenários continuam protegidos.
  */
 export function handoffContamination(input: HandoffGuardInput): HandoffContamination | null {
   const ultima = input.bestPromptByIteration?.at(-1);
   const campeao = ultima?.systemPrompt;
   const doTreino = ultima?.gate?.contamination;
-  const corpus = contaminationCorpus(input.pinnedStages ?? []);
+  const demos = typeof campeao === 'string' ? demoQuestionsOf([campeao]) : new Set<string>();
+  const protegidos = (input.pinnedStages ?? []).filter(
+    (s) => !(demos.size > 0 && s && typeof s.question === 'string' && demos.has(questionKey(s.question))),
+  );
+  const corpus = contaminationCorpus(protegidos);
   if (typeof campeao !== 'string' || !campeao.trim()) return null;
   const base = input.config?.basePrompt;
   const r = corpus.length
