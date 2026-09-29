@@ -431,7 +431,7 @@ const CHAVES_CANONICAS: readonly string[] = [
   // RunConfig cru
   'datagenModelId', 'judgeModelIds', 'judgeModelId', 'contestantModelId', 'basePrompt',
   'techniqueIds', 'manualVariants', 'temperature', 'promptGroup', 'promptId', 'competitorModelIds',
-  'competitorConfigs', 'customStages', 'scenarioSeed', 'reasoning', 'referenceModelId',
+  'competitorConfigs', 'competitorAnchor', 'customStages', 'scenarioSeed', 'reasoning', 'referenceModelId',
   'referenceJudging', 'promptOptimization', 'optimizerModelId', 'judgePasses', 'maxPricePerMTok',
   'maxOutputTokens', 'timeoutMs', 'concurrency',
   // cenário / etapa

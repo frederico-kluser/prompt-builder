@@ -908,10 +908,13 @@ export function NewRun() {
         };
       } else if (competitors.some((id) => effortOf(id) || tempOf(id) !== undefined)) {
         // Ajuste por competidor: uma lista de ids não representa mais a run —
-        // promove para competitorConfigs, NA ORDEM dos chips.
+        // promove para competitorConfigs, NA ORDEM dos chips. Continua sendo
+        // uma lista de MODELOS: `competitorAnchor: false` impede o 1º de virar
+        // "base/controlo" (regra do eixo compare-llms — web-code#16).
         config = {
           mode,
           ...common,
+          competitorAnchor: false,
           competitorConfigs: competitors.map((id) => {
             const t = tempOf(id);
             const e = effortOf(id);

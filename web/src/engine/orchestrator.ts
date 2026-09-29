@@ -176,7 +176,11 @@ function compareContestants(config: RunConfig): Contestant[] {
   if (sane.error) return contestantsFromConfig(config);
   for (const w of sane.warnings) console.warn(`[compare-llms] ${w}`);
   const contestants = variantsToContestants(sane.variants);
-  if (contestants[0]) contestants[0] = { ...contestants[0], isOriginal: true };
+  // web-code#16: só o eixo compare-llms tem âncora; lista de MODELOS
+  // (competitorAnchor: false) não tem controle.
+  if (contestants[0] && config.competitorAnchor !== false) {
+    contestants[0] = { ...contestants[0], isOriginal: true };
+  }
   return contestants;
 }
 

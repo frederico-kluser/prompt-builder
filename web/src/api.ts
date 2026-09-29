@@ -288,6 +288,8 @@ export interface RunConfig {
   scenarioSeed?: StageSpec[];
   /** compare-llms: variantes de config {modelo, temp, reasoning}. */
   competitorConfigs?: { modelId: string; temperature?: number; reasoningLevel?: ReasoningLevel }[];
+  /** web-code#16: `false` = nenhum concorrente é controle (ver src/types.ts). */
+  competitorAnchor?: boolean;
   /**
    * training: margem PRATICA minima de ganho (pp) p/ promover; sem ganho =
    * convergiu. Ausente = max(1; 50/n) (meia granularidade — IMPL-002); o gate

@@ -318,6 +318,9 @@ const compareObj = z.object({
     .min(MIN_LLM_VARIANTS)
     .max(MAX_LLM_VARIANTS)
     .optional(),
+  // web-code#16: `false` = a 1ª config NÃO vira controle (lista de modelos
+  // diferentes, não configs do mesmo modelo). Sem isto o zod descartaria o campo.
+  competitorAnchor: z.boolean().optional(),
   ...baseFields,
 });
 const variationObj = z.object({
