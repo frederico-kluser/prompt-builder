@@ -264,3 +264,10 @@ texto de rubrica.
 `start_run`/`estimate_cost` aceitam `jev-config@1` (casos inline). `get_result`
 lê runs e sessões JEV. `list_models {"modality":"decisions"}` lista os modelos
 de decisão.
+
+## Interface web (SPA)
+
+- Em `/new`, o seletor **LLM | JEV** fica no topo (`/new?tipo=jev` abre direto no JEV). O formulário tem as mesmas duas superfícies do LLM, guiado em 5 passos e completo. «Importar/Exportar JSON» troca o **mesmo** `jev-config@1` do CLI, sem conversão.
+- O motor roda **na aba**, sem servidor. O `/api/alpha/decisions` tem CORS aberto: o preflight responde 204 com `Access-Control-Allow-Origin: *`, e `X-Generation-Id`/`X-Provider-Name` vêm expostos. As chamadas saem pelo mesmo gateway, com o mesmo limitador, a mesma reserva e o mesmo `usage.cost`. Os records ficam no IndexedDB do navegador (stores `jevRuns`/`jevSessions`/`jevSummaries`).
+- Quando a aba não alcança o endpoint (rede corporativa, bloqueador, VPN), a run mostra o diagnóstico e o caminho reserva: rodar o mesmo JSON no terminal (`jev run -c`) e trazer o record com «Histórico → JEV → Importar do terminal». Esse botão aceita o arquivo de `~/.prompt-builder/jev-runs/` ou `jev-sessions/` e a saída de `jev show <id> --full --json`. O resumo sem `--full` e records ainda `running` são recusados.
+- Telas: `/jev/runs/<id>` (métricas, calibração, bandas, matriz de confusão, caso a caso, cascata, handoff/cURL), `/jev/training/<id>` (ciclos, gate, diff, política, holdout) e `/jev/training/<id>/report` (relatório de ciclos em Markdown/HTML/JSON).

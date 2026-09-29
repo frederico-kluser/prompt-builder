@@ -72,7 +72,7 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
 - **Não há mais streaming ao vivo por competidor:** os eventos `competitor.started`/`competitor.progress` foram removidos e ninguém escreve `StageRecord.live` (o tipo só sobrevive p/ ler records antigos). A tela de run em andamento é **só o heatmap**.
 - ⚠️ **Dois whitelists engolem campo novo em silêncio** — ao adicionar campo em `RunConfigBase`/`RunRecord`, cheque os dois: (1) `normalizeRunRecord` (`normalize.ts`), que hoje espalha `...raw` de propósito (antes perdia `judgeScoreByContestant`/`standings`/`finalists` ao reler do IndexedDB); (2) **`variationConfigFrom` (`trainer.ts`)**, que enumera campo a campo — o que faltar ali é descartado em toda iteração do treino e no holdout, sem erro nenhum.
 - No **training**, promoção exige margem `minGain` sobre a campeã (`rank.ts`); `analyzeIteration` **não existe mais** (feedback = lições GEPA determinísticas) e o evento `iteration.analyzing` não é mais emitido. Holdout (piso 5) + significância bootstrap fecham a sessão.
-- IndexedDB do cliente é **v2** (store `prompts` — biblioteca `/prompts` via `web/src/engine/promptStore.ts`, client-only). Eventos agregados `stage.gabarito` (`stageIndex: -1`) e `duel.progress` (sem índice) **não** entram no reducer de etapas.
+- IndexedDB do cliente é **v3** (v2: store `prompts` — biblioteca `/prompts` via `web/src/engine/promptStore.ts`, client-only; v3: `jevRuns`/`jevSessions`/`jevSummaries` do modo JEV, `web/src/jev/store.ts`). Eventos agregados `stage.gabarito` (`stageIndex: -1`) e `duel.progress` (sem índice) **não** entram no reducer de etapas.
 - Há um **modo client-side** (`web/src/engine/`) que roda o pipeline no navegador (SPA
   estática/Vercel). Desde o F0 do PLANO-PARIDADE a duplicação é **classificada e vigiada**:
   módulos puros (`rank`/`stats`/`holdout`/`dedup`/`duelCore`/…) são **fonte única** em `src/` e o
@@ -123,6 +123,9 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
 - O Jev NÃO é ZDR: em área LGPD sensível o modo fica indisponível (fail-closed no pré-voo).
 - Métrica: ECE/Brier sobre a probabilidade top-label; o `confidence` da API é opaco e só decide a
   banda. Estatística pareada por `caseId`, valores 0–1 (nunca `brierScore` em p.p. no teste).
+- Web: `/new` é o wrapper `NewBenchmark` (seletor LLM | JEV; `NewRun`/`GuidedSetup` intocados) e o
+  motor JEV roda NA ABA (CORS do `/alpha/decisions` é aberto; sem rota `/v1/jev`). O reserva é o
+  terminal: mesmo `jev-config@1`, e o record volta por «Importar do terminal» (`web/src/jev/transfer.ts`).
 - Docs para agentes: `agent-docs/jev.md` (`prompt-builder docs jev`).
 
 ## CLI (`src/cli/`, publicado como `prompt-builder`)
