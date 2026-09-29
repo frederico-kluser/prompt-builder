@@ -3,7 +3,7 @@
 import type { ExpectedSpec, ReferenceValidation } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
-import type { ItemSaturationReport } from '../../../src/datagen.js';
+import type { DatagenReport, ItemSaturationReport } from '../../../src/datagen.js';
 import type { PiiRunReport } from '../../../src/engine/pii.js';
 import type {
   CallFinishSignals,
@@ -895,6 +895,8 @@ export interface RunRecord {
    * (src/datagen.ts) no fim do julgamento. Ausente em records antigos.
    */
   itemSaturation?: ItemSaturationReport;
+  /** web-live#7 — relatório da geração de cenários (espelho de src/types.ts). */
+  datagenReport?: DatagenReport;
   /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
@@ -1270,6 +1272,8 @@ export type RunEvent =
     }
   | { type: 'stage.dueled'; runId: string; stageIndex: number; duels: StageDuels }
   | { type: 'duel.progress'; runId: string; done: number; total: number }
+  /** web-live#7 — relatório da geração (agregado, fora do reducer de etapas). */
+  | { type: 'datagen.report'; runId: string; report: DatagenReport }
   /** Gasto acumulado (espelho de src/types.ts). */
   | {
       type: 'run.spend';

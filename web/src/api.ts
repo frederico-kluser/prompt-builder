@@ -3,7 +3,7 @@ import { requestPersistentStorage, type StorageSubject } from './storageHealth';
 import type { ExpectedSpec, ReferenceValidation } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
-import type { ItemSaturationReport } from '../../src/datagen.js';
+import type { DatagenReport, ItemSaturationReport } from '../../src/datagen.js';
 import type {
   CallFinishSignals,
   CostEntry,
@@ -660,6 +660,8 @@ export interface RunRecord {
    * (src/datagen.ts) no fim do julgamento. Ausente em records antigos.
    */
   itemSaturation?: ItemSaturationReport;
+  /** web-live#7 — relatório da geração de cenários (espelho de src/types.ts). */
+  datagenReport?: DatagenReport;
   /**
    * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
    * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).

@@ -4,7 +4,7 @@
 // mensagem de erro em PT-BR legível, para a UI exibir sem derrubar nada.
 
 import { z } from 'zod';
-import { rougeL } from './dedup.js';
+import { exactPairKey } from './dedup.js';
 import { checkImportPii, type PiiImportCheck } from './engine/pii.js';
 import { stageLabelIssues } from './engine/groundTruth.js';
 import type { ScenarioPack, StageSpec } from './types.js';
@@ -21,10 +21,6 @@ export const SCENARIO_PACK_FORMAT = 'prompt-builder-pack@1';
 export const SCENARIO_PACK_FORMAT_LEGACY = 'ai-benchmark-pack@1';
 
 const FORMATOS_ACEITOS = [SCENARIO_PACK_FORMAT, SCENARIO_PACK_FORMAT_LEGACY] as const;
-
-// Limiar de quase-duplicata por ROUGE-L (F1): a partir daqui o cenário gerado
-// é considerado repetido em relação a um já aceito (mesmo valor do datagen).
-const ROUGE_L_DUP_THRESHOLD = 0.7;
 
 // ----------------------------------------------------------------------------
 // build
@@ -157,17 +153,38 @@ export function parseScenarioPack(
  * Mescla o seed importado com os cenários gerados. A assimetria é proposital:
  * o seed é CURADORIA do usuário (ele exportou, revisou e reimportou o pacote),
  * então entra sempre primeiro, na íntegra, marcado `origin: 'import'`, e nunca
- * é descartado por duplicidade. Os gerados são só COMPLEMENTO: cada um entra
- * apenas se não for quase-duplicata (ROUGE-L < 0.7 contra TODOS os já aceitos,
- * seed + gerados aceitos) e sai marcado `origin: 'ai'`.
+ * é descartado por duplicidade. Os gerados são só COMPLEMENTO e saem marcados
+ * `origin: 'ai'`; um gerado só é recusado se repetir o PAR (pergunta +
+ * contexto) de um item do SEED.
+ *
+ * web-live#7: antes o critério era ROUGE-L ≥ 0.7 da pergunta contra TODOS os
+ * aceitos (seed + gerados). Isto rodava DEPOIS de `generateStages` já ter
+ * deduplicado e decidido a reposição — o que o merge tirava ninguém repunha, e
+ * sem aviso: numa run paga real, 8 de 12 cenários sumiram assim (perguntas
+ * legítimas do mesmo tema, como "jejum para glicemia" × "jejum para
+ * colesterol", passam de 0.7) e a sessão inteira terminou inconclusiva. O
+ * dedup gerado×gerado E gerado×seed agora mora em `generateStages` (âncoras de
+ * `dedupeSemantic`, antes da decisão de reposição); aqui fica só a rede de
+ * segurança do par exato contra o seed.
  */
 export function mergeScenarios(seed: StageSpec[], generated: StageSpec[]): StageSpec[] {
+  return mergeScenariosReport(seed, generated).specs;
+}
+
+/** `mergeScenarios` + quantos gerados colidiram com o seed (para o relatório da run). */
+export function mergeScenariosReport(
+  seed: StageSpec[],
+  generated: StageSpec[],
+): { specs: StageSpec[]; droppedVsSeed: number } {
   const accepted: StageSpec[] = seed.map((s) => ({ ...s, origin: 'import' as const }));
+  const chavesSeed = new Set(seed.map(exactPairKey));
+  let droppedVsSeed = 0;
   for (const gen of generated) {
-    const repetido = accepted.some(
-      (a) => rougeL(a.question, gen.question) >= ROUGE_L_DUP_THRESHOLD,
-    );
-    if (!repetido) accepted.push({ ...gen, origin: 'ai' as const });
+    if (chavesSeed.has(exactPairKey(gen))) {
+      droppedVsSeed += 1;
+      continue;
+    }
+    accepted.push({ ...gen, origin: 'ai' as const });
   }
-  return accepted;
+  return { specs: accepted, droppedVsSeed };
 }

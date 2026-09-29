@@ -197,7 +197,7 @@ describe('IMPL-070 c4 — snapshot das mensagens montadas por papel (R-05:REC-3)
     // Snapshots: hash canônico por papel. (Uma assert por LINHA — o snapshot
     // inline é localizado pela linha de origem; dois no mesmo laço colidem.)
     expect(hashMensagens(etapa), 'datagen-etapa').toMatchInlineSnapshot(`"b00016e7a81736b455077a0af73effef10d11b5841a416dfd92664b2c7a6d983"`);
-    expect(hashMensagens(lote), 'datagen-lote').toMatchInlineSnapshot(`"ba2b4c0f19bada7154970293afbb4b3fe3d2aed7c3622bf20eb801ec8bb635c9"`);
+    expect(hashMensagens(lote), 'datagen-lote').toMatchInlineSnapshot(`"6d74e3bf5a15a70ce06bb0443748662834155012974f75d624bbe0465fe38fdc"`);
     for (const [nome, msgs] of [
       ['datagen-etapa', etapa],
       ['datagen-lote', lote],

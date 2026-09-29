@@ -293,6 +293,28 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
     case 'duel.progress':
       out.event('progress', { ...base, phase: 'duels', done: e.done, total: e.total });
       break;
+    case 'datagen.report': {
+      // web-live#7: contagens da geração (sem texto de cenário, salvo as
+      // perguntas truncadas das rubricas não-respondíveis, já cortadas).
+      const r = e.report;
+      out.event('datagen.report', {
+        ...base,
+        requested: r.requested,
+        generated: r.generated,
+        final: r.final,
+        shortfall: r.shortfall,
+        dedupedExact: r.dedupedExact,
+        dedupedSemantic: r.dedupedSemantic,
+        droppedVsSeed: r.droppedVsSeed,
+        backfillRounds: r.backfillRounds,
+        stoppedBy: r.stoppedBy,
+        semantic: r.semantic,
+        effectiveCosineThreshold: r.effectiveCosineThreshold,
+        rubricUnanswerable: r.rubricUnanswerable,
+        ...(r.warning ? { warning: r.warning } : {}),
+      });
+      break;
+    }
     case 'run.spend':
       out.event('budget', {
         ...base,

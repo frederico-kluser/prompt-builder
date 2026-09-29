@@ -1,5 +1,12 @@
 const randomUUID = (): string => crypto.randomUUID();
-import { generateStages, itemSaturationReport, scenarioPolicyReport } from './datagen';
+import {
+  batchCountFor,
+  describeDatagenShortfall,
+  generateStages,
+  itemSaturationReport,
+  scenarioPolicyReport,
+  type DatagenReport,
+} from './datagen';
 import { countCompetitorOutcomes, runCompetitor } from './competitor';
 import { judgeStage, JUDGE_LISTWISE_CONTRACT_TEXT } from './judge';
 import { generateReferences, validateGeneratedReferences } from './gabarito';
@@ -26,7 +33,7 @@ import {
 } from '../../../src/engine/judgeCalibration.js';
 import type { JudgeContractComponents } from './types';
 import { modelRolesForRun, snapshotModelLifecycle } from '../../../src/engine/modelLifecycle.js';
-import { mergeScenarios } from './scenarioPack';
+import { mergeScenariosReport } from './scenarioPack';
 import { sanitizeLlmVariants, variantsToContestants } from './llmVariants';
 import { judgeScoreFromVerdicts } from './rank';
 import { runCompleteness } from './stats';
@@ -454,10 +461,17 @@ async function runLoop(
   // passando do teto). Lista vazia => deixa o estimador contar técnicas+base,
   // e a estimativa é refeita com os contestants reais depois do `prepare`.
   // Degrau por contestant = o que o competidor recebe (IMPL-016, espelho do Node).
-  const estimar = (contestants: ReadonlyArray<{ id: string; reasoningLevel?: ReasoningLevel }>) =>
+  // `stagesReais` (web-live#7, espelho do Node): se o datagen entregou menos,
+  // a porta G2 projeta com o n REAL.
+  const estimar = (
+    contestants: ReadonlyArray<{ id: string; reasoningLevel?: ReasoningLevel }>,
+    stagesReais?: number,
+  ) =>
     estimateRunCost(
       estimateInputFromConfig(
-        record.config as never,
+        (stagesReais !== undefined
+          ? { ...record.config, stages: Math.max(1, stagesReais) }
+          : record.config) as never,
         contestants.length > 0
           ? {
               contestantIds: contestants.map((c) => c.id),
@@ -617,7 +631,24 @@ async function runLoop(
     return;
   }
 
+  /**
+   * web-live#7 (espelho do Node) — relatório da geração no record, no evento
+   * `datagen.report` e no log quando faltou cenário, ANTES de gastar com
+   * gabarito/competidores/juízes.
+   */
+  const publishDatagenReport = (r: DatagenReport): void => {
+    record.datagenReport = r;
+    emitEvent({ type: 'datagen.report', runId, report: r });
+    if (r.warning) log(runId, `datagen: ${r.warning}`);
+    if (r.rubricUnanswerable > 0) {
+      log(runId, `datagen: ${r.rubricUnanswerable} rubrica(s) exigem fatos ausentes do caso (IMPL-059)`);
+    }
+  };
+
   let specs: StageSpec[];
+  // web-live#7: relatório da geração (ausente = sem datagen nesta run).
+  // (o `as` evita o estreitamento para `undefined`: a atribuição é num callback)
+  let datagenReport = undefined as DatagenReport | undefined;
   if (pinado) {
     specs = pinnedStages!;
   } else if (seed.length >= record.config.stages) {
@@ -625,32 +656,52 @@ async function runLoop(
     specs = seed;
   } else {
     // Gera em LOTE apenas o que falta para o alvo (batches paralelos + dedup
-    // exato/ROUGE-L + 1 backfill dentro de generateStages — substitui o antigo
-    // retry por etapa) e mescla: seed primeiro (curadoria do usuario, nunca
-    // descartado), gerados como complemento nao-duplicado.
+    // exato/semântico COM o seed como âncora + reposição por diversidade em
+    // laço limitado, tudo dentro de generateStages) e mescla: seed primeiro
+    // (curadoria do usuario, nunca descartado), gerados como complemento.
+    const pedido = alvo - seed.length;
+    // Porta suave da reposição: um lote a mais só se couber no orçamento.
+    const custoLote = est.byRole.datagen / Math.max(1, batchCountFor(pedido));
     const gerados = await generateStages({
       apiKey,
       theme: record.config.theme,
       scenarioBrief: record.config.scenarioBrief,
-      count: alvo - seed.length,
+      count: pedido,
       modelId: record.config.datagenModelId,
-      excludePrompts: seed.map((s) => s.question),
+      seed,
       reasoningLevel: record.config.reasoning?.datagen,
       timeoutMs: datagenTimeout,
       // IMPL-056: idioma opt-in; o aviso de idioma sai do relatório da run
       // (todas as fontes, logo abaixo) — sem duplicar no console do datagen.
       languages: record.config.languages,
       onLanguageWarnings: () => undefined,
+      canAffordBatch: () => ledger.canAfford(custoLote),
+      onReport: (r) => {
+        datagenReport = r;
+      },
       ctx,
     });
     // Cancelou no meio do lote: "nenhum cenário" seria um erro falso.
     throwIfCancelled();
-    specs = mergeScenarios(seed, gerados).map(saneMaxTokens);
+    const merged = mergeScenariosReport(seed, gerados);
+    specs = merged.specs.map(saneMaxTokens);
+    if (datagenReport) {
+      // Rede de segurança do merge (par exato contra o seed) entra na conta.
+      if (merged.droppedVsSeed > 0) {
+        datagenReport.droppedVsSeed += merged.droppedVsSeed;
+        datagenReport.final -= merged.droppedVsSeed;
+        datagenReport.shortfall += merged.droppedVsSeed;
+        datagenReport.warning = describeDatagenShortfall(datagenReport, alvo);
+      }
+      publishDatagenReport(datagenReport);
+    }
     if (specs.length === 0) {
       throw new Error(
         `Datagen nao entregou nenhum cenario valido (alvo: ${alvo}). Verifique o modelo gerador (${record.config.datagenModelId}) ou importe um pacote de cenarios.`,
       );
     }
+    // Faltou cenário: a porta G2 (competidores + juízes) projeta com o n REAL.
+    if (specs.length < alvo) est = estimar(record.contestants, specs.length);
   }
 
   // IMPL-056 + IMPL-068: política dos cenários sobre TODAS as fontes (seed,
@@ -752,7 +803,10 @@ async function runLoop(
     });
   });
   for (let i = specs.length; i < record.stages.length; i++) {
-    const msg = `Datagen entregou menos cenarios que o alvo apos dedup/falha de lote; etapa descartada.`;
+    // web-live#7: a etapa descartada diz QUANTOS vieram e POR QUE (espelho do Node).
+    const msg = datagenReport?.warning
+      ? `${datagenReport.warning} Etapa descartada.`
+      : `Datagen entregou menos cenarios que o alvo apos dedup/falha de lote; etapa descartada.`;
     record.stages[i].error = msg;
     record.stages[i].finishedAt = nowIso();
     emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });

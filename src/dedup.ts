@@ -17,8 +17,9 @@
 // Por que a antiga camada ROUGE-L ≥ 0.7 sobre a pergunta foi REMOVIDA: a sonda
 // N1 mediu os dois erros dela — paráfrases reais passavam (similaridade 0.00 e
 // 0.12) e pares que diferem só por entidade colapsavam (0.88 e 0.91 → viravam
-// "duplicata" e eram descartados). `rougeL` continua exportado (o pacote de
-// cenários o usa para a checagem própria), mas ele NÃO decide mais fusão.
+// "duplicata" e eram descartados). `rougeL` continua exportado (checagem de eco
+// de template), mas ele NÃO decide mais fusão — nem no merge seed × gerados do
+// pacote de cenários (web-live#7), que descartava calado DEPOIS da reposição.
 //
 // VETO de entidade: duas perguntas que divergem em entidades salientes
 // (números, códigos, nomes próprios) NUNCA fundem, mesmo com cosseno alto —
@@ -60,7 +61,7 @@ function lcsLen(a: string[], b: string[]): number {
 
 /** ROUGE-L F1 em [0,1] entre dois textos (normalizados e tokenizados por espaco).
  * Strings vazias (apos normalizacao) → 0. NAO decide mais fusão (ver header) —
- * usado só pela checagem de eco de template e pelo pacote de cenários. */
+ * usado só pela checagem de eco de template. */
 export function rougeL(a: string, b: string): number {
   const ta = tokens(a);
   const tb = tokens(b);
@@ -117,6 +118,16 @@ export interface DedupeOptions {
   echoThreshold?: number;
   /** Embedder (sem ele: só a passe exata + relatório de eco). */
   embed?: EmbedFn;
+  /**
+   * ÂNCORAS (web-live#7): itens JÁ aceitos — o seed/pacote importado, que é
+   * curadoria do usuário. Nunca são descartados nem entram nas contagens do
+   * relatório; servem só de referência: um item da lista que colide com uma
+   * âncora (par exato, ou cosseno sem conflito de entidade) sai e é contado em
+   * `anchorDropped`. É o que deixa o dedup contra o seed acontecer ANTES da
+   * decisão de reposição do datagen — antes o merge seed×gerados descartava
+   * DEPOIS dela, sem repor e sem contar.
+   */
+  anchors?: { question: string; productContext?: string }[];
 }
 
 /** Relatório de duplicatas removidas por run (R-05:REC-7): taxa + alerta > 20%. */
@@ -129,6 +140,12 @@ export interface DedupeReport {
   exactDropped: number;
   /** Descartes da camada semântica (cosseno sobre o par). */
   semanticDropped: number;
+  /**
+   * Dos descartes acima (exatos + semânticos), quantos colidiram com uma
+   * ÂNCORA (seed importado) e não com outro item gerado. Subconjunto — nunca
+   * somado de novo a `dropped`.
+   */
+  anchorDropped: number;
   /** Pares de ECO DE TEMPLATE detectados (pergunta quase idêntica, par distinto) —
    * relatados, nunca descartados. */
   templateEcho: number;
@@ -155,6 +172,7 @@ export function emptyDedupeReport(): DedupeReport {
     dropped: 0,
     exactDropped: 0,
     semanticDropped: 0,
+    anchorDropped: 0,
     templateEcho: 0,
     rate: 0,
     alertRate: DEDUP_ALERT_RATE,
@@ -171,6 +189,7 @@ export function combineDedupeReports(...reports: DedupeReport[]): DedupeReport {
     out.dropped += r.dropped;
     out.exactDropped += r.exactDropped;
     out.semanticDropped += r.semanticDropped;
+    out.anchorDropped += r.anchorDropped ?? 0;
     out.templateEcho += r.templateEcho;
     out.alertRate = r.alertRate;
   }
@@ -249,13 +268,29 @@ function isBetterKeep<T extends { question: string }>(candidate: T, current: T):
   return candidate.question.length > current.question.length;
 }
 
-/** Passe exata: chave = PAR normalizado (pergunta + contexto). O(n). */
-function exactPass<T extends { question: string }>(items: T[]): { unique: T[]; dropped: T[] } {
+/** Chave da passe exata: PAR normalizado (pergunta + contexto). */
+export function exactPairKey(item: { question: string }): string {
+  return `${normPrompt(item.question)}\u0000${normPrompt(contextOf(item))}`;
+}
+
+/** Passe exata: chave = PAR normalizado (pergunta + contexto). O(n). Colisão
+ * com uma âncora também descarta (e conta em `anchorHits`). */
+function exactPass<T extends { question: string }>(
+  items: T[],
+  anchors: { question: string }[] = [],
+): { unique: T[]; dropped: T[]; anchorHits: number } {
+  const ancoras = new Set(anchors.map(exactPairKey));
   const seen = new Set<string>();
   const unique: T[] = [];
   const dropped: T[] = [];
+  let anchorHits = 0;
   for (const item of items) {
-    const key = `${normPrompt(item.question)}\u0000${normPrompt(contextOf(item))}`;
+    const key = exactPairKey(item);
+    if (ancoras.has(key)) {
+      anchorHits += 1;
+      dropped.push(item);
+      continue;
+    }
     if (seen.has(key)) {
       dropped.push(item);
       continue;
@@ -263,7 +298,7 @@ function exactPass<T extends { question: string }>(items: T[]): { unique: T[]; d
     seen.add(key);
     unique.push(item);
   }
-  return { unique, dropped };
+  return { unique, dropped, anchorHits };
 }
 
 /**
@@ -273,17 +308,31 @@ function exactPass<T extends { question: string }>(items: T[]): { unique: T[]; d
  */
 async function semanticPass<T extends { question: string }>(
   unique: T[],
-  opts: { cosineThreshold: number; echoThreshold: number; embed?: EmbedFn },
-): Promise<{ kept: T[]; dropped: T[]; templateEcho: number }> {
+  opts: {
+    cosineThreshold: number;
+    echoThreshold: number;
+    embed?: EmbedFn;
+    anchors?: { question: string; productContext?: string }[];
+  },
+): Promise<{ kept: T[]; dropped: T[]; templateEcho: number; anchorHits: number }> {
   const { cosineThreshold, echoThreshold, embed } = opts;
-  if (!embed || unique.length <= 1) return { kept: unique, dropped: [], templateEcho: 0 };
+  const anchors = opts.anchors ?? [];
+  if (!embed || unique.length === 0 || (unique.length === 1 && anchors.length === 0)) {
+    return { kept: unique, dropped: [], templateEcho: 0, anchorHits: 0 };
+  }
 
-  const vetores = await embed(unique.map(pairText));
-  const clusters: { rep: T; vec: number[]; members: T[] }[] = [];
+  // Âncoras e itens num lote só de embeddings (uma chamada).
+  const vetores = await embed([...anchors.map(pairText), ...unique.map(pairText)]);
+  type Cluster = { rep: { question: string }; vec: number[]; members: T[]; fixed: boolean };
+  // Âncoras abrem clusters FIXOS: o representante nunca é trocado e o item que
+  // cair nele sai (colidiu com a curadoria do usuário).
+  const clusters: Cluster[] = anchors.map((a, i) => ({ rep: a, vec: vetores[i] ?? [], members: [], fixed: true }));
+  const base = anchors.length;
+  let anchorHits = 0;
   for (let i = 0; i < unique.length; i += 1) {
     const item = unique[i];
-    const vec = vetores[i] ?? [];
-    let placed: { rep: T; vec: number[]; members: T[] } | undefined;
+    const vec = vetores[base + i] ?? [];
+    let placed: Cluster | undefined;
     for (const c of clusters) {
       if (entityConflict(item.question, c.rep.question)) continue;
       if (cosine(vec, c.vec) >= cosineThreshold) {
@@ -293,16 +342,17 @@ async function semanticPass<T extends { question: string }>(
     }
     if (placed) {
       placed.members.push(item);
-      if (isBetterKeep(item, placed.rep)) {
+      if (placed.fixed) anchorHits += 1;
+      else if (isBetterKeep(item, placed.rep as T)) {
         placed.rep = item;
         placed.vec = vec;
       }
     } else {
-      clusters.push({ rep: item, vec, members: [item] });
+      clusters.push({ rep: item, vec, members: [item], fixed: false });
     }
   }
 
-  const kept = clusters.map((c) => c.rep);
+  const kept = clusters.filter((c) => !c.fixed).map((c) => c.rep as T);
   const keepSet = new Set<T>(kept);
   const dropped = unique.filter((item) => !keepSet.has(item));
 
@@ -315,7 +365,7 @@ async function semanticPass<T extends { question: string }>(
       if (rougeL(kept[i].question, kept[j].question) >= echoThreshold) templateEcho += 1;
     }
   }
-  return { kept, dropped, templateEcho };
+  return { kept, dropped, templateEcho, anchorHits };
 }
 
 /**
@@ -331,16 +381,17 @@ export async function dedupeSemantic<T extends { question: string }>(
   const cosineThreshold = opts?.cosineThreshold ?? DEFAULT_COSINE_THRESHOLD;
   const echoThreshold = opts?.echoThreshold ?? DEFAULT_ECHO_THRESHOLD;
   const embed = opts?.embed;
+  const anchors = (opts?.anchors ?? []).filter(Boolean);
   const items = list.filter(Boolean);
   const report = emptyDedupeReport();
   report.total = items.length;
-  if (items.length <= 1) {
+  if (items.length === 0 || (items.length === 1 && anchors.length === 0)) {
     report.kept = items.length;
     return { kept: items, dropped: [], method: 'none', report };
   }
 
-  const exata = exactPass(items);
-  const sem = await semanticPass(exata.unique, { cosineThreshold, echoThreshold, embed });
+  const exata = exactPass(items, anchors);
+  const sem = await semanticPass(exata.unique, { cosineThreshold, echoThreshold, embed, anchors });
 
   const kept = sem.kept;
   const dropped = [...exata.dropped, ...sem.dropped];
@@ -348,6 +399,7 @@ export async function dedupeSemantic<T extends { question: string }>(
   report.dropped = dropped.length;
   report.exactDropped = exata.dropped.length;
   report.semanticDropped = sem.dropped.length;
+  report.anchorDropped = exata.anchorHits + sem.anchorHits;
   report.templateEcho = sem.templateEcho;
   report.rate = report.total > 0 ? report.dropped / report.total : 0;
   report.alert = report.rate > report.alertRate;
@@ -365,15 +417,16 @@ export function dedupeAdvanced<T extends { question: string }>(
   opts?: DedupeOptions,
 ): DedupeResult<T> {
   const echoThreshold = opts?.echoThreshold ?? DEFAULT_ECHO_THRESHOLD;
+  const anchors = (opts?.anchors ?? []).filter(Boolean);
   const items = list.filter(Boolean);
   const report = emptyDedupeReport();
   report.total = items.length;
-  if (items.length <= 1) {
+  if (items.length === 0 || (items.length === 1 && anchors.length === 0)) {
     report.kept = items.length;
     return { kept: items, dropped: [], method: 'none', report };
   }
 
-  const exata = exactPass(items);
+  const exata = exactPass(items, anchors);
   let templateEcho = 0;
   for (let i = 0; i < exata.unique.length; i += 1) {
     for (let j = i + 1; j < exata.unique.length; j += 1) {
@@ -383,6 +436,7 @@ export function dedupeAdvanced<T extends { question: string }>(
   report.kept = exata.unique.length;
   report.dropped = exata.dropped.length;
   report.exactDropped = exata.dropped.length;
+  report.anchorDropped = exata.anchorHits;
   report.templateEcho = templateEcho;
   report.rate = report.total > 0 ? report.dropped / report.total : 0;
   report.alert = report.rate > report.alertRate;

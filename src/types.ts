@@ -25,7 +25,7 @@ import type { ExpectedSpec, ReferenceValidation } from './engine/groundTruth.js'
 import type { PromptContracts } from './engine/contracts.js';
 import type { PromptGroup } from './engine/promptGroup.js';
 import type { ModelLifecycleSnapshot } from './engine/modelLifecycle.js';
-import type { ItemSaturationReport } from './datagen.js';
+import type { DatagenReport, ItemSaturationReport } from './datagen.js';
 
 // Ciclo de vida de modelos (IMPL-019): fonte única em src/engine/modelLifecycle.ts.
 export type {
@@ -1774,6 +1774,14 @@ export interface RunRecord {
    */
   itemSaturation?: ItemSaturationReport;
   /**
+   * web-live#7 (+ IMPL-063/IMPL-059) — relatório da GERAÇÃO de cenários:
+   * pedido/gerado/descartes por camada (exata, semântica, contra o seed)/
+   * rodadas de reposição/entregues/limiares + aviso de falta e rubricas que
+   * exigem fato ausente do caso. Ausente = run sem datagen (pinada/seed cobre)
+   * ou record antigo. Sai de `generateStages` (`onReport`).
+   */
+  datagenReport?: DatagenReport;
+  /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
    * `allowPii`. E o registro de que os identificadores foram pseudonimizados
@@ -2491,6 +2499,13 @@ export type RunEvent =
     }
   | { type: 'stage.dueled'; runId: string; stageIndex: number; duels: StageDuels }
   | { type: 'duel.progress'; runId: string; done: number; total: number }
+  /**
+   * web-live#7 — relatório da geração de cenários, emitido UMA vez, logo
+   * depois do datagen e ANTES de gastar com gabarito/competidores/juízes.
+   * `report.warning` presente = faltou cenário (a run segue com n menor).
+   * Agregado: NÃO entra no reducer de etapas (sem `stageIndex`).
+   */
+  | { type: 'datagen.report'; runId: string; report: DatagenReport }
   /** Gasto acumulado (throttled). Hook do CLI para a linha de orcamento. */
   | {
       type: 'run.spend';

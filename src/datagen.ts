@@ -1,7 +1,18 @@
 import { z } from 'zod';
 import { chatCompletion, isFatalGatewayError, type ChatMessage } from './openrouter.js';
 import { isControlSignal } from './budget.js';
-import { dedupeAdvanced, dedupeSemantic, combineDedupeReports, type DedupeOptions, type DedupeReport } from './dedup.js';
+import {
+  dedupeAdvanced,
+  dedupeSemantic,
+  DEFAULT_COSINE_THRESHOLD,
+  DEFAULT_ECHO_THRESHOLD,
+  normPrompt,
+  salientTokens,
+  type DedupeOptions,
+  type DedupeReport,
+  type EmbedFn,
+} from './dedup.js';
+import { renderCaseInput } from './engine/caseInput.js';
 import { contentHash, sha256Hex } from './engine/hash.js';
 import { renderScenarioRules } from './engine/scenarioRules.js';
 import { MAX_TOKENS_DATAGEN_BATCH, MAX_TOKENS_DATAGEN_STAGE } from './engine/callCaps.js';
@@ -384,6 +395,32 @@ export interface GenerateStagesParams {
   /** Relatorio de duplicatas removidas desta geracao (uma chamada = uma run de datagen). */
   onDedupReport?: (report: DedupeReport) => void;
   /**
+   * SEED/curadoria ja aceita (web-live#7): entra como ÂNCORA do dedup — nunca
+   * descartada, e um gerado que a repita sai ANTES da decisao de reposicao
+   * (antes o merge seed×gerados descartava DEPOIS, sem repor). As perguntas do
+   * seed tambem entram na exclusao de todo lote.
+   */
+  seed?: Pick<StageSpec, 'question' | 'productContext'>[];
+  /**
+   * Teto de RODADAS de reposicao (web-live#7). Default
+   * `DATAGEN_MAX_BACKFILL_ROUNDS` (3). Cada rodada pede `ceil(falta*1.5)`
+   * cenarios com as perguntas ja mantidas/descartadas como exclusao e uma
+   * instrucao explicita de DIVERSIDADE. 0 = sem reposicao.
+   */
+  maxBackfillRounds?: number;
+  /**
+   * Porta suave de orcamento ANTES de cada rodada de reposicao: `false` = para
+   * de repor (o relatorio sai com `stoppedBy: 'budget'`), sem lancar — a run
+   * segue com o que houver e avisa. A porta DURA do ledger continua valendo.
+   */
+  canAffordBatch?: () => boolean;
+  /**
+   * Relatorio COMPLETO da geracao (web-live#7): pedido/gerado/descartes por
+   * camada/reposicao/final/limiares + aviso de falta. Ausente = a falta vai
+   * para o stderr (`console.warn`) — o caso do `library seed`.
+   */
+  onReport?: (report: DatagenReport) => void;
+  /**
    * Avisos de idioma fora da politica (IMPL-056). Ausente = `console.warn`
    * (stderr) — o caso do `library seed`. O orquestrador passa o seu: a run
    * reporta TODAS as fontes no record (`scenarioPolicyReport`), sem duplicar.
@@ -552,16 +589,179 @@ export function batchCountFor(count: number): number {
   return Math.max(1, Math.min(8, Math.ceil(count / 4)));
 }
 
+// ---------------------------------------------------------------------------
+// Relatorio da geracao + reposicao por DIVERSIDADE (web-live#7).
+//
+// Numa run PAGA real (tema estreito "triagem de pedidos de reembolso", 12
+// cenarios) so 4 chegaram a run: o dedup (+ o merge ROUGE-L que rodava depois
+// da decisao de reposicao) descartou 8 em silencio, as etapas 4-11 sairam
+// "Datagen entregou menos cenarios que o alvo" e a sessao inteira terminou
+// inconclusiva (n efetivo < 5) sem decisao nenhuma. Agora: (1) o dedup contra
+// o seed acontece ANTES da decisao (ancoras); (2) a reposicao e um laco
+// LIMITADO com exclusao das perguntas ja vistas e instrucao explicita de
+// variedade; (3) com embedder, o limiar semantico relaxa ate manter o piso de
+// n; (4) tudo vai num relatorio que a run grava e emite, com aviso ANTES de
+// gastar com competidores/juizes.
+// ---------------------------------------------------------------------------
+
+/** Teto default de rodadas de reposicao por diversidade. */
+export const DATAGEN_MAX_BACKFILL_ROUNDS = 3;
+
+/**
+ * Piso de n efetivo que o limiar semantico adaptativo tenta preservar em temas
+ * estreitos: min(pedido, 5) — abaixo de 5 cenarios julgados a run sai
+ * inconclusiva (`verdictIntegrity`), entao descartar abaixo disso por
+ * "quase-duplicata" semantica custa a run inteira.
+ */
+export const DATAGEN_MIN_EFFECTIVE_N = 5;
+
+/** Degraus de relaxamento do cosseno (so com embedder e so abaixo do piso). */
+export const DATAGEN_RELAXED_COSINE_STEPS: readonly number[] = [0.93, 0.96, 0.99];
+
+/** Quantas perguntas no maximo vao na lista de exclusao de um lote. */
+const MAX_EXCLUDE_PROMPTS = 50;
+
+/**
+ * Relatorio da geracao de cenarios de UMA run (web-live#7 + IMPL-063): vai para
+ * `RunRecord.datagenReport` e no evento `datagen.report` (SSE/NDJSON).
+ */
+export interface DatagenReport {
+  /** Cenarios pedidos ao gerador (alvo − seed). */
+  requested: number;
+  /** Itens do seed/pacote importado (ancoras; nunca descartados). */
+  seed: number;
+  /** Chamadas de lote iniciais (paralelas). */
+  batches: number;
+  /** Chamadas (lote ou reposicao) que falharam e viraram lote vazio. */
+  failedCalls: number;
+  /** Itens VALIDOS brutos recebidos (lotes + reposicao), antes do dedup. */
+  generated: number;
+  /** Rodadas de reposicao executadas. */
+  backfillRounds: number;
+  /** Teto de rodadas configurado. */
+  maxBackfillRounds: number;
+  /** Itens brutos que vieram da reposicao. */
+  backfilled: number;
+  /** Descartes da passe exata (par pergunta+contexto). */
+  dedupedExact: number;
+  /** Descartes da camada semantica (cosseno sobre o par, veto de entidade). */
+  dedupedSemantic: number;
+  /** Dos descartes, quantos repetiam o SEED (subconjunto). */
+  droppedVsSeed: number;
+  /** Pares de eco de template entre os mantidos (relatados, nunca descartados). */
+  templateEcho: number;
+  /** Cenarios gerados ENTREGUES a run (≤ requested). */
+  final: number;
+  /** requested − final (0 = alvo atingido). */
+  shortfall: number;
+  /** Fracao descartada (descartes / gerados) e o alerta > 20%. */
+  rate: number;
+  alert: boolean;
+  /** Camada semantica ligada (havia embedder e ele respondeu). */
+  semantic: boolean;
+  /** Embedder falhou (erro nao-controle): a geracao seguiu so com a passe exata. */
+  semanticError?: string;
+  /** Limiar semantico configurado e o efetivamente usado (relaxado p/ o piso). */
+  cosineThreshold: number;
+  effectiveCosineThreshold: number;
+  echoThreshold: number;
+  /** Por que a reposicao parou: alvo atingido, teto de rodadas ou orcamento. */
+  stoppedBy: 'target' | 'rounds' | 'budget';
+  /**
+   * IMPL-059 (R-05:REC-2): rubricas que exigem fatos (numeros, codigos, nomes)
+   * que NAO estao no caso que o competidor recebe (`renderCaseInput`) — o
+   * candidato seria julgado por informacao que so o gabarito tem. Sinal de
+   * curadoria: o item NAO e descartado.
+   */
+  rubricUnanswerable: number;
+  rubricIssues?: { question: string; missing: string[] }[];
+  /** Aviso PT-BR pronto quando faltou cenario (run segue com n menor). */
+  warning?: string;
+}
+
+/**
+ * IMPL-059 (R-05:REC-2) — checagem DETERMINISTICA (custo zero) de
+ * respondibilidade da rubrica: as entidades salientes que ela exige (numeros,
+ * codigos, nomes proprios — `salientTokens`) precisam aparecer no CASO como o
+ * competidor o recebe (`renderCaseInput`: bloco do contexto + pergunta, byte a
+ * byte o mesmo de todos os papeis). Rubrica sem entidade saliente (ex.: "deve
+ * recusar com cordialidade") e respondivel por definicao.
+ */
+export function rubricAnswerability(
+  stage: Pick<StageSpec, 'question' | 'productContext' | 'rubric'>,
+): { answerable: boolean; missing: string[] } {
+  const rubrica = (stage.rubric ?? '').trim();
+  if (!rubrica) return { answerable: true, missing: [] };
+  const bloco = renderCaseInput(stage);
+  const caso = new Set(salientTokens(bloco));
+  const texto = normPrompt(bloco);
+  const missing = salientTokens(rubrica).filter((t) => !caso.has(t) && !texto.includes(normPrompt(t)));
+  return { answerable: missing.length === 0, missing };
+}
+
+/** Frase PT-BR do aviso de falta (a mesma no log, no evento e na etapa descartada). */
+export function describeDatagenShortfall(r: DatagenReport, alvo: number): string {
+  const entregues = alvo - r.shortfall;
+  const partes: string[] = [];
+  const descartes = r.dedupedExact + r.dedupedSemantic;
+  if (descartes > 0) {
+    const detalhe = [
+      r.dedupedExact ? `${r.dedupedExact} exata(s)` : '',
+      r.dedupedSemantic ? `${r.dedupedSemantic} semântica(s)` : '',
+      r.droppedVsSeed ? `${r.droppedVsSeed} repetindo o seed` : '',
+    ]
+      .filter(Boolean)
+      .join(', ');
+    partes.push(`${descartes} quase-duplicata(s) descartada(s) (${detalhe})`);
+  }
+  if (r.failedCalls > 0) partes.push(`${r.failedCalls} chamada(s) do gerador falharam`);
+  const parada =
+    r.stoppedBy === 'budget'
+      ? 'reposição parada pelo orçamento'
+      : `${r.backfillRounds}/${r.maxBackfillRounds} rodada(s) de reposição`;
+  const piso =
+    entregues < DATAGEN_MIN_EFFECTIVE_N
+      ? ` Abaixo de ${DATAGEN_MIN_EFFECTIVE_N} cenários julgados a run termina inconclusiva.`
+      : '';
+  return (
+    `Datagen entregou ${entregues} de ${alvo} cenários (${[...partes, parada].join('; ')}).${piso}` +
+    ' Varie o tema/briefing, importe um pacote de cenários ou troque o modelo gerador.'
+  );
+}
+
+/** Embedder com memoria por texto: o laco re-deduplica tudo a cada rodada sem pagar de novo. */
+function memoEmbed(embed: EmbedFn): EmbedFn {
+  const cache = new Map<string, number[]>();
+  return async (texts: string[]) => {
+    const faltam = [...new Set(texts.filter((t) => !cache.has(t)))];
+    if (faltam.length > 0) {
+      const vetores = await embed(faltam);
+      faltam.forEach((t, i) => cache.set(t, vetores[i] ?? []));
+    }
+    return texts.map((t) => cache.get(t) ?? []);
+  };
+}
+
+/** Instrucao da rodada de reposicao: variedade EXPLICITA, nao "mais do mesmo". */
+function diversityInstruction(round: number, maxRounds: number, falta: number): string {
+  return `\nCubra LACUNAS DE VARIEDADE: tipos de tarefa e dificuldades ainda sub-representados.\nREPOSICAO DE DIVERSIDADE (rodada ${round} de ${maxRounds}; faltam ${falta} cenario(s)): as perguntas geradas ate agora ficaram PARECIDAS DEMAIS entre si. Gere cenarios com INTENCOES DIFERENTES das perguntas listadas: varie a intencao do usuario, a persona (quem pergunta), o canal (chat, e-mail, telefone, app), valores/quantias, datas e prazos, e inclua casos com DADO FALTANTE, ambiguo ou contraditorio. NAO reaproveite o molde das perguntas existentes trocando so uma palavra ou entidade.`;
+}
+
 /**
  * Gera `count` cenarios de uma vez: lotes paralelos → dedup (exata + semantica
- * por embeddings quando ha embedder) → UM backfill se faltar (pede
- * ceil(falta*1.5), exclusao ampliada) → dedup de novo → slice(0, count).
- * Falha de um lote = lote vazio (console.warn), nunca derruba. Itens voltam SEM
- * id (o consumidor atribui) e com origin 'ai'.
+ * por embeddings quando ha embedder, com o SEED como ancora) → ate
+ * `maxBackfillRounds` rodadas de REPOSICAO por diversidade enquanto faltar
+ * (pede ceil(falta*1.5), exclusao das perguntas ja vistas, instrucao explicita
+ * de variedade; porta suave `canAffordBatch` antes de cada uma) → limiar
+ * semantico relaxado ate o piso de n (so com embedder) → slice(0, count).
+ * Falha de um lote = lote vazio (console.warn), nunca derruba; 401/402 e
+ * orcamento/cancelamento sobem. Itens voltam SEM id (o consumidor atribui) e
+ * com origin 'ai'.
  *
- * Reporta (R-05:REC-7 / IMPL-063): `onDedupReport` recebe o relatorio de
- * duplicatas removidas da geracao (taxa + alerta > 20%) e cenarios com idioma
- * fora da politica da run saem em warning (IMPL-056).
+ * Reporta (R-05:REC-7 / IMPL-063 / web-live#7): `onDedupReport` recebe o
+ * relatorio de duplicatas (taxa + alerta > 20%), `onReport` o relatorio
+ * COMPLETO da geracao (`DatagenReport`) e cenarios com idioma fora da politica
+ * da run saem em warning (IMPL-056).
  */
 export async function generateStages(opts: GenerateStagesParams): Promise<StageSpec[]> {
   const {
@@ -578,16 +778,51 @@ export async function generateStages(opts: GenerateStagesParams): Promise<StageS
     dedup,
     onDedupReport,
     onLanguageWarnings,
+    onReport,
+    canAffordBatch,
     timeoutMs,
     reasoningLevel,
     ctx,
   } = opts;
   if (count <= 0) return [];
 
+  const seed = (opts.seed ?? []).filter((s) => s && typeof s.question === 'string');
+  const maxRounds = Math.max(0, Math.floor(opts.maxBackfillRounds ?? DATAGEN_MAX_BACKFILL_ROUNDS));
   const batchCount = batchCountFor(count);
   const perBatch = Math.max(1, Math.ceil(count / batchCount));
-  const exclude = (excludePrompts ?? []).slice(0, 30);
-  const dedupOpts: DedupeOptions = { ...dedup };
+  // Exclusao base: o que o chamador pediu + as perguntas do seed (sem repetir).
+  const exclusaoBase = [...new Set([...(excludePrompts ?? []), ...seed.map((s) => s.question)])];
+  const exclude = exclusaoBase.slice(0, 30);
+  const cosineThreshold = dedup?.cosineThreshold ?? DEFAULT_COSINE_THRESHOLD;
+  const echoThreshold = dedup?.echoThreshold ?? DEFAULT_ECHO_THRESHOLD;
+  // Embedder com memoria: cada rodada re-deduplica TUDO (relatorio sem
+  // dupla-contagem) sem pagar o embedding do mesmo texto duas vezes.
+  let semanticError: string | undefined;
+  const embedBase = dedup?.embed ? memoEmbed(dedup.embed) : undefined;
+  const dedupOpts: DedupeOptions = {
+    ...dedup,
+    cosineThreshold,
+    echoThreshold,
+    embed: embedBase,
+    anchors: seed,
+  };
+  let failedCalls = 0;
+  /**
+   * Dedup de TODOS os brutos contra o seed. Falha do embedder (erro que nao e
+   * controle nem 401/402) degrada para a passe exata — com aviso e registro no
+   * relatorio, nunca calada.
+   */
+  const deduplicar = async (itens: StageSpec[], limiar = cosineThreshold) => {
+    try {
+      return await dedupeSemantic(itens, { ...dedupOpts, cosineThreshold: limiar });
+    } catch (err) {
+      if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
+      semanticError = (err as Error).message;
+      console.warn(`[datagen] embeddings falharam (${semanticError}) — dedup segue so com a passe exata.`);
+      dedupOpts.embed = undefined;
+      return dedupeSemantic(itens, { ...dedupOpts, cosineThreshold: limiar });
+    }
+  };
 
   const batches = await Promise.all(
     Array.from({ length: batchCount }, (_, b) => {
@@ -615,34 +850,49 @@ export async function generateStages(opts: GenerateStagesParams): Promise<StageS
         // credito (cli#3) tambem sobem: nenhum outro lote conserta, e engolir
         // trocava o 401/402 por "datagen nao entregou cenario" (exit 1).
         if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
+        failedCalls += 1;
         console.warn(`[datagen] lote ${b + 1}/${batchCount} falhou: ${(err as Error).message}`);
         return [] as StageSpec[];
       });
     }),
   );
 
-  const brutos = batches.flat();
-  const primeira = await dedupeSemantic(brutos, dedupOpts);
-  let merged = primeira.kept;
-  let backfill: StageSpec[] = [];
-  let segunda: DedupeReport | undefined;
+  // TODOS os brutos, em ordem de chegada: cada rodada re-deduplica o conjunto
+  // inteiro, entao o relatorio final e o de UMA passe (sem dupla-contagem).
+  const todos: StageSpec[] = batches.flat();
+  let passe = await deduplicar(todos);
+  let backfilled = 0;
+  let rounds = 0;
+  let stoppedBy: DatagenReport['stoppedBy'] = passe.kept.length >= count ? 'target' : 'rounds';
 
-  // Backfill unico e limitado, se o dedup deixou faltar cenario.
-  if (merged.length < count) {
-    const falta = count - merged.length;
-    const excludeAll = [...(excludePrompts ?? []), ...merged.map((s) => s.question)].slice(0, 40);
-    backfill = await runBatch({
+  // Reposicao por DIVERSIDADE em laco LIMITADO enquanto faltar cenario.
+  while (passe.kept.length < count && rounds < maxRounds) {
+    if (canAffordBatch && !canAffordBatch()) {
+      stoppedBy = 'budget';
+      console.warn('[datagen] reposicao de cenarios parada: sem folga no orcamento para outro lote.');
+      break;
+    }
+    rounds += 1;
+    const falta = count - passe.kept.length;
+    // Exclusao: seed + o que foi MANTIDO + o que foi DESCARTADO (o molde que o
+    // gerador esta repetindo) — as mais recentes primeiro, com teto.
+    const vistas = [
+      ...exclusaoBase,
+      ...passe.kept.map((s) => s.question),
+      ...passe.dropped.map((s) => s.question),
+    ];
+    const exclusao = [...new Set(vistas)].slice(-MAX_EXCLUDE_PROMPTS);
+    const novos = await runBatch({
       apiKey,
       modelId,
       theme,
-      count: Math.ceil(falta * 1.5),
-      excludePrompts: excludeAll,
+      count: Math.max(2, Math.ceil(falta * 1.5)),
+      excludePrompts: exclusao,
       scenarioBrief,
       rules,
       coverageInstructionText,
       // IMPL-056: lacunas de VARIEDADE sem idioma — idioma so se pediu.
-      extraInstruction:
-        '\nCubra LACUNAS DE VARIEDADE: tipos de tarefa e dificuldades ainda sub-representados.',
+      extraInstruction: diversityInstruction(rounds, maxRounds, falta),
       languages,
       tierTargets,
       timeoutMs,
@@ -650,22 +900,37 @@ export async function generateStages(opts: GenerateStagesParams): Promise<StageS
       ctx,
     }).catch((err: unknown) => {
       if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
-      console.warn(`[datagen] backfill falhou: ${(err as Error).message}`);
+      failedCalls += 1;
+      console.warn(`[datagen] reposicao ${rounds}/${maxRounds} falhou: ${(err as Error).message}`);
       return [] as StageSpec[];
     });
-    const passe2 = await dedupeSemantic(merged.concat(backfill), dedupOpts);
-    segunda = passe2.report;
-    merged = passe2.kept;
+    backfilled += novos.length;
+    todos.push(...novos);
+    passe = await deduplicar(todos);
+    if (passe.kept.length >= count) stoppedBy = 'target';
   }
 
-  // Relatorio UNICO por run de datagen (IMPL-063): os descartes de cada passe
-  // somam sem duplicar (a 2a passe so ve os mantidos da 1a + o backfill).
-  const relatorio = combineDedupeReports(primeira.report, ...(segunda ? [segunda] : []));
-  relatorio.total = brutos.length + backfill.length;
-  relatorio.kept = merged.length;
-  relatorio.dropped = relatorio.total - relatorio.kept;
-  relatorio.rate = relatorio.total > 0 ? relatorio.dropped / relatorio.total : 0;
-  relatorio.alert = relatorio.rate > relatorio.alertRate;
+  // Tema ESTREITO com embedder: o cosseno relaxa em degraus ate manter o piso
+  // de n (min(pedido, 5)) — nunca abaixo do par exato, que continua fora.
+  let effectiveCosineThreshold = cosineThreshold;
+  const piso = Math.min(count, DATAGEN_MIN_EFFECTIVE_N);
+  if (dedupOpts.embed && passe.kept.length < piso && passe.report.semanticDropped > 0) {
+    for (const degrau of DATAGEN_RELAXED_COSINE_STEPS) {
+      if (degrau <= effectiveCosineThreshold) continue;
+      const relaxada = await deduplicar(todos, degrau);
+      passe = relaxada;
+      effectiveCosineThreshold = degrau;
+      if (relaxada.kept.length >= piso) break;
+    }
+    console.warn(
+      `[datagen] tema estreito: limiar semantico relaxado de ${cosineThreshold} para ${effectiveCosineThreshold} para manter ${passe.kept.length} cenario(s) (piso ${piso}).`,
+    );
+  }
+  const merged = passe.kept;
+
+  // Relatorio UNICO por run de datagen (IMPL-063): uma passe sobre TODOS os
+  // brutos (lotes + reposicao) — sem dupla-contagem entre rodadas.
+  const relatorio = passe.report;
   if (relatorio.alert) {
     console.warn(
       `[datagen] dedup removeu ${(relatorio.rate * 100).toFixed(0)}% dos cenarios gerados (${relatorio.dropped}/${relatorio.total}) — acima de ${relatorio.alertRate * 100}%. Confira se o gerador nao esta repetindo o mesmo template (ecos: ${relatorio.templateEcho}).`,
@@ -685,6 +950,52 @@ export async function generateStages(opts: GenerateStagesParams): Promise<StageS
   const avisosIdioma = languageWarnings(final, { languages });
   if (onLanguageWarnings) onLanguageWarnings(avisosIdioma);
   else for (const aviso of avisosIdioma) console.warn(aviso);
+
+  // IMPL-059: rubrica que exige fato ausente do caso (sinal, nunca descarte).
+  const problemasRubrica = final
+    .map((st) => ({ question: st.question, ...rubricAnswerability(st) }))
+    .filter((r) => !r.answerable);
+
+  const report: DatagenReport = {
+    requested: count,
+    seed: seed.length,
+    batches: batchCount,
+    failedCalls,
+    generated: todos.length,
+    backfillRounds: rounds,
+    maxBackfillRounds: maxRounds,
+    backfilled,
+    dedupedExact: relatorio.exactDropped,
+    dedupedSemantic: relatorio.semanticDropped,
+    droppedVsSeed: relatorio.anchorDropped,
+    templateEcho: relatorio.templateEcho,
+    final: final.length,
+    shortfall: Math.max(0, count - final.length),
+    rate: relatorio.rate,
+    alert: relatorio.alert,
+    semantic: Boolean(dedupOpts.embed),
+    ...(semanticError ? { semanticError } : {}),
+    cosineThreshold,
+    effectiveCosineThreshold,
+    echoThreshold,
+    stoppedBy: final.length >= count ? 'target' : stoppedBy,
+    rubricUnanswerable: problemasRubrica.length,
+    ...(problemasRubrica.length
+      ? {
+          rubricIssues: problemasRubrica
+            .slice(0, 10)
+            .map((r) => ({ question: r.question.slice(0, 120), missing: r.missing.slice(0, 8) })),
+        }
+      : {}),
+  };
+  if (report.shortfall > 0) report.warning = describeDatagenShortfall(report, count + seed.length);
+  if (onReport) onReport(report);
+  else if (report.warning) console.warn(`[datagen] ${report.warning}`);
+  if (!onReport && report.rubricUnanswerable > 0) {
+    console.warn(
+      `[datagen] ${report.rubricUnanswerable} rubrica(s) exigem fatos ausentes do caso (IMPL-059) — revise o cenário/contexto.`,
+    );
+  }
 
   return final;
 }
