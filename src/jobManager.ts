@@ -72,6 +72,7 @@ import {
 import { trainToCompletion } from './trainer.js';
 import { agentVerdictTreeVersionOf, classifyStop } from './agent/verdictTree.js';
 import { infraSummaryFields, type AgentInfraCounts } from './agent/infraError.js';
+import { winnerFromStandings, type StandingsWinner } from './engine/duelCore.js';
 // IMPL-031 (revisão): as tools que GASTAM passam pelas mesmas camadas do CLI —
 // ledger da máquina (teto diário somando processos) e lock por config.
 import { withSpendGuards } from './cli/spendGuards.js';
@@ -263,23 +264,36 @@ export function agentSummary(rec: {
 }
 
 /**
- * Vencedor da run pela MESMA régua do `runs winner` do CLI: a classificação
- * dos duelos das finais (`standings`, já ordenada por winRate) e, sem finais,
- * o judge-score. `tie` = o 2º colocado empata na régua — o agente não deve
- * ler um desempate arbitrário como vitória. `null` = run sem nota nenhuma.
+ * Vencedor da run pela MESMA régua do `runs winner` do CLI — literalmente a
+ * mesma função (`winnerFromStandings`, src/engine/duelCore.ts): finais
+ * re-ordenadas por winRate → vitórias → judge-score → rank cego semeado (vale
+ * também para records antigos, gravados com a ordem de cadastro no empate) e,
+ * sem finais, o judge-score. `tie` = mais de um dividiu a maior taxa;
+ * `tieBreak`/`unresolved` dizem como (ou se) o empate foi desfeito — o agente
+ * não deve ler um sorteio cego como vitória. `null` = run sem nota nenhuma.
  */
-export function runWinner(
-  rec: RunRecord,
-): { contestantId: string; label?: string; ruler: 'duels' | 'judge-score'; tie: boolean } | null {
-  const rotulo = (id: string): string | undefined => rec.contestants?.find((c) => c.id === id)?.label;
-  if (rec.standings?.length) {
-    const [a, b] = rec.standings;
-    return { contestantId: a.id, label: a.label ?? rotulo(a.id), ruler: 'duels', tie: b !== undefined && b.winRate === a.winRate };
-  }
-  const notas = Object.entries(rec.judgeScoreByContestant ?? {}).sort((x, y) => y[1] - x[1]);
-  if (notas.length === 0) return null;
-  const [[id, nota], segundo] = notas;
-  return { contestantId: id, label: rotulo(id), ruler: 'judge-score', tie: segundo !== undefined && segundo[1] === nota };
+export function runWinner(rec: RunRecord): {
+  contestantId: string;
+  label?: string;
+  ruler: StandingsWinner['ruler'];
+  tie: boolean;
+  tiedIds: string[];
+  tieBreak: StandingsWinner['tieBreak'];
+  unresolved: boolean;
+} | null {
+  const w = winnerFromStandings(rec);
+  if (w.contestantId === undefined) return null;
+  const id = w.contestantId;
+  const label = rec.standings?.find((r) => r.id === id)?.label ?? rec.contestants?.find((c) => c.id === id)?.label;
+  return {
+    contestantId: id,
+    label,
+    ruler: w.ruler,
+    tie: w.tie,
+    tiedIds: w.tiedIds,
+    tieBreak: w.tieBreak,
+    unresolved: w.unresolved,
+  };
 }
 
 export function benchmarkSummary(rec: RunRecord): Record<string, unknown> {

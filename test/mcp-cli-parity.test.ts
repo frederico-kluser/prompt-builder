@@ -459,9 +459,44 @@ describe('cli#12/mcp#2 — get_result traz o desfecho (quem venceu, quanto melho
     expect(out.standings).toEqual(runComPlacar(id).standings);
     expect(out.judgeScoreByContestant).toEqual({ a: 50, b: 87.5, c: 12.5 });
     expect(out.finalists).toEqual(['b', 'a']);
-    expect(out.winner).toEqual({ contestantId: 'b', label: 'Modelo B', ruler: 'duels', tie: false });
+    expect(out.winner).toEqual({
+      contestantId: 'b',
+      label: 'Modelo B',
+      ruler: 'duels',
+      tie: false,
+      tiedIds: ['b'],
+      tieBreak: 'none',
+      unresolved: false,
+    });
     expect(out.verdictIntegrity).toEqual({ conclusive: true, reasons: [] });
     expect(estimateTokens(texto(r))).toBeLessThanOrEqual(SOFT_RESULT_TOKENS);
+  });
+
+  it('empate nas finais gravado na ordem de cadastro: MCP e `runs winner` desempatam IGUAL (judge-score)', async () => {
+    // Record antigo: winRate empatado e o controle 'a' em 1º por ordem de
+    // cadastro. A régua única (winnerFromStandings) re-ordena — o MCP não pode
+    // devolver 'a' enquanto o CLI devolve 'b'.
+    const id = randomUUID();
+    const empatado = {
+      ...runComPlacar(id),
+      standings: [
+        { id: 'a', label: 'Modelo A', isControl: true, wins: 2, ties: 0, losses: 2, winRate: 0.5 },
+        { id: 'b', label: 'Modelo B', isControl: false, wins: 2, ties: 0, losses: 2, winRate: 0.5 },
+      ],
+    };
+    await saveRun(empatado as unknown as RunRecord);
+    const out = json(await chamar('get_result', { id }));
+    const { winnerFromStandings } = await import('../src/engine/duelCore.js');
+    const cli = winnerFromStandings(empatado as unknown as RunRecord);
+    expect(cli.contestantId).toBe('b');
+    expect(out.winner).toMatchObject({
+      contestantId: cli.contestantId,
+      ruler: 'duels+judge-score',
+      tie: true,
+      tiedIds: cli.tiedIds,
+      tieBreak: 'judge-score',
+      unresolved: false,
+    });
   });
 
   it('run sem finais: vencedor pelo judge-score; empate na régua é DITO (tie)', async () => {
