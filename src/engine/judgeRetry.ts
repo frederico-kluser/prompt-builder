@@ -20,9 +20,13 @@
 //
 // `BudgetExceeded`/`RunCancelled` sobem intactos (controle, não erro), e um
 // abort externo no meio da chamada vira `RunCancelled`: cancelamento não é
-// falha do juiz e não pode inflar `failureCountByRole`.
+// falha do juiz e não pode inflar `failureCountByRole`. Key recusada (401) e
+// sem crédito (402) também sobem (cli#3): nenhum retry nem outro juiz conserta,
+// e degradar para veredito ausente deixava a run "concluir" e sair com exit 1
+// em vez do 4/5 documentado.
 
 import { isControlSignal, RunCancelled } from '../budget.js';
+import { isFatalGatewayError } from '../openrouter.js';
 import { judgeReplyCut, type JudgeReplyFinish } from './truncation.js';
 import { sha256Hex } from './hash.js';
 import type { JudgeCallFinish, VerdictError } from '../types.js';
@@ -123,7 +127,7 @@ export async function callJudgeWithRetry<T>(opts: JudgeRetryOptions<T>): Promise
       const raw = await opts.call(reminder);
       reply = typeof raw === 'string' ? { text: raw } : raw;
     } catch (err) {
-      if (isControlSignal(err)) throw err;
+      if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
       if (opts.signal?.aborted) throw new RunCancelled(opts.signal.reason);
       const error = describeJudgeError(err);
       if (error.kind === 'timeout' && !timeoutRetried) {

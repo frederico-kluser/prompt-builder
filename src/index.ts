@@ -127,6 +127,37 @@ export type {
 export { gatewayConfigFromEnv, configureGatewayFromEnv } from './gatewayEnv.js';
 export type { ChatCompletionParams, ChatCompletionResult, KeyInfo } from './openrouter.js';
 
+// Saturação por item (IMPL-112) e relatório da geração de cenários
+// (web-live#7): o MESMO cálculo que a run grava em `record.itemSaturation` /
+// `record.datagenReport` — quem consome a biblioteca audita records antigos ou
+// monta a fila de revisão de gabarito sem reimplementar a régua.
+export {
+  itemSaturationReport,
+  gabaritoReviewQueue,
+  assertIrtSampleSize,
+  IrtSampleSizeError,
+  DEFAULT_SATURATION_MIN_EXECUTIONS,
+  IRT_MIN_CONTESTANTS,
+  rubricAnswerability,
+  describeDatagenShortfall,
+  DATAGEN_MAX_BACKFILL_ROUNDS,
+} from './datagen.js';
+export type {
+  ItemSaturationReport,
+  ItemSaturationRow,
+  ItemSaturationCell,
+  ItemSaturationClass,
+  ItemSaturationStage,
+  DatagenReport,
+} from './datagen.js';
+
+// Embedder de produção do dedup de cenários (IMPL-063): /embeddings pelo MESMO
+// gateway/ledger do chat — para quem deduplica pacotes fora de uma run.
+export { createOpenRouterEmbedder, DEFAULT_DEDUP_EMBED_MODEL } from './embeddings.js';
+export type { OpenRouterEmbedderOptions } from './embeddings.js';
+export { meteredInputCall } from './openrouter.js';
+export type { MeteredInputParams, MeteredInputResult } from './openrouter.js';
+
 export { REASONING_LEVELS, fitEffort, applyReasoning, coerceLevel } from './reasoning.js';
 export { listTechniques, getTechnique } from './techniques.js';
 export { subscribe, subscribeSession } from './events.js';

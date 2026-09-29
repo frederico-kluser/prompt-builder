@@ -1,9 +1,11 @@
 // Shape do rotulo esperado e da validacao do gabarito vem do motor
 // compartilhado (fonte unica).
 import type { ExpectedSpec, ReferenceValidation } from '../../../src/engine/groundTruth.js';
-import type { PromptContracts } from '../../../src/engine/contracts.js';
+import type { PromptContracts, ResponseSecurity, SecuritySummary } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
-import type { ItemSaturationReport } from '../../../src/datagen.js';
+import type { DatagenReport, ItemSaturationReport } from '../../../src/datagen.js';
+import type { CascadeReport, JudgeCascadeConfig, JudgeCascadeSummary } from '../../../src/judge.js';
+import type { ScenarioDedupConfig } from '../../../src/dedup.js';
 import type { PiiRunReport } from '../../../src/engine/pii.js';
 import type {
   CallFinishSignals,
@@ -360,6 +362,18 @@ export interface RunConfigBase {
    * fora desta lista vira aviso em `RunRecord.languageWarnings`.
    */
   languages?: string[];
+  /**
+   * IMPL-063 — dedup SEMÂNTICO dos cenários gerados: `semantic: true` liga
+   * os embeddings do OpenRouter (mesmo gateway/ledger do chat, custo no papel
+   * datagen) com limiares calibráveis. Ausente = só a passe exata do par.
+   */
+  scenarioDedup?: ScenarioDedupConfig;
+  /**
+   * IMPL-115 — modo ECONÔMICO do julgamento: 2 juízes baratos em paralelo e o
+   * forte só nos vereditos em dúvida (discordância, 'parcial', anomalia de
+   * comprimento). Ausente = julgamento normal por `judgeModelIds`.
+   */
+  judgeCascade?: JudgeCascadeConfig;
   /** Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`. */
   scenarioSeed?: StageSpec[];
   /**
@@ -658,6 +672,8 @@ export interface SingleJudgeResult {
  * tambem o resultado individual de cada juiz (placar aditivo + justificativas).
  */
 export interface JudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /** Consenso entre juizes (posicao media): melhor -> pior. Placar/heatmap/CSV usam isto. */
   rankedContestantIds: string[];
   /**
@@ -694,6 +710,8 @@ export interface JudgeResult {
  * sem comparar contestants entre si. Base do judge-score.
  */
 export interface ReferenceJudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /**
    * Veredito ternario por contestant (consenso entre juizes, quando ha mais de
    * um). SO vereditos legitimos: falha do juiz/competidor deixa a chave AUSENTE
@@ -814,6 +832,12 @@ export interface CompetitorLiveState {
 }
 
 export interface StageRecord {
+  /**
+   * IMPL-069 — estado de SEGURANÇA de cada resposta (contestantId → estado)
+   * nos cenários do conjunto de guarda (tier adversarial/benign-twin), separado
+   * do judge-score. Ausente nos demais cenários e em records antigos.
+   */
+  security?: Record<string, ResponseSecurity>;
   index: number;
   spec?: StageSpec;
   responses: CompetitorResponse[];
@@ -902,6 +926,20 @@ export interface RunRecord {
    * (src/datagen.ts) no fim do julgamento. Ausente em records antigos.
    */
   itemSaturation?: ItemSaturationReport;
+  /** web-live#7 — relatório da geração de cenários (espelho de src/types.ts). */
+  datagenReport?: DatagenReport;
+  /**
+   * IMPL-115 — resumo do modo econômico: vereditos julgados/escalonados ao
+   * juiz forte, fração escalonada e histograma dos gatilhos. O custo por
+   * veredito sai MEDIDO do ledger (`costByRole.judge`). Ausente = sem cascata.
+   */
+  judgeCascade?: JudgeCascadeSummary;
+  /**
+   * IMPL-069 — resumo de segurança por contestant (ataques, violações,
+   * recusas; gêmeos benignos e recusa excessiva). `classifier: 'none'`: só o
+   * detector determinístico (canário/span do system prompt) está ligado.
+   */
+  securitySummary?: SecuritySummary;
   /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
@@ -1277,6 +1315,8 @@ export type RunEvent =
     }
   | { type: 'stage.dueled'; runId: string; stageIndex: number; duels: StageDuels }
   | { type: 'duel.progress'; runId: string; done: number; total: number }
+  /** web-live#7 — relatório da geração (agregado, fora do reducer de etapas). */
+  | { type: 'datagen.report'; runId: string; report: DatagenReport }
   /** Gasto acumulado (espelho de src/types.ts). */
   | {
       type: 'run.spend';

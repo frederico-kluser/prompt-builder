@@ -301,6 +301,29 @@ const baseFields = {
     .min(1)
     .max(10)
     .optional(),
+  // IMPL-063: dedup SEMÂNTICO dos cenários gerados (embeddings do OpenRouter
+  // pelo mesmo gateway/ledger; custo no papel datagen). Ausente = só o exato.
+  scenarioDedup: z
+    .object({
+      semantic: z.boolean().optional(),
+      embedModelId: z.string().min(1).optional(),
+      cosineThreshold: z.number().min(0.5).max(1).optional(),
+      echoThreshold: z.number().min(0.5).max(1).optional(),
+    })
+    .strict()
+    .optional(),
+  // IMPL-115: modo ECONÔMICO do julgamento — 2 juízes baratos + o forte só nos
+  // vereditos em dúvida. Os 3 modelos distintos (o forte não pode ser barato).
+  judgeCascade: z
+    .object({
+      cheap: z.array(z.string().min(1)).length(2, 'judgeCascade.cheap precisa de exatamente 2 juízes baratos'),
+      strong: z.string().min(1),
+    })
+    .strict()
+    .refine((c) => new Set([...c.cheap, c.strong]).size === 3, {
+      message: 'judgeCascade: os 2 baratos e o forte precisam ser modelos distintos',
+    })
+    .optional(),
   // Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`.
   scenarioSeed: z.array(stageSpecSchema).max(50).optional(),
   // Nº de finalistas (melhores por judge-score) que disputam os duelos. 0 = sem finais.

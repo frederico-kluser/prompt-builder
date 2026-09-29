@@ -828,6 +828,24 @@ export interface JudgeContractPin {
    * granularidade — mostra, meses depois, o QUE entrou no hash além dos ids.
    */
   components?: JudgeContractComponentsExt;
+  /**
+   * IMPL-070 (R-20:REC-8): fingerprint dos META-PROMPTS do pipeline
+   * (reescritor, reflexão, técnicas, datagen, gabarito — `src/metaPrompts.ts`)
+   * em vigor na run. Ausente em records antigos.
+   */
+  metaPromptsFingerprint?: string;
+  /**
+   * Hash de contrato DA RUN = contrato do juiz (`hash`) + meta-prompts: muda
+   * quando o texto de QUALQUER prompt interno muda. O `hash` do juiz fica
+   * intacto de propósito — o `baseline check` do CI segue só sobre o juízo.
+   */
+  runContractHash?: string;
+}
+
+/** Hash de contrato da RUN (IMPL-070): juiz + fingerprint dos meta-prompts. */
+export function runContractHash(judgeHash: string, metaFingerprint: string): string {
+  const canonical = `${judgeHash.length}:${judgeHash}\u0000${metaFingerprint.length}:${metaFingerprint}`;
+  return FNV_SEEDS.map((seed) => hex32(fnv1a32(canonical, seed))).join('');
 }
 
 /**
@@ -938,12 +956,17 @@ export function pinJudgeContract(
   judgePromptText: string,
   now?: Date,
   components?: JudgeContractComponentsExt,
+  opts: { metaPromptsFingerprint?: string } = {},
 ): JudgeContractPin {
+  const hash = judgeContractHash(modelIds, judgePromptText, components);
+  const meta = opts.metaPromptsFingerprint;
   return {
-    hash: judgeContractHash(modelIds, judgePromptText, components),
+    hash,
     modelIds: [...modelIds],
     pinnedAt: (now ?? new Date()).toISOString(),
     ...(components ? { components } : {}),
+    // IMPL-070: o contrato DA RUN cobre também os meta-prompts do pipeline.
+    ...(meta ? { metaPromptsFingerprint: meta, runContractHash: runContractHash(hash, meta) } : {}),
   };
 }
 

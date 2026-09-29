@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { chatCompletion, peekModelsCache } from './openrouter.js';
+import { chatCompletion, isFatalGatewayError, peekModelsCache } from './openrouter.js';
+import { roleTimeoutMs } from './roleLimits.js';
 import { isControlSignal } from './budget.js';
 import {
   applyFewShotDemos,
@@ -344,7 +345,8 @@ async function generateOneVariant(
         { role: 'user', content: safeUserPrompt },
       ],
       temperature: 0.4,
-      timeoutMs: p.timeoutMs ?? 90_000,
+      // extra#2: piso do papel — 60 s cortava reescrita com raciocinio.
+      timeoutMs: roleTimeoutMs('rewriter', p.timeoutMs, p.reasoningLevel),
       // IMPL-017: teto explicito — sem ele a saida era ilimitada. Constante
       // unica: a porta suave (estimate.ts) projeta com o MESMO teto.
       maxTokens: MAX_TOKENS_REWRITER,
@@ -387,7 +389,7 @@ async function generateOneVariant(
           },
         ],
         temperature: 0.3,
-        timeoutMs: p.timeoutMs ?? 90_000,
+        timeoutMs: roleTimeoutMs('rewriter', p.timeoutMs, p.reasoningLevel),
         maxTokens: MAX_TOKENS_REWRITER, // IMPL-017
         reasoningLevel: p.reasoningLevel,
         role: 'rewriter',
@@ -410,7 +412,8 @@ async function generateOneVariant(
   } catch (err) {
     // Sem o rethrow, orcamento estourado produziria uma lista de variantes
     // menor do que o pedido — o treino "converge" por falta de candidatos.
-    if (isControlSignal(err)) throw err;
+    // 401/402 (cli#3) idem: nenhuma outra técnica conserta key/crédito.
+    if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
     console.warn(`[variator] tecnica ${technique.id} falhou: ${(err as Error).message}`);
     return null;
   }
@@ -600,7 +603,7 @@ export async function generateBasePrompt(p: GenerateBasePromptParams): Promise<s
       { role: 'user', content: userPrompt },
     ],
     temperature: 0.4,
-    timeoutMs: p.timeoutMs ?? 90_000,
+    timeoutMs: roleTimeoutMs('rewriter', p.timeoutMs),
     maxTokens: MAX_TOKENS_REWRITER, // IMPL-017
     responseFormatJson: true,
     role: 'rewriter',
@@ -689,7 +692,7 @@ Produza o bloco de licoes para a proxima rodada de reescrita.`;
       { role: 'user', content: userPrompt },
     ],
     temperature: 0.3,
-    timeoutMs: p.timeoutMs ?? 90_000,
+    timeoutMs: roleTimeoutMs('rewriter', p.timeoutMs, p.reasoningLevel),
     maxTokens: MAX_TOKENS_REWRITER, // IMPL-017
     reasoningLevel: p.reasoningLevel,
     role: 'rewriter',

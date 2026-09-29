@@ -3,6 +3,7 @@ import {
   chatCompletionStream,
   guessPromptTokens,
   isCallerRetryable,
+  isFatalGatewayError,
   isGatewayBlocked,
   peekModelsCache,
   type ChatMessage,
@@ -225,8 +226,10 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
     } catch (err) {
       // Orcamento/cancelamento sao SINAIS DE CONTROLE: repetir a chamada so
       // gastaria mais, e devolver status 'error' faria a run parecer completa
-      // com um competidor "que falhou". Sai do laco propagando.
-      if (isControlSignal(err)) throw err;
+      // com um competidor "que falhou". Sai do laco propagando. Key recusada
+      // (401) / sem credito (402) idem (cli#3): nenhuma nova tentativa nem
+      // outro competidor conserta — a run tem de parar com exit 4/5.
+      if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
       spentOnFailed += attemptCost?.usd ?? 0;
       // Bloqueio de moderacao/guardrail (403) e DETERMINISTICO para a mesma
       // entrada: repetir so gastaria tempo, e nao e falha de infraestrutura

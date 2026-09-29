@@ -22,10 +22,12 @@ import type {
 // Módulo PURO (sem node:*): seguro no grafo do web (IMPL-094).
 import type { AgentInfraCounts } from './agent/infraError.js';
 import type { ExpectedSpec, ReferenceValidation } from './engine/groundTruth.js';
-import type { PromptContracts } from './engine/contracts.js';
+import type { PromptContracts, ResponseSecurity, SecuritySummary } from './engine/contracts.js';
 import type { PromptGroup } from './engine/promptGroup.js';
 import type { ModelLifecycleSnapshot } from './engine/modelLifecycle.js';
-import type { ItemSaturationReport } from './datagen.js';
+import type { DatagenReport, ItemSaturationReport } from './datagen.js';
+import type { CascadeReport, JudgeCascadeConfig, JudgeCascadeSummary } from './judge.js';
+import type { ScenarioDedupConfig } from './dedup.js';
 
 // Ciclo de vida de modelos (IMPL-019): fonte única em src/engine/modelLifecycle.ts.
 export type {
@@ -675,6 +677,18 @@ export interface RunConfigBase {
    * fora desta lista vira aviso em `RunRecord.languageWarnings`.
    */
   languages?: string[];
+  /**
+   * IMPL-063 — dedup SEMÂNTICO dos cenários gerados: `semantic: true` liga
+   * os embeddings do OpenRouter (mesmo gateway/ledger do chat, custo no papel
+   * datagen) com limiares calibráveis. Ausente = só a passe exata do par.
+   */
+  scenarioDedup?: ScenarioDedupConfig;
+  /**
+   * IMPL-115 — modo ECONÔMICO do julgamento: 2 juízes baratos em paralelo e o
+   * forte só nos vereditos em dúvida (discordância, 'parcial', anomalia de
+   * comprimento). Ausente = julgamento normal por `judgeModelIds`.
+   */
+  judgeCascade?: JudgeCascadeConfig;
   /** Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`. */
   scenarioSeed?: StageSpec[];
   /**
@@ -1337,6 +1351,8 @@ export interface SingleJudgeResult {
  * tambem o resultado individual de cada juiz (placar aditivo + justificativas).
  */
 export interface JudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /** Consenso entre juizes (posicao media): melhor -> pior. Placar/heatmap/CSV usam isto. */
   rankedContestantIds: string[];
   /**
@@ -1373,6 +1389,8 @@ export interface JudgeResult {
  * sem comparar contestants entre si. Base do judge-score.
  */
 export interface ReferenceJudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /**
    * Veredito ternario por contestant (consenso entre juizes, quando ha mais de
    * um). SO vereditos legitimos: falha do juiz/competidor deixa a chave AUSENTE
@@ -1578,6 +1596,12 @@ export interface CompetitorLiveState {
 }
 
 export interface StageRecord {
+  /**
+   * IMPL-069 — estado de SEGURANÇA de cada resposta (contestantId → estado)
+   * nos cenários do conjunto de guarda (tier adversarial/benign-twin), separado
+   * do judge-score. Ausente nos demais cenários e em records antigos.
+   */
+  security?: Record<string, ResponseSecurity>;
   index: number;
   spec?: StageSpec;
   responses: CompetitorResponse[];
@@ -1796,6 +1820,26 @@ export interface RunRecord {
    * (src/datagen.ts) no fim do julgamento. Ausente em records antigos.
    */
   itemSaturation?: ItemSaturationReport;
+  /**
+   * web-live#7 (+ IMPL-063/IMPL-059) — relatório da GERAÇÃO de cenários:
+   * pedido/gerado/descartes por camada (exata, semântica, contra o seed)/
+   * rodadas de reposição/entregues/limiares + aviso de falta e rubricas que
+   * exigem fato ausente do caso. Ausente = run sem datagen (pinada/seed cobre)
+   * ou record antigo. Sai de `generateStages` (`onReport`).
+   */
+  datagenReport?: DatagenReport;
+  /**
+   * IMPL-115 — resumo do modo econômico: vereditos julgados/escalonados ao
+   * juiz forte, fração escalonada e histograma dos gatilhos. O custo por
+   * veredito sai MEDIDO do ledger (`costByRole.judge`). Ausente = sem cascata.
+   */
+  judgeCascade?: JudgeCascadeSummary;
+  /**
+   * IMPL-069 — resumo de segurança por contestant (ataques, violações,
+   * recusas; gêmeos benignos e recusa excessiva). `classifier: 'none'`: só o
+   * detector determinístico (canário/span do system prompt) está ligado.
+   */
+  securitySummary?: SecuritySummary;
   /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
@@ -2124,7 +2168,7 @@ export interface BestOfKTest {
  * `reeval` (IMPL-013): passou no gate da melhor de K, mas a re-avaliação LIMPA no
  * minibatch não confirmou a melhora (ou não chegou a rodar até o fim).
  */
-export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance' | 'reeval';
+export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance' | 'reeval' | 'contamination' | 'safety';
 
 /**
  * Re-avaliação LIMPA do candidato antes de confirmar a promoção (IMPL-013,
@@ -2187,6 +2231,20 @@ export interface IterationGate {
    * `heldBy: ['reeval']`.
    */
   reeval?: PromotionReeval;
+  /**
+   * IMPL-067 (R-20:REC-9): contaminação dados→prompt do `bestId` contra o
+   * corpus da run de seleção (cenários ∪ gabaritos ∪ explicações do juiz),
+   * sem contar o que o prompt de base já trazia. `blocked` (span exato ≥ 8
+   * tokens) segura a promoção (`heldBy: ['contamination']`); `containment` é
+   * reportado para toda campeã.
+   */
+  contamination?: { containment: number; alert: boolean; blocked: boolean; detail?: string };
+  /**
+   * IMPL-069 (R-21:REC-2): restrição DURA de segurança — variantes com NOVA
+   * violação em âncora crítica (cenário adversarial que a régua não violava)
+   * ficam FORA da disputa antes da utilidade (ordem lexicográfica).
+   */
+  safety?: { excludedIds: string[] };
 }
 
 /** Pareamento final da sessão (holdout, ou a última run de treino sem holdout). */
@@ -2514,6 +2572,13 @@ export type RunEvent =
     }
   | { type: 'stage.dueled'; runId: string; stageIndex: number; duels: StageDuels }
   | { type: 'duel.progress'; runId: string; done: number; total: number }
+  /**
+   * web-live#7 — relatório da geração de cenários, emitido UMA vez, logo
+   * depois do datagen e ANTES de gastar com gabarito/competidores/juízes.
+   * `report.warning` presente = faltou cenário (a run segue com n menor).
+   * Agregado: NÃO entra no reducer de etapas (sem `stageIndex`).
+   */
+  | { type: 'datagen.report'; runId: string; report: DatagenReport }
   /** Gasto acumulado (throttled). Hook do CLI para a linha de orcamento. */
   | {
       type: 'run.spend';

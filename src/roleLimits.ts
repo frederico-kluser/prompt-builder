@@ -171,3 +171,89 @@ export function roleMaxTokensViolations(
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// PISOS DE TIMEOUT por papel (extra#2).
+//
+// `config.timeoutMs` (default 60 s) nasceu para a RESPOSTA do competidor, mas
+// era repassado igual a todo papel — e o gateway só ENCURTA o teto do papel
+// com ele (`min(timeoutMs, roleTimeouts[role].totalMs)`). Num treino REAL
+// (2026-09-29, juiz z-ai/glm-5.3-flash esforço low, reescritor
+// xiaomi/mimo-v2.6-pro) o juiz estourou os 60 s ("saída do juiz cortada ...
+// (timeout) — veredito INVÁLIDO") e o reescritor também ("timeout total
+// (60000ms, papel rewriter)"): vereditos descartados e técnicas perdidas. Juiz
+// (dossiê longo + raciocínio), gabarito, datagen e reescritor (prompt inteiro
+// reescrito com raciocínio) precisam de mais tempo de parede que uma resposta.
+//
+// Regra: o papel usa `max(timeoutMs configurado, piso do papel)`; o piso é
+// menor com raciocínio DESLIGADO ('off'). O competidor NÃO tem piso (fica no
+// `config.timeoutMs`). Onde se aplica: no ponto em que o `config.timeoutMs` da
+// RUN vira timeout de papel — os orquestradores (juiz, duelo, gabarito,
+// datagen) e o reescritor (`variator.ts`, chamado pelo treino e pela run
+// variation). Os módulos de juízo seguem honrando um `timeoutMs` EXPLÍCITO de
+// quem os chama direto. O teto por papel do gateway (`roleTimeouts` — override
+// explícito do usuário) continua valendo por cima: ele ainda ENCURTA.
+// ---------------------------------------------------------------------------
+
+/** Papéis com piso de timeout (o competidor fica no `config.timeoutMs`). */
+export type TimedRole = 'judge' | 'duel' | 'gabarito' | 'datagen' | 'rewriter';
+
+/**
+ * Piso com raciocínio LIGADO ou no padrão do modelo (degrau ausente). Juiz e
+ * duelo = o teto total do papel no gateway (`DEFAULT_ROLE_TIMEOUTS`: 120 s /
+ * 90 s); gabarito (esforço default `high`), datagen (lote de cenários) e
+ * reescritor (prompt inteiro) ficam abaixo do teto de 300 s deles.
+ */
+export const ROLE_TIMEOUT_FLOOR_MS: Readonly<Record<TimedRole, number>> = Object.freeze({
+  judge: 120_000,
+  duel: 90_000,
+  gabarito: 180_000,
+  datagen: 180_000,
+  rewriter: 180_000,
+});
+
+/**
+ * Piso com raciocínio DESLIGADO (`off`). Gabarito/datagen mantêm os 120 s que
+ * o orquestrador já garantia antes (`max(timeoutMs, 120 s)`) — nunca regride.
+ */
+export const ROLE_TIMEOUT_FLOOR_NO_REASONING_MS: Readonly<Record<TimedRole, number>> = Object.freeze({
+  judge: 90_000,
+  duel: 60_000,
+  gabarito: 120_000,
+  datagen: 120_000,
+  rewriter: 120_000,
+});
+
+/**
+ * Timeout EFETIVO da chamada de um papel: o configurado (`config.timeoutMs`)
+ * nunca abaixo do piso do papel. Configurado ausente/inválido = o piso.
+ */
+export function roleTimeoutMs(role: TimedRole, configuredMs: number | undefined, level?: ReasoningLevel): number {
+  const floor = level === 'off' ? ROLE_TIMEOUT_FLOOR_NO_REASONING_MS[role] : ROLE_TIMEOUT_FLOOR_MS[role];
+  const valido = typeof configuredMs === 'number' && Number.isFinite(configuredMs) && configuredMs > 0;
+  return Math.max(valido ? configuredMs : floor, floor);
+}
+
+/** Config mínima para projetar os timeouts efetivos (estimate/dry-run). */
+export interface RoleTimeoutsInput {
+  timeoutMs?: number;
+  reasoning?: Partial<Record<'competitor' | 'judge' | 'duel' | 'gab' | 'rewriter' | 'datagen', ReasoningLevel>>;
+}
+
+/**
+ * Timeouts efetivos (ms) por papel de uma run — o que o `--dry-run` mostra
+ * (extra#2). Competidor = `config.timeoutMs` (default 60 s). Degrau por papel
+ * com o mesmo fallback do motor (duelo/gabarito ausentes → o do juiz).
+ */
+export function effectiveRoleTimeouts(cfg: RoleTimeoutsInput): Record<'competitor' | TimedRole, number> {
+  const configured = typeof cfg.timeoutMs === 'number' && cfg.timeoutMs > 0 ? cfg.timeoutMs : 60_000;
+  const r = cfg.reasoning ?? {};
+  return {
+    competitor: configured,
+    judge: roleTimeoutMs('judge', configured, r.judge),
+    duel: roleTimeoutMs('duel', configured, r.duel ?? r.judge),
+    gabarito: roleTimeoutMs('gabarito', configured, r.gab ?? r.judge),
+    datagen: roleTimeoutMs('datagen', configured, r.datagen),
+    rewriter: roleTimeoutMs('rewriter', configured, r.rewriter),
+  };
+}

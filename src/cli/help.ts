@@ -30,6 +30,7 @@ export const COMMANDS = [
   'registry',
   'baseline',
   'calib',
+  'prompts',
   'doctor',
   'limits',
   'mcp',
@@ -80,6 +81,7 @@ const RESUMO: Record<string, string> = {
   registry: 'guarda de drift dos prompts de produção',
   baseline: 'pina e confere juiz/gabarito/contrato de uma run',
   calib: 'calibração juiz × humano (α de Krippendorff, AC2 de Gwet, IC95%)',
+  prompts: 'regressão dos meta-prompts internos (reescritor, reflexão, datagen, gabarito, juiz)',
   doctor: 'diagnostica key, limites e o ambiente do modo agente',
   limits: 'teto diário de gasto da máquina',
   mcp: 'servidor MCP por stdio (mesmo binário)',
@@ -115,7 +117,10 @@ const USO: Record<string, string> = {
   Comuns: --theme --stages --judge --budget <usd|none> --dry-run
   --output-format ndjson --idempotency-key <k> --allow-concurrent --detach
   --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR —
-                           cenário fora da política vira aviso no record)`,
+                           cenário fora da política vira aviso no record)
+  --judge-cascade b1,b2:forte  modo econômico: 2 juízes baratos; o forte só
+                           nos vereditos em dúvida (fração escalonada no record)
+  --semantic-dedup         dedup semântico dos cenários (embeddings, papel datagen)`,
   vary: `  vary --model <id>        testa variações de prompt num modelo
   vary --config <arq>      usa um arena-config@1 (ver: docs config)
   Comuns: --theme --stages --judge --techniques --budget --dry-run --detach
@@ -225,6 +230,14 @@ const USO: Record<string, string> = {
   calib template [-o <arq.jsonl>]
            exemplo comentado do formato calibration-jsonl@1 (itens SINTÉTICOS)
   Formato e protocolo do piloto: \`prompt-builder docs calibration\``,
+  prompts: `  prompts regression --model <id> --judge <id> [--roles a,b] [--budget <usd|none>] [--dry-run]
+           roda a suíte FIXA dos meta-prompts: 80 reescritas × técnicas + 40
+           canários de contrato + reflexão, datagen, gabarito e juiz rotulados.
+           Limiares: inválidas ≤ 10%, diversidade (1 − 8-gramas) ≥ 0,4, juiz
+           ≥ 85%, κ do gabarito ≥ 0,6 — abaixo = exit 10 (gate), relatório em
+           error.details.report. --dry-run estima o TETO pelo catálogo (sem
+           key); rodada ≤ US$ 2. Ganho por técnica NÃO é medido (use \`vary\`).
+           Rode de novo quando o fingerprint dos prompts mudar.`,
   doctor: `  doctor [--deep] [--container] [--config <arq>]
            key (exit 4 se ausente/recusada), teto diário, runs ativas e a
            sala do modo agente (canário real com --deep)`,

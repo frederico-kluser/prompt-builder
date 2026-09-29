@@ -39,7 +39,14 @@ import { targetModelFor, type LabeledScenario } from './techniques.js';
 import { emitSessionEvent } from './events.js';
 import { saveSession } from './storage.js';
 import { computeMedals } from './medals.js';
-import { judgeScoreFromVerdicts, pickWinner, promotionEventFields, type RankEntry } from './rank.js';
+import {
+  contaminationInputFromRun,
+  judgeScoreFromVerdicts,
+  pickWinner,
+  promotionEventFields,
+  safetyInputFromRun,
+  type RankEntry,
+} from './rank.js';
 import {
   holdoutConfirmationText,
   HOLDOUT_RATIO_DEFAULT,
@@ -656,6 +663,11 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     // IMPL-056: sem repassar, TODA iteracao (e o holdout) voltaria ao pt-BR
     // exclusivo e os avisos de idioma usariam a politica errada.
     languages: cfg.languages,
+    // IMPL-063/IMPL-115: dedup semântico e modo econômico do juiz são escolhas
+    // da SESSÃO — sem repassar, a iteração 0 (que gera os cenários) e todas as
+    // outras voltariam ao exato/ao juiz normal em silêncio.
+    scenarioDedup: cfg.scenarioDedup,
+    judgeCascade: cfg.judgeCascade,
     scenarioSeed: cfg.scenarioSeed,
     // Fase de finais: sem repassar, TODA iteracao (e o holdout) cairia no
     // default de 3 finalistas — a escolha do usuario era descartada em silencio.
@@ -1236,6 +1248,12 @@ async function trainingLoop(
         {
           minGain,
           scoresById,
+          // IMPL-067: campeã que cola span ≥ 8 tokens de cenário/gabarito/
+          // explicação do juiz NÃO é promovida; o containment vai no gate.
+          contamination: contaminationInputFromRun(selRun, controlId),
+          // IMPL-069: nova violação em âncora crítica (adversarial) = fora da
+          // disputa antes da utilidade (segurança → utilidade).
+          safety: safetyInputFromRun(selRun),
         },
       );
       // IMPL-013: passou no gate da melhor de K → re-avaliação LIMPA num

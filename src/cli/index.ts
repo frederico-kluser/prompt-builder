@@ -33,6 +33,7 @@ import { cmdTelemetry } from './commands/telemetry.js';
 import { installCostSamplesPersistence } from '../costSamplesStore.js';
 import { getDataDir } from '../storage.js';
 import { cmdCalib } from './commands/calib.js';
+import { cmdPrompts } from './commands/prompts.js';
 
 const VERSION = pkgVersion();
 
@@ -104,6 +105,8 @@ OUTROS
   doctor                   key (exit 4 se ausente/recusada), limite da key,
                            teto diário e runs ativas
   registry validate [--file <arq>]   guarda de drift dos prompts de produção
+  prompts regression --model <id> --judge <id> [--dry-run] [--budget <usd>]
+                           regressão dos meta-prompts internos (exit 10 abaixo dos limiares)
   registry init [-o <arq>]           grava um registro-exemplo comentado
   baseline pin <runId> [-o <arq>]    pina juiz/gabarito/contrato de uma run (judge-baseline@1)
   baseline check [--file <arq>] [--config <arq>] [--catalog <models.json>]
@@ -214,6 +217,8 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdBaseline(argv);
     case 'calib':
       return cmdCalib(argv);
+    case 'prompts':
+      return cmdPrompts(argv);
     case 'doctor':
       return cmdDoctor(argv);
     case 'limits':

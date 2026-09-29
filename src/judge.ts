@@ -587,6 +587,75 @@ export interface CascadeReport {
   cheapVerdictByContestant: Record<string, Verdict>;
   /** true = o juiz forte decidiu; false = escalonou mas o forte falhou e valeu o barato. */
   strongDecided: boolean;
+  /**
+   * Vereditos que a cascata julgou nesta etapa (contestants com resposta
+   * julgável) e os que foram ao juiz forte. Pointwise escala POR VEREDITO
+   * (`escalatedContestantIds`); listwise, a etapa inteira.
+   */
+  verdicts?: number;
+  escalatedContestantIds?: string[];
+}
+
+/**
+ * Config de RUN do modo ECONÔMICO (IMPL-115) — `RunConfigBase.judgeCascade`:
+ * os 2 juízes BARATOS (em paralelo) e o FORTE de escalonamento. Vale para o
+ * pointwise por referência (default) e para o listwise (fallback).
+ */
+export interface JudgeCascadeConfig {
+  cheap: string[];
+  strong: string;
+}
+
+/** Resumo da cascata na run (IMPL-115) — `RunRecord.judgeCascade`. */
+export interface JudgeCascadeSummary {
+  cheapJudgeIds: string[];
+  strongJudgeId: string;
+  /** Etapas julgadas pela cascata / com ≥1 veredito levado ao forte. */
+  stages: number;
+  escalatedStages: number;
+  /** Vereditos julgados pela cascata / levados ao juiz forte. */
+  verdicts: number;
+  escalatedVerdicts: number;
+  /** escalatedVerdicts / verdicts (0 sem veredito) — a "fração escalonada". */
+  escalatedFraction: number;
+  /** Etapas em que o forte falhou e valeu o consenso barato (degradado). */
+  strongFailedStages: number;
+  /** Histograma dos gatilhos, por etapa escalonada. */
+  reasons: Record<CascadeEscalationReason, number>;
+}
+
+/**
+ * Agrega os relatórios por etapa num resumo da run (puro). O custo por
+ * veredito NÃO é calculado aqui: sai medido do ledger (`costByRole.judge`).
+ */
+export function summarizeJudgeCascade(
+  cfg: JudgeCascadeConfig,
+  reports: CascadeReport[],
+): JudgeCascadeSummary {
+  const reasons: Record<CascadeEscalationReason, number> = { disagreement: 0, parcial: 0, 'length-anomaly': 0 };
+  let verdicts = 0;
+  let escalatedVerdicts = 0;
+  let strongFailedStages = 0;
+  for (const r of reports) {
+    const n = r.verdicts ?? Object.keys(r.cheapVerdictByContestant).length;
+    verdicts += n;
+    if (r.escalated) {
+      escalatedVerdicts += r.escalatedContestantIds?.length ?? n;
+      if (!r.strongDecided) strongFailedStages += 1;
+      for (const motivo of r.reasons) reasons[motivo] += 1;
+    }
+  }
+  return {
+    cheapJudgeIds: [...new Set(cfg.cheap)],
+    strongJudgeId: cfg.strong,
+    stages: reports.length,
+    escalatedStages: reports.filter((r) => r.escalated).length,
+    verdicts,
+    escalatedVerdicts,
+    escalatedFraction: verdicts > 0 ? escalatedVerdicts / verdicts : 0,
+    strongFailedStages,
+    reasons,
+  };
 }
 
 /** Resultado da cascata = JudgeResult + o relatorio da cascata. */
@@ -631,11 +700,13 @@ export async function judgeStageCascade(params: CascadeJudgeParams): Promise<Cas
     cheapVerdictByContestant: barato.verdictByContestant ?? {},
   };
 
+  // Listwise escala a ETAPA inteira: todo contestant julgado conta como veredito.
+  const julgados = (params.responses ?? []).filter((r) => !unjudgeableReason(r) && r.text.trim().length > 0).length;
   if (reasons.length === 0) {
     return {
       ...barato,
       rawJudgeText: `${barato.rawJudgeText}\n[cascata] sem gatilho — consenso dos juizes baratos.`,
-      cascade: { ...base, escalated: false, strongDecided: false },
+      cascade: { ...base, escalated: false, strongDecided: false, verdicts: julgados },
     };
   }
 
@@ -650,6 +721,6 @@ export async function judgeStageCascade(params: CascadeJudgeParams): Promise<Cas
     rawJudgeText:
       `${final.rawJudgeText}\n[cascata] escalonada (${reasons.join(', ')}) — ` +
       (strongDecided ? `decidida pelo juiz forte ${strongJudgeId}.` : `juiz forte ${strongJudgeId} falhou; valeu o consenso barato.`),
-    cascade: { ...base, escalated: true, strongDecided },
+    cascade: { ...base, escalated: true, strongDecided, verdicts: julgados },
   };
 }

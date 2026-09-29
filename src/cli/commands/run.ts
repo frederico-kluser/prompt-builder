@@ -21,6 +21,7 @@ import { holdoutSkipReasonOf } from '../../engine/sessionDecision.js';
 import { TRAINING_DEFAULT_STAGES } from '../../engine/trainingPolicy.js';
 import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, toCliError, type Output } from '../output.js';
 import { fatalGatewayErrorFromRecord } from '../../openrouter.js';
+import { effectiveRoleTimeouts } from '../../roleLimits.js';
 import {
   assertNoUnknownConfigKeys,
   buildContext,
@@ -100,6 +101,10 @@ const OPTIONS = {
   'scenario-brief': { type: 'string' },
   // IMPL-056: idiomas do datagen (opt-in, lista por vírgula). Sem a flag, 100% pt-BR.
   languages: { type: 'string' },
+  // IMPL-115: modo ECONÔMICO do juiz — `barato1,barato2:forte`.
+  'judge-cascade': { type: 'string' },
+  // IMPL-063: dedup SEMÂNTICO dos cenários gerados (embeddings; custo no datagen).
+  'semantic-dedup': { type: 'boolean' },
   'effort-competitor': { type: 'string' },
   'effort-judge': { type: 'string' },
   'effort-datagen': { type: 'string' },
@@ -145,6 +150,31 @@ function piiModeFlag(v: unknown): 'redact' | 'synthetic' | undefined {
     code: 'usage.invalid_flag_value',
     hint: 'Use `--pii-mode redact` (pseudonimiza no envio) ou `--pii-mode synthetic` (só dado sintético).',
   });
+}
+
+/**
+ * `--judge-cascade barato1,barato2:forte` (IMPL-115) validado — uso errado =
+ * exit 2, nada gasto. Os 3 modelos distintos (o forte não pode ser barato).
+ */
+function judgeCascadeFlag(v: unknown): { cheap: string[]; strong: string } | undefined {
+  if (typeof v !== 'string' || !v.trim()) return undefined;
+  const [baratos, forte, ...resto] = v.split(':').map((x) => x.trim());
+  const cheap = (baratos ?? '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (resto.length > 0 || !forte || cheap.length !== 2 || new Set([...cheap, forte]).size !== 3) {
+    throw new CliError(
+      '--judge-cascade deve ser `barato1,barato2:forte` (3 modelos distintos).',
+      EXIT.USAGE,
+      { flag: '--judge-cascade', value: v },
+      {
+        code: 'usage.invalid_flag_value',
+        hint: 'Ex.: `--judge-cascade google/gemini-2.5-flash-lite,openai/gpt-5-nano:anthropic/claude-sonnet-4.5`.',
+      },
+    );
+  }
+  return { cheap, strong: forte };
 }
 
 function n(v: unknown, campo: string): number | undefined {
@@ -387,6 +417,8 @@ export async function buildFromFlags(
       ? { scenarioBrief: values['scenario-brief'] }
       : {}),
     ...(list(values.languages) ? { languages: list(values.languages) } : {}),
+    ...(judgeCascadeFlag(values['judge-cascade']) ? { judgeCascade: judgeCascadeFlag(values['judge-cascade']) } : {}),
+    ...(values['semantic-dedup'] === true ? { scenarioDedup: { semantic: true } } : {}),
     ...(Object.keys(reasoning).length ? { reasoning } : {}),
     ...(piiModeFlag(values['pii-mode']) ? { piiMode: piiModeFlag(values['pii-mode']) } : {}),
     ...(values['allow-pii'] === true ? { allowPii: true } : {}),
@@ -480,6 +512,12 @@ function renderDryRun(out: Output, config: RunConfig, rep: PreflightReport): voi
   out.line(JSON.stringify(config, null, 2));
   out.line();
   out.line(`Custo estimado: ${fmtUsd(rep.estimate.low)} – ${fmtUsd(rep.estimate.high)}`);
+  // extra#2: timeout EFETIVO por papel (juiz/gabarito/datagen/reescritor têm piso).
+  const t = effectiveRoleTimeouts(config);
+  out.line(
+    `Timeouts:       competidor ${t.competitor / 1000}s · juiz ${t.judge / 1000}s · duelo ${t.duel / 1000}s · ` +
+      `gabarito ${t.gabarito / 1000}s · datagen ${t.datagen / 1000}s · reescritor ${t.rewriter / 1000}s`,
+  );
   const c = rep.checks;
   out.line(
     'Pré-voo:        ' +
@@ -1088,6 +1126,8 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
     const resumo = {
       dryRun: true,
       estimate: rep.estimate,
+      // extra#2: timeouts efetivos por papel (ms) — o piso do papel sobre `timeoutMs`.
+      roleTimeoutsMs: effectiveRoleTimeouts(configComOrcamento),
       wouldRefuse: rep.wouldRefuse,
       requires: rep.requires,
       warnings: rep.warnings,

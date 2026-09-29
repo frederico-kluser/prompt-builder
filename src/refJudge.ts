@@ -7,6 +7,7 @@ import { caseParts } from './engine/caseInput.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
 import { isJudgeCutKind } from './engine/truncation.js';
 import { aggregateVerdicts, tieLabel } from './engine/verdictAggregate.js';
+import { hasLengthAnomaly, type CascadeEscalationReason, type CascadeReport } from './judge.js';
 import {
   DATA_BLOCKS_NOTICE,
   formatReminderFor,
@@ -504,6 +505,151 @@ export async function judgeStageReference(
 
   // Nenhum veredito de juiz na etapa inteira: a etapa nao pontua no placar.
   return result(!algumVeredito);
+}
+
+// ----------------------------------------------------------------------------
+// MODO ECONÔMICO do julgamento pointwise (IMPL-115 / R-08:REC-2). O papel juiz
+// domina o custo do pipeline; aqui os DOIS juízes baratos votam em paralelo e
+// o forte é chamado POR VEREDITO, só onde há dúvida:
+//   • `disagreement` — os baratos divergem (ou um deles não votou);
+//   • `parcial`      — algum voto barato saiu 'parcial' (nível intermediário);
+//   • `length-anomaly` — a resposta é um extremo (maior/menor) de uma etapa
+//     com razão de comprimento > 3× (viés de verbosidade derruba juiz barato).
+// Sem gatilho, o consenso dos baratos decide. A fração escalonada vai no
+// relatório; o custo por veredito continua MEDIDO pelo ledger (papel judge).
+// Nenhum sinal estatístico por token é pedido ou lido (só vereditos + comprimento).
+// ----------------------------------------------------------------------------
+
+export interface JudgeStageReferenceCascadeParams extends Omit<JudgeStageReferenceParams, 'judgeModelIds'> {
+  /** Os 2 juízes BARATOS (a 1ª camada, em paralelo). */
+  cheapJudgeIds: string[];
+  /** O juiz FORTE — só nos vereditos em dúvida. */
+  strongJudgeId: string;
+}
+
+/** Contestants cujo veredito vai ao juiz forte, com os gatilhos da etapa. */
+function pointwiseEscalation(
+  cheap: string[],
+  barato: ReferenceJudgeResult,
+  responses: CompetitorResponse[],
+): { ids: string[]; reasons: CascadeEscalationReason[] } {
+  const votos = barato.judgeVotesByContestant ?? {};
+  const julgados = Object.keys(votos);
+  const motivos = new Set<CascadeEscalationReason>();
+  const escalar = new Set<string>();
+  for (const id of julgados) {
+    const porJuiz = new Map(votos[id].map((v) => [v.judgeModelId, v.verdict]));
+    const vs = cheap.map((j) => porJuiz.get(j));
+    if (cheap.length < 2 || vs.some((v) => v === undefined) || new Set(vs).size > 1) {
+      motivos.add('disagreement');
+      escalar.add(id);
+    }
+    if (vs.includes('parcial')) {
+      motivos.add('parcial');
+      escalar.add(id);
+    }
+  }
+  // Anomalia de comprimento: SÓ os extremos da etapa (maior e menor resposta)
+  // vão ao forte — escalar a etapa inteira anularia a economia.
+  const comTexto = responses.filter((r) => julgados.includes(r.contestantId) && r.text.trim().length > 0);
+  const tamanhos = comTexto.map((r) => r.text.length);
+  if (hasLengthAnomaly(tamanhos)) {
+    const max = Math.max(...tamanhos);
+    const min = Math.min(...tamanhos);
+    for (const r of comTexto) {
+      if (r.text.length === max || r.text.length === min) {
+        motivos.add('length-anomaly');
+        escalar.add(r.contestantId);
+      }
+    }
+  }
+  const ordem: CascadeEscalationReason[] = ['disagreement', 'parcial', 'length-anomaly'];
+  return { ids: julgados.filter((id) => escalar.has(id)), reasons: ordem.filter((m) => motivos.has(m)) };
+}
+
+/**
+ * Julgamento pointwise em modo econômico (IMPL-115). Mesma regra de origem e
+ * mesmo contrato de `judgeStageReference` (é ele que roda nas duas camadas); o
+ * resultado carrega `cascade` com o que cada camada decidiu. Juiz forte que
+ * falha num veredito escalonado: vale o consenso barato, marcado 'degraded'.
+ */
+export async function judgeStageReferenceCascade(
+  opts: JudgeStageReferenceCascadeParams,
+): Promise<ReferenceJudgeResult & { cascade?: CascadeReport }> {
+  const { cheapJudgeIds, strongJudgeId, ...rest } = opts;
+  const cheap = [...new Set(cheapJudgeIds)];
+  const barato = await judgeStageReference({ ...rest, judgeModelIds: cheap });
+  const julgados = Object.keys(barato.judgeVotesByContestant ?? {});
+  // Etapa sem juiz LLM (ground-truth, sem gabarito, nada julgável): a cascata
+  // não se aplica — nada a relatar.
+  if (julgados.length === 0) return barato;
+
+  const { ids, reasons } = pointwiseEscalation(cheap, barato, rest.responses);
+  const base = {
+    reasons,
+    cheapJudgeIds: cheap,
+    strongJudgeId,
+    cheapVerdictByContestant: { ...barato.verdictByContestant },
+    verdicts: julgados.length,
+  };
+  if (ids.length === 0) {
+    return { ...barato, cascade: { ...base, escalated: false, strongDecided: false, escalatedContestantIds: [] } };
+  }
+
+  const alvo = new Set(ids);
+  const forte = await judgeStageReference({
+    ...rest,
+    responses: rest.responses.filter((r) => alvo.has(r.contestantId)),
+    contestants: rest.contestants.filter((c) => alvo.has(c.id)),
+    judgeModelIds: [strongJudgeId],
+  });
+
+  const out: ReferenceJudgeResult = {
+    ...barato,
+    verdictByContestant: { ...barato.verdictByContestant },
+    explanationByContestant: { ...barato.explanationByContestant },
+    verdictSourceByContestant: { ...(barato.verdictSourceByContestant ?? {}) },
+    verdictErrorByContestant: { ...(barato.verdictErrorByContestant ?? {}) },
+    judgeVotesByContestant: { ...(barato.judgeVotesByContestant ?? {}) },
+    ...(barato.verdictTieByContestant ? { verdictTieByContestant: { ...barato.verdictTieByContestant } } : {}),
+    ...(barato.canaryByContestant ? { canaryByContestant: { ...barato.canaryByContestant } } : {}),
+    ...(barato.confidenceByContestant ? { confidenceByContestant: { ...barato.confidenceByContestant } } : {}),
+    judgeModelId: `${cheap.join('+')}>${strongJudgeId}`,
+  };
+  let fortesDecidiram = 0;
+  for (const id of ids) {
+    // O voto do forte fica AO LADO dos baratos (auditável: quem decidiu o quê).
+    const votosForte = forte.judgeVotesByContestant?.[id] ?? [];
+    out.judgeVotesByContestant![id] = [...(out.judgeVotesByContestant![id] ?? []), ...votosForte];
+    const v = forte.verdictByContestant[id];
+    if (v) {
+      fortesDecidiram += 1;
+      out.verdictByContestant[id] = v;
+      out.explanationByContestant[id] = forte.explanationByContestant[id] ?? '';
+      out.verdictSourceByContestant![id] = forte.verdictSourceByContestant?.[id] ?? 'judge';
+      delete out.verdictErrorByContestant![id];
+      delete out.verdictTieByContestant?.[id];
+      if (forte.canaryByContestant?.[id]) out.canaryByContestant = { ...(out.canaryByContestant ?? {}), [id]: forte.canaryByContestant[id] };
+      if (forte.confidenceByContestant?.[id]) {
+        out.confidenceByContestant = { ...(out.confidenceByContestant ?? {}), [id]: forte.confidenceByContestant[id] };
+      } else if (out.confidenceByContestant) {
+        delete out.confidenceByContestant[id];
+      }
+    } else if (out.verdictByContestant[id]) {
+      // Forte falhou: vale o consenso barato, com a marca de painel reduzido.
+      out.verdictSourceByContestant![id] = 'degraded';
+    }
+  }
+  if (Object.keys(out.verdictByContestant).length > 0) delete out.inconclusive;
+  return {
+    ...out,
+    cascade: {
+      ...base,
+      escalated: true,
+      strongDecided: fortesDecidiram === ids.length,
+      escalatedContestantIds: ids,
+    },
+  };
 }
 
 // ----------------------------------------------------------------------------

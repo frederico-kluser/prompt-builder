@@ -1,9 +1,26 @@
 const randomUUID = (): string => crypto.randomUUID();
-import { generateStages, itemSaturationReport, scenarioPolicyReport } from './datagen';
+import {
+  batchCountFor,
+  describeDatagenShortfall,
+  generateStages,
+  itemSaturationReport,
+  scenarioPolicyReport,
+  type DatagenReport,
+} from './datagen';
 import { countCompetitorOutcomes, runCompetitor } from './competitor';
-import { judgeStage, JUDGE_LISTWISE_CONTRACT_TEXT } from './judge';
+import {
+  judgeStage,
+  judgeStageCascade,
+  JUDGE_LISTWISE_CONTRACT_TEXT,
+  summarizeJudgeCascade,
+  type JudgeStageParams,
+} from './judge';
 import { generateReferences, validateGeneratedReferences } from './gabarito';
-import { judgeStageReference } from './refJudge';
+import {
+  judgeStageReference,
+  judgeStageReferenceCascade,
+  type JudgeStageReferenceParams,
+} from './refJudge';
 import { blindRankMap, DUEL_HEAD, pickFinalists, runStageDuels, seedFromId, VERDICT_SCORE } from './duels';
 import { buildFinalStandings, oracleScoresFromVerdicts } from '../../../src/engine/duelCore.js';
 import { assessVerdictIntegrity } from '../../../src/engine/verdictIntegrity.js';
@@ -26,18 +43,21 @@ import {
 } from '../../../src/engine/judgeCalibration.js';
 import type { JudgeContractComponents } from './types';
 import { modelRolesForRun, snapshotModelLifecycle } from '../../../src/engine/modelLifecycle.js';
-import { mergeScenarios } from './scenarioPack';
+import { mergeScenariosReport } from './scenarioPack';
 import { sanitizeLlmVariants, variantsToContestants } from './llmVariants';
 import { judgeScoreFromVerdicts } from './rank';
 import { runCompleteness } from './stats';
 import { emitEvent } from './events';
 import { listRuns, loadRun, saveRun } from './storage';
 import { contestantsFromConfig } from './normalize';
-import { AUDITABLE_ROLES, gatewayErrorFields, listModels, reconcileAtRunEnd } from './openrouter';
+import { AUDITABLE_ROLES, gatewayErrorFields, isFatalGatewayError, listModels, reconcileAtRunEnd } from './openrouter';
 import { enforceRunCompliance } from '../lgpd';
 import { BudgetLedger, isControlSignal, RunCancelled, toControlSignal } from './budget';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
 import { reasoningLevelForRole } from '../modelCaps';
+import { roleTimeoutMs } from './roleLimits';
+import { pipelineMetaPromptsFingerprint } from '../../../src/metaPrompts.js';
+import { stageSecurity, summarizeSecurity } from '../../../src/engine/contracts.js';
 import { acquireLock } from './runLocks';
 import {
   cutDuels,
@@ -65,6 +85,16 @@ import type {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * cli#3 (espelho do Node) — o que NUNCA degrada numa etapa: sinal de CONTROLE (orçamento/
+ * cancelamento) e falha FATAL do gateway (401 key recusada / 402 sem crédito).
+ * Nenhum retry nem outro modelo conserta estas; degradar deixava a run
+ * "concluir" com etapas vazias e sair com exit 1 em vez do 4/5 documentado.
+ */
+function mustPropagate(err: unknown): boolean {
+  return isControlSignal(err) || isFatalGatewayError(err);
 }
 
 function log(runId: string, msg: string, extra?: Record<string, unknown>): void {
@@ -454,10 +484,17 @@ async function runLoop(
   // passando do teto). Lista vazia => deixa o estimador contar técnicas+base,
   // e a estimativa é refeita com os contestants reais depois do `prepare`.
   // Degrau por contestant = o que o competidor recebe (IMPL-016, espelho do Node).
-  const estimar = (contestants: ReadonlyArray<{ id: string; reasoningLevel?: ReasoningLevel }>) =>
+  // `stagesReais` (web-live#7, espelho do Node): se o datagen entregou menos,
+  // a porta G2 projeta com o n REAL.
+  const estimar = (
+    contestants: ReadonlyArray<{ id: string; reasoningLevel?: ReasoningLevel }>,
+    stagesReais?: number,
+  ) =>
     estimateRunCost(
       estimateInputFromConfig(
-        record.config as never,
+        (stagesReais !== undefined
+          ? { ...record.config, stages: Math.max(1, stagesReais) }
+          : record.config) as never,
         contestants.length > 0
           ? {
               contestantIds: contestants.map((c) => c.id),
@@ -565,7 +602,28 @@ async function runLoop(
 
   // Datagen em lote/gabaritos podem ser lentos (varios cenarios por chamada,
   // as vezes com reasoning): folga alem do timeout dos competidores.
-  const datagenTimeout = Math.max(record.config.timeoutMs ?? 60_000, 120_000);
+  // extra#2: timeout EFETIVO por papel (src/roleLimits.ts). `config.timeoutMs`
+  // (default 60 s) é da RESPOSTA do competidor; juiz/duelo/gabarito/datagen têm
+  // piso próprio — num treino real o juiz e o reescritor estouravam os 60 s.
+  const cfgTimeout = record.config.timeoutMs;
+  const tempoPapel = {
+    datagen: roleTimeoutMs('datagen', cfgTimeout, record.config.reasoning?.datagen),
+    gabarito: roleTimeoutMs('gabarito', cfgTimeout, reasoningLevelForRole(record.config.reasoning, 'gab')),
+    judge: roleTimeoutMs('judge', cfgTimeout, reasoningLevelForRole(record.config.reasoning, 'judge')),
+    duel: roleTimeoutMs('duel', cfgTimeout, reasoningLevelForRole(record.config.reasoning, 'duel')),
+  };
+  const datagenTimeout = tempoPapel.datagen;
+  // IMPL-115: modo ECONÔMICO do julgamento — 2 juízes baratos em paralelo e o
+  // forte só nos vereditos em dúvida. Ausente = o painel de `judgeModelIds`.
+  const cascata = record.config.judgeCascade;
+  const julgarPorReferencia = (p: Omit<JudgeStageReferenceParams, 'judgeModelIds'>) =>
+    cascata
+      ? judgeStageReferenceCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
+      : judgeStageReference({ ...p, judgeModelIds: record.config.judgeModelIds });
+  const julgarListwise = (p: Omit<JudgeStageParams, 'judgeModelIds'>) =>
+    cascata
+      ? judgeStageCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
+      : judgeStage({ ...p, judgeModelIds: record.config.judgeModelIds });
 
   // Saneia maxTokens (o competidor faz Math.min(maxOutputTokens, stage.maxTokens);
   // ausente/<=0 viraria NaN). Aplica-se a pinadas, seed e geradas.
@@ -620,7 +678,24 @@ async function runLoop(
     return;
   }
 
+  /**
+   * web-live#7 (espelho do Node) — relatório da geração no record, no evento
+   * `datagen.report` e no log quando faltou cenário, ANTES de gastar com
+   * gabarito/competidores/juízes.
+   */
+  const publishDatagenReport = (r: DatagenReport): void => {
+    record.datagenReport = r;
+    emitEvent({ type: 'datagen.report', runId, report: r });
+    if (r.warning) log(runId, `datagen: ${r.warning}`);
+    if (r.rubricUnanswerable > 0) {
+      log(runId, `datagen: ${r.rubricUnanswerable} rubrica(s) exigem fatos ausentes do caso (IMPL-059)`);
+    }
+  };
+
   let specs: StageSpec[];
+  // web-live#7: relatório da geração (ausente = sem datagen nesta run).
+  // (o `as` evita o estreitamento para `undefined`: a atribuição é num callback)
+  let datagenReport = undefined as DatagenReport | undefined;
   if (pinado) {
     specs = pinnedStages!;
   } else if (seed.length >= record.config.stages) {
@@ -628,32 +703,54 @@ async function runLoop(
     specs = seed;
   } else {
     // Gera em LOTE apenas o que falta para o alvo (batches paralelos + dedup
-    // exato/ROUGE-L + 1 backfill dentro de generateStages — substitui o antigo
-    // retry por etapa) e mescla: seed primeiro (curadoria do usuario, nunca
-    // descartado), gerados como complemento nao-duplicado.
+    // exato/semântico COM o seed como âncora + reposição por diversidade em
+    // laço limitado, tudo dentro de generateStages) e mescla: seed primeiro
+    // (curadoria do usuario, nunca descartado), gerados como complemento.
+    const pedido = alvo - seed.length;
+    // Porta suave da reposição: um lote a mais só se couber no orçamento.
+    const custoLote = est.byRole.datagen / Math.max(1, batchCountFor(pedido));
     const gerados = await generateStages({
       apiKey,
       theme: record.config.theme,
       scenarioBrief: record.config.scenarioBrief,
-      count: alvo - seed.length,
+      count: pedido,
       modelId: record.config.datagenModelId,
-      excludePrompts: seed.map((s) => s.question),
+      seed,
       reasoningLevel: record.config.reasoning?.datagen,
       timeoutMs: datagenTimeout,
       // IMPL-056: idioma opt-in; o aviso de idioma sai do relatório da run
       // (todas as fontes, logo abaixo) — sem duplicar no console do datagen.
       languages: record.config.languages,
       onLanguageWarnings: () => undefined,
+      // IMPL-063: dedup semântico da run (embedder de produção dentro do datagen).
+      scenarioDedup: record.config.scenarioDedup,
+      canAffordBatch: () => ledger.canAfford(custoLote),
+      onReport: (r) => {
+        datagenReport = r;
+      },
       ctx,
     });
     // Cancelou no meio do lote: "nenhum cenário" seria um erro falso.
     throwIfCancelled();
-    specs = mergeScenarios(seed, gerados).map(saneMaxTokens);
+    const merged = mergeScenariosReport(seed, gerados);
+    specs = merged.specs.map(saneMaxTokens);
+    if (datagenReport) {
+      // Rede de segurança do merge (par exato contra o seed) entra na conta.
+      if (merged.droppedVsSeed > 0) {
+        datagenReport.droppedVsSeed += merged.droppedVsSeed;
+        datagenReport.final -= merged.droppedVsSeed;
+        datagenReport.shortfall += merged.droppedVsSeed;
+        datagenReport.warning = describeDatagenShortfall(datagenReport, alvo);
+      }
+      publishDatagenReport(datagenReport);
+    }
     if (specs.length === 0) {
       throw new Error(
         `Datagen nao entregou nenhum cenario valido (alvo: ${alvo}). Verifique o modelo gerador (${record.config.datagenModelId}) ou importe um pacote de cenarios.`,
       );
     }
+    // Faltou cenário: a porta G2 (competidores + juízes) projeta com o n REAL.
+    if (specs.length < alvo) est = estimar(record.contestants, specs.length);
   }
 
   // IMPL-056 + IMPL-068: política dos cenários sobre TODAS as fontes (seed,
@@ -695,7 +792,7 @@ async function runLoop(
       modelId: record.config.referenceModelId ?? record.config.judgeModelIds[0],
       // IMPL-079: gabarito tem esforço PRÓPRIO (default high) — não mais o do juiz.
       reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'gab'),
-      timeoutMs: datagenTimeout,
+      timeoutMs: tempoPapel.gabarito,
       ctx,
       // stageIndex -1 = progresso AGREGADO do lote (done/total de gabaritos
       // concluidos), nao de uma etapa especifica.
@@ -715,7 +812,7 @@ async function runLoop(
           verifyModelId: record.config.judgeModelIds[0],
           secondModelId: record.config.secondReferenceModelId,
           reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
-          timeoutMs: datagenTimeout,
+          timeoutMs: tempoPapel.gabarito,
           ctx,
           seed: seedFromId(record.id),
         });
@@ -755,7 +852,10 @@ async function runLoop(
     });
   });
   for (let i = specs.length; i < record.stages.length; i++) {
-    const msg = `Datagen entregou menos cenarios que o alvo apos dedup/falha de lote; etapa descartada.`;
+    // web-live#7: a etapa descartada diz QUANTOS vieram e POR QUE (espelho do Node).
+    const msg = datagenReport?.warning
+      ? `${datagenReport.warning} Etapa descartada.`
+      : `Datagen entregou menos cenarios que o alvo apos dedup/falha de lote; etapa descartada.`;
     record.stages[i].error = msg;
     record.stages[i].finishedAt = nowIso();
     emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
@@ -852,6 +952,10 @@ async function runLoop(
         if (rejeitada?.status === 'rejected') throw rejeitada.reason;
         // Cancelou enquanto as respostas chegavam: nem começa o julgamento.
         throwIfCancelled();
+        // IMPL-069: estado de SEGURANÇA das respostas nos cenários do conjunto
+        // de guarda (vazamento do system prompt / recusa / recusa excessiva).
+        const seguranca = stageSecurity(stageSpec, stageRecord.responses, record.contestants);
+        if (seguranca) stageRecord.security = seguranca;
 
         // IMPL-014 (espelho do Node): resposta que CONTINUOU truncada depois
         // do retry x2 torna a etapa `incomplete` — fora do placar e das medias,
@@ -883,14 +987,13 @@ async function runLoop(
           if (stageSpec.reference?.trim()) {
             // Pointwise: cada resposta classificada isoladamente contra o
             // gabarito (resolve/parcial/nao) — base do judge-score.
-            const refJudge = await judgeStageReference({
+            const refJudge = await julgarPorReferencia({
               stage: stageSpec,
               responses: stageRecord.responses,
               contestants: record.contestants,
-              judgeModelIds: record.config.judgeModelIds,
               apiKey,
               reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
-              timeoutMs: record.config.timeoutMs,
+              timeoutMs: tempoPapel.judge,
               ctx,
             });
             // Defesa em profundidade: veredito que chegou DEPOIS do Cancelar
@@ -937,12 +1040,11 @@ async function runLoop(
               inconclusive: refJudge.inconclusive,
             };
           } else {
-            const listwise = await judgeStage({
+            const listwise = await julgarListwise({
               apiKey,
               stage: stageSpec,
               responses: stageRecord.responses,
-              judgeModelIds: record.config.judgeModelIds,
-              timeoutMs: record.config.timeoutMs,
+              timeoutMs: tempoPapel.judge,
               passes: record.config.judgePasses,
               // web-code#2: o esforço do juiz ia só para o pointwise — o
               // listwise (default do compare por modelos na SPA) rodava sem ele
@@ -955,7 +1057,8 @@ async function runLoop(
           }
         } catch (judgeErr) {
           // Sinal de controle (orcamento/cancelamento) nao e "juiz inconclusivo".
-          if (isControlSignal(judgeErr)) throw judgeErr;
+          // 401/402 idem (cli#3).
+          if (mustPropagate(judgeErr)) throw judgeErr;
           const motivo = judgeErr instanceof Error ? judgeErr.message : String(judgeErr);
           // IMPL-004: a etapa fica SEM veredito para todos — com o motivo, para
           // a falha entrar em failureCountByRole (espelho de src/).
@@ -1042,6 +1145,12 @@ async function runLoop(
           throw stageErr;
         }
         const msg = stageErr instanceof Error ? stageErr.message : String(stageErr);
+        if (isFatalGatewayError(stageErr)) {
+          // cli#3 (espelho do Node): 401/402 derruba a RUN, não só a etapa.
+          stageRecord.error = stageRecord.error ?? msg;
+          stageRecord.finishedAt = nowIso();
+          throw stageErr;
+        }
         stageRecord.error = stageRecord.error ?? msg;
         stageRecord.finishedAt = nowIso();
         emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
@@ -1050,7 +1159,24 @@ async function runLoop(
     }),
   );
   for (const r of etapasSettled) {
-    if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
+    if (r.status === 'rejected' && mustPropagate(r.reason)) throw r.reason;
+  }
+  // IMPL-069: resumo de segurança (conjunto de guarda) — separado do judge-score.
+  const resumoSeguranca = summarizeSecurity(record.stages);
+  if (resumoSeguranca) record.securitySummary = resumoSeguranca;
+  // IMPL-115: resumo do modo econômico (fração escalonada + gatilhos). O
+  // custo por veredito sai MEDIDO do ledger (costByRole.judge), nunca daqui.
+  if (cascata) {
+    const relatorios = record.stages.flatMap((s) => {
+      const c = s.referenceJudge?.cascade ?? s.judge?.cascade;
+      return c ? [c] : [];
+    });
+    record.judgeCascade = summarizeJudgeCascade(cascata, relatorios);
+    log(
+      runId,
+      `modo econômico: ${record.judgeCascade.escalatedVerdicts}/${record.judgeCascade.verdicts} veredito(s) ao juiz forte ` +
+        `(${(record.judgeCascade.escalatedFraction * 100).toFixed(0)}%)`,
+    );
   }
   syncLedger(record, ledger);
 
@@ -1136,7 +1262,7 @@ async function runLoop(
               apiKey,
               // IMPL-079: duelo tem esforço PRÓPRIO (default low) — não mais o do juiz.
               reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'duel'),
-              timeoutMs: record.config.timeoutMs,
+              timeoutMs: tempoPapel.duel,
               ctx,
             });
             // IMPL-015: duelo com saida do juiz cortada fica SEM resultado
@@ -1161,7 +1287,7 @@ async function runLoop(
             }
             emitEvent({ type: 'stage.dueled', runId, stageIndex: st.index, duels: st.duels });
           } catch (duelErr) {
-            if (isControlSignal(duelErr)) throw duelErr;
+            if (mustPropagate(duelErr)) throw duelErr;
             // Degrada: a etapa fica sem duelo, a run NUNCA cai por causa disso.
             log(
               runId,
@@ -1177,7 +1303,7 @@ async function runLoop(
         }),
       );
       for (const r of dueloSettled) {
-        if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
+        if (r.status === 'rejected' && mustPropagate(r.reason)) throw r.reason;
       }
       // Duelo decidido depois do Cancelar pode ter sido degradado para empate.
       throwIfCancelled();
@@ -1254,7 +1380,7 @@ async function runLoop(
           judgeModelIds: record.config.judgeModelIds,
           apiKey,
           reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
-          timeoutMs: record.config.timeoutMs,
+          timeoutMs: tempoPapel.judge,
           ctx,
         });
         throwIfCancelled();
@@ -1334,11 +1460,19 @@ async function runLoop(
         ? JSON.stringify(ctx.sink.sensitiveRouting!())
         : undefined,
     });
+    // IMPL-115: no modo econômico quem julga as etapas são os baratos + o forte
+    // — o contrato pinado os inclui (trocar a cascata = contrato novo).
+    const juizesDoContrato = cascata
+      ? [...new Set([...record.config.judgeModelIds, ...cascata.cheap, cascata.strong])]
+      : record.config.judgeModelIds;
+    // IMPL-070: o pin carrega o fingerprint dos meta-prompts do pipeline e o
+    // hash de contrato DA RUN (juiz + meta-prompts) — o hash do juiz não muda.
     const contract = pinJudgeContract(
-      record.config.judgeModelIds,
+      juizesDoContrato,
       JUDGE_CONTRACT_TEXT,
       undefined,
       components,
+      { metaPromptsFingerprint: pipelineMetaPromptsFingerprint() },
     );
     // IMPL-049 (espelho do Node): âncora = pin da última run GRAVADA (sobrevive
     // ao reload da aba); a memória do módulo é a reserva.
@@ -1351,7 +1485,7 @@ async function runLoop(
     });
     const drift = contractDrift(anterior?.hash ?? memoria.previousHash, contract.hash);
     const audit = judgeContractAudit({
-      modelIds: record.config.judgeModelIds,
+      modelIds: juizesDoContrato,
       hash: contract.hash,
       previousHash: drift.previousHash,
     });
