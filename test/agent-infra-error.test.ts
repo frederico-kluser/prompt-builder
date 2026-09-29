@@ -292,11 +292,13 @@ describe('runAgentStage — erro de infra fica FORA do placar (nunca nao)', () =
     });
   });
 
-  it('reps=3 com infra na rep 1: só ELA sai; as outras são observações normais', async () => {
+  it('reps=3 com infra PERSISTENTE na rep 1: só ELA sai; as outras são observações normais', async () => {
     await comJuiz(async () => {
       const ok: Passo = { stopReason: 'completed', write: ['done.txt'] };
-      const res = await runAgentStage(params({ verify: VERIFY }, gatewayFalso(ok, infra(), ok), 3));
+      // IMPL-094: a rep 1 é refeita às cegas 2× (3 tentativas) antes de sair.
+      const res = await runAgentStage(params({ verify: VERIFY }, gatewayFalso(ok, infra(), infra(), infra(), ok), 3));
       expect(res.repResults.map((r) => r.verdict)).toEqual(['resolve', null, 'resolve']);
+      expect(res.repResults.map((r) => r.attempts)).toEqual([1, 3, 1]);
       expect(res.incomplete).toBe(false);
     });
   });

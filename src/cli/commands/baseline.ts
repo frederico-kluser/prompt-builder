@@ -35,7 +35,7 @@ import { reasoningLevelForRole } from '../../modelCaps.js';
 import { getGateway } from '../../openrouter.js';
 import { loadCatalogFile, loadPublicCatalog } from '../../publicCatalog.js';
 import { getDataDir, loadRun } from '../../storage.js';
-import { parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
+import { isArenaAgentConfigFormat, parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
 import { arenaAgentConfigToRunConfig, arenaConfigToRunConfig } from '../../arenaConfig.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
 import { CliError, EXIT } from '../output.js';
@@ -169,7 +169,7 @@ async function setupFromConfigFile(file: string): Promise<BaselineSetup> {
   }
   const formato = (json as Record<string, unknown> | null)?.format;
   let cfg: { judgeModelIds?: string[]; referenceModelId?: string; reasoning?: ReasoningConfig; agent?: unknown };
-  if (formato === 'arena-agent-config@1') {
+  if (isArenaAgentConfigFormat(formato)) {
     const p = parseArenaAgentConfig(json);
     if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
     const conv = arenaAgentConfigToRunConfig(p.config);

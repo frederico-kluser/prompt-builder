@@ -15,12 +15,18 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { nodeOrTsx } from './support/cli.js';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EXIT } from '../src/cli/output.js';
-import { ensureExecConfigApproved, readAgentConfigFile, sha256Hex } from '../src/cli/commands/agents.js';
+import { EXIT, isCliError, resetOutputState, type CliError } from '../src/cli/output.js';
+import {
+  checkExecConfigApproval,
+  cmdAgents,
+  ensureExecConfigApproved,
+  readAgentConfigFile,
+  sha256Hex,
+} from '../src/cli/commands/agents.js';
 import { McpSession } from '../src/cli/commands/mcp.js';
 import { getDataDir, setDataDir } from '../src/storage.js';
 
@@ -249,5 +255,249 @@ describe('MCP: run_agent_benchmark sem portão não executa', { timeout: 60_000 
     } finally {
       rmSync(dir, { force: true, recursive: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. cli#6 / skill-install#6 — o `--dry-run` recusa com o MESMO error.code/exit
+//    da execução real (paridade documentada: "exit 0 = a run real passaria").
+//    Antes: dry-run exit 0 com wouldRefuse [] e a real exit 3
+//    `config.exec_not_approved`. E o dry-run NUNCA pina (nem com a flag).
+// ---------------------------------------------------------------------------
+
+function cliEm(dir: string, args: string[]): CliRun {
+  const env: NodeJS.ProcessEnv = { ...process.env, PROMPT_BUILDER_HOME: dir, OPENROUTER_BASE_URL: DEAD_BASE };
+  delete env.OPENROUTER_API_KEY;
+  const r = spawnSync(TSX, [ENTRY, ...args], { env, encoding: 'utf-8', timeout: 60_000 });
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+
+interface Envelope {
+  ok: boolean;
+  data?: { wouldRefuse: { code: string; exit: number }[]; checks: { execConfig: string } };
+  error?: {
+    code: string;
+    kind: string;
+    hint: string;
+    details: { wouldRefuse: { code: string }[]; checks: { execConfig: string } };
+  };
+}
+
+describe('cli#6: `agents run --dry-run` espelha o portão de config executável', { timeout: 180_000 }, () => {
+  it('sem pin e sem flag: dry-run e real recusam com config.exec_not_approved (exit 3) e nada é pinado', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'pb-exec-dry-'));
+    try {
+      const file = path.join(dir, 'agent.json');
+      writeFileSync(file, JSON.stringify(agentConfig([{ path: 'a.ts', content: 'x' }])));
+      const dry = cliEm(dir, ['agents', 'run', '--config', file, '--budget', '5', '--dry-run', '--json']);
+      const real = cliEm(dir, ['agents', 'run', '--config', file, '--budget', '5', '--key', KEY, '--json']);
+      const envDry = JSON.parse(dry.stdout) as Envelope;
+      const envReal = JSON.parse(real.stdout) as Envelope;
+      expect(dry.status, dry.stderr).toBe(EXIT.CONFIG);
+      expect(envDry.error?.code).toBe('config.exec_not_approved');
+      expect(envDry.error?.hint).toContain('--allow-exec-config');
+      expect(envDry.error?.details.wouldRefuse.map((w) => w.code)).toEqual(['config.exec_not_approved']);
+      expect(envDry.error?.details.checks.execConfig).toBe('not_approved');
+      // Paridade: MESMO código e MESMO exit da execução real.
+      expect(real.status).toBe(dry.status);
+      expect(envReal.error?.code).toBe(envDry.error?.code);
+      // O dry-run é só leitura: nenhum pin nasceu.
+      expect(existsSync(path.join(dir, 'exec-config-approvals.json'))).toBe(false);
+    } finally {
+      rmSync(dir, { force: true, recursive: true });
+    }
+  });
+
+  it('com --allow-exec-config: dry-run passa (would_approve) SEM gravar o pin; pinado, passa sem flag (approved)', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'pb-exec-dry-'));
+    try {
+      const file = path.join(dir, 'agent.json');
+      const texto = JSON.stringify(agentConfig([{ path: 'a.ts', content: 'x' }]));
+      writeFileSync(file, texto);
+      const comFlag = cliEm(dir, ['agents', 'run', '--config', file, '--budget', '5', '--dry-run', '--allow-exec-config', '--json']);
+      expect(comFlag.status, comFlag.stderr).toBe(EXIT.OK);
+      const env = JSON.parse(comFlag.stdout) as Envelope;
+      expect(env.data?.wouldRefuse).toEqual([]);
+      expect(env.data?.checks.execConfig).toBe('would_approve');
+      expect(existsSync(path.join(dir, 'exec-config-approvals.json'))).toBe(false);
+
+      // Aprovação real (a MESMA que o `agents run --allow-exec-config` grava; o
+      // store mora no data-dir ATIVO).
+      const anterior = getDataDir();
+      setDataDir(dir);
+      try {
+        await ensureExecConfigApproved({
+          dataDir: dir,
+          content: texto,
+          identity: path.resolve(file),
+          label: file,
+          command: `agents run --config ${file}`,
+          allowExecConfig: true,
+        });
+      } finally {
+        setDataDir(anterior);
+      }
+      const pinado = cliEm(dir, ['agents', 'run', '--config', file, '--budget', '5', '--dry-run', '--json']);
+      expect(pinado.status, pinado.stderr).toBe(EXIT.OK);
+      expect((JSON.parse(pinado.stdout) as Envelope).data?.checks.execConfig).toBe('approved');
+
+      // Conteúdo mudou depois do pin ⇒ o dry-run recusa com exec_hash_changed (como a real).
+      writeFileSync(file, JSON.stringify(agentConfig([{ path: 'a.ts', content: 'OUTRO' }])));
+      const mudou = cliEm(dir, ['agents', 'run', '--config', file, '--budget', '5', '--dry-run', '--json']);
+      const real = cliEm(dir, ['agents', 'run', '--config', file, '--budget', '5', '--key', KEY, '--json']);
+      expect(mudou.status).toBe(EXIT.CONFIG);
+      expect((JSON.parse(mudou.stdout) as Envelope).error?.code).toBe('config.exec_hash_changed');
+      expect(real.status).toBe(mudou.status);
+      expect((JSON.parse(real.stdout) as Envelope).error?.code).toBe('config.exec_hash_changed');
+    } finally {
+      rmSync(dir, { force: true, recursive: true });
+    }
+  });
+
+  it('ordem das recusas = a da real: orçamento ausente vem ANTES do portão', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'pb-exec-dry-'));
+    try {
+      const file = path.join(dir, 'agent.json');
+      writeFileSync(file, JSON.stringify(agentConfig([{ path: 'a.ts', content: 'x' }])));
+      const dry = cliEm(dir, ['agents', 'run', '--config', file, '--dry-run', '--json']);
+      const env = JSON.parse(dry.stdout) as Envelope;
+      expect(env.error?.code).toBe('usage.budget_required');
+      expect(env.error?.details.wouldRefuse.map((w) => w.code)).toEqual([
+        'usage.budget_required',
+        'config.exec_not_approved',
+      ]);
+    } finally {
+      rmSync(dir, { force: true, recursive: true });
+    }
+  });
+
+  it('checkExecConfigApproval é só leitura e decide igual ao ensureExecConfigApproved', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'pb-exec-check-'));
+    const anterior = getDataDir();
+    setDataDir(dir);
+    try {
+      const base = { dataDir: dir, identity: '/x/c.json', label: 'c.json', command: 'agents run --config c.json' };
+      const semFlag = await checkExecConfigApproval({ ...base, content: 'v1', allowExecConfig: false });
+      expect(semFlag.state).toBe('not_approved');
+      expect(semFlag.refusal?.errorCode).toBe('config.exec_not_approved');
+      const comFlag = await checkExecConfigApproval({ ...base, content: 'v1', allowExecConfig: true });
+      expect(comFlag).toMatchObject({ state: 'would_approve', refusal: null, hash: sha256Hex('v1') });
+      expect(existsSync(path.join(dir, 'exec-config-approvals.json'))).toBe(false);
+      await ensureExecConfigApproved({ ...base, content: 'v1', allowExecConfig: true });
+      expect((await checkExecConfigApproval({ ...base, content: 'v1', allowExecConfig: false })).state).toBe('approved');
+      const mudou = await checkExecConfigApproval({ ...base, content: 'v2', allowExecConfig: false });
+      expect(mudou.refusal?.errorCode).toBe('config.exec_hash_changed');
+    } finally {
+      setDataDir(anterior);
+      rmSync(dir, { force: true, recursive: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. IMPL-099 — `agents task validate` EXECUTA setup[]/solution/checks no host:
+//    passa pelo MESMO portão (flag + pin SHA-256), e o hash cobre o testsDir.
+//    Antes: rodava `setup[]` arbitrário sem flag nem pin (marcador criado).
+// ---------------------------------------------------------------------------
+
+describe('IMPL-099: `agents task validate` passa pelo portão de config executável', { timeout: 120_000 }, () => {
+  let dir = '';
+  beforeAll(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'pb-exec-validate-'));
+  });
+  afterAll(() => {
+    if (dir) rmSync(dir, { force: true, recursive: true });
+  });
+
+  async function validate(file: string, extra: string[] = []): Promise<{ exit: number; err?: CliError }> {
+    resetOutputState();
+    try {
+      return { exit: await cmdAgents(['task', 'validate', file, '--json', '--data-dir', dir, '--quiet', ...extra]) };
+    } catch (err) {
+      if (!isCliError(err)) throw err;
+      return { exit: err.code, err };
+    }
+  }
+
+  /** Tarefa VÁLIDA cujo setup[] deixa um marcador FORA do workspace (prova de execução). */
+  function tarefa(marker: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      agentTask: {
+        setup: [{ cmd: `touch ${marker}` }],
+        verify: [{ cmd: 'test -f done.txt', label: 'done' }],
+        solution: { kind: 'script', script: 'printf ok > done.txt' },
+        ...extra,
+      },
+    };
+  }
+
+  it('sem --allow-exec-config e sem pin: exit 3 config.exec_not_approved e o setup NÃO roda', async () => {
+    const marker = path.join(dir, 'PWNED-1');
+    const file = path.join(dir, 'task-1.json');
+    writeFileSync(file, JSON.stringify(tarefa(marker)));
+    const r = await validate(file);
+    expect(r.exit).toBe(EXIT.CONFIG);
+    expect(r.err?.errorCode).toBe('config.exec_not_approved');
+    expect(r.err?.hint).toContain('agents task validate');
+    expect(r.err?.hint).toContain('--allow-exec-config');
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('com a flag: roda (marcador criado) e pina; o MESMO conteúdo passa sem flag depois', async () => {
+    const marker = path.join(dir, 'PWNED-2');
+    const file = path.join(dir, 'task-2.json');
+    writeFileSync(file, JSON.stringify(tarefa(marker)));
+    expect((await validate(file, ['--allow-exec-config'])).exit).toBe(EXIT.OK);
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker, { force: true });
+    expect((await validate(file)).exit).toBe(EXIT.OK);
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it('o hash cobre o testsDir: trocar um arquivo de teste depois do aceite revive a revisão', async () => {
+    const sub = mkdtempSync(path.join(dir, 'td-'));
+    mkdirSync(path.join(sub, 'suites'));
+    writeFileSync(path.join(sub, 'suites', 'check.sh'), 'test -f done.txt\n');
+    const marker = path.join(sub, 'PWNED-3');
+    const file = path.join(sub, 'task.json');
+    writeFileSync(
+      file,
+      JSON.stringify(tarefa(marker, { testsDir: 'suites', verify: [{ cmd: 'sh check.sh', label: 'suite' }] })),
+    );
+    expect((await validate(file, ['--allow-exec-config'])).exit).toBe(EXIT.OK);
+    // Só o teste muda (o JSON é o mesmo) — e o teste também EXECUTA.
+    writeFileSync(path.join(sub, 'suites', 'check.sh'), `touch ${marker}-teste; exit 0\n`);
+    rmSync(marker, { force: true });
+    const r = await validate(file);
+    expect(r.exit).toBe(EXIT.CONFIG);
+    expect(r.err?.errorCode).toBe('config.exec_hash_changed');
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(`${marker}-teste`)).toBe(false);
+  });
+
+  it('env mínimo: o setup[] aprovado não herda a key do OpenRouter do processo', async () => {
+    const dump = path.join(dir, 'env-dump.txt');
+    const file = path.join(dir, 'task-env.json');
+    writeFileSync(
+      file,
+      JSON.stringify({
+        agentTask: {
+          setup: [{ cmd: `sh -c "env > ${dump}"` }],
+          verify: [{ cmd: 'test -f done.txt', label: 'done' }],
+          solution: { kind: 'script', script: 'printf ok > done.txt' },
+        },
+      }),
+    );
+    const anterior = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = KEY;
+    try {
+      expect((await validate(file, ['--allow-exec-config'])).exit).toBe(EXIT.OK);
+    } finally {
+      if (anterior === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = anterior;
+    }
+    const env = readFileSync(dump, 'utf-8');
+    expect(env).not.toContain('OPENROUTER_API_KEY');
+    expect(env).not.toContain(KEY);
   });
 });

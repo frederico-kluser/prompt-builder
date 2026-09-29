@@ -90,7 +90,7 @@ import { renderSessionReportHtml } from '../../engine/sessionReportHtml.js';
 import { ensureCatalog } from '../../modelsCache.js';
 import { toExportRow } from '../../modelCaps.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
-import { ARENA_AGENT_CONFIG_FORMAT, parseArenaAgentConfig } from '../../configFile.js';
+import { isArenaAgentConfigFormat, parseArenaAgentConfig } from '../../configFile.js';
 import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { readArtifact } from '../../agent/store.js';
 import { assertNoUnknownConfigKeys, parse, resolveHome, resolveKey, tryResolveKey } from '../context.js';
@@ -516,7 +516,7 @@ async function jobInputFromStartArgs(
   args: Record<string, unknown>,
 ): Promise<RunJobInput> {
   const budgetUsd = budgetOf(args.budgetUsd);
-  if (raw.format === ARENA_AGENT_CONFIG_FORMAT) {
+  if (isArenaAgentConfigFormat(raw.format)) {
     const cfg = parseAgentConfigRaw(raw);
     return { kind: cfg.mode === 'training' ? 'training' : 'agent', config: { ...cfg, budgetUsd }, budgetUsd };
   }
@@ -1090,7 +1090,7 @@ const TOOLS: McpTool[] = [
       // fora do workspace, biblioteca vazia) é recusado sem gravar pin.
       const input = await jobInputFromStartArgs(cru, args);
       // IMPL-099: config de agente é EXECUTÁVEL — MESMO portão do `agents run`.
-      if (cru.format === ARENA_AGENT_CONFIG_FORMAT) await execConfigGateForTool('start_run', cru, args);
+      if (isArenaAgentConfigFormat(cru.format)) await execConfigGateForTool('start_run', cru, args);
       // Só valida e grava: o catálogo e a run rodam no job (fora do caminho da
       // resposta — o id sai em < 500 ms). Se ESTA requisição for cancelada
       // depois daqui, o job segue: o retry com a mesma chave o reencontra.

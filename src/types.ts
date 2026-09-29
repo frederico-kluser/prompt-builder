@@ -19,6 +19,8 @@ import type {
   AgentTaskSpec,
   ExecutionRef,
 } from './agent/types.js';
+// Módulo PURO (sem node:*): seguro no grafo do web (IMPL-094).
+import type { AgentInfraCounts } from './agent/infraError.js';
 import type { ExpectedSpec, ReferenceValidation } from './engine/groundTruth.js';
 import type { PromptContracts } from './engine/contracts.js';
 import type { PromptGroup } from './engine/promptGroup.js';
@@ -1689,6 +1691,20 @@ export interface RunRecord {
    * nenhum veredito sai dos DOIS lados do par (IMPL-005, `pairedStageScores`).
    */
   agentUnscoredRepsByContestant?: Record<string, number>;
+  /**
+   * IMPL-094 (R-14a REC-2) — falhas que NAO sao do agente, por run: execucoes
+   * que valem, `infraErrors` (sem veredito por infra depois das retentativas
+   * cegas), tentativas/retentativas (transitoria: 429/5xx/rede/sandbox morto,
+   * ate 2x) e etapas invalidadas para TODOS por defeito da tarefa. Presente
+   * (zerado) em toda run com agente, desde o inicio.
+   */
+  agentInfra?: AgentInfraCounts;
+  /**
+   * IMPL-094 — `agentInfra.infraErrors / agentInfra.executions` (0..1). Acima
+   * de 5% = alerta; acima de 10% a run e INVALIDA (status `inconclusive` com o
+   * motivo em `verdictIntegrity.reasons`; `agents run` sai 6 `run.infra_invalid`).
+   */
+  infraErrorRate?: number;
   /**
    * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
    * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).

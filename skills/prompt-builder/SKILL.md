@@ -33,7 +33,8 @@ Defaults por papel e listas completas: `models.md` (ao lado desta skill). Juiz �
 
 - **MCP** (`prompt-builder mcp`): `start_run`+`idempotencyKey`→`jobId`, `run_status`,
   `cancel_run`, `get_result`, `get_session_report`, `estimate_cost`, `list_models`, `read_docs`.
-- **Agente**: `agents doctor` · `agents run --config <arq> --budget <usd> [--dry-run]`.
+- **Agente**: `agents doctor` · `agents run --config <arq> --budget <usd> [--allow-exec-config] [--dry-run]`
+  (config executa comandos: aprove 1×; sem pin = exit `3`, até no dry-run).
 
 ## Regras
 

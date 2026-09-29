@@ -35,7 +35,7 @@ import { subscribe } from './events.js';
 import { getLiveRun } from './orchestrator.js';
 import { cancelControlled, startControlledRun } from './httpRunControl.js';
 import { parseRunConfig } from './runConfigSchema.js';
-import { parseArenaAgentConfig } from './configFile.js';
+import { isArenaAgentConfigFormat, parseArenaAgentConfig } from './configFile.js';
 import { arenaAgentConfigToRunConfig } from './arenaConfig.js';
 import { runPreflight } from './agent/doctor.js';
 import {
@@ -255,7 +255,7 @@ router.post('/runs', async (req, res) => {
         return;
       }
       config = translated.config;
-    } else if ((req.body as Record<string, unknown> | null)?.format === 'arena-agent-config@1') {
+    } else if (isArenaAgentConfigFormat((req.body as Record<string, unknown> | null)?.format)) {
       // O formato bateu mas o parse falhou — devolve o erro real do schema.
       res.status(400).json({ error: agentFile.error });
       return;

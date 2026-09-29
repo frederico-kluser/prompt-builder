@@ -138,6 +138,11 @@ etapa e o motivo vai em `verdictErrorByContestant`. Leia
 
 Rode com `--output-format ndjson` e procure `progress` com `phase: "gabarito"`.
 
+**Modo agente, `run.infra_invalid` (código 6):** mais de 10% das execuções ficaram
+sem veredito por infraestrutura (provedor/rede/sandbox), mesmo após as 2
+retentativas cegas — a run mede a infraestrutura, não os agentes. Veja `agentInfra`
+em `agents show <runId> --json`, rode `agents doctor --deep` e repita.
+
 ## `config.unknown_model` — modelo fora do catálogo (código 3)
 
 O id não existe no catálogo carregado — provavelmente um erro de digitação ou um
@@ -213,6 +218,18 @@ avisa no stderr. `models list` funciona offline — e sem key: o catálogo é
 público, e sem key o CLI usa o cache mais recente que houver em disco; runs,
 não.
 
+## `config.exec_not_approved` / `config.exec_hash_changed` (código 3)
+
+`arena-agent-config` **executa comandos nesta máquina** (`setup[]`, `verify[]`,
+`testsDir`; em `agents task validate`, também a `solution`) — e config escrito por
+LLM é conteúdo não confiável. Sem aprovação explícita nada roda: revise o arquivo e
+rode de novo com `--allow-exec-config` (no MCP, `allowExecConfig: true` em
+`run_agent_benchmark`/`start_run`). O SHA-256 do conteúdo (texto do arquivo +
+manifesto dos `testsDir`) fica pinado em `<data-dir>/exec-config-approvals.json` e o
+**mesmo** conteúdo passa sem a flag depois. `config.exec_hash_changed` = o arquivo
+(ou um teste do `testsDir`) mudou desde a aprovação: revise o que mudou e aprove de
+novo. O `--dry-run` recusa com o **mesmo** código (e nunca grava o pin).
+
 ## Modo container — `docker: comando não encontrado` / daemon indisponível
 
 Quando `isolation.kind` é `"container"`, o run precisa do Docker **CLI** no PATH e de um
@@ -234,7 +251,8 @@ Docker Engine no Linux). Se a rota existe mas o modelo não responde, veja o log
 pelo proxy; `502` = o HOST não alcança o provedor (rede/`OPENROUTER_BASE_URL`). O `pi`
 esgota as retentativas e sai 0 — o prompt-builder marca a execução como **erro de
 infraestrutura** (`stopReason: "error"` + `execution.infraError`) e põe a dica no
-`stderr.log`. A repetição fica **sem veredito — fora do placar e das médias, nunca `nao`**
+`stderr.log`. A execução é refeita às cegas até 2×; persistindo, a repetição fica **sem
+veredito — fora do placar e das médias, nunca `nao`**
 (exceto se o oráculo já for conclusivo: passou 100% ou violou `forbiddenPaths`). Um
 processo que **morre** sem erro do provedor continua `error` → `nao`.
 `PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK=bridge` **não** conserta a rota do modelo (ela é
