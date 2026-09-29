@@ -16,7 +16,8 @@
 //
 // Só lê — zero LLM, zero I/O.
 
-import type { RunRecord, Verdict } from '../types.js';
+import type { HumanReviewItem, JudgeConfidence, RunRecord, Verdict } from '../types.js';
+import { HUMAN_REVIEW_COST_USD } from './groundTruth.js';
 
 const RANK: Record<Verdict, number> = { nao: 0, parcial: 1, resolve: 2 };
 
@@ -72,4 +73,77 @@ export function judgeScaleWarning(
     `${juizes} juízes o judge-score foi calculado por média ordinal ARREDONDADA PARA CIMA ` +
     '(resolve+parcial contava como resolve). Não compare esse judge-score com o de runs novas.'
   );
+}
+
+// ----------------------------------------------------------------------------
+// Quais etapas FORMAM o judge-score (web-code#12). A regra mora aqui — fonte
+// única para os dois orquestradores (`judgeScoreByContestant`) e para quem
+// mostra contagens/nota por contestant (heatmap, narrativa, CLI): antes a tela
+// contava também os vereditos LISTWISE das etapas cujo gabarito falhou ou foi
+// descartado (cortado), e a nota/ordem do heatmap divergia da nota oficial.
+// ----------------------------------------------------------------------------
+
+/** Fatia de etapa que a regra lê (compatível com `StageRecord` dos dois lados). */
+export interface JudgeScoreStageLike {
+  referenceJudge?: { verdictByContestant?: Record<string, Verdict> } | null;
+  incomplete?: boolean;
+}
+
+/**
+ * A etapa entra no judge-score oficial? Só etapa julgada POR REFERÊNCIA e não
+ * cortada (`incomplete` — orçamento/cancelamento/truncamento). Etapa listwise
+ * (sem gabarito) é outro instrumento: fica FORA da nota por referência.
+ */
+export function stageCountsInJudgeScore(stage: JudgeScoreStageLike): boolean {
+  return Boolean(stage.referenceJudge) && !stage.incomplete;
+}
+
+/** Contagem que FORMA o judge-score de um contestant (resolve/parcial/nao sobre as etapas que valem). */
+export function judgeScoreTally(
+  stages: ReadonlyArray<JudgeScoreStageLike>,
+  contestantId: string,
+): { resolve: number; parcial: number; nao: number; judged: number } {
+  let resolve = 0;
+  let parcial = 0;
+  let nao = 0;
+  for (const s of stages) {
+    if (!stageCountsInJudgeScore(s)) continue;
+    const v = s.referenceJudge?.verdictByContestant?.[contestantId];
+    if (v === 'resolve') resolve += 1;
+    else if (v === 'parcial') parcial += 1;
+    else if (v === 'nao') nao += 1;
+  }
+  return { resolve, parcial, nao, judged: resolve + parcial + nao };
+}
+
+// ----------------------------------------------------------------------------
+// Triagem de revisão humana por CONFIANÇA (IMPL-047 → IMPL-055): o juiz
+// devolve `confianca` por veredito; 'baixa' é candidato natural a revisão e
+// entra na fila `needs-human-review` da run (zero LLM — só lê o que foi gravado).
+// ----------------------------------------------------------------------------
+
+/** Fatia de etapa lida pela triagem por confiança. */
+export interface ConfidenceStageLike {
+  index: number;
+  incomplete?: boolean;
+  referenceJudge?: { confidenceByContestant?: Record<string, JudgeConfidence> } | null;
+}
+
+/** Itens `low_confidence_verdict` (1 por etapa × contestant com `confianca: 'baixa'`). */
+export function lowConfidenceReviewItems(stages: ReadonlyArray<ConfidenceStageLike>): HumanReviewItem[] {
+  const itens: HumanReviewItem[] = [];
+  for (const st of stages) {
+    if (st.incomplete) continue;
+    for (const [contestantId, conf] of Object.entries(st.referenceJudge?.confidenceByContestant ?? {})) {
+      if (conf !== 'baixa') continue;
+      itens.push({
+        stageIndex: st.index,
+        contestantId,
+        reason: 'low_confidence_verdict',
+        detail: "o juiz declarou confiança 'baixa' neste veredito — confira o veredito (e o gabarito) antes de usá-lo.",
+        estimatedCostUsd: HUMAN_REVIEW_COST_USD,
+      });
+    }
+  }
+  return itens;
 }

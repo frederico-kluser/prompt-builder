@@ -23,6 +23,7 @@ import type { ExpectedSpec, ReferenceValidation } from './engine/groundTruth.js'
 import type { PromptContracts } from './engine/contracts.js';
 import type { PromptGroup } from './engine/promptGroup.js';
 import type { ModelLifecycleSnapshot } from './engine/modelLifecycle.js';
+import type { ItemSaturationReport } from './datagen.js';
 
 // Ciclo de vida de modelos (IMPL-019): fonte única em src/engine/modelLifecycle.ts.
 export type {
@@ -634,6 +635,27 @@ export interface RunConfigBase {
   referenceModelId?: string;
   /** Julgamento por referencia (pointwise vs gabarito + duelos). Default: true em variation/training, false em compare. */
   referenceJudging?: boolean;
+  /**
+   * IMPL-053 (R-03b:REC-1) — sondas CONTRAFACTUAIS do diagnóstico de
+   * verbosidade: re-julga ~20% das respostas com o texto truncado/preenchido
+   * em 20% e publica a taxa de INVERSÃO (`verbosityDiag.taxaInversaoSondas`,
+   * bom < 10%). OPT-IN: custa chamadas extras de juiz (papel `judge`, no
+   * ledger). Ausente/false = sem sondas (taxa `null`).
+   */
+  verbosityProbes?: boolean;
+  /**
+   * IMPL-055 (R-03a:REC-1) — valida os gabaritos GERADOS antes do julgamento:
+   * verificação dirigida pela rubrica (1º juiz) + amostra humana de 5–10% →
+   * `RunRecord.needsHumanReview`. OPT-IN (chamadas extras). Implícito quando
+   * `secondReferenceModelId` está presente.
+   */
+  validateReferences?: boolean;
+  /**
+   * IMPL-055 — modelo do 2º GABARITO (família DISTINTA do `referenceModelId`),
+   * disparado só quando a verificação acusa 'parcial'/divergência. Liga a
+   * validação dos gabaritos.
+   */
+  secondReferenceModelId?: string;
   /** Descricao detalhada do que testar — guia o datagen na geracao de cenarios. */
   scenarioBrief?: string;
   /** Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`. */
@@ -1066,6 +1088,11 @@ export interface JudgeContractComponents {
   judgeReasoningLevel?: string;
   /** Política de provedor das chamadas de juiz (ex.: roteamento ZDR forçado). */
   providerPolicy?: string;
+  /**
+   * Temperatura de amostragem das chamadas de juízo (IMPL-117, R-07b:REC-5) —
+   * `JUDGE_TEMPERATURE` (0) no pipeline. Ausente em pins anteriores ao IMPL-117.
+   */
+  judgeTemperature?: number | string;
 }
 
 /**
@@ -1150,13 +1177,35 @@ export interface VerdictError {
 }
 
 /**
+ * Sinais de fim + artefato de UMA chamada de juízo (IMPL-014 / IMPL-117), POR
+ * voto/ordem/passagem — antes só o histograma por papel
+ * (`finishSignalsByRole.judge`) sobrevivia e não dava para saber qual veredito
+ * terminou com qual `finish_reason`. É a ÚLTIMA chamada que respondeu (o
+ * lembrete de formato é uma 2ª chamada). Ausente = nenhuma resposta (exceção de
+ * transporte), veredito determinístico (oráculo/ground-truth) ou record antigo.
+ */
+export interface JudgeCallFinish {
+  /** `finish_reason` normalizado pelo OpenRouter (ex.: stop, length). */
+  finishReason?: string;
+  /** `native_finish_reason` cru do provedor. */
+  nativeFinishReason?: string;
+  /** true = saída cortada no teto (o voto foi DESCARTADO — `truncated`). */
+  truncated?: boolean;
+  /** Id da geração no OpenRouter (`gen-…`) — auditoria/conciliação da chamada. */
+  generationId?: string;
+  /** SHA-256 (hex) do texto devolvido pelo juiz — prova da resposta que virou veredito. */
+  responseSha256?: string;
+}
+
+/**
  * Voto de UM juiz para UMA resposta (IMPL-057, R-11a:REC-8): veredito +
  * explicação + confiança + canário persistidos POR JUIZ — antes o resultado
  * agregado descartava os singles e era impossível mostrar "2 de 3 juízes:
  * resolve", destacar o divergente ou calcular κ painel×humano. Juiz que FALHOU
- * entra com `error` e sem `verdict` (falha ≠ veredito).
+ * entra com `error` e sem `verdict` (falha ≠ veredito). Os sinais de fim da
+ * chamada (IMPL-014) vão nos campos de `JudgeCallFinish`.
  */
-export interface JudgeVote {
+export interface JudgeVote extends JudgeCallFinish {
   judgeModelId: string;
   /** Veredito deste juiz; ausente = este juiz falhou (motivo em `error`). */
   verdict?: Verdict;
@@ -1232,6 +1281,12 @@ export interface SingleJudgeResult {
   /** letra -> contestantId desta avaliacao (cosmetico p/ a UI "(era X)"). */
   blindMap: Record<string, string>;
   inconclusive?: boolean;
+  /**
+   * Sinais de fim de CADA passagem deste juiz (IMPL-014), na ordem das
+   * passagens — inclusive a que falhou com resposta (ex.: cortada). Ausente em
+   * records antigos.
+   */
+  passFinish?: JudgeCallFinish[];
 }
 
 /**
@@ -1360,8 +1415,12 @@ export interface ReferenceJudgeResult {
   unscoredRepsByContestant?: Record<string, number>;
 }
 
-/** Uma ordem de apresentação de um duelo, nos termos REAIS do par ('a' = 1º do par). */
-export interface DuelOrderResult {
+/**
+ * Uma ordem de apresentação de um duelo, nos termos REAIS do par ('a' = 1º do
+ * par). Os sinais de fim da chamada dessa ordem (IMPL-014) vão nos campos de
+ * `JudgeCallFinish` (ausentes no oráculo e em records antigos).
+ */
+export interface DuelOrderResult extends JudgeCallFinish {
   winner: 'a' | 'b' | 'tie';
   explanation: string;
   /** Canário que o juiz devolveu nesta ordem (IMPL-006). Ausente no oráculo e em records antigos. */
@@ -1405,6 +1464,11 @@ export interface DuelFailure {
   order1?: DuelOrderResult;
   order2?: DuelOrderResult;
   error: VerdictError;
+  /**
+   * Sinais de fim das ordens que FALHARAM com resposta (ex.: cortada no teto —
+   * IMPL-014). As ordens com vencedor já os levam em `order1`/`order2`.
+   */
+  failedOrderFinish?: { order1?: JudgeCallFinish; order2?: JudgeCallFinish };
 }
 
 /**
@@ -1653,6 +1717,13 @@ export interface RunRecord {
    */
   needsHumanReview?: HumanReviewItem[];
   /**
+   * IMPL-112 (R-05:REC-8) — taxa de acerto POR ITEM × contestants da run e a
+   * fila de REVISÃO HUMANA do gabarito (100% 'resolve' ou 100% 'nao' em k
+   * execuções — nunca descarte automático). Sai de `itemSaturationReport`
+   * (src/datagen.ts) no fim do julgamento. Ausente em records antigos.
+   */
+  itemSaturation?: ItemSaturationReport;
+  /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
    * `allowPii`. E o registro de que os identificadores foram pseudonimizados
@@ -1673,6 +1744,19 @@ export interface RunRecord {
       modelIds: string[];
       pinnedAt: string;
       components?: JudgeContractComponents;
+    };
+    /**
+     * Auditoria do contrato ENTRE runs (IMPL-049/IMPL-057): o pin da última
+     * run gravada antes desta (a âncora sobrevive a processos/abas) e a linha
+     * curta "juiz: <modelo> (mesmo contrato desde a última run)" — `detail`
+     * (12 chars do hash) é o que vai no detalhe/export.
+     */
+    contractAudit?: {
+      changed: boolean;
+      previousHash?: string;
+      previousRunId?: string;
+      line: string;
+      detail: string;
     };
     /**
      * Viés de verbosidade (IMPL-052): a regressão deixa de misturar papéis —

@@ -66,6 +66,7 @@ import {
   type MachineBudgetLedger,
 } from '../spendLedger.js';
 import { pruneSpendState } from '../spendGuards.js';
+import { seedFromId, sortStandings, winnerFromStandings } from '../../engine/duelCore.js';
 import { emitRunEvent, emitSessionEventNdjson, truncationFields } from '../ndjson.js';
 import { ROLE_LABEL } from '../../budget.js';
 import { forceExitNow, installGracefulStop } from '../runControl.js';
@@ -521,10 +522,27 @@ function relatorioFinal(out: Output, record: RunRecord): void {
   if (record.standings?.length) {
     out.line();
     out.line('Classificação (duelos das finais, por taxa de vitória):');
-    for (const s of record.standings) {
+    // cli#1: judge-score ao lado de cada finalista e o empate dito em TEXTO —
+    // antes só a tabela empatada aparecia e o 0 × 100 do judge-score sumia.
+    const js = record.judgeScoreByContestant ?? {};
+    const w = winnerFromStandings(record);
+    const ordem = sortStandings(record.standings, record.judgeScoreByContestant, seedFromId(record.id));
+    for (const s of ordem) {
       // IMPL-007: taxa de vitória = (V + ½E) / disputados — rótulo honesto do placar.
       const taxa = `${Math.round(s.winRate * 100)}%`.padStart(4);
-      out.line(`  ${s.label.padEnd(24)} taxa de vitória ${taxa}  (${s.wins}V ${s.ties}E ${s.losses}D)`);
+      const nota = typeof js[s.id] === 'number' ? js[s.id].toFixed(1) : '—';
+      out.line(
+        `  ${s.label.padEnd(24)} taxa de vitória ${taxa}  (${s.wins}V ${s.ties}E ${s.losses}D) · judge ${nota}`,
+      );
+    }
+    if (w.tie) {
+      const labelDe = (id: string): string => record.standings!.find((s) => s.id === id)?.label ?? id;
+      out.line(
+        `  empate na taxa de vitória: ${w.tiedIds.map(labelDe).join(', ')} — ` +
+          (w.unresolved
+            ? 'empate também no desempate (vencedor pelo sorteio cego, não pelos dados)'
+            : `desempate por ${w.tieBreak === 'wins' ? 'nº de vitórias' : 'judge-score'}`),
+      );
     }
   } else if (record.judgeScoreByContestant) {
     out.line();

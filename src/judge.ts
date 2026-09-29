@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { ROLE_MAX_TOKENS } from './roleLimits.js';
-import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
+import { callJudgeWithRetry, JUDGE_TEMPERATURE, withReminder } from './engine/judgeRetry.js';
+import { caseParts } from './engine/caseInput.js';
 import { isJudgeCutKind } from './engine/truncation.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
 import { aggregateVerdicts } from './engine/verdictAggregate.js';
@@ -18,6 +19,7 @@ import {
 } from './engine/judgeGuard.js';
 import type {
   CompetitorResponse,
+  JudgeCallFinish,
   JudgeResult,
   JudgeVerdict,
   SingleJudgeResult,
@@ -150,7 +152,10 @@ interface PassResult {
   blindMap: Record<string, string>;
 }
 
-type PassAttempt = { ok: true; pass: PassResult } | { ok: false; error: VerdictError };
+/** `finish` = sinais de fim da chamada da passagem (IMPL-014), quando houve resposta. */
+type PassAttempt =
+  | { ok: true; pass: PassResult; finish?: JudgeCallFinish }
+  | { ok: false; error: VerdictError; finish?: JudgeCallFinish };
 
 /**
  * Parse ESTRITO de uma passagem (IMPL-006): o texto INTEIRO e um objeto JSON
@@ -193,17 +198,26 @@ export interface ListwisePrompt {
  */
 export function buildListwisePrompt(stage: StageSpec, ordered: { text: string }[]): ListwisePrompt {
   const rubric = stage.rubric?.trim();
-  const guard = newJudgeGuard([stage.question, stage.productContext ?? '', rubric ?? '', ...ordered.map((r) => r.text)]);
+  // IMPL-059 (R-05:REC-2): o CASO byte a byte como os modelos o receberam
+  // (`caseParts`: o bloco delimitado do contexto + a pergunta), na MESMA ordem
+  // do competidor — contexto antes da pergunta. Sem contexto, sem bloco (como
+  // no competidor).
+  const caso = caseParts(stage);
+  const guard = newJudgeGuard([caso.context, caso.question, rubric ?? '', ...ordered.map((r) => r.text)]);
   const labels = ordered.map((_, i) => letterFor(i));
   const blocks = ordered.map((r, i) => markedBlock(`RESPOSTA ${labels[i]}`, guard.nonce, r.text));
   const schema = listwiseSchema(labels);
   const partes = [
-    'PERGUNTA DO USUARIO:',
-    markedBlock('PERGUNTA', guard.nonce, stage.question),
     // IMPL-009: o contexto do caso É entregue a todos os modelos (bloco de dado
     // antes da pergunta) — o rótulo antigo "fornecido aos modelos" era falso p/ variante.
-    'CONTEXTO DO CASO (entregue a todos os modelos como dado, antes da pergunta):',
-    markedBlock('CONTEXTO', guard.nonce, stage.productContext ?? ''),
+    ...(caso.context
+      ? [
+          'CONTEXTO DO CASO (entregue a todos os modelos como dado, antes da pergunta):',
+          markedBlock('CONTEXTO', guard.nonce, caso.context),
+        ]
+      : []),
+    'PERGUNTA DO USUARIO:',
+    markedBlock('PERGUNTA', guard.nonce, caso.question),
   ];
   if (rubric) {
     partes.push(
@@ -267,7 +281,7 @@ async function rankOnePass(
           { role: 'system', content: prompt.system },
           { role: 'user', content: withReminder(prompt.user, reminder) },
         ],
-        temperature: 0,
+        temperature: JUDGE_TEMPERATURE,
         // Antes SEM teto nenhum (IMPL-016): o ledger reservava 1024 as cegas e o
         // raciocinio nao tinha limite. Teto TOTAL do juiz, o mesmo do pointwise.
         maxTokens: ROLE_MAX_TOKENS.judge,
@@ -284,7 +298,8 @@ async function rankOnePass(
     formatReminder: prompt.formatReminder,
     signal: extra.ctx?.signal,
   });
-  if (!attempt.ok) return { ok: false, error: attempt.error };
+  const finish = attempt.finish ? { finish: attempt.finish } : {};
+  if (!attempt.ok) return { ok: false, error: attempt.error, ...finish };
 
   const order = attempt.value.ranking.map((l) => letterToContestant[l]);
   const verdicts: JudgeVerdict[] = okResponses.map((r) => {
@@ -293,7 +308,7 @@ async function rankOnePass(
     // canario da passagem registrado em CADA veredito (IMPL-006).
     return { contestantId: r.contestantId, verdict: v.verdict, motivo: v.motivo, canary: attempt.value.canary };
   });
-  return { ok: true, pass: { order, verdicts, blindMap } };
+  return { ok: true, pass: { order, verdicts, blindMap }, ...finish };
 }
 
 /** Agrega varias ordenacoes por POSICAO MEDIA (menor = melhor). Empate -> 1a ordenacao. */
@@ -356,6 +371,8 @@ async function runOneJudge(
     ids,
     valid.map((p) => p.order),
   );
+  // IMPL-014: sinais de fim de CADA passagem que respondeu (ordem das passagens).
+  const passFinish = passResults.flatMap((p) => (p.finish ? [p.finish] : []));
   return {
     ok: true,
     judge: {
@@ -363,6 +380,7 @@ async function runOneJudge(
       rankedContestantIds,
       verdicts: valid[0].verdicts,
       blindMap: valid[0].blindMap,
+      ...(passFinish.length > 0 ? { passFinish } : {}),
     },
   };
 }

@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { chatCompletion, supportsPromptCacheControl } from './openrouter.js';
 import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { matchExpected } from './engine/groundTruth.js';
-import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
+import { callJudgeWithRetry, JUDGE_TEMPERATURE, withReminder } from './engine/judgeRetry.js';
+import { caseParts } from './engine/caseInput.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
 import { isJudgeCutKind } from './engine/truncation.js';
 import { aggregateVerdicts, tieLabel } from './engine/verdictAggregate.js';
@@ -20,6 +21,7 @@ import {
 import type {
   CompetitorResponse,
   Contestant,
+  JudgeCallFinish,
   JudgeConfidence,
   JudgeResult,
   JudgeVote,
@@ -138,8 +140,9 @@ export interface ReferenceJudgePrompt {
 }
 
 /**
- * Prompt do usuario (IMPL-006): referencia, pergunta, rubrica (prioritaria) e
- * candidato, CADA UM num bloco marcado com o codigo sorteado para ESTE
+ * Prompt do usuario (IMPL-006): referencia, contexto do caso (IMPL-059),
+ * pergunta, rubrica (prioritaria) e candidato, CADA UM num bloco marcado com o
+ * codigo sorteado para ESTE
  * veredito, e o bloco INSTRUCOES anti-injecao por ultimo. O texto do candidato
  * so aparece escapado e dentro de `⟦CANDIDATO·codigo⟧ … ⟦/CANDIDATO·codigo⟧`.
  */
@@ -150,19 +153,27 @@ export function buildReferenceJudgePrompt(
   opts: { sharedNonce?: string } = {},
 ): ReferenceJudgePrompt {
   const rubric = stage.rubric?.trim();
-  const dados = [reference, stage.question, rubric ?? '', candidateText];
+  // IMPL-059 (R-05:REC-2): o CASO que o candidato recebeu — contexto + pergunta,
+  // byte a byte (`caseParts`). Antes o pointwise NÃO via o productContext: a
+  // referência (escrita com ele) punia o candidato por informação privilegiada.
+  const caso = caseParts(stage);
+  const dados = [reference, caso.context, caso.question, rubric ?? '', candidateText];
   // IMPL-114: marcador COMPARTILHADO pela etapa (o prefixo fica byte a byte
   // igual entre candidatos e o cache de prompt do provedor acerta); o canário
   // segue novo por veredito. O escape de `⟦`/`⟧` é o que impede fechar bloco —
-  // o marcador comum não enfraquece a blindagem.
+  // o marcador comum não enfraquece a blindagem. O CONTEXTO do caso é da
+  // etapa (igual p/ todo candidato), então mora no prefixo estável.
   const guard: JudgeGuard = opts.sharedNonce
     ? { nonce: opts.sharedNonce, canary: newJudgeGuard([...dados, opts.sharedNonce]).canary }
     : newJudgeGuard(dados);
   const prefixo = [
     'REFERÊNCIA (resposta CANDIDATA de outro modelo — pode estar errada):',
     markedBlock('REFERÊNCIA', guard.nonce, reference),
+    ...(caso.context
+      ? ['CONTEXTO DO CASO (o mesmo que o candidato recebeu, como dado):', markedBlock('CONTEXTO', guard.nonce, caso.context)]
+      : []),
     'PERGUNTA:',
-    markedBlock('PERGUNTA', guard.nonce, stage.question),
+    markedBlock('PERGUNTA', guard.nonce, caso.question),
   ];
   if (rubric) {
     prefixo.push('CRITÉRIO DE CORRETUDE DESTA ETAPA (tem prioridade):', markedBlock('CRITÉRIO', guard.nonce, rubric));
@@ -218,8 +229,10 @@ type SingleVerdict =
       explanation: string;
       canary: string;
       confianca?: JudgeConfidence;
+      /** Sinais de fim + artefato da chamada (IMPL-014/IMPL-117). */
+      finish?: JudgeCallFinish;
     }
-  | { ok: false; judgeModelId: string; contestantId: string; error: VerdictError };
+  | { ok: false; judgeModelId: string; contestantId: string; error: VerdictError; finish?: JudgeCallFinish };
 
 /** Ordem crescente de confiança — o MENOR valor entre votos manda na triagem (IMPL-047). */
 const CONFIDENCE_RANK: Record<JudgeConfidence, number> = { baixa: 0, media: 1, alta: 2 };
@@ -274,7 +287,7 @@ async function judgeOne(params: {
               { role: 'user', content: withReminder(prompt.user, reminder) },
             ],
         ...(cacheavel ? { cacheControlAfter: 1 } : {}),
-        temperature: 0,
+        temperature: JUDGE_TEMPERATURE,
         // Teto TOTAL com sala p/ raciocinio (IMPL-016): 1024 virava `length` vazio.
         maxTokens: ROLE_MAX_TOKENS.judge,
         responseFormatJson: true,
@@ -290,10 +303,11 @@ async function judgeOne(params: {
     formatReminder: prompt.formatReminder,
     signal: ctx?.signal,
   });
+  const finish = attempt.finish ? { finish: attempt.finish } : {};
   if (!attempt.ok) {
-    return { ok: false, judgeModelId, contestantId: response.contestantId, error: attempt.error };
+    return { ok: false, judgeModelId, contestantId: response.contestantId, error: attempt.error, ...finish };
   }
-  return { ok: true, judgeModelId, contestantId: response.contestantId, ...attempt.value };
+  return { ok: true, judgeModelId, contestantId: response.contestantId, ...attempt.value, ...finish };
 }
 
 /**
@@ -403,9 +417,17 @@ export async function judgeStageReference(
   }
 
   // IMPL-114: marcador da ETAPA para os juízes com cache de prompt explícito —
-  // sorteado contra TODOS os dados da etapa (nenhum texto o contém).
+  // sorteado contra TODOS os dados da etapa (nenhum texto o contém) — inclui o
+  // CONTEXTO do caso (IMPL-059), que também entra num bloco marcado.
+  const casoEtapa = caseParts(stage);
   const sharedNonce = judgeIds.some(supportsPromptCacheControl)
-    ? newJudgeGuard([reference, stage.question, stage.rubric?.trim() ?? '', ...judgeable.map((r) => r.text)]).nonce
+    ? newJudgeGuard([
+        reference,
+        casoEtapa.context,
+        casoEtapa.question,
+        stage.rubric?.trim() ?? '',
+        ...judgeable.map((r) => r.text),
+      ]).nonce
     : undefined;
   // UMA chamada por (juiz x competidor), TODAS em paralelo — sem cap local;
   // o limitador global de openrouter.ts gateia (e o aquecimento do prefixo,
@@ -433,7 +455,9 @@ export async function judgeStageReference(
   for (const r of judgeable) {
     const vs = singles.filter((s) => s.contestantId === r.contestantId);
     // IMPL-057: persiste o voto de CADA juiz (inclusive a falha — badge
-    // 'avaliador falhou' é do juiz, nunca nota do candidato).
+    // 'avaliador falhou' é do juiz, nunca nota do candidato). IMPL-014: com os
+    // sinais de fim da chamada daquele voto (qual veredito terminou em qual
+    // `finish_reason`) + o artefato da resposta (IMPL-117).
     judgeVotesByContestant[r.contestantId] = vs.map(
       (s): JudgeVote =>
         s.ok
@@ -443,8 +467,9 @@ export async function judgeStageReference(
               explanation: s.explanation,
               ...(s.confianca ? { confianca: s.confianca } : {}),
               canary: s.canary,
+              ...(s.finish ?? {}),
             }
-          : { judgeModelId: s.judgeModelId, error: s.error },
+          : { judgeModelId: s.judgeModelId, error: s.error, ...(s.finish ?? {}) },
     );
     const oks = vs.filter((s): s is Extract<SingleVerdict, { ok: true }> => s.ok);
     if (oks.length === 0) {
@@ -602,7 +627,10 @@ export function verdictFailuresFromStages(
   const entradas: VerdictFailureEntry[] = [];
   stages.forEach((st, stageIndex) => {
     const scenario = st.spec?.question;
-    for (const res of [st.referenceJudge, st.judge]) {
+    // Etapa POR REFERÊNCIA: o `judge` dela é o SINTETIZADO a partir do
+    // `referenceJudge` (mesmos erros copiados) — ler os dois contava cada falha
+    // duas vezes. Só a etapa sem referência (listwise) usa o `judge`.
+    for (const res of st.referenceJudge ? [st.referenceJudge] : [st.judge]) {
       const erros = res?.verdictErrorByContestant;
       if (!erros) continue;
       for (const [contestantId, error] of Object.entries(erros)) {

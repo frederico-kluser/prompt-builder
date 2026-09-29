@@ -236,6 +236,12 @@ const baseFields = {
   referenceModelId: z.string().min(1).optional(),
   // Julgamento por referencia (pointwise vs gabarito + duelos).
   referenceJudging: z.boolean().optional(),
+  // IMPL-053: sondas contrafactuais do diagnostico de verbosidade (opt-in, custa juiz).
+  verbosityProbes: z.boolean().optional(),
+  // IMPL-055: valida os gabaritos gerados (rubrica + amostra humana); o 2º
+  // gabarito (familia distinta) liga a validacao por si so.
+  validateReferences: z.boolean().optional(),
+  secondReferenceModelId: z.string().min(1).optional(),
   // Descricao detalhada do que testar — guia o datagen na geracao de cenarios.
   scenarioBrief: z.string().max(4000).optional(),
   // Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`.

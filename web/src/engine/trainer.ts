@@ -678,6 +678,11 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     reasoning: cfg.reasoning,
     referenceModelId: cfg.referenceModelId,
     referenceJudging: cfg.referenceJudging,
+    // IMPL-053/IMPL-055: sondas de verbosidade e validação dos gabaritos são
+    // escolhas da SESSÃO — valem em toda iteração e no holdout.
+    verbosityProbes: cfg.verbosityProbes,
+    validateReferences: cfg.validateReferences,
+    secondReferenceModelId: cfg.secondReferenceModelId,
     scenarioBrief: cfg.scenarioBrief,
     scenarioSeed: cfg.scenarioSeed,
     // Fase de finais: sem repassar, TODA iteracao (e o holdout) cairia no

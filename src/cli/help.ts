@@ -122,6 +122,7 @@ const USO: Record<string, string> = {
   runs show <id>           record completo + diagnóstico do juiz
   runs winner <id> [--prompt-only]
   runs reproduce <id>      config reconstruído + comando p/ re-rodar
+  runs reproduce <id> --replay  re-pontua as respostas gravadas a US$ 0 (exit 3 se divergir)
   runs export <id> [-o <arq>]
   runs status|wait|cancel <id>  job (--detach), run ou sessão`,
   sessions: `  sessions list            lista sessões (teto 50; --all/--limit N)

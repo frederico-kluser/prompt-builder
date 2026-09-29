@@ -3,6 +3,7 @@ import { requestPersistentStorage, type StorageSubject } from './storageHealth';
 import type { ExpectedSpec, ReferenceValidation } from '../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
+import type { ItemSaturationReport } from '../../src/datagen.js';
 import type {
   CallFinishSignals,
   CostEntry,
@@ -64,10 +65,11 @@ export type {
 export { isTerminalRunStatus } from '../../src/types.js';
 // Fila `needs-human-review` + voto de cada juiz + diagnóstico de verbosidade
 // (IMPL-055/057/053): fonte única em src/types.ts, como acima.
-import type { HumanReviewItem, JudgeVote } from '../../src/types.js';
+import type { HumanReviewItem, JudgeCallFinish, JudgeVote } from '../../src/types.js';
 export type {
   HumanReviewItem,
   HumanReviewReason,
+  JudgeCallFinish,
   JudgeVote,
   VerbosityDiag,
 } from '../../src/types.js';
@@ -263,6 +265,27 @@ export interface RunConfig {
   /** Julgamento por referencia (pointwise vs gabarito + duelos). */
   referenceJudging?: boolean;
   /**
+   * IMPL-053 (R-03b:REC-1) — sondas CONTRAFACTUAIS do diagnóstico de
+   * verbosidade: re-julga ~20% das respostas com o texto truncado/preenchido
+   * em 20% e publica a taxa de INVERSÃO (`verbosityDiag.taxaInversaoSondas`,
+   * bom < 10%). OPT-IN: custa chamadas extras de juiz (papel `judge`, no
+   * ledger). Ausente/false = sem sondas (taxa `null`).
+   */
+  verbosityProbes?: boolean;
+  /**
+   * IMPL-055 (R-03a:REC-1) — valida os gabaritos GERADOS antes do julgamento:
+   * verificação dirigida pela rubrica (1º juiz) + amostra humana de 5–10% →
+   * `RunRecord.needsHumanReview`. OPT-IN (chamadas extras). Implícito quando
+   * `secondReferenceModelId` está presente.
+   */
+  validateReferences?: boolean;
+  /**
+   * IMPL-055 — modelo do 2º GABARITO (família DISTINTA do `referenceModelId`),
+   * disparado só quando a verificação acusa 'parcial'/divergência. Liga a
+   * validação dos gabaritos.
+   */
+  secondReferenceModelId?: string;
+  /**
    * No de FINALISTAS que disputam os duelos depois do julgamento pointwise.
    * Os melhores por judge-score medio (todos os cenarios) duelam entre si em
    * cada cenario. 0 = sem duelos. Default 3.
@@ -417,6 +440,8 @@ export interface SingleJudgeResult {
   verdicts: JudgeVerdict[];
   blindMap: Record<string, string>;
   inconclusive?: boolean;
+  /** Sinais de fim de CADA passagem deste juiz (IMPL-014). */
+  passFinish?: JudgeCallFinish[];
 }
 
 export interface JudgeResult {
@@ -482,8 +507,9 @@ export interface ReferenceJudgeResult {
 export interface DuelOutcome {
   a: string;
   b: string;
-  order1: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence };
-  order2: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence };
+  // + sinais de fim da chamada de cada ordem (IMPL-014) — espelho de src/types.ts.
+  order1: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence } & JudgeCallFinish;
+  order2: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence } & JudgeCallFinish;
   /** Resultado combinado das 2 ordens. */
   outcome: 'a' | 'b' | 'tie';
   /** Quem decidiu (IMPL-004): juiz LLM ou oráculo. */
@@ -592,6 +618,13 @@ export interface RunRecord {
    * gabarito discordante ou amostra humana de auditoria (5–10%).
    */
   needsHumanReview?: HumanReviewItem[];
+  /**
+   * IMPL-112 (R-05:REC-8) — taxa de acerto POR ITEM × contestants da run e a
+   * fila de REVISÃO HUMANA do gabarito (100% 'resolve' ou 100% 'nao' em k
+   * execuções — nunca descarte automático). Sai de `itemSaturationReport`
+   * (src/datagen.ts) no fim do julgamento. Ausente em records antigos.
+   */
+  itemSaturation?: ItemSaturationReport;
   /**
    * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
    * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).

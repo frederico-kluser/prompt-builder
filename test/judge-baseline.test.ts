@@ -20,10 +20,7 @@ import {
   type JudgeSetup,
 } from '../src/engine/judgeBaseline.js';
 import { snapshotModelLifecycle, type CatalogModelLike } from '../src/engine/modelLifecycle.js';
-import { judgeContractHash } from '../src/engine/judgeCalibration.js';
-import { DUEL_HEAD } from '../src/engine/duelPrompt.js';
-import { JUDGE_LISTWISE_CONTRACT_TEXT } from '../src/judge.js';
-import { JUDGE_CONTRACT_TEXT } from '../src/refJudge.js';
+import { contractHashFor } from '../src/cli/commands/baseline.js';
 import { parseModelsPayload } from '../src/openrouter.js';
 import { nodeOrTsx } from './support/cli.js';
 
@@ -36,14 +33,11 @@ const JUIZ = 'anthropic/claude-sonnet-5';
 const GABARITO = 'openai/gpt-5-mini';
 const SETUP: JudgeSetup = { judgeModelIds: [JUIZ], referenceModelId: GABARITO };
 // IMPL-049: o contrato cobre juízes + prompts (pointwise/duelo/listwise) +
-// gabarito — MESMO cálculo do `contractHashFor` do CLI (espaço de setup do
-// gate; think level/provedor entram no hash DA RUN, fora do gate do baseline).
-const hashFor = (s: JudgeSetup): string =>
-  judgeContractHash(s.judgeModelIds, JUDGE_CONTRACT_TEXT, {
-    duelPromptText: DUEL_HEAD,
-    listwisePromptText: JUDGE_LISTWISE_CONTRACT_TEXT,
-    referenceModelId: s.referenceModelId,
-  });
+// gabarito — e (cli#0/IMPL-117) o think level EFETIVO do juiz + a temperatura
+// do juízo. É o `contractHashFor` do PRÓPRIO CLI (fonte única com o
+// orquestrador): uma cópia do cálculo aqui escondia justamente o bug do cli#0
+// (o check recalculava um hash que nenhuma run produz).
+const hashFor = (s: JudgeSetup): string => contractHashFor(s);
 
 function catalogo(): CatalogModelLike[] {
   return parseModelsPayload(JSON.parse(readFileSync(FIXTURE, 'utf-8')));

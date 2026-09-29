@@ -231,6 +231,9 @@ describe('whitelists silenciosos — os campos NÃO podem sumir', () => {
       reasoning: { competitor: 'low', judge: 'high', rewriter: 'medium', datagen: 'off' },
       referenceModelId: 'r/x',
       referenceJudging: true,
+      verbosityProbes: true, // IMPL-053
+      validateReferences: true, // IMPL-055
+      secondReferenceModelId: 's/x', // IMPL-055
       scenarioBrief: 'brief',
       duels: false,
       finalists: 4,

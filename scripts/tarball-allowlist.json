@@ -109,6 +109,8 @@
   "dist/cli/output.js",
   "dist/cli/preflight.d.ts",
   "dist/cli/preflight.js",
+  "dist/cli/replay.d.ts",
+  "dist/cli/replay.js",
   "dist/cli/runControl.d.ts",
   "dist/cli/runControl.js",
   "dist/cli/runLock.d.ts",

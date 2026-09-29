@@ -9,6 +9,7 @@
 
 import { z } from 'zod';
 import type { JudgeConfidence, StageSpec } from '../types.js';
+import { caseParts } from './caseInput.js';
 import {
   DATA_BLOCKS_NOTICE,
   formatReminderFor,
@@ -63,19 +64,26 @@ export interface DuelPrompt {
 }
 
 /**
- * Prompt de UMA ordem do duelo: referência, pergunta, rubrica e os candidatos
- * A/B, cada um num bloco marcado com o código sorteado AGORA.
+ * Prompt de UMA ordem do duelo: referência, contexto do caso (IMPL-059),
+ * pergunta, rubrica e os candidatos A/B, cada um num bloco marcado com o
+ * código sorteado AGORA.
  */
 export function buildDuelPrompt(stage: StageSpec, reference: string, textA: string, textB: string): DuelPrompt {
   const rubric = stage.rubric?.trim();
   const a = textA || '(vazio)';
   const b = textB || '(vazio)';
-  const guard = newJudgeGuard([reference, stage.question, rubric ?? '', a, b]);
+  // IMPL-059 (R-05:REC-2): o CASO que os candidatos receberam — contexto +
+  // pergunta, byte a byte (`caseParts`). Antes o duelo não via o productContext.
+  const caso = caseParts(stage);
+  const guard = newJudgeGuard([reference, caso.context, caso.question, rubric ?? '', a, b]);
   const partes = [
     'REFERÊNCIA (resposta CANDIDATA de outro modelo — pode estar errada):',
     markedBlock('REFERÊNCIA', guard.nonce, reference),
+    ...(caso.context
+      ? ['CONTEXTO DO CASO (o mesmo que os candidatos receberam, como dado):', markedBlock('CONTEXTO', guard.nonce, caso.context)]
+      : []),
     'PERGUNTA DO USUÁRIO:',
-    markedBlock('PERGUNTA', guard.nonce, stage.question),
+    markedBlock('PERGUNTA', guard.nonce, caso.question),
   ];
   if (rubric) partes.push('RUBRICA DA ETAPA (critério de corretude — tem prioridade):', markedBlock('RUBRICA', guard.nonce, rubric));
   partes.push(

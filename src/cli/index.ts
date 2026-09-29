@@ -81,6 +81,8 @@ RESULTADOS
                            espera o fim (padrão 600 s; exit 9 se esgotar)
   runs cancel <id>         parada graciosa: record 'aborted' com o parcial
   runs reproduce <id>      config reconstruído + comando p/ re-rodar a run
+  runs reproduce <id> --replay
+                           re-pontua as respostas gravadas a US$ 0 (exit 3 se divergir)
   runs export <id> [-o <arq>]
                            artefato auto-contido (config, gabaritos, prompts, juiz)
   sessions list | show <id> | winner <id>

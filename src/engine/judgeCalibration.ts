@@ -39,6 +39,8 @@ import type {
   VerdictSource,
   VerbosityDiag,
 } from '../types.js';
+import { isControlSignal } from '../budget.js';
+import { JUDGE_TEMPERATURE } from './judgeRetry.js';
 
 /** Par observado (uma resposta julgada): score do juiz × tamanho da resposta. */
 export interface CalibrationSample {
@@ -777,23 +779,26 @@ export async function runCounterfactualProbes(params: {
   seed?: number;
 }): Promise<CounterfactualProbePair[]> {
   const alvos = selectCounterfactualProbes(params.rows, params.rate, params.seed);
+  // Em PARALELO (o limitador global do gateway gateia — sem cap local);
+  // allSettled: todas terminam antes de o sinal de controle subir, e o
+  // resultado sai na ORDEM das sondas (determinístico).
+  const settled = await Promise.allSettled(
+    alvos.map(({ row, mode }) => params.rejudge(buildCounterfactualText(row.text, mode, params.rate ?? 0.2), row)),
+  );
   const pares: CounterfactualProbePair[] = [];
-  for (const { row, mode } of alvos) {
-    const probeText = buildCounterfactualText(row.text, mode, params.rate ?? 0.2);
-    let verdict: Verdict | null = null;
-    try {
-      verdict = await params.rejudge(probeText, row);
-    } catch {
-      verdict = null;
-    }
+  settled.forEach((r, k) => {
+    // Orçamento/cancelamento são CONTROLE (AGENTS.md): engolir aqui viraria
+    // sonda "falhou" e a run seguiria gastando depois do teto.
+    if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
+    const { row, mode } = alvos[k];
     pares.push({
       contestantId: row.contestantId,
       scenarioId: row.scenarioId,
       mode,
       originalVerdict: verdictOfScore(row.score),
-      probeVerdict: verdict,
+      probeVerdict: r.status === 'fulfilled' ? r.value : null,
     });
-  }
+  });
   return pares;
 }
 
@@ -838,6 +843,32 @@ export interface JudgeContractPin {
 export interface JudgeContractComponentsExt extends JudgeContractComponents {
   /** Temperatura de amostragem efetiva das chamadas de juízo (0 no pipeline). */
   judgeTemperature?: number | string;
+}
+
+/**
+ * Componentes do contrato do PIPELINE — fonte ÚNICA para o pin da run (Node e
+ * SPA) e para o `baseline check` do CLI (cli#0): antes cada lado montava os
+ * seus e o CLI deixava de fora o think level efetivo (o default do papel,
+ * IMPL-079) — o check recalculava um hash que NENHUMA run produz e o gate de CI
+ * ficava vermelho logo depois do `baseline pin` da mesma run. A temperatura
+ * (IMPL-117) é a constante que os juízes realmente enviam.
+ */
+export function pipelineContractComponents(input: {
+  duelPromptText: string;
+  listwisePromptText: string;
+  referenceModelId: string;
+  /** Degrau EFETIVO do juiz (`reasoningLevelForRole(config.reasoning, 'judge')` — default incluso). */
+  judgeReasoningLevel: string;
+  providerPolicy?: string;
+}): JudgeContractComponentsExt {
+  return {
+    duelPromptText: input.duelPromptText,
+    listwisePromptText: input.listwisePromptText,
+    referenceModelId: input.referenceModelId,
+    judgeReasoningLevel: input.judgeReasoningLevel,
+    ...(input.providerPolicy ? { providerPolicy: input.providerPolicy } : {}),
+    judgeTemperature: JUDGE_TEMPERATURE,
+  };
 }
 
 /**
@@ -917,31 +948,33 @@ export function pinJudgeContract(
 }
 
 // ----------------------------------------------------------------------------
-// Drift do contrato ENTRE runs (IMPL-049) — memória do processo.
+// Drift do contrato ENTRE runs (IMPL-049).
 //
 // O hash por run denuncia mudança ao ser comparado, mas alguém tem de COMPARAR.
-// A âncora é o último pin visto neste processo (o servidor e a sessão de treino
-// rodam várias runs no mesmo processo; o CLI de run única não tem anterior — aí
-// quem compara é o `baseline check`/`runs show`). Quando o hash muda, o evento
-// `judge.contract.changed` sugere RECALIBRAÇÃO: calibrar um contrato que vai
-// mudar é desperdício (R-03a:REC-9).
+// A âncora PRIMÁRIA é o pin da última run GRAVADA (`previousContractPin`, com o
+// storage de cada motor injetado): cada `prompt-builder run/train` é um
+// processo novo, a SPA perde a memória no reload e, no servidor, runs
+// concorrentes com configs diferentes faziam a âncora em memória oscilar. A
+// memória do processo (`noteJudgeContract`) fica como reserva quando não há
+// run gravada legível. Quando o hash muda, o evento `judge.contract.changed`
+// sugere RECALIBRAÇÃO: calibrar um contrato que vai mudar é desperdício
+// (R-03a:REC-9).
 // ----------------------------------------------------------------------------
 
 let ultimoContractHash: string | undefined;
 
-/**
- * Registra o hash do contrato desta run e devolve o aviso de drift quando ele
- * difere do último visto no processo. `changed: false` na primeira run (não há
- * anterior) e quando o contrato é o mesmo.
- */
-export function noteJudgeContract(hash: string): {
+/** Resultado da comparação de contrato entre duas runs. */
+export interface ContractDrift {
   changed: boolean;
   previousHash?: string;
   message: string;
-} {
-  const previousHash = ultimoContractHash;
-  ultimoContractHash = hash;
-  if (previousHash === undefined || previousHash === hash) return { changed: false, message: '' };
+}
+
+/** Compara o hash desta run com o anterior (ausente = sem âncora, nunca "mudou"). */
+export function contractDrift(previousHash: string | undefined, hash: string): ContractDrift {
+  if (previousHash === undefined || previousHash === hash) {
+    return { changed: false, ...(previousHash ? { previousHash } : {}), message: '' };
+  }
   return {
     changed: true,
     previousHash,
@@ -950,6 +983,62 @@ export function noteJudgeContract(hash: string): {
       'scores não comparáveis com runs antigas: recalibre antes de comparar notas ' +
       '(trocar juiz/prompt/referência/think level/provedor muda a distribuição de veredito).',
   };
+}
+
+/**
+ * Registra o hash do contrato desta run e devolve o aviso de drift quando ele
+ * difere do último visto no processo. `changed: false` na primeira run (não há
+ * anterior) e quando o contrato é o mesmo.
+ */
+export function noteJudgeContract(hash: string): ContractDrift {
+  const previousHash = ultimoContractHash;
+  ultimoContractHash = hash;
+  const d = contractDrift(previousHash, hash);
+  return d.changed ? d : { changed: false, message: '' };
+}
+
+/** Resumo de run que a busca da âncora lê (o `RunSummary` dos dois storages serve). */
+export interface ContractAnchorSummary {
+  id: string;
+  status?: string;
+  startedAt?: string;
+}
+
+/**
+ * Pin da ÚLTIMA run gravada ANTES desta (IMPL-049): a âncora do drift entre
+ * processos/abas. Candidatas: runs terminadas com julgamento (`finished` ou
+ * `inconclusive`), iniciadas antes desta, da mais recente para trás — a 1ª com
+ * pin vence (até `maxLookback`, default 5: record antigo sem pin não para a
+ * busca). Diagnóstico: falha de leitura devolve `undefined` (nunca derruba a run).
+ */
+export async function previousContractPin(params: {
+  runId: string;
+  startedAt: string;
+  listRuns: () => Promise<ReadonlyArray<ContractAnchorSummary>>;
+  loadRun: (id: string) => Promise<{ judgeDiagnostics?: { contract?: { hash?: string } } } | null | undefined>;
+  maxLookback?: number;
+}): Promise<{ runId: string; hash: string } | undefined> {
+  try {
+    const todas = await params.listRuns();
+    const candidatas = todas
+      .filter(
+        (r) =>
+          r.id !== params.runId &&
+          (r.status === 'finished' || r.status === 'inconclusive') &&
+          typeof r.startedAt === 'string' &&
+          r.startedAt < params.startedAt,
+      )
+      .sort((a, b) => (a.startedAt! < b.startedAt! ? 1 : a.startedAt! > b.startedAt! ? -1 : 0))
+      .slice(0, Math.max(1, params.maxLookback ?? 5));
+    for (const c of candidatas) {
+      const rec = await params.loadRun(c.id);
+      const hash = rec?.judgeDiagnostics?.contract?.hash;
+      if (typeof hash === 'string' && hash) return { runId: c.id, hash };
+    }
+  } catch (err) {
+    if (isControlSignal(err)) throw err;
+  }
+  return undefined;
 }
 
 /**
@@ -962,7 +1051,7 @@ export function noteJudgeContract(hash: string): {
 export function judgeContractAudit(params: {
   modelIds: string[];
   hash: string;
-  /** Hash da run anterior, quando conhecido (memória do processo/CLI). */
+  /** Hash da run anterior, quando conhecido (última run gravada — `previousContractPin`). */
   previousHash?: string;
 }): { line: string; detail: string } {
   const juizes = params.modelIds.length > 0 ? params.modelIds.join('+') : '(sem juiz)';

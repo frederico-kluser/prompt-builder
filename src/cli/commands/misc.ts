@@ -43,6 +43,9 @@ import {
 } from '../../stats.js';
 import { convergenceReasonText, sessionConfirmationText } from '../../engine/sessionDecision.js';
 import { judgeScaleWarning } from '../../engine/verdictAggregate.js';
+import { winnerFromStandings } from '../../engine/duelCore.js';
+import { groupVerdictFailures, verdictFailuresFromStages } from '../../refJudge.js';
+import { replayRun, replayUnsupportedReason } from '../replay.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import {
   assertNoUnknownConfigKeys,
@@ -283,6 +286,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     out: { type: 'string', short: 'o' },
     timeout: { type: 'string' },
     reason: { type: 'string' },
+    // IMPL-117: `runs reproduce <id> --replay` re-pontua a run gravada a US$ 0.
+    replay: { type: 'boolean' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -329,6 +334,48 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     );
   }
 
+  if (sub === 'reproduce' && parsed.values.replay === true) {
+    // IMPL-117 (R-07b:REC-5): re-pontua as respostas GRAVADAS com o pipeline de
+    // hoje, a US$ 0 (gateway de replay — nenhuma chamada sai para a rede).
+    const motivo = replayUnsupportedReason(record);
+    if (motivo) throw new CliError(`Replay indisponível: ${motivo}`, EXIT.USAGE);
+    out.info(`replay da run ${record.id}: re-pontuando as respostas gravadas (sem rede, US$ 0)…`);
+    const { replay, comparison, calls } = await replayRun(record);
+    const payload = {
+      runId: record.id,
+      identical: comparison.identical,
+      costUsd: replay.totalCostUsd,
+      calls,
+      scenarios: comparison.scenarios,
+      judgeScoreOriginal: comparison.judgeScoreOriginal,
+      judgeScoreReplay: comparison.judgeScoreReplay,
+      mismatches: comparison.mismatches,
+    };
+    if (out.isText) {
+      out.line(`replay: ${calls} chamada(s) respondidas do record · custo $${replay.totalCostUsd} · ${comparison.scenarios} cenário(s)`);
+      for (const [id, nota] of Object.entries(comparison.judgeScoreOriginal)) {
+        out.line(`  ${id.padEnd(28)} original ${nota.toFixed(1)} · replay ${comparison.judgeScoreReplay[id]?.toFixed(1) ?? '—'}`);
+      }
+      out.line(comparison.identical ? 'ok: judge-score idêntico em 100% dos cenários.' : 'DIVERGIU:');
+      for (const m of comparison.mismatches.slice(0, 20)) out.line(`  [${m.what}] ${m.detail}`);
+    }
+    if (!comparison.identical) {
+      // Drift de PONTUAÇÃO (agregação/regra do judge-score/finais) — o mesmo
+      // código de saída do gate de contrato (`baseline check`).
+      throw new CliError(
+        `Replay divergiu da run gravada em ${comparison.mismatches.length} ponto(s): ${comparison.mismatches[0]?.detail ?? ''}`,
+        EXIT.CONFIG,
+        payload,
+        {
+          code: 'config.replay_mismatch',
+          hint: 'O binário de hoje pontua as respostas gravadas de outro jeito — compare as versões antes de comparar notas.',
+        },
+      );
+    }
+    out.result(true, 'runs.reproduce.replay', payload);
+    return EXIT.OK;
+  }
+
   if (sub === 'reproduce') {
     // Reprodutibilidade: o config equivalente ao da run salva + o comando EXATO
     // para re-rodá-la. A vista arena-config@1 vem junto no --json (o `config` é
@@ -371,22 +418,33 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   }
 
   if (sub === 'winner') {
-    const ranking = record.standings?.length
-      ? record.standings.map((s) => s.id)
-      : Object.entries(record.judgeScoreByContestant ?? {})
-          .sort((a, b) => b[1] - a[1])
-          .map(([cid]) => cid);
-    const vencedorId = ranking[0];
+    // cli#1: empate nos duelos NUNCA sai calado — o desempate é o judge-score
+    // (a régua que escolheu os finalistas), e o vencedor nunca é "o 1º da
+    // lista" (o controle vinha 1º por ordem de cadastro). Re-ordena também os
+    // records gravados antes do desempate.
+    const w = winnerFromStandings(record);
+    const vencedorId = w.contestantId;
     const vencedor = record.contestants.find((c) => c.id === vencedorId);
+    const labelDe = (cid: string): string => record.contestants.find((c) => c.id === cid)?.label ?? cid;
+    const aviso = w.unresolved
+      ? `empate também no desempate (${w.tiedIds.map(labelDe).join(', ')}): o vencedor saiu do sorteio cego, não dos dados — rode mais cenários.`
+      : w.tie
+        ? `empate nos duelos (${w.tiedIds.map(labelDe).join(', ')}) — desempate por ${w.tieBreak === 'wins' ? 'nº de vitórias' : 'judge-score'}.`
+        : undefined;
     if (parsed.values['prompt-only'] === true) {
       // Payload puro no stdout: e o movimento final do fluxo
-      // (`… winner <id> --prompt-only > prompt.md`).
+      // (`… winner <id> --prompt-only > prompt.md`). O empate vai no stderr.
+      if (aviso) out.warn(aviso);
       out.raw(vencedor?.systemPrompt ?? '');
       return EXIT.OK;
     }
+    if (aviso) out.warn(aviso);
     if (out.isText) {
-      out.line(`vencedor: ${vencedor?.label ?? vencedorId ?? '—'}`);
-      out.line(`régua: ${record.standings?.length ? 'duelos das finais' : 'judge-score'}`);
+      const js = vencedorId !== undefined ? record.judgeScoreByContestant?.[vencedorId] : undefined;
+      out.line(`vencedor: ${vencedor?.label ?? vencedorId ?? '—'}${typeof js === 'number' ? ` · judge-score ${js.toFixed(1)}` : ''}`);
+      out.line(
+        `régua: ${w.ruler === 'judge-score' ? 'judge-score' : w.ruler === 'duels+judge-score' ? 'duelos das finais (empate desfeito pelo judge-score)' : 'duelos das finais'}`,
+      );
       if (vencedor?.systemPrompt) {
         out.line();
         out.line(vencedor.systemPrompt);
@@ -396,7 +454,12 @@ export async function cmdRuns(argv: string[]): Promise<number> {
       contestantId: vencedorId,
       label: vencedor?.label,
       systemPrompt: vencedor?.systemPrompt,
-      ruler: record.standings?.length ? 'duels' : 'judge-score',
+      ruler: w.ruler,
+      tie: w.tie,
+      tiedIds: w.tiedIds,
+      tieBreak: w.tieBreak,
+      unresolved: w.unresolved,
+      judgeScore: vencedorId !== undefined ? (record.judgeScoreByContestant?.[vencedorId] ?? null) : null,
     });
     return EXIT.OK;
   }
@@ -407,6 +470,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   // IMPL-054: ICC, design effect, nEfetivo e pass@k/pass^k sempre que há
   // repetição (compare `repeats` ou agente `repetitions`) — no texto E no JSON.
   const repeticao = repetitionReportOf(record);
+  // IMPL-057: falhas de veredito agrupadas (derivadas das etapas — vale para runs antigas).
+  const gruposDeFalha = groupVerdictFailures(verdictFailuresFromStages(record.stages));
   if (out.isText) {
     out.line(`${record.id}  ${record.status}  ${record.mode}`);
     out.line(`tema: ${record.config.theme}`);
@@ -430,7 +495,30 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     if (diag) {
       out.line();
       out.line(`juiz: contrato ${diag.contract.hash.slice(0, 12)} (${diag.contract.modelIds.join(', ')})`);
+      // IMPL-049/IMPL-057: o contrato comparado com a ÚLTIMA run gravada.
+      if (diag.contractAudit) out.line(`${diag.contractAudit.changed ? '! ' : ''}${diag.contractAudit.line}`);
       if (diag.verbosity.warning) out.line(`! ${diag.verbosity.warning}`);
+    }
+    // IMPL-057: falhas de veredito AGRUPADAS por (cenário, categoria, causa) —
+    // 'degraded' (painel reduzido) nunca é falha do candidato.
+    if (gruposDeFalha.length > 0) {
+      const total = gruposDeFalha.reduce((s, g) => s + g.count, 0);
+      out.line(`falhas de veredito: ${total} em ${gruposDeFalha.length} grupo(s) (cenário × categoria × causa)`);
+      for (const g of gruposDeFalha.slice(0, 4)) {
+        out.line(`  ${g.count}× ${g.category}/${g.cause}${g.scenario ? ` — ${g.scenario.slice(0, 60)}` : ''}`);
+      }
+      if (gruposDeFalha.length > 4) out.line(`  … +${gruposDeFalha.length - 4} grupo(s) no --json`);
+    }
+    // IMPL-055/IMPL-047: fila needs-human-review; IMPL-112: itens saturados.
+    if (record.needsHumanReview?.length) {
+      const motivos = [...new Set(record.needsHumanReview.map((i) => i.reason))].join(', ');
+      out.line(`! revisão humana: ${record.needsHumanReview.length} item(ns) na fila needs-human-review (${motivos})`);
+    }
+    if (record.itemSaturation?.reviewQueue.length) {
+      out.line(
+        `! saturação: ${record.itemSaturation.reviewQueue.length} item(ns) com 100% 'resolve' ou 100% 'nao' em ` +
+          `≥${record.itemSaturation.minExecutions} execuções — revise o GABARITO (nunca descarte o item)`,
+      );
     }
     for (const aviso of record.fairnessWarnings ?? []) out.line(`! ${aviso}`);
     // IMPL-019: alertas de ciclo de vida gravados NO INÍCIO da run (30/14/7
@@ -450,6 +538,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     // `--json` vê exatamente o que o texto mostra (null sem repetição).
     repetition: repeticao ? { repeats: repeticao.repeats, contestants: repeticao.contestants } : null,
     judgeDiagnostics: record.judgeDiagnostics ?? null,
+    // IMPL-057: falhas agrupadas (cenário × categoria × causa) no mesmo payload do texto.
+    verdictFailureGroups: gruposDeFalha,
     fairnessWarnings: record.fairnessWarnings ?? [],
     lifecycleAlerts: record.modelLifecycle?.alerts ?? [],
     // IMPL-007: judge-score de painel em escala antiga (média ordinal inflada).
