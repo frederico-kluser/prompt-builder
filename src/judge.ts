@@ -18,6 +18,7 @@ import {
 } from './engine/judgeGuard.js';
 import type {
   CompetitorResponse,
+  JudgeCallFinish,
   JudgeResult,
   JudgeVerdict,
   SingleJudgeResult,
@@ -150,7 +151,10 @@ interface PassResult {
   blindMap: Record<string, string>;
 }
 
-type PassAttempt = { ok: true; pass: PassResult } | { ok: false; error: VerdictError };
+/** `finish` = sinais de fim da chamada da passagem (IMPL-014), quando houve resposta. */
+type PassAttempt =
+  | { ok: true; pass: PassResult; finish?: JudgeCallFinish }
+  | { ok: false; error: VerdictError; finish?: JudgeCallFinish };
 
 /**
  * Parse ESTRITO de uma passagem (IMPL-006): o texto INTEIRO e um objeto JSON
@@ -284,7 +288,8 @@ async function rankOnePass(
     formatReminder: prompt.formatReminder,
     signal: extra.ctx?.signal,
   });
-  if (!attempt.ok) return { ok: false, error: attempt.error };
+  const finish = attempt.finish ? { finish: attempt.finish } : {};
+  if (!attempt.ok) return { ok: false, error: attempt.error, ...finish };
 
   const order = attempt.value.ranking.map((l) => letterToContestant[l]);
   const verdicts: JudgeVerdict[] = okResponses.map((r) => {
@@ -293,7 +298,7 @@ async function rankOnePass(
     // canario da passagem registrado em CADA veredito (IMPL-006).
     return { contestantId: r.contestantId, verdict: v.verdict, motivo: v.motivo, canary: attempt.value.canary };
   });
-  return { ok: true, pass: { order, verdicts, blindMap } };
+  return { ok: true, pass: { order, verdicts, blindMap }, ...finish };
 }
 
 /** Agrega varias ordenacoes por POSICAO MEDIA (menor = melhor). Empate -> 1a ordenacao. */
@@ -356,6 +361,8 @@ async function runOneJudge(
     ids,
     valid.map((p) => p.order),
   );
+  // IMPL-014: sinais de fim de CADA passagem que respondeu (ordem das passagens).
+  const passFinish = passResults.flatMap((p) => (p.finish ? [p.finish] : []));
   return {
     ok: true,
     judge: {
@@ -363,6 +370,7 @@ async function runOneJudge(
       rankedContestantIds,
       verdicts: valid[0].verdicts,
       blindMap: valid[0].blindMap,
+      ...(passFinish.length > 0 ? { passFinish } : {}),
     },
   };
 }

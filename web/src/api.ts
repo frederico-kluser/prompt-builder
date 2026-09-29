@@ -63,10 +63,11 @@ export type {
 export { isTerminalRunStatus } from '../../src/types.js';
 // Fila `needs-human-review` + voto de cada juiz + diagnóstico de verbosidade
 // (IMPL-055/057/053): fonte única em src/types.ts, como acima.
-import type { HumanReviewItem, JudgeVote } from '../../src/types.js';
+import type { HumanReviewItem, JudgeCallFinish, JudgeVote } from '../../src/types.js';
 export type {
   HumanReviewItem,
   HumanReviewReason,
+  JudgeCallFinish,
   JudgeVote,
   VerbosityDiag,
 } from '../../src/types.js';
@@ -416,6 +417,8 @@ export interface SingleJudgeResult {
   verdicts: JudgeVerdict[];
   blindMap: Record<string, string>;
   inconclusive?: boolean;
+  /** Sinais de fim de CADA passagem deste juiz (IMPL-014). */
+  passFinish?: JudgeCallFinish[];
 }
 
 export interface JudgeResult {
@@ -481,8 +484,9 @@ export interface ReferenceJudgeResult {
 export interface DuelOutcome {
   a: string;
   b: string;
-  order1: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence };
-  order2: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence };
+  // + sinais de fim da chamada de cada ordem (IMPL-014) — espelho de src/types.ts.
+  order1: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence } & JudgeCallFinish;
+  order2: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence } & JudgeCallFinish;
   /** Resultado combinado das 2 ordens. */
   outcome: 'a' | 'b' | 'tie';
   /** Quem decidiu (IMPL-004): juiz LLM ou oráculo. */

@@ -20,6 +20,7 @@ import {
 import type {
   CompetitorResponse,
   Contestant,
+  JudgeCallFinish,
   JudgeConfidence,
   JudgeResult,
   JudgeVote,
@@ -199,8 +200,10 @@ type SingleVerdict =
       explanation: string;
       canary: string;
       confianca?: JudgeConfidence;
+      /** Sinais de fim + artefato da chamada (IMPL-014/IMPL-117). */
+      finish?: JudgeCallFinish;
     }
-  | { ok: false; judgeModelId: string; contestantId: string; error: VerdictError };
+  | { ok: false; judgeModelId: string; contestantId: string; error: VerdictError; finish?: JudgeCallFinish };
 
 /** Ordem crescente de confiança — o MENOR valor entre votos manda na triagem (IMPL-047). */
 const CONFIDENCE_RANK: Record<JudgeConfidence, number> = { baixa: 0, media: 1, alta: 2 };
@@ -257,10 +260,11 @@ async function judgeOne(params: {
     formatReminder: prompt.formatReminder,
     signal: ctx?.signal,
   });
+  const finish = attempt.finish ? { finish: attempt.finish } : {};
   if (!attempt.ok) {
-    return { ok: false, judgeModelId, contestantId: response.contestantId, error: attempt.error };
+    return { ok: false, judgeModelId, contestantId: response.contestantId, error: attempt.error, ...finish };
   }
-  return { ok: true, judgeModelId, contestantId: response.contestantId, ...attempt.value };
+  return { ok: true, judgeModelId, contestantId: response.contestantId, ...attempt.value, ...finish };
 }
 
 /**
@@ -393,7 +397,9 @@ export async function judgeStageReference(
   for (const r of judgeable) {
     const vs = singles.filter((s) => s.contestantId === r.contestantId);
     // IMPL-057: persiste o voto de CADA juiz (inclusive a falha — badge
-    // 'avaliador falhou' é do juiz, nunca nota do candidato).
+    // 'avaliador falhou' é do juiz, nunca nota do candidato). IMPL-014: com os
+    // sinais de fim da chamada daquele voto (qual veredito terminou em qual
+    // `finish_reason`) + o artefato da resposta (IMPL-117).
     judgeVotesByContestant[r.contestantId] = vs.map(
       (s): JudgeVote =>
         s.ok
@@ -403,8 +409,9 @@ export async function judgeStageReference(
               explanation: s.explanation,
               ...(s.confianca ? { confianca: s.confianca } : {}),
               canary: s.canary,
+              ...(s.finish ?? {}),
             }
-          : { judgeModelId: s.judgeModelId, error: s.error },
+          : { judgeModelId: s.judgeModelId, error: s.error, ...(s.finish ?? {}) },
     );
     const oks = vs.filter((s): s is Extract<SingleVerdict, { ok: true }> => s.ok);
     if (oks.length === 0) {

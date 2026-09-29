@@ -1085,13 +1085,35 @@ export interface VerdictError {
 }
 
 /**
+ * Sinais de fim + artefato de UMA chamada de juízo (IMPL-014 / IMPL-117), POR
+ * voto/ordem/passagem — antes só o histograma por papel
+ * (`finishSignalsByRole.judge`) sobrevivia e não dava para saber qual veredito
+ * terminou com qual `finish_reason`. É a ÚLTIMA chamada que respondeu (o
+ * lembrete de formato é uma 2ª chamada). Ausente = nenhuma resposta (exceção de
+ * transporte), veredito determinístico (oráculo/ground-truth) ou record antigo.
+ */
+export interface JudgeCallFinish {
+  /** `finish_reason` normalizado pelo OpenRouter (ex.: stop, length). */
+  finishReason?: string;
+  /** `native_finish_reason` cru do provedor. */
+  nativeFinishReason?: string;
+  /** true = saída cortada no teto (o voto foi DESCARTADO — `truncated`). */
+  truncated?: boolean;
+  /** Id da geração no OpenRouter (`gen-…`) — auditoria/conciliação da chamada. */
+  generationId?: string;
+  /** SHA-256 (hex) do texto devolvido pelo juiz — prova da resposta que virou veredito. */
+  responseSha256?: string;
+}
+
+/**
  * Voto de UM juiz para UMA resposta (IMPL-057, R-11a:REC-8): veredito +
  * explicação + confiança + canário persistidos POR JUIZ — antes o resultado
  * agregado descartava os singles e era impossível mostrar "2 de 3 juízes:
  * resolve", destacar o divergente ou calcular κ painel×humano. Juiz que FALHOU
- * entra com `error` e sem `verdict` (falha ≠ veredito).
+ * entra com `error` e sem `verdict` (falha ≠ veredito). Os sinais de fim da
+ * chamada (IMPL-014) vão nos campos de `JudgeCallFinish`.
  */
-export interface JudgeVote {
+export interface JudgeVote extends JudgeCallFinish {
   judgeModelId: string;
   /** Veredito deste juiz; ausente = este juiz falhou (motivo em `error`). */
   verdict?: Verdict;
@@ -1167,6 +1189,12 @@ export interface SingleJudgeResult {
   /** letra -> contestantId desta avaliacao (cosmetico p/ a UI "(era X)"). */
   blindMap: Record<string, string>;
   inconclusive?: boolean;
+  /**
+   * Sinais de fim de CADA passagem deste juiz (IMPL-014), na ordem das
+   * passagens — inclusive a que falhou com resposta (ex.: cortada). Ausente em
+   * records antigos.
+   */
+  passFinish?: JudgeCallFinish[];
 }
 
 /**
@@ -1295,8 +1323,12 @@ export interface ReferenceJudgeResult {
   unscoredRepsByContestant?: Record<string, number>;
 }
 
-/** Uma ordem de apresentação de um duelo, nos termos REAIS do par ('a' = 1º do par). */
-export interface DuelOrderResult {
+/**
+ * Uma ordem de apresentação de um duelo, nos termos REAIS do par ('a' = 1º do
+ * par). Os sinais de fim da chamada dessa ordem (IMPL-014) vão nos campos de
+ * `JudgeCallFinish` (ausentes no oráculo e em records antigos).
+ */
+export interface DuelOrderResult extends JudgeCallFinish {
   winner: 'a' | 'b' | 'tie';
   explanation: string;
   /** Canário que o juiz devolveu nesta ordem (IMPL-006). Ausente no oráculo e em records antigos. */
@@ -1340,6 +1372,11 @@ export interface DuelFailure {
   order1?: DuelOrderResult;
   order2?: DuelOrderResult;
   error: VerdictError;
+  /**
+   * Sinais de fim das ordens que FALHARAM com resposta (ex.: cortada no teto —
+   * IMPL-014). As ordens com vencedor já os levam em `order1`/`order2`.
+   */
+  failedOrderFinish?: { order1?: JudgeCallFinish; order2?: JudgeCallFinish };
 }
 
 /**

@@ -388,6 +388,10 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
         // fica SEM resultado (nunca empate) e o evento `judge.truncated` a ve.
         const erros = [v1, v2].flatMap((v) => (v.ok ? [] : [v.error]));
         const falha = erros.find((e) => isJudgeCutKind(e.kind)) ?? erros[0];
+        // IMPL-014: a ordem que FALHOU com resposta (ex.: cortada) também deixa
+        // os sinais de fim — é ela que explica o duelo sem resultado.
+        const f1 = !v1.ok ? v1.finish : undefined;
+        const f2 = !v2.ok ? v2.finish : undefined;
         return {
           ok: false,
           failure: {
@@ -400,6 +404,7 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
                     explanation: v1.value.explanation,
                     canary: v1.value.canary,
                     ...(v1.value.confianca ? { confidence: v1.value.confianca } : {}),
+                    ...(v1.finish ?? {}),
                   },
                 }
               : {}),
@@ -410,10 +415,14 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
                     explanation: v2.value.explanation,
                     canary: v2.value.canary,
                     ...(v2.value.confianca ? { confidence: v2.value.confianca } : {}),
+                    ...(v2.finish ?? {}),
                   },
                 }
               : {}),
             error: falha ?? { kind: 'judge_failed', message: 'Ordem do duelo sem resultado.' },
+            ...(f1 || f2
+              ? { failedOrderFinish: { ...(f1 ? { order1: f1 } : {}), ...(f2 ? { order2: f2 } : {}) } }
+              : {}),
           },
         };
       }
@@ -425,12 +434,16 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
           explanation: v1.value.explanation,
           canary: v1.value.canary,
           ...(v1.value.confianca ? { confidence: v1.value.confianca } : {}),
+          // IMPL-014: sinais de fim da chamada desta ordem (+ artefato, IMPL-117).
+          ...(v1.finish ?? {}),
         },
         order2: {
           winner: o2,
           explanation: v2.value.explanation,
           canary: v2.value.canary,
           ...(v2.value.confianca ? { confidence: v2.value.confianca } : {}),
+          // IMPL-014: sinais de fim da chamada desta ordem (+ artefato, IMPL-117).
+          ...(v2.finish ?? {}),
         },
         outcome: combineDuelOrders(o1, o2),
         source: 'judge',

@@ -109,6 +109,7 @@ export type {
 export type {
   HumanReviewItem,
   HumanReviewReason,
+  JudgeCallFinish,
   JudgeVote,
   VerbosityDiag,
 } from '../../../src/types.js';
@@ -117,6 +118,7 @@ import type {
   DuelFailure,
   DuelOrderResult,
   HumanReviewItem,
+  JudgeCallFinish,
   JudgeConfidence,
   JudgeContractComponents,
   JudgeVote,
@@ -593,6 +595,8 @@ export interface SingleJudgeResult {
   /** letra -> contestantId desta avaliacao (cosmetico p/ a UI "(era X)"). */
   blindMap: Record<string, string>;
   inconclusive?: boolean;
+  /** Sinais de fim de CADA passagem deste juiz (IMPL-014) — espelho de src/types.ts. */
+  passFinish?: JudgeCallFinish[];
 }
 
 /**
