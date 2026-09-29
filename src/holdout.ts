@@ -125,7 +125,20 @@ export function trainOnlyView<
   R extends { stages: readonly SelectionStage[]; contestants: readonly { id: string }[] },
 >(run: R, train: readonly unknown[]): R {
   const keep = new Set<unknown>(train);
-  const stages = run.stages.filter((s) => s.spec !== undefined && keep.has(s.spec));
+  return selectionView(run, (spec) => keep.has(spec));
+}
+
+/**
+ * Visão de SELEÇÃO genérica: só as etapas cuja spec passa em `keep`, com o
+ * judge-score RECOMPUTADO sobre elas (a mesma regra de {@link trainOnlyView})
+ * e os agregados de run inteira fora. Serve também ao "leave-demos-out" do
+ * few-shot (IMPL-061): a pergunta que um prompt carrega como demo não pode
+ * decidir a seleção (o prompt a acerta de graça).
+ */
+export function selectionView<
+  R extends { stages: readonly SelectionStage[]; contestants: readonly { id: string }[] },
+>(run: R, keep: (spec: unknown) => boolean): R {
+  const stages = run.stages.filter((s) => s.spec !== undefined && keep(s.spec));
   const view = { ...run, stages } as Record<string, unknown>;
   for (const k of RUN_WIDE_AGGREGATES) delete view[k];
   // Regra ÚNICA de "a etapa vale no judge-score" (a mesma dos orquestradores).
