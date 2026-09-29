@@ -62,7 +62,15 @@ import {
   processLane,
   settleWithin,
 } from '../../jobs.js';
-import { JobManager, defaultJobManager, type JobView, type RunJobInput } from '../../jobManager.js';
+import {
+  JobManager,
+  agentSummary,
+  benchmarkSummary,
+  defaultJobManager,
+  trainingSummary,
+  type JobView,
+  type RunJobInput,
+} from '../../jobManager.js';
 import { PKG_DOCS_DIR, PKG_ROOT, pkgVersion } from '../../paths.js';
 import { assertValidRecordId, isValidRecordId, publicErrorMessage } from '../../pathSafety.js';
 import { readDocTopic } from './knowledge.js';
@@ -210,6 +218,11 @@ export interface McpTool {
   noKey?: boolean;
   /** Saída em JSON compacto (tools de poll: cada chamada custa tokens). */
   compact?: boolean;
+  /**
+   * Próximo passo quando a resposta estoura o teto duro — o da PRÓPRIA tool
+   * (o genérico aponta cursor/limit do get_result, que nem toda tool tem).
+   */
+  oversizeHint?: string;
   run: (args: Record<string, unknown>, apiKey: string, ctx: ToolCtx) => Promise<unknown>;
 }
 
@@ -483,8 +496,77 @@ function recordRef(kind: 'run' | 'session', id: string): Record<string, unknown>
 }
 
 /**
+ * Teto do prompt campeão no RESUMO (≈ 1,1 mil tokens na heurística). O texto
+ * inteiro vem em `detail:"full"` ou no arquivo do `ref`.
+ */
+export const CHAMPION_PROMPT_SUMMARY_CHARS = 4000;
+
+/** Campos do SessionRecord que fecham o desfecho do treino (todos O(1)). */
+const DESFECHO_SESSAO = [
+  'pairing',
+  'convergedAtIteration',
+  'convergenceReason',
+  'championDeclaration',
+  'stoppedAtIteration',
+  'judgeDrift',
+] as const;
+
+/**
+ * Desfecho compacto do record (cli#12/mcp#2): o MESMO resumo que o run_status
+ * devolve no fim do job (`benchmarkSummary`/`trainingSummary`/
+ * `agentSummary`, jobManager.ts). Sem ele o get_result não dizia quem
+ * venceu nem quanto o prompt melhorou — e o run_status some com o job
+ * (retenção de 24 h; run disparada pelo CLI nem tem job). Só campos
+ * O(contestants) + o prompt campeão aparado: o resumo segue ≤ 5 mil tokens.
+ */
+function desfecho(kind: 'run' | 'session', rec: RunRecord | SessionRecord): Record<string, unknown> {
+  if (kind === 'session') {
+    const sessao = rec as SessionRecord;
+    // Os campos que o sessionSummary já traz (id/status/custo/iterações) saem daqui.
+    const {
+      sessionId: _id,
+      status: _status,
+      totalCostUsd: _custo,
+      stoppedReason: _motivo,
+      iterationsDone: _feitas,
+      championPrompt,
+      ...resto
+    } = trainingSummary(sessao);
+    const out: Record<string, unknown> = { ...resto };
+    const ultimo = sessao.bestPromptByIteration?.at(-1);
+    if (ultimo) {
+      out.champion = { iteration: ultimo.iteration, runId: ultimo.runId, contestantId: ultimo.winnerContestantId };
+    }
+    if (typeof championPrompt === 'string') {
+      out.championPrompt = championPrompt.slice(0, CHAMPION_PROMPT_SUMMARY_CHARS);
+      if (championPrompt.length > CHAMPION_PROMPT_SUMMARY_CHARS) {
+        out.championPromptTruncated = true;
+        out.championPromptChars = championPrompt.length;
+      }
+    }
+    for (const k of DESFECHO_SESSAO) if (sessao[k] !== undefined) out[k] = sessao[k];
+    return out;
+  }
+  const run = rec as RunRecord;
+  const { runId: _id, status: _status, totalCostUsd: _custo, stoppedReason: _motivo, ...resto } =
+    benchmarkSummary(run);
+  const out: Record<string, unknown> = { ...resto };
+  // Run de agentes (execuções nas respostas): o MESMO agentSummary do run_status.
+  const agentes = agentSummary(run);
+  if (agentes) out.agentSummary = agentes;
+  if (run.finalists?.length) out.finalists = run.finalists;
+  if (run.verdictIntegrity) {
+    // Só o veredito da integridade: os contadores por papel ficam no record.
+    const motivos = run.verdictIntegrity.reasons ?? [];
+    out.verdictIntegrity = { conclusive: motivos.length === 0, reasons: motivos };
+  }
+  return out;
+}
+
+/**
  * Resumo por padrão (≤ 5 mil tokens): campos do `runSummary`/`sessionSummary`
- * (o MESMO cálculo do CLI) + uma fatia paginada de etapas por cursor.
+ * (o MESMO cálculo do CLI) + o DESFECHO (placar/vencedor da run; campeão,
+ * holdout e significância do treino) + uma fatia paginada de etapas por cursor.
  */
 export function summarizeRecord(
   kind: 'run' | 'session',
@@ -501,6 +583,7 @@ export function summarizeRecord(
     // 'cancelled'): sem isto o resumo nao distingue corte de orcamento de
     // cancelamento do cliente — e o parcial so e "legivel" se denunciar o corte.
     ...(rec.stoppedReason ? { stoppedReason: rec.stoppedReason } : {}),
+    ...desfecho(kind, rec),
     ref: recordRef(kind, rec.id),
   };
   if (kind === 'run') {
@@ -556,9 +639,27 @@ const CONFIG_STRING_SCHEMA = {
   description: 'JSON string de arena-agent-config@1 (aceita também objeto)',
 };
 
+/**
+ * Teto de linhas do list_models: ~256 tokens por linha no catálogo real (460
+ * modelos; medido: pior janela de 60 linhas ≈ 15,6 mil tokens), com folga sob
+ * o teto duro de 25 mil. O antigo 200 anunciava uma faixa cuja metade de cima
+ * SEMPRE estourava.
+ */
+export const LIST_MODELS_MAX_LIMIT = 60;
+/**
+ * Página padrão: 15 linhas ≈ 3,8 mil tokens, sob o teto PADRÃO de 5 mil
+ * (IMPL-086) — as 20 de antes davam ~5,04 mil no catálogo real. O resto vem
+ * por offset/nextOffset.
+ */
+export const LIST_MODELS_DEFAULT_LIMIT = 15;
+
 const LIST_MODELS_ARGS = z.strictObject({
   search: z.string().describe('filtra por parte do id ou do nome').optional(),
-  limit: z.number().describe('máximo de resultados (padrão 20)').optional(),
+  limit: z
+    .number()
+    .describe(`máximo de resultados (padrão ${LIST_MODELS_DEFAULT_LIMIT}, máx. ${LIST_MODELS_MAX_LIMIT})`)
+    .optional(),
+  offset: z.number().describe('pula os N primeiros (paginação: use o nextOffset da resposta)').optional(),
 });
 const ESTIMATE_COST_ARGS = z.strictObject({
   config: zRunConfig.describe('a configuração da run'),
@@ -833,6 +934,7 @@ const TOOLS: McpTool[] = [
     argsSchema: LIST_MODELS_ARGS,
     inputSchema: inputSchemaFrom(LIST_MODELS_ARGS),
     outputSchema: MODELOS_OUTPUT,
+    oversizeHint: `use um limit menor (máx. ${LIST_MODELS_MAX_LIMIT}), pagine por offset/nextOffset ou filtre por search`,
     run: async (args, apiKey) => {
       const cat = await ensureCatalog(apiKey);
       const busca = str(args.search)?.toLowerCase();
@@ -843,11 +945,20 @@ const TOOLS: McpTool[] = [
         );
       }
       // Teto do catálogo fatiado: sem ele, `limit: 100000` estouraria o teto de
-      // tokens da resposta de qualquer cliente.
-      const limite = Math.min(Math.max(Math.trunc(numOf(args.limit) ?? 20), 1), 200);
+      // tokens da resposta de qualquer cliente. O resto do catálogo é
+      // alcançável por offset/nextOffset (antes só por `search`).
+      const limite = Math.min(
+        Math.max(Math.trunc(numOf(args.limit) ?? LIST_MODELS_DEFAULT_LIMIT), 1),
+        LIST_MODELS_MAX_LIMIT,
+      );
+      const inicio = Math.max(Math.trunc(numOf(args.offset) ?? 0), 0);
+      const pagina = rows.slice(inicio, inicio + limite);
+      const proximo = inicio + pagina.length;
       return {
         count: rows.length,
-        models: rows.slice(0, limite).map(toExportRow),
+        offset: inicio,
+        models: pagina.map(toExportRow),
+        nextOffset: proximo < rows.length ? proximo : null,
       };
     },
   },
@@ -1021,7 +1132,8 @@ const TOOLS: McpTool[] = [
     },
     description:
       'Lê o resultado de uma run ou sessão pelo id. POR PADRÃO devolve um RESUMO (≤ 5 mil tokens) ' +
-      'com paginação de etapas (cursor/limit); detail:"full" devolve o record inteiro (máx. 25 mil ' +
+      'com o desfecho (run: placar, judge-score e vencedor; treino: campeão, holdout e significância) ' +
+      'e paginação de etapas (cursor/limit); detail:"full" devolve o record inteiro (máx. 25 mil ' +
       'tokens — acima disso, resumo + referência ao arquivo em disco).',
     argsSchema: GET_RESULT_ARGS,
     inputSchema: inputSchemaFrom(GET_RESULT_ARGS),
@@ -1309,7 +1421,9 @@ export async function callTool(
               ok: false,
               error:
                 `resposta grande demais (~${estimateTokens(text)} tokens; teto ${HARD_RESULT_TOKENS}). ` +
-                'Use paginação/verbosidade (ex.: get_result com cursor/limit) ou um filtro mais estreito.',
+                (tool.oversizeHint
+                  ? `${tool.oversizeHint[0].toUpperCase()}${tool.oversizeHint.slice(1)}.`
+                  : 'Use paginação/verbosidade (ex.: get_result com cursor/limit) ou um filtro mais estreito.'),
             }),
           },
         ],
