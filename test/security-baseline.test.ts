@@ -328,6 +328,34 @@ describe('IMPL-024 — superfície HTTP (rotas + Host/Origin + bind)', () => {
 describe('IMPL-024 — entrypoint real do servidor (processo tsx)', () => {
   const { cmd: SRV_CMD, entry: SERVER } = nodeOrTsx(path.join(ROOT, 'src', 'server.ts'));
 
+  /**
+   * Desliga o servidor e SÓ depois apaga a sala: o shutdown gracioso escreve os
+   * records terminais depois do SIGTERM, e o rmSync corria com o filho ainda a
+   * gravar (ENOTEMPTY intermitente sob carga — a asserção passava, o cleanup
+   * derrubava o teste).
+   */
+  async function desligarServidor(child: ReturnType<typeof spawn>, home: string): Promise<void> {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM');
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 5_000);
+        child.once('exit', () => {
+          clearTimeout(t);
+          resolve();
+        });
+      });
+    }
+    for (let tentativa = 0; ; tentativa += 1) {
+      try {
+        rmSync(home, { recursive: true, force: true });
+        return;
+      } catch (err) {
+        if (tentativa >= 4) throw err;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+  }
+
   it('sem HOST: sobe em 127.0.0.1 (não em todas as interfaces) e aplica a guarda de Host', async () => {
     const home = mkdtempSync(path.join(tmpdir(), 'pb-impl024-srv-'));
     const child = spawn(TSX, [SERVER], {
@@ -364,8 +392,7 @@ describe('IMPL-024 — entrypoint real do servidor (processo tsx)', () => {
       expect((await rawRequest(porta, '/health')).status).toBe(200);
       expect((await rawRequest(porta, '/health', { headers: { host: 'evil.com' } })).status).toBe(400);
     } finally {
-      child.kill('SIGTERM');
-      rmSync(home, { recursive: true, force: true });
+      await desligarServidor(child, home);
     }
   }, 30_000);
 
@@ -402,8 +429,7 @@ describe('IMPL-024 — entrypoint real do servidor (processo tsx)', () => {
       expect(linha).toMatch(/\(bind 127\.0\.0\.1\)/u);
       expect(stderr).toMatch(/HOST='meu-container\.local' ignorado/u);
     } finally {
-      child.kill('SIGTERM');
-      rmSync(home, { recursive: true, force: true });
+      await desligarServidor(child, home);
     }
   }, 30_000);
 
