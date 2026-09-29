@@ -275,6 +275,43 @@ function arquivosTs(dir: string): string[] {
   return out;
 }
 
+describe('decide() × registo por chamada (merge com ciclos: IMPL-074/075)', () => {
+  it('a decisão MEDIDA leva o x-generation-id ao callLog (ponte com a fatura), como todo 200 de chat', async () => {
+    const fake = fakeOpenRouter({ decisionCatalog: DECISION_CATALOG });
+    const g = gw(fake);
+    await g.listDecisionModels(KEY);
+    const ledger = new BudgetLedger({ budgetUsd: 1 });
+    const r = await g.decide({ apiKey: KEY, modelId: 'typesafe/jev-1.13', state: 'x', questions: QUESTIONS, sink: ledger });
+    const log = ledger.callLog();
+    expect(log).toHaveLength(1);
+    expect(r.generationId).toBe('gen-dec-0');
+    expect(log[0]).toMatchObject({ role: 'competitor', modelId: 'typesafe/jev-1.13', status: 'measured', generationId: 'gen-dec-0', provider: 'TypeSafe' });
+    expect(typeof log[0].latencyMs).toBe('number');
+  });
+
+  it('decisão NUNCA se declara auditável: o corpo não leva o pin de provedor, mesmo com o papel na política', async () => {
+    const fake = fakeOpenRouter({ decisionCatalog: DECISION_CATALOG });
+    const g = gw(fake, { auditableRoles: ['competitor'] });
+    await g.listDecisionModels(KEY);
+    const ledger = new BudgetLedger({ budgetUsd: 1 });
+    ledger.setAuditableRoles(['competitor']);
+    await g.decide({ apiKey: KEY, modelId: 'typesafe/jev-1.13', state: 'x', questions: QUESTIONS, sink: ledger });
+    expect(fake.decisionRequests()[0].body).not.toHaveProperty('provider');
+    expect(ledger.callLog()[0].auditable).toBeUndefined();
+    expect(ledger.snapshot().byRole.competitor.auditableCalls).toBeUndefined();
+  });
+
+  it('o chat segue marcando auditável pelo MESMO auditableFor que monta o corpo (recorte contábil)', async () => {
+    const fake = fakeOpenRouter({ chat: () => ({ text: 'ok' }) });
+    const g = gw(fake, { auditableRoles: ['judge'] });
+    const ledger = new BudgetLedger({ budgetUsd: 1 });
+    const res = await g.chatCompletion({ apiKey: KEY, modelId: 'm/x', messages: [{ role: 'user', content: 'oi' }], role: 'judge', sink: ledger });
+    expect(fake.chatRequests()[0].body?.provider).toMatchObject({ allow_fallbacks: false });
+    expect(res.auditable).toBe(true);
+    expect(ledger.callLog()[0].auditable).toBe(true);
+  });
+});
+
 describe('prova ESTÁTICA do ponto único de decisões', () => {
   it('só src/openrouter.ts fala com o endpoint de decisões (Node e SPA)', () => {
     const quem = [...arquivosTs(join(ROOT, 'src')), ...arquivosTs(join(ROOT, 'web', 'src'))]

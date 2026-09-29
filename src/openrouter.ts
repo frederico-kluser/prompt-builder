@@ -2408,9 +2408,10 @@ interface AccountingCall {
   /** Teto de saída que entra na reserva e na estimativa (chat = `max_tokens`; decisão = 0). */
   capTokens: number;
   /**
-   * IMPL-075 — a chamada foi no modo auditável (registo `auditable: true` no
-   * ledger). Resolvido UMA vez: chat por `auditableFor(params)`; decisão pelo
-   * preset/política do papel (`auditableRoleFor`).
+   * IMPL-075 — o CORPO foi no modo auditável (registo `auditable: true` no
+   * ledger). Resolvido UMA vez: chat pelo MESMO `auditableFor(params)` que
+   * monta o corpo; decisão = sempre `false` (o corpo de decisão não leva o pin
+   * de provedor — ver `decide`).
    */
   auditable: boolean;
 }
@@ -3108,16 +3109,6 @@ export class OpenRouterGateway {
   }
 
   /**
-   * IMPL-075 para DECISÕES: sem flag por chamada (o `DecideParams` não tem),
-   * vale o preset do gateway ou a política do ledger para o papel — a MESMA
-   * regra de `auditableFor`, sem o `ChatCompletionParams`.
-   */
-  private auditableRoleFor(role: CostRole, sink?: CostSink): boolean {
-    if ((this.cfg.auditableRoles ?? []).includes(role)) return true;
-    return (sink?.auditableRoles?.() ?? []).includes(role);
-  }
-
-  /**
    * Chamada DESPACHADA sem custo medido (IMPL-017 / R-07a:REC-2): abort,
    * timeout, corpo ilegivel ou resposta sem bloco `usage`. A reserva e mantida
    * (pendente, conciliavel pelo `generationId`) ou lancada inteira como gasto
@@ -3251,7 +3242,11 @@ export class OpenRouterGateway {
       promptTokensGuess:
         countTextTokens(JSON.stringify({ state: body.state, questions: body.questions })) + DECISION_REQUEST_OVERHEAD_TOKENS,
       capTokens: 0,
-      auditable: this.auditableRoleFor(role, p.sink),
+      // IMPL-075: o registo `auditable` afirma que o CORPO foi com o pin de
+      // provedor (`applyAuditable`). O corpo de decisão não leva `provider`
+      // (o endpoint é de um provedor só e não se sabe se aceita o campo) —
+      // marcar `true` aqui, mesmo com o papel na política, seria mentira.
+      auditable: false,
     };
     const reservation = await this.reserveFor(acct);
 
