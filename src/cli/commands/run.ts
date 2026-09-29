@@ -71,6 +71,7 @@ import { emitRunEvent, emitSessionEventNdjson, truncationFields } from '../ndjso
 import { ROLE_LABEL } from '../../budget.js';
 import { forceExitNow, installGracefulStop } from '../runControl.js';
 import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
+import { recordRunCompletedTelemetry } from './telemetry.js';
 import type {
   CostRole,
   RunConfig,
@@ -1236,6 +1237,7 @@ async function runSingle(
   }
 
   relatorioFinal(out, record);
+  await recordRunCompletedTelemetry({ runId: record.id, status: record.status }, ctx.dataDir); // IMPL-120 (no-op sem opt-in)
   return runOutcome(out, record, {
     ...(guards.claim ? { idempotency: { key: guards.claim.key, reused: false } } : {}),
     dailyCapReached: guards.machine.capHit,
@@ -1307,6 +1309,7 @@ async function runTraining(
   unsubSession();
   for (const u of unsubRuns) u();
 
+  await recordRunCompletedTelemetry({ sessionId: sessionId || record.id, status: record.status }, ctx.dataDir); // IMPL-120
   return sessionOutcome(out, record, sessionId || record.id, {
     ...(guards.claim ? { idempotency: { key: guards.claim.key, reused: false } } : {}),
     dailyCapReached: guards.machine.capHit,

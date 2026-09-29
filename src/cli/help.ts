@@ -247,8 +247,8 @@ const USO: Record<string, string> = {
   agents show <runId> | list (teto 50; --all/--limit N) | logs | replay | gc`,
   telemetry: `  telemetry [status]       estado do opt-in e da atribuição (padrão)
   telemetry schema         schema PÚBLICO do payload + allowlist de eventos
-  telemetry counters       contadores locais (sem id de usuário/máquina; ganchos de
-                           funil ainda não ligados — hooksWired: false, nada é contado)
+  telemetry counters       contadores locais (sem id de usuário/máquina): docs --list,
+                           runs export, 1ª run concluída e saída 7 — só com opt-in
 
   Ambiente: PROMPT_BUILDER_TELEMETRY=on liga a telemetria (DESLIGADA por
   padrão, e nunca ativa em CI/agente sem esse opt-in explícito);

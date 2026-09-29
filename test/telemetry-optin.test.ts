@@ -209,24 +209,28 @@ describe('IMPL-120 (4) — flag PROMPT_BUILDER_NO_ATTRIBUTION suprime os headers
   });
 });
 describe('IMPL-120 — honestidade dos contadores: a flag `hooksWired` bate com o código', () => {
-  it('TELEMETRY_FUNNEL_HOOKS_WIRED é true SE E SÓ SE algum comando chama recordTelemetryEvent', async () => {
+  it('TELEMETRY_FUNNEL_HOOKS_WIRED é true SE E SÓ SE algum comando chama um gancho de funil', async () => {
     const { readdirSync, readFileSync, statSync } = await import('node:fs');
-    const { join } = await import('node:path');
+    const { join, relative } = await import('node:path');
     const { TELEMETRY_FUNNEL_HOOKS_WIRED } = await import('../src/cli/commands/telemetry.js');
     const raiz = join(process.cwd(), 'src');
+    const GANCHO = /\b(?:recordTelemetryEvent|recordExitTelemetry|recordRunCompletedTelemetry)\s*\(/u;
     const chamadores: string[] = [];
     const varrer = (dir: string): void => {
       for (const nome of readdirSync(dir)) {
         const p = join(dir, nome);
         if (statSync(p).isDirectory()) varrer(p);
         else if (p.endsWith('.ts') && !p.endsWith(join('commands', 'telemetry.ts'))) {
-          if (/\brecordTelemetryEvent\s*\(/u.test(readFileSync(p, 'utf-8'))) chamadores.push(p);
+          if (GANCHO.test(readFileSync(p, 'utf-8'))) chamadores.push(relative(raiz, p).split('\\').join('/'));
         }
       }
     };
     varrer(raiz);
-    // Hoje nenhum gancho: o comentário e o `telemetry counters` dizem isso.
     expect(TELEMETRY_FUNNEL_HOOKS_WIRED).toBe(chamadores.length > 0);
+    // Os 4 funis da allowlist, cada um com o seu gancho.
+    expect(chamadores.sort()).toEqual(
+      ['cli/commands/knowledge.ts', 'cli/commands/misc.ts', 'cli/commands/run.ts', 'cli/index.ts'].sort(),
+    );
   });
 
   it('`telemetry counters` devolve hooksWired e avisa que zero não é medida', async () => {
@@ -241,16 +245,23 @@ describe('IMPL-120 — honestidade dos contadores: a flag `hooksWired` bate com 
     const wErr = process.stderr.write.bind(process.stderr);
     process.stdout.write = ((c: string) => (saida.push(String(c)), true)) as typeof process.stdout.write;
     process.stderr.write = ((c: string) => (erro.push(String(c)), true)) as typeof process.stderr.write;
+    const optInAntes = process.env.PROMPT_BUILDER_TELEMETRY;
+    delete process.env.PROMPT_BUILDER_TELEMETRY;
     try {
       const code = await cmdTelemetry(['counters', '--json', '--data-dir', dir]);
       expect(code).toBe(0);
     } finally {
       process.stdout.write = wOut;
       process.stderr.write = wErr;
+      if (optInAntes !== undefined) process.env.PROMPT_BUILDER_TELEMETRY = optInAntes;
       rmSync(dir, { recursive: true, force: true });
     }
-    const payload = JSON.parse(saida.join('').trim().split('\n').at(-1)!) as { data: { hooksWired: boolean } };
-    expect(payload.data.hooksWired).toBe(false);
-    expect(erro.join('')).toContain('ganchos de funil ainda não ligados');
+    const payload = JSON.parse(saida.join('').trim().split('\n').at(-1)!) as {
+      data: { hooksWired: boolean; enabled: boolean };
+    };
+    expect(payload.data.hooksWired).toBe(true);
+    expect(payload.data.enabled).toBe(false);
+    // Desligada, zero continua não sendo medida — e a narração diz isso.
+    expect(erro.join('')).toContain('telemetria desligada: nada é contado');
   });
 });

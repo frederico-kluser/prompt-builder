@@ -10,6 +10,7 @@ import path from 'node:path';
 import { PKG_DOCS_DIR, PKG_SKILLS_DIR } from '../../paths.js';
 import { CliError, EXIT } from '../output.js';
 import { buildContext, parse } from '../context.js';
+import { recordTelemetryEvent } from './telemetry.js';
 
 const SKILL_NAME = 'prompt-builder';
 
@@ -124,6 +125,8 @@ export async function cmdDocs(argv: string[]): Promise<number> {
       out.line('Comece por: prompt-builder docs quickstart');
     }
     out.result(true, 'docs.list', { topics: index });
+    // IMPL-120: funil de descoberta — no-op sem opt-in (nada contado nem gravado).
+    recordTelemetryEvent('docs.list', ctx.dataDir);
     return EXIT.OK;
   }
 
