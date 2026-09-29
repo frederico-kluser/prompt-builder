@@ -34,6 +34,7 @@ import { COST_ROLES } from './types.js';
 import { cloneFinishCounts, emptyFinishCounts, tallyFinish } from './engine/truncation.js';
 import type { SensitiveRouting } from './engine/sensitiveRouting.js';
 import type { VerdictCache } from './engine/verdictCache.js';
+import type { CallJournal } from './engine/callJournal.js';
 
 // ---------------------------------------------------------------------------
 // Sinais de controle
@@ -344,6 +345,24 @@ export class BudgetLedger implements CostSink {
     return undefined;
   }
 
+  // IMPL-081 (R-10:REC-2): journal de chamadas pagas da RUN (a retomada o
+  // carrega com as respostas das tentativas anteriores). Mora no ledger da run
+  // e vale para os níveis abaixo dele; o gateway o acha pelo `sink`.
+  private callJournalSlot?: CallJournal;
+
+  /** Liga o journal de chamadas neste nível (e abaixo). */
+  setCallJournal(journal: CallJournal | undefined): void {
+    this.callJournalSlot = journal;
+  }
+
+  /** O journal mais próximo subindo a cadeia (este ledger → raiz). */
+  callJournal(): CallJournal | undefined {
+    for (let n: BudgetLedger | undefined = this; n; n = n.parent) {
+      if (n.callJournalSlot) return n.callJournalSlot;
+    }
+    return undefined;
+  }
+
   private root(): BudgetLedger {
     let node: BudgetLedger = this;
     while (node.parent) node = node.parent;
@@ -635,6 +654,39 @@ export class BudgetLedger implements CostSink {
       ...(entry.provider?.name ? { provider: entry.provider.name } : {}),
       ...(typeof entry.latencyMs === 'number' ? { latencyMs: entry.latencyMs } : {}),
       ...(entry.auditable ? { auditable: true } : {}),
+    });
+  }
+
+  /**
+   * IMPL-081 — resposta servida do JOURNAL numa run retomada. NÃO é chamada nem
+   * gasto desta tentativa: nada de reserva, `calls`, `usd`, `spentUsd` ou
+   * `committedUsd` (o dinheiro foi pago UMA vez, na tentativa que gravou a
+   * resposta — somá-lo de novo seria contar em dobro). Sobe à parte em
+   * `replayedCalls`/`replayedUsd` (custo MEDIDO original) e entra no registo
+   * como `replayed`. Os sinais de fim contam (a resposta está no record: a
+   * taxa de truncamento da run a inclui).
+   */
+  noteReplayed(entry: {
+    role: CostRole;
+    modelId: string;
+    originalCost?: CallCost;
+    finish?: CallFinishSignals;
+  }): void {
+    const orig = entry.originalCost;
+    const pago = orig && orig.source === 'usage' && Number.isFinite(orig.usd) ? orig.usd : undefined;
+    for (const n of BudgetLedger.chain(this)) {
+      const slot = n.byRole[entry.role];
+      slot.replayedCalls = (slot.replayedCalls ?? 0) + 1;
+      if (pago !== undefined) slot.replayedUsd = (slot.replayedUsd ?? 0) + pago;
+      if (entry.finish) tallyFinish((n.finishByRole[entry.role] ??= emptyFinishCounts()), entry.finish);
+    }
+    BudgetLedger.log(this, {
+      role: entry.role,
+      modelId: entry.modelId,
+      usd: 0,
+      source: orig?.source ?? 'unknown',
+      status: 'replayed',
+      ...(orig && Number.isFinite(orig.usd) ? { replayedFromUsd: orig.usd } : {}),
     });
   }
 

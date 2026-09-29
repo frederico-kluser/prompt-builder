@@ -18,6 +18,7 @@ import {
 import { LOCKLESS_ORPHAN_AFTER_MS } from '../../jobs.js';
 import { recordTelemetryEvent } from './telemetry.js';
 import { runsCancel, runsStatus, runsWait } from './runsJobs.js';
+import { runsResume } from './runsResume.js';
 import { isValidRecordId } from '../../pathSafety.js';
 import { z } from 'zod';
 import { listTechniques } from '../../techniques.js';
@@ -353,6 +354,8 @@ const RUNS_SUBS = [
   'status',
   'wait',
   'cancel',
+  // IMPL-081: retoma a run parada sem pagar de novo o que está no journal.
+  'resume',
   'reproduce',
   'export',
   'import',
@@ -389,6 +392,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     // IMPL-100: `runs prune [--older-than 30d] [--dry-run]`.
     'older-than': { type: 'string' },
     'dry-run': { type: 'boolean' },
+    // IMPL-081: `runs resume <id> [--budget <usd>|none]` (teto da continuação).
+    budget: { type: 'string' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -397,6 +402,7 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   if (sub === 'status') return runsStatus(ctx);
   if (sub === 'wait') return runsWait(ctx);
   if (sub === 'cancel') return runsCancel(ctx);
+  if (sub === 'resume') return runsResume(ctx);
 
   // IMPL-100: apagamento de verdade (record + resíduos) e o TTL sob demanda.
   if (sub === 'delete') return runsDelete(out, parsed.positionals);

@@ -11,6 +11,7 @@ import {
   verdictCacheKey,
   type VerdictCacheEntry,
 } from './engine/verdictCache.js';
+import type { JournaledResult, JournalRequest } from './engine/callJournal.js';
 import type {
   CallCost,
   CallFinishSignals,
@@ -2035,6 +2036,17 @@ export interface ChatCompletionResult {
   provider?: CallProviderInfo;
   /** true = corpo enviado no modo auditável (IMPL-075) — visível no artefato de replay. */
   auditable?: boolean;
+  /**
+   * IMPL-081 — servido do JOURNAL de chamadas (run retomada): nenhuma chamada
+   * saiu nesta tentativa e `cost.usd` é 0 porque NADA foi cobrado agora — a
+   * resposta foi paga UMA vez, na tentativa que a gravou.
+   */
+  replayed?: boolean;
+  /**
+   * Sinais de fim desta chamada como o ledger os contou (IMPL-014) — é o que o
+   * journal grava para o replay contá-los de novo (a resposta está no record).
+   */
+  finishSignals?: CallFinishSignals;
 }
 
 export interface ChatCompletionParams {
@@ -3273,13 +3285,93 @@ export class OpenRouterGateway {
   }
 
   async chatCompletion(params: ChatCompletionParams): Promise<ChatCompletionResult> {
+    // IMPL-081: journal da run PRIMEIRO — o que já foi pago numa tentativa
+    // anterior volta daqui, antes de cache, reserva e fetch.
     // IMPL-080: cache EXATO de vereditos ANTES de qualquer reserva/fetch.
     // IMPL-114: aquecimento do prefixo cacheável DEPOIS dele (hit não aquece).
-    return this.withVerdictCache(params, () => this.withCacheWarmup(params, () => this.chatCompletionDirect(params)));
+    return this.withCallJournal(params, () =>
+      this.withVerdictCache(params, () => this.withCacheWarmup(params, () => this.chatCompletionDirect(params))),
+    );
   }
 
   async chatCompletionStream(params: ChatStreamParams): Promise<ChatCompletionResult> {
-    return this.withVerdictCache(params, () => this.withCacheWarmup(params, () => this.chatCompletionStreamDirect(params)));
+    return this.withCallJournal(params, () =>
+      this.withVerdictCache(params, () => this.withCacheWarmup(params, () => this.chatCompletionStreamDirect(params))),
+    );
+  }
+
+  /** O pedido CANÔNICO desta chamada para o journal (IMPL-081) — o que muda a resposta. */
+  private journalRequestOf(params: ChatCompletionParams): JournalRequest {
+    return {
+      role: params.role ?? 'competitor',
+      modelId: params.modelId,
+      // As mensagens ORIGINAIS (antes da cascata de dado pessoal): o cofre de
+      // pseudônimos tem chave nova por run/processo — o corpo do fio mudaria
+      // a cada tentativa e nada seria replayável.
+      messages: params.messages,
+      temperature: params.temperature ?? 0,
+      maxTokens: effectiveMaxTokens(params.maxTokens),
+      reasoningLevel: params.reasoningLevel ?? null,
+      responseFormatJson: params.responseFormatJson ?? null,
+      responseSchema: params.responseSchema ?? null,
+      maxPricePerMTok: params.maxPricePerMTok ?? null,
+      cacheControlAfter: params.cacheControlAfter ?? null,
+      auditable: this.auditableFor(params),
+    };
+  }
+
+  /**
+   * IMPL-081 (R-10:REC-2) — journal de chamadas PAGAS da run (`sink.callJournal`).
+   * ANTES da chamada: numa run RETOMADA, a resposta gravada desta ocorrência do
+   * MESMO pedido canônico volta sem reserva, sem fetch e sem gasto (US$ 0 nesta
+   * tentativa; o ledger a registra como `replayed`, fora do gasto). DEPOIS: a
+   * resposta nova é gravada (durável) antes de voltar ao papel. Abort pendente
+   * NUNCA é replayado: segue o caminho normal, que o devolve como sinal de
+   * CONTROLE (RunCancelled). Falha ao gravar não derruba a chamada paga.
+   */
+  private async withCallJournal(
+    params: ChatStreamParams,
+    run: () => Promise<ChatCompletionResult>,
+  ): Promise<ChatCompletionResult> {
+    const journal = params.sink?.callJournal?.();
+    if (!journal) return run();
+    if (params.signal?.aborted) return run();
+    const req = this.journalRequestOf(params);
+    const got = journal.take(req);
+    if (got.kind === 'replay') {
+      const r = got.result;
+      params.sink?.noteReplayed?.({
+        role: req.role,
+        modelId: params.modelId,
+        originalCost: r.cost,
+        ...(r.finishSignals ? { finish: r.finishSignals } : {}),
+      });
+      params.onDelta?.(r.text, r.text);
+      return {
+        text: r.text,
+        tokensIn: r.tokensIn,
+        tokensOut: r.tokensOut,
+        latencyMs: r.latencyMs,
+        raw: { replayed: true },
+        cost: { usd: 0, source: 'usage', replayed: true },
+        ...(typeof r.cachedTokensIn === 'number' ? { cachedTokensIn: r.cachedTokensIn } : {}),
+        ...(typeof r.reasoningTokens === 'number' ? { reasoningTokens: r.reasoningTokens } : {}),
+        ...(r.finishReason ? { finishReason: r.finishReason } : {}),
+        ...(r.nativeFinishReason ? { nativeFinishReason: r.nativeFinishReason } : {}),
+        ...(r.refusal ? { refusal: r.refusal } : {}),
+        ...(r.blocked ? { blocked: r.blocked as GatewayBlock } : {}),
+        ...(typeof r.truncated === 'boolean' ? { truncated: r.truncated } : {}),
+        ...(r.truncationSignals?.length ? { truncationSignals: r.truncationSignals as TruncationSignal[] } : {}),
+        ...(r.provider ? { provider: r.provider } : {}),
+        ...(r.auditable ? { auditable: true } : {}),
+        ...(r.finishSignals ? { finishSignals: r.finishSignals } : {}),
+        replayed: true,
+      };
+    }
+    const result = await run();
+    // Replay de OUTRA camada (não existe hoje) nunca é regravado.
+    if (!result.replayed) await journal.record(got.ticket, result as JournaledResult);
+    return result;
   }
 
   // --- decisões (modo JEV) -----------------------------------------------------
@@ -3732,6 +3824,7 @@ export class OpenRouterGateway {
       ...(provider ? { provider } : {}),
       ...(acct.auditable ? { auditable: true } : {}),
       ...trunc,
+      ...(fim ? { finishSignals: fim } : {}),
     };
   }
 

@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { contentHash } from './engine/hash.js';
+import { journalEntryId, parseJournalEntry, type JournalEntry, type JournalStore } from './engine/callJournal.js';
 import { normalizeRunRecord } from './normalize.js';
 import {
   assertValidRecordId,
@@ -862,44 +863,47 @@ export async function listSessions(): Promise<SessionSummary[]> {
 
 // ---------------------------------------------------------------------------
 // Journal de chamadas (IMPL-081, R-10:REC-2) — retomada sem repetir chamadas
-// pagas
+// pagas. Este é o ADAPTADOR Node (arquivo); o núcleo — chave canônica,
+// ocorrência, replay e política de retomada — é fonte única em
+// `src/engine/callJournal.ts` (o gateway o consulta ANTES de cada chamada e
+// grava DEPOIS de cada resposta, via `sink.callJournal`).
 // ---------------------------------------------------------------------------
-// `saveRun` guarda só o snapshot do record: depois de um crash/reload no meio
-// da run, o usuário reexecutava TUDO — as chamadas já pagas eram repetidas.
-// O journal é append-only com 1 entrada por chamada CONCLUÍDA, chaveada pelo
-// hash canônico de `model + messages + params` (chave de idempotência): na
-// retomada, `replayCall` devolve o resultado gravado ANTES de a chamada ser
-// refeita — replay, não re-execução.
+// `saveRun` guarda só o snapshot do record: depois de um crash/kill no meio da
+// run, o usuário reexecutava TUDO — as chamadas já pagas eram repetidas.
+// `runs/<id>.journal` é append-only com 1 linha por chamada CONCLUÍDA; na
+// retomada (`runs resume <id>`) as respostas gravadas voltam a US$ 0 — replay,
+// não re-execução.
 //
-// GRUPO ATÔMICO (competidores + julgamento entra inteiro ou é refeito): cada
-// entrada pertence a um `group` e só é replayable depois de o grupo ter o
-// registro `commit` (`commitCallGroup`). Kill em qualquer fase do grupo =>
-// entradas sem commit => o grupo é REFEITO por completo — nunca se retoma uma
-// etapa com resposta e sem nota.
+// ATOMICIDADE (grupo competidores + julgamento): a retomada re-executa o
+// pipeline INTEIRO — nenhuma etapa é carregada pela metade do disco — e só as
+// CHAMADAS vêm do journal. A chave é o conteúdo do pedido, então a
+// dependência se resolve sozinha (competidor refeito => texto novo => o pedido
+// do juiz muda => o juiz é chamado de novo). Por isso não há "commit de grupo":
+// travar o replay até o grupo fechar faria o kill no meio do julgamento pagar
+// de novo TODAS as respostas do grupo — o contrário do critério (i).
 //
-// Durabilidade: o append do journal é escrita de CHECKPOINT — tmp não serve
+// Durabilidade: o append é escrita de CHECKPOINT — tmp não serve
 // (append-only), então a entrada é escrita com fsync na hora (`'strict'`); as
 // batidas periódicas do record (800 ms) seguem sem fsync. Espelho web:
-// web/src/engine/storage.ts (IndexedDB, durability 'strict' nas mesmas entradas).
+// web/src/engine/callJournal.ts (IndexedDB, durability 'strict').
 export interface CallJournalEntry {
-  /** Chave de idempotência: `contentHash` de model+messages+params. */
+  /** Id da entrada (`<chave canônica>#<ocorrência>` — ver `journalEntryId`). */
   key: string;
-  /** Grupo atômico (ex.: `stage:2:competitors+judge`) — entra inteiro ou é refeito. */
+  /** Rótulo livre (o papel da chamada) — só para inspeção. */
   group: string;
   /** ISO do momento em que a chamada CONCLUIU (resultado já na mão). */
   at: string;
-  /** Resultado serializável para replay (a resposta da chamada). */
+  /** A entrada do núcleo (`JournalEntry`), serializável. */
   result: unknown;
 }
 
-type CallJournalLine =
-  | ({ t: 'call' } & CallJournalEntry)
-  | { t: 'commit'; group: string; at: string };
+type CallJournalLine = { t: 'call' } & CallJournalEntry;
 
 /**
- * Chave de idempotência de uma chamada: hash canônico (JCS) de
- * `model + messages + params`. Mesma função no espelho web — mesmo valor nos
- * dois runtimes por construção (fonte única em src/engine/hash.ts).
+ * Hash canônico (JCS) de `model + messages + params` — identidade de conteúdo
+ * genérica, mesma função no espelho web (fonte única em src/engine/hash.ts).
+ * O motor usa a chave COMPLETA de `journalRequestKey` (papel, esforço,
+ * formato da saída, blindagem do juiz normalizada…).
  */
 export function callJournalKey(model: string, messages: unknown, params?: unknown): string {
   return contentHash({ model, messages, params: params ?? null });
@@ -927,11 +931,13 @@ function withJournalQueue(runId: string, task: () => Promise<void>): Promise<voi
   return job;
 }
 
-/** Append DURÁVEL de uma linha do journal (fsync imediato = checkpoint 'strict'). */
-async function appendJournalLine(runId: string, line: CallJournalLine): Promise<void> {
+/**
+ * Append DURÁVEL de um lote de linhas do journal (fsync antes de devolver =
+ * checkpoint 'strict'). Quem gravou só segue depois do fsync.
+ */
+async function appendJournalLine(runId: string, texto: string): Promise<void> {
   await ensureDir();
   const file = journalFileFor(runId);
-  const texto = `${JSON.stringify(line)}\n`;
   let fh: fs.FileHandle | null = null;
   try {
     fh = await fs.open(file, 'a', PRIVATE_FILE_MODE);
@@ -946,78 +952,84 @@ async function appendJournalLine(runId: string, line: CallJournalLine): Promise<
 }
 
 /**
+ * COMMIT EM GRUPO: as entradas que chegam enquanto o lote anterior está no
+ * fsync entram no PRÓXIMO lote — 1 escrita + 1 fsync por lote, não por
+ * chamada. Sem isto as etapas paralelas enfileiravam um fsync por resposta
+ * (a vazão do journal viraria 1/latência do fsync).
+ */
+const openJournalBatches = new Map<string, { lines: string[]; done: Promise<void> }>();
+
+/**
  * Grava 1 entrada por chamada CONCLUÍDA (o resultado fica para replay). Chame
  * depois de a resposta chegar — nunca antes: entrada sem resultado não é
- * replayable de qualquer jeito.
+ * replayable de qualquer jeito. Resolve só depois do fsync do lote dela.
  */
-export async function appendCallJournal(runId: string, entry: CallJournalEntry): Promise<void> {
-  await withJournalQueue(runId, () =>
-    appendJournalLine(runId, { t: 'call', key: entry.key, group: entry.group, at: entry.at, result: entry.result }),
-  );
+export function appendCallJournal(runId: string, entry: CallJournalEntry): Promise<void> {
+  const linha: CallJournalLine = { t: 'call', key: entry.key, group: entry.group, at: entry.at, result: entry.result };
+  const texto = `${JSON.stringify(linha)}\n`;
+  let lote = openJournalBatches.get(runId);
+  if (!lote) {
+    const novo = { lines: [] as string[], done: Promise.resolve() };
+    novo.done = withJournalQueue(runId, async () => {
+      // O lote FECHA quando começa a ser gravado: quem chega agora vai no próximo.
+      if (openJournalBatches.get(runId) === novo) openJournalBatches.delete(runId);
+      await appendJournalLine(runId, novo.lines.join(''));
+    });
+    openJournalBatches.set(runId, novo);
+    lote = novo;
+  }
+  lote.lines.push(texto);
+  return lote.done;
 }
 
 /**
- * Fecha o grupo atômico: a partir daqui as chamadas dele são replayable. Sem
- * este registro o grupo inteiro é refeito na retomada (kill no meio => nunca
- * etapa pela metade).
+ * Entradas do journal (ordem de escrita; id repetido = vale a 1ª). Linha rasgada
+ * por kill no meio do append é descartada — as anteriores (com fsync) valem.
+ * Linhas `commit` de journals antigos são ignoradas.
  */
-export async function commitCallGroup(runId: string, group: string): Promise<void> {
-  await withJournalQueue(runId, () =>
-    appendJournalLine(runId, { t: 'commit', group, at: new Date().toISOString() }),
-  );
-}
-
-interface JournalState {
-  calls: Map<string, CallJournalEntry>;
-  commits: Set<string>;
-}
-
-async function readJournalState(runId: string): Promise<JournalState> {
-  const state: JournalState = { calls: new Map(), commits: new Set() };
+export async function readCallJournal(runId: string): Promise<CallJournalEntry[]> {
+  const calls = new Map<string, CallJournalEntry>();
   let texto: string;
   try {
     texto = await fs.readFile(journalFileFor(runId), 'utf-8');
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return state;
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
   }
   for (const linha of texto.split('\n')) {
     if (!linha.trim()) continue;
     try {
-      const l = JSON.parse(linha) as CallJournalLine;
-      if (l?.t === 'call' && typeof l.key === 'string' && typeof l.group === 'string') {
-        state.calls.set(l.key, { key: l.key, group: l.group, at: l.at, result: l.result });
-      } else if (l?.t === 'commit' && typeof l.group === 'string') {
-        state.commits.add(l.group);
+      const l = JSON.parse(linha) as Partial<CallJournalLine>;
+      if (l?.t === 'call' && typeof l.key === 'string' && typeof l.group === 'string' && !calls.has(l.key)) {
+        calls.set(l.key, { key: l.key, group: l.group, at: String(l.at ?? ''), result: l.result });
       }
     } catch {
-      // linha rasgada por kill no meio do append: descartada — o que veio antes
-      // (entradas já com fsync) continua válido.
+      // linha rasgada por kill no meio do append: descartada
     }
   }
-  return state;
-}
-
-/**
- * Replay de UMA chamada: devolve o resultado gravado se a chamada está no
- * journal E o grupo dela foi commitado; `undefined` = não há replay (chame de
- * verdade). É a consulta ANTES de cada chamada na retomada.
- */
-export async function replayCall<T = unknown>(runId: string, key: string): Promise<T | undefined> {
-  const { calls, commits } = await readJournalState(runId);
-  const entry = calls.get(key);
-  if (!entry || !commits.has(entry.group)) return undefined;
-  return entry.result as T;
-}
-
-/** Entradas de chamada do journal (ordem de escrita). Para inspeção/testes. */
-export async function readCallJournal(runId: string): Promise<CallJournalEntry[]> {
-  const { calls } = await readJournalState(runId);
   return [...calls.values()];
 }
 
+/** Porta de persistência do núcleo (`CallJournal`) para uma run — o arquivo com fsync. */
+export function callJournalStore(runId: string): JournalStore {
+  return {
+    append: (e: JournalEntry) =>
+      appendCallJournal(runId, { key: journalEntryId(e), group: e.role, at: e.at, result: e }),
+  };
+}
+
+/** Entradas VÁLIDAS do journal da run (o que a retomada pode replayar). */
+export async function loadCallJournal(runId: string): Promise<JournalEntry[]> {
+  const out: JournalEntry[] = [];
+  for (const e of await readCallJournal(runId)) {
+    const parsed = parseJournalEntry(e.result);
+    if (parsed && journalEntryId(parsed) === e.key) out.push(parsed);
+  }
+  return out;
+}
+
 /**
- * Apaga o journal da run (a retomada terminou — ou o record foi deletado e o
+ * Apaga o journal da run (a run CONCLUIU — ou o record foi deletado e o
  * cache de idempotência não tem mais razão de existir). Idempotente.
  */
 export async function clearCallJournal(runId: string): Promise<void> {

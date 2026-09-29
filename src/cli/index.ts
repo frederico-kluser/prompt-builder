@@ -94,6 +94,7 @@ RESULTADOS
   runs wait <id> [--timeout <s>]
                            espera o fim (padrão 600 s; exit 9 se esgotar)
   runs cancel <id>         parada graciosa: record 'aborted' com o parcial
+  runs resume <id>         retoma sem pagar de novo (journal: chamadas pagas a US$ 0)
   runs reproduce <id>      config reconstruído + comando p/ re-rodar a run
   runs reproduce <id> --replay
                            re-pontua as respostas gravadas a US$ 0 (exit 3 se divergir)

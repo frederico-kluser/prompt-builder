@@ -1081,6 +1081,8 @@ export interface RunRecord {
   sessionId?: string;
   iteration?: number; // 0-based
   parentRunId?: string;
+  /** IMPL-081 — execução RETOMADA (espelho de src/types.ts; tipo lá). */
+  resume?: import('../../../src/types.js').RunResumeInfo;
 }
 
 // ----------------------------------------------------------------------------

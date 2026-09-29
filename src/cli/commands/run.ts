@@ -700,7 +700,7 @@ export function exitFor(
   return EXIT.OK;
 }
 
-function relatorioFinal(out: Output, record: RunRecord): void {
+export function relatorioFinal(out: Output, record: RunRecord): void {
   if (!out.isText) return;
   out.line();
   for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) {
@@ -859,7 +859,7 @@ function fatalGatewayOutcome(
  * reaproveitada por --idempotency-key (o agente nao distingue pelo formato, so
  * por `idempotency.reused`).
  */
-function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
+export function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
   // IMPL-014: o alerta de truncamento (> 2% das chamadas) vai SEMPRE para o
   // stderr (narração), em qualquer formato; no payload ele sai em `truncationAlert`.
   const camposTrunc = truncationFields(record);
@@ -903,6 +903,8 @@ function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
     // IMPL-004: falhas por papel e, se inconclusiva, o porquê.
     failureCountByRole: record.failureCountByRole,
     inconclusiveReasons: record.verdictIntegrity?.reasons,
+    // IMPL-081: run RETOMADA — replays do journal (US$ 0) e o gasto anterior.
+    ...(record.resume ? { resume: record.resume } : {}),
     ...extrasData(x),
   };
   const exit = exitFor(record.stoppedReason, record.budgetExhausted, record.status);

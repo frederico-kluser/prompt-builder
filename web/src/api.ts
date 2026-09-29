@@ -102,7 +102,13 @@ import {
   type PiiRunReport,
 } from './lgpd';
 import { BudgetLedger } from '../../src/budget.js';
-import { cancelRun as engineCancelRun, isRunCancellable, startRun } from './engine/orchestrator';
+import {
+  cancelRun as engineCancelRun,
+  isRunCancellable,
+  resumeRun as engineResumeRun,
+  startRun,
+} from './engine/orchestrator';
+import { resumeRefusal } from './engine/callJournal';
 import { cancelTraining, isTrainingCancellable, startTraining } from './engine/trainer';
 import { generateContestants, generateBasePrompt as engineGenerateBasePrompt } from './engine/variator';
 import { listModels, validateKey as engineValidateKey, currentConcurrency } from './engine/openrouter';
@@ -780,6 +786,11 @@ export interface RunRecord {
   sessionId?: string;
   iteration?: number;
   parentRunId?: string;
+  /**
+   * IMPL-081 — execução RETOMADA: as chamadas já pagas vieram do journal a
+   * US$ 0; `totalCostUsd` é só o desta tentativa (o anterior em `priorSpentUsd`).
+   */
+  resume?: import('../../src/types.js').RunResumeInfo;
 }
 
 export interface RunSummary {
@@ -1053,8 +1064,18 @@ export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Pro
   // de qualquer chamada paga, com a mesma mensagem do schema.
   assertRoleSeparation(config);
   await assertCostConfirmed(config, launch);
-  // Client-side: o run roda na própria aba (engine). Para variação, as variantes
-  // são geradas via "optimizer" antes do loop (igual ao prepare do backend).
+  const { runId, record } = startRun(config as never, apiKey, engineOptsFor(config, apiKey) as never);
+  cacheRunRecord(record);
+  return runId;
+}
+
+/**
+ * Opções do motor por modo — as MESMAS na run nova e na retomada (IMPL-081).
+ * Client-side: o run roda na própria aba (engine). Para variação, as variantes
+ * são geradas via "optimizer" antes do loop (igual ao prepare do backend) — na
+ * retomada o reescritor volta do journal a US$ 0, com as mesmas variantes.
+ */
+function engineOptsFor(config: RunConfig, apiKey: string): Record<string, unknown> {
   const cfg = config as Record<string, any>;
   const opts: Record<string, unknown> = {};
   if (cfg.mode === 'variation') {
@@ -1088,7 +1109,41 @@ export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Pro
         ctx: runCtx,
       });
   }
-  const { runId, record } = startRun(config as never, apiKey, opts as never);
+  return opts;
+}
+
+/**
+ * IMPL-081 — por que esta run NÃO pode ser retomada (`null` = pode): a regra
+ * única de `src/engine/callJournal.ts` (órfã/cancelada/orçamento/erro sim;
+ * concluída, em execução, rodada de treino ou modo agente não).
+ */
+export function runResumeRefusal(record: RunRecord): string | null {
+  return resumeRefusal(record as never);
+}
+
+/**
+ * IMPL-081 (R-10:REC-2) — RETOMA a run nesta aba sem pagar de novo o que já
+ * foi pago: o pipeline roda outra vez com o MESMO id e a MESMA config, e as
+ * chamadas concluídas voltam do journal (IndexedDB) a US$ 0. O teto é o que
+ * sobrou do original. Run 'running' passa antes pela checagem de órfã (lock):
+ * se outra aba a executa, nada é retomado aqui.
+ */
+export async function resumeRun(id: string): Promise<string> {
+  void requestPersistentStorage();
+  const apiKey = requireKey();
+  // O DISCO decide (é dele que o motor recarrega a config e o journal); a
+  // memória só cobre o record que nunca chegou a ser gravado.
+  let rec = ((await loadRun(id)) as unknown as RunRecord | null) ?? (getRunRecord(id) as unknown as RunRecord | undefined);
+  if (!rec) throw new Error('Run nao encontrada');
+  if (rec.status === 'running' && !isHeldHere('run', id)) {
+    const chk = await reconcileRun(id);
+    if (chk.state !== 'missing') rec = chk.record as unknown as RunRecord;
+  }
+  const motivo = runResumeRefusal(rec);
+  if (motivo) throw new Error(`Esta run não pode ser retomada: ${motivo}`);
+  // IMPL-048: o record veio do disco — a mesma recusa de papéis do createRun.
+  assertRoleSeparation(rec.config);
+  const { runId, record } = await engineResumeRun(id, apiKey, engineOptsFor(rec.config, apiKey) as never);
   cacheRunRecord(record);
   return runId;
 }

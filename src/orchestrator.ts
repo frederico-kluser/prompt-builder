@@ -57,7 +57,24 @@ import { sanitizeLlmVariants, variantsToContestants } from './llmVariants.js';
 import { judgeScoreFromVerdicts } from './rank.js';
 import { runCompleteness } from './stats.js';
 import { emitEvent } from './events.js';
-import { saveRun, getDataDir, listRuns, loadRun } from './storage.js';
+import {
+  callJournalStore,
+  clearCallJournal,
+  getDataDir,
+  listRuns,
+  loadCallJournal,
+  loadRun,
+  saveRun,
+} from './storage.js';
+import {
+  CallJournal,
+  discountByRole,
+  journalEnabledFor,
+  resumeBudgetUsd,
+  resumeInfoFor,
+  resumeRefusal,
+  type JournalEntry,
+} from './engine/callJournal.js';
 import { withStageCountInRange } from './engine/stageCount.js';
 import { contestantsFromConfig } from './normalize.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
@@ -239,6 +256,19 @@ export interface StartRunOpts {
   parentLedger?: BudgetLedger;
   /** Contexto pronto (usado por prepareOptsFor). Tem precedencia sobre signal. */
   ctx?: RunCtx;
+  /**
+   * IMPL-081 — journal de chamadas PRONTO (a retomada o passa carregado com as
+   * respostas das tentativas anteriores). Ausente => a run avulsa de chat cria
+   * o seu, vazio (ver `journalEnabledFor`); rodada de treino não grava.
+   */
+  callJournal?: CallJournal;
+  /**
+   * Teto EFETIVO desta execução quando a run cria o próprio ledger (sem
+   * `parentLedger`). A retomada passa o que SOBROU do teto original
+   * (`resumeBudgetUsd`) — nunca o teto inteiro de novo. Ausente =
+   * `config.budgetUsd`.
+   */
+  budgetUsd?: number;
 }
 
 /**
@@ -443,6 +473,11 @@ async function executeRun(
     // desfecho): sem timer órfão e com o record final no disco. A conciliação
     // é idempotente — não roda de novo aqui.
     await saver.flush();
+    // IMPL-081: run CONCLUÍDA não tem o que retomar — o journal some. Abortada
+    // (órfã, cancelada, orçamento) ou com erro mantém o dela para `runs resume`.
+    if ((record.status === 'finished' || record.status === 'inconclusive') && journalEnabledFor(record)) {
+      await clearCallJournal(record.id).catch(() => undefined);
+    }
     // So DEPOIS da escrita terminal: quem chega agora le o record final do disco.
     if (liveRuns.get(record.id) === record) liveRuns.delete(record.id);
   }
@@ -486,6 +521,61 @@ export function runToCompletion(
   return executeRun(record, apiKey, opts);
 }
 
+// ---------------------------------------------------------------------------
+// IMPL-081 — RETOMADA (`runs resume <id>`): o pipeline roda de novo, com o
+// MESMO id e a MESMA config, e as chamadas já pagas voltam do journal a US$ 0.
+// ---------------------------------------------------------------------------
+
+/** O que a retomada precisa: o record da tentativa anterior e o journal dela. */
+export interface ResumePlan {
+  previous: RunRecord;
+  entries: JournalEntry[];
+}
+
+export type ResumePlanResult =
+  | { ok: true; plan: ResumePlan }
+  | { ok: false; reason: string; record: RunRecord | null };
+
+/**
+ * Carrega e valida a retomada de uma run — só leitura, nada é gasto. A
+ * varredura de órfãs (dono morto => 'aborted') é de quem chama (o CLI a faz
+ * antes, como em `runs status`).
+ */
+export async function planResume(runId: string): Promise<ResumePlanResult> {
+  const previous = await loadRun(runId);
+  if (!previous) return { ok: false, reason: 'run não encontrada.', record: null };
+  const motivo = resumeRefusal(previous);
+  if (motivo) return { ok: false, reason: motivo, record: previous };
+  return { ok: true, plan: { previous, entries: await loadCallJournal(runId) } };
+}
+
+/**
+ * Executa a retomada até o fim. O record é RECONSTRUÍDO do zero (nenhuma etapa
+ * é carregada pela metade — o grupo competidores+julgamento é refeito inteiro,
+ * pagando só as chamadas que não estão no journal) e carimbado com `resume`
+ * (tentativa, gasto das anteriores, replays). O teto desta execução é o que
+ * sobrou do original (`resumeBudgetUsd`) — com `parentLedger` (CLI) é o do pai.
+ */
+export function resumeToCompletion(plan: ResumePlan, apiKey: string, opts: StartRunOpts = {}): Promise<RunRecord> {
+  const prev = plan.previous;
+  const record = buildRecord(prev.config, { ...opts, runId: prev.id });
+  record.startedAt = prev.startedAt;
+  record.resume = resumeInfoFor(prev, plan.entries.length);
+  const journal = new CallJournal({
+    store: callJournalStore(prev.id),
+    entries: plan.entries,
+    onError: (err) =>
+      log(prev.id, `journal de chamadas: falhou ao gravar (a retomada pagaria de novo): ${err instanceof Error ? err.message : String(err)}`),
+  });
+  liveRuns.set(record.id, record);
+  return executeRun(record, apiKey, {
+    ...opts,
+    runId: prev.id,
+    callJournal: journal,
+    budgetUsd: opts.budgetUsd ?? resumeBudgetUsd(prev),
+  });
+}
+
 async function runLoop(
   record: RunRecord,
   apiKey: string,
@@ -513,10 +603,23 @@ async function runLoop(
   const ledger =
     opts.parentLedger?.fork() ??
     new BudgetLedger({
-      budgetUsd: record.config.budgetUsd,
+      budgetUsd: opts.budgetUsd ?? record.config.budgetUsd,
       signal: opts.ctx?.signal ?? opts.signal,
       estimateCall: makeCallEstimator(catalogo, { maxPricePerMTok: record.config.maxPricePerMTok }),
     });
+  // IMPL-081 (R-10:REC-2): journal de chamadas PAGAS — o gateway consulta ANTES
+  // de cada chamada (replay a US$ 0 na retomada) e grava DEPOIS de cada
+  // resposta (arquivo append-only com fsync). Só a run AVULSA de chat.
+  const journal =
+    opts.callJournal ??
+    (journalEnabledFor(record)
+      ? new CallJournal({
+          store: callJournalStore(runId),
+          onError: (err) =>
+            log(runId, `journal de chamadas: falhou ao gravar (a retomada pagaria de novo): ${err instanceof Error ? err.message : String(err)}`),
+        })
+      : undefined);
+  if (journal) ledger.setCallJournal(journal);
   const ctx: RunCtx = { signal: opts.ctx?.signal ?? opts.signal ?? ledger.signal, sink: ledger };
   const maxPricePerMTok = record.config.maxPricePerMTok;
   record.budgetUsd = ledger.remainingUsd() !== undefined ? ledger.snapshot().budgetUsd : undefined;
@@ -533,11 +636,17 @@ async function runLoop(
   // do competidor inclui a folga de raciocinio desse degrau.
   // `stagesReais` (web-live#7): depois do datagen, se faltou cenário, a porta
   // G2 projeta com o n REAL — não com o alvo que não foi entregue.
+  // IMPL-081: numa RETOMADA, a projeção de cada porta desconta o que o journal
+  // já cobre (as chamadas que voltam a US$ 0) — senão o teto que sobrou
+  // recusaria o grupo que na verdade cabe.
+  const jaPagoPorPapel = journal?.loadedUsdByRole() ?? {};
+  const descontarJournal = <E extends { byRole: Record<string, number> }>(e: E): E =>
+    Object.keys(jaPagoPorPapel).length > 0 ? { ...e, byRole: discountByRole(e.byRole, jaPagoPorPapel) } : e;
   const estimar = (
     contestants: ReadonlyArray<{ id: string; reasoningLevel?: ReasoningLevel }>,
     stagesReais?: number,
   ) =>
-    estimateRunCost(
+    descontarJournal(estimateRunCost(
       estimateInputFromConfig(
         stagesReais !== undefined ? { ...record.config, stages: Math.max(1, stagesReais) } : record.config,
         contestants.length > 0
@@ -551,7 +660,7 @@ async function runLoop(
       ),
       catalogo,
       { unknownPrice: 'worst-case' },
-    );
+    ));
   let est = estimar(record.contestants);
 
   /**
@@ -598,6 +707,12 @@ async function runLoop(
     record.callLog = ledger.callLog();
     if (ledger.callLogDropped > 0) record.callLogDropped = ledger.callLogDropped;
     Object.assign(record, truncationRecordFields(snap.finishByRole));
+    // IMPL-081: quantas respostas desta tentativa vieram do journal (US$ 0).
+    if (record.resume && journal) {
+      const st = journal.stats();
+      record.resume.replayedCalls = st.replayedCalls;
+      record.resume.replayedUsd = st.replayedUsd;
+    }
   };
   saver.bindLedger(syncLedger, () => reconcileAtRunEnd(ledger, apiKey));
 
