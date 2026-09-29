@@ -115,13 +115,17 @@ o ganho do treino era ruído ou sobreajuste. Não promova esse prompt: o
 
 ```bash
 prompt-builder runs reproduce <id>          # config + comando exato para re-rodar
+prompt-builder runs reproduce <id> --replay # re-pontua as respostas GRAVADAS a US$ 0 (exit 3 se divergir)
 prompt-builder runs export <id> -o run.json # artefato auto-contido (gabaritos, prompts, vereditos)
 prompt-builder sessions winner <sid> --apply prompt.md [--commit] [--override "<motivo>"]
 prompt-builder registry validate            # guarda de drift: o needle do prompt ainda existe no fonte?
 ```
 
 O `runs reproduce` devolve o RunConfig **lossless** (passa em `config validate`)
-e a vista `arena-config@1`; o `runs export` produz `prompt-builder-run@1` —
+e a vista `arena-config@1`; com `--replay` ele roda o pipeline de HOJE sobre as
+respostas e saídas de juiz GRAVADAS (nenhuma chamada sai para a rede, custo $0)
+e compara o judge-score por cenário — divergência = drift de pontuação (exit 3,
+`config.replay_mismatch`); run de agente não tem replay. O `runs export` produz `prompt-builder-run@1` —
 auditoria completa sem o disco original. O `--apply` nunca perde o prompt de
 produção: backup `<destino>.bak-<ts>` antes de sobrescrever, diff sempre.
 

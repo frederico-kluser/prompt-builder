@@ -45,6 +45,7 @@ import { holdoutConfirmationText, holdoutStrength } from '../../holdout.js';
 import { judgeScaleWarning } from '../../engine/verdictAggregate.js';
 import { winnerFromStandings } from '../../engine/duelCore.js';
 import { groupVerdictFailures, verdictFailuresFromStages } from '../../refJudge.js';
+import { replayRun, replayUnsupportedReason } from '../replay.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import {
   assertNoUnknownConfigKeys,
@@ -287,6 +288,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     out: { type: 'string', short: 'o' },
     timeout: { type: 'string' },
     reason: { type: 'string' },
+    // IMPL-117: `runs reproduce <id> --replay` re-pontua a run gravada a US$ 0.
+    replay: { type: 'boolean' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -331,6 +334,48 @@ export async function cmdRuns(argv: string[]): Promise<number> {
       `Run "${id}" não encontrada no diretório de dados (confira \`prompt-builder runs list\` e --data-dir).`,
       EXIT.USAGE,
     );
+  }
+
+  if (sub === 'reproduce' && parsed.values.replay === true) {
+    // IMPL-117 (R-07b:REC-5): re-pontua as respostas GRAVADAS com o pipeline de
+    // hoje, a US$ 0 (gateway de replay — nenhuma chamada sai para a rede).
+    const motivo = replayUnsupportedReason(record);
+    if (motivo) throw new CliError(`Replay indisponível: ${motivo}`, EXIT.USAGE);
+    out.info(`replay da run ${record.id}: re-pontuando as respostas gravadas (sem rede, US$ 0)…`);
+    const { replay, comparison, calls } = await replayRun(record);
+    const payload = {
+      runId: record.id,
+      identical: comparison.identical,
+      costUsd: replay.totalCostUsd,
+      calls,
+      scenarios: comparison.scenarios,
+      judgeScoreOriginal: comparison.judgeScoreOriginal,
+      judgeScoreReplay: comparison.judgeScoreReplay,
+      mismatches: comparison.mismatches,
+    };
+    if (out.isText) {
+      out.line(`replay: ${calls} chamada(s) respondidas do record · custo $${replay.totalCostUsd} · ${comparison.scenarios} cenário(s)`);
+      for (const [id, nota] of Object.entries(comparison.judgeScoreOriginal)) {
+        out.line(`  ${id.padEnd(28)} original ${nota.toFixed(1)} · replay ${comparison.judgeScoreReplay[id]?.toFixed(1) ?? '—'}`);
+      }
+      out.line(comparison.identical ? 'ok: judge-score idêntico em 100% dos cenários.' : 'DIVERGIU:');
+      for (const m of comparison.mismatches.slice(0, 20)) out.line(`  [${m.what}] ${m.detail}`);
+    }
+    if (!comparison.identical) {
+      // Drift de PONTUAÇÃO (agregação/regra do judge-score/finais) — o mesmo
+      // código de saída do gate de contrato (`baseline check`).
+      throw new CliError(
+        `Replay divergiu da run gravada em ${comparison.mismatches.length} ponto(s): ${comparison.mismatches[0]?.detail ?? ''}`,
+        EXIT.CONFIG,
+        payload,
+        {
+          code: 'config.replay_mismatch',
+          hint: 'O binário de hoje pontua as respostas gravadas de outro jeito — compare as versões antes de comparar notas.',
+        },
+      );
+    }
+    out.result(true, 'runs.reproduce.replay', payload);
+    return EXIT.OK;
   }
 
   if (sub === 'reproduce') {
