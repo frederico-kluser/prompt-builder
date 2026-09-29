@@ -13,14 +13,21 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
+  REJECT_KINDS,
   coverageReport,
+  curatedKofN,
+  curationIssue,
+  curationStatus,
   hasGabarito,
   labelIssue,
   libraryItemFromStage,
   mergeSeedItems,
   normalizeLibraryItem,
+  planItemReviews,
   type CoverageTargets,
+  type ItemReviewRequest,
   type LibraryItem,
+  type RejectKind,
   type ScenarioRules,
 } from '../../engine/libraryCore.js';
 import { coverageInstruction, parseScenarioRules } from '../../engine/scenarioRules.js';
@@ -32,6 +39,7 @@ import {
 import {
   deleteItem,
   deleteProfile,
+  saveItems,
   exportProfileExchange,
   exportProfilePackDeclared,
   getItem,
@@ -52,6 +60,7 @@ import {
   generateAdversarialStages,
   generateStages,
   languageWarnings,
+  type DatagenReport,
 } from '../../datagen.js';
 import { generateReferences } from '../../gabarito.js';
 import { BudgetLedger, isControlSignal } from '../../budget.js';
@@ -59,7 +68,8 @@ import { SCENARIO_PACK_FORMAT } from '../../scenarioPack.js';
 import { pkgVersion } from '../../paths.js';
 import type { StageSpec } from '../../types.js';
 import { buildContext, buildNetworkContext, isAgentContext, limitList, parse, parseListLimit, readJsonFile } from '../context.js';
-import { CliError, EXIT } from '../output.js';
+import { resolveApprover } from '../approval.js';
+import { CliError, EXIT, type Output } from '../output.js';
 import { renderCommandHelp } from '../help.js';
 import { isUnsafePathError } from '../../pathSafety.js';
 
@@ -146,6 +156,16 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
     // IMPL-092: teto default de 50 em `library list` (--limit N / --all).
     limit: { type: 'string' },
     all: { type: 'boolean' },
+    // IMPL-063 (left#4): dedup SEMÂNTICO do `seed --generate` (embeddings; custo no papel datagen).
+    'semantic-dedup': { type: 'boolean' },
+    // IMPL-090/087 (left#7): `library review` — ids separados por vírgula.
+    approve: { type: 'string' },
+    reject: { type: 'string' },
+    adjust: { type: 'string' },
+    reopen: { type: 'string' },
+    reviewer: { type: 'string' },
+    reason: { type: 'string' },
+    note: { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   });
   if (parsed.values.help) {
@@ -186,8 +206,10 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
         if (!itens.length) out.line(`(perfil "${profileId}" sem itens)`);
         for (const it of itens) {
           const gab = hasGabarito(it) ? (it.expected !== undefined ? 'expected' : 'reference') : 'SEM GABARITO';
+          // left#7: o estado de curadoria na listagem (aprovado velho = hash não bate).
+          const estado = it.state === 'aprovado' && curationIssue(it) ? 'aprov.velho' : (it.state ?? '-');
           out.line(
-            `${it.id.padEnd(16)} ${it.tier.padEnd(12)} ${gab.padEnd(13)} ${it.title}`,
+            `${it.id.padEnd(16)} ${it.tier.padEnd(12)} ${gab.padEnd(13)} ${estado.padEnd(11)} ${it.title}`,
           );
         }
       }
@@ -343,6 +365,9 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
         typeof parsed.values.languages === 'string'
           ? parsed.values.languages.split(',').map((l) => l.trim()).filter(Boolean)
           : undefined;
+      if (adversarial && parsed.values['semantic-dedup'] === true) {
+        out.warn('--semantic-dedup não se aplica a --tier adversarial: cada categoria é gerada à parte (flag ignorada).');
+      }
       if (adversarial && languages?.length) {
         out.warn('--languages não se aplica a --tier adversarial: o gerador adversarial é pt-BR (flag ignorada).');
       }
@@ -379,6 +404,7 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
         const existentes = await listItems(profileId);
         const exclude = existentes.map((i) => i.question);
         let stages: StageSpec[];
+        let relatorioDatagen: DatagenReport | undefined;
         if (adversarial) {
           // IMPL-068: um lote por categoria (6), ≥ 4 cenários em cada; tier,
           // rótulo single-turn e hash do prompt-base CARIMBADOS em código.
@@ -401,10 +427,29 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
             rules,
             coverageInstructionText: coverageInstruction(gaps),
             ...(languages?.length ? { languages } : {}),
+            // IMPL-063 (left#4): o banco JÁ curado é âncora do dedup — gerado
+            // que repita um item existente sai ANTES da reposição (e é contado
+            // em `droppedVsSeed`), em vez de só ser pulado pelo id no merge.
+            // `--semantic-dedup` liga os embeddings (mesmo gateway/ledger).
+            seed: existentes.map((i) => ({ question: i.question, productContext: i.productContext })),
+            ...(parsed.values['semantic-dedup'] === true ? { scenarioDedup: { semantic: true } } : {}),
+            onReport: (r) => {
+              relatorioDatagen = r;
+            },
             // O aviso sai UMA vez, sobre os itens gravados (logo abaixo).
             onLanguageWarnings: () => undefined,
             ctx: { sink: ledger },
           });
+          const r = relatorioDatagen as DatagenReport | undefined;
+          if (r && r.shortfall > 0) {
+            // A mensagem do datagen fala de RUN; aqui é o banco (idempotente).
+            out.warn(
+              `seed: ${r.final} de ${r.requested} gerados sobreviveram (${r.dedupedExact + r.dedupedSemantic} quase-duplicata(s), ` +
+                `${r.droppedVsSeed} repetindo o banco; ${r.failedCalls} chamada(s) falharam) — rode de novo com outro tema/briefing.`,
+            );
+          } else if (r?.alert) {
+            out.warn(`seed: dedup removeu ${(r.rate * 100).toFixed(0)}% dos gerados — o gerador está repetindo o molde.`);
+          }
         }
         // Custo de GERAÇÃO medido (usage.cost, papel datagen) ANTES dos gabaritos.
         const custoDatagen = ledger.snapshot().byRole.datagen?.usd ?? 0;
@@ -474,6 +519,9 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
           datagenCostPerScenarioUsd: porCenario,
           warnings,
           languageWarnings: avisosIdioma,
+          // IMPL-063 (left#4): o relatório da geração (dedup exato/semântico,
+          // reposição, falta) — o MESMO formato do `datagenReport` da run.
+          ...(relatorioDatagen ? { datagenReport: relatorioDatagen } : {}),
           ...(adversarial
             ? {
                 tier: 'adversarial',
@@ -638,6 +686,9 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
       return EXIT.OK;
     }
 
+    case 'review':
+      return libraryReview(exigirProfile(parsed.values), parsed.values, out);
+
     case 'rm': {
       const profileId = exigirProfile(parsed.values);
       const itemId = ctx.positionals[0];
@@ -660,4 +711,192 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
     default:
       throw new CliError(`Subcomando desconhecido: "library ${sub}". Veja \`prompt-builder library --help\`.`, EXIT.USAGE);
   }
+}
+
+// ----------------------------------------------------------------------------
+// `library review` (IMPL-090 / IMPL-087, left#7) — o fluxo de APROVAÇÃO
+// ----------------------------------------------------------------------------
+// Antes um item só virava `aprovado` importando-o já com estado + contentHash:
+// não havia comando de revisão, então o `--require-approved`, a exigência de
+// holdout 100% aprovado e a âncora humana do treino (IMPL-065) dependiam de
+// editar JSON à mão. Agora: sem ação, a FILA (o que não conta como curado e
+// por quê); com `--approve/--reject/--adjust/--reopen`, a revisão amarrada ao
+// `contentHash` do conteúdo atual (editou depois, caduca). Tudo ou nada: um id
+// ruim recusa o lote inteiro ANTES de gravar.
+
+/** Caractere de controle (inclui `\n`/`\r`/`\t`, NUL e DEL). */
+const CONTROLE = /[\u0000-\u001f\u007f]/u;
+
+const ACOES_DE_REVISAO = ['approve', 'reject', 'adjust', 'reopen'] as const;
+
+function idsDaFlag(v: unknown): string[] {
+  if (typeof v !== 'string') return [];
+  return v
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Quem revisa: `--reviewer` explícito, senão a identidade que o git usaria
+ * AQUI (`Nome <email>`, como o `sessions winner --approver`). Fora de um
+ * terminal (agente/CI) o `--reviewer` é OBRIGATÓRIO: aprovar é uma afirmação
+ * humana ("gente conferiu pergunta + gabarito") — nunca implícita.
+ */
+function revisorDe(values: Record<string, unknown>): string {
+  const bruto = typeof values.reviewer === 'string' ? values.reviewer : undefined;
+  if (bruto !== undefined && CONTROLE.test(bruto)) {
+    throw new CliError(
+      '--reviewer não pode conter quebra de linha nem outro caractere de controle.',
+      EXIT.USAGE,
+      { flag: '--reviewer' },
+      { code: 'usage.invalid_flag_value', hint: 'Use uma linha só, no formato `--reviewer "Nome <email>"`.' },
+    );
+  }
+  const explicito = bruto?.trim() || undefined;
+  if (!explicito && isAgentContext()) {
+    throw new CliError(
+      'Fora de um terminal, `library review` exige --reviewer "Nome <email>": aprovar afirma que uma PESSOA conferiu o item.',
+      EXIT.USAGE,
+      { flag: '--reviewer' },
+      {
+        code: 'usage.reviewer_required',
+        hint: 'Passe `--reviewer "Nome <email>"` de quem revisou (fica gravado no item).',
+      },
+    );
+  }
+  const revisor = resolveApprover(explicito, process.cwd());
+  if (!revisor) {
+    throw new CliError(
+      'Revisão sem revisor: não há --reviewer nem identidade git (user.name/user.email) aqui.',
+      EXIT.USAGE,
+      { flag: '--reviewer' },
+      { code: 'usage.reviewer_required', hint: 'Passe `--reviewer "Nome <email>"` (ou configure user.name/user.email).' },
+    );
+  }
+  return revisor;
+}
+
+async function libraryReview(profileId: string, values: Record<string, unknown>, out: Output): Promise<number> {
+  for (const acao of ACOES_DE_REVISAO) {
+    if (values[acao] !== undefined && idsDaFlag(values[acao]).length === 0) {
+      throw new CliError(`--${acao} exige ids de item separados por vírgula.`, EXIT.USAGE, { flag: `--${acao}` }, {
+        code: 'usage.missing_flag_value',
+        hint: `Ex.: \`library review --profile ${profileId} --${acao} item-01,item-02\` (sem ação, o comando lista a fila).`,
+      });
+    }
+  }
+  const aprovar = idsDaFlag(values.approve);
+  const rejeitar = idsDaFlag(values.reject);
+  const ajustar = idsDaFlag(values.adjust);
+  const reabrir = idsDaFlag(values.reopen);
+  const temAcao = aprovar.length + rejeitar.length + ajustar.length + reabrir.length > 0;
+  if (!temAcao && (values.reason !== undefined || values.note !== undefined || values.reviewer !== undefined)) {
+    throw new CliError(
+      '--reviewer/--reason/--note só fazem sentido com --approve, --reject, --adjust ou --reopen.',
+      EXIT.USAGE,
+      undefined,
+      {
+        code: 'usage.review_without_action',
+        hint: `Sem ação, \`library review --profile ${profileId}\` só lista a fila de revisão.`,
+      },
+    );
+  }
+
+  const itens = await listItems(profileId);
+
+  // Sem ação: a FILA — o que não conta como curado e por quê.
+  if (!temAcao) {
+    const fila = itens
+      .map((i) => ({ id: i.id, state: i.state ?? 'sem_estado', issue: curationIssue(i), title: i.title }))
+      .filter((x): x is { id: string; state: string; issue: string; title: string } => x.issue !== null);
+    const status = curationStatus(itens);
+    if (out.isText) {
+      out.line(`curadoria: ${curatedKofN(itens)}`);
+      if (!itens.length) out.line(`(perfil "${profileId}" sem itens)`);
+      for (const f of fila) out.line(`  ${f.id.padEnd(16)} ${f.issue.padEnd(36)} ${f.title}`);
+    }
+    if (fila.length) {
+      out.info(
+        `revise com \`library show <id> --profile ${profileId}\` (pergunta E gabarito) e aprove com ` +
+          `\`library review --profile ${profileId} --approve <ids> --reviewer "Nome <email>"\`.`,
+      );
+    }
+    out.result(true, 'library.review', {
+      profile: profileId,
+      mode: 'queue',
+      curatedKofN: curatedKofN(itens),
+      curated: status.curated,
+      total: status.total,
+      queue: fila,
+    });
+    return EXIT.OK;
+  }
+
+  let rejectReason: { kind: RejectKind; note?: string } | undefined;
+  if (rejeitar.length) {
+    const kind = typeof values.reason === 'string' ? values.reason.trim() : '';
+    if (!(REJECT_KINDS as readonly string[]).includes(kind)) {
+      throw new CliError(
+        `--reject exige --reason ${REJECT_KINDS.join('|')}${kind ? ` (recebi "${kind}")` : ''}.`,
+        EXIT.USAGE,
+        { flag: '--reason', value: kind || null, accepted: [...REJECT_KINDS] },
+        {
+          code: 'usage.invalid_flag_value',
+          hint: 'A recusa tem de ser legível: `--reason gabarito_errado --note "o prazo certo é 30 dias"`.',
+        },
+      );
+    }
+    const note = typeof values.note === 'string' && values.note.trim() ? values.note.trim() : undefined;
+    rejectReason = { kind: kind as RejectKind, ...(note ? { note } : {}) };
+  } else if (values.reason !== undefined || values.note !== undefined) {
+    throw new CliError('--reason/--note só valem com --reject.', EXIT.USAGE, { flag: values.reason !== undefined ? '--reason' : '--note' }, {
+      code: 'usage.invalid_flag_value',
+      hint: 'Use `--reject <ids> --reason <tipo> [--note <texto>]`.',
+    });
+  }
+  const revisor = revisorDe(values);
+  const pedidos: ItemReviewRequest[] = [];
+  if (aprovar.length) pedidos.push({ ids: aprovar, state: 'aprovado' });
+  if (rejeitar.length) pedidos.push({ ids: rejeitar, state: 'rejeitado', rejectReason });
+  if (ajustar.length) pedidos.push({ ids: ajustar, state: 'ajustar' });
+  if (reabrir.length) pedidos.push({ ids: reabrir, state: 'em_revisao' });
+
+  const plano = planItemReviews(itens, pedidos, { reviewer: revisor });
+  if (plano.issues.length) {
+    // Tudo ou nada: NADA foi gravado. Conteúdo (sem gabarito/labelSet) = 3,
+    // como o `library verify`; id/transição = uso (2).
+    const conteudo = plano.issues.every((i) => i.kind === 'no_gabarito' || i.kind === 'label_set');
+    for (const i of plano.issues) out.warn(`${i.id}: ${i.error}`);
+    throw new CliError(
+      `Revisão recusada (nada gravado): ${plano.issues.map((i) => `${i.id} (${i.error})`).join('; ')}.`,
+      conteudo ? EXIT.CONFIG : EXIT.USAGE,
+      { profile: profileId, issues: plano.issues },
+      {
+        code: conteudo ? 'library.review_invalid_item' : 'library.review_invalid',
+        hint: conteudo
+          ? `Corrija o gabarito dos itens de details.issues (\`library verify --profile ${profileId}\`) antes de aprovar.`
+          : `Confira os ids com \`library review --profile ${profileId}\`; item rejeitado volta à revisão com --reopen antes de ser aprovado.`,
+      },
+    );
+  }
+  await saveItems(profileId, plano.items);
+  const depois = await listItems(profileId);
+  const status = curationStatus(depois);
+  if (out.isText) {
+    for (const c of plano.changes) out.line(`${c.id.padEnd(16)} ${c.from} → ${c.to}`);
+    out.line(`curadoria: ${curatedKofN(depois)} (revisor: ${revisor})`);
+  }
+  out.result(true, 'library.review', {
+    profile: profileId,
+    mode: 'review',
+    reviewer: revisor,
+    reviewed: plano.changes,
+    curatedKofN: curatedKofN(depois),
+    curated: status.curated,
+    total: status.total,
+    unapproved: status.unapproved.slice(0, 50),
+    ...(status.unapproved.length > 50 ? { unapprovedTruncated: status.unapproved.length - 50 } : {}),
+  });
+  return EXIT.OK;
 }

@@ -201,10 +201,13 @@ const USO: Record<string, string> = {
                                      seed IDEMPOTENTE por id (o que existe não é
                                      sobrescrito)
   library seed --profile <id> --generate <N> --theme <t> --model <id>
-               [--budget <usd|none>] [--languages pt-BR,en]
+               [--budget <usd|none>] [--languages pt-BR,en] [--semantic-dedup]
                                      gera N itens via datagen + gabarito por item
                                      (tier, dimensionTags, persona… preservados);
-                                     sem --languages, 100% pt-BR
+                                     sem --languages, 100% pt-BR. O banco atual é
+                                     âncora do dedup (par exato; --semantic-dedup
+                                     liga embeddings, custo no papel datagen);
+                                     o relatório sai em datagenReport
   library seed --profile <id> --generate <N> --tier adversarial
                --base-prompt-file <arq> --model <id> [--budget <usd|none>]
                                      cenários adversariais condicionados ao prompt-
@@ -213,6 +216,14 @@ const USO: Record<string, string> = {
                                      por categoria e custo por cenário no resultado
   library verify --profile <id>      itens SEM gabarito ou rótulo curto sem labelSet
                                      (recusados no evolve; exit 3)
+  library review --profile <id>      fila de curadoria: k de n curados e o que não
+                                     conta (sem estado, rejeitado, aprovação velha)
+  library review --profile <id> --approve <ids> [--reject <ids> --reason <tipo>
+               [--note <t>]] [--adjust <ids>] [--reopen <ids>] --reviewer "Nome <email>"
+                                     revisão amarrada ao contentHash (editou, caduca);
+                                     aprovado conta como âncora humana no treino.
+                                     Sem TTY, --reviewer é obrigatório. Tudo ou nada:
+                                     id ruim = exit 2, aprovar sem gabarito = exit 3
   library coverage --profile <id>    cobertura tier × dimensão + lacunas
   library export --profile <id> [-o <dir|arq.json>] [--format exchange|pack]
                                      exchange (default): prompt-builder-exchange@1
