@@ -1,0 +1,171 @@
+{
+ "_note": "Subconjunto REAL de GET /api/v1/models?output_modalities=all (2026-09-28): modelos de decisão + jev-router (chat, preço -1).",
+ "data": [
+  {
+   "id": "typesafe/jev-1.13",
+   "canonical_slug": "typesafe/jev-1.13-20260917",
+   "name": "TypeSafe: Jev 1.13",
+   "context_length": 32000,
+   "architecture": {
+    "modality": "text->decisions",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "decisions"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.000000042",
+    "completion": "0"
+   },
+   "supported_parameters": [],
+   "expiration_date": null
+  },
+  {
+   "id": "~typesafe/jev-latest",
+   "canonical_slug": "~typesafe/jev-latest",
+   "name": "TypeSafe: Jev Latest",
+   "context_length": 32000,
+   "architecture": {
+    "modality": "text->decisions",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "decisions"
+    ],
+    "tokenizer": "Router",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.000000042",
+    "completion": "0"
+   },
+   "supported_parameters": [],
+   "expiration_date": null
+  },
+  {
+   "id": "upstage/solar-decide",
+   "canonical_slug": "upstage/solar-decide-20260928",
+   "name": "Upstage: Solar Decide",
+   "context_length": 524288,
+   "architecture": {
+    "modality": "text->decisions",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "decisions"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.00000005",
+    "completion": "0",
+    "input_cache_read": "0.00000005"
+   },
+   "supported_parameters": [],
+   "expiration_date": null
+  },
+  {
+   "id": "jaredpalmer/kev-4b",
+   "canonical_slug": "jaredpalmer/kev-4b-20260924",
+   "name": "Jared Palmer: Kev 4B",
+   "context_length": 8192,
+   "architecture": {
+    "modality": "text->decisions",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "decisions"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.000000042",
+    "completion": "0"
+   },
+   "supported_parameters": [],
+   "expiration_date": null
+  },
+  {
+   "id": "respan/span-01",
+   "canonical_slug": "respan/span-01-20260925",
+   "name": "Respan: Span-01",
+   "context_length": 0,
+   "architecture": {
+    "modality": "text->decisions",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "decisions"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.00000002",
+    "completion": "0"
+   },
+   "supported_parameters": [],
+   "expiration_date": null
+  },
+  {
+   "id": "respan/span-01-lite:free",
+   "canonical_slug": "respan/span-01-lite-20260925",
+   "name": "Respan: Span-01 Lite (free)",
+   "context_length": 0,
+   "architecture": {
+    "modality": "text->decisions",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "decisions"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0",
+    "completion": "0"
+   },
+   "supported_parameters": [],
+   "expiration_date": null
+  },
+  {
+   "id": "typesafe/jev-router",
+   "canonical_slug": "typesafe/jev-router",
+   "name": "TypeSafe: Jev Router",
+   "context_length": 1000000,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "audio",
+     "file",
+     "image",
+     "text",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Router",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "-1",
+    "completion": "-1"
+   },
+   "supported_parameters": [],
+   "expiration_date": null
+  }
+ ]
+}

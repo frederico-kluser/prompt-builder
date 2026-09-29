@@ -15,11 +15,23 @@
 
 const DB_NAME = 'prompt-builder';
 // v2: adiciona a store 'prompts' (biblioteca de prompts salvos/evoluídos).
+// v3: modo JEV (decisões tipadas) — 'jevRuns', 'jevSessions' e 'jevSummaries'
+// (records do `src/engine/jev/` + o resumo da lista, gravados na mesma
+// transação por `web/src/jev/store.ts`).
 // O upgrade de clientes existentes já está coberto: o onupgradeneeded itera
-// STORES e cria apenas as stores que faltam, então quem vem da v1 ganha a
-// store nova sem perder os dados das demais.
-const DB_VERSION = 2;
-export const STORES = ['runs', 'sessions', 'runSummaries', 'sessionSummaries', 'prompts'] as const;
+// STORES e cria apenas as stores que faltam, então quem vem da v1/v2 ganha as
+// stores novas sem perder os dados das demais.
+export const DB_VERSION = 3;
+export const STORES = [
+  'runs',
+  'sessions',
+  'runSummaries',
+  'sessionSummaries',
+  'prompts',
+  'jevRuns',
+  'jevSessions',
+  'jevSummaries',
+] as const;
 export type Store = (typeof STORES)[number];
 
 /** quota = sem espaço · unavailable = não abriu (bloqueado/privado/ausente) · failed = o resto. */

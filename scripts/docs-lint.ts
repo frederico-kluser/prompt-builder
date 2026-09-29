@@ -33,6 +33,7 @@ import { cmdConfig } from '../src/cli/commands/misc.js';
 import { parseArenaAgentConfig } from '../src/configFile.js';
 import { assertNoUnknownConfigKeys } from '../src/cli/context.js';
 import { EXIT } from '../src/cli/output.js';
+import { lintResolved, parseJevConfig, resolveJevConfig } from '../src/engine/jev/index.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DOCS_DIR = join(ROOT, 'agent-docs');
@@ -42,6 +43,8 @@ export const HELP_SNAPSHOT_PATH = join(ROOT, 'scripts', 'docs-lint.help.json');
 /** Formatos de configuração que a doc pode exemplificar. */
 const ARENA_FORMAT = 'arena-config@1';
 const ARENA_AGENT_FORMAT = 'arena-agent-config@1';
+/** Modo JEV: jev-config@1 (casos INLINE nos exemplos — o validador não lê arquivo). */
+const JEV_FORMAT = 'jev-config@1';
 
 // ---------------------------------------------------------------------------
 // Extração dos blocos da doc
@@ -180,6 +183,15 @@ async function muted<T>(f: () => Promise<T>): Promise<T> {
  * o validador do `agents run --config`). Nunca lança: vira `ConfigValidation`.
  */
 export async function validateConfigExample(json: unknown, format: string): Promise<ConfigValidation> {
+  if (format === JEV_FORMAT) {
+    // Modo JEV: parse + resolve + lint (erro de lint = o `jev run` recusaria com exit 3).
+    const p = parseJevConfig(json);
+    if (!p.ok) return { ok: false, code: EXIT.CONFIG, error: p.error };
+    const r = resolveJevConfig(p.config);
+    if (!r.ok) return { ok: false, code: EXIT.CONFIG, error: r.issues.map((i) => `${i.code}: ${i.message}`).join('; ') };
+    const erros = lintResolved(r.resolved).filter((i) => i.level === 'error');
+    return erros.length ? { ok: false, code: EXIT.CONFIG, error: erros.map((i) => `${i.code}: ${i.message}`).join('; ') } : { ok: true, code: EXIT.OK };
+  }
   if (format === ARENA_AGENT_FORMAT) {
     try {
       const p = parseArenaAgentConfig(json);
@@ -479,7 +491,7 @@ export async function lintDocs(sources: DocSource[] = readDocSources()): Promise
         }
         const format = (json as Record<string, unknown>)?.format;
         const esperadoInvalido = block.marks.expectInvalid;
-        if (typeof format !== 'string' || (format !== ARENA_FORMAT && format !== ARENA_AGENT_FORMAT)) {
+        if (typeof format !== 'string' || (format !== ARENA_FORMAT && format !== ARENA_AGENT_FORMAT && format !== JEV_FORMAT)) {
           if (esperadoInvalido) {
             // Exemplo negativo por "format" desconhecido/ausente: o validador real
             // recusa — está de acordo com a marcação.

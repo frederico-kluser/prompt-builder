@@ -92,6 +92,8 @@ import { toExportRow } from '../../modelCaps.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { isArenaAgentConfigFormat, parseArenaAgentConfig } from '../../configFile.js';
 import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
+// Modo JEV (jev-config@1): ganchos de 1 linha; a lógica mora em src/jev/job.ts.
+import { estimateJevForTool, isJevConfigRaw, jevJobInput, jevResultForTool, listDecisionModelsForTool } from '../../jev/job.js';
 import { readArtifact } from '../../agent/store.js';
 import { assertNoUnknownConfigKeys, parse, resolveHome, resolveKey, tryResolveKey } from '../context.js';
 import { assertAgentFilesContained, ensureExecConfigApproved } from './agents.js';
@@ -516,6 +518,7 @@ async function jobInputFromStartArgs(
   args: Record<string, unknown>,
 ): Promise<RunJobInput> {
   const budgetUsd = budgetOf(args.budgetUsd);
+  if (isJevConfigRaw(raw)) return jevJobInput(raw, budgetUsd);
   if (isArenaAgentConfigFormat(raw.format)) {
     const cfg = parseAgentConfigRaw(raw);
     return { kind: cfg.mode === 'training' ? 'training' : 'agent', config: { ...cfg, budgetUsd }, budgetUsd };
@@ -731,6 +734,7 @@ const LIST_MODELS_ARGS = z.strictObject({
     .describe(`máximo de resultados (padrão ${LIST_MODELS_DEFAULT_LIMIT}, máx. ${LIST_MODELS_MAX_LIMIT})`)
     .optional(),
   offset: z.number().describe('pula os N primeiros (paginação: use o nextOffset da resposta)').optional(),
+  modality: z.enum(['text', 'decisions']).describe('decisions = modelos de decisão (modo JEV)').optional(),
 });
 const ESTIMATE_COST_ARGS = z.strictObject({
   config: zRunConfig.describe('a configuração da run'),
@@ -838,6 +842,7 @@ function configObject(config: unknown, dialeto = ''): Record<string, unknown> {
  * parse: a biblioteca era ignorada e a run caía em cenários GERADOS (mcp#0).
  */
 async function toRunConfig(config: unknown, opts: { inspectOnly?: boolean } = {}): Promise<RunConfig> {
+  if (isJevConfigRaw(config)) throw new Error('jev-config@1 (modo JEV) roda como job: use start_run (e run_status/get_result).');
   // Config CRUA com `agent`/`agentTask` é RECUSADA aqui (config.agent_requires_agents_run):
   // modo agente só entra por arena-agent-config@1 + `execConfigGateForTool`.
   return configFromJson(configObject(config), {}, opts);
@@ -1012,6 +1017,10 @@ const TOOLS: McpTool[] = [
     optionalKey: true,
     oversizeHint: `use um limit menor (máx. ${LIST_MODELS_MAX_LIMIT}), pagine por offset/nextOffset ou filtre por search`,
     run: async (args, apiKey) => {
+      if (args.modality === 'decisions') {
+        const teto = Math.min(Math.max(Math.trunc(numOf(args.limit) ?? LIST_MODELS_DEFAULT_LIMIT), 1), LIST_MODELS_MAX_LIMIT);
+        return listDecisionModelsForTool(apiKey, str(args.search)?.toLowerCase(), teto);
+      }
       const cat = await ensureCatalog(apiKey);
       const busca = str(args.search)?.toLowerCase();
       let rows = cat.models;
@@ -1057,6 +1066,7 @@ const TOOLS: McpTool[] = [
     // como o `estimate` do CLI.
     optionalKey: true,
     run: async (args, apiKey) => {
+      if (isJevConfigRaw(args.config)) return estimateJevForTool(configObject(args.config), apiKey);
       // Estimar não executa nada: aceita também a config crua de modo agente.
       const cfg = await toRunConfig(args.config, { inspectOnly: true });
       const cat = await ensureCatalog(apiKey);
@@ -1073,7 +1083,7 @@ const TOOLS: McpTool[] = [
       openWorldHint: true,
     },
     description:
-      'Inicia uma run (compare/vary/training/agentes) em segundo plano e devolve o jobId na hora. ' +
+      'Inicia uma run (compare/vary/training/agentes, ou jev-config@1 = modo JEV com casos inline) em segundo plano e devolve o jobId na hora. ' +
       'Depois: run_status (poll ≥ 5 s) e cancel_run. idempotencyKey obrigatória: reuse-a nos retries ' +
       '(mesma chave = mesmo job, nunca uma 2ª run paga). arena-agent-config é EXECUTÁVEL e exige ' +
       'allowExecConfig: true no primeiro aceite (pin SHA-256; ver run_agent_benchmark).',
@@ -1219,7 +1229,7 @@ const TOOLS: McpTool[] = [
     outputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['run', 'session'] },
+        kind: { type: 'string', enum: ['run', 'session', 'jev-run', 'jev-session'] },
         detail: { type: 'string', enum: ['summary', 'full'] },
         id: { type: 'string' },
         status: { type: 'string' },
@@ -1242,7 +1252,11 @@ const TOOLS: McpTool[] = [
       if (kind === 'session') {
         rec = await loadSession(id);
         tipo = 'session';
-        if (!rec) throw naoEncontrado('sessão não encontrada', kind);
+        if (!rec) {
+          const jev = await jevResultForTool(id, args.detail);
+          if (jev) return jev;
+          throw naoEncontrado('sessão não encontrada', kind);
+        }
       } else {
         const run = await loadRun(id);
         if (run) {
@@ -1251,7 +1265,11 @@ const TOOLS: McpTool[] = [
         } else {
           rec = await loadSession(id);
           tipo = 'session';
-          if (!rec) throw naoEncontrado('run/sessão não encontrada', kind);
+          if (!rec) {
+            const jev = await jevResultForTool(id, args.detail);
+            if (jev) return jev;
+            throw naoEncontrado('run/sessão não encontrada', kind);
+          }
         }
       }
       if (args.detail === 'full') return recordOuResumo(tipo, rec, paginacao);

@@ -129,7 +129,7 @@ export const processLane = new HeavyLane(1);
 // `jobManager.ts` (Node).
 
 /** Tipo de trabalho pesado que um job executa. */
-export type JobKind = 'benchmark' | 'training' | 'agent';
+export type JobKind = 'benchmark' | 'training' | 'agent' | 'jev';
 
 /**
  * Estado de um job. `queued`/`working` não são terminais; `completed` (a

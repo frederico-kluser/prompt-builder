@@ -76,6 +76,9 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   // http-api#9: célula CSV (aspas RFC 4180 + neutralização de fórmula) — as
   // rotas /v1 e o botão "CSV" do SPA exportam texto de LLM pela MESMA função.
   csv: 'shim',
+  // Modo JEV (decisões tipadas): runner, métricas, lint, treino e relatórios
+  // são fonte única em src/engine/jev/ — o web re-exporta o barrel.
+  jev: 'shim',
   // Pares mantidos à mão (seams diferentes). Ao mudar UM lado, mude o outro.
   configFile: 'mirror',
   duels: 'mirror', // a MATEMÁTICA é compartilhada via src/engine/duelCore.ts (src lê dossiê de agente do disco)
@@ -106,6 +109,7 @@ const CANONICO_EM: Record<string, string> = {
   sessionReport: 'engine/sessionReport',
   sessionReportHtml: 'engine/sessionReportHtml',
   csv: 'engine/csv',
+  jev: 'engine/jev/index',
 };
 
 /**

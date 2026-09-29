@@ -54,8 +54,9 @@ export function canonicalJson(v: unknown): string {
 }
 
 /** Identidade do EXPERIMENTO (sha256 hex) — sem o teto de gasto. */
-export function configHash(config: RunConfig): string {
-  const { budgetUsd: _teto, ...resto } = config as RunConfig & { budgetUsd?: number };
+export function configHash(config: RunConfig | object): string {
+  // `object`: o modo JEV tranca a identidade do experimento dele (jev-config@1).
+  const { budgetUsd: _teto, ...resto } = config as { budgetUsd?: number } & Record<string, unknown>;
   return createHash('sha256').update(canonicalJson(resto)).digest('hex');
 }
 

@@ -33,6 +33,7 @@ import { cmdTelemetry } from './commands/telemetry.js';
 import { installCostSamplesPersistence } from '../costSamplesStore.js';
 import { getDataDir } from '../storage.js';
 import { cmdCalib } from './commands/calib.js';
+import { cmdJev } from './commands/jev.js';
 
 const VERSION = pkgVersion();
 
@@ -121,6 +122,10 @@ CALIBRAÇÃO DO JUIZ (juiz × humano; só disco, sem key)
                            α humano ≥ 0,667; exit 10 se reprovar (ver: docs calibration)
   calib template [-o <arq.jsonl>]
                            exemplo comentado do formato (itens SINTÉTICOS)
+
+DECISÕES TIPADAS (modo JEV — noul/choice/score em casos rotulados)
+  jev validate|example|models|import|run|eval|compare|train|list|show|report|export|techniques
+                           mede e evolui definições de decisão do Jev (ver: docs jev)
 
 AGENTES (modo agente — mesmo motor, executor pi)
   agents doctor [--deep] [--container] [--config <arq>]
@@ -224,6 +229,9 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdAgents(argv);
     case 'telemetry':
       return cmdTelemetry(argv);
+    case 'jev':
+    case 'decisions':
+      return cmdJev(argv);
     default: {
       const sugestao = cmd ? closestMatch(cmd, COMMANDS) : undefined;
       throw new CliError(
