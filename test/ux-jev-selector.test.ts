@@ -20,7 +20,8 @@ import { contrastRatio, oklchToRgb, type Rgb } from './uxHtml';
 const ROOT = process.cwd();
 const WEB_REACT = join(ROOT, 'web', 'node_modules', 'react', 'index.js');
 const WEB_REACT_DOM_SERVER = join(ROOT, 'web', 'node_modules', 'react-dom', 'server.node.js');
-const temWebDeps = existsSync(WEB_REACT) && existsSync(WEB_REACT_DOM_SERVER);
+const WEB_REACT_DOM_STATIC = join(ROOT, 'web', 'node_modules', 'react-dom', 'static.node.js');
+const temWebDeps = existsSync(WEB_REACT) && existsSync(WEB_REACT_DOM_SERVER) && existsSync(WEB_REACT_DOM_STATIC);
 
 /* ------------------------------------------------------------- stubs da UI */
 
@@ -128,9 +129,17 @@ async function render(search: string, storage: Storage | null | 'throws'): Promi
   }
   try {
     const { createElement } = await import(pathToFileURL(WEB_REACT).href);
-    const { renderToStaticMarkup } = await import(pathToFileURL(WEB_REACT_DOM_SERVER).href);
     const { NewBenchmark } = await import('../web/src/pages/NewBenchmark');
-    return renderToStaticMarkup(createElement(NewBenchmark));
+    // left#15: o formulário JEV é `React.lazy` (chunk próprio). O
+    // `renderToStaticMarkup` síncrono mostraria só o fallback do Suspense; o
+    // `prerenderToNodeStream` do React 19 ESPERA os lazy resolverem — é o HTML
+    // que o usuário vê depois do chunk chegar. Os marcadores de Suspense e os
+    // separadores de texto (`<!-- -->`) saem para o HTML seguir comparável.
+    const { prerenderToNodeStream } = await import(pathToFileURL(WEB_REACT_DOM_STATIC).href);
+    const { prelude } = await prerenderToNodeStream(createElement(NewBenchmark));
+    let html = '';
+    for await (const parte of prelude) html += String(parte);
+    return html.replace(/<!--(?:\$|\/\$| )-->/g, '');
   } finally {
     Object.defineProperty(g, 'localStorage', { configurable: true, writable: true, value: anterior });
   }

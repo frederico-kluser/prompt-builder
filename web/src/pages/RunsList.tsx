@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Search } from 'lucide-react';
 import type { RunMode, RunSummary, SessionSummary } from '../api';
@@ -8,7 +8,10 @@ import { SkeletonResolveList, SkeletonResolveRow, Skeleton } from '@/components/
 import { Input } from '@/components/ui/input';
 import { Banner, EmptyState, PageHeader, Screen, StatusPill, Tag } from '../components/primitives';
 import { StorageNotice } from '../components/StorageNotice';
-import { JevHistory } from '../components/jev/JevHistory';
+
+// left#15: o histórico JEV (e o motor JEV que ele puxa) só baixa quando a aba
+// "JEV (decisões)" é aberta.
+const JevHistory = lazy(async () => ({ default: (await import('../components/jev/JevHistory')).JevHistory }));
 
 const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 
@@ -186,7 +189,9 @@ export function RunsList() {
             />
             <Input className="pl-8" placeholder="Buscar por tema…" aria-label="Buscar por tema" value={query} onChange={(e) => setQuery(e.target.value)} />
           </div>
-          <JevHistory query={query} />
+          <Suspense fallback={<Skeleton className="h-40 w-full rounded-xl" />}>
+            <JevHistory query={query} />
+          </Suspense>
         </>
       ) : (
       <>

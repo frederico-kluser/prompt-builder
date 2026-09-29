@@ -441,28 +441,6 @@ export function draftProblems(d: JevDraft, issues: readonly JevLintIssue[], opts
   return out.sort((a, b) => ordem.indexOf(a.step) - ordem.indexOf(b.step));
 }
 
-/** "Modo JEV" é a escolha lembrada? (`?tipo=` > handoffs LLM > `pb.benchKind`). */
-export type BenchKind = 'llm' | 'jev';
-
-export const BENCH_KIND_KEY = 'pb.benchKind';
-
-/**
- * Qual lado do seletor abre. Precedência (crítica A4.1): `?tipo=` explícito;
- * depois os handoffs que IMPLICAM LLM (`?objetivo=` vindo do /welcome e o
- * rascunho da biblioteca `arena:prompt-draft`) — senão o usuário cairia no JEV
- * e perderia o que escolheu; por fim a escolha lembrada; default LLM.
- */
-export function initialBenchKind(search: string, storage: Pick<Storage, 'getItem'> | null): BenchKind {
-  const q = new URLSearchParams(search);
-  const tipo = q.get('tipo');
-  if (tipo === 'jev' || tipo === 'llm') return tipo;
-  if (q.get('objetivo')) return 'llm';
-  try {
-    if (storage?.getItem('arena:prompt-draft')) return 'llm';
-    const lembrado = storage?.getItem(BENCH_KIND_KEY);
-    if (lembrado === 'jev' || lembrado === 'llm') return lembrado;
-  } catch {
-    // localStorage indisponível (privado/bloqueado): segue o default.
-  }
-  return 'llm';
-}
+// Seletor "LLM | JEV" (D-12): mora em `./benchKind.ts` (leve, sem o motor —
+// left#15); re-exportado aqui para quem já importava deste módulo.
+export { BENCH_KIND_KEY, initialBenchKind, type BenchKind } from './benchKind';
