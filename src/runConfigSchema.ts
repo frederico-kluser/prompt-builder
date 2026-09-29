@@ -38,6 +38,19 @@ const agentLimitsSchema = z.object({
   maxDiffBytes: z.number().int().positive().optional(),
 });
 
+// Um check do oraculo (`verify[]`) ou da regressao (`regression[]`, IMPL-098).
+const agentCheckSchema = z.object({
+  cmd: z.string().min(1),
+  expectExit: z.number().int().optional(),
+  timeoutMs: z.number().int().positive().optional(),
+  weight: z.number().positive().optional(),
+  label: z.string().optional(),
+  // IMPL-039: F2P (default) x P2P (regressao: quebrar = falha).
+  kind: z.enum(['fail_to_pass', 'pass_to_pass']).optional(),
+  // IMPL-098: check critico (barreira da validacao da tarefa).
+  critical: z.boolean().optional(),
+});
+
 // Schema Zod de AgentTaskSpec (src/agent/types.ts): a etapa de agente.
 const agentTaskSchema = z.object({
   // Repositorio-semente. `ref` OBRIGATORIO quando ha repo (sem ref pinada nao
@@ -71,18 +84,28 @@ const agentTaskSchema = z.object({
     )
     .optional(),
   // Oraculo deterministico: comandos cujo exit code decide o veredito.
-  verify: z
-    .array(
-      z.object({
-        cmd: z.string().min(1),
-        expectExit: z.number().int().optional(),
-        timeoutMs: z.number().int().positive().optional(),
-        weight: z.number().positive().optional(),
-        label: z.string().optional(),
-        // IMPL-039: F2P (default) x P2P (regressao: quebrar = falha).
-        kind: z.enum(['fail_to_pass', 'pass_to_pass']).optional(),
-      }),
-    )
+  verify: z.array(agentCheckSchema).optional(),
+  // IMPL-098 (agentTask@2) — ADITIVOS. Sem eles aqui o parse do RunConfig os
+  // DESCARTAVA em silencio (z.object tira chave desconhecida) e a run rodava
+  // sem regressao/testsDir mesmo com o arquivo dizendo o contrario.
+  regression: z.array(agentCheckSchema).optional(),
+  solution: z
+    .union([
+      z.object({ kind: z.literal('script'), script: z.string().min(1) }),
+      z.object({ kind: z.literal('diff'), diff: z.string().min(1) }),
+    ])
+    .optional(),
+  // Na RunConfig ja chega ABSOLUTO (o CLI resolve pelo diretorio do arquivo).
+  testsDir: z.string().min(1).optional(),
+  env: z.object({ digest: z.string().min(1), path: z.string().optional() }).optional(),
+  metadata: z
+    .object({
+      origin: z.string().optional(),
+      commit: z.string().optional(),
+      difficulty: z.enum(['easy', 'medium', 'hard']).optional(),
+      tags: z.array(z.string()).optional(),
+      canary: z.boolean().optional(),
+    })
     .optional(),
   // Caminhos que o agente NAO pode tocar (reward-hacking). Semantica gitignore.
   forbiddenPaths: z.array(z.string()).optional(),

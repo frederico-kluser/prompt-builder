@@ -644,17 +644,21 @@ describe('processo real (tsx) — sem OPENROUTER_API_KEY', { timeout: 120_000 },
         scenarios: [{ question: 'Conserte o parser.', agentTask: { files: [{ path: 'a.ts', content: 'x' }] } }],
       }),
     );
-    const r = await cli(['agents', 'run', '--config', file, '--budget', '5', '--dry-run', '--json']);
+    // cli#6: sem `--allow-exec-config` (e sem pin) o dry-run RECUSA como a real
+    // (config.exec_not_approved, exit 3 — contrato em cli-exec-gate.test.ts);
+    // com a flag ele diz `would_approve` e não pina nada.
+    const r = await cli(['agents', 'run', '--config', file, '--budget', '5', '--dry-run', '--allow-exec-config', '--json']);
     expect(r.status, r.stderr).toBe(EXIT.OK);
     const data = json<{
       data: {
         estimate: { byRole: Record<string, number>; unpricedModelIds: string[] };
         wouldRefuse: unknown[];
         requires: { code: string }[];
-        checks: { catalog: { scope: string } | null };
+        checks: { catalog: { scope: string } | null; execConfig: string };
       };
     }>(r).data;
     expect(data.checks.catalog?.scope).toBe('public');
+    expect(data.checks.execConfig).toBe('would_approve');
     expect(data.estimate.byRole.judge + data.estimate.byRole.gabarito).toBeGreaterThan(0);
     expect(data.wouldRefuse).toEqual([]);
     expect(data.requires.map((x) => x.code)).toEqual(['auth.key_missing']);

@@ -169,7 +169,11 @@ const USO: Record<string, string> = {
            CONFIGURÁVEL/EXECUTÁVEL (setup[]/verify[] rodam comandos): sem um
            hash SHA-256 aprovado o comando RECUSA (exit 3). A aprovação é
            única por conteúdo: \`--allow-exec-config\` grava o pin; conteúdo
-           diferente revê a aprovação.
+           diferente revê a aprovação. \`--dry-run\` recusa com o MESMO
+           código (config.exec_not_approved/exec_hash_changed) e nunca pina.
+  agents task validate <arq> [--repetitions N] [--allow-exec-config]
+           as 6 checagens da tarefa — EXECUTA setup[]/solution/checks no
+           host: passa pelo MESMO portão (pin SHA-256 inclui o testsDir)
   agents show <runId> | list (teto 50; --all/--limit N) | logs | replay | gc`,
 };
 

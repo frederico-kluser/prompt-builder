@@ -15,15 +15,40 @@ import { getTechnique } from './techniques.js';
 import { stageLabelIssues } from './engine/groundTruth.js';
 import { validatePromptGroup } from './engine/promptGroup.js';
 import type { ReasoningLevel } from './types.js';
-import type { AgentLimits } from './agent/types.js';
+import type { AgentLimits, AgentTaskEnv, AgentTaskMetadata, AgentTaskSolution } from './agent/types.js';
+// IMPL-098: as peças do agentTask@2 são FONTE ÚNICA em `agent/taskSchema.ts`
+// (solution/env/metadata e a regra do testsDir) — nada de terceira cópia.
+import {
+  agentTaskEnvSchema,
+  agentTaskMetadataSchema,
+  agentTaskSolutionSchema,
+  testsDirProblem,
+} from './agent/taskSchema.js';
 import { promptContractsSchema } from './engine/contracts.js';
 import type { PromptContracts } from './engine/contracts.js';
 
 /** Valor do campo `format` — versão do contrato do arquivo de configuração. */
 export const ARENA_CONFIG_FORMAT = 'arena-config@1';
 
-/** Valor do campo `format` do arquivo de configuração do MODO AGENTE. */
+/** Valor do campo `format` do arquivo de configuração do MODO AGENTE (v1). */
 export const ARENA_AGENT_CONFIG_FORMAT = 'arena-agent-config@1';
+
+/**
+ * IMPL-098 — `arena-agent-config@2`: o `agentTask` ganha `solution`,
+ * `regression[]`, `testsDir`, `env` e `metadata` (e `verify[].critical`). O
+ * @1 continua LEGÍVEL: os campos novos são aditivos e opcionais na run — um
+ * arquivo que passa em `agents task validate` passa também em `agents run`.
+ */
+export const ARENA_AGENT_CONFIG_FORMAT_V2 = 'arena-agent-config@2';
+
+/** Formatos do arquivo de agente que o parser aceita (o mais novo por último). */
+export const ARENA_AGENT_CONFIG_FORMATS = [ARENA_AGENT_CONFIG_FORMAT, ARENA_AGENT_CONFIG_FORMAT_V2] as const;
+export type ArenaAgentConfigFormat = (typeof ARENA_AGENT_CONFIG_FORMATS)[number];
+
+/** `format` é de um arquivo de config de AGENTE (qualquer versão aceita)? */
+export function isArenaAgentConfigFormat(format: unknown): format is ArenaAgentConfigFormat {
+  return (ARENA_AGENT_CONFIG_FORMATS as readonly unknown[]).includes(format);
+}
 
 // ----------------------------------------------------------------------------
 // ⚠️ ESPELHO ASSIMÉTRICO — arquivo `arena-agent-config@1` NO BACKEND.
@@ -168,19 +193,34 @@ export interface ArenaAgentConfigLimits extends AgentLimits {
   maxCostUsd: number;
 }
 
+/** Um check do arquivo (`verify[]` / `regression[]`). */
+export interface ArenaAgentTaskCheck {
+  label?: string;
+  cmd: string;
+  expectExit?: number;
+  timeoutMs?: number;
+  weight?: number;
+  kind?: 'fail_to_pass' | 'pass_to_pass';
+  /** IMPL-098: check crítico (decide sozinho na validação da tarefa). */
+  critical?: boolean;
+}
+
 /** Nó `scenario[].agentTask` do arquivo — espelha `AgentTaskSpec` (src/agent/types.ts). */
 export interface ArenaAgentTaskConfig {
   repo?: { kind: 'git'; url?: string; path?: string; ref: string; shallow?: boolean };
   setup?: { cmd: string; timeoutMs?: number }[];
   files?: { path: string; content: string }[];
-  verify?: {
-    label?: string;
-    cmd: string;
-    expectExit?: number;
-    timeoutMs?: number;
-    weight?: number;
-    kind?: 'fail_to_pass' | 'pass_to_pass';
-  }[];
+  verify?: ArenaAgentTaskCheck[];
+  /** IMPL-098 (@2): regressão (PASS_TO_PASS) — entra no oráculo da run como `pass_to_pass`. */
+  regression?: ArenaAgentTaskCheck[];
+  /** IMPL-098 (@2): solução de referência (obrigatória só em `agents task validate`). */
+  solution?: AgentTaskSolution;
+  /** IMPL-098 (@2): diretório de testes, RELATIVO ao arquivo — copiado para o verificador DEPOIS do agente. */
+  testsDir?: string;
+  /** IMPL-098 (@2): ambiente fixado por digest (`path`, se houver, absoluto). */
+  env?: AgentTaskEnv;
+  /** IMPL-098 (@2): proveniência/curadoria. */
+  metadata?: AgentTaskMetadata;
   forbiddenPaths?: string[];
   rebuild?: { cmd?: string; lockfiles?: string[]; protect?: string[]; timeoutMs?: number };
   detectors?: 'off' | 'warn' | 'fail';
@@ -210,9 +250,9 @@ export interface ArenaAgentConfigAgent {
   };
 }
 
-/** Contrato do arquivo de configuração do MODO AGENTE (`arena-agent-config@1`). */
+/** Contrato do arquivo de configuração do MODO AGENTE (`arena-agent-config@1|@2`). */
 export interface ArenaAgentConfigFile {
-  format: 'arena-agent-config@1';
+  format: ArenaAgentConfigFormat;
   mode: 'compare' | 'variation' | 'training';
   theme: string; // min 1
   scenarioBrief?: string;
@@ -719,6 +759,26 @@ const agentLimitsSchema = z
     'agent.limits deve ser um objeto com maxCostUsd obrigatório',
   );
 
+/** Um check do arquivo (`verify[]`/`regression[]`) — mesmas regras nos dois. */
+function agentCheckSchema(campo: 'verify' | 'regression') {
+  return z.object(
+    {
+      label: z.string('label deve ser texto').optional(),
+      cmd: z.string('cmd obrigatório').min(1, 'cmd obrigatório'),
+      expectExit: z.number('deve ser número inteiro').int('deve ser número inteiro').optional(),
+      timeoutMs: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
+      weight: z.number('deve ser número').positive('deve ser maior que zero').optional(),
+      // IMPL-039: F2P (default) × P2P (regressão: quebrar = falha).
+      kind: z
+        .enum(['fail_to_pass', 'pass_to_pass'], 'kind deve ser "fail_to_pass" ou "pass_to_pass"')
+        .optional(),
+      // IMPL-098: check crítico (a validação da tarefa o trata como barreira).
+      critical: z.boolean('critical deve ser boolean').optional(),
+    },
+    `cada ${campo} deve ser { cmd }`,
+  );
+}
+
 const agentTaskSchema = z
   .object(
     {
@@ -758,25 +818,24 @@ const agentTaskSchema = z
           'files deve ser uma lista',
         )
         .optional(),
-      verify: z
-        .array(
-          z.object(
-            {
-              label: z.string('label deve ser texto').optional(),
-              cmd: z.string('cmd obrigatório').min(1, 'cmd obrigatório'),
-              expectExit: z.number('deve ser número inteiro').int('deve ser número inteiro').optional(),
-              timeoutMs: z.number('deve ser número inteiro').int('deve ser número inteiro').positive('deve ser maior que zero').optional(),
-              weight: z.number('deve ser número').positive('deve ser maior que zero').optional(),
-              // IMPL-039: F2P (default) × P2P (regressão: quebrar = falha).
-              kind: z
-                .enum(['fail_to_pass', 'pass_to_pass'], 'kind deve ser "fail_to_pass" ou "pass_to_pass"')
-                .optional(),
-            },
-            'cada verify deve ser { cmd }',
-          ),
-          'verify deve ser uma lista',
-        )
+      verify: z.array(agentCheckSchema('verify'), 'verify deve ser uma lista').optional(),
+      // --- IMPL-098 (arena-agent-config@2) — aditivos, opcionais na run ------
+      // regression[]: PASS_TO_PASS (a run os roda como `pass_to_pass`).
+      regression: z.array(agentCheckSchema('regression'), 'regression deve ser uma lista').optional(),
+      // solution: só a validação (`agents task validate`) a exige.
+      solution: agentTaskSolutionSchema.optional(),
+      // testsDir: relativo ao arquivo e contido nele (o CLI resolve p/ absoluto).
+      testsDir: z
+        .string('testsDir deve ser texto')
+        .min(1, 'testsDir não pode ser vazio')
+        .superRefine((v, ctx) => {
+          const problema = testsDirProblem(v);
+          if (problema) ctx.addIssue({ code: 'custom', message: `testsDir ${problema}` });
+        })
         .optional(),
+      // env: digest pinado; `path` relativo é REJEITADO (reprodutibilidade).
+      env: agentTaskEnvSchema.optional(),
+      metadata: agentTaskMetadataSchema.optional(),
       forbiddenPaths: z.array(z.string('caminho deve ser texto'), 'deve ser uma lista de caminhos').optional(),
       // IMPL-039: rebuild de dependências do lockfile do seed antes do verify[].
       rebuild: z
@@ -855,7 +914,7 @@ const agentScenarioSchema = z
 const arenaAgentConfigSchema = z
   .object(
     {
-      format: z.literal(ARENA_AGENT_CONFIG_FORMAT),
+      format: z.enum(ARENA_AGENT_CONFIG_FORMATS),
       mode: z.enum(['compare', 'variation', 'training'], "deve ser 'compare', 'variation' ou 'training'"),
       theme: z.string('obrigatório').min(1, 'obrigatório'),
       scenarioBrief: z.string('deve ser texto').max(4000, 'não pode passar de 4000 caracteres').optional(),
@@ -903,16 +962,17 @@ const arenaAgentConfigSchema = z
   );
 
 /**
- * Valida um JSON lido de arquivo como ArenaAgentConfigFile (`arena-agent-config@1`).
- * Nunca lança. Valida o `format` ANTES do zod, para a mensagem exata de "não é uma
- * configuração" quando o arquivo é outro (ou de outra versão).
+ * Valida um JSON lido de arquivo como ArenaAgentConfigFile (`arena-agent-config@1`
+ * ou `@2` — IMPL-098: o @1 continua legível). Nunca lança. Valida o `format`
+ * ANTES do zod, para a mensagem exata de "não é uma configuração" quando o
+ * arquivo é outro (ou de outra versão).
  */
 export function parseArenaAgentConfig(
   json: unknown,
 ): { ok: true; config: ArenaAgentConfigFile } | { ok: false; error: string } {
   const formato =
     json && typeof json === 'object' ? (json as Record<string, unknown>).format : undefined;
-  if (formato !== ARENA_AGENT_CONFIG_FORMAT) {
+  if (!isArenaAgentConfigFormat(formato)) {
     const desc = typeof formato === 'string' && formato.trim() ? formato : 'desconhecido';
     return {
       ok: false,

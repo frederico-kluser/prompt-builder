@@ -23,7 +23,7 @@
 //   injetado (fake no smoke) devolve a MESMA forma.
 // - A `CompetitorResponse.execution` é um `ExecutionRef` RELATIVO a getDataDir().
 // ----------------------------------------------------------------------------
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ensurePrivateSubtree } from '../pathSafety.js';
@@ -57,6 +57,7 @@ import {
   type RunCostMeterLease,
 } from './costProxy.js';
 import { hostCommandRunner, removeTreeBestEffort, writeFileNoFollow, type CommandRunner } from './sandboxExec.js';
+import { combinedChecks, copyTestsDirInto } from './taskValidate.js';
 import { isDigestRef, sandboxCommandRunner, sandboxProfile } from './container.js';
 import { BudgetExceeded, isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
@@ -365,6 +366,20 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
     };
   }
 
+  // IMPL-098: `testsDir` chega RESOLVIDO pelo CLI (absoluto, existente) — é
+  // conferido ANTES de executar qualquer coisa. Relativo (config vinda sem
+  // diretório de origem: MCP/HTTP) nunca é resolvido contra o cwd nem contra o
+  // workspace — o agente plantaria o próprio "teste".
+  const testsDirErr = testsDirIssue(task);
+  if (testsDirErr) {
+    return {
+      response: responseError(contestant, contestant.modelId, testsDirErr, 0),
+      repResults: failedReps(runId, stageIndex, contestant.id, reps, testsDirErr),
+      incomplete: false,
+      errorMsg: testsDirErr,
+    };
+  }
+
   const promptMode = agentConfig.promptMode ?? forcedPromptMode ?? 'append';
   // O executor (pi) lê `config.promptMode` p/ montar o argv (`--system-prompt` vs
   // `--append-system-prompt`). Passamos a config com o modo RESOLVIDO para que o
@@ -667,7 +682,10 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         //    PRÍSTINOS da tarefa reescritos DEPOIS do agente (padrão Harbor/
         //    SWE-bench) — o agente não entrega o próprio teste adulterado.
         // `rebuild` (IMPL-039) também roda na cópia: nunca no workspace do agente.
-        const needsVerifier = (task.verify?.length ?? 0) > 0 || task.rebuild !== undefined;
+        // IMPL-098: `regression[]` entra no oráculo como PASS_TO_PASS e o
+        // `testsDir` só existe no verificador — os dois exigem a cópia.
+        const checks = combinedChecks(task);
+        const needsVerifier = checks.length > 0 || task.rebuild !== undefined || task.testsDir !== undefined;
         const collect = await workspaceMgr.collect(workspaceDir, seedCommit, limits.maxDiffBytes, {
           keepSnapshot: needsVerifier,
         });
@@ -675,11 +693,17 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
 
         let oracle: AgentOracleResult | undefined;
         let oracleAttempts = 0;
-        if (task.verify?.length || task.forbiddenPaths?.length || task.rebuild) {
-          const verify = task.verify ?? [];
+        if (checks.length || task.forbiddenPaths?.length || task.rebuild) {
+          const verify = checks;
           oracleAttempts = 1;
           if (verifierDir) {
             for (const f of task.files ?? []) writeFileNoFollow(verifierDir, f.path, f.content);
+            // IMPL-098: o material de `testsDir` entra DEPOIS do agente e SÓ na
+            // cópia do verificador (padrão Harbor/SWE-bench) — durante a
+            // execução ele não existe no workspace. Mesma função da validação
+            // (`task validate`): régua igual nos dois lados. O CLI já o resolveu
+            // para absoluto (a etapa recusa relativo antes de executar).
+            if (task.testsDir) copyTestsDirInto(task.testsDir, verifierDir);
           }
           // Checks (e rebuild) na CÓPIA com os fixtures prístinos; o hash dos
           // protegidos olha o workspace que o agente deixou (`guardDir`).
@@ -1344,6 +1368,24 @@ function writeVerdictArtifact(absDir: string, rep: AgentRepResult): void {
   } catch {
     /* melhor esforço — a nota já está no AgentRepResult */
   }
+}
+
+/** IMPL-098: problema do `testsDir` da tarefa na RUN (absoluto e diretório), ou `undefined`. */
+function testsDirIssue(task: NonNullable<StageSpec['agentTask']>): string | undefined {
+  const td = task.testsDir;
+  if (!td) return undefined;
+  if (!path.isAbsolute(td)) {
+    return (
+      `testsDir "${td}" relativo sem diretório de origem — só \`agents run --config <arq>\` o resolve ` +
+      '(pelo diretório do arquivo)'
+    );
+  }
+  try {
+    if (!statSync(td).isDirectory()) return `testsDir "${td}" não é um diretório`;
+  } catch {
+    return `testsDir "${td}" não existe`;
+  }
+  return undefined;
 }
 
 function responseError(contestant: Contestant, modelId: string, errorMsg: string, costUsd: number): CompetitorResponse {

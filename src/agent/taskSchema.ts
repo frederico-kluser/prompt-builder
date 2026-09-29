@@ -161,6 +161,23 @@ export const agentTaskSpecSchema = z
   })
   .strict();
 
+/**
+ * Regra do `testsDir` no ARQUIVO (IMPL-098): relativo ao diretório da
+ * configuração e contido nele — absoluto muda de significado entre máquinas e
+ * `../` levaria para o verificador (e para o hash do portão) arquivos de fora
+ * da tarefa. `undefined` = ok. Fonte única: `taskSchema` e `configFile` usam.
+ */
+export function testsDirProblem(testsDir: string): string | undefined {
+  if (path.posix.isAbsolute(testsDir) || path.win32.isAbsolute(testsDir)) {
+    return `deve ser relativo à configuração (recebido "${testsDir}")`;
+  }
+  const norm = path.posix.normalize(testsDir.split('\\').join('/'));
+  if (norm === '..' || norm.startsWith('../')) {
+    return `não pode sair do diretório da configuração (recebido "${testsDir}")`;
+  }
+  return undefined;
+}
+
 /** Modo de validação: `validate` exige solução de referência (IMPL-097/098). */
 export type AgentTaskParseMode = 'validate' | 'run';
 
@@ -204,9 +221,8 @@ export function parseAgentTaskSpec(input: unknown, opts: { mode?: AgentTaskParse
   if (task.solution?.kind === 'diff' && !task.solution.diff.includes('\n') && !task.solution.diff.startsWith('diff ')) {
     warnings.push('solution.diff parece curto demais para um patch unificado');
   }
-  if (task.testsDir && (path.posix.isAbsolute(task.testsDir) || path.win32.isAbsolute(task.testsDir))) {
-    errors.push(`testsDir: deve ser relativo à configuração (recebido "${task.testsDir}")`);
-  }
+  const testsDirIssue = task.testsDir === undefined ? undefined : testsDirProblem(task.testsDir);
+  if (testsDirIssue) errors.push(`testsDir: ${testsDirIssue}`);
 
   return errors.length > 0 ? { ok: false, errors } : { ok: true, task, warnings };
 }

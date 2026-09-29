@@ -79,7 +79,7 @@ import { ensureCatalog } from '../../modelsCache.js';
 import { toExportRow } from '../../modelCaps.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
-import { ARENA_AGENT_CONFIG_FORMAT, parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
+import { isArenaAgentConfigFormat, parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
 import { arenaConfigToRunConfig, arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { readArtifact } from '../../agent/store.js';
 import { resolveHome, resolveKey, parse } from '../context.js';
@@ -427,7 +427,7 @@ async function jobInputFromStartArgs(args: Record<string, unknown>): Promise<Run
     }
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config é obrigatório (objeto).');
-  if ((raw as Record<string, unknown>).format === ARENA_AGENT_CONFIG_FORMAT) {
+  if (isArenaAgentConfigFormat((raw as Record<string, unknown>).format)) {
     const cfg = parseAgentConfigRaw(raw);
     return { kind: cfg.mode === 'training' ? 'training' : 'agent', config: { ...cfg, budgetUsd }, budgetUsd };
   }
@@ -894,7 +894,7 @@ const TOOLS: McpTool[] = [
       }
       // IMPL-099: config de agente é EXECUTÁVEL — MESMO portão do `agents run`.
       const cru = rawConfigObject(args.config);
-      if (cru && cru.format === ARENA_AGENT_CONFIG_FORMAT) {
+      if (cru && isArenaAgentConfigFormat(cru.format)) {
         const recusa = await execConfigGateForTool('start_run', cru, args);
         if (recusa) return recusa;
       }

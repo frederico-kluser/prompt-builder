@@ -201,7 +201,9 @@ async function cliValidate(task: unknown): Promise<{ exit: number; cliErr?: CliE
   const file = path.join(tmp, `cli-${Math.random().toString(36).slice(2)}.json`);
   writeFileSync(file, JSON.stringify({ agentTask: task }), 'utf8');
   try {
-    const exit = await cmdAgents(['task', 'validate', file, '--json', '--data-dir', tmp, '--quiet']);
+    // IMPL-099: a validação EXECUTA a tarefa — aqui o aceite explícito é
+    // ortogonal ao que se testa (o portão tem contrato próprio em cli-exec-gate).
+    const exit = await cmdAgents(['task', 'validate', file, '--json', '--data-dir', tmp, '--quiet', '--allow-exec-config']);
     return { exit };
   } catch (err) {
     if (!isCliError(err)) throw err;

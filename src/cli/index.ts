@@ -111,8 +111,12 @@ AGENTES (modo agente — mesmo motor, executor pi)
                            pré-voo do executor (canário real com --deep; valida Docker/sandbox em
                            --container; --config mede a imagem/runtime daquela run)
   agents run --config <arq> --budget <usd|none> [--dry-run] [--allow-concurrent]
+          [--allow-exec-config]
                            roda a arena de agentes até o fim (mesmo teto
-                           diário e lock por config dos comandos de run)
+                           diário e lock por config dos comandos de run; config
+                           executável exige o pin SHA-256 — exit 3 sem ele)
+  agents task validate <arq> [--allow-exec-config]
+                           as 6 checagens da tarefa (mesmo portão de execução)
   agents show <runId>      record + execuções de agente
   agents list              varre <data-dir>/agent-runs
   agents logs <runId> --stage N --contestant <id>

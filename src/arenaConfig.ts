@@ -252,6 +252,13 @@ export function arenaAgentConfigToRunConfig(
         ...(s.agentTask.setup ? { setup: s.agentTask.setup } : {}),
         ...(s.agentTask.files ? { files: s.agentTask.files } : {}),
         ...(s.agentTask.verify ? { verify: s.agentTask.verify } : {}),
+        // IMPL-098 (arena-agent-config@2): aditivos. `testsDir` sai RELATIVO ao
+        // arquivo — quem sabe de onde o arquivo veio (o CLI) o resolve.
+        ...(s.agentTask.regression ? { regression: s.agentTask.regression } : {}),
+        ...(s.agentTask.solution ? { solution: s.agentTask.solution } : {}),
+        ...(s.agentTask.testsDir ? { testsDir: s.agentTask.testsDir } : {}),
+        ...(s.agentTask.env ? { env: s.agentTask.env } : {}),
+        ...(s.agentTask.metadata ? { metadata: s.agentTask.metadata } : {}),
         ...(s.agentTask.forbiddenPaths ? { forbiddenPaths: s.agentTask.forbiddenPaths } : {}),
         ...(s.agentTask.rebuild ? { rebuild: s.agentTask.rebuild } : {}),
         ...(s.agentTask.detectors ? { detectors: s.agentTask.detectors } : {}),
