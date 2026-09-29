@@ -10,6 +10,8 @@ import { getDataDir, setDataDir } from '../src/storage.js';
 import { eraseRunFiles, pruneExpiredRuns } from '../src/lgpd.js';
 import { findJevRecord, listJevRecords, loadJevRun, saveJevRun, saveJevSession } from '../src/jev/store.js';
 import {
+  computeMetrics,
+  renderJevRunReportHtml,
   buildJevRunReport,
   buildJevSessionReport,
   lineDiffCounts,
@@ -124,6 +126,22 @@ describe('relatórios', () => {
     expect(md).toContain('| m · o | 100,0% |');
     expect(md).not.toContain('Checkout quebrou');
     expect(renderJevRunReportMarkdown(buildJevRunReport(rec, new Date('2026-09-29T00:00:00Z')))).toBe(md);
+  });
+
+  it('L2: competidor SEM nada pontuado sai "—" no Markdown e no HTML, nunca "0,0%" / ECE 0', () => {
+    const vazio = computeMetrics({ items: [], goldOf: () => [], planned: 1, noScore: 1, cells: [], questionsPerCell: 1, repeats: 1 });
+    const rec = runRecord('rep-vazio', { status: 'inconclusive', metrics: { 'd:o@m': vazio }, byQuestion: { 'd:o@m': { b: vazio } } });
+    const r = buildJevRunReport(rec, new Date('2026-09-29T00:00:00Z'));
+    expect(r.contestants[0]).toMatchObject({ accuracy: null, ece: null, coverageAtAuto: null, brierScore: null });
+    const md = renderJevRunReportMarkdown(r);
+    const linha = md.split('\n').find((l) => l.startsWith('| m · o |'))!;
+    expect(linha).toMatch(/^\| m · o \| — \| — \| — \| — \| — \|/);
+    expect(md).not.toMatch(/\| 0,0% \|/);
+    const linhaQ = md.split('\n').find((l) => l.startsWith('| b | m · o |'))!;
+    expect(linhaQ).toContain('| 0 | — | — | — | — |');
+    const html = renderJevRunReportHtml(r);
+    expect(html).not.toContain('>0,0%<');
+    expect(html).not.toContain('>0,000<');
   });
 
   function sessao(extra: Partial<JevSessionRecord>): JevSessionRecord {

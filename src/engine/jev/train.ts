@@ -124,7 +124,9 @@ function caseScores(
       const raw = scoreDist(q, c.id, oc.dist, c.expected[qid], pol, { tolerance: run.config.scoreTolerance, invalid: oc.invalid });
       const d: Dist = applyTemperature(oc.dist, temps[qid]);
       const cal = scoreDist(q, c.id, d, c.expected[qid], pol, { tolerance: run.config.scoreTolerance, invalid: oc.invalid });
-      if (cal.brier !== null) briers.push(oc.invalid ? 0 : 1 - cal.brier);
+      // Inválida já sai no pior caso (Brier 1 → 0) de `scoreDist`: a MESMA
+      // regra do placar e do teste pareado da comparação (`perCaseScores`).
+      if (cal.brier !== null) briers.push(1 - cal.brier);
       accs.push(raw.correct ? 1 : 0);
     }
     out.set(c.id, { score: briers.length ? mean(briers) : null, acc: accs.length ? mean(accs) : null });
@@ -196,6 +198,19 @@ export async function trainJev(resolved: ResolvedJevConfig, deps: JevTrainDeps):
     decisionCatalog = await gateway.listDecisionModels(deps.apiKey);
   } catch (err) {
     log(`catálogo de decisões indisponível (${(err as Error).message}) — a reserva por chamada fica sem preço.`);
+  }
+  // Orçamento de CONTEXTO por modelo, agora com o catálogo (L5): as runs
+  // aninhadas pulam o lint (`skipLint`), e sem isto um estado grande demais
+  // para o modelo viraria N×400 pagos em vez de uma recusa antes de gastar.
+  const lintCtx = lintResolved(resolved, { decisionCatalog, strict: deps.strict }).filter((i) => i.code.startsWith('budget.'));
+  if (!isRunnable(lintCtx)) {
+    throw new JevConfigError(
+      `estado grande demais para o contexto do modelo: ${lintCtx
+        .filter((i) => i.level === 'error')
+        .map((i) => i.message)
+        .join('; ')}`,
+      lintCtx,
+    );
   }
   const chatCatalog = gateway.peekModelsCache(deps.apiKey)?.data ?? [];
   const ledger =

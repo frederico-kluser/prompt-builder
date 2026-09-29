@@ -174,6 +174,21 @@ describe('jev run — execução, NDJSON, orçamento', () => {
   });
 });
 
+describe('jev show — texto sem nada pontuado (L2)', () => {
+  it('teto que não cabe nem uma decisão: nScored 0 → a tabela imprime "—", nunca "0.0%" / ECE 0.000', async () => {
+    const p = escrever('vazio.json', jevExample('triagem', 'eval'));
+    const r = await run(['jev', 'run', '-c', p, '--budget', '0.000000001', '--json', '--allow-concurrent']);
+    expect(r.code).toBe(7);
+    const env = JSON.parse(r.stdout) as { data: { runId: string } };
+    const t = await run(['jev', 'show', env.data.runId, '--output-format', 'text']);
+    expect(t.code).toBe(0);
+    const linha = t.stdout.split('\n').find((l) => l.startsWith('jev-1.13'))!;
+    expect(linha).toBeDefined();
+    expect(linha).not.toMatch(/0\.0%|0\.000/);
+    expect(linha.split(/\s+/).filter((x) => x === '—').length).toBeGreaterThanOrEqual(4);
+  });
+});
+
 describe('jev export — portão do holdout', () => {
   it('holdout regredido BLOQUEIA (exit 10); --override libera com o motivo gravado; --request dá só o corpo', async () => {
     const home = path.join(dir, 'home-export');

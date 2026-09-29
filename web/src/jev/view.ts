@@ -194,7 +194,7 @@ export function reliabilitySeries(run: JevRunRecord, qid: string | null): Reliab
   const out: ReliabilitySeries[] = [];
   run.contestants.forEach((ct, index) => {
     const m = qid ? run.byQuestion[ct.id]?.[qid] : run.metrics[ct.id];
-    if (!m || m.nScored === 0) return;
+    if (!m || m.nScored === 0 || m.ece === null) return;
     out.push({ contestant: ct, index, bins: m.bins.filter((b) => b.n > 0), ece: m.ece, n: m.nScored });
   });
   return out;

@@ -92,6 +92,18 @@ export function fitThresholds(
 }
 
 /**
+ * Limiar arredondado para CIMA em 4 casas. Arredondar para baixo (o antigo
+ * `toFixed(4)`) admitia na banda auto pontos logo ABAIXO do corte ajustado —
+ * com sinal contínuo (temperatura) isso fura a precisão-alvo. Para cima, o
+ * pior efeito é deixar de fora o próprio ponto do corte (mais conservador).
+ * O `−1e-9` (em unidades de 1e-4) só absorve o ruído de ponto flutuante de
+ * `x·1e4` — um corte já com 4 casas (0,9; 0,85) não sobe um degrau.
+ */
+export function ceilThreshold(x: number): number {
+  return Math.ceil(x * 1e4 - 1e-9) / 1e4;
+}
+
+/**
  * Política ajustada de UMA pergunta: T (NLL) e, com o sinal calibrado, o
  * limiar auto para a precisão-alvo. Com menos de `MIN_FIT_POINTS`: devolve a
  * base (T = 1) marcada como não ajustada.
@@ -112,8 +124,8 @@ export function fitQuestionPolicy(
   const th = fitThresholds(sinais, opts.targetPrecision, base.hitl);
   return {
     ...pol,
-    auto: Number(th.auto.toFixed(4)),
-    hitl: Number(th.hitl.toFixed(4)),
+    auto: ceilThreshold(th.auto),
+    hitl: ceilThreshold(th.hitl),
     fittedOn: {
       split: opts.split,
       n: points.length,

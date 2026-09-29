@@ -47,10 +47,29 @@ export interface DecisionsRequest {
   session_id?: string;
 }
 
+/**
+ * Resposta tipada no formato do fio. O PREVISTO é a resposta DECLARADA — o
+ * `choice` da API (documentado como a opção de maior probabilidade, e é nele
+ * que a skill do Jev pontua), o `answer` da noul e o `level` do score de um
+ * LLM. As probabilidades (2 casas no fio; verbalizadas no LLM) servem só às
+ * métricas probabilísticas (pTrue, Brier, log-loss, ECE).
+ */
 export type JevWireAnswer =
-  | { type: 'noul'; noul: number }
+  | {
+      type: 'noul';
+      noul: number;
+      /** LLM: o sim/não DECLARADO (`answer`). Ausente (Jev) = previsto por `noul ≥ 0,5`. */
+      answer?: boolean;
+    }
   | { type: 'choice'; choice: string; probabilities?: Record<string, number>; confidence?: number }
-  | { type: 'score'; score: number; probabilities?: Record<string, number>; confidence?: number };
+  | {
+      type: 'score';
+      score: number;
+      probabilities?: Record<string, number>;
+      confidence?: number;
+      /** LLM: o nível DECLARADO (`level`). Ausente (Jev) = previsto pelo nível argmax. */
+      level?: number;
+    };
 
 /** Um problema de contrato do fio (erro da API ou validação local). */
 export interface DecisionsIssue {
@@ -217,14 +236,17 @@ export interface JevScoredAnswer {
   qid: string;
   caseId: string;
   type: JevPrimitive;
-  /** Rótulo canônico (choice), boolean (noul) ou nível argmax (score). */
+  /**
+   * A resposta DECLARADA: rótulo canônico do `choice` (choice), `answer` do LLM
+   * ou p ≥ 0,5 (noul), `level` do LLM ou nível argmax (score).
+   */
   predicted: JevExpected | null;
   correct: boolean;
   /** Probabilidade atribuída ao rótulo certo (alternativas somam). */
   pTrue: number;
-  /** Probabilidade da classe prevista (ECE top-label). */
+  /** Probabilidade atribuída à classe PREVISTA (ECE top-label). */
   pTop: number;
-  /** argmax == ouro (score: nível modal). */
+  /** previsto == ouro (score: nível previsto, não a expectativa). */
   topCorrect: boolean;
   /** O que decide a banda. */
   signal: number;
@@ -272,24 +294,29 @@ export interface JevMetrics {
   nInvalid: number;
   /** Sem nota (error/blocked). */
   nNoScore: number;
-  accuracy: number;
+  /** `null` (como logLoss/ece/eceAdaptive/aurc/coverageAtAuto) = nada pontuado (`nScored = 0`). */
+  accuracy: number | null;
   macroF1?: number;
-  /** Média do Brier normalizado (sem as perguntas degeneradas). `null` = nada pontuável. */
+  /** Média do Brier normalizado (inválida = 1; degeneradas fora). `null` = nada pontuável. */
   brier: number | null;
   /** 100·(1−brier) — a régua do gate, em p.p. */
   brierScore: number | null;
-  /** Brier de PIOR caso: resposta fora do contrato = 1 (B2 — invalid não pode sair "melhor" que erro confiante). */
+  /**
+   * Brier de PIOR caso: resposta fora do contrato = 1, INCLUSIVE na pergunta
+   * degenerada. Como o `brier` já pontua o inválido no pior caso, os dois só
+   * diferem pelas degeneradas inválidas.
+   */
   brierWorstCase: number | null;
-  logLoss: number;
-  ece: number;
-  eceAdaptive: number;
+  logLoss: number | null;
+  ece: number | null;
+  eceAdaptive: number | null;
   bins: JevBin[];
   bands: { auto: number; hitl: number; abstain: number };
   precisionAtAuto: number | null;
-  coverageAtAuto: number;
+  coverageAtAuto: number | null;
   /** Erros dentro da banda auto ("errado com confiança"). */
   wrongAuto: number;
-  aurc: number;
+  aurc: number | null;
   auroc: number | null;
   scoreMae?: number;
   flipRate?: number | null;
@@ -308,11 +335,11 @@ export interface JevMetrics {
 
 /** Manchete de uma métrica (evento/NDJSON — nunca estado nem rubrica). */
 export interface JevMetricsHeadline {
-  accuracy: number;
+  accuracy: number | null;
   macroF1: number | null;
   brierScore: number | null;
-  ece: number;
-  coverageAtAuto: number;
+  ece: number | null;
+  coverageAtAuto: number | null;
   precisionAtAuto: number | null;
   wrongAuto: number;
   p50Ms: number | null;

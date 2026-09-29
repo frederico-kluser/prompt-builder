@@ -66,12 +66,13 @@ export interface JevContestantRow {
   label: string;
   kind: 'decision' | 'llm';
   modelId: string;
-  accuracy: number;
+  /** `null` (como ece/coverageAtAuto) = nada pontuado — impresso "—", nunca 0. */
+  accuracy: number | null;
   macroF1: number | null;
   brierScore: number | null;
   brierWorstCase: number | null;
-  ece: number;
-  coverageAtAuto: number;
+  ece: number | null;
+  coverageAtAuto: number | null;
   precisionAtAuto: number | null;
   wrongAuto: number;
   p50Ms: number | null;
@@ -227,7 +228,16 @@ export interface JevRunReport {
   generatedAt: string;
   run: { id: string; mode: string; status: string; theme: string; cases: number; repeats: number; client: string; startedAt: string; finishedAt?: string };
   contestants: JevContestantRow[];
-  byQuestion: { question: string; contestant: string; accuracy: number; brierScore: number | null; ece: number; coverageAtAuto: number; precisionAtAuto: number | null; nScored: number }[];
+  byQuestion: {
+    question: string;
+    contestant: string;
+    accuracy: number | null;
+    brierScore: number | null;
+    ece: number | null;
+    coverageAtAuto: number | null;
+    precisionAtAuto: number | null;
+    nScored: number;
+  }[];
   comparisons: JevComparison[];
   cascade: JevCascade[];
   policy: Record<string, Record<string, JevQuestionPolicy>>;

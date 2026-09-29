@@ -140,9 +140,12 @@ export function parseLlmAnswer(q: JevQuestionSpec, obj: unknown): LlmParse {
   if (!isPlainObject(obj)) return { ok: false, code: 'llm.not_object' };
   if (q.type === 'noul') {
     const p = num(obj.p_yes);
-    const ans = obj.answer;
-    if (p !== undefined && p >= 0 && p <= 1) return { ok: true, answer: { type: 'noul', noul: p }, probabilitySource: 'verbalized' };
-    if (typeof ans === 'boolean') return { ok: true, answer: { type: 'noul', noul: ans ? 1 : 0 }, probabilitySource: 'none' };
+    const ans = typeof obj.answer === 'boolean' ? obj.answer : undefined;
+    // O PREVISTO é o `answer` declarado; `p_yes` (verbalizado) só vai às métricas.
+    if (p !== undefined && p >= 0 && p <= 1) {
+      return { ok: true, answer: { type: 'noul', noul: p, ...(ans !== undefined ? { answer: ans } : {}) }, probabilitySource: 'verbalized' };
+    }
+    if (ans !== undefined) return { ok: true, answer: { type: 'noul', noul: ans ? 1 : 0, answer: ans }, probabilitySource: 'none' };
     return { ok: false, code: 'llm.noul_invalid' };
   }
   if (q.type === 'choice') {
@@ -159,9 +162,10 @@ export function parseLlmAnswer(q: JevQuestionSpec, obj: unknown): LlmParse {
   if (lv === undefined || !Number.isInteger(lv) || lv < 0 || lv >= L) return { ok: false, code: 'llm.level_out_of_scale' };
   const keys = Array.from({ length: L }, (_, i) => String(i));
   const d = distribution(obj.probabilities, keys);
-  if (!d) return { ok: true, answer: { type: 'score', score: lv }, probabilitySource: 'none' };
+  if (!d) return { ok: true, answer: { type: 'score', score: lv, level: lv }, probabilitySource: 'none' };
   const esperado = keys.reduce((s, k) => s + Number(k) * d[k], 0);
-  return { ok: true, answer: { type: 'score', score: esperado, probabilities: d }, probabilitySource: 'verbalized' };
+  // O PREVISTO é o `level` declarado; a distribuição verbalizada só vai às métricas.
+  return { ok: true, answer: { type: 'score', score: esperado, probabilities: d, level: lv }, probabilitySource: 'verbalized' };
 }
 
 /** Texto da resposta → respostas por pergunta (`per-case` devolve um objeto por id). */

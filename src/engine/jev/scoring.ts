@@ -7,7 +7,11 @@
 //   - SAEM: casos incompletos (orçamento/cancelamento — de todos os
 //     competidores) e casos com alguma rep error/blocked (SEM NOTA, dos dois lados);
 //   - repetições: distribuições promediadas ANTES; o caso é pontuado uma vez;
-//   - resposta fora do contrato em qualquer rep: p uniforme e ERRADA.
+//   - resposta fora do contrato em qualquer rep: ERRADA e no PIOR CASO das
+//     métricas probabilísticas (Brier 1, pTrue 0, log-loss −ln ε) — a MESMA
+//     regra no placar, no teste pareado da comparação e no gate do treino.
+//     Com p uniforme ela sairia MELHOR que um erro confiante (1−Brier 0,75
+//     numa noul) e premiaria quem quebra o contrato de resposta.
 //
 // Estatística (crítica A2): valores na escala 0–1 para `pairedSignificance`
 // (que multiplica por 100), vetores JÁ agregados por caso e alinhados por
@@ -141,6 +145,15 @@ export function logLossOf(pTrue: number): number {
   return -Math.log(Math.max(PROB_EPS, Math.min(1, pTrue)));
 }
 
+/**
+ * Resposta fora do contrato: Brier de PIOR caso (1; `null` segue `null` na
+ * pergunta degenerada), pTrue 0 e o log-loss máximo (−ln ε). Uma regra só
+ * para `scoreDist` — e por ela para o placar, a comparação e o gate.
+ */
+function worstCaseOf(brier: number | null): { brier: number | null; pTrue: number; logLoss: number } {
+  return { brier: brier === null ? null : 1, pTrue: 0, logLoss: logLossOf(0) };
+}
+
 export interface ScoreOptions {
   tolerance?: number;
   invalid?: boolean;
@@ -161,7 +174,8 @@ export function scoreDist(
   const expected = expectedList(expectedRaw);
   const tol = opts.tolerance ?? DEFAULT_SCORE_TOLERANCE;
   const predicted = predictedOf(d);
-  const pTrue = pTrueOf(d, expected);
+  const pior = opts.invalid ? worstCaseOf(brierOf(d, expected)) : null;
+  const pTrue = pior ? pior.pTrue : pTrueOf(d, expected);
   const pTop = pTopOf(d);
   const topCorrect = !opts.invalid && expected.includes(predicted);
   let correct = topCorrect;
@@ -184,8 +198,8 @@ export function scoreDist(
     signal,
     // Fora do contrato nunca fica em "auto": abstém.
     band: opts.invalid ? 'abstain' : bandFor(signal, policy),
-    brier: brierOf(d, expected),
-    logLoss: logLossOf(pTrue),
+    brier: pior ? pior.brier : brierOf(d, expected),
+    logLoss: pior ? pior.logLoss : logLossOf(pTrue),
     ...(absError !== undefined ? { absError } : {}),
     ...(opts.invalid ? { invalid: true } : {}),
     ...(opts.flipped ? { flipped: true } : {}),
@@ -193,13 +207,14 @@ export function scoreDist(
   const cal = opts.calibratedPolicy;
   if (cal) {
     const dc = applyTemperature(d, cal.temperature);
-    const pT = pTrueOf(dc, expected);
+    const cpior = opts.invalid ? worstCaseOf(brierOf(dc, expected)) : null;
+    const pT = cpior ? cpior.pTrue : pTrueOf(dc, expected);
     const sig = signalOf(dc, cal);
     out.calibrated = {
       pTrue: pT,
       pTop: pTopOf(dc),
-      brier: brierOf(dc, expected),
-      logLoss: logLossOf(pT),
+      brier: cpior ? cpior.brier : brierOf(dc, expected),
+      logLoss: cpior ? cpior.logLoss : logLossOf(pT),
       signal: sig,
       band: opts.invalid ? 'abstain' : bandFor(sig, cal),
     };
@@ -221,7 +236,8 @@ export interface CaseQuestionOutcome {
 /**
  * Reps de (caso, competidor) → distribuição por pergunta. Qualquer rep sem
  * resposta (error/blocked/skipped) = SEM NOTA para o caso inteiro; qualquer rep
- * fora do contrato numa pergunta = aquela pergunta INVÁLIDA (uniforme, errada).
+ * fora do contrato numa pergunta = aquela pergunta INVÁLIDA (dist uniforme só
+ * como marcador; `scoreDist` a pontua errada e no pior caso).
  */
 export function aggregateReps(q: JevQuestionSpec, reps: readonly JevCell[]): CaseQuestionOutcome {
   if (reps.length === 0) return { dist: null, invalid: false, flipped: false };
@@ -385,6 +401,11 @@ function mean(xs: readonly number[]): number {
   return xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0;
 }
 
+/**
+ * Métricas de um conjunto. Com `nScored = 0` (tudo sem nota, spec recusada)
+ * acurácia, log-loss, ECE, AURC e cobertura saem `null` — nunca 0: "ECE 0 /
+ * log-loss 0 / AURC 0" leria como calibração perfeita num conjunto VAZIO.
+ */
 export function computeMetrics(inp: MetricsInput): JevMetrics {
   const items = inp.items;
   const nScored = items.length;
@@ -424,14 +445,14 @@ export function computeMetrics(inp: MetricsInput): JevMetrics {
     nScored,
     nInvalid: items.filter((i) => i.invalid).length,
     nNoScore: inp.noScore,
-    accuracy: nScored ? items.filter((i) => i.correct).length / nScored : 0,
+    accuracy: nScored ? items.filter((i) => i.correct).length / nScored : null,
     ...(f1s.length ? { macroF1: mean(f1s) } : {}),
     brier,
     brierScore: brier === null ? null : 100 * (1 - brier),
     brierWorstCase: worst.length ? mean(worst) : null,
-    logLoss: mean(items.map((i) => i.logLoss)),
-    ece,
-    eceAdaptive: eceEqualMass(pts),
+    logLoss: nScored ? mean(items.map((i) => i.logLoss)) : null,
+    ece: nScored ? ece : null,
+    eceAdaptive: nScored ? eceEqualMass(pts) : null,
     bins,
     bands: {
       auto: nScored ? auto.length / nScored : 0,
@@ -439,9 +460,9 @@ export function computeMetrics(inp: MetricsInput): JevMetrics {
       abstain: nScored ? items.filter((i) => i.band === 'abstain').length / nScored : 0,
     },
     precisionAtAuto: auto.length ? auto.filter((i) => i.correct).length / auto.length : null,
-    coverageAtAuto: nScored ? auto.length / nScored : 0,
+    coverageAtAuto: nScored ? auto.length / nScored : null,
     wrongAuto: auto.filter((i) => !i.correct).length,
-    aurc: aurc(items.map((i) => ({ signal: i.signal, correct: i.correct, key: `${i.caseId}\u0000${i.qid}` }))),
+    aurc: nScored ? aurc(items.map((i) => ({ signal: i.signal, correct: i.correct, key: `${i.caseId}\u0000${i.qid}` }))) : null,
     auroc: auroc(items.map((i) => ({ signal: i.signal, correct: i.correct }))),
     ...(scoreItems.length ? { scoreMae: mean(scoreItems.map((i) => i.absError as number)) } : {}),
     flipRate: inp.repeats > 1 && nScored ? items.filter((i) => i.flipped).length / nScored : null,

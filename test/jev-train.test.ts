@@ -19,7 +19,7 @@ import {
   type ResolvedJevConfig,
 } from '../src/engine/jev/index.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeRequest } from './fakeOpenRouter.js';
-import { DECISION_CATALOG, answerFor } from './fakeDecisions.js';
+import { DECISION_CATALOG, answerFor, decisionCatalogItem } from './fakeDecisions.js';
 
 const KEY = 'sk-or-v1-fake-key-para-testes-0000';
 
@@ -167,6 +167,23 @@ describe('trainJev — gate, promoção e holdout', () => {
     const s2 = await trainJev(r2, { apiKey: KEY, client: 'node' });
     const pol = Object.values(s2.policy).find((p) => p.fittedOn);
     expect(pol?.fittedOn?.split).toBe('calib');
+  });
+});
+
+describe('L5: contexto do modelo checado com o catálogo ANTES de gastar', () => {
+  it('estado maior que o contexto do modelo de decisão: recusa (JEV_CONFIG) sem nenhuma decisão paga', async () => {
+    const r = resolved(EX);
+    const modelo = r.contestants.find((c) => c.kind === 'decision')!.modelId;
+    const fake = fakeOpenRouter({ decisionCatalog: [decisionCatalogItem(modelo, 0.042e-6, 64)], decisions: jevSensivel() as never });
+    prev = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));
+    const salvas: unknown[] = [];
+    const err = await trainJev(r, { apiKey: KEY, client: 'node', saveSession: async (x) => void salvas.push(x) }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'JEV_CONFIG' });
+    expect(String((err as Error).message)).toMatch(/contexto/);
+    expect(((err as { issues: { code: string }[] }).issues ?? []).some((i) => i.code === 'budget.context')).toBe(true);
+    expect(fake.decisionRequests()).toHaveLength(0);
+    expect(fake.billedUsd()).toBe(0);
+    expect(salvas).toHaveLength(0);
   });
 });
 

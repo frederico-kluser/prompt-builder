@@ -12,6 +12,11 @@ import {
   eceEqualWidth,
   fitTemperature,
   fitThresholds,
+  fitQuestionPolicy,
+  bandUnder,
+  ceilThreshold,
+  headlineOf,
+  parseLlmAnswer,
   aggregateReps,
   percentile,
   policyFor,
@@ -79,18 +84,41 @@ describe('Brier / RPS / log-loss / acerto por primitiva', () => {
     expect(scoreDist(NOUL, 'x', d, true, pol(NOUL)).band).toBe('abstain');
   });
 
-  it('célula inválida: p uniforme, ERRADA e abstém — e o Brier pior-caso a trata como 1', () => {
+  it('célula inválida: ERRADA, abstém e no PIOR caso (Brier 1, pTrue 0, log-loss −ln ε) — placar e pior-caso concordam', () => {
     const cells: JevCell[] = [{ caseId: 'x', contestantId: 'k', rep: 0, status: 'ok', answers: {}, invalid: { t: 'choice.not_in_criteria' } }];
     const oc = aggregateReps(CHOICE, cells);
     expect(oc.invalid).toBe(true);
     const it = scoreDist(CHOICE, 'x', oc.dist!, 'a', pol(CHOICE), { invalid: true });
     expect(it.correct).toBe(false);
     expect(it.band).toBe('abstain');
-    expect(it.pTrue).toBeCloseTo(1 / 3, 12);
+    expect(it.predicted).toBeNull();
+    expect(it.pTrue).toBe(0);
+    expect(it.brier).toBe(1);
+    expect(it.logLoss).toBeCloseTo(-Math.log(1e-3), 12);
     const m = computeMetrics({ items: [it], goldOf: () => ['a'], planned: 1, noScore: 0, cells, questionsPerCell: 1, repeats: 1 });
     expect(m.brierWorstCase).toBe(1);
-    expect(m.brier!).toBeLessThan(1);
+    expect(m.brier).toBe(1);
+    expect(m.brierScore).toBe(0);
     expect(m.nInvalid).toBe(1);
+    // com a política ajustada, o calibrado segue a MESMA regra
+    const cal = scoreDist(CHOICE, 'x', oc.dist!, 'a', pol(CHOICE), { invalid: true, calibratedPolicy: { ...pol(CHOICE), temperature: 2 } });
+    expect(cal.calibrated).toMatchObject({ brier: 1, pTrue: 0, band: 'abstain' });
+  });
+
+  it('L1: inválida NUNCA sai melhor que um erro confiante — nem no placar, nem na comparação pareada', () => {
+    // noul: erro confiante (p=0,9 no lado errado) × resposta fora do contrato.
+    const errado = scoreDist(NOUL, 'x', distFromAnswer(NOUL, { type: 'noul', noul: 0.1 }), true, pol(NOUL));
+    const invalida = scoreDist(NOUL, 'x', aggregateReps(NOUL, [{ caseId: 'x', contestantId: 'k', rep: 0, status: 'invalid' }]).dist!, true, pol(NOUL), { invalid: true });
+    expect(errado.brier).toBeCloseTo(0.81, 12);
+    expect(invalida.brier!).toBeGreaterThanOrEqual(errado.brier!);
+    // Comparação pareada (1−Brier por caso): o competidor que quebra o contrato
+    // em todos os casos PERDE para o que erra com confiança — antes (uniforme)
+    // ganhava 0,75 × 0,19 por caso.
+    const casos = Array.from({ length: 8 }, (_, i) => `c${i}`);
+    const ctrl = casos.map((c) => ({ ...errado, caseId: c }));
+    const quebra = casos.map((c) => ({ ...invalida, caseId: c }));
+    const cmp = compareToControl('ctrl', 'quebra', ctrl, quebra, 'brierScore');
+    expect(cmp.meanDiffPp!).toBeLessThan(0);
   });
 
   it('reps: distribuições promediadas antes; flip quando o previsto muda', () => {
@@ -189,5 +217,104 @@ describe('comparação pareada e cascata', () => {
     expect(k.escalationToMatchLlm).toBeCloseTo(0.5, 12);
     expect(k.decisionOnly.accuracy).toBeCloseTo(0.5, 12);
     expect(k.curve.length).toBe(21);
+  });
+});
+
+describe('M1: o PREVISTO é a resposta DECLARADA (choice da API, answer/level do LLM)', () => {
+  it('choice: `choice` da API decide mesmo com as probabilidades de 2 casas empatadas ou invertidas', () => {
+    const empate = distFromAnswer(CHOICE, { type: 'choice', choice: 'b', probabilities: { a: 0.5, b: 0.5, c: 0 }, confidence: 0.6 });
+    const i1 = scoreDist(CHOICE, 'x', empate, 'b', pol(CHOICE));
+    expect(i1).toMatchObject({ predicted: 'b', correct: true, topCorrect: true });
+    expect(i1.pTop).toBeCloseTo(0.5, 12);
+    const invertida = distFromAnswer(CHOICE, { type: 'choice', choice: 'b', probabilities: { a: 0.51, b: 0.49, c: 0 } });
+    const i2 = scoreDist(CHOICE, 'x', invertida, 'b', pol(CHOICE));
+    expect(i2).toMatchObject({ predicted: 'b', correct: true, topCorrect: true });
+    // ECE/certeza usam a p da classe PREVISTA; Brier segue as probabilidades.
+    expect(i2.pTop).toBeCloseTo(0.49, 12);
+    expect(i2.brier).toBeCloseTo(0.5 * (0.51 ** 2 + 0.51 ** 2), 12);
+    // e o erro de verdade continua erro
+    expect(scoreDist(CHOICE, 'x', invertida, 'a', pol(CHOICE)).correct).toBe(false);
+  });
+
+  it('LLM noul: `answer` declarado decide; p_yes verbalizado só nas métricas (e na certeza)', () => {
+    const p = parseLlmAnswer(NOUL, { answer: true, p_yes: 0.3 });
+    if (!p.ok) throw new Error(p.code);
+    expect(p.answer).toEqual({ type: 'noul', noul: 0.3, answer: true });
+    const it = scoreDist(NOUL, 'x', distFromAnswer(NOUL, p.answer), true, pol(NOUL));
+    expect(it).toMatchObject({ predicted: true, correct: true, topCorrect: true });
+    expect(it.pTrue).toBeCloseTo(0.3, 12);
+    expect(it.pTop).toBeCloseTo(0.3, 12);
+    expect(it.band).toBe('abstain'); // resposta que contradiz a própria p não fica em auto
+    // sem p_yes: o answer vira p 0/1 e segue sendo o previsto
+    const so = parseLlmAnswer(NOUL, { answer: false });
+    if (!so.ok) throw new Error(so.code);
+    expect(scoreDist(NOUL, 'x', distFromAnswer(NOUL, so.answer), false, pol(NOUL)).correct).toBe(true);
+  });
+
+  it('LLM choice e score: `choice`/`level` declarados vencem a distribuição verbalizada', () => {
+    const c = parseLlmAnswer(CHOICE, { choice: 'c', probabilities: { a: 0.6, b: 0.3, c: 0.1 } });
+    if (!c.ok) throw new Error(c.code);
+    expect(scoreDist(CHOICE, 'x', distFromAnswer(CHOICE, c.answer), 'c', pol(CHOICE))).toMatchObject({ predicted: 'c', correct: true });
+    const sc = parseLlmAnswer(SCORE, { level: 2, probabilities: { '0': 0.5, '1': 0.3, '2': 0.2 } });
+    if (!sc.ok) throw new Error(sc.code);
+    expect(sc.answer).toMatchObject({ type: 'score', level: 2 });
+    const it = scoreDist(SCORE, 'x', distFromAnswer(SCORE, sc.answer), 2, pol(SCORE));
+    expect(it.predicted).toBe(2);
+    expect(it.topCorrect).toBe(true);
+    expect(it.pTop).toBeCloseTo(0.2, 12);
+  });
+
+  it('reps: a resposta declarada mais votada; empate pela p média; temperatura preserva o pick', () => {
+    const cel = (rep: number, choice: string, a: number): JevCell => ({
+      caseId: 'x', contestantId: 'k', rep, status: 'ok', answers: { t: { type: 'choice', choice, probabilities: { a, b: 1 - a, c: 0 } } },
+    });
+    const maioria = aggregateReps(CHOICE, [cel(0, 'b', 0.5), cel(1, 'b', 0.6), cel(2, 'a', 0.9)]);
+    // p média de a = 0,667 > b, mas 2 das 3 reps DISSERAM b
+    expect(scoreDist(CHOICE, 'x', maioria.dist!, 'b', pol(CHOICE)).predicted).toBe('b');
+    expect(maioria.flipped).toBe(true);
+    const empate = aggregateReps(CHOICE, [cel(0, 'a', 0.4), cel(1, 'b', 0.4)]);
+    expect(scoreDist(CHOICE, 'x', empate.dist!, 'b', pol(CHOICE)).predicted).toBe('b'); // p média b 0,6
+    const quente = applyTemperature(maioria.dist!, 3);
+    expect((quente as { pick?: string }).pick).toBe('b');
+    const noul = applyTemperature({ type: 'noul', pYes: 0.3, pick: true }, 0.5);
+    expect((noul as { pick?: boolean }).pick).toBe(true);
+  });
+});
+
+describe('L2: conjunto VAZIO não parece perfeito', () => {
+  it('nScored = 0 → acurácia, log-loss, ECE, AURC e cobertura null (nunca 0)', () => {
+    const m = computeMetrics({ items: [], goldOf: () => [], planned: 4, noScore: 4, cells: [], questionsPerCell: 1, repeats: 1 });
+    expect(m.nScored).toBe(0);
+    for (const k of ['accuracy', 'logLoss', 'ece', 'eceAdaptive', 'aurc', 'coverageAtAuto', 'brier', 'brierScore'] as const) expect(m[k]).toBeNull();
+    expect(headlineOf(m)).toMatchObject({ accuracy: null, ece: null, coverageAtAuto: null, brierScore: null });
+  });
+});
+
+describe('L3: limiar auto ajustado arredonda para CIMA', () => {
+  it('ceilThreshold não sobe um corte já com 4 casas e nunca desce abaixo do corte', () => {
+    for (const x of [0.9, 0.85, 0.29, 0.57, 0.1234, 1.01]) expect(ceilThreshold(x)).toBe(x);
+    expect(ceilThreshold(0.912345)).toBe(0.9124);
+    expect(ceilThreshold(0.12340000001)).toBeGreaterThanOrEqual(0.12340000001);
+  });
+
+  it('um ponto ERRADO logo abaixo do corte contínuo nunca entra na banda auto', () => {
+    const pt = (conf: number, correct: boolean) => ({
+      dist: { type: 'choice' as const, labels: ['a', 'b', 'c'], probs: correct ? [0.8, 0.1, 0.1] : [0.1, 0.8, 0.1], confidence: conf, pick: correct ? 'a' : 'b' },
+      expected: ['a'],
+      correct,
+    });
+    const pontos = [
+      ...Array.from({ length: 20 }, () => pt(0.99, true)),
+      pt(0.912345, true), // o corte ajustado (precisão 21/21)
+      pt(0.912341, false), // logo abaixo: com ele, 21/22 < 0,99
+      ...Array.from({ length: 4 }, () => pt(0.5, false)),
+    ];
+    const base = policyFor({}, CHOICE, DEFAULT_BANDS);
+    const pol2 = fitQuestionPolicy(CHOICE, base, pontos, { targetPrecision: 0.99, split: 'calib' });
+    expect(pol2.fitted).toBe(true);
+    expect(pol2.auto).toBeGreaterThanOrEqual(0.912345);
+    expect(bandUnder(pontos[21], pol2)).not.toBe('auto');
+    // o antigo toFixed(4) daria 0,9123 e admitiria o ponto errado
+    expect(Number((0.912345).toFixed(4))).toBeLessThan(0.912341);
   });
 });
