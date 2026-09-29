@@ -13,7 +13,7 @@
 //    - web-live#1 / web-code#5: o estúdio "Melhor prompt" abre no campeão da
 //      SESSÃO (última rodada), não no argmax de ouros (o original da rodada 1);
 //    - web-live#2 / web-code#9: o `session.finished` (mesma referência mutada)
-//      re-renderiza — sai o "running", o "— ao vivo" e o botão de cancelar;
+//      re-renderiza — sai o "em andamento" (antes "running"), o "— ao vivo" e o botão de cancelar;
 //    - web-live#11: seleção < 20 cenários = "Sem holdout", não "Holdout pulado";
 //    - IMPL-046: o veredito de recomendação aparece, com braços rotulados;
 //    - web-live#17: tela de Treino e relatório mostram o MESMO p (bilateral);
@@ -354,6 +354,8 @@ afterAll(async () => {
 /* ============================================================ 1. HARNESS */
 
 describe.skipIf(!alvo)('web-live#0 — TrainingView com a sessão carregada e as runs ainda não', () => {
+  // web-live#16: a pílula mostra o rótulo PT-BR (STATUS_LABEL), não o enum gravado.
+  const ROTULO = { finished: 'concluída', running: 'em andamento' } as const;
   for (const status of ['finished', 'running'] as const) {
     it(`sessão ${status}: renderiza o cockpit (sem fronteira de erro, sem exceção)`, async () => {
       const { page, contexto, erros } = await harnessPage();
@@ -364,7 +366,7 @@ describe.skipIf(!alvo)('web-live#0 — TrainingView com a sessão carregada e as
         // O drawer da variante lia `undefined.contestants` e a fronteira (ou,
         // antes dela, a tela em branco) tomava a página inteira.
         expect(await page.getByText('Esta tela encontrou um erro').count()).toBe(0);
-        expect(await page.getByText(status, { exact: true }).count()).toBeGreaterThan(0);
+        expect(await page.getByText(ROTULO[status], { exact: true }).count()).toBeGreaterThan(0);
         expect(erros).toEqual([]);
       } finally {
         await contexto.close();
@@ -504,7 +506,7 @@ describe.skipIf(!alvo)('web-live#2 / web-code#9 — o fim do treino re-renderiza
     try {
       const sid = await montar(page, 'ao-vivo');
       await page.getByRole('button', { name: 'Segure para cancelar' }).waitFor({ timeout: 10_000 });
-      await page.getByText('running', { exact: true }).waitFor();
+      await page.getByText('em andamento', { exact: true }).waitFor();
       await page.getByText(/— ao vivo/).waitFor();
       // Sessão em andamento não tem veredito de recomendação ainda.
       expect(await page.getByTestId('session-recommendation').count()).toBe(0);
@@ -512,12 +514,12 @@ describe.skipIf(!alvo)('web-live#2 / web-code#9 — o fim do treino re-renderiza
       // O trainer do navegador: muta o record vivo e emite session.finished com ele.
       await page.evaluate((id) => (window as unknown as { __tvFake: { finish(id: string): void } }).__tvFake.finish(id), sid);
 
-      await page.getByText('finished', { exact: true }).waitFor({ timeout: 5_000 });
+      await page.getByText('concluída', { exact: true }).waitFor({ timeout: 5_000 });
       await expect
         .poll(() => page.getByRole('button', { name: 'Segure para cancelar' }).count(), { timeout: 5_000 })
         .toBe(0);
       await expect.poll(() => page.getByText(/— ao vivo/).count(), { timeout: 5_000 }).toBe(0);
-      expect(await page.getByText('running', { exact: true }).count()).toBe(0);
+      expect(await page.getByText('em andamento', { exact: true }).count()).toBe(0);
       expect(erros).toEqual([]);
     } finally {
       await contexto.close();

@@ -53,7 +53,7 @@ run real teria (`docs budget`). O `config example` é o esqueleto de cada modo.
 | `theme` | string | **sim** | — | Tema (não vazio); guia o gerador e nomeia a run. |
 | `scenarioBrief` | string | não | — | O que testar, ≤ 4000 caracteres (entra no prompt do gerador). |
 | `languages` | string[] | não | só pt-BR | Tags BCP 47, 1..10: idiomas **permitidos** ao gerador (opt-in). O CLI aplica; a SPA avisa e gera só pt-BR. |
-| `stages` | int | não | 5 | Total de cenários (pinados + gerados), 1..50; nunca menor que o nº de pinados. |
+| `stages` | int | não | 5 (training: 10) | Total de cenários (pinados + gerados), 1..50; nunca menor que o nº de pinados. |
 | `scenarios` | lista **ou** objeto | não | — | Cenários pinados (3.2) ou referência à biblioteca (3.3). |
 | `repeats` | 1 \| 2 \| 3 | não | 1 | **Só compare**: cada cenário roda N× (instabilidade); os clones dividem o gabarito. |
 | `prompt` | objeto | variation/training | — | Prompt base (3.4). No `compare` o `text` é ignorado (o system prompt é o `productContext` do cenário). |
@@ -157,6 +157,10 @@ Ids: `persona`, `cot`, `fewshot`, `format`, `constraints`, `decompose`,
 | `feedbackDriven` | bool | `true` | Lições da rodada anterior entram no rewriter. |
 | `reflection` | string | `deterministic` | `deterministic` (custo zero), `llm` (custo contado) ou `off`. |
 | `paretoPool` | int | 1 | 0..8; > 1 = população Pareto por fatia como base de derivação. |
+| `paretoCoverageSampling` | bool | `false` | Pai ∝ cobertura candidato × cenário (só com fatias múltiplas e n ≥ 20). |
+| `maxLessonTokens` | int | 4000 | 200..4000: teto do dossiê de lições, em tokens. |
+| `lessonsIncludeReference` | bool | `false` | Gabarito no dossiê de lições (risco de o rewriter explorar o juiz). |
+| `minCuratedItems` | int | 20 | 0..1000: itens curados (gabarito escrito por gente) para DECLARAR campeão; proposta sem fonte, calibrar. |
 
 ### 3.9 `judging`
 
@@ -164,7 +168,8 @@ Ids: `persona`, `cot`, `fewshot`, `format`, `constraints`, `decompose`,
 finais). Default ligado em variation/training e no compare com
 `competitorConfigs`; desligado no compare clássico, que usa o juiz **listwise**
 (sem finais). `passes` (1 \| 2, default 1): passes do listwise (2 = as duas
-ordens, anti-viés de posição).
+ordens, anti-viés de posição). `auditable` (bool, default `false`): juiz e
+gabarito com provedor travado (sem fallback, `require_parameters`).
 
 ### 3.10 `limits`
 
