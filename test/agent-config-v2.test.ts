@@ -21,7 +21,7 @@
 // Sem rede real, sem LLM pago, sem Docker: gateway/juiz falsos e git/sh locais.
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -163,6 +163,19 @@ describe('IMPL-098 — arena-agent-config@2 no schema da RUN', () => {
     const semDir = path.join(dir, 'sem-suites.json');
     writeFileSync(semDir, JSON.stringify(arquivo(tarefaV2({ testsDir: 'nao-existe' }))));
     await expect(readAgentConfigFile(semDir)).rejects.toMatchObject({
+      code: EXIT.CONFIG,
+      errorCode: 'config.tests_dir_invalid',
+    });
+  });
+
+  it('testsDir que é SYMLINK para fora do diretório da config é recusado (contenção por realpath)', async () => {
+    const fora = mkdtempSync(path.join(tmp, 'fora-'));
+    writeFileSync(path.join(fora, 'segredo.txt'), 'não deveria ir para o verificador\n');
+    const dir = mkdtempSync(path.join(tmp, 'symlink-'));
+    symlinkSync(fora, path.join(dir, 'suites'));
+    const file = path.join(dir, 'arena.json');
+    writeFileSync(file, JSON.stringify(arquivo(tarefaV2())));
+    await expect(readAgentConfigFile(file)).rejects.toMatchObject({
       code: EXIT.CONFIG,
       errorCode: 'config.tests_dir_invalid',
     });

@@ -24,7 +24,7 @@
 // sandbox passa o runner). O score é o MESMO do oráculo de execução
 // (`runOracle`): validar com uma régua diferente da run seria teatro.
 // ----------------------------------------------------------------------------
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, type Dirent } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, type Dirent } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { runOracle } from './oracle.js';
@@ -168,9 +168,21 @@ export function resolveTestsDir(testsDir: string, baseDir: string): string {
   if (path.isAbsolute(testsDir)) return path.resolve(testsDir);
   const base = path.resolve(baseDir);
   const abs = path.resolve(base, testsDir);
-  const rel = path.relative(base, abs);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`testsDir "${testsDir}" sai do diretório da configuração`);
+  const fora = (from: string, to: string): boolean => {
+    const rel = path.relative(from, to);
+    return rel.startsWith('..') || path.isAbsolute(rel);
+  };
+  if (fora(base, abs)) throw new Error(`testsDir "${testsDir}" sai do diretório da configuração`);
+  // Contenção também por REALPATH: um `suites -> ~/.ssh` passaria na régua
+  // lexical e levaria arquivos de fora para o verificador (e para o dossiê).
+  let real: string | undefined;
+  try {
+    real = realpathSync(abs);
+  } catch {
+    real = undefined; // ainda não existe: quem chama confere a existência
+  }
+  if (real !== undefined && fora(realpathSync(base), real)) {
+    throw new Error(`testsDir "${testsDir}" aponta (symlink) para fora do diretório da configuração`);
   }
   return abs;
 }
