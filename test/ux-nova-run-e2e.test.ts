@@ -16,7 +16,9 @@
 //      de aba (a validação deixou de ser atrelada a abas);
 //  IMPL-107 (a) virtualização com 459 itens: contagem de nós DOM estável;
 //  IMPL-107 (b) teclado no padrão ARIA combobox: setas movem o
-//      aria-activedescendant, Enter seleciona, Esc fecha;
+//      aria-activedescendant, Enter seleciona, Esc fecha — e o axe-core
+//      (devDependency) roda no popup aberto: zero violação `aria-*`
+//      (wcag2a/wcag2aa), antes e depois de as setas moverem o item ativo;
 //  IMPL-107 (c)+(e) ordenação default (popularidade semanal) ≠ newest e
 //      trocável na UI; "mostrando X de Y" reflete o total filtrado; preço
 //      "-1" nunca aparece como número negativo.
@@ -37,6 +39,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
@@ -81,6 +84,50 @@ if (!alvo) {
       '                   Ligue com: npx playwright-core install chromium\n' +
       '                   (ou instale Chrome/Chromium/Brave, ou exporte PB_E2E_CHROMIUM=<caminho>).',
   );
+}
+
+/* ------------------------------------------------------------------ axe */
+
+/**
+ * axe-core (devDependency — IMPL-107 (b)): o build minificado é injetado na
+ * página. Ausente = `npm install` não rodou desde que a dependência entrou:
+ * o gate FALHA com a instrução (nunca verde mudo).
+ */
+function axeScript(): string {
+  try {
+    return createRequire(import.meta.url).resolve('axe-core/axe.min.js');
+  } catch {
+    throw new Error('axe-core ausente: rode `npm install` (devDependency do IMPL-107 (b)).');
+  }
+}
+
+interface AxeViolacao {
+  id: string;
+  impact: string | null;
+  alvos: string[];
+}
+
+/** axe sobre o popup do seletor (o dialog aberto), só WCAG 2 A/AA. */
+async function axeNoPopup(page: Page): Promise<AxeViolacao[]> {
+  if (!(await page.evaluate(() => 'axe' in window))) await page.addScriptTag({ path: axeScript() });
+  return page.evaluate(async () => {
+    const alvo = document.querySelector('[role="dialog"]');
+    if (!alvo) throw new Error('popup do seletor não está aberto');
+    const axe = (window as unknown as {
+      axe: {
+        run: (
+          ctx: Element,
+          opts: object,
+        ) => Promise<{ violations: { id: string; impact: string | null; nodes: { target: string[] }[] }[] }>;
+      };
+    }).axe;
+    const r = await axe.run(alvo, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] } });
+    return r.violations.map((v) => ({
+      id: v.id,
+      impact: v.impact,
+      alvos: v.nodes.slice(0, 5).map((n) => n.target.join(' ')),
+    }));
+  });
 }
 
 /* ------------------------------------------------- build + servidor estático */
@@ -470,6 +517,11 @@ describe.skipIf(!alvo)('IMPL-107 — seletor de modelos num browser real', () =>
         await page.evaluate(() => document.activeElement?.getAttribute('role')),
       ).toBe('combobox');
 
+      // axe (IMPL-107 b): nenhuma violação de ARIA no popup aberto.
+      const semAria = (vs: AxeViolacao[]) => vs.filter((v) => v.id.startsWith('aria-'));
+      const inicial = await axeNoPopup(page);
+      expect(semAria(inicial), `axe aria-* no popup: ${JSON.stringify(inicial)}`).toEqual([]);
+
       const input = page.locator('input[role="combobox"]');
       const antes = await input.getAttribute('aria-activedescendant');
       await page.keyboard.press('ArrowDown');
@@ -477,6 +529,9 @@ describe.skipIf(!alvo)('IMPL-107 — seletor de modelos num browser real', () =>
       const depois = await input.getAttribute('aria-activedescendant');
       expect(depois, 'setas não moveram o item ativo').not.toBe(antes);
       expect(depois).toMatch(/-opt-2$/);
+      // …e continua sem violação com o item ativo movido (activedescendant válido).
+      const movido = await axeNoPopup(page);
+      expect(semAria(movido), `axe aria-* após as setas: ${JSON.stringify(movido)}`).toEqual([]);
       // Foco ≠ seleção: nada foi escolhido ainda.
       expect(await page.locator('#sec-sujeitos >> text=modelo-002').count()).toBe(0);
 
