@@ -16,6 +16,7 @@ import type {
 } from './types.js';
 import { imputeExtremes, pairCoverage, SENSITIVITY_EXCLUSION_THRESHOLD, type PairScore } from './stats.js';
 import { bestOfKTest, GATE_ALPHA, resolveMinGain, winnersCurseInflation } from './engine/bestOfK.js';
+import { contaminationCheck, contaminationCorpus, type ContaminationStage } from './engine/contracts.js';
 // O web recebe a margem default e o α do gate pelo shim de `rank` (UI da Nova run).
 export { defaultMinGain, GATE_ALPHA } from './engine/bestOfK.js';
 
@@ -89,6 +90,19 @@ export interface PickResult {
    * régua e best: pareamento, teste da melhor de K, ganho corrigido, margem.
    */
   gate?: IterationGate;
+  /** IMPL-067: contaminação dados→prompt do `best` (com `opts.contamination`). */
+  contamination?: NonNullable<IterationGate['contamination']>;
+}
+
+/**
+ * Entrada da métrica de contaminação no gate (IMPL-067, R-20:REC-9): o prompt
+ * de cada contestant, o corpus protegido (cenários ∪ gabaritos ∪ explicações
+ * do juiz) e o que NÃO conta (o prompt de base/régua — a política do usuário).
+ */
+export interface PickWinnerContamination {
+  promptById: Readonly<Record<string, string | undefined>>;
+  protectedTexts: readonly string[];
+  allowedTexts?: readonly string[];
 }
 
 const round2 = (x: number): number => Number(x.toFixed(2)) + 0;
@@ -112,6 +126,80 @@ export interface PickWinnerOpts {
   /** B e seed do Monte Carlo (quando a enumeração exata passa do teto). */
   iterations?: number;
   seed?: number;
+  /**
+   * IMPL-067: com isto, a campeã que COLA um span exato ≥ 8 tokens do corpus
+   * protegido NÃO é promovida (`heldBy: ['contamination']`) e o containment
+   * de 8-gramas vai no gate — reportado para toda campeã.
+   */
+  contamination?: PickWinnerContamination;
+}
+
+/**
+ * Corpus/prompts da métrica de contaminação a partir da RUN de seleção
+ * (IMPL-067): cada contestant pelo fragmento evoluído (o que vira campeão) ou
+ * pelo prompt; o corpus = cenários (pergunta, contexto, gabarito, rubrica) +
+ * explicações/justificativas do juiz; permitido = o prompt da régua e o
+ * original (o que a base já trazia não é contaminação).
+ */
+export function contaminationInputFromRun(
+  run: {
+    stages: readonly {
+      spec?: ContaminationStage | null;
+      referenceJudge?: { explanationByContestant?: Record<string, string> } | null;
+      judge?: { judges?: readonly { verdicts?: readonly { motivo?: string }[] }[] } | null;
+    }[];
+    contestants: readonly { id: string; systemPrompt?: string; promptFragment?: string; isOriginal?: boolean }[];
+  },
+  controlId: string,
+): PickWinnerContamination {
+  const explicacoes: string[] = [];
+  for (const st of run.stages ?? []) {
+    explicacoes.push(...Object.values(st.referenceJudge?.explanationByContestant ?? {}));
+    for (const j of st.judge?.judges ?? []) for (const v of j.verdicts ?? []) if (v.motivo) explicacoes.push(v.motivo);
+  }
+  const promptById: Record<string, string | undefined> = {};
+  const allowed: string[] = [];
+  for (const c of run.contestants ?? []) {
+    promptById[c.id] = c.promptFragment ?? c.systemPrompt;
+    if (c.id === controlId || c.isOriginal) {
+      for (const t of [c.promptFragment, c.systemPrompt]) if (t) allowed.push(t);
+    }
+  }
+  return {
+    promptById,
+    protectedTexts: contaminationCorpus(
+      (run.stages ?? []).map((s) => s.spec),
+      explicacoes,
+    ),
+    allowedTexts: allowed,
+  };
+}
+
+/** Aplica a métrica/barreira de contaminação ao resultado do gate (IMPL-067). */
+function withContamination(r: PickResult, c: PickWinnerContamination | undefined): PickResult {
+  if (!c || !r.best) return r;
+  const prompt = c.promptById[r.best.id];
+  if (typeof prompt !== 'string' || !prompt.trim()) return r;
+  const check = contaminationCheck(prompt, c.protectedTexts, { allowedTexts: c.allowedTexts ?? [] });
+  const contamination = {
+    containment: round4(check.containment),
+    alert: check.alert,
+    blocked: check.blocked,
+    ...(check.detail ? { detail: check.detail } : {}),
+  };
+  if (!check.blocked) {
+    return { ...r, contamination, ...(r.gate ? { gate: { ...r.gate, contamination } } : {}) };
+  }
+  // Barreira: campeã contaminada NUNCA é promovida, qualquer que seja o ganho.
+  const gate: IterationGate | undefined = r.gate
+    ? {
+        ...r.gate,
+        contamination,
+        heldBy: [...(r.gate.heldBy ?? []), 'contamination'],
+        decision: r.gate.decision === 'inconclusive' ? 'inconclusive' : 'held',
+      }
+    : undefined;
+  return { ...r, isWinner: false, contamination, ...(gate ? { gate } : {}) };
 }
 
 /**
@@ -141,6 +229,10 @@ export interface PickWinnerOpts {
  * sem os scores por etapa não há teste possível.
  */
 export function pickWinner(entries: RankEntry[], opts?: PickWinnerOpts): PickResult {
+  return withContamination(pickWinnerCore(entries, opts), opts?.contamination);
+}
+
+function pickWinnerCore(entries: RankEntry[], opts?: PickWinnerOpts): PickResult {
   const control = entries.find((e) => e.isControl);
   const best = rankEntries(entries.filter((e) => !e.isControl))[0];
   if (!best) return { best: undefined, control, gain: 0, isWinner: false };

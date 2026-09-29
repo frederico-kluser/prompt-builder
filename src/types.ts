@@ -2133,7 +2133,7 @@ export interface BestOfKTest {
  * `reeval` (IMPL-013): passou no gate da melhor de K, mas a re-avaliação LIMPA no
  * minibatch não confirmou a melhora (ou não chegou a rodar até o fim).
  */
-export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance' | 'reeval';
+export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance' | 'reeval' | 'contamination';
 
 /**
  * Re-avaliação LIMPA do candidato antes de confirmar a promoção (IMPL-013,
@@ -2196,6 +2196,14 @@ export interface IterationGate {
    * `heldBy: ['reeval']`.
    */
   reeval?: PromotionReeval;
+  /**
+   * IMPL-067 (R-20:REC-9): contaminação dados→prompt do `bestId` contra o
+   * corpus da run de seleção (cenários ∪ gabaritos ∪ explicações do juiz),
+   * sem contar o que o prompt de base já trazia. `blocked` (span exato ≥ 8
+   * tokens) segura a promoção (`heldBy: ['contamination']`); `containment` é
+   * reportado para toda campeã.
+   */
+  contamination?: { containment: number; alert: boolean; blocked: boolean; detail?: string };
 }
 
 /** Pareamento final da sessão (holdout, ou a última run de treino sem holdout). */

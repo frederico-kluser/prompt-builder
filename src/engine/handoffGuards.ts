@@ -20,9 +20,17 @@
 // dos campos antigos em record legado) — antes toda sessão com < 20 cenários
 // lia "pulado por orçamento/cancelamento" e o agente ia subir o --budget quando
 // o remédio era ter mais cenários.
+//
+// IMPL-067 (R-20:REC-9): BARREIRA FINAL de contaminação dados→prompt. O campeão
+// que carrega um span exato de ≥ 8 tokens dos cenários pinados (pergunta,
+// contexto, gabarito, rubrica) — ou que o treino já marcou como contaminado no
+// gate da iteração — BLOQUEIA o handoff (mesmo override justificado do
+// holdout). Containment ≥ 30% sem span exato só AVISA. O que o prompt de base
+// já continha fica fora da conta (política do usuário ≠ dado colado).
 
 import { holdoutSkipReasonText } from '../holdout.js';
 import { holdoutSkipReasonOf } from './sessionDecision.js';
+import { contaminationCheck, contaminationCorpus, type ContaminationStage } from './contracts.js';
 import type { HoldoutSkipReason } from '../types.js';
 
 /** Identificador estável de cada sinal (vai no JSON, no log de auditoria e no trailer). */
@@ -35,6 +43,8 @@ export type HandoffIssueCode =
   | 'significance.missing'
   | 'judge.drift'
   | 'session.unfinished'
+  | 'contamination.blocked'
+  | 'contamination.alert'
   | 'override.applied'
   | 'override.unused';
 
@@ -69,6 +79,30 @@ export interface HandoffGuardInput {
   budgetExhausted?: boolean;
   significance?: { ci95Pp: [number, number]; n?: number; meanDiffPp?: number; pValue?: number } | null;
   judgeDrift?: boolean;
+  /**
+   * IMPL-067: o campeão é o `systemPrompt` da última iteração; o gate da
+   * iteração pode trazer o veredito de contaminação do treino (com o corpus
+   * da run de seleção, explicações do juiz inclusas).
+   */
+  bestPromptByIteration?: {
+    systemPrompt?: string;
+    gate?: { contamination?: { blocked?: boolean; containment?: number; detail?: string } };
+  }[];
+  /** Cenários congelados do treino — o corpus protegido da barreira. */
+  pinnedStages?: ContaminationStage[];
+  /** Prompt de base (o que ele já continha não é contaminação). */
+  config?: { basePrompt?: string };
+}
+
+/** Veredito de contaminação do campeão no handoff (IMPL-067). */
+export interface HandoffContamination {
+  containment: number;
+  alert: boolean;
+  blocked: boolean;
+  exactSpans: string[];
+  detail: string;
+  /** `recomputed` = sobre os cenários pinados; `training` = o gate da iteração já marcou. */
+  source: 'recomputed' | 'training';
 }
 
 export interface HandoffGuardReport {
@@ -78,6 +112,47 @@ export interface HandoffGuardReport {
   warnings: HandoffIssue[];
   /** Presente quando um motivo de override válido foi dado (com ou sem bloqueio a sobrepor). */
   override: HandoffOverride | null;
+  /**
+   * IMPL-067: containment de 8-gramas do campeão contra os cenários pinados
+   * (reportado SEMPRE que há campeão e corpus); `null` = sem como medir.
+   */
+  contamination?: HandoffContamination | null;
+}
+
+/**
+ * Contaminação do campeão (IMPL-067): o veredito do TREINO (gate da última
+ * iteração) prevalece quando bloqueou — ele viu também as explicações do juiz;
+ * senão, recomputa sobre os cenários pinados. Sem campeão ou sem corpus = null.
+ */
+export function handoffContamination(input: HandoffGuardInput): HandoffContamination | null {
+  const ultima = input.bestPromptByIteration?.at(-1);
+  const campeao = ultima?.systemPrompt;
+  const doTreino = ultima?.gate?.contamination;
+  const corpus = contaminationCorpus(input.pinnedStages ?? []);
+  if (typeof campeao !== 'string' || !campeao.trim()) return null;
+  const base = input.config?.basePrompt;
+  const r = corpus.length
+    ? contaminationCheck(campeao, corpus, { allowedTexts: typeof base === 'string' ? [base] : [] })
+    : null;
+  if (doTreino?.blocked) {
+    return {
+      containment: typeof doTreino.containment === 'number' ? doTreino.containment : (r?.containment ?? 0),
+      alert: Boolean(r?.alert),
+      blocked: true,
+      exactSpans: r?.exactSpans ?? [],
+      detail: doTreino.detail || r?.detail || 'o treino marcou o campeão como contaminado',
+      source: 'training',
+    };
+  }
+  if (!r) return null;
+  return {
+    containment: r.containment,
+    alert: r.alert,
+    blocked: r.blocked,
+    exactSpans: r.exactSpans,
+    detail: r.detail,
+    source: 'recomputed',
+  };
 }
 
 /**
@@ -195,6 +270,24 @@ export function evaluateHandoffGuards(
     });
   }
 
+  // IMPL-067: barreira final de contaminação dados→prompt.
+  const contamination = handoffContamination(input);
+  if (contamination?.blocked) {
+    blocks.push({
+      code: 'contamination.blocked',
+      severity: 'block',
+      message:
+        `campeão CONTAMINADO por dado do benchmark (${contamination.detail}) — o ganho medido é inseparável ` +
+        'da memorização de cenários; reveja o diff antes de promover.',
+    });
+  } else if (contamination?.alert) {
+    warnings.push({
+      code: 'contamination.alert',
+      severity: 'warn',
+      message: `containment de 8-gramas do campeão com os cenários em ${(contamination.containment * 100).toFixed(0)}% (≥ 30%): revise se o prompt não está decorando cenários.`,
+    });
+  }
+
   const reason = normalizeOverrideReason(opts.overrideReason);
   let override: HandoffOverride | null = null;
   if (reason) {
@@ -214,5 +307,5 @@ export function evaluateHandoffGuards(
     );
   }
 
-  return { blocked: blocks.length > 0 && override === null, blocks, warnings, override };
+  return { blocked: blocks.length > 0 && override === null, blocks, warnings, override, contamination };
 }

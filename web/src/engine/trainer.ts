@@ -32,7 +32,13 @@ import { emitSessionEvent } from './events';
 import { saveSession } from './storage';
 import { acquireLock } from './runLocks';
 import { computeMedals } from './medals';
-import { judgeScoreFromVerdicts, pickWinner, promotionEventFields, type RankEntry } from './rank';
+import {
+  contaminationInputFromRun,
+  judgeScoreFromVerdicts,
+  pickWinner,
+  promotionEventFields,
+  type RankEntry,
+} from './rank';
 import {
   holdoutConfirmationText,
   HOLDOUT_RATIO_DEFAULT,
@@ -1165,6 +1171,9 @@ async function trainingLoop(
         {
           minGain,
           scoresById,
+          // IMPL-067: campeã que cola span ≥ 8 tokens de cenário/gabarito/
+          // explicação do juiz NÃO é promovida; o containment vai no gate.
+          contamination: contaminationInputFromRun(selRun, controlId),
         },
       );
       // IMPL-013: passou no gate da melhor de K → re-avaliação LIMPA num

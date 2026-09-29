@@ -659,8 +659,12 @@ export const promptContractsSchema = z.object(
 //   • STRING-CANÁRIO migrada (BLOQUEIO): canário plantado no cenário que aparece
 //     no prompt — migração de dado para instrução, sem ambiguidade.
 //
-// Aplicação (os 2 pontos do DEC-8): métrica no `pickWinner` (pré-promoção) e
-// barreira final antes do handoff (`assertNoContamination`). Tudo LOCAL e
+// Aplicação (os 2 pontos do DEC-8): métrica no `pickWinner` (pré-promoção,
+// `PickWinnerOpts.contamination` em src/rank.ts — o treino passa o corpus da
+// run de seleção) e barreira final antes do handoff (`evaluateHandoffGuards`,
+// src/engine/handoffGuards.ts, sobre os cenários pinados da sessão). O que o
+// prompt de BASE já continha fica fora (`allowedTexts`): contaminação é o que
+// o otimizador COLOU, não a política que o usuário escreveu. Tudo LOCAL e
 // determinístico — custo ~zero, zero chamada de LLM.
 // ---------------------------------------------------------------------------
 
@@ -733,12 +737,17 @@ function sharedExactSpans(
   prompt: string,
   protectedTexts: readonly string[],
   minTokens: number,
+  allowedTexts: readonly string[] = [],
 ): string[] {
   const toks = rawTokens(prompt);
   if (toks.length < minTokens) return [];
   const corpus = new Set<string>();
   for (const src of protectedTexts ?? []) {
     for (const key of ngramKeys(rawTokens(src).map((k) => k.t), minTokens)) corpus.add(key);
+  }
+  // O que o prompt de BASE já trazia não é contaminação (a política do usuário).
+  for (const src of allowedTexts ?? []) {
+    for (const key of ngramKeys(rawTokens(src).map((k) => k.t), minTokens)) corpus.delete(key);
   }
   const ranges = exactSpanRanges(toks.length, minTokens, (i) =>
     corpus.has(toks.slice(i, i + minTokens).map((k) => k.t).join(NGRAM_SEP)),
@@ -751,13 +760,22 @@ function sharedExactSpans(
  * corpus protegido (comparação NORMALIZADA — minúsculas, sem acento, espaço
  * colapsado). 0 quando o prompt não tem 8-grama completo.
  */
-export function ngramContainment(prompt: string, protectedTexts: readonly string[]): number {
+export function ngramContainment(
+  prompt: string,
+  protectedTexts: readonly string[],
+  allowedTexts: readonly string[] = [],
+): number {
   const toks = rawTokens(prompt).map((k) => foldAccents(k.t.toLowerCase()));
   if (toks.length < CONTAMINATION_NGRAM) return 0;
   const corpus = new Set<string>();
   for (const src of protectedTexts ?? []) {
     for (const key of ngramKeys(rawTokens(src).map((k) => foldAccents(k.t.toLowerCase())), CONTAMINATION_NGRAM)) {
       corpus.add(key);
+    }
+  }
+  for (const src of allowedTexts ?? []) {
+    for (const key of ngramKeys(rawTokens(src).map((k) => foldAccents(k.t.toLowerCase())), CONTAMINATION_NGRAM)) {
+      corpus.delete(key);
     }
   }
   let total = 0;
@@ -805,11 +823,20 @@ export interface ContaminationCheck {
 export function contaminationCheck(
   prompt: string,
   protectedTexts: readonly string[],
-  opts?: { canaries?: readonly string[] },
+  opts?: {
+    canaries?: readonly string[];
+    /**
+     * Textos cujos n-gramas NÃO contam (o prompt de base/controle): a
+     * política que o usuário escreveu e que também aparece nos cenários não é
+     * dado do benchmark colado pelo otimizador.
+     */
+    allowedTexts?: readonly string[];
+  },
 ): ContaminationCheck {
   const text = asText(prompt);
-  const containment = ngramContainment(text, protectedTexts ?? []);
-  const exactSpans = sharedExactSpans(text, protectedTexts ?? [], CONTAMINATION_SPAN_TOKENS);
+  const allowed = (opts?.allowedTexts ?? []).filter((t): t is string => typeof t === 'string' && t.length > 0);
+  const containment = ngramContainment(text, protectedTexts ?? [], allowed);
+  const exactSpans = sharedExactSpans(text, protectedTexts ?? [], CONTAMINATION_SPAN_TOKENS, allowed);
   const canaryHits = canaryHitsIn(text, opts?.canaries);
   const alert = containment >= CONTAINMENT_ALERT_RATIO;
   const blocked = exactSpans.length > 0 || canaryHits.length > 0;
@@ -843,7 +870,7 @@ export function contaminationCheck(
 export function assertNoContamination(
   prompt: string,
   protectedTexts: readonly string[],
-  opts?: { canaries?: readonly string[] },
+  opts?: { canaries?: readonly string[]; allowedTexts?: readonly string[] },
 ): ContaminationCheck {
   const check = contaminationCheck(prompt, protectedTexts, opts);
   if (check.blocked) {
@@ -853,6 +880,34 @@ export function assertNoContamination(
     );
   }
   return check;
+}
+
+/** Fatia de um cenário que entra no corpus protegido (estrutural: StageSpec serve). */
+export interface ContaminationStage {
+  question?: string;
+  productContext?: string;
+  reference?: string;
+  rubric?: string;
+}
+
+/**
+ * Corpus protegido de um conjunto de cenários (IMPL-067): pergunta, contexto,
+ * gabarito e rubrica de cada um + textos extras (explicações do juiz). Vazios
+ * saem; a ordem não importa (vira conjunto de n-gramas).
+ */
+export function contaminationCorpus(
+  stages: readonly (ContaminationStage | null | undefined)[],
+  extra: readonly (string | null | undefined)[] = [],
+): string[] {
+  const out: string[] = [];
+  for (const st of stages ?? []) {
+    if (!st) continue;
+    for (const t of [st.question, st.productContext, st.reference, st.rubric]) {
+      if (typeof t === 'string' && t.trim()) out.push(t);
+    }
+  }
+  for (const t of extra ?? []) if (typeof t === 'string' && t.trim()) out.push(t);
+  return out;
 }
 
 /**
