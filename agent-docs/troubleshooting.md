@@ -167,7 +167,9 @@ variável (`openrouter/auto`) não têm. Use o id base ou `--budget none`.
 
 O teto está dentro da faixa estimada: a run pode parar no meio (código `7`).
 Fora de um terminal isso exige `--yes` — ou suba o `--budget` acima do teto
-estimado (`error.details.estimateHighUsd`).
+estimado (`error.details.estimateHighUsd`). Com `error.details.belowFloor:
+true` o teto está ABAIXO do piso e você já passou `--force`: fora de um
+terminal a run abaixo do piso exige `--force --yes` (ou suba o `--budget`).
 
 ## `run.locked` (código 2)
 

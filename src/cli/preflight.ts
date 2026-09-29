@@ -338,10 +338,13 @@ export async function runPreflight(
 
     // 6. Orçamento × faixa estimada (a do ORÇAMENTO: pior caso p/ preço variável).
     if (budgetUsd !== undefined && estOrcamento.high > budgetUsd) {
-      if (estOrcamento.low > budgetUsd && !input.force) {
-        refuse(budgetBelowEstimateError(budgetUsd, estOrcamento));
+      const abaixoDoPiso = estOrcamento.low > budgetUsd;
+      if (abaixoDoPiso && !input.force) {
+        refuse(budgetBelowEstimateError(budgetUsd, estOrcamento, input.agentContext === true && !input.yes));
       } else if (!input.yes && input.agentContext) {
-        refuse(confirmationRequiredError(budgetUsd, estOrcamento));
+        // cli#17: com --force abaixo do piso, fora de um terminal ainda falta o
+        // --yes — a mensagem diz ABAIXO do piso (não "dentro da faixa").
+        refuse(confirmationRequiredError(budgetUsd, estOrcamento, abaixoDoPiso));
       } else {
         warn(
           `orçamento ${fmtUsd(budgetUsd)} pode não cobrir o teto (${fmtUsd(estOrcamento.high)}) — a run pode parar cedo.`,
@@ -565,29 +568,38 @@ function priceCapError(
   return null;
 }
 
-function budgetBelowEstimateError(budgetUsd: number, est: CostEstimate): CliError {
+function budgetBelowEstimateError(budgetUsd: number, est: CostEstimate, agentContext = false): CliError {
+  // cli#17: fora de um terminal o --force sozinho não basta (a confirmação
+  // também é exigida) — a dica já nomeia as DUAS flags, sem um 2º tropeço.
+  const forcar = agentContext ? '--force --yes' : '--force';
   return new CliError(
     `Orçamento ${fmtUsd(budgetUsd)} abaixo do piso estimado ${fmtUsd(est.low)}.\n` +
       'Reduza --stages, desligue as finais (--no-duels), use menos juízes, ' +
-      'ou passe --force para rodar mesmo assim (as portas de orçamento seguem armadas).',
+      `ou passe ${forcar} para rodar mesmo assim (as portas de orçamento seguem armadas).`,
     EXIT.USAGE,
-    { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high },
+    { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high, requiredFlags: forcar.split(' ') },
     {
       code: 'usage.budget_below_estimate',
-      hint: 'Suba --budget, reduza --stages/--no-duels/juízes, ou passe --force para rodar mesmo assim.',
+      hint: `Suba --budget, reduza --stages/--no-duels/juízes, ou passe ${forcar} para rodar mesmo assim.`,
     },
   );
 }
 
-function confirmationRequiredError(budgetUsd: number, est: CostEstimate): CliError {
+function confirmationRequiredError(budgetUsd: number, est: CostEstimate, belowFloor = false): CliError {
+  const faixa = `${fmtUsd(est.low)} – ${fmtUsd(est.high)}`;
   return new CliError(
-    `Orçamento ${fmtUsd(budgetUsd)} está dentro da faixa estimada (${fmtUsd(est.low)} – ${fmtUsd(est.high)}), ` +
-      'então a run pode parar no meio. Confirme com --yes.',
+    belowFloor
+      ? `Orçamento ${fmtUsd(budgetUsd)} está ABAIXO do piso estimado ${fmtUsd(est.low)} (faixa ${faixa}): ` +
+          '--force aceito, mas fora de um terminal a run também exige --yes.'
+      : `Orçamento ${fmtUsd(budgetUsd)} está dentro da faixa estimada (${faixa}), ` +
+          'então a run pode parar no meio. Confirme com --yes.',
     EXIT.USAGE,
-    { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high },
+    { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high, belowFloor },
     {
       code: 'usage.confirmation_required',
-      hint: 'Repita o mesmo comando com `--yes` (ou suba --budget acima do teto estimado).',
+      hint: belowFloor
+        ? 'Repita o mesmo comando com `--force --yes` (ou suba --budget).'
+        : 'Repita o mesmo comando com `--yes` (ou suba --budget acima do teto estimado).',
     },
   );
 }
