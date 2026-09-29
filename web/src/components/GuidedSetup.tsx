@@ -13,6 +13,7 @@ import { AreaRow, NumRow, SwitchRow, TxtNumRow } from './formRows';
 import { SettingGroup, SettingRow } from './primitives';
 import { cn } from '@/lib/utils';
 import type { OpenRouterModel, RunMode } from '../api';
+import { MIN_SCENARIOS_FOR_HOLDOUT } from '../engine/holdout';
 
 /**
  * Fluxo GUIADO da Nova Run (pedido do dono: "configuração totalmente guiada").
@@ -89,7 +90,8 @@ export const GOALS: GuidedGoal[] = [
     icon: TrendingUp,
     title: 'Treinar um prompt',
     question: 'Melhore o meu prompt automaticamente.',
-    detail: 'O prompt evolui rodada a rodada, com campeã só quando há ganho real, e termina num teste cego.',
+    // web-code#8: o teste cego (holdout) só existe com ≥ 20 cenários (piso de 10 reservados).
+    detail: 'O prompt evolui rodada a rodada, com campeã só quando há ganho real; com 20+ cenários, termina num teste cego.',
   },
 ];
 
@@ -209,7 +211,9 @@ function RunPlan({ p }: { p: GuidedSetupProps }) {
       ? `No fim, os ${p.finalists} melhores duelam entre si em todos os cenários — o duelo final confirma o vencedor.`
       : 'Sem duelo final: o vencedor sai do placar de vereditos.',
     p.mode === 'training'
-      ? 'No treino, uma variante só vira campeã se superar a atual com margem real; a sessão termina num teste cego (holdout).'
+      ? p.stages >= MIN_SCENARIOS_FOR_HOLDOUT
+        ? 'No treino, uma variante só vira campeã se superar a atual com margem real; a sessão termina num teste cego (holdout).'
+        : `No treino, uma variante só vira campeã se superar a atual com margem real. Com menos de ${MIN_SCENARIOS_FOR_HOLDOUT} cenários não há teste cego (holdout): o campeão sai só com confirmação fraca.`
       : null,
   ].filter(Boolean) as string[];
 

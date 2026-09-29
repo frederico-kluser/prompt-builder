@@ -20,7 +20,14 @@ import { applyEvent, denseStages, EvolutionHeatmap, ScoreHeatmap, FinalsPanel } 
 import { RunNarrative } from '../components/RunNarrative';
 import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
 import { diffLines } from '../diff';
-import { formatIterationGate, formatPValue, reportPValue } from '../engine/stats';
+import { formatIterationGate, formatPValue, formatSignificanceOrigin, reportPValue } from '../engine/stats';
+import { holdoutSkipReasonText } from '../engine/holdout';
+import {
+  convergenceReasonText,
+  holdoutSkipReasonOf,
+  reevalRunIdsOf,
+  sessionConfirmationText,
+} from '../../../src/engine/sessionDecision.js';
 import {
   SmoothTabs,
   SmoothTabsList,
@@ -360,7 +367,9 @@ export function TrainingView() {
             .catch(() => undefined);
         }
         if (event.type === 'session.converged') {
-          setSession((prev) => (prev ? { ...prev, convergedAtIteration: event.iteration } : prev));
+          setSession((prev) =>
+            prev ? { ...prev, convergedAtIteration: event.iteration, convergenceReason: event.reason } : prev,
+          );
         }
         if (event.type === 'session.holdout') {
           setSession((prev) => (prev ? { ...prev, holdout: event.holdout } : prev));
@@ -501,7 +510,15 @@ export function TrainingView() {
   // Gates (holdout / significancia / convergencia) em UMA linha.
   const signed = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(1)}`;
   const gates: string[] = [];
-  if (session.convergedAtIteration != null) gates.push(`Convergiu na rodada ${session.convergedAtIteration + 1}`);
+  // IMPL-051: a convergência diz a rodada E o motivo (platão vs paciência).
+  if (session.convergedAtIteration != null) {
+    gates.push(
+      `Convergiu na rodada ${session.convergedAtIteration + 1} (${convergenceReasonText(
+        session.convergenceReason,
+        session.config.patience,
+      )})`,
+    );
+  }
   if (session.holdout) {
     const h = session.holdout;
     gates.push(
@@ -512,17 +529,32 @@ export function TrainingView() {
     const sig = session.significance;
     // IMPL-001: relatório mostra o p BILATERAL do teste exato (o unilateral é o do gate).
     const rep = sig === null ? null : reportPValue(sig);
+    // IMPL-050: toda saída de significância traz a ORIGEM do p (holdout |
+    // seleção | sem p) — o mesmo rótulo do CLI.
     gates.push(
       rep === null
-        ? 'amostra insuficiente p/ significância'
-        : `${formatPValue(rep.p)} ${rep.kind === 'two-sided' ? 'bilateral' : '(bootstrap, legado)'}`,
+        ? `amostra insuficiente p/ significância (${formatSignificanceOrigin(null)})`
+        : `${formatPValue(rep.p)} ${rep.kind === 'two-sided' ? 'bilateral' : '(bootstrap, legado)'} · ${formatSignificanceOrigin(sig)}`,
     );
+  }
+  // web-code#8: por que não houve holdout — gravado pelo motor (derivado em record antigo).
+  const holdoutSkipReason = holdoutSkipReasonOf(session);
+  // IMPL-050: a confirmação do campeão ("validado" só com holdout que CONFIRMOU).
+  // Holdout pulado já tem o aviso próprio (abaixo); aqui entram o resultado do
+  // holdout e a ausência por desenho (desligado, campeão = base).
+  if (session.status !== 'running' && (session.holdout || (!session.holdoutSkipped && holdoutSkipReason))) {
+    gates.push(`Confirmação: ${sessionConfirmationText(session)}`);
   }
 
   // IMPL-002: gate de cada rodada — ganho bruto × corrigido × p ajustado (max-T).
+  // web-code#18: a run PAGA da re-avaliação limpa fica alcançável pelo link.
   const gateLines = session.bestPromptByIteration
     .filter((it) => it.gate?.test)
-    .map((it) => ({ key: it.iteration, text: `Rodada ${it.iteration + 1} — ${formatIterationGate(it.gate!)}` }));
+    .map((it) => ({
+      key: it.iteration,
+      text: `Rodada ${it.iteration + 1} — ${formatIterationGate(it.gate!)}`,
+      reevalRunId: it.gate?.reeval?.runId,
+    }));
 
   function downloadPack() {
     if (!session || !packScenarios.length) return;
@@ -625,11 +657,13 @@ export function TrainingView() {
         targets={[
           { subject: 'session', id: session.id },
           ...session.runIds.map((id) => ({ subject: 'run' as const, id })),
+          // web-code#18: a re-avaliação limpa também grava — falha dela aparece aqui.
+          ...reevalRunIdsOf(session).map((id) => ({ subject: 'run' as const, id })),
         ]}
       />
       {session.holdoutSkipped && (
         <Banner tone="warn" className="mt-4">
-          <strong>Holdout pulado</strong> (orçamento/cancelamento): o campeão NÃO foi validado nos cenários
+          <strong>Holdout pulado</strong> ({holdoutSkipReason ? holdoutSkipReasonText(holdoutSkipReason) : 'motivo não registrado'}): o campeão NÃO foi validado em cenários
           reservados — o ganho pode ser sobreajuste à seleção de treino.
         </Banner>
       )}
@@ -641,7 +675,17 @@ export function TrainingView() {
       {gateLines.length > 0 && (
         <ul className="mt-2 space-y-0.5 text-xs text-muted-foreground" aria-label="Gate de promoção por rodada">
           {gateLines.map((l) => (
-            <li key={l.key}>{l.text}</li>
+            <li key={l.key}>
+              {l.text}
+              {l.reevalRunId && (
+                <>
+                  {' · '}
+                  <Link className="underline underline-offset-2 hover:text-foreground" to={`/runs/${l.reevalRunId}`}>
+                    ver re-avaliação
+                  </Link>
+                </>
+              )}
+            </li>
           ))}
         </ul>
       )}

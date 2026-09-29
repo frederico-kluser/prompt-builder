@@ -16,6 +16,8 @@ import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
 import { hasGabarito, labelIssue, toStageSpec } from '../../engine/libraryCore.js';
 import { formatGateSummary, formatSignificance } from '../../stats.js';
+import { holdoutSkipReasonText } from '../../holdout.js';
+import { holdoutSkipReasonOf } from '../../engine/sessionDecision.js';
 import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, type Output } from '../output.js';
 import {
   assertNoUnknownConfigKeys,
@@ -659,8 +661,10 @@ function sessionOutcome(out: Output, record: SessionRecord, sessionId: string, x
       out.line();
       // Sem o holdout o campeao esta NAO validado contra sobreajuste — omitir
       // isso transformaria a feature de orcamento numa regressao de qualidade.
+      // cli#9: o MOTIVO real (piso de cenários ≠ orçamento ≠ cancelamento).
+      const motivo = holdoutSkipReasonOf(record);
       out.warn(
-        'campeão NÃO validado em holdout (pulado por orçamento/interrupção) — ' +
+        `campeão NÃO validado em holdout (${motivo ? holdoutSkipReasonText(motivo) : 'pulado'}) — ` +
           'pode estar sobreajustado aos cenários de treino.',
       );
     }
@@ -697,6 +701,8 @@ function sessionOutcome(out: Output, record: SessionRecord, sessionId: string, x
     budgetExhausted: Boolean(record.budgetExhausted),
     stoppedReason: record.stoppedReason ?? null,
     holdoutSkipped: Boolean(record.holdoutSkipped),
+    // cli#9: por que não houve holdout (null = houve).
+    holdoutSkipReason: holdoutSkipReasonOf(record) ?? null,
     championPrompt: campeao?.systemPrompt,
     holdout: record.holdout,
     significance: record.significance,
