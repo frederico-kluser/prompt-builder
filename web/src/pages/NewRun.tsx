@@ -9,6 +9,7 @@ import {
   createSession,
   estimateConfigCost,
   isCostConfirmationRequired,
+  isKeyMissing,
   fetchLgpd,
   fetchModels,
   fetchTechniques,
@@ -51,6 +52,7 @@ import {
   type ConfigRow,
 } from '../arenaForm';
 import { CostConfirmDialog } from '../components/CostConfirmDialog';
+import { KeySetup } from '../components/KeySetup';
 import { AreaRow, LinkButton, NumRow, SwitchRow, TxtNumRow } from '../components/formRows';
 import { GuidedSetup, SECTION_STEP, type GuidedStep } from '../components/GuidedSetup';
 import {
@@ -330,6 +332,12 @@ export function NewRun() {
   const [modelsLoading, setModelsLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Key sumida" no meio da configuração (IMPL-082 crit. iv): a key vive só na
+  // memória da aba por default e o navegador pode apagar a lembrada. O que
+  // gasta recusa com `KeyMissingError` ANTES de qualquer fetch — aqui isso vira
+  // RE-PROMPT (o KeySetup no topo, com tudo o que foi preenchido intacto),
+  // nunca um erro genérico no rodapé.
+  const [needKey, setNeedKey] = useState(false);
   // Só depois de o usuário TENTAR iniciar a pendência vira erro (vermelho) —
   // validação prematura em vermelho é anti-padrão.
   const [tried, setTried] = useState(false);
@@ -703,7 +711,10 @@ export function NewRun() {
         ),
       );
     } catch (err) {
-      setGenBaseError((err as Error).message);
+      if (isKeyMissing(err)) {
+        setNeedKey(true);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else setGenBaseError((err as Error).message);
     } finally {
       setGenBaseLoading(false);
     }
@@ -958,6 +969,11 @@ export function NewRun() {
         setPendingLaunch({ config, estimate: err.estimate });
         return;
       }
+      if (isKeyMissing(err)) {
+        setNeedKey(true);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
       setError((err as Error).message);
     }
   }
@@ -1129,6 +1145,16 @@ export function NewRun() {
               </SegmentedToggleOption>
             ))}
           </SegmentedToggle>
+        )}
+
+        {needKey && (
+          <div className="mt-4 flex flex-col gap-3">
+            <Banner tone="warn">
+              A chave da OpenRouter não está mais nesta aba (recarregou sem «Lembrar neste dispositivo», ou o
+              navegador apagou os dados do site). Conecte-a de novo — o que você preencheu continua aqui.
+            </Banner>
+            <KeySetup onSaved={() => setNeedKey(false)} />
+          </div>
         )}
 
         {piiImport && (

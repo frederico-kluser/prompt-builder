@@ -809,11 +809,6 @@ export function requireKey(): string {
   return key;
 }
 
-function authHeaders(): Record<string, string> {
-  const key = getStoredKey();
-  return key ? { 'x-openrouter-key': key } : {};
-}
-
 // -------------- Calls --------------
 
 export interface ValidateKeyResponse {

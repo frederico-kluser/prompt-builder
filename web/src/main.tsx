@@ -22,15 +22,21 @@ import './index.css';
 startOrphanWatch();
 
 /**
- * "Pede direto a key" (pedido do dono): sem chave salva — e sem o "explorar sem
+ * "Pede direto a key" (pedido do dono): sem chave — e sem o "explorar sem
  * chave" desta sessão — QUALQUER rota cai no first-run (`/welcome`), que pede a
  * key como passo seguinte. Com chave (ou com o salto), a app segue normal.
+ *
+ * A key vive só na memória da aba por default (IMPL-082: localStorage só com
+ * «Lembrar neste dispositivo»), e o navegador pode apagar a lembrada (Safari:
+ * 7 dias sem uso). "Key sumida" é RE-PROMPT, não erro: o gate leva a rota de
+ * origem em `state.from` e o first-run devolve o usuário a ela — recarregar
+ * `/runs/:id` não perde mais a run que estava aberta.
  */
 function KeyFirstGate({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   const semChave = !getStoredKey() && !keyAskSkipped();
   if (semChave && location.pathname !== '/welcome') {
-    return <Navigate to="/welcome" replace />;
+    return <Navigate to="/welcome" replace state={{ from: `${location.pathname}${location.search}` }} />;
   }
   return <>{children}</>;
 }

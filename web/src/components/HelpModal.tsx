@@ -127,8 +127,10 @@ export const TUTORIALS: Record<HelpTutorial, Step[]> = {
     },
     {
       kicker: 'A chave',
-      title: 'Local, com limite e revogável',
-      body: 'A key vive só no localStorage deste navegador e segue direto para o OpenRouter. Qualquer key válida é aceite; se algo parecer errado, revogue-a na página de keys e crie outra.',
+      title: 'Só neste navegador, e revogável',
+      // IMPL-082: memória da aba por default; localStorage só com «Lembrar
+      // neste dispositivo» (verificado em test/key-handling.test.ts).
+      body: 'A key fica só na memória desta aba — ou no localStorage deste navegador, se marcar «Lembrar neste dispositivo» — e segue direto para o OpenRouter. Qualquer key válida é aceite; se algo parecer errado, revogue-a na página de keys e crie outra.',
     },
     {
       kicker: 'Tema',

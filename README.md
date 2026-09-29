@@ -546,8 +546,9 @@ symlinks versionados. Começo: [`AGENTS.md`](./AGENTS.md) (comandos exatos + reg
 
 **Não é preciso nenhum `.env` para rodar** — todos os parâmetros têm default. A **chave do
 OpenRouter não vai em variável de ambiente**: a app **pede-a logo ao abrir** (first-run, com os
-pontos de risco/limite/revogação) e ela continua gerível em **Configurações** — fica no
-`localStorage` do navegador, indo ao backend só no header `x-openrouter-key`. Detalhes no
+pontos de risco/limite/revogação) e ela continua gerível em **Configurações** — fica na memória
+da aba (ou no `localStorage`, com «Lembrar neste dispositivo») e sai do navegador só para o
+OpenRouter. Detalhes no
 [GUIA §2](./GUIA.md#2-primeiro-acesso-a-chave).
 
 Variáveis **opcionais** (veja `.env.example`):
@@ -766,8 +767,9 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
 
 ## Segurança da API key
 
-- A key **nunca** fica em `.env` nem no servidor: vive no **`localStorage`** do navegador e é
-  enviada **só** no header `x-openrouter-key` das chamadas que precisam dela.
+- A key **nunca** fica em `.env` nem no servidor: vive na **memória da aba** (ou no
+  **`localStorage`** do navegador, só com «Lembrar neste dispositivo») e é enviada **só** ao
+  OpenRouter nas chamadas que precisam dela (no modo servidor, no header `x-openrouter-key`).
 - O backend **não persiste** a key — usa na requisição e descarta.
 - A validação usa o endpoint **autenticado** `GET /key` (e não `/models`, que é público e
   responderia `200` até para uma key inválida), então uma key ruim é barrada **na hora**.

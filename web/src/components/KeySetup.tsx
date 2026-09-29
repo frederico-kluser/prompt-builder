@@ -1,12 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Check, LoaderCircle, TriangleAlert } from 'lucide-react';
-import type { ValidateKeyResponse } from '../api';
-import { getStoredKey, setStoredKey, validateKey } from '../api';
+import type { KeyPersistence, ValidateKeyResponse } from '../api';
+import { getStoredKey, keyPersistence, setStoredKey, validateKey } from '../api';
+import { keyHandlingFacts, OPENROUTER_KEYS_URL } from '../keyHandling';
 import { MultiStateButton } from '@/components/motion-ui/multi-state-button';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
 import { Banner, PageHeader, Screen } from './primitives';
-import { cn } from '@/lib/utils';
 
 type Status = 'idle' | 'validating' | 'valid' | 'invalid';
 
@@ -33,10 +34,11 @@ function describeKey(res: ValidateKeyResponse): string {
 // opcional do usuário e o sistema nunca cobra nem bloqueia por isso.
 
 // Rótulo e glifo do botão por estado — o MultiStateButton morfa a largura entre eles.
+// "conectada", não "salva": sem «Lembrar» a key vive só na memória da aba.
 const BUTTON_LABEL: Record<Status, string> = {
-  idle: 'Validar e salvar',
+  idle: 'Validar e conectar',
   validating: 'Validando…',
-  valid: 'Key salva',
+  valid: 'Key conectada',
   invalid: 'Tentar de novo',
 };
 
@@ -44,10 +46,32 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
   const [key, setKey] = useState(getStoredKey());
   const [status, setStatus] = useState<Status>(getStoredKey() ? 'valid' : 'idle');
   const [message, setMessage] = useState<string | null>(null);
+  // Como a key está guardada AGORA — a tela declara isso (IMPL-082), nunca um
+  // texto fixo. Atualizado a cada gravação.
+  const [persistence, setPersistence] = useState<KeyPersistence>(() => keyPersistence());
+  // "Lembrar neste dispositivo": opt-in EXPLÍCITO (default: só memória). Com uma
+  // key já lembrada, nasce marcado — revalidá-la não a apaga do disco em
+  // silêncio (antes: todo revalidar chamava setStoredKey sem `remember` e
+  // removia a cópia persistida).
+  const [remember, setRemember] = useState(() => keyPersistence() === 'remembered');
+  const rememberId = useId();
 
   useEffect(() => {
     setKey(getStoredKey());
   }, []);
+
+  /** Grava e sincroniza a declaração da tela com o que ficou guardado. */
+  function store(k: string, lembrar: boolean) {
+    setStoredKey(k, { remember: lembrar });
+    setPersistence(keyPersistence());
+  }
+
+  /** A escolha vale NA HORA para a key já conectada: desmarcar tira do disco já. */
+  function handleRemember(v: boolean) {
+    setRemember(v);
+    const atual = getStoredKey();
+    if (atual && status === 'valid') store(atual, v);
+  }
 
   async function handleValidate(rawKey?: string) {
     const target = (rawKey ?? key).trim();
@@ -61,12 +85,12 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
     try {
       const res = await validateKey(target);
       if (res.ok) {
-        setStoredKey(target);
+        store(target, remember);
         setStatus('valid');
         setMessage(describeKey(res));
         onSaved?.();
       } else {
-        setStoredKey('');
+        store('', false);
         setStatus('invalid');
         setMessage(res.error ?? 'Key inválida.');
       }
@@ -77,7 +101,7 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
   }
 
   function handleClear() {
-    setStoredKey('');
+    store('', false);
     setKey('');
     setStatus('idle');
     setMessage(null);
@@ -99,34 +123,30 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
         Cole sua key do OpenRouter. Ela vai direto do navegador para o OpenRouter — nenhum outro
         servidor a recebe.
       </p>
-      {/* Pontos de risco concretos — localização da key, riscos
-          (XSS/extensões/máquina partilhada) e revogação. (O 4º ponto antigo,
-          "crie a key COM limite de crédito", foi REMOVIDO a pedido do dono em
-          2026-09-27: key sem limite é aceite sem cobrança nem aviso.) */}
-      <ul className="mt-2 space-y-1.5 text-sm leading-relaxed text-muted-foreground">
-        <li>
-          <strong className="font-medium text-foreground">Onde ela fica:</strong> salva só no{' '}
-          <code className="font-mono text-[12.5px]">localStorage</code> deste navegador — apagar os
-          dados do navegador apaga também a key.
-        </li>
-        <li>
-          <strong className="font-medium text-foreground">Riscos:</strong> qualquer script da página
-          (XSS), extensão do navegador com acesso à página ou outra pessoa neste computador consegue
-          ler a key. Em máquina partilhada, não a salve.
-        </li>
-        <li>
-          <strong className="font-medium text-foreground">Como revogar:</strong> a key é exibida uma
-          única vez; se algo parecer errado, revogue-a e crie outra na{' '}
-          <a
-            className="text-primary underline-offset-4 hover:underline"
-            href="https://openrouter.ai/keys"
-            target="_blank"
-            rel="noreferrer"
-          >
-            página de keys do OpenRouter ↗
-          </a>
-          .
-        </li>
+      {/* "Como sua key é tratada" (IMPL-082): só frases VERIFICÁVEIS, montadas a
+          partir do estado real (web/src/keyHandling.ts — cada uma tem
+          verificador em test/key-handling.test.ts). O antigo 4º ponto, "crie a
+          key COM limite de crédito", foi REMOVIDO a pedido do dono em
+          2026-09-27: key sem limite é aceite sem cobrança nem aviso. */}
+      <ul className="mt-2 space-y-1.5 text-sm leading-relaxed text-muted-foreground" aria-label="Como sua key é tratada">
+        {keyHandlingFacts(persistence).map((f) => (
+          <li key={f.id} data-key-fact={f.id}>
+            <strong className="font-medium text-foreground">{f.title}:</strong> {f.text}
+            {f.id === 'revogar' && (
+              <>
+                {' '}
+                <a
+                  className="text-primary underline-offset-4 hover:underline"
+                  href={OPENROUTER_KEYS_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Página de keys do OpenRouter ↗
+                </a>
+              </>
+            )}
+          </li>
+        ))}
       </ul>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -168,6 +188,27 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
         )}
       </div>
 
+      {/* Opt-in de persistência (IMPL-082): declarado, reversível e com efeito
+          imediato sobre a key já conectada. */}
+      <div className="mt-3 flex items-start gap-2.5">
+        <Switch
+          className="mt-0.5"
+          checked={remember}
+          onCheckedChange={(v) => handleRemember(!!v)}
+          aria-labelledby={`${rememberId}-rotulo`}
+          aria-describedby={`${rememberId}-nota`}
+        />
+        <div className="min-w-0">
+          <span id={`${rememberId}-rotulo`} className="block text-sm font-medium text-foreground">
+            Lembrar neste dispositivo
+          </span>
+          <p id={`${rememberId}-nota`} className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+            Guarda a key no <code className="font-mono text-[12.5px]">localStorage</code> deste navegador
+            para não precisar colá-la a cada visita. Desligado, ela vive só na memória desta aba.
+          </p>
+        </div>
+      </div>
+
       {message && (
         <Banner tone={status === 'invalid' ? 'error' : 'neutral'} className="mt-3">
           {message}
@@ -185,7 +226,7 @@ export function KeyGate({ children }: { children: React.ReactNode }) {
       <Screen>
         <PageHeader
           title="Conecte sua chave"
-          subtitle="Para criar uma run, cole sua chave da OpenRouter. Ela fica salva só no seu navegador."
+          subtitle="Para criar uma run, cole sua chave da OpenRouter. Ela vai direto do navegador para a OpenRouter — marque «Lembrar neste dispositivo» para não precisar colá-la de novo."
         />
         <KeySetup onSaved={() => setHasKey(true)} />
       </Screen>

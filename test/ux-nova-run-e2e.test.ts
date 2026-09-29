@@ -165,6 +165,8 @@ async function paginaNova(
   // Superfície do formulário (2026-09-27): os contratos IMPL-106/107 medem a
   // página única COMPLETA; a superfície GUIADA (default) tem o seu describe.
   estilo: 'guided' | 'complete' = 'complete',
+  // `key: false` = navegador SEM key (fluxo BYOK: o first-run pede a key).
+  opts: { key?: boolean } = {},
 ): Promise<{
   contexto: BrowserContext;
   page: Page;
@@ -172,11 +174,18 @@ async function paginaNova(
   const contexto = await navegador!.newContext({ viewport });
   const page = await contexto.newPage();
   // KeyGate deixa passar com key "lembrada" — sem tocar no OpenRouter de verdade.
-  await page.addInitScript((s: string) => {
-    localStorage.setItem('openrouter_api_key', 'sk-or-e2e-nao-real');
-    localStorage.setItem('openrouter_api_key:remember', '1');
-    localStorage.setItem('pb.formStyle', s);
-  }, estilo);
+  // O init roda em TODA navegação (inclusive reload): só grava a key se pedido.
+  await page.addInitScript(
+    ({ s, comKey }: { s: string; comKey: boolean }) => {
+      if (comKey) {
+        localStorage.setItem('openrouter_api_key', 'sk-or-e2e-nao-real');
+        localStorage.setItem('openrouter_api_key:remember', '1');
+      }
+      localStorage.setItem('pb.formStyle', s);
+      localStorage.setItem('pb.onboarded', '1'); // o first-run abre direto no passo da key
+    },
+    { s: estilo, comKey: opts.key !== false },
+  );
   await page.route('**/*', async (route) => {
     const alvoUrl = route.request().url();
     if (alvoUrl.includes('/api/v1/models')) {
@@ -184,6 +193,14 @@ async function paginaNova(
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify(fixtureCatalogo()),
+      });
+    }
+    // Validação da key (GET /key): resposta de key válida, sem rede real.
+    if (/\/api\/v1\/key(\?|$)/.test(alvoUrl)) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ data: { label: 'e2e', usage: 0, limit: null, is_free_tier: false } }),
       });
     }
     if (alvoUrl.startsWith(url)) return route.continue();
@@ -544,4 +561,82 @@ describe.skipIf(!alvo)('superfície GUIADA (default) — 5 passos, plano e rodap
       await contexto.close();
     }
   }, 180_000);
+});
+
+/* ================================================================== BYOK */
+
+// web-code#3 + IMPL-082 (i)/(iv) — num browser REAL: a key só sobrevive ao
+// reload com «Lembrar neste dispositivo»; sem ela, "key sumida" é RE-PROMPT que
+// devolve o usuário à rota de onde veio (antes: a key morria em todo reload e o
+// texto dizia "salva no localStorage").
+describe.skipIf(!alvo)('BYOK — «Lembrar neste dispositivo» num browser real', () => {
+  const KEY = 'sk-or-v1-e2e-nao-real-000000000000';
+  const lida = (page: Page) => page.evaluate(() => localStorage.getItem('openrouter_api_key'));
+
+  async function conectar(page: Page, lembrar: boolean): Promise<void> {
+    await page.waitForSelector('input[aria-label="OpenRouter API key"]', { timeout: 30_000 });
+    // A transição de rota (AppShell, AnimatePresence mode="wait") remonta a
+    // página ao fim da saída do redirect → espera o MESMO input sobreviver a
+    // duas sondagens antes de digitar (senão a digitação cai na instância que sai).
+    await page.waitForFunction(
+      () => {
+        const w = window as unknown as { __pbKeyInput?: Element };
+        const el = document.querySelector('input[aria-label="OpenRouter API key"]');
+        if (el && w.__pbKeyInput === el) return true;
+        w.__pbKeyInput = el ?? undefined;
+        return false;
+      },
+      undefined,
+      { polling: 400, timeout: 10_000 },
+    );
+    const sw = page.getByRole('switch', { name: 'Lembrar neste dispositivo' });
+    // Opt-in: nasce DESLIGADO (key em memória por default).
+    expect(await sw.getAttribute('aria-checked')).toBe('false');
+    if (lembrar) await sw.click();
+    await page.fill('input[aria-label="OpenRouter API key"]', KEY);
+    await page.getByRole('button', { name: /Validar e conectar/ }).click();
+    await page.getByText('Key conectada').first().waitFor({ timeout: 10_000 });
+  }
+
+  it('sem «Lembrar»: a key morre no reload e o app pede de novo, voltando à rota de origem', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided', { key: false });
+    try {
+      await page.goto(`${url}runs`);
+      await page.waitForURL(/\/welcome$/, { timeout: 30_000 });
+      await conectar(page, false);
+      expect(await lida(page), 'sem opt-in nada vai para o disco').toBeNull();
+      await page.getByRole('button', { name: 'Voltar para onde estava' }).click();
+      await page.waitForURL(/\/runs$/);
+
+      await page.reload();
+      await page.waitForURL(/\/welcome$/, { timeout: 30_000 }); // memória da aba: o reload apagou
+      await page.getByRole('button', { name: 'Voltar para onde estava' }).waitFor({ timeout: 10_000 });
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('com «Lembrar»: sobrevive ao reload, a tela declara, e desligar tira do disco na hora', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided', { key: false });
+    try {
+      await page.goto(`${url}settings`);
+      await page.waitForURL(/\/welcome$/, { timeout: 30_000 });
+      await conectar(page, true);
+      expect(await lida(page)).toBe(KEY);
+      await page.getByRole('button', { name: 'Voltar para onde estava' }).click();
+      await page.waitForURL(/\/settings$/);
+
+      await page.reload();
+      await page.getByText(/no localStorage deste navegador, até você a remover/).first().waitFor({ timeout: 30_000 });
+      expect(page.url(), 'a key lembrada não pede first-run').toMatch(/\/settings$/);
+      const sw = page.getByRole('switch', { name: 'Lembrar neste dispositivo' });
+      expect(await sw.getAttribute('aria-checked')).toBe('true');
+
+      await sw.click();
+      await page.getByText(/só na memória desta aba — recarregar/).first().waitFor({ timeout: 10_000 });
+      expect(await lida(page), 'desmarcar remove a cópia persistida').toBeNull();
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
 });

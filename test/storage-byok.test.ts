@@ -13,9 +13,10 @@
 //    DECLARADA (o usuário a salvou; apagar em silêncio seria perda surpresa);
 //  — localStorage bloqueado/ausente degrada para memória, sem lançar.
 //
-// O que fica pendente (fora da fronteira do item — UI): checkbox "lembrar neste
-// dispositivo" e a declaração no KeySetup e a página "como sua key é tratada"
-// com frases amarradas a evidência.
+// A UI (checkbox «Lembrar neste dispositivo», declaração do estado real no
+// KeySetup e a lista "como sua key é tratada" com cada frase amarrada a um
+// verificador) é coberta em test/key-handling.test.ts e no E2E BYOK de
+// test/ux-nova-run-e2e.test.ts.
 //
 // DECISÃO sobre OAuth PKCE (IMPL-082 crit. iii) — registada com evidência de
 // documentação oficial (OpenRouter, consultada 2026-09-27):
