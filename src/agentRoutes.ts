@@ -177,9 +177,17 @@ router.param('id', (_req, res, next, id: unknown) => {
  * `x-openrouter-key`); sem deep não chama LLM.
  */
 router.get('/doctor', async (req, res) => {
+  // A sala do pré-voo é DESCARTÁVEL: sem o `finally` cada GET deixava um
+  // tmp/doctor-<uuid> (no deep, com doctor-proj, doctor-home e doctor-sess).
+  // O cache durável do canário mora em <dataDir>/agent-doctor-cache/, fora
+  // daqui. A resposta só sai DEPOIS da limpeza: quem recebe o 200 não vê a
+  // sala ainda em disco.
+  let runDir = '';
+  let status = 200;
+  let body: unknown;
   try {
     const deep = req.query.deep === '1' || req.query.deep === 'true';
-    const runDir = path.join(getDataDir(), 'tmp', 'doctor-' + randomUUID());
+    runDir = path.join(getDataDir(), 'tmp', 'doctor-' + randomUUID());
     // IMPL-024: a sala envenenada do canário nasce dentro de tmp/ 0700.
     await ensurePrivateDataDir(runDir);
     const apiKeyHeader = req.headers['x-openrouter-key'];
@@ -199,10 +207,14 @@ router.get('/doctor', async (req, res) => {
       model,
       bin: undefined,
     });
-    res.json(result);
+    body = result;
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    status = 500;
+    body = { error: (err as Error).message };
+  } finally {
+    if (runDir) await fs.rm(runDir, { recursive: true, force: true }).catch(() => undefined);
   }
+  res.status(status).json(body);
 });
 
 // ---------------------------------------------------------------------------
