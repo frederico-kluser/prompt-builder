@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowRight, Download } from 'lucide-react';
+import { ArrowRight, Download, FileBarChart } from 'lucide-react';
 import type { RunRecord, SessionRecord, StageSpec } from '../api';
 import {
   cacheSession,
@@ -575,6 +575,11 @@ export function TrainingView() {
           <Button variant="outline" size="sm" onClick={downloadPack} disabled={!packScenarios.length}>
             <Download aria-hidden="true" />
             Pacote
+          </Button>
+          {/* Relatório de ciclos: quanto melhorou × quanto a mudança muda o custo. */}
+          <Button size="sm" onClick={() => navigate(`/training/${session.id}/report`)} disabled={done === 0}>
+            <FileBarChart aria-hidden="true" />
+            Relatório de ciclos
           </Button>
           {cancellable && (
             <div className="ml-auto">

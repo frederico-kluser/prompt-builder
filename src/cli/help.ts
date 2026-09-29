@@ -126,7 +126,11 @@ const USO: Record<string, string> = {
   sessions show <id>
   sessions winner <id> [--prompt-only | --apply <arq> [--commit] [--override "<motivo>"]]
            handoff com backup + diff; holdout regredido BLOQUEIA (exit 10)
-           salvo --override com motivo (gravado na auditoria + trailer)`,
+           salvo --override com motivo (gravado na auditoria + trailer)
+  sessions report <id> [--html <arq>] [--markdown <arq>] [--calls-per-month N] [--annotate]
+           relatório de ciclos: quanto melhorou (original × campeão, por ciclo
+           e no holdout) e quanto a mudança muda o custo por chamada; --html
+           grava a página no tema do Plannotator, --annotate abre na UI dele`,
   library: `  library list [--profile <id>]
           perfis (ou itens de um perfil; teto 50; --all/--limit N)
   library init|show|add|seed|verify|coverage|export|rm|drop

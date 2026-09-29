@@ -12,6 +12,8 @@ import { prepareOptsFor } from './prepareRun.js';
 import { isTerminalRunStatus } from './types.js';
 import { isValidRecordId, publicErrorMessage } from './pathSafety.js';
 import type { CompareConfig, CompetitorResponse, RunRecord } from './types.js';
+import { buildSessionReport, renderSessionReportMarkdown } from './engine/sessionReport.js';
+import { renderSessionReportHtml } from './engine/sessionReportHtml.js';
 
 const router = Router();
 
@@ -349,6 +351,62 @@ router.get('/sessions/:id', ah(async (req, res) => {
       return;
     }
     res.json(record);
+  } catch (err) {
+    fail500(res, err);
+  }
+}));
+
+/**
+ * Relatório de CICLOS da sessão (src/engine/sessionReport.ts): `format=json`
+ * (padrão), `html` (página autocontida no tema do Plannotator) ou `markdown`.
+ * `callsPerMonth` muda o volume da projeção de custo.
+ */
+router.get('/sessions/:id/report', ah(async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!isValidRecordId(id)) {
+      res.status(400).json({ error: 'Id de sessão inválido.' });
+      return;
+    }
+    const format = typeof req.query.format === 'string' ? req.query.format : 'json';
+    if (!['json', 'html', 'markdown'].includes(format)) {
+      res.status(400).json({ error: 'format deve ser json, html ou markdown.' });
+      return;
+    }
+    const cpmRaw = typeof req.query.callsPerMonth === 'string' ? Number(req.query.callsPerMonth) : undefined;
+    if (cpmRaw !== undefined && (!Number.isInteger(cpmRaw) || cpmRaw <= 0)) {
+      res.status(400).json({ error: 'callsPerMonth deve ser um inteiro positivo.' });
+      return;
+    }
+    const session = await loadSession(id);
+    if (!session) {
+      res.status(404).json({ error: 'Sessao nao encontrada' });
+      return;
+    }
+    const ids = new Set<string>(session.runIds);
+    for (const it of session.bestPromptByIteration) {
+      const rid = it.gate?.reeval?.runId;
+      if (rid) ids.add(rid);
+    }
+    const runs: RunRecord[] = [];
+    for (const rid of ids) {
+      if (!isValidRecordId(rid)) continue;
+      const r = await loadRun(rid);
+      if (r) runs.push(r);
+    }
+    const report = buildSessionReport(session, runs, {
+      generatedAt: new Date().toISOString(),
+      ...(cpmRaw ? { callsPerMonth: cpmRaw } : {}),
+    });
+    if (format === 'html') {
+      res.type('html').send(renderSessionReportHtml(report));
+      return;
+    }
+    if (format === 'markdown') {
+      res.type('text/markdown; charset=utf-8').send(renderSessionReportMarkdown(report));
+      return;
+    }
+    res.json(report);
   } catch (err) {
     fail500(res, err);
   }

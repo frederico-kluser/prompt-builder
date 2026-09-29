@@ -21,15 +21,30 @@
 #
 #   agente          marcador (config)        diretório de skills
 #   Claude Code     ~/.claude                ~/.claude/skills
+#   Claude (perfil) $CLAUDE_CONFIG_DIR       $CLAUDE_CONFIG_DIR/skills
+#   Claude (perfis) ~/.claude-<nome>         ~/.claude-<nome>/skills  (só perfis
+#                                            reais: com skills/, settings.json
+#                                            ou projects/ — backups ficam fora)
 #   Codex CLI       ~/.codex                 ~/.codex/skills
+#   Copilot CLI     ~/.copilot               ~/.copilot/skills
+#   Cursor          ~/.cursor                ~/.cursor/skills
+#   Kiro            ~/.kiro                  ~/.kiro/skills
 #   DSH             ~/.dsh                   ~/.dsh/skills
+#   jcode           ~/.jcode                 ~/.jcode/skills
+#   pi              ~/.pi/agent              ~/.pi/agent/skills
 #   Gemini CLI      ~/.gemini                ~/.gemini/skills
 #   OpenCode        ~/.config/opencode       ~/.config/opencode/skills
 #   OpenCode (leg.) ~/.config/opencode/skill (só se já existir — convenção antiga)
 #   genérico        ~/.agents                ~/.agents/skills   (agentskills.io)
 #
+# Diretórios repetidos (ex.: CLAUDE_CONFIG_DIR=~/.claude) contam uma vez só.
+# PB_EXTRA_AGENT_DIRS="dir1:dir2" acrescenta alvos à descoberta (criados sempre).
+#
 # `--target <dir>` (repetível) substitui a descoberta: instala sempre nesses
 # diretórios, criando-os se necessário — vale para qualquer agente fora da lista.
+#
+# `dirs` imprime, um por linha, os diretórios de skills que o `install` usaria
+# (é a FONTE ÚNICA da descoberta — o scripts/agent-setup.sh lê daqui).
 #
 # `install` é idempotente: link já apontado = "já ok"; link antigo DESTA skill
 # (caminho `.../skills/prompt-builder`, ex.: repo mudou de lugar) = re-apontado;
@@ -60,19 +75,22 @@ erro() { printf 'ERRO: %s\n' "$*" >&2; }
 
 uso() {
   cat <<EOF
-Uso: bash $PROG <install|uninstall|doctor|help> [--target <dir>]...
+Uso: bash $PROG <install|uninstall|doctor|dirs|help> [--target <dir>]...
 
   install    cria <alvo>/prompt-builder -> <origem>/skills/prompt-builder (symlink)
   uninstall  remove só os symlinks que apontam para esta skill
   doctor     lista onde está instalado, se o link está íntegro e o SKILL.md visível
+  dirs       imprime os diretórios de skills que o install usaria (um por linha)
 
   --target <dir>   diretório de skills a usar (repetível; substitui a descoberta
                    e é sempre criado se faltar). Sem ele, o install cobre os
                    diretórios de agentes conhecidos que existirem na máquina,
                    todos relativos ao home do usuário:
-                   .claude/skills · .codex/skills · .dsh/skills · .gemini/skills ·
+                   .claude/skills · \$CLAUDE_CONFIG_DIR/skills · .claude-<perfil>/skills ·
+                   .codex/skills · .copilot/skills · .cursor/skills · .kiro/skills ·
+                   .dsh/skills · .jcode/skills · .pi/agent/skills · .gemini/skills ·
                    .config/opencode/skills (+ .config/opencode/skill legado) ·
-                   .agents/skills
+                   .agents/skills  (+ PB_EXTRA_AGENT_DIRS="d1:d2")
 
 Exit codes: 0 ok · 2 uso inválido · 1 operacional (detalhe no fim da saída).
 Este instalador liga a skill GLOBALMENTE (symlink, acompanha o repo/pacote);
@@ -126,17 +144,41 @@ checa_origem() {
 # ---------------------------------------------------------------------------
 
 # Linhas "nome|marcador|dir"; o modo é derivado do nome (opencode-legado = só se
-# o diretório já existir; os restantes = criar se o marcador existir).
+# o diretório já existir; extra = sempre; os restantes = criar se o marcador
+# existir). Um mesmo diretório aparece UMA vez (o primeiro nome vence).
 alvos_conhecidos() {
-  cat <<EOF
-claude-code|$HOME/.claude|$HOME/.claude/skills
-codex|$HOME/.codex|$HOME/.codex/skills
-dsh|$HOME/.dsh|$HOME/.dsh/skills
-gemini-cli|$HOME/.gemini|$HOME/.gemini/skills
-opencode|$HOME/.config/opencode|$HOME/.config/opencode/skills
-opencode-legado|-|$HOME/.config/opencode/skill
-generico|$HOME/.agents|$HOME/.agents/skills
-EOF
+  xdg=${XDG_CONFIG_HOME:-$HOME/.config}
+  {
+    printf 'claude-code|%s|%s\n' "$HOME/.claude" "$HOME/.claude/skills"
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+      printf 'claude-config|%s|%s\n' "$CLAUDE_CONFIG_DIR" "$CLAUDE_CONFIG_DIR/skills"
+    fi
+    # Perfis extras do Claude Code (o que CLAUDE_CONFIG_DIR aponta quando há mais
+    # de uma conta na máquina). Só perfis REAIS: um ~/.claude-backups qualquer
+    # não ganha uma pasta skills/ nova.
+    for perfil in "$HOME"/.claude-*; do
+      [ -d "$perfil" ] || continue
+      if [ -d "$perfil/skills" ] || [ -f "$perfil/settings.json" ] || [ -d "$perfil/projects" ]; then
+        printf 'claude-perfil:%s|%s|%s\n' "${perfil##*/}" "$perfil" "$perfil/skills"
+      fi
+    done
+    printf 'codex|%s|%s\n' "$HOME/.codex" "$HOME/.codex/skills"
+    printf 'copilot|%s|%s\n' "$HOME/.copilot" "$HOME/.copilot/skills"
+    printf 'cursor|%s|%s\n' "$HOME/.cursor" "$HOME/.cursor/skills"
+    printf 'kiro|%s|%s\n' "$HOME/.kiro" "$HOME/.kiro/skills"
+    printf 'dsh|%s|%s\n' "$HOME/.dsh" "$HOME/.dsh/skills"
+    printf 'jcode|%s|%s\n' "$HOME/.jcode" "$HOME/.jcode/skills"
+    printf 'pi|%s|%s\n' "$HOME/.pi/agent" "$HOME/.pi/agent/skills"
+    printf 'gemini-cli|%s|%s\n' "$HOME/.gemini" "$HOME/.gemini/skills"
+    printf 'opencode|%s|%s\n' "$xdg/opencode" "$xdg/opencode/skills"
+    printf 'opencode-legado|-|%s\n' "$xdg/opencode/skill"
+    printf 'generico|%s|%s\n' "$HOME/.agents" "$HOME/.agents/skills"
+    if [ -n "${PB_EXTRA_AGENT_DIRS:-}" ]; then
+      printf '%s\n' "$PB_EXTRA_AGENT_DIRS" | tr ':' '\n' | while IFS= read -r d; do
+        [ -n "$d" ] && printf 'extra|-|%s\n' "$d"
+      done
+    fi
+  } | awk -F'|' '!visto[$3]++'
 }
 
 # Lista final "nome|marcador|dir" conforme o subcomando; ALVOS_EXPLICITOS (por
@@ -152,6 +194,10 @@ lista_alvos() {
   alvos_conhecidos | while IFS='|' read -r nome marcador dir; do
     if [ "$nome" = "opencode-legado" ]; then
       [ -d "$dir" ] && printf '%s|%s|%s\n' "$nome" "$marcador" "$dir"
+      continue
+    fi
+    if [ "$nome" = "extra" ]; then
+      printf '%s|%s|%s\n' "$nome" "$marcador" "$dir"
       continue
     fi
     if [ -d "$dir" ] || [ -d "$marcador" ]; then
@@ -361,7 +407,7 @@ SUB=$1
 shift
 
 case $SUB in
-  install | uninstall | doctor) ;;
+  install | uninstall | doctor | dirs) ;;
   help | -h | --help)
     uso
     exit 0
@@ -403,4 +449,10 @@ case $SUB in
   install) cmd_install ;;
   uninstall) cmd_uninstall ;;
   doctor) cmd_doctor ;;
+  dirs)
+    lista_alvos install | while IFS='|' read -r _nome _marcador dir; do
+      [ -n "${dir:-}" ] && printf '%s\n' "$dir"
+    done
+    exit 0
+    ;;
 esac

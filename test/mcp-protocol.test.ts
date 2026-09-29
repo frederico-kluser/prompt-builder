@@ -175,6 +175,7 @@ describe('IMPL-085 — anotações e inputSchema das tools', () => {
       ['read_docs', true, false, true, false],
       ['get_result', true, false, true, false],
       ['get_agent_dossier', true, false, true, false],
+      ['get_session_report', false, false, true, false],
       ['run_status', true, false, true, false],
       ['run_benchmark', false, false, false, true],
       ['train_prompt', false, false, false, true],

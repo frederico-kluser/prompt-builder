@@ -53,6 +53,9 @@ export function isAllowedPath(p, sources) {
   // Instalador global da skill de agente (bash, zero dependências) — embarca para
   // instalar por symlink a partir do checkout OU de node_modules/prompt-builder-cli.
   if (p === 'scripts/install-agent-skill.sh') return true;
+  // Setup completo para agentes (lançadores do CLI + skill + Plannotator do
+  // relatório de ciclos) — o `npm run agent-setup`, também rodável do pacote.
+  if (p === 'scripts/agent-setup.sh') return true;
   if (p.startsWith('agent-docs/') || p.startsWith('skills/')) return true;
   if (/^src\/data\/[^/]+\.json$/u.test(p)) return true;
   const m = /^dist\/(.+)\.(js|d\.ts)$/u.exec(p);

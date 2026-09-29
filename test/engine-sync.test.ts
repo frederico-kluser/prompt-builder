@@ -69,6 +69,10 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   // src/engine/ — o web re-exporta por shim (nunca uma terceira cópia).
   libraryCore: 'shim',
   exchange: 'shim',
+  // Relatório de ciclos do treino (JSON + HTML no tema do Plannotator): fonte
+  // única em src/engine/ — CLI (`sessions report`) e web (/training/:id/report).
+  sessionReport: 'shim',
+  sessionReportHtml: 'shim',
   // Pares mantidos à mão (seams diferentes). Ao mudar UM lado, mude o outro.
   configFile: 'mirror',
   duels: 'mirror', // a MATEMÁTICA é compartilhada via src/engine/duelCore.ts (src lê dossiê de agente do disco)
@@ -96,6 +100,8 @@ const CANONICO_EM: Record<string, string> = {
   verdictCache: 'engine/verdictCache',
   libraryCore: 'engine/libraryCore',
   exchange: 'engine/exchange',
+  sessionReport: 'engine/sessionReport',
+  sessionReportHtml: 'engine/sessionReportHtml',
 };
 
 /**

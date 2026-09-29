@@ -85,6 +85,9 @@ RESULTADOS
                            handoff com backup + diff; holdout regredido
                            BLOQUEIA (exit 10) salvo --override com motivo
                            (gravado em <data-dir>/handoffs.jsonl + trailer)
+  sessions report <id> [--html <arq>] [--calls-per-month N] [--annotate]
+                           relatório de CICLOS: quanto melhorou (original ×
+                           campeão) e quanto a mudança muda o custo por chamada
 
 BIBLIOTECA (dataset estável de cenários+gabaritos)
   library list | init | show | add | seed | verify | coverage | export | rm | drop

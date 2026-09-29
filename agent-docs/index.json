@@ -48,6 +48,12 @@
     "approxTokens": 800
   },
   {
+    "topic": "report",
+    "title": "Relatório de ciclos",
+    "summary": "sessions report: quanto o prompt melhorou (original × campeão, por ciclo e no holdout) e quanto a mudança muda o custo por chamada; HTML no tema do Plannotator e entrega pela skill plannotator-visual-explainer",
+    "approxTokens": 1200
+  },
+  {
     "topic": "ndjson",
     "title": "Saída NDJSON",
     "summary": "tabela completa de eventos, o envelope de erro (kind/code/hint) e o que não vem no stream",

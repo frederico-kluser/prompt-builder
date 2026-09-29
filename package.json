@@ -138,7 +138,8 @@
     "src/data/lgpd-retention.json",
     "agent-docs",
     "skills",
-    "scripts/install-agent-skill.sh"
+    "scripts/install-agent-skill.sh",
+    "scripts/agent-setup.sh"
   ],
   "scripts": {
     "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
@@ -146,6 +147,9 @@
     "build:all": "npm run build && npm run web:build",
     "prepublishOnly": "npm run build && npm run test:full && npm run gate:publint && npm run gate:attw && npm run gate:tarball && npm run gate:smoke",
     "setup": "npm --prefix web install",
+    "agent-setup": "bash scripts/agent-setup.sh install",
+    "agent-setup:doctor": "bash scripts/agent-setup.sh doctor",
+    "agent-setup:uninstall": "bash scripts/agent-setup.sh uninstall",
     "cli": "tsx src/cli/index.ts",
     "dev": "concurrently -n bench,web -c blue,green \"tsx watch src/server.ts\" \"npm run web:dev\"",
     "start": "node dist/server.js",

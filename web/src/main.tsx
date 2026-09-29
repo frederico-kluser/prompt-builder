@@ -12,6 +12,7 @@ import { NewRun } from './pages/NewRun';
 import { RunView } from './pages/RunView';
 import { RunsList } from './pages/RunsList';
 import { TrainingView } from './pages/TrainingView';
+import { TrainingReport } from './pages/TrainingReport';
 import { SettingsPage } from './pages/Settings';
 import { PromptsPage } from './pages/PromptsPage';
 import { getStoredKey, startOrphanWatch } from './api';
@@ -49,6 +50,7 @@ createRoot(document.getElementById('root')!).render(
               <Route path="/runs" element={<RunsList />} />
               <Route path="/runs/:id" element={<RunView />} />
               <Route path="/training/:sessionId" element={<TrainingView />} />
+              <Route path="/training/:sessionId/report" element={<TrainingReport />} />
               <Route path="/prompts" element={<PromptsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Routes>

@@ -64,7 +64,17 @@ import { JobManager, defaultJobManager, type JobView, type RunJobInput } from '.
 import { PKG_DOCS_DIR, PKG_ROOT, pkgVersion } from '../../paths.js';
 import { assertValidRecordId, isValidRecordId, publicErrorMessage } from '../../pathSafety.js';
 import { readDocTopic } from './knowledge.js';
-import { setDataDir, getDataDir, loadRun, loadSession, runSummary, sessionSummary } from '../../storage.js';
+import {
+  ensurePrivateDataDir,
+  setDataDir,
+  getDataDir,
+  loadRun,
+  loadSession,
+  runSummary,
+  sessionSummary,
+} from '../../storage.js';
+import { buildSessionReport, renderSessionReportMarkdown } from '../../engine/sessionReport.js';
+import { renderSessionReportHtml } from '../../engine/sessionReportHtml.js';
 import { ensureCatalog } from '../../modelsCache.js';
 import { toExportRow } from '../../modelCaps.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
@@ -587,6 +597,14 @@ const GET_RESULT_ARGS = z.strictObject({
   cursor: z.string().describe('cursor da página de etapas').optional(),
   limit: z.number().describe('etapas por página (padrão 5)').optional(),
 });
+const SESSION_REPORT_ARGS = z.strictObject({
+  sessionId: z.string('sessionId obrigatório').describe('id da sessão de treino'),
+  format: z
+    .enum(['markdown', 'json', 'html'])
+    .describe('markdown (padrão, é o brief da skill plannotator-visual-explainer), json ou html (grava em <data-dir>/reports)')
+    .optional(),
+  callsPerMonth: z.number().describe('volume da projeção de custo (padrão 10000)').optional(),
+});
 const RUN_AGENT_ARGS = z.strictObject({
   config: zRunConfig.describe('JSON string de arena-agent-config@1'),
   budgetUsd: z.number('budgetUsd é obrigatório e deve ser maior que zero.').describe('teto de gasto em USD'),
@@ -1042,6 +1060,60 @@ const TOOLS: McpTool[] = [
       }
       if (args.detail === 'full') return recordOuResumo(tipo, rec, paginacao);
       return summarizeRecord(tipo, rec, paginacao);
+    },
+  },
+  {
+    name: 'get_session_report',
+    annotations: {
+      title: 'Relatório de ciclos',
+      // format:"html" grava um arquivo DERIVADO em <data-dir>/reports — não é
+      // só leitura, mas é idempotente e não destrói nada.
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    description:
+      'Relatório de CICLOS de uma sessão de treino: quanto o prompt melhorou (original × campeão, por ciclo ' +
+      'e no holdout, com IC/p) e quanto a MUDANÇA muda o custo por chamada (custo, tokens, latência, projeção ' +
+      'mensal, retorno da otimização). markdown = brief para a skill plannotator-visual-explainer; html = página ' +
+      'pronta no tema do Plannotator (entregue com `plannotator annotate <arquivo>`).',
+    argsSchema: SESSION_REPORT_ARGS,
+    inputSchema: inputSchemaFrom(SESSION_REPORT_ARGS),
+    noKey: true,
+    run: async (args) => {
+      const id = args.sessionId;
+      assertValidRecordId(id);
+      const cpm = numOf(args.callsPerMonth);
+      if (cpm !== undefined && (!Number.isInteger(cpm) || cpm <= 0)) {
+        throw new Error('callsPerMonth deve ser um inteiro positivo.');
+      }
+      const session = await loadSession(id);
+      if (!session) return { error: 'sessão não encontrada' };
+      const ids = new Set<string>(session.runIds);
+      for (const it of session.bestPromptByIteration) {
+        const rid = it.gate?.reeval?.runId;
+        if (rid) ids.add(rid);
+      }
+      const runs: RunRecord[] = [];
+      for (const rid of ids) {
+        if (!isValidRecordId(rid)) continue;
+        const r = await loadRun(rid);
+        if (r) runs.push(r);
+      }
+      const report = buildSessionReport(session, runs, {
+        generatedAt: new Date().toISOString(),
+        ...(cpm ? { callsPerMonth: cpm } : {}),
+      });
+      const format = args.format ?? 'markdown';
+      if (format === 'json') return report;
+      if (format === 'html') {
+        const dir = await ensurePrivateDataDir(path.join(getDataDir(), 'reports'));
+        const file = path.join(dir, `${session.id}.html`);
+        await fs.writeFile(file, renderSessionReportHtml(report), 'utf-8');
+        return { file, headline: report.headline, verdict: report.verdict, deliver: `plannotator annotate ${file}` };
+      }
+      return { markdown: renderSessionReportMarkdown(report), verdict: report.verdict };
     },
   },
   {

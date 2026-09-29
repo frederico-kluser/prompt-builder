@@ -78,6 +78,8 @@ import {
   overrideTrailers,
 } from '../handoff.js';
 import type { RunRecord, SessionRecord } from '../../types.js';
+import { buildSessionReport, renderSessionReportMarkdown } from '../../engine/sessionReport.js';
+import { renderSessionReportHtml } from '../../engine/sessionReportHtml.js';
 import { readConfigFile, resolveArenaLibrary } from './run.js';
 
 /**
@@ -613,8 +615,18 @@ async function applyPromptFile(
   return { applied: true, file, backup, committed };
 }
 
+const SESSIONS_SUBS = new Set(['list', 'show', 'winner', 'report']);
+
 export async function cmdSessions(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
+  if (!SESSIONS_SUBS.has(sub)) {
+    // Antes um subcomando desconhecido caía em silêncio no `show` (com o nome
+    // do subcomando lido como id): o agente achava que rodou outra coisa.
+    throw new CliError(
+      `Subcomando desconhecido: "sessions ${sub}". Use: sessions list | show <id> | winner <id> | report <id>.`,
+      EXIT.USAGE,
+    );
+  }
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     'prompt-only': { type: 'boolean' },
     limit: { type: 'string' },
@@ -623,6 +635,11 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     apply: { type: 'string' },
     commit: { type: 'boolean' },
     override: { type: 'string' },
+    // `sessions report`: relatório de ciclos (quanto melhorou × quanto muda o custo).
+    html: { type: 'string' },
+    markdown: { type: 'string' },
+    'calls-per-month': { type: 'string' },
+    annotate: { type: 'boolean' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -650,6 +667,8 @@ export async function cmdSessions(argv: string[]): Promise<number> {
   const record = await loadSession(id);
   if (!record) throw new CliError(`Sessão "${id}" não encontrada.`, EXIT.USAGE);
   const campeao = record.bestPromptByIteration.at(-1);
+
+  if (sub === 'report') return sessionsReport(record, parsed.values, out);
 
   if (sub === 'winner') {
     // Handoff versionado: --apply leva o campeão para um arquivo de produção,
@@ -830,6 +849,116 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     recommendation: decisao.recommendation,
   });
   return EXIT.OK;
+}
+
+// --- sessions report ---------------------------------------------------------
+
+/**
+ * `sessions report <id>`: o relatório de ciclos (src/engine/sessionReport.ts).
+ * Texto = Markdown no stdout (é o brief da skill plannotator-visual-explainer);
+ * `--json` = o objeto `prompt-builder-session-report@1`; `--html <arq>` grava a
+ * página autocontida no design system do Plannotator; `--annotate` a abre na UI
+ * de anotação (`plannotator annotate`, binário instalado pelo agent-setup).
+ */
+async function sessionsReport(
+  record: SessionRecord,
+  values: Record<string, unknown>,
+  out: Output,
+): Promise<number> {
+  const cpmRaw = values['calls-per-month'];
+  let callsPerMonth: number | undefined;
+  if (typeof cpmRaw === 'string') {
+    const n = Number(cpmRaw.replace(/[_.]/g, ''));
+    if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
+      throw new CliError('--calls-per-month exige um inteiro positivo (ex.: 50000).', EXIT.USAGE);
+    }
+    callsPerMonth = n;
+  }
+  const htmlRaw = values.html;
+  const mdRaw = values.markdown;
+  if (typeof htmlRaw === 'string' && !htmlRaw.trim()) throw new CliError('--html exige um caminho de arquivo.', EXIT.USAGE);
+  if (typeof mdRaw === 'string' && !mdRaw.trim()) throw new CliError('--markdown exige um caminho de arquivo.', EXIT.USAGE);
+
+  // Runs da sessão + as de re-avaliação limpa (os ids vivem no gate, não em runIds).
+  const ids = new Set<string>(record.runIds);
+  for (const it of record.bestPromptByIteration) {
+    const rid = it.gate?.reeval?.runId;
+    if (rid) ids.add(rid);
+  }
+  const runs: RunRecord[] = [];
+  for (const rid of ids) {
+    if (!isValidRecordId(rid)) continue;
+    const r = await loadRun(rid);
+    if (r) runs.push(r);
+  }
+  const report = buildSessionReport(record, runs, {
+    generatedAt: new Date().toISOString(),
+    ...(callsPerMonth ? { callsPerMonth } : {}),
+  });
+
+  const files: { html?: string; markdown?: string } = {};
+  let htmlPath = typeof htmlRaw === 'string' ? path.resolve(htmlRaw.trim()) : undefined;
+  if (values.annotate === true && !htmlPath) {
+    // --annotate sem --html: grava ao lado dos dados (0700), nunca no cwd do usuário.
+    const dir = await ensurePrivateDataDir(path.join(getDataDir(), 'reports'));
+    htmlPath = path.join(dir, `${record.id}.html`);
+  }
+  if (htmlPath) {
+    await fs.mkdir(path.dirname(htmlPath), { recursive: true });
+    await fs.writeFile(htmlPath, renderSessionReportHtml(report), 'utf-8');
+    files.html = htmlPath;
+    out.info(`relatório HTML: ${htmlPath}`);
+  }
+  if (typeof mdRaw === 'string') {
+    const mdPath = path.resolve(mdRaw.trim());
+    await fs.mkdir(path.dirname(mdPath), { recursive: true });
+    await fs.writeFile(mdPath, renderSessionReportMarkdown(report), 'utf-8');
+    files.markdown = mdPath;
+    out.info(`relatório Markdown: ${mdPath}`);
+  }
+
+  let annotated: boolean | undefined;
+  if (values.annotate === true && htmlPath) {
+    annotated = openInPlannotator(htmlPath, out);
+  }
+
+  if (out.isText) {
+    // Sem --html/--markdown, o Markdown vai para o stdout (payload do comando).
+    if (!files.html && !files.markdown) out.raw(renderSessionReportMarkdown(report));
+    else out.line(report.headline);
+  }
+  out.result(true, 'sessions.report', {
+    report,
+    ...(files.html || files.markdown ? { files } : {}),
+    ...(annotated !== undefined ? { annotated } : {}),
+  });
+  return EXIT.OK;
+}
+
+/**
+ * Abre o HTML na UI de anotação do Plannotator e ESPERA a pessoa terminar.
+ * O stdout do plannotator vai para o NOSSO stderr: o stdout do CLI é payload.
+ */
+function openInPlannotator(file: string, out: Output): boolean {
+  const home = process.env.HOME ?? '';
+  const candidatos = [process.env.PB_PLANNOTATOR_BIN, 'plannotator', home ? path.join(home, '.local/bin/plannotator') : '']
+    .filter((x): x is string => Boolean(x));
+  for (const bin of candidatos) {
+    try {
+      execFileSync(bin, ['annotate', file], { stdio: ['ignore', 2, 2] });
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') continue;
+      out.warn(`plannotator annotate terminou com erro: ${(err as Error).message}`);
+      return false;
+    }
+  }
+  out.warn(
+    'Plannotator não encontrado — rode `npm run agent-setup` no repositório do prompt-builder ' +
+      `(ou abra ${file} no navegador).`,
+  );
+  return false;
 }
 
 // --- techniques / lgpd / config / registry / doctor --------------------------
