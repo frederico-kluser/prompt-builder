@@ -46,20 +46,36 @@
 # `dirs` imprime, um por linha, os diretórios de skills que o `install` usaria
 # (é a FONTE ÚNICA da descoberta — o scripts/agent-setup.sh lê daqui).
 #
-# `install` é idempotente: link já apontado = "já ok"; link antigo DESTA skill
-# (caminho `.../skills/prompt-builder`, ex.: repo mudou de lugar) = re-apontado;
-# ficheiro/diretório/link alheio nunca é tocado (conta como erro, exit 1).
+# QUEM É "ESTA SKILL" (a regra que decide o que pode ser re-apontado/removido):
+# o nome `prompt-builder` é genérico (há outro pacote npm com ele), então o
+# caminho `.../skills/prompt-builder` NÃO basta. Um link é desta skill quando
+#   (a) aponta para esta origem; ou
+#   (b) o destino é a skill do prompt-builder-cli — SKILL.md com
+#       `name: prompt-builder` E o homepage `npmjs.com/package/prompt-builder-cli`
+#       (no frontmatter desde a v0.1.0), ou a raiz dela (`<skill>/../..`) tem o
+#       package.json do `prompt-builder-cli` (outro checkout/versão do pacote); ou
+#   (c) o link está QUEBRADO e o caminho terminava em `.../skills/prompt-builder`
+#       (repo/pacote mudou de lugar — o conteúdo já não dá para ler).
+# Qualquer outra coisa com o mesmo nome é ALHEIA e nunca é tocada.
 #
-# `uninstall` remove APENAS symlinks `<alvo>/prompt-builder` que apontam para esta
-# skill (esta origem ou outra `.../skills/prompt-builder`); cópias locais, links
-# de outras skills e ficheiros alheios nunca são tocados.
+# `install` é idempotente: link já apontado = "já ok"; cópia local IDÊNTICA à
+# origem = "cópia ok" (não tocada); link desta skill vindo de outra origem
+# (regras b/c) = re-apontado; cópia local desatualizada e ficheiro/diretório/
+# link alheio nunca são tocados (contam como erro, exit 1).
 #
-# `doctor` diz onde está instalado, se o link está íntegro (não quebrado) e se o
-# SKILL.md está visível através dele.
+# `uninstall` remove APENAS symlinks `<alvo>/prompt-builder` desta skill (regras
+# a–c); cópias locais, links de outras skills e ficheiros alheios nunca são tocados.
+#
+# `doctor` diz onde está instalado e usa o MESMO critério do `install`: só conta
+# como íntegro o link para esta origem (ou uma cópia idêntica a ela). Link
+# quebrado, link para outra cópia/versão (desatualizado), cópia local diferente
+# da origem e link/pasta de OUTRA skill com o mesmo nome contam como problema
+# (exit 1) — exatamente os estados em que o `install` re-aponta ou recusa.
 #
 # Saída em PT-BR. Exit codes: 0 ok · 2 uso inválido · 1 operacional (skill em
-# falta, alvo ocupado por ficheiro alheio, falha de mkdir/ln, link quebrado ou
-# nada instalado no `doctor`, nada instalado no `install`).
+# falta, alvo ocupado por ficheiro alheio ou cópia desatualizada, falha de
+# mkdir/ln, qualquer problema ou nada instalado no `doctor`, nada instalado no
+# `install`).
 
 set -u
 
@@ -78,8 +94,8 @@ uso() {
 Uso: bash $PROG <install|uninstall|doctor|dirs|help> [--target <dir>]...
 
   install    cria <alvo>/prompt-builder -> <origem>/skills/prompt-builder (symlink)
-  uninstall  remove só os symlinks que apontam para esta skill
-  doctor     lista onde está instalado, se o link está íntegro e o SKILL.md visível
+  uninstall  remove só os symlinks desta skill (links de outra skill homónima ficam)
+  doctor     estado de cada alvo, pelo MESMO critério do install (problema = exit 1)
   dirs       imprime os diretórios de skills que o install usaria (um por linha)
 
   --target <dir>   diretório de skills a usar (repetível; substitui a descoberta
@@ -209,15 +225,40 @@ lista_alvos() {
   return 0
 }
 
-# O link aponta para ESTA skill (esta origem ou outra pasta skills/prompt-builder)?
+# A pasta (ou o link íntegro) contém a skill `prompt-builder` DESTE projeto, em
+# qualquer versão/cópia? Regra (b) do cabeçalho — por CONTEÚDO, nunca por nome.
+e_skill_do_projeto() {
+  pasta=$1
+  if [ -f "$pasta/SKILL.md" ] &&
+    grep -q "^name: $SKILL_NAME\$" "$pasta/SKILL.md" 2>/dev/null &&
+    grep -q 'npmjs\.com/package/prompt-builder-cli' "$pasta/SKILL.md" 2>/dev/null; then
+    return 0
+  fi
+  # `<skill>/../..` = raiz do checkout ou do pacote (o kernel resolve o link antes do `..`)
+  grep -q '"name"[[:space:]]*:[[:space:]]*"prompt-builder-cli"' "$pasta/../../package.json" 2>/dev/null
+}
+
+# O link <dest> é DESTA skill (regras a–c do cabeçalho)? Link de outra skill com
+# o mesmo nome — mesmo terminando em `.../skills/prompt-builder` — NÃO é.
 link_e_da_skill() {
   dest=$1
   alvo_link=$(readlink "$dest" 2>/dev/null) || return 1
-  [ "$alvo_link" = "$SKILL_SRC" ] && return 0
+  [ -n "${SKILL_SRC:-}" ] && [ "$alvo_link" = "$SKILL_SRC" ] && return 0
+  if [ -e "$dest" ]; then
+    e_skill_do_projeto "$dest"
+    return
+  fi
+  # Quebrado: o conteúdo não dá para ler — só a regra de caminho (repo/pacote mudou de lugar).
   case $alvo_link in
     */skills/$SKILL_NAME) return 0 ;;
   esac
   return 1
+}
+
+# <dest> é uma cópia local (pasta real) com o MESMO SKILL.md desta origem?
+copia_identica() {
+  [ -n "${SKILL_SRC:-}" ] && [ -d "$1" ] && [ ! -L "$1" ] && [ -f "$1/SKILL.md" ] &&
+    cmp -s "$1/SKILL.md" "$SKILL_SRC/SKILL.md"
 }
 
 # ---------------------------------------------------------------------------
@@ -255,8 +296,18 @@ cmd_install() {
       fi
       continue
     fi
+    if copia_identica "$dest"; then
+      # Mesmo critério do doctor: cópia idêntica funciona (só não acompanha updates).
+      info "[cópia ok]  $nome: $dest é cópia idêntica à origem (não é symlink — não tocada)"
+      n_ok=$((n_ok + 1))
+      continue
+    fi
     if [ -e "$dest" ]; then
-      erro "$nome: $dest está ocupado por um ficheiro/diretório alheio — não tocado."
+      if [ -d "$dest" ] && e_skill_do_projeto "$dest"; then
+        erro "$nome: $dest é cópia local DESATUALIZADA do prompt-builder — não tocada; remova-a e rode install de novo."
+      else
+        erro "$nome: $dest está ocupado por um ficheiro/diretório alheio — não tocado."
+      fi
       n_erros=$((n_erros + 1))
       continue
     fi
@@ -355,19 +406,38 @@ cmd_doctor() {
     [ -n "${dir:-}" ] || continue
     dest=$dir/$SKILL_NAME
     if [ -L "$dest" ]; then
-      if [ -f "$dest/SKILL.md" ]; then
-        info "[ok]        $nome: $dest -> $(readlink "$dest" 2>/dev/null) (SKILL.md visível)"
+      # MESMO critério do install: só o link para ESTA origem é íntegro.
+      alvo=$(readlink "$dest" 2>/dev/null)
+      resolvido=$(CDPATH='' cd -P -- "$dest" 2>/dev/null && pwd)
+      if [ ! -f "$dest/SKILL.md" ]; then
+        if link_e_da_skill "$dest"; then
+          info "[PROBLEMA]  $nome: $dest -> $alvo LINK QUEBRADO (SKILL.md invisível) — rode install para re-apontar"
+        else
+          info "[PROBLEMA]  $nome: $dest -> $alvo link quebrado de OUTRA origem (o install não o toca)"
+        fi
+        n_problemas=$((n_problemas + 1))
+      elif [ -n "${SKILL_SRC:-}" ] && [ "${resolvido:-}" = "$SKILL_SRC" ]; then
+        info "[ok]        $nome: $dest -> $alvo (SKILL.md visível)"
         n_ok=$((n_ok + 1))
+      elif link_e_da_skill "$dest"; then
+        info "[DESATUALIZADO] $nome: $dest -> $alvo é outra cópia/versão do prompt-builder — rode install para re-apontar"
+        n_problemas=$((n_problemas + 1))
       else
-        info "[PROBLEMA]  $nome: $dest -> $(readlink "$dest" 2>/dev/null) LINK QUEBRADO (SKILL.md invisível)"
+        info "[PROBLEMA]  $nome: $dest -> $alvo é link de OUTRA skill com o mesmo nome (install/uninstall não o tocam)"
         n_problemas=$((n_problemas + 1))
       fi
     elif [ -d "$dest" ]; then
-      if [ -f "$dest/SKILL.md" ]; then
-        info "[cópia]     $nome: $dest (pasta local, não é symlink — o uninstall não a remove)"
-        n_ok=$((n_ok + 1))
-      else
+      if [ ! -f "$dest/SKILL.md" ]; then
         info "[PROBLEMA]  $nome: $dest existe mas não tem SKILL.md"
+        n_problemas=$((n_problemas + 1))
+      elif copia_identica "$dest"; then
+        info "[cópia]     $nome: $dest (idêntica à origem; pasta local, não é symlink — não acompanha updates e o uninstall não a remove)"
+        n_ok=$((n_ok + 1))
+      elif e_skill_do_projeto "$dest"; then
+        info "[DESATUALIZADA] $nome: $dest é cópia local DIFERENTE da origem — remova-a e rode install"
+        n_problemas=$((n_problemas + 1))
+      else
+        info "[PROBLEMA]  $nome: $dest é pasta de OUTRA skill com o mesmo nome (install/uninstall não a tocam)"
         n_problemas=$((n_problemas + 1))
       fi
     elif [ -e "$dest" ]; then
