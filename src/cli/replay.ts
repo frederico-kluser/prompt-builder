@@ -345,7 +345,10 @@ export function replayTransport(record: RunRecord): ReplayTransport {
       // Catálogo/endpoints: vazio — o replay não precisa (e não pode) consultar a rede.
       return new Response(JSON.stringify({ data: [] }), { status: 200 });
     }
-    if (!p.endsWith('/chat/completions')) return new Response('replay: rota não gravada', { status: 404 });
+    // Este transporte fica ATRÁS do ponto único (é o `fetch` injetado no
+    // gateway de `openrouter.ts`, como o transporte falso dos testes): ele
+    // RECEBE o POST de chat do gateway — nunca fala com a rede.
+    if (!p.endsWith('/completions')) return new Response('replay: rota não gravada', { status: 404 });
     const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
     const model = String(body.model ?? '');
     const stream = body.stream === true;
