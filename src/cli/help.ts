@@ -33,6 +33,7 @@ export const COMMANDS = [
   'limits',
   'mcp',
   'agents',
+  'telemetry',
 ] as const;
 
 /** Rodapé comum de TODO help: contrato de saída + a tabela de códigos. */
@@ -81,6 +82,7 @@ const RESUMO: Record<string, string> = {
   limits: 'teto diário de gasto da máquina',
   mcp: 'servidor MCP por stdio (mesmo binário)',
   agents: 'modo agente: arena de agentes com executor pi',
+  telemetry: 'telemetria opt-in e os headers de atribuição enviados ao OpenRouter',
 };
 
 /**
@@ -171,6 +173,15 @@ const USO: Record<string, string> = {
            única por conteúdo: \`--allow-exec-config\` grava o pin; conteúdo
            diferente revê a aprovação.
   agents show <runId> | list (teto 50; --all/--limit N) | logs | replay | gc`,
+  telemetry: `  telemetry [status]       estado do opt-in e da atribuição (padrão)
+  telemetry schema         schema PÚBLICO do payload + allowlist de eventos
+  telemetry counters       contadores locais (sem id de usuário/máquina)
+
+  Ambiente: PROMPT_BUILDER_TELEMETRY=on liga a telemetria (DESLIGADA por
+  padrão, e nunca ativa em CI/agente sem esse opt-in explícito);
+  PROMPT_BUILDER_TELEMETRY_URL é o destino do upload.
+  PROMPT_BUILDER_NO_ATTRIBUTION=on suprime HTTP-Referer e X-Title — headers de
+  atribuição que o gateway envia ao OpenRouter (dado partilhado com terceiro).`,
 };
 
 export function renderCommandHelp(cmd: string): string {
