@@ -22,6 +22,9 @@ export interface FakeRequest {
   system: string;
   user: string;
   stream: boolean;
+  /** Modo JEV: perguntas e estado do corpo de decisão (quando for decisão). */
+  questions?: Record<string, unknown>;
+  state?: unknown;
 }
 
 export interface FakeUsage {
@@ -66,9 +69,28 @@ export interface FakeChatReply {
   provider?: string;
 }
 
+/** Modo JEV — resposta do endpoint de decisões. */
+export interface FakeDecisionReply {
+  /** Default 200. Diferente de 200 => corpo `bodyText` (e `headers`) e nenhum custo. */
+  status?: number;
+  bodyText?: string;
+  /** `answers` por id de pergunta. Ausente = resposta default determinística do fake. */
+  answers?: Record<string, unknown>;
+  /** Snapshot devolvido em `model` (default `<pedido>-20260917`). */
+  model?: string;
+  provider?: string;
+  /** `null` = resposta sem bloco usage. Ausente = input_tokens pelo tamanho do corpo e custo a 0,042/Mtok. */
+  usage?: { input_tokens?: number; output_tokens?: number; cost?: number } | null;
+  headers?: Record<string, string>;
+}
+
 export interface FakeOpenRouterOptions {
   /** Itens CRUS de /models (formato do OpenRouter). */
   catalog?: unknown[];
+  /** Modo JEV: itens CRUS de `GET /models?output_modalities=decisions`. */
+  decisionCatalog?: unknown[];
+  /** Modo JEV: resposta de cada decisão. `n` = índice do pedido de decisão (0-based). */
+  decisions?: (req: FakeRequest, n: number) => FakeDecisionReply | Response | Promise<FakeDecisionReply | Response>;
   /** Resposta de cada chat. `n` = índice do pedido de chat (0-based). */
   chat?: (req: FakeRequest, n: number) => FakeChatReply | Response | Promise<FakeChatReply | Response>;
   /** `data` de GET /key. */
@@ -79,6 +101,8 @@ export interface FakeOpenRouter {
   fetch: FetchLike;
   requests: FakeRequest[];
   chatRequests(): FakeRequest[];
+  /** Modo JEV: pedidos ao endpoint de decisões. */
+  decisionRequests(): FakeRequest[];
   /** Soma do `usage.cost` servido em respostas 200 (a "fatura"). */
   billedUsd(): number;
   /** Quantas respostas de chat 200 foram servidas. */
@@ -92,6 +116,7 @@ function sse(frames: string[]): string {
 export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter {
   const requests: FakeRequest[] = [];
   let chatN = 0;
+  let decisionN = 0;
   let billed = 0;
   let billedCalls = 0;
 
@@ -120,12 +145,38 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
       system: textOf(messages.find((m) => m.role === 'system')?.content),
       user: messages.filter((m) => m.role === 'user').map((m) => textOf(m.content)).join('\n'),
       stream: body?.stream === true,
+      ...(body && typeof body.questions === 'object' ? { questions: body.questions as Record<string, unknown>, state: body.state } : {}),
     };
     requests.push(req);
     if (init?.signal?.aborted) throw init.signal.reason ?? new Error('aborted');
 
     if (method === 'GET' && path.endsWith('/models')) {
-      return new Response(JSON.stringify({ data: opts.catalog ?? [] }), { status: 200 });
+      const decisoes = new URL(url).searchParams.get('output_modalities') === 'decisions';
+      return new Response(JSON.stringify({ data: (decisoes ? opts.decisionCatalog : opts.catalog) ?? [] }), { status: 200 });
+    }
+    if (method === 'POST' && path.endsWith('/alpha/decisions')) {
+      const n = decisionN++;
+      const reply = (await opts.decisions?.(req, n)) ?? {};
+      if (reply instanceof Response) return reply;
+      const status = reply.status ?? 200;
+      if (status !== 200) return new Response(reply.bodyText ?? '', { status, headers: reply.headers ?? {} });
+      const inTok = Math.max(270, Math.ceil(JSON.stringify(body ?? {}).length / 3));
+      const usage =
+        reply.usage === null ? undefined : { input_tokens: inTok, output_tokens: 22, cost: inTok * 0.042e-6, ...(reply.usage ?? {}) };
+      if (typeof usage?.cost === 'number') billed += usage.cost;
+      billedCalls += 1;
+      const answers = reply.answers ?? defaultDecisionAnswers(req.questions ?? {});
+      const json: Record<string, unknown> = {
+        model: reply.model ?? `${String(body?.model ?? '').replace(/^~/, '')}-20260917`,
+        answers,
+        id: `gen-dec-${n}`,
+        provider: reply.provider ?? 'TypeSafe',
+      };
+      if (usage) json.usage = usage;
+      return new Response(JSON.stringify(json), {
+        status: 200,
+        headers: { 'x-generation-id': `gen-dec-${n}`, 'x-provider-name': reply.provider ?? 'TypeSafe', ...(reply.headers ?? {}) },
+      });
     }
     if (method === 'GET' && path.endsWith('/key')) {
       return new Response(JSON.stringify({ data: opts.keyData ?? { label: 'fake', usage: 0, limit: null } }), {
@@ -208,6 +259,7 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
     fetch,
     requests,
     chatRequests: () => requests.filter((r) => r.path.endsWith('/chat/completions')),
+    decisionRequests: () => requests.filter((r) => r.path.endsWith('/alpha/decisions')),
     billedUsd: () => billed,
     billedCalls: () => billedCalls,
   };
@@ -228,6 +280,33 @@ export function catalogItem(
     supported_parameters: ['temperature', 'seed', 'max_tokens', 'response_format'],
     ...extra,
   };
+}
+
+/**
+ * Modo JEV — respostas default de um corpo de decisão: noul 0,9; choice na 1ª
+ * opção com 0,8 (resto dividido), confidence 0,7; score no último nível com 0,9.
+ */
+export function defaultDecisionAnswers(questions: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [qid, raw] of Object.entries(questions)) {
+    const q = (raw ?? {}) as { type?: string; criteria?: unknown };
+    if (q.type === 'noul') out[qid] = { type: 'noul', noul: 0.9 };
+    else if (q.type === 'choice') {
+      const keys = Object.keys((q.criteria ?? {}) as Record<string, unknown>);
+      const resto = keys.length > 1 ? 0.2 / (keys.length - 1) : 0;
+      out[qid] = {
+        type: 'choice',
+        choice: keys[0],
+        probabilities: Object.fromEntries(keys.map((k, i) => [k, i === 0 ? (keys.length > 1 ? 0.8 : 1) : resto])),
+        confidence: 0.7,
+      };
+    } else if (q.type === 'score') {
+      const L = Array.isArray(q.criteria) ? q.criteria.length : 1;
+      const probs = Object.fromEntries(Array.from({ length: L }, (_, i) => [String(i), i === L - 1 ? (L > 1 ? 0.9 : 1) : L > 1 ? 0.1 / (L - 1) : 0]));
+      out[qid] = { type: 'score', score: Object.entries(probs).reduce((s, [k, p]) => s + Number(k) * p, 0), probabilities: probs, confidence: 0.8 };
+    }
+  }
+  return out;
 }
 
 /** Espera nula para o backoff (injeta em `createGateway({ sleep })`). */

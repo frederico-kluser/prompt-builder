@@ -11,7 +11,7 @@ import motionTheme from '../motion.theme';
 import { AppShell, RouteTransition } from './components/AppShell';
 import { FirstRun, keyAskSkipped } from './components/FirstRun';
 import { KeyGate } from './components/KeySetup';
-import { NewRun } from './pages/NewRun';
+import { NewBenchmark } from './pages/NewBenchmark';
 import { RunView } from './pages/RunView';
 import { RunsList } from './pages/RunsList';
 import { TrainingView } from './pages/TrainingView';
@@ -19,12 +19,18 @@ import { TrainingReport } from './pages/TrainingReport';
 import { RouteErrorBoundary } from './components/RouteErrorBoundary';
 import { SettingsPage } from './pages/Settings';
 import { PromptsPage } from './pages/PromptsPage';
+import { JevRunView } from './pages/jev/JevRunView';
+import { JevTrainingView } from './pages/jev/JevTrainingView';
+import { JevReportPage } from './pages/jev/JevReportPage';
 import { getStoredKey, startOrphanWatch } from './api';
+import { startJevOrphanWatch } from './jev/api';
 import './index.css';
 
 // IMPL-023: na carga, runs/treinos 'running' sem dono (a aba que os executava
 // fechou ou recarregou) viram interrompidos — sem ninguém precisar abri-los.
 startOrphanWatch();
+// Modo JEV: a mesma regra para as runs/sessões JEV (lock livre = órfã).
+void startJevOrphanWatch();
 
 /**
  * "Pede direto a key" (pedido do dono): sem chave — e sem o "explorar sem
@@ -81,11 +87,15 @@ function AppRoutes() {
         >
           <Route path="/" element={<Navigate to="/new" replace />} />
           <Route path="/welcome" element={<FirstRun />} />
-          <Route path="/new" element={<KeyGate><NewRun /></KeyGate>} />
+          {/* Seletor LLM | JEV (D-12): wrapper sobre o NewRun intocado. */}
+          <Route path="/new" element={<KeyGate><NewBenchmark /></KeyGate>} />
           <Route path="/runs" element={<RunsList />} />
           <Route path="/runs/:id" element={<RunView />} />
           <Route path="/training/:sessionId" element={<TrainingView />} />
           <Route path="/training/:sessionId/report" element={<TrainingReport />} />
+          <Route path="/jev/runs/:id" element={<JevRunView />} />
+          <Route path="/jev/training/:sessionId" element={<JevTrainingView />} />
+          <Route path="/jev/training/:sessionId/report" element={<JevReportPage />} />
           <Route path="/prompts" element={<PromptsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>

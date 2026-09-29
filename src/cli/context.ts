@@ -238,7 +238,7 @@ export function limitList<T>(rows: T[], cap: ListLimit, out: Output, rotulo: str
 // --- config fail-closed ------------------------------------------------------
 
 /** Comandos com subcomando: o rotulo do envelope vira `runs.show`, `key.check`… */
-const FAMILIAS_COM_SUB = new Set(['models', 'key', 'runs', 'sessions', 'library', 'config', 'registry', 'agents', 'limits', 'calib']);
+const FAMILIAS_COM_SUB = new Set(['models', 'key', 'runs', 'sessions', 'library', 'config', 'registry', 'agents', 'limits', 'calib', 'jev']);
 
 /**
  * Rotulo `command` do envelope de erro, tirado do argv cru (o erro pode nascer

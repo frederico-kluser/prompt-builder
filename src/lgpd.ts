@@ -276,6 +276,11 @@ async function residueOf(
     // `sessions report --annotate` sem --html grava aqui (0700).
     add(path.posix.join('reports', `${id}.html`), dataSub(dataDir, 'reports', `${id}.html`));
   }
+  // Modo JEV: record da run ou da sessão (estados dos casos = dado do usuário).
+  // `runs delete <id>` (e o TTL das runs) alcança os dois; `sessions delete`
+  // alcança a sessão JEV de mesmo id.
+  const jevDirs = kind === 'run' ? ['jev-runs', 'jev-sessions'] : ['jev-sessions'];
+  for (const jd of jevDirs) add(path.posix.join(jd, `${id}.json`), dataSub(dataDir, jd, `${id}.json`));
 
   // Jobs: o de mesmo id e os que APONTAM este id (o `--detach` tem jobId próprio).
   const jobIds = new Set<string>([id]);
@@ -301,8 +306,8 @@ async function residueOf(
     }
   }
 
-  // Sobras `.tmp` de escrita atômica interrompida no diretório do tipo e em jobs/.
-  for (const sub of [dir, 'jobs']) {
+  // Sobras `.tmp` de escrita atômica interrompida no diretório do tipo, em jobs/ e jev-*/.
+  for (const sub of [dir, 'jobs', ...jevDirs]) {
     let nomes: string[] = [];
     try {
       nomes = await fs.readdir(dataSub(dataDir, sub));
@@ -450,45 +455,50 @@ async function pruneExpired(kind: ErasableKind, opts: PruneOptions): Promise<Pru
     const cutoff = retentionCutoffMs(now, retentionDays);
     if (cutoff === null) return report; // TTL desligado: nada vence
 
-    const dir = dataSub(dataDir, DIR_DO_TIPO[kind]);
-    let nomes: string[] = [];
-    try {
-      nomes = await fs.readdir(dir);
-    } catch {
-      return report; // data-dir ainda sem o diretório
-    }
-    for (const nome of nomes) {
-      if (!nome.endsWith('.json')) continue;
-      const id = nome.slice(0, -'.json'.length);
+    // Modo JEV: jev-runs/ e jev-sessions/ seguem o MESMO TTL das runs (e saem
+    // pelo mesmo apagamento de run — ver `residueOf`).
+    const subs = kind === 'run' ? [DIR_DO_TIPO.run, 'jev-runs', 'jev-sessions'] : [DIR_DO_TIPO[kind]];
+    for (const sub of subs) {
+      const dir = dataSub(dataDir, sub);
+      let nomes: string[] = [];
       try {
-        assertValidRecordId(id, kind === 'run' ? 'id de run' : 'id de sessão');
+        nomes = await fs.readdir(dir);
       } catch {
-        continue; // nome estranho no diretório não é registro nosso
+        continue; // data-dir ainda sem este diretório
       }
-      report.scanned += 1;
-      try {
-        let ref: number | string = (await fs.stat(path.join(dir, nome))).mtimeMs;
+      for (const nome of nomes) {
+        if (!nome.endsWith('.json')) continue;
+        const id = nome.slice(0, -'.json'.length);
         try {
-          const rec = JSON.parse(await fs.readFile(path.join(dir, nome), 'utf-8')) as {
-            startedAt?: string;
-            importedAt?: string;
-          };
-          // Revisão w2: importado conta da IMPORTAÇÃO (`importedAt`), não do
-          // início original — ver `retentionReferenceMs`.
-          const refMs = retentionReferenceMs(rec);
-          if (refMs !== null) ref = refMs;
-          else if (rec.startedAt) ref = rec.startedAt; // ilegível ⇒ vencido (isOlderThan)
+          assertValidRecordId(id, kind === 'run' ? 'id de run' : 'id de sessão');
         } catch {
-          // record corrompido ⇒ idade pelo mtime (nunca trava o prune)
+          continue; // nome estranho no diretório não é registro nosso
         }
-        if (!isOlderThan(ref, now, retentionDays)) {
-          report.kept.push(id);
-          continue;
+        report.scanned += 1;
+        try {
+          let ref: number | string = (await fs.stat(path.join(dir, nome))).mtimeMs;
+          try {
+            const rec = JSON.parse(await fs.readFile(path.join(dir, nome), 'utf-8')) as {
+              startedAt?: string;
+              importedAt?: string;
+            };
+            // Revisão w2: importado conta da IMPORTAÇÃO (`importedAt`), não do
+            // início original — ver `retentionReferenceMs`.
+            const refMs = retentionReferenceMs(rec);
+            if (refMs !== null) ref = refMs;
+            else if (rec.startedAt) ref = rec.startedAt; // ilegível ⇒ vencido (isOlderThan)
+          } catch {
+            // record corrompido ⇒ idade pelo mtime (nunca trava o prune)
+          }
+          if (!isOlderThan(ref, now, retentionDays)) {
+            report.kept.push(id);
+            continue;
+          }
+          if (!opts.dryRun) await eraseFiles(dataDir, kind, id);
+          report.deleted.push(id);
+        } catch (err) {
+          report.errors.push({ id, error: err instanceof Error ? err.message : String(err) });
         }
-        if (!opts.dryRun) await eraseFiles(dataDir, kind, id);
-        report.deleted.push(id);
-      } catch (err) {
-        report.errors.push({ id, error: err instanceof Error ? err.message : String(err) });
       }
     }
   } catch (err) {

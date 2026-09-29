@@ -25,10 +25,16 @@ import {
   type MachineBudgetLedger,
 } from './spendLedger.js';
 
+/**
+ * O que as guardas leem da config: o teto e o teto de preço — mais a
+ * identidade do experimento (hash do lock). O modo JEV passa a dele.
+ */
+export type SpendGuardConfig = RunConfig | (object & { budgetUsd?: number; maxPricePerMTok?: RunConfig['maxPricePerMTok'] });
+
 export interface SpendGuardOptions {
   dataDir: string;
   /** A config que vai rodar, JÁ com `budgetUsd` (o teto da run fica na raiz). */
-  config: RunConfig;
+  config: SpendGuardConfig;
   /** Rótulo no lock e no ledger (ex.: `mcp run_benchmark`, `agents run`). */
   command: string;
   /** Catálogo para a reserva otimista por chamada (sem ele a reserva vale 0). */

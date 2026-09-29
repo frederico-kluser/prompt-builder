@@ -221,6 +221,13 @@ export interface GatewayConfig {
    * `false` = desligado (default) — quem liga é a sessão de treino.
    */
   verdictCache?: VerdictCache | false;
+  /**
+   * Modo JEV (D-6) — URL do endpoint de DECISÕES (modelos de decisão tipada,
+   * ex.: `typesafe/jev-1.13`). AUSENTE = derivada da `baseUrl` a cada chamada
+   * (`deriveDecisionsUrl`): `…/api/v1` → `…/api/alpha/decisions`. Explícita
+   * vence (proxy/mock). Node: `OPENROUTER_DECISIONS_URL` (src/gatewayEnv.ts).
+   */
+  decisionsUrl?: string;
 }
 
 /**
@@ -321,6 +328,10 @@ function mergeConfig(base: GatewayConfig, patch: Partial<GatewayConfig>): Gatewa
   }
   // IMPL-080: cache de vereditos — instancia explicita; `false` desliga.
   if (patch.verdictCache !== undefined) out.verdictCache = patch.verdictCache === false ? undefined : patch.verdictCache;
+  // Modo JEV: URL de decisões explícita (vazio/ausente = derivada da baseUrl).
+  if (typeof patch.decisionsUrl === 'string' && patch.decisionsUrl.trim()) {
+    out.decisionsUrl = normalizeBaseUrl(patch.decisionsUrl);
+  }
   if ('fetch' in patch) out.fetch = patch.fetch;
   if ('sleep' in patch) out.sleep = patch.sleep;
   return out;
@@ -880,6 +891,18 @@ export class GatewayError extends Error {
   readonly gatewayError: GatewayErrorKind;
   readonly httpStatus?: number;
   readonly block?: GatewayBlock;
+  /**
+   * Modo JEV — `x-generation-id` do erro HTTP, quando o provedor atribuiu uma
+   * geração ANTES de recusar (400 upstream do endpoint de decisões): a chamada
+   * pode ter sido cobrada e fica pendente conciliável, nunca "de graça".
+   */
+  generationId?: string;
+  /**
+   * Modo JEV — corpo CRU do erro HTTP (recortado a 16 KB). A `message` é
+   * resumida (300 chars) e cortaria a lista de problemas do 400 de validação;
+   * o engine lê daqui os caminhos do esquema recusado.
+   */
+  responseBody?: string;
   constructor(kind: GatewayErrorKind, message: string, opts: { httpStatus?: number; block?: GatewayBlock } = {}) {
     super(message);
     this.name = 'GatewayError';
@@ -2093,6 +2116,74 @@ export interface ChatCompletionParams {
   cacheControlAfter?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Modo JEV — decisões tipadas (D-6/D-8). O endpoint é outro (não é chat): o
+// corpo é `{model, state, questions, session_id?}` e a resposta
+// `{model, answers, usage:{input_tokens, output_tokens, cost}, id, provider}`.
+// O gateway NÃO conhece os tipos do engine (`src/engine/jev/types.ts`):
+// perguntas e respostas atravessam como `Record<string, unknown>`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Overhead fixo de uma decisão, em tokens de entrada (medido ao vivo: ~270
+ * com 1 `noul` curta, ~400 com 3–5 perguntas e estado vazio). Entra na
+ * reserva por cima dos tokens do JSON de estado+perguntas.
+ */
+export const DECISION_REQUEST_OVERHEAD_TOKENS = 300;
+/** Teto total de uma decisão (ms): encurta o do papel (competidor = 600 s). Latência típica 0,3 s. */
+export const DEFAULT_DECISION_TIMEOUT_MS = 30_000;
+
+/** `…/api/v1` → `…/api/alpha/decisions`; outra base (proxy/mock) → `<base>/alpha/decisions`. */
+export function deriveDecisionsUrl(baseUrl: string): string {
+  const b = normalizeBaseUrl(baseUrl);
+  return /\/v1$/.test(b) ? b.replace(/\/v1$/, '/alpha/decisions') : `${b}/alpha/decisions`;
+}
+
+/**
+ * `usage` da resposta de decisão: `input_tokens`/`output_tokens`/`cost` (NÃO
+ * `prompt_tokens`). `cost` é o valor cobrado — a única fonte exata.
+ */
+export function extractDecisionUsage(u: unknown): UsageInfo {
+  if (!u || typeof u !== 'object') return { tokensIn: 0, tokensOut: 0 };
+  const o = u as Record<string, unknown>;
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  return { tokensIn: num(o.input_tokens) ?? 0, tokensOut: num(o.output_tokens) ?? 0, cost: num(o.cost) };
+}
+
+export interface DecideParams {
+  apiKey: string;
+  /** `typesafe/jev-1.13` (fixado) | `~typesafe/jev-latest` | outro modelo de decisão do catálogo. */
+  modelId: string;
+  /** Estado JÁ projetado (`stateView`): string, objeto ou lista. */
+  state: unknown;
+  /** Perguntas no formato do fio (`JevWireQuestion` do engine). */
+  questions: Record<string, unknown>;
+  /** → `session_id` do corpo (≤ 256; o runner usa o id da run). */
+  sessionId?: string;
+  /** Default `competitor` (D-7: nenhum papel novo). */
+  role?: CostRole;
+  sink?: CostSink;
+  signal?: AbortSignal;
+  /** Teto total (ms). Default `DEFAULT_DECISION_TIMEOUT_MS`. */
+  timeoutMs?: number;
+  onCost?: (cost: CallCost) => void;
+}
+
+export interface DecideResult {
+  /** Respostas CRUAS por id de pergunta (o engine valida). */
+  answers: Record<string, unknown>;
+  /** Snapshot datado que serviu (`typesafe/jev-1.13-20260917`). */
+  resolvedModel: string;
+  provider?: string;
+  generationId?: string;
+  tokensIn: number;
+  tokensOut: number;
+  /** Do despacho ao corpo lido (não inclui a fila do limitador). */
+  latencyMs: number;
+  cost: CallCost;
+  raw: unknown;
+}
+
 export interface ChatStreamParams extends ChatCompletionParams {
   onDelta?: (delta: string, fullText: string) => void;
 }
@@ -2379,6 +2470,36 @@ function withEffort(fim: CallFinishSignals, body: Record<string, unknown>): Call
   return effort ? { ...fim, effort } : fim;
 }
 
+/**
+ * O recorte CONTÁBIL de uma chamada (modo JEV, D-6): o que `reserveFor`,
+ * `account` e `accountUnmeasured` precisam — e só isso. Chat e decisão passam
+ * pelo MESMO ponto de contabilidade; a diferença fica nos números JÁ
+ * resolvidos aqui (`promptTokensGuess`/`capTokens`), nunca num segundo
+ * "account" paralelo. Decisão NÃO passa por `effectiveMaxTokens` (a saída é
+ * grátis: teto 0 — com `DEFAULT_MAX_TOKENS` a reserva sairia inflada).
+ */
+interface AccountingCall {
+  /** 'decision' não vira amostra de calibração de custo (ver `account`). */
+  kind: 'chat' | 'decision';
+  apiKey: string;
+  modelId: string;
+  role: CostRole;
+  sink?: CostSink;
+  signal?: AbortSignal;
+  onCost?: (cost: CallCost) => void;
+  /** Tokens de entrada estimados SEM margem (a margem é só da reserva dura). */
+  promptTokensGuess: number;
+  /** Teto de saída que entra na reserva e na estimativa (chat = `max_tokens`; decisão = 0). */
+  capTokens: number;
+  /**
+   * IMPL-075 — o CORPO foi no modo auditável (registo `auditable: true` no
+   * ledger). Resolvido UMA vez: chat pelo MESMO `auditableFor(params)` que
+   * monta o corpo; decisão = sempre `false` (o corpo de decisão não leva o pin
+   * de provedor — ver `decide`).
+   */
+  auditable: boolean;
+}
+
 export class OpenRouterGateway {
   private cfg: GatewayConfig;
   /**
@@ -2393,6 +2514,13 @@ export class OpenRouterGateway {
   private readonly modelsCache = new Map<string, { fetchedAt: number; data: OpenRouterModel[] }>();
   /** Alertas da ultima validacao de /models, por key (ver `validateModelsPayload`). */
   private readonly modelsIssues = new Map<string, CatalogIssue[]>();
+  /**
+   * Modo JEV (D-8) — catálogo de MODELOS DE DECISÃO (`GET /models?output_modalities=decisions`,
+   * público), por key, com a MESMA TTL do catálogo de chat. O `/models`
+   * padrão não lista o Jev; sem este cache a reserva das decisões ficaria sem
+   * preço e o ledger serializaria uma chamada em voo por papel.
+   */
+  private readonly decisionModelsCache = new Map<string, { fetchedAt: number; data: OpenRouterModel[] }>();
   // LGPD (IMPL-042): cascata de dado pessoal — uma por instância (contadores
   // próprios; cofre de pseudônimos com chave HMAC própria POR RUN/SESSÃO),
   // aplicada em `buildBody`, o ponto único dos 6 papéis.
@@ -2418,7 +2546,10 @@ export class OpenRouterGateway {
    * `idleMs: 0` = sem watchdog de inatividade (caminho JSON, onde o provedor
    * fica em silêncio enquanto gera e o teto total é que vale).
    */
-  private timeoutsFor(params: ChatCompletionParams, streaming: boolean): { totalMs: number; idleMs: number } {
+  private timeoutsFor(
+    params: Pick<ChatCompletionParams, 'role' | 'timeoutMs' | 'idleTimeoutMs'>,
+    streaming: boolean,
+  ): { totalMs: number; idleMs: number } {
     const role = params.role ?? 'competitor';
     const dflt = DEFAULT_ROLE_TIMEOUTS[role] ?? DEFAULT_ROLE_TIMEOUTS.competitor;
     const cfgT = this.cfg.roleTimeouts?.[role] ?? {};
@@ -2612,9 +2743,52 @@ export class OpenRouterGateway {
     return this.modelsCache.get(cacheKey(apiKey));
   }
 
-  /** Modelo do catalogo EM CACHE (sem rede). */
+  /** Modelo do catalogo EM CACHE (sem rede): chat primeiro, depois o de decisões (modo JEV). */
   cachedModel(apiKey: string, modelId: string): OpenRouterModel | undefined {
-    return this.modelsCache.get(cacheKey(apiKey))?.data.find((m) => m.id === modelId);
+    const ck = cacheKey(apiKey);
+    return (
+      this.modelsCache.get(ck)?.data.find((m) => m.id === modelId) ??
+      this.decisionModelsCache.get(ck)?.data.find((m) => m.id === modelId)
+    );
+  }
+
+  /** Modo JEV — semeia o catálogo de decisões sem rede (CLI/testes). */
+  primeDecisionModelsCache(apiKey: string, data: OpenRouterModel[], fetchedAt: number = Date.now()): void {
+    this.decisionModelsCache.set(cacheKey(apiKey), { fetchedAt, data });
+  }
+
+  /** Modo JEV — espia o catálogo de decisões em memória. `undefined` = frio. */
+  peekDecisionModelsCache(apiKey: string): { fetchedAt: number; data: OpenRouterModel[] } | undefined {
+    return this.decisionModelsCache.get(cacheKey(apiKey));
+  }
+
+  /**
+   * Modo JEV (D-8) — catálogo de modelos de DECISÃO. Público (sem key), com
+   * cache próprio. O preço dele (jev-1.13: 4,2e-8/token de entrada, saída 0)
+   * serve SÓ à reserva/estimativa: dinheiro continua vindo de `usage.cost`.
+   * Defensivo: se o endpoint ignorar o filtro e devolver o catálogo de chat,
+   * só entram itens que declaram saída `decisions` (ou sem `architecture`).
+   * Mesmo transporte de metadados do `/models` (IMPL-077: teto em headers E corpo).
+   */
+  async listDecisionModels(apiKey: string, force = false): Promise<OpenRouterModel[]> {
+    const ck = cacheKey(apiKey);
+    const cached = this.decisionModelsCache.get(ck);
+    if (!force && cached && Date.now() - cached.fetchedAt < this.cfg.modelsCacheTtlMs) return cached.data;
+    const res = await this.metaRequest(`${this.cfg.baseUrl}/models?output_modalities=decisions`, {
+      method: 'GET',
+      headers: this.headers(apiKey),
+    });
+    if (!res.ok) {
+      throw new Error(`OpenRouter /models (decisões) falhou: ${res.status} ${res.statusText} ${res.text.slice(0, 200)}`);
+    }
+    const { models } = validateModelsPayload(JSON.parse(res.text) as unknown);
+    const data = models.filter((m) => {
+      const arch = (m.raw as { architecture?: { output_modalities?: unknown } } | undefined)?.architecture;
+      const outs = arch?.output_modalities;
+      return !Array.isArray(outs) || outs.includes('decisions');
+    });
+    this.decisionModelsCache.set(ck, { fetchedAt: Date.now(), data });
+    return data;
   }
 
   async listModels(apiKey: string, force = false): Promise<OpenRouterModel[]> {
@@ -2785,7 +2959,13 @@ export class OpenRouterGateway {
         slot.release();
         if (externalSignal?.aborted) throw toControlSignal(externalSignal.reason);
         // Classificado: 403 de moderacao sai como 'blocked' (nao "key invalida").
-        throw classifyHttpError(status, errText);
+        const httpErr = classifyHttpError(status, errText);
+        // Modo JEV: geração atribuída antes da recusa (400 upstream) — o
+        // chamador decide se a reserva fica pendente (ver `decide`).
+        const genId = res.headers?.get?.('x-generation-id');
+        if (typeof genId === 'string' && genId.trim()) httpErr.generationId = genId.trim();
+        if (errText) httpErr.responseBody = errText.slice(0, 16_384);
+        throw httpErr;
       }
 
       // OK: segura o slot ate o chamador terminar de ler o corpo.
@@ -2912,34 +3092,37 @@ export class OpenRouterGateway {
    * reasoning tokens, latência, estimado x real e o provedor que serviu.
    */
   private account(
-    params: ChatCompletionParams,
+    call: AccountingCall,
     reservation: ReturnType<CostSink['reserve']> | undefined,
     usage: UsageInfo,
     finish?: CallFinishSignals,
     extra?: { latencyMs?: number; provider?: CallProviderInfo; generationId?: string },
   ): CallCost {
-    const role = params.role ?? 'competitor';
-    const cost = priceUsage(usage, this.cachedModel(params.apiKey, params.modelId));
+    const role = call.role;
+    const cost = priceUsage(usage, this.cachedModel(call.apiKey, call.modelId));
     // Estimado x real por chamada (IMPL-113): só o custo MEDIDO vira amostra —
     // `catalog`/`unknown` não têm "real" e jamais entram (nem como zero).
-    const estimado = this.estimatedUsdFor(params);
+    const estimado = this.estimatedUsdFor(call);
     const real = measuredCallUsd(cost);
-    if (cost.source === 'usage' && estimado !== null && estimado > 0 && real !== null && real >= 0) {
+    // Modo JEV: chamada de DECISÃO (saída grátis, estimado ≈ real) nunca vira
+    // amostra — milhares delas no papel `competitor` distorceriam a faixa
+    // conformal do competidor LLM (`CostCalibration.live`).
+    if (call.kind === 'chat' && cost.source === 'usage' && estimado !== null && estimado > 0 && real !== null && real >= 0) {
       recordCostSample({
         role,
-        modelId: params.modelId,
-        family: modelFamilyOf(params.modelId),
+        modelId: call.modelId,
+        family: modelFamilyOf(call.modelId),
         estimatedUsd: estimado,
         actualUsd: real,
         ...(typeof finish?.effort === 'string' ? { effort: finish.effort } : {}),
         ...(typeof usage.reasoningTokens === 'number' ? { reasoningTokens: usage.reasoningTokens } : {}),
-        capTokens: effectiveMaxTokens(params.maxTokens),
+        capTokens: call.capTokens,
       });
     }
     if (reservation) {
-      params.sink?.note(reservation, {
+      call.sink?.note(reservation, {
         role,
-        modelId: params.modelId,
+        modelId: call.modelId,
         cost,
         tokensIn: usage.tokensIn,
         tokensOut: usage.tokensOut,
@@ -2950,23 +3133,19 @@ export class OpenRouterGateway {
         // IMPL-074: o id de geração de TODA chamada 200 vai ao registo (a ponte
         // com a fatura — conferência de cobrança dupla por id).
         ...(extra?.generationId ? { generationId: extra.generationId } : {}),
-        ...(this.auditableFor(params) ? { auditable: true } : {}),
+        ...(call.auditable ? { auditable: true } : {}),
         // Estimado x real (IMPL-078): a MESMA conta da reserva (catálogo), contra `cost.usd`.
         ...(estimado !== null ? { estimatedUsd: estimado } : {}),
         ...(finish ? { finish } : {}),
       });
     }
-    params.onCost?.(cost);
+    call.onCost?.(cost);
     return cost;
   }
 
   /** Estimativa de catálogo desta chamada (a mesma que vai na reserva). `null` = não precificável. */
-  private estimatedUsdFor(params: ChatCompletionParams): number | null {
-    return computeCost(
-      guessPromptTokens(params.messages),
-      effectiveMaxTokens(params.maxTokens),
-      this.cachedModel(params.apiKey, params.modelId),
-    );
+  private estimatedUsdFor(call: AccountingCall): number | null {
+    return computeCost(call.promptTokensGuess, call.capTokens, this.cachedModel(call.apiKey, call.modelId));
   }
 
   /**
@@ -2981,19 +3160,38 @@ export class OpenRouterGateway {
    * ao registo estimado × real (`estimatedUsdFor`) fica SEM margem, para a
    * calibração comparar estimativa honesta com o real.
    */
-  private async reserveFor(
-    params: ChatCompletionParams,
-    role: CostRole,
-  ): Promise<ReturnType<CostSink['reserve']> | undefined> {
-    const sink = params.sink;
+  private async reserveFor(call: AccountingCall): Promise<ReturnType<CostSink['reserve']> | undefined> {
+    const sink = call.sink;
     if (!sink) return undefined;
-    const cap = effectiveMaxTokens(params.maxTokens);
-    const promptGuess = Math.ceil(guessPromptTokens(params.messages) * RESERVE_TOKEN_MARGIN);
-    const fallback = computeCost(promptGuess, cap, this.cachedModel(params.apiKey, params.modelId));
+    const cap = call.capTokens;
+    const promptGuess = Math.ceil(call.promptTokensGuess * RESERVE_TOKEN_MARGIN);
+    const fallback = computeCost(promptGuess, cap, this.cachedModel(call.apiKey, call.modelId));
     const fb = fallback === null ? undefined : fallback;
     return sink.admit
-      ? sink.admit(role, params.modelId, promptGuess, cap, fb, params.signal)
-      : sink.reserve(role, params.modelId, promptGuess, cap, fb);
+      ? sink.admit(call.role, call.modelId, promptGuess, cap, fb, call.signal)
+      : sink.reserve(call.role, call.modelId, promptGuess, cap, fb);
+  }
+
+  /**
+   * O recorte CONTÁBIL de uma chamada de chat (modo JEV: o mesmo `account`
+   * serve a `decide`). Calculado UMA vez por chamada — a estimativa de tokens e
+   * o teto de saída são exatamente os de antes (`guessPromptTokens` das
+   * mensagens originais + `effectiveMaxTokens`), e o modo auditável sai do
+   * MESMO `auditableFor(params)` que monta o corpo.
+   */
+  private accountingOf(params: ChatCompletionParams): AccountingCall {
+    return {
+      kind: 'chat',
+      apiKey: params.apiKey,
+      modelId: params.modelId,
+      role: params.role ?? 'competitor',
+      sink: params.sink,
+      signal: params.signal,
+      onCost: params.onCost,
+      promptTokensGuess: guessPromptTokens(params.messages),
+      capTokens: effectiveMaxTokens(params.maxTokens),
+      auditable: this.auditableFor(params),
+    };
   }
 
   /**
@@ -3007,7 +3205,7 @@ export class OpenRouterGateway {
    * `soma(costByContestant)` passava de `totalCostUsd`.
    */
   private accountUnmeasured(
-    params: ChatCompletionParams,
+    call: AccountingCall,
     reservation: ReturnType<CostSink['reserve']> | undefined,
     reason: PendingReason,
     generationId: string | undefined,
@@ -3015,21 +3213,21 @@ export class OpenRouterGateway {
     extra?: { provider?: CallProviderInfo; latencyMs?: number },
   ): CallCost {
     if (reservation) {
-      params.sink?.pending(reservation, {
-        role: params.role ?? 'competitor',
-        modelId: params.modelId,
+      call.sink?.pending(reservation, {
+        role: call.role,
+        modelId: call.modelId,
         reason,
         ...(generationId ? { generationId } : {}),
         ...(extra?.provider ? { provider: extra.provider } : {}),
         ...(typeof extra?.latencyMs === 'number' ? { latencyMs: extra.latencyMs } : {}),
-        ...(this.auditableFor(params) ? { auditable: true } : {}),
+        ...(call.auditable ? { auditable: true } : {}),
         ...(finish ? { finish } : {}),
       });
     }
     const usd = reservation?.usd ?? 0;
     const cost: CallCost =
       reservation?.status === 'pending' ? { usd: 0, source: 'unknown', pendingUsd: usd } : { usd, source: 'unknown' };
-    params.onCost?.(cost);
+    call.onCost?.(cost);
     return cost;
   }
 
@@ -3072,6 +3270,148 @@ export class OpenRouterGateway {
     return this.withVerdictCache(params, () => this.withCacheWarmup(params, () => this.chatCompletionStreamDirect(params)));
   }
 
+  // --- decisões (modo JEV) -----------------------------------------------------
+
+  /** URL efetiva do endpoint de decisões (explícita > derivada da baseUrl). */
+  private decisionsUrlOf(): string {
+    return this.cfg.decisionsUrl ?? deriveDecisionsUrl(this.cfg.baseUrl);
+  }
+
+  /**
+   * Corpo da decisão — o PONTO ÚNICO do modo JEV (espelha `buildBody`):
+   * estado e perguntas passam pela cascata de dado pessoal (`protectDeep`: toda
+   * string, sem teto de profundidade — os VALORES; chaves de opção e ids ficam
+   * intactos) e o roteamento sensível LGPD é aplicado POR ÚLTIMO (fail-closed:
+   * modelo fora da allowlist ZDR lança aqui, antes da reserva e do fetch).
+   * Nunca vão `temperature`, `max_tokens`, `reasoning` nem `user` (o endpoint
+   * ignora temperatura e recusa `user` longo; toda temperatura é pós-hoc).
+   */
+  private buildDecisionBody(p: DecideParams): Record<string, unknown> {
+    const safe = this.piiGuard.protectDeep({ state: p.state, questions: p.questions }, piiScopeOf(p.sink));
+    const body: Record<string, unknown> = { model: p.modelId, state: safe.state, questions: safe.questions };
+    if (typeof p.sessionId === 'string' && p.sessionId.trim()) body.session_id = p.sessionId.trim().slice(0, 256);
+    applySensitiveRouting(body, p.sink?.sensitiveRouting?.(), p.modelId, p.role ?? 'competitor');
+    return body;
+  }
+
+  /**
+   * Modo JEV (D-6) — UMA decisão tipada (`noul`/`choice`/`score`) num modelo de
+   * decisão. Mesmo esqueleto de `chatCompletion`: guarda anti-reenvio, reserva
+   * ANTES do slot, limitador AIMD por (key, modelo), backoff com
+   * `Retry-After` (quando o header é legível — no navegador o CORS do endpoint
+   * não o expõe e só o AIMD protege), timeout tipado, abort externo como sinal
+   * de controle e a contabilidade no MESMO `account` (role + sink), com o id de
+   * geração no registo (IMPL-074: a ponte com a fatura). Diferenças de dinheiro:
+   *   - reserva = tokens(JSON do estado+perguntas) + overhead medido, saída 0;
+   *   - 400 com `x-generation-id` (recusa do upstream) pode ter sido cobrado:
+   *     fica PENDENTE conciliável; só o 400 do edge (sem id) devolve a reserva;
+   *   - decisão nunca vira amostra da calibração de custo do LLM.
+   * `answers` volta CRU (validado no engine: `validateDecisionsResponse`).
+   */
+  async decide(p: DecideParams): Promise<DecideResult> {
+    const role = p.role ?? 'competitor';
+    const timeouts = this.timeoutsFor({ role, timeoutMs: p.timeoutMs ?? DEFAULT_DECISION_TIMEOUT_MS }, false);
+    const body = this.buildDecisionBody(p);
+    const bodyJson = JSON.stringify(body);
+    const guardKey = this.guardKey(bodyJson);
+    const bloqueado = this.resendBlocked(guardKey);
+    if (bloqueado !== undefined) throw bloqueado;
+
+    const acct: AccountingCall = {
+      kind: 'decision',
+      apiKey: p.apiKey,
+      modelId: p.modelId,
+      role,
+      sink: p.sink,
+      signal: p.signal,
+      onCost: p.onCost,
+      promptTokensGuess:
+        countTextTokens(JSON.stringify({ state: body.state, questions: body.questions })) + DECISION_REQUEST_OVERHEAD_TOKENS,
+      capTokens: 0,
+      // IMPL-075: o registo `auditable` afirma que o CORPO foi com o pin de
+      // provedor (`applyAuditable`). O corpo de decisão não leva `provider`
+      // (o endpoint é de um provedor só e não se sabe se aceita o campo) —
+      // marcar `true` aqui, mesmo com o papel na política, seria mentira.
+      auditable: false,
+    };
+    const reservation = await this.reserveFor(acct);
+
+    const track: DispatchTrack = {};
+    let guarded: GuardedResponse;
+    try {
+      guarded = await this.guardedFetch(
+        this.decisionsUrlOf(),
+        { method: 'POST', headers: this.headers(p.apiKey), body: JSON.stringify(body) },
+        timeouts,
+        role,
+        limiterScopeOf(p.apiKey, p.modelId, body),
+        p.signal,
+        track,
+      );
+    } catch (err) {
+      const genId = (err as { generationId?: unknown })?.generationId;
+      if (track.abortedInFlight) this.accountUnmeasured(acct, reservation, track.abortedInFlight, undefined);
+      else if (typeof genId === 'string' && genId) this.accountUnmeasured(acct, reservation, 'no_usage', genId);
+      else reservation?.release();
+      throw err;
+    }
+    const { res, startedAt, finish } = guarded;
+
+    let ok = false;
+    let accounted = false;
+    let generationId: string | undefined;
+    let provider: CallProviderInfo | undefined;
+    try {
+      const json = (await res.json()) as Record<string, unknown>;
+      const latencyMs = Date.now() - startedAt;
+      const header = (name: string): string | undefined => {
+        const v = res.headers?.get?.(name);
+        return typeof v === 'string' && v.trim() ? v.trim() : undefined;
+      };
+      generationId = header('x-generation-id') ?? generationIdOf(json);
+      const providerName = header('x-provider-name') ?? (typeof json.provider === 'string' ? json.provider : undefined);
+      provider = providerName ? { name: providerName } : undefined;
+      const usage = extractDecisionUsage(json.usage);
+      const semId = { latencyMs, ...(provider ? { provider } : {}) };
+      // IMPL-074: o id de geração vai ao registo da chamada medida (a ponte com
+      // a fatura), como em todo 200 de chat (`finalizeReply`).
+      const cost = hasUsage(json.usage)
+        ? this.account(acct, reservation, usage, undefined, { ...semId, ...(generationId ? { generationId } : {}) })
+        : this.accountUnmeasured(acct, reservation, 'no_usage', generationId, undefined, semId);
+      accounted = true;
+      const answers = json.answers;
+      // Cobrada (já contabilizada acima) mas fora do contrato: falha alto.
+      if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+        throw new Error('decisões: resposta sem `answers` (objeto) — contabilizada, fora do contrato.');
+      }
+      ok = true;
+      return {
+        answers: answers as Record<string, unknown>,
+        resolvedModel: typeof json.model === 'string' && json.model.trim() ? json.model.trim() : p.modelId,
+        ...(providerName ? { provider: providerName } : {}),
+        ...(generationId ? { generationId } : {}),
+        tokensIn: usage.tokensIn,
+        tokensOut: usage.tokensOut,
+        latencyMs,
+        cost,
+        raw: json,
+      };
+    } catch (err) {
+      if (!accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
+      throw controlIfAborted(err, p.signal);
+    } finally {
+      // Corpo ilegível/abortado depois do 200: despachada, sem custo medido —
+      // pendente pelo id (conservador sem ele), nunca devolvida.
+      if (!accounted) {
+        this.accountUnmeasured(acct, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
+          ...(provider ? { provider } : {}),
+          latencyMs: Date.now() - startedAt,
+        });
+      }
+      finish(ok);
+    }
+  }
+
   /**
    * IMPL-063 — chamada PAGA não-chat com lista de textos (`input`), pelo MESMO
    * caminho do chat: cascata de dado pessoal nos textos (IMPL-042), roteamento
@@ -3100,7 +3440,10 @@ export class OpenRouterGateway {
     const corpo: Record<string, unknown> = { model: modelId, input: protegidas };
     applySensitiveRouting(corpo, sink?.sensitiveRouting?.(), modelId, role);
     const timeouts = this.timeoutsFor(comoChat, false);
-    const reservation = await this.reserveFor(comoChat, role);
+    // Modo JEV: o recorte contábil é o MESMO do chat (`accountingOf`) — um só
+    // `account` para chat, decisão e esta chamada não-chat.
+    const acct = this.accountingOf(comoChat);
+    const reservation = await this.reserveFor(acct);
     const track: DispatchTrack = {};
     let guarded: GuardedResponse;
     try {
@@ -3114,7 +3457,7 @@ export class OpenRouterGateway {
         track,
       );
     } catch (err) {
-      if (track.abortedInFlight) this.accountUnmeasured(comoChat, reservation, track.abortedInFlight, undefined);
+      if (track.abortedInFlight) this.accountUnmeasured(acct, reservation, track.abortedInFlight, undefined);
       else reservation?.release();
       throw err;
     }
@@ -3127,11 +3470,11 @@ export class OpenRouterGateway {
       generationId = typeof json?.id === 'string' && json.id ? json.id : undefined;
       const latencyMs = Date.now() - startedAt;
       const cost = hasUsage(json?.usage)
-        ? this.account(comoChat, reservation, extractUsage(json.usage), undefined, {
+        ? this.account(acct, reservation, extractUsage(json.usage), undefined, {
             latencyMs,
             ...(generationId ? { generationId } : {}),
           })
-        : this.accountUnmeasured(comoChat, reservation, 'no_usage', generationId, undefined, { latencyMs });
+        : this.accountUnmeasured(acct, reservation, 'no_usage', generationId, undefined, { latencyMs });
       contabilizado = true;
       // 200 com corpo de erro (provedor recusou): falha, já contabilizada.
       if (json?.error) {
@@ -3144,7 +3487,7 @@ export class OpenRouterGateway {
       throw controlIfAborted(err, externalSignal);
     } finally {
       if (!contabilizado) {
-        this.accountUnmeasured(comoChat, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
+        this.accountUnmeasured(acct, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
           latencyMs: Date.now() - startedAt,
         });
       }
@@ -3302,6 +3645,7 @@ export class OpenRouterGateway {
    */
   private async finalizeReply(
     params: ChatCompletionParams,
+    acct: AccountingCall,
     reservation: ReturnType<CostSink['reserve']> | undefined,
     body: Record<string, unknown>,
     maxTokens: number,
@@ -3352,8 +3696,8 @@ export class OpenRouterGateway {
     const latencyMs = Date.now() - startedAt;
     // Sem bloco `usage` nao ha custo medido: pendente pelo id (IMPL-017).
     const cost = hasUsage(reply.usageRaw)
-      ? this.account(params, reservation, usage, fim, { latencyMs, provider, generationId: reply.generationId })
-      : this.accountUnmeasured(params, reservation, 'no_usage', reply.generationId, fim, { latencyMs, provider });
+      ? this.account(acct, reservation, usage, fim, { latencyMs, provider, generationId: reply.generationId })
+      : this.accountUnmeasured(acct, reservation, 'no_usage', reply.generationId, fim, { latencyMs, provider });
     st.accounted = true;
     if (inBandFailure && reply.error) {
       if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
@@ -3374,7 +3718,7 @@ export class OpenRouterGateway {
       ...(refusal ? { refusal } : {}),
       ...(blocked ? { blocked } : {}),
       ...(provider ? { provider } : {}),
-      ...(this.auditableFor(params) ? { auditable: true } : {}),
+      ...(acct.auditable ? { auditable: true } : {}),
       ...trunc,
     };
   }
@@ -3387,6 +3731,7 @@ export class OpenRouterGateway {
     const { signal: externalSignal } = params;
     const maxTokens = effectiveMaxTokens(params.maxTokens);
     const role = params.role ?? 'competitor';
+    const acct = this.accountingOf(params);
     const timeouts = this.timeoutsFor(params, false);
     const body = this.buildBody(params, false);
     const bodyJson = JSON.stringify(body);
@@ -3396,7 +3741,7 @@ export class OpenRouterGateway {
     const bloqueado = this.resendBlocked(guardKey);
     if (bloqueado !== undefined) throw bloqueado;
 
-    const reservation = await this.reserveFor(params, role);
+    const reservation = await this.reserveFor(acct);
 
     const track: DispatchTrack = {};
     let guarded: GuardedResponse;
@@ -3416,7 +3761,7 @@ export class OpenRouterGateway {
     } catch (err) {
       // Abortada depois de despachada => pendente/conservador; HTTP de erro e
       // falha de rede sem resposta => nada gerado, a reserva volta (IMPL-017).
-      if (track.abortedInFlight) this.accountUnmeasured(params, reservation, track.abortedInFlight, undefined);
+      if (track.abortedInFlight) this.accountUnmeasured(acct, reservation, track.abortedInFlight, undefined);
       else reservation?.release();
       throw err;
     }
@@ -3429,7 +3774,7 @@ export class OpenRouterGateway {
     let lido: CollectedReply | undefined;
     try {
       lido = collectJsonReply(await res.json());
-      const result = await this.finalizeReply(params, reservation, body, maxTokens, startedAt, lido, st);
+      const result = await this.finalizeReply(params, acct, reservation, body, maxTokens, startedAt, lido, st);
       ok = true;
       return result;
     } catch (err) {
@@ -3442,7 +3787,7 @@ export class OpenRouterGateway {
       // Corpo abortado/ilegivel depois do 200: o provedor gerou (e cobra) —
       // no nao-streaming ele segue gerando apos o abort (IMPL-017).
       if (!st.accounted) {
-        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', lido?.generationId, undefined, {
+        this.accountUnmeasured(acct, reservation, guarded.abortReason() ?? 'no_usage', lido?.generationId, undefined, {
           provider: lido?.provider,
           latencyMs: Date.now() - startedAt,
         });
@@ -3455,6 +3800,7 @@ export class OpenRouterGateway {
     const { signal: externalSignal, sink, onDelta } = params;
     const maxTokens = effectiveMaxTokens(params.maxTokens);
     const role = params.role ?? 'competitor';
+    const acct = this.accountingOf(params);
     // IMPL-077: inatividade + teto total por papel (o watchdog de inatividade é
     // o que faz sentido em stream — cada chunk zera o relógio via `touch`).
     const timeouts = this.timeoutsFor(params, true);
@@ -3465,7 +3811,7 @@ export class OpenRouterGateway {
     const bloqueado = this.resendBlocked(guardKey);
     if (bloqueado !== undefined) throw bloqueado;
 
-    const reservation = await this.reserveFor(params, role);
+    const reservation = await this.reserveFor(acct);
 
     const track: DispatchTrack = {};
     let guarded: GuardedResponse;
@@ -3481,7 +3827,7 @@ export class OpenRouterGateway {
         track,
       );
     } catch (err) {
-      if (track.abortedInFlight) this.accountUnmeasured(params, reservation, track.abortedInFlight, undefined);
+      if (track.abortedInFlight) this.accountUnmeasured(acct, reservation, track.abortedInFlight, undefined);
       else reservation?.release();
       throw err;
     }
@@ -3572,7 +3918,7 @@ export class OpenRouterGateway {
         if (acc.text) onDelta?.(acc.text, this.restoreText(acc.text, sink, false));
       }
 
-      const result = await this.finalizeReply(params, reservation, body, maxTokens, startedAt, acc, st);
+      const result = await this.finalizeReply(params, acct, reservation, body, maxTokens, startedAt, acc, st);
       ok = true;
       return result;
     } catch (err) {
@@ -3585,7 +3931,7 @@ export class OpenRouterGateway {
       // Stream cortado no meio (abort/timeout/rede): tokens ja gerados foram
       // cobrados — pendente pelo id dos chunks, conservador sem ele (IMPL-017).
       if (!st.accounted) {
-        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', acc.generationId, undefined, {
+        this.accountUnmeasured(acct, reservation, guarded.abortReason() ?? 'no_usage', acc.generationId, undefined, {
           provider: acc.provider,
           latencyMs: Date.now() - startedAt,
         });
@@ -3885,6 +4231,16 @@ export function chatCompletionStream(params: ChatStreamParams): Promise<ChatComp
 /** IMPL-063 — chamada paga não-chat pelo gateway padrão (ver `OpenRouterGateway.meteredInputCall`). */
 export function meteredInputCall(params: MeteredInputParams): Promise<MeteredInputResult> {
   return defaultGateway.meteredInputCall(params);
+}
+
+/** Modo JEV — uma decisão tipada pela instância padrão (ver `OpenRouterGateway.decide`). */
+export function decide(params: DecideParams): Promise<DecideResult> {
+  return defaultGateway.decide(params);
+}
+
+/** Modo JEV — catálogo de modelos de decisão da instância padrão (público; cache próprio). */
+export function listDecisionModels(apiKey: string, force = false): Promise<OpenRouterModel[]> {
+  return defaultGateway.listDecisionModels(apiKey, force);
 }
 
 /** Pseudonimiza `value` com o cofre do escopo de `sink` na instancia padrao (ver o metodo). */

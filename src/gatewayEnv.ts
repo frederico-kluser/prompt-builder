@@ -89,6 +89,7 @@ function parseAuditableRoles(raw: string | undefined): CostRole[] | undefined {
  * OPENROUTER_META_TIMEOUT_MS → metaTimeoutMs (/models, /key, /generation)
  * OPENROUTER_AUDITABLE → auditableRoles (IMPL-075; `on` = juiz + duelo + gabarito)
  * OPENROUTER_AUDITABLE_PROVIDERS → auditableProviderOrder (lista por virgula)
+ * OPENROUTER_DECISIONS_URL → decisionsUrl (modo JEV; vazio = derivada da base)
  */
 export function gatewayConfigFromEnv(env: Env): Partial<GatewayConfig> {
   const out: Partial<GatewayConfig> = {};
@@ -97,6 +98,8 @@ export function gatewayConfigFromEnv(env: Env): Partial<GatewayConfig> {
   if (env.OPENROUTER_APP_URL !== undefined) out.appUrl = env.OPENROUTER_APP_URL;
   if (env.OPENROUTER_APP_TITLE !== undefined) out.appTitle = env.OPENROUTER_APP_TITLE;
   if (isAttributionSuppressedEnv(env)) out.attribution = false;
+  const decisions = env.OPENROUTER_DECISIONS_URL?.trim();
+  if (decisions) out.decisionsUrl = decisions;
   const conc = env.OPENROUTER_MAX_CONCURRENCY?.trim();
   if (conc) {
     const n = Number(conc);

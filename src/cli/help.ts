@@ -36,6 +36,7 @@ export const COMMANDS = [
   'mcp',
   'agents',
   'telemetry',
+  'jev',
 ] as const;
 
 /** Rodapé comum de TODO help: contrato de saída + a tabela de códigos. */
@@ -87,6 +88,7 @@ const RESUMO: Record<string, string> = {
   mcp: 'servidor MCP por stdio (mesmo binário)',
   agents: 'modo agente: arena de agentes com executor pi',
   telemetry: 'telemetria opt-in e os headers de atribuição enviados ao OpenRouter',
+  jev: 'modo JEV: mede e evolui decisões tipadas (noul/choice/score) em casos rotulados',
 };
 
 /**
@@ -302,6 +304,23 @@ const USO: Record<string, string> = {
   PROMPT_BUILDER_TELEMETRY_URL é o destino do upload.
   PROMPT_BUILDER_NO_ATTRIBUTION=on suprime HTTP-Referer e X-Title — headers de
   atribuição que o gateway envia ao OpenRouter (dado partilhado com terceiro).`,
+  jev: `  jev validate <arq> [--strict] [--spec <cfg>]
+           lint offline de jev-config@1, DecisionsRequest cru ou dataset (sem key, sem custo)
+  jev example [--kind triagem|guardrail|roteamento] [--mode eval|compare|train] [-o <arq>]
+  jev models               catálogo de modelos de decisão (público; preço de entrada)
+  jev import --from <csv|jsonl|json> [--spec <cfg>] [-o <casos.jsonl>]
+  jev run -c <arq> --budget <usd|none> [--mode eval|compare|train] [--repeats N]
+          [--dry-run] [--emit-cells] [--allow-pii] [--allow-concurrent] [--strict]
+  jev eval -c <arq> | jev compare -c <arq> | jev train -c <arq>
+           atalhos de \`run\` que fixam --mode (mesmas flags)
+  jev list [--kind run|session] (teto 50; --all/--limit N) | show <id> [--full]
+  jev report <id> [--json | --markdown <arq>] [--requests-per-month N]
+  jev export <id> [--request] [-o <arq>] [--override "<motivo>"]
+           handoff da definição campeã (DecisionsRequest + política por pergunta);
+           holdout regredido BLOQUEIA (exit 10) salvo --override
+  jev techniques           operadores do modo + as 19 técnicas de prompt LLM no Jev
+  Alias: \`decisions\`. Exit 6 = inconclusiva; 7 = parcial por orçamento; 3 = config,
+  lint, dataset, recusa LGPD/PII ou definição recusada pela API (400).`,
 };
 
 export function renderCommandHelp(cmd: string): string {
