@@ -35,7 +35,7 @@ prompt-builder train --config arena.json --budget 10 --output-format ndjson
 | `--reference <id>` | quem escreve o gabarito — **obrigatório** em `train`/`vary` (sem ele: exit `3`); não pode ser juiz nem o `--model` |
 | `--techniques a,b,c` | técnicas de reescrita (`prompt-builder techniques`) |
 | `--base-prompt-file` | o prompt de partida; entra como controle |
-| `--iterations N` | teto de iterações (2–10; recomendado 3–5). O laço para antes se convergir: paciência = 2 iterações seguidas sem promoção (configurável via `patience` 1–5 no JSON do config — default 2) ou parada por platão (IC95 do ganho abaixo de `minGain`; `convergenceReason` diz qual foi) |
+| `--iterations N` | teto de iterações (2–10; recomendado 3–5). O laço para antes se convergir: paciência = 2 iterações seguidas sem promoção (`patience` 1–5 num RunConfig cru em `--config` — o `arena-config@1` não tem a chave; default 2) ou parada por platão (IC95 do ganho abaixo de `minGain`; `convergenceReason` diz qual foi) |
 | `--min-gain N` | margem PRÁTICA mínima em pontos de judge-score para promover. Padrão: `max(1; 50/n)` — meia granularidade (com 8 cenários, 6,25 pontos). Além dela, o gate exige p ajustado ≤ 0,05 (ver abaixo) |
 | `--holdout-ratio N` | fatia reservada para o gate final (padrão 0,3; 0 desliga). **Piso absoluto de 10 cenários**: fatia menor não é holdout — é "confirmação fraca" (`holdoutSkipped`) e a palavra "validado" fica bloqueada no resultado |
 | `--stages N` | quantos cenários (1–50; **padrão 10 no `train`**, 5 nos outros). Recomendado 6–12; veja a tabela de poder abaixo (`stages ≤ 5` = **modo econômico**, o `estimate` avisa) |
