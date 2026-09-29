@@ -39,6 +39,7 @@ import { contentHash } from '../engine/hash.js';
 import { isExchangeReadError, readExchangeDir, writeExchangeDir } from '../library.js';
 import { pkgVersion } from '../paths.js';
 import { sessionRunIds } from './approval.js';
+import { findJevRecord } from '../jev/store.js';
 import { readJsonFile } from './context.js';
 import { CliError, EXIT, type Output } from './output.js';
 import type { SessionRecord } from '../types.js';
@@ -108,12 +109,44 @@ export async function runsPrune(out: Output, values: Record<string, unknown>): P
 
 // --- apagamento explícito (IMPL-100) -----------------------------------------
 
+/**
+ * Modo JEV (merge sobre a onda 2): `runs delete` também alcança um record de
+ * `jev-runs/`/`jev-sessions/` e `sessions delete` uma sessão JEV (com as runs
+ * dela). O apagamento em si é o MESMO (`eraseRunFiles`/`eraseSessionFiles`,
+ * src/lgpd.ts, já leva os arquivos jev-*); sem isto a única saída LGPD de um
+ * record JEV seria o TTL. `running` aqui já passou pela checagem de órfã do
+ * store (dono morto vira `aborted` ao carregar) — ou seja, dono vivo.
+ */
+async function jevApagavel(
+  kind: RecordKind,
+  id: string,
+): Promise<{ status: string; sessionId?: string; runIds: string[] } | null> {
+  const jev = await findJevRecord(id).catch(() => null);
+  if (!jev || (kind === 'session' && jev.kind !== 'session')) return null;
+  if (jev.kind === 'session') {
+    return { status: jev.rec.status, runIds: (jev.rec.runIds ?? []).filter((x) => isValidRecordId(x)) };
+  }
+  return { status: jev.rec.status, ...(jev.rec.sessionId ? { sessionId: jev.rec.sessionId } : {}), runIds: [] };
+}
+
 async function exigirApagavel(kind: RecordKind, id: string): Promise<{ status: string; sessionId?: string; runIds: string[] }> {
   if (!isValidRecordId(id)) {
     throw new CliError(`Id de ${NOME[kind]} inválido: use o id listado em \`prompt-builder ${DIR_DO_TIPO[kind]} list\`.`, EXIT.USAGE);
   }
   const record = kind === 'run' ? await loadRun(id) : await loadSession(id);
   if (!record) {
+    const jev = await jevApagavel(kind, id);
+    if (jev) {
+      if (jev.status === 'running') {
+        throw new CliError(
+          `A ${NOME[kind]} JEV "${id}" ainda está rodando — nada foi apagado.`,
+          EXIT.USAGE,
+          { id, status: jev.status },
+          { code: `${DIR_DO_TIPO[kind]}.delete_running`, hint: 'Pare o processo dono (Ctrl-C/SIGTERM) e repita o delete.' },
+        );
+      }
+      return jev;
+    }
     throw new CliError(
       `${kind === 'run' ? 'Run' : 'Sessão'} "${id}" não encontrada no diretório de dados — nada foi apagado.`,
       EXIT.USAGE,

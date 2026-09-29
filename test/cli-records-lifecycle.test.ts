@@ -16,7 +16,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 import { EXIT } from '../src/cli/output.js';
 import { nodeOrTsx, ROOT } from './support/cli.js';
@@ -178,6 +178,46 @@ describe('IMPL-100 — `runs delete` apaga com zero resíduo', { timeout: 120_00
     const r2 = cli(dd, ['sessions', 'delete', SESS]);
     expect(r2.status, r2.stderr).toBe(EXIT.OK);
     for (const id of [SESS, S_RUN1, S_RUN2, S_REEVAL]) expect(residuos(dd, id)).toEqual([]);
+  });
+});
+
+describe('modo JEV × IMPL-100 — `runs delete`/`sessions delete` alcançam jev-runs/jev-sessions', { timeout: 120_000 }, () => {
+  const J_RUN = 'e1b2c3d4-0000-4000-8000-000000000021';
+  const J_SESS = 'e1b2c3d4-0000-4000-8000-00000000002a';
+  const J_S_RUN = 'e1b2c3d4-0000-4000-8000-000000000022';
+  const jevRun = (id: string, extra: Record<string, unknown> = {}) => ({
+    format: 'jev-run@1',
+    id,
+    status: 'finished',
+    mode: 'eval',
+    theme: 'jev-apagar',
+    startedAt: agora(),
+    totalCostUsd: 0,
+    ...extra,
+  });
+
+  it('`runs delete <id JEV>` apaga o record jev-runs; running com dono vivo recusa', () => {
+    const dd = tempDir('pb-rec-jev-');
+    write(dd, `jev-runs/${J_RUN}.json`, jevRun(J_RUN));
+    const r = cli(dd, ['runs', 'delete', J_RUN]);
+    expect(r.status, r.stderr).toBe(EXIT.OK);
+    expect(residuos(dd, J_RUN)).toEqual([]);
+
+    // Dono = este processo de teste (vivo): nada é apagado.
+    write(dd, `jev-runs/${J_RUN}.json`, jevRun(J_RUN, { status: 'running', owner: { pid: process.pid, host: os.hostname(), startToken: null } }));
+    const vivo = cli(dd, ['runs', 'delete', J_RUN]);
+    expect(vivo.status).toBe(EXIT.USAGE);
+    expect(vivo.json.error?.code).toBe('runs.delete_running');
+    expect(existsSync(path.join(dd, 'jev-runs', `${J_RUN}.json`))).toBe(true);
+  });
+
+  it('`sessions delete <id JEV>` leva a sessão JEV e as runs dela', () => {
+    const dd = tempDir('pb-rec-jevs-');
+    write(dd, `jev-sessions/${J_SESS}.json`, { format: 'jev-session@1', id: J_SESS, status: 'finished', theme: 't', runIds: [J_S_RUN], startedAt: agora(), totalCostUsd: 0 });
+    write(dd, `jev-runs/${J_S_RUN}.json`, jevRun(J_S_RUN, { sessionId: J_SESS }));
+    const r = cli(dd, ['sessions', 'delete', J_SESS]);
+    expect(r.status, r.stderr).toBe(EXIT.OK);
+    for (const id of [J_SESS, J_S_RUN]) expect(residuos(dd, id)).toEqual([]);
   });
 });
 
