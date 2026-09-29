@@ -61,5 +61,11 @@ campeão não está validado contra sobreajuste**.
 
 ## Onde ficam os dados
 
-`~/.prompt-builder/` — `runs/`, `sessions/`, `cache/` e `key` (modo 0600).
-Mude com `--data-dir` ou `$PROMPT_BUILDER_HOME`.
+`~/.prompt-builder/` — `runs/`, `sessions/`, `cache/` e `key` (modo 0600), mais
+`library/` (dataset estável), `jev-runs/`/`jev-sessions/` (modo JEV, `docs jev`),
+`agent-runs/` (modo agente) e `handoffs.jsonl` (auditoria do `sessions winner
+--apply`). Mude com `--data-dir` ou `$PROMPT_BUILDER_HOME`. Retenção: TTL de 90
+dias por default (`runs prune`, `docs results`).
+
+Depois de um `train`, `sessions report <id>` resume os ciclos: quanto o prompt
+melhorou e quanto a mudança muda o custo por chamada (`docs report`).

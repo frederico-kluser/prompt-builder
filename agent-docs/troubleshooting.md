@@ -15,7 +15,7 @@ Nada foi gasto.
 O nível pedido não existe naquele modelo. Confira antes:
 
 ```bash
-prompt-builder models show <id> --json | jq .model.thinkLevels
+prompt-builder models show <id> --json | jq .data.model.thinkLevels
 ```
 
 `accepted` lista o que pode ser pedido; `fit` mostra o que vai no fio para cada
