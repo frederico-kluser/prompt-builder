@@ -150,13 +150,21 @@ export function RunsList() {
       <StorageNotice className="mb-4" targets="all" />
 
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        {/* web-live#13: a 390 px os 4 filtros (~400 px) passavam da tela ("Com
+            erro" cortado). Em tela estreita o controle ocupa a largura e QUEBRA
+            em 2×2 em vez de vazar — tudo à vista, sem rolagem escondida. */}
         <SegmentedToggle
           value={filter}
           onChange={(v) => setFilter(v as 'all' | Group)}
           ariaLabel="Filtrar por status"
+          className="max-w-full flex-wrap max-sm:w-full"
         >
           {FILTERS.map((f) => (
-            <SegmentedToggleOption key={f.key} value={f.key} className="px-3 py-1.5 text-[13px]">
+            <SegmentedToggleOption
+              key={f.key}
+              value={f.key}
+              className="px-3 py-1.5 text-[13px] whitespace-nowrap max-sm:flex-1 max-sm:justify-center"
+            >
               {f.label}
               <span className="text-[11px] opacity-70 tabular">{counts[f.key]}</span>
             </SegmentedToggleOption>
