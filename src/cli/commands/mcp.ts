@@ -42,7 +42,9 @@
 // MESMO JSON espelhado em content de texto COMPACTO (0 espaços após ':' e ','
 // — indentação infla o contexto do agente sem dar nada). Teto de ~5 mil tokens
 // por resposta (get_result resume por padrão e pagina por cursor), dura 25 mil
-// no pico. Anotações (IMPL-085, R-13:REC-6) são honestas: um `readOnlyHint`
+// no pico. Recusa (não encontrado, portão, config inválido, job que falhou)
+// sai SEMPRE como `isError` — nunca sucesso com `{error}`/`{ok:false}`.
+// Anotações (IMPL-085, R-13:REC-6) são honestas: um `readOnlyHint`
 // NUNCA autoriza nada sozinho do lado do cliente.
 
 import { promises as fs } from 'node:fs';
@@ -72,7 +74,7 @@ import {
   type RunJobInput,
 } from '../../jobManager.js';
 import { PKG_DOCS_DIR, PKG_ROOT, pkgVersion } from '../../paths.js';
-import { assertValidRecordId, isValidRecordId, publicErrorMessage } from '../../pathSafety.js';
+import { assertValidRecordId, isValidRecordId, publicErrorMessage, redactPaths } from '../../pathSafety.js';
 import { readDocTopic } from './knowledge.js';
 import {
   ensurePrivateDataDir,
@@ -88,13 +90,13 @@ import { renderSessionReportHtml } from '../../engine/sessionReportHtml.js';
 import { ensureCatalog } from '../../modelsCache.js';
 import { toExportRow } from '../../modelCaps.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
-import { parseRunConfig } from '../../runConfigSchema.js';
-import { ARENA_AGENT_CONFIG_FORMAT, parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
-import { arenaConfigToRunConfig, arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
+import { ARENA_AGENT_CONFIG_FORMAT, parseArenaAgentConfig } from '../../configFile.js';
+import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { readArtifact } from '../../agent/store.js';
-import { resolveHome, resolveKey, parse } from '../context.js';
-import { ensureExecConfigApproved } from './agents.js';
-import { EXIT } from '../output.js';
+import { assertNoUnknownConfigKeys, parse, resolveHome, resolveKey } from '../context.js';
+import { assertAgentFilesContained, ensureExecConfigApproved } from './agents.js';
+import { configFromJson } from './run.js';
+import { EXIT, isCliError } from '../output.js';
 import type { RunConfig, RunRecord, SessionRecord, StageRecord } from '../../types.js';
 
 // ---------------------------------------------------------------------------
@@ -224,6 +226,70 @@ export interface McpTool {
    */
   oversizeHint?: string;
   run: (args: Record<string, unknown>, apiKey: string, ctx: ToolCtx) => Promise<unknown>;
+}
+
+/**
+ * Recusa de ferramenta com dados estruturados (IMPL-086): sai como `isError`
+ * com o JSON `{ok:false, error, code?, hint?, …}` no texto — NUNCA como
+ * sucesso com campo placeholder (`{error:'não encontrado'}` sem isError fazia
+ * o agente seguir como se tivesse lido um resultado).
+ */
+export class ToolFailure extends Error {
+  constructor(
+    message: string,
+    readonly data: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = 'ToolFailure';
+  }
+}
+
+/** Por FORMA, não por `instanceof` (mesma regra do `isControlSignal`). */
+function isToolFailure(e: unknown): e is ToolFailure {
+  return (
+    typeof e === 'object' &&
+    e !== null &&
+    (e as { name?: unknown }).name === 'ToolFailure' &&
+    typeof (e as { data?: unknown }).data === 'object'
+  );
+}
+
+/** Record inexistente no data dir deste servidor: isError acionável (IMPL-086). */
+function naoEncontrado(msg: string, kind: unknown): ToolFailure {
+  return new ToolFailure(msg, {
+    code: 'not_found',
+    hint:
+      kind === 'session'
+        ? 'Confira o sessionId devolvido por start_run/run_status (e o --data-dir deste servidor MCP).'
+        : 'Confira o id devolvido por start_run/run_status (e o --data-dir deste servidor MCP).',
+  });
+}
+
+/** Texto (sem caminho absoluto) de um valor de dado de erro. */
+function semCaminho(v: unknown): unknown {
+  return typeof v === 'string' ? redactPaths(v) : v;
+}
+
+/**
+ * Texto do `isError`: recusa estruturada (ToolFailure, CliError com código e
+ * dica) vira JSON compacto `{ok:false, error, code, hint}` — o agente lê o
+ * PRÓXIMO PASSO; erro comum segue como a mensagem. Sempre sem caminho
+ * absoluto (IMPL-024).
+ */
+function textoDoErro(err: unknown): string {
+  if (isToolFailure(err)) {
+    const extra = Object.fromEntries(Object.entries(err.data).map(([k, v]) => [k, semCaminho(v)]));
+    return JSON.stringify({ ok: false, error: publicErrorMessage(err), ...extra });
+  }
+  if (isCliError(err)) {
+    return JSON.stringify({
+      ok: false,
+      error: publicErrorMessage(err),
+      code: err.errorCode,
+      ...(err.hint ? { hint: redactPaths(err.hint) } : {}),
+    });
+  }
+  return publicErrorMessage(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -373,13 +439,12 @@ function emAndamento(job: JobView): Record<string, unknown> {
 
 /**
  * Resultado de uma tool longa a partir do job: terminal = o MESMO resumo que
- * a tool sempre devolveu; em andamento = o handle do job.
+ * a tool sempre devolveu; em andamento = o handle do job. Job que FALHOU é
+ * `isError` (IMPL-086) com o jobId — nunca sucesso com `{ok:false}`.
  */
-function resultadoDoJob(job: JobView, errosComoResultado: boolean): unknown {
+function resultadoDoJob(job: JobView): unknown {
   if (job.status === 'failed') {
-    const msg = job.error ?? 'o job falhou';
-    if (errosComoResultado) return { ok: false, error: msg, jobId: job.jobId };
-    throw new Error(msg);
+    throw new ToolFailure(job.error ?? 'o job falhou', { jobId: job.jobId, status: 'failed' });
   }
   if (job.result) return job.result;
   if (isTerminalJobStatus(job.status)) {
@@ -402,7 +467,6 @@ async function runLongTool(
   args: Record<string, unknown>,
   apiKey: string,
   ctx: ToolCtx,
-  errosComoResultado = false,
 ): Promise<unknown> {
   const { job } = await ctx.jobs.start(input, apiKey, {
     tool,
@@ -422,9 +486,9 @@ async function runLongTool(
     const fim = await ctx.jobs.wait(job.jobId, ctx.blockingWaitMs, ctx.signal);
     if (ctx.signal.aborted) {
       const parado = await ctx.jobs.wait(job.jobId, CANCEL_SETTLE_MS);
-      return resultadoDoJob(parado ?? job, errosComoResultado);
+      return resultadoDoJob(parado ?? job);
     }
-    return resultadoDoJob(fim ?? job, errosComoResultado);
+    return resultadoDoJob(fim ?? job);
   } finally {
     ctx.signal.removeEventListener('abort', pararJob);
   }
@@ -434,18 +498,12 @@ async function runLongTool(
  * Config de start_run: arena-agent-config@1 (objeto ou JSON string),
  * arena-config@1 ou RunConfig. O TIPO do job sai da própria config.
  */
-async function jobInputFromStartArgs(args: Record<string, unknown>): Promise<RunJobInput> {
+async function jobInputFromStartArgs(
+  raw: Record<string, unknown>,
+  args: Record<string, unknown>,
+): Promise<RunJobInput> {
   const budgetUsd = budgetOf(args.budgetUsd);
-  let raw: unknown = args.config;
-  if (typeof raw === 'string') {
-    try {
-      raw = JSON.parse(raw);
-    } catch {
-      throw new Error('config não é um JSON válido.');
-    }
-  }
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config é obrigatório (objeto).');
-  if ((raw as Record<string, unknown>).format === ARENA_AGENT_CONFIG_FORMAT) {
+  if (raw.format === ARENA_AGENT_CONFIG_FORMAT) {
     const cfg = parseAgentConfigRaw(raw);
     return { kind: cfg.mode === 'training' ? 'training' : 'agent', config: { ...cfg, budgetUsd }, budgetUsd };
   }
@@ -740,48 +798,51 @@ const MODELOS_OUTPUT = {
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
 const numOf = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined);
 
-async function toRunConfig(raw: unknown): Promise<RunConfig> {
-  if (typeof (raw as Record<string, unknown>)?.format === 'string') {
-    const p = parseArenaConfig(raw);
-    if (!p.ok) throw new Error(p.error);
-    const c = arenaConfigToRunConfig(p.config);
-    if (!c.ok) throw new Error(c.error);
-    return c.config;
-  }
-  const p = parseRunConfig(raw);
-  if (!p.ok) throw new Error(p.error);
-  return p.config;
-}
-
-// Config de agente chega como STRING JSON (arena-agent-config@1). Aceita tambem
-// objeto por robustez, mas o contrato do schema e a string.
-function parseAgentConfigRaw(config: unknown): RunConfig {
+/**
+ * O `config` da tool como OBJETO: o inputSchema anuncia objeto OU string JSON
+ * (mcp#3) — a string é parseada aqui, UM lugar para todas as tools (antes só
+ * o start_run parseava e as outras falhavam com "expected object").
+ */
+function configObject(config: unknown, dialeto = ''): Record<string, unknown> {
   let raw: unknown = config;
   if (typeof config === 'string') {
     try {
       raw = JSON.parse(config);
     } catch {
-      throw new Error('config não é um JSON válido de arena-agent-config@1.');
+      throw new Error(`config não é um JSON válido${dialeto ? ` de ${dialeto}` : ''}.`);
     }
   }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config é obrigatório (objeto).');
+  return raw as Record<string, unknown>;
+}
+
+/**
+ * arena-config@1 ou RunConfig cru → RunConfig pelo MESMO caminho do
+ * `--config` do CLI (`configFromJson`, run.ts): schema, fail-closed de chave
+ * desconhecida (IMPL-093 — typo nunca é descartado em silêncio) e a
+ * biblioteca (`scenarios.from: 'library'` vira customStages; perfil vazio,
+ * item sem gabarito ou sem labelSet são RECUSADOS). Antes o MCP refazia só o
+ * parse: a biblioteca era ignorada e a run caía em cenários GERADOS (mcp#0).
+ */
+async function toRunConfig(config: unknown): Promise<RunConfig> {
+  return configFromJson(configObject(config));
+}
+
+/**
+ * arena-agent-config@1 (string JSON ou objeto) → RunConfig com as MESMAS
+ * guardas do `readAgentConfigFile` do CLI: fail-closed de chave desconhecida
+ * (IMPL-093) e `files[].path` contido ao workspace (IMPL-099/E6) — recusa
+ * de VALIDAÇÃO, antes de qualquer execução.
+ */
+function parseAgentConfigRaw(config: unknown): RunConfig {
+  const raw = configObject(config, 'arena-agent-config@1');
   const p = parseArenaAgentConfig(raw);
   if (!p.ok) throw new Error(p.error);
+  assertNoUnknownConfigKeys(raw, p.config);
+  assertAgentFilesContained(p.config);
   const c = arenaAgentConfigToRunConfig(p.config);
   if (!c.ok) throw new Error(c.error);
   return c.config;
-}
-
-/** O `config` da tool como OBJETO (string JSON parseada); `null` se não der. */
-function rawConfigObject(config: unknown): Record<string, unknown> | null {
-  let raw: unknown = config;
-  if (typeof config === 'string') {
-    try {
-      raw = JSON.parse(config);
-    } catch {
-      return null;
-    }
-  }
-  return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
 }
 
 /**
@@ -789,13 +850,14 @@ function rawConfigObject(config: unknown): Record<string, unknown> | null {
  * rodam `arena-agent-config` (setup[]/verify[] na máquina de quem chama) passam
  * pelo MESMO portão do `agents run` — aceite explícito (`allowExecConfig:
  * true`) + pin SHA-256 do conteúdo, aprovação ÚNICA por conteúdo (mudou ⇒ a
- * revisão revive). Devolve a recusa estruturada ou `null` quando aprovado.
+ * revisão revive). A recusa sai como `isError` estruturado (IMPL-086):
+ * `{ok:false, code, error, hint}` — nada é executado.
  */
 async function execConfigGateForTool(
   toolName: string,
   rawConfig: Record<string, unknown>,
   args: Record<string, unknown>,
-): Promise<Record<string, unknown> | null> {
+): Promise<void> {
   try {
     await ensureExecConfigApproved({
       dataDir: getDataDir(),
@@ -805,16 +867,13 @@ async function execConfigGateForTool(
       command: `${toolName}({…, allowExecConfig: true})`,
       allowExecConfig: args.allowExecConfig === true,
     });
-    return null;
   } catch (err) {
     if (isControlSignal(err)) throw err;
     const e = err as { message?: unknown; errorCode?: unknown; hint?: unknown };
-    return {
-      ok: false,
+    throw new ToolFailure(typeof e.message === 'string' ? e.message : String(err), {
       code: typeof e.errorCode === 'string' ? e.errorCode : 'config.exec_not_approved',
-      error: typeof e.message === 'string' ? e.message : String(err),
       hint: typeof e.hint === 'string' ? e.hint : null,
-    };
+    });
   }
 }
 
@@ -1008,13 +1067,12 @@ const TOOLS: McpTool[] = [
             'nos retries deste mesmo pedido.',
         );
       }
+      const cru = configObject(args.config);
+      // Valida ANTES do portão: config inválido (chave desconhecida, files[]
+      // fora do workspace, biblioteca vazia) é recusado sem gravar pin.
+      const input = await jobInputFromStartArgs(cru, args);
       // IMPL-099: config de agente é EXECUTÁVEL — MESMO portão do `agents run`.
-      const cru = rawConfigObject(args.config);
-      if (cru && cru.format === ARENA_AGENT_CONFIG_FORMAT) {
-        const recusa = await execConfigGateForTool('start_run', cru, args);
-        if (recusa) return recusa;
-      }
-      const input = await jobInputFromStartArgs(args);
+      if (cru.format === ARENA_AGENT_CONFIG_FORMAT) await execConfigGateForTool('start_run', cru, args);
       // Só valida e grava: o catálogo e a run rodam no job (fora do caminho da
       // resposta — o id sai em < 500 ms). Se ESTA requisição for cancelada
       // depois daqui, o job segue: o retry com a mesma chave o reencontra.
@@ -1163,7 +1221,7 @@ const TOOLS: McpTool[] = [
       if (kind === 'session') {
         rec = await loadSession(id);
         tipo = 'session';
-        if (!rec) return { error: 'sessão não encontrada' };
+        if (!rec) throw naoEncontrado('sessão não encontrada', kind);
       } else {
         const run = await loadRun(id);
         if (run) {
@@ -1172,7 +1230,7 @@ const TOOLS: McpTool[] = [
         } else {
           rec = await loadSession(id);
           tipo = 'session';
-          if (!rec) return { error: 'não encontrado' };
+          if (!rec) throw naoEncontrado('run/sessão não encontrada', kind);
         }
       }
       if (args.detail === 'full') return recordOuResumo(tipo, rec, paginacao);
@@ -1206,7 +1264,7 @@ const TOOLS: McpTool[] = [
         throw new Error('callsPerMonth deve ser um inteiro positivo.');
       }
       const session = await loadSession(id);
-      if (!session) return { error: 'sessão não encontrada' };
+      if (!session) throw naoEncontrado('sessão não encontrada', 'session');
       const ids = new Set<string>(session.runIds);
       for (const it of session.bestPromptByIteration) {
         const rid = it.gate?.reeval?.runId;
@@ -1250,31 +1308,18 @@ const TOOLS: McpTool[] = [
     inputSchema: inputSchemaFrom(RUN_AGENT_ARGS, { config: CONFIG_STRING_SCHEMA }),
     outputSchema: { type: 'object', additionalProperties: true },
     run: async (args, apiKey, ctx) => {
-      // Validacao nunca derruba o servidor: erros viram {ok:false, error}.
-      let cfg: RunConfig;
-      try {
-        cfg = parseAgentConfigRaw(args.config);
-      } catch (err) {
-        return { ok: false, error: publicErrorMessage(err) };
-      }
+      // Recusa (config inválido, portão, orçamento, job que falhou) sai como
+      // isError (IMPL-086) — nunca {ok:false} com cara de sucesso. A mensagem
+      // passa por publicErrorMessage no callTool (IMPL-024: sem caminho absoluto).
+      const cfg = parseAgentConfigRaw(args.config);
       // IMPL-099: portão de config executável — MESMO portão do `agents run`.
-      const cru = rawConfigObject(args.config);
-      if (cru) {
-        const recusa = await execConfigGateForTool('run_agent_benchmark', cru, args);
-        if (recusa) return recusa;
-      }
+      await execConfigGateForTool('run_agent_benchmark', configObject(args.config), args);
       const budgetUsd = numOf(args.budgetUsd);
       if (budgetUsd === undefined || budgetUsd <= 0) {
-        return { ok: false, error: 'budgetUsd é obrigatório e deve ser maior que zero.' };
+        throw new ToolFailure('budgetUsd é obrigatório e deve ser maior que zero.');
       }
       const input: RunJobInput = { kind: 'agent', config: { ...cfg, budgetUsd }, budgetUsd };
-      try {
-        return await runLongTool('run_agent_benchmark', input, args, apiKey, ctx, true);
-      } catch (err) {
-        if (isControlSignal(err)) throw err;
-        // IMPL-024: erro de workspace/executor costuma citar caminho absoluto.
-        return { ok: false, error: publicErrorMessage(err) };
-      }
+      return runLongTool('run_agent_benchmark', input, args, apiKey, ctx);
     },
   },
   {
@@ -1300,9 +1345,9 @@ const TOOLS: McpTool[] = [
       const ref = stage?.responses.find(
         (r) => r.contestantId === str(args.contestantId) && r.execution && r.execution.repetition === (numOf(args.repetition) ?? 0),
       )?.execution;
-      if (!ref) return { ok: false, error: 'dossier não encontrado' };
+      if (!ref) throw new ToolFailure('dossier não encontrado', { code: 'not_found' });
       const content = await readArtifact(ref, 'dossier.md');
-      if (content === null) return { ok: false, error: 'dossier não encontrado' };
+      if (content === null) throw new ToolFailure('dossier não encontrado', { code: 'not_found' });
       const sha256 = createHash('sha256').update(content).digest('hex');
       return { ok: true, dossier: content, sha256, truncated: Boolean(ref.dossierTruncated) };
     },
@@ -1441,7 +1486,7 @@ export async function callTool(
       ...(estruturado ? { structuredContent: estruturado } : {}),
     };
   } catch (err) {
-    return { content: [{ type: 'text', text: publicErrorMessage(err) }], isError: true };
+    return { content: [{ type: 'text', text: textoDoErro(err) }], isError: true };
   }
 }
 

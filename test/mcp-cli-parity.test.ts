@@ -1,9 +1,16 @@
-// Paridade MCP × CLI (auditoria cli#12, mcp#2, mcp#6): o servidor MCP é a
-// entrada principal dos agentes e não pode esconder o que o CLI mostra.
+// Paridade MCP × CLI (auditoria mcp#0..#6, cli#12, IMPL-086, IMPL-093): o
+// servidor MCP é a entrada principal dos agentes e não pode aceitar o que o
+// CLI recusa, nem esconder o que o CLI mostra.
 //
+//   • mcp#0 — `scenarios: {from:'library'}` usa a biblioteca curada (mesmo
+//     caminho do `--config`); perfil inexistente é RECUSADO;
+//   • mcp#1/IMPL-093 — chave desconhecida é erro (fail-closed), inclusive em
+//     arena-agent-config (+ files[] contido ao workspace);
+//   • mcp#3 — `config` como string JSON vale em toda tool que o anuncia;
 //   • mcp#6 — list_models pagina (offset/nextOffset) e o teto nunca estoura;
 //   • cli#12/mcp#2 — get_result traz o DESFECHO (placar/vencedor; campeão,
-//     holdout, significância).
+//     holdout, significância);
+//   • IMPL-086 — recusa sai como isError, nunca sucesso com placeholder.
 //
 // Zero rede e zero gasto: gateway FALSO e executor de job FALSO.
 
@@ -89,6 +96,188 @@ function executorEspiao(): { executor: JobExecutor; inputs: RunJobInput[] } {
   };
   return { executor, inputs };
 }
+
+// ---------------------------------------------------------------------------
+// mcp#0 — biblioteca curada
+// ---------------------------------------------------------------------------
+
+const ITENS: LibraryItem[] = [1, 2, 3, 4].map((i) => ({
+  id: `item-${i}`,
+  title: `Item ${i}`,
+  tier: 'mft',
+  maxTokens: 300,
+  question: `Pergunta curada numero ${i} sobre reembolso do pedido ${i * 7}?`,
+  productContext: 'Politica: reembolso em 7 dias.',
+  reference: `Resposta de referencia ${i}: reembolso em 7 dias.`,
+  origin: 'manual',
+  createdAt: '2026-01-01T00:00:00.000Z',
+})) as LibraryItem[];
+
+const ARENA_BASE = {
+  format: 'arena-config@1',
+  mode: 'compare',
+  theme: 'suporte',
+  prompt: { text: 'Voce e um assistente de suporte.' },
+  limits: { maxOutputTokens: 300 },
+  models: { datagen: 'fake/gen', judges: ['fake/judge'], reference: 'fake/ref', competitors: ['fake/a', 'fake/b'] },
+};
+const LIB_CFG = { ...ARENA_BASE, scenarios: { from: 'library', profile: 'curado' } };
+
+async function semearBiblioteca(): Promise<void> {
+  await saveProfile({ id: 'curado', name: 'curado' });
+  await saveItems('curado', ITENS);
+}
+
+describe('mcp#0 — scenarios {from:"library"} pelo MESMO caminho do CLI', () => {
+  it('estimate_cost: N etapas = N itens e ZERO de datagen (antes: 5 etapas geradas e datagen cobrado)', async () => {
+    instalarCatalogo();
+    await semearBiblioteca();
+    const r = await chamar('estimate_cost', { config: LIB_CFG });
+    expect(r.isError).toBeUndefined();
+    const est = json(r) as { assumptions: { stages: number }; byRole: Record<string, number> };
+    expect(est.assumptions.stages).toBe(ITENS.length);
+    expect(est.byRole.datagen).toBe(0);
+  });
+
+  it('perfil inexistente é RECUSADO (isError) em estimate_cost e start_run — nenhum job criado', async () => {
+    instalarCatalogo();
+    const cfg = { ...ARENA_BASE, scenarios: { from: 'library', profile: 'nao-existe' } };
+    const est = await chamar('estimate_cost', { config: cfg });
+    expect(est.isError).toBe(true);
+    expect(texto(est)).toMatch(/Biblioteca \\?"nao-existe\\?" sem itens/u);
+
+    const { executor, inputs } = executorEspiao();
+    const jobs = new JobManager({ lane: new HeavyLane(1), executor });
+    const st = await chamar('start_run', { config: cfg, budgetUsd: 1, idempotencyKey: 'lib-x' }, { jobs });
+    expect(st.isError).toBe(true);
+    expect(inputs).toHaveLength(0);
+    const dirJobs = path.join(tmp, 'jobs');
+    expect(existsSync(dirJobs) ? readdirSync(dirJobs).filter((f) => f.endsWith('.json')) : []).toHaveLength(0);
+  });
+
+  it('start_run: o job recebe os itens CURADOS como customStages (nunca cenários gerados)', async () => {
+    await semearBiblioteca();
+    const { executor, inputs } = executorEspiao();
+    const jobs = new JobManager({ lane: new HeavyLane(1), executor });
+    const st = await chamar('start_run', { config: LIB_CFG, budgetUsd: 1, idempotencyKey: 'lib-1' }, { jobs });
+    expect(st.isError).toBeUndefined();
+    await vi.waitFor(() => expect(inputs).toHaveLength(1));
+    const cfg = inputs[0].config as RunConfig & { customStages?: { question: string; reference?: string }[] };
+    expect(cfg.stages).toBe(ITENS.length);
+    expect(cfg.customStages?.map((s) => s.question)).toEqual(ITENS.map((i) => i.question));
+    expect(cfg.customStages?.every((s) => typeof s.reference === 'string' && s.reference.length > 0)).toBe(true);
+    await jobs.wait(json(st).jobId as string, 2_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcp#1 / IMPL-093 — fail-closed de chave desconhecida
+// ---------------------------------------------------------------------------
+
+function agentConfig(files: { path: string; content: string }[], extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    format: 'arena-agent-config@1',
+    mode: 'compare',
+    theme: 'Correção de bugs',
+    agent: { executor: 'pi', executorVersion: '0.84.2', limits: { maxCostUsd: 0.2 } },
+    models: { datagen: 'acme/judge', judges: ['acme/judge'], competitors: ['acme/alpha', 'acme/beta'] },
+    scenarios: [{ question: 'Conserte o parser.', agentTask: { files } }],
+    ...extra,
+  };
+}
+
+describe('mcp#1/IMPL-093 — chave desconhecida nunca é descartada em silêncio', () => {
+  it('estimate_cost com typo no RunConfig cru → isError config.unknown_key com "você quis dizer"', async () => {
+    instalarCatalogo();
+    const r = await chamar('estimate_cost', { config: { ...COMPARE, stagess: 50 } });
+    expect(r.isError).toBe(true);
+    const erro = json(r);
+    expect(erro).toMatchObject({ ok: false, code: 'config.unknown_key' });
+    expect(String(erro.error)).toContain('"stagess" (você quis dizer "stages"?)');
+    expect(String(erro.hint)).toMatch(/config validate/u);
+  });
+
+  it('start_run com typo ANINHADO no arena-config (limits.maxPricePerMtok) → isError, nenhum job', async () => {
+    const { executor, inputs } = executorEspiao();
+    const jobs = new JobManager({ lane: new HeavyLane(1), executor });
+    const cfg = { ...ARENA_BASE, stages: 2, limits: { maxOutputTokens: 300, maxPricePerMtok: 0.1 } };
+    const r = await chamar('start_run', { config: cfg, budgetUsd: 1, idempotencyKey: 'typo-1' }, { jobs });
+    expect(r.isError).toBe(true);
+    expect(json(r).code).toBe('config.unknown_key');
+    expect(String(json(r).error)).toContain('limits.maxPricePerMtok');
+    expect(inputs).toHaveLength(0);
+  });
+
+  it('run_benchmark/train_prompt também recusam o typo (mesmo caminho)', async () => {
+    const rb = await chamar('run_benchmark', { config: { ...COMPARE, finalistz: 2 }, budgetUsd: 1 });
+    expect(rb.isError).toBe(true);
+    expect(json(rb).code).toBe('config.unknown_key');
+    const tp = await chamar('train_prompt', { config: { ...TRAINING, iteratons: 3 }, budgetUsd: 1 });
+    expect(tp.isError).toBe(true);
+    expect(String(json(tp).error)).toContain('"iteratons"');
+  });
+
+  it('arena-agent-config: typo e files[] fora do workspace são recusados ANTES do portão (sem pin gravado)', async () => {
+    const typo = await chamar('run_agent_benchmark', {
+      config: JSON.stringify(agentConfig([{ path: 'a.ts', content: 'x' }], { theem: 'x' })),
+      budgetUsd: 1,
+      allowExecConfig: true,
+    });
+    expect(typo.isError).toBe(true);
+    expect(json(typo).code).toBe('config.unknown_key');
+
+    const fuga = await chamar('start_run', {
+      config: agentConfig([{ path: '../fora.txt', content: 'x' }]),
+      budgetUsd: 1,
+      idempotencyKey: 'fuga-1',
+      allowExecConfig: true,
+    });
+    expect(fuga.isError).toBe(true);
+    expect(json(fuga).code).toBe('config.files_path_escapes_workspace');
+    // validação vem ANTES do portão: nada foi aprovado/pinado
+    expect(existsSync(path.join(tmp, 'exec-config-approvals.json'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcp#3 — config como string JSON
+// ---------------------------------------------------------------------------
+
+describe('mcp#3 — config como string JSON em toda tool que o anuncia', () => {
+  it('estimate_cost com string == com objeto (inclusive arena-config@1 em string)', async () => {
+    instalarCatalogo();
+    const obj = await chamar('estimate_cost', { config: COMPARE });
+    const txt = await chamar('estimate_cost', { config: JSON.stringify(COMPARE) });
+    expect(txt.isError).toBeUndefined();
+    expect(json(txt).point).toBe(json(obj).point);
+    const arena = await chamar('estimate_cost', { config: JSON.stringify({ ...ARENA_BASE, stages: 3 }) });
+    expect(arena.isError).toBeUndefined();
+    expect((json(arena).assumptions as { stages: number }).stages).toBe(3);
+  });
+
+  it('run_benchmark/train_prompt parseiam a string (a recusa é a do MODO, não "expected object")', async () => {
+    const rb = await chamar('run_benchmark', { config: JSON.stringify(TRAINING), budgetUsd: 1 });
+    expect(rb.isError).toBe(true);
+    expect(texto(rb)).toMatch(/Use train_prompt/u);
+    const tp = await chamar('train_prompt', { config: JSON.stringify(COMPARE), budgetUsd: 1 });
+    expect(tp.isError).toBe(true);
+    expect(texto(tp)).toMatch(/precisa ser "training"/u);
+  });
+
+  it('string malformada → "config não é um JSON válido." (em todas)', async () => {
+    for (const [tool, extra] of [
+      ['estimate_cost', {}],
+      ['run_benchmark', { budgetUsd: 1 }],
+      ['train_prompt', { budgetUsd: 1 }],
+      ['start_run', { budgetUsd: 1, idempotencyKey: 'k' }],
+    ] as const) {
+      const r = await chamar(tool, { config: '{nope', ...extra });
+      expect(r.isError, tool).toBe(true);
+      expect(texto(r), tool).toMatch(/config não é um JSON válido/u);
+      expect(texto(r), tool).not.toMatch(/expected object/iu);
+    }
+  });
+});
 
 // ---------------------------------------------------------------------------
 // mcp#6 — list_models pagina e o teto nunca estoura
@@ -263,3 +452,51 @@ describe('cli#12/mcp#2 — get_result traz o desfecho (quem venceu, quanto melho
   });
 });
 
+// ---------------------------------------------------------------------------
+// IMPL-086 — recusa é isError, nunca sucesso com placeholder
+// ---------------------------------------------------------------------------
+
+describe('IMPL-086 — recusa sai como isError acionável', () => {
+  it('não encontrado (get_result/get_session_report/get_agent_dossier) é isError com code not_found', async () => {
+    const id = randomUUID();
+    for (const [tool, args] of [
+      ['get_result', { id }],
+      ['get_result', { id, kind: 'session' }],
+      ['get_session_report', { sessionId: id }],
+      ['get_agent_dossier', { runId: id, stageIndex: 0, contestantId: 'x' }],
+    ] as const) {
+      const r = await chamar(tool, args as Record<string, unknown>);
+      expect(r.isError, tool).toBe(true);
+      expect(r.structuredContent, tool).toBeUndefined();
+      expect(json(r), tool).toMatchObject({ ok: false, code: 'not_found' });
+      expect(texto(r), tool).not.toMatch(ABS_PATH_RE);
+    }
+  });
+
+  it('run_agent_benchmark/start_run sem aceite do config executável → isError com code e dica do portão', async () => {
+    const cfg = agentConfig([{ path: 'a.ts', content: 'x' }]);
+    for (const [tool, extra] of [
+      ['run_agent_benchmark', { config: JSON.stringify(cfg) }],
+      ['start_run', { config: cfg, idempotencyKey: 'gate-1' }],
+    ] as const) {
+      const r = await chamar(tool, { ...extra, budgetUsd: 1 });
+      expect(r.isError, tool).toBe(true);
+      const out = json(r);
+      expect(out.ok, tool).toBe(false);
+      expect(out.code, tool).toBe('config.exec_not_approved');
+      expect(String(out.hint), tool).toContain('allowExecConfig');
+    }
+  });
+
+  it('job que FALHA numa tool longa vira isError com o jobId (antes: {ok:false} como sucesso)', async () => {
+    const executor: JobExecutor = async () => {
+      throw new Error('executor quebrou');
+    };
+    const jobs = new JobManager({ lane: new HeavyLane(1), executor });
+    const r = await chamar('run_benchmark', { config: COMPARE, budgetUsd: 1 }, { jobs, blockingWaitMs: 3_000 });
+    expect(r.isError).toBe(true);
+    const out = json(r);
+    expect(out).toMatchObject({ ok: false, status: 'failed' });
+    expect(typeof out.jobId).toBe('string');
+  });
+});

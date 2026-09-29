@@ -246,7 +246,20 @@ export async function readConfigFile(
   file: string,
   pii: { allowPii?: boolean; piiMode?: 'redact' | 'synthetic' } = {},
 ): Promise<RunConfig> {
-  let json = await readJsonFile(file);
+  return configFromJson(await readJsonFile(file), pii);
+}
+
+/**
+ * O MESMO caminho do `--config`, a partir do JSON já lido: dialeto, schema,
+ * fail-closed de chave desconhecida (IMPL-093), avisos de chave descontinuada
+ * e a biblioteca (`scenarios.from: 'library'`). Exportado para o servidor MCP
+ * — antes ele refazia só o parse e perdia a biblioteca e o fail-closed.
+ */
+export async function configFromJson(
+  input: unknown,
+  pii: { allowPii?: boolean; piiMode?: 'redact' | 'synthetic' } = {},
+): Promise<RunConfig> {
+  let json = input;
 
   // Detecta o dialeto pela chave `format`: arena-config@1 (declarativo, o que a
   // ARENA-CONFIG.md documenta) vs RunConfig cru.
