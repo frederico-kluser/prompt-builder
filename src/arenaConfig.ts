@@ -11,6 +11,7 @@
 // abaixo, cada uma marcando o que se perde se ela for esquecida.
 
 import { parseRunConfig } from './runConfigSchema.js';
+import { HOLDOUT_RATIO_DEFAULT, HOLDOUT_RATIO_MAX } from './holdout.js';
 import type { ArenaAgentConfigFile, ArenaConfigFile } from './configFile.js';
 import type { ReasoningConfig, RunConfig, StageSpec } from './types.js';
 
@@ -177,7 +178,8 @@ export function arenaConfigToRunConfig(
             // IMPL-002: sem minGain no arquivo o gate usa o default max(1; 50/n)
             // — cravar 1 aqui desligaria a margem ligada à granularidade.
             ...(file.training?.minGain !== undefined ? { minGain: clamp(file.training.minGain, 0, 100) } : {}),
-            holdoutRatio: clamp(file.training?.holdoutRatio ?? 0.2, 0, 0.5),
+            // web-code#17: default canônico do trainer (0,3 — IMPL-050), não 0,2.
+            holdoutRatio: clamp(file.training?.holdoutRatio ?? HOLDOUT_RATIO_DEFAULT, 0, HOLDOUT_RATIO_MAX),
             feedbackDriven: file.training?.feedbackDriven !== false,
             ...(file.training?.reflection ? { reflection: file.training.reflection } : {}),
             ...(file.training?.paretoPool !== undefined ? { paretoPool: file.training.paretoPool } : {}),

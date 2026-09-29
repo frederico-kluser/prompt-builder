@@ -12,7 +12,7 @@
 // usuário confirma é a mesma conta que o ledger usa para parar a run.
 
 import { estimateInputFromConfig, estimateRunCost, type CostEstimate, type EstimateInput } from '../estimate.js';
-import { splitHoldout } from '../holdout.js';
+import { HOLDOUT_RATIO_DEFAULT, splitHoldout } from '../holdout.js';
 import type { CostRole, OpenRouterModel, RunConfig } from '../types.js';
 import { COST_ROLES } from '../types.js';
 
@@ -104,8 +104,9 @@ export function plannedHoldoutStages(config: RunConfig): number {
   const pinned = config.customStages?.length ?? 0;
   const seed = config.scenarioSeed?.length ?? 0;
   const planned = pinned > 0 ? pinned : Math.max(config.stages, seed);
-  return splitHoldout(Array.from({ length: planned }, (_, i) => i), config.holdoutRatio ?? 0.2).holdout
-    .length;
+  // web-code#17: o MESMO default do trainer (0,3 — IMPL-050), não 0,2.
+  return splitHoldout(Array.from({ length: planned }, (_, i) => i), config.holdoutRatio ?? HOLDOUT_RATIO_DEFAULT)
+    .holdout.length;
 }
 
 /** Chamadas por papel em UMA iteração (mesma contabilidade de `estimateRunCost`). */
