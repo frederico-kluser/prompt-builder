@@ -902,3 +902,166 @@ describe.skipIf(!alvo)('IMPL-106 na superfície GUIADA (default) — viewport, T
     }
   }, 120_000);
 });
+
+/* ================================================== left#16 — 390 px ======== */
+
+// left#16 (notado pelo agente JEV web): a 390 px a PÁGINA não rolava, mas o
+// trilho dos passos guiados media 548 px e rolava na horizontal — "Limites" e
+// "Revisão", e a pista de pendência deles (IMPL-106 d: pista SEMPRE à vista),
+// ficavam atrás da rolagem. O trilho agora QUEBRA em linhas, como os filtros
+// do Histórico (web-live#13). O que se guarda aqui, a 390×844:
+//   • /new?tipo=llm guiado: trilho sem rolagem, os 5 passos inteiros na
+//     viewport, pista de pendência do passo 4 visível; e a completa sem rolagem;
+//   • /new?tipo=jev: o mesmo para o trilho do guiado JEV;
+//   • /runs COM linhas reais (import exchange@1 pela UI): lista e filtros sem
+//     rolagem horizontal — o gate de antes media a lista VAZIA.
+describe.skipIf(!alvo)('left#16 — 390 px: sem rolagem horizontal escondida', () => {
+  const VP = { width: 390, height: 844 };
+
+  /** Página sem rolagem horizontal + trilho de passos sem scroll, abas inteiras. */
+  async function trilhoSemRolar(page: Page, ariaLabel: string): Promise<void> {
+    const r = await page.evaluate((label) => {
+      const rail = document.querySelector(`[aria-label="${label}"]`);
+      const abas = [...(rail?.querySelectorAll('[role="tab"]') ?? [])].map((t) => {
+        const b = t.getBoundingClientRect();
+        return { texto: (t.textContent ?? '').trim(), left: b.left, right: b.right };
+      });
+      return {
+        sw: rail?.scrollWidth ?? -1,
+        cw: rail?.clientWidth ?? -1,
+        vw: window.innerWidth,
+        doc: document.documentElement.scrollWidth,
+        abas,
+      };
+    }, ariaLabel);
+    expect(r.doc, `rolagem horizontal da página (${r.doc} > ${r.vw})`).toBeLessThanOrEqual(r.vw);
+    expect(r.sw, `trilho "${ariaLabel}" rola na horizontal (${r.sw} > ${r.cw})`).toBeLessThanOrEqual(r.cw + 1);
+    expect(r.abas.length, `trilho "${ariaLabel}" sem abas`).toBeGreaterThan(1);
+    for (const a of r.abas) {
+      expect(a.left, `aba "${a.texto}" cortada à esquerda`).toBeGreaterThanOrEqual(-1);
+      expect(a.right, `aba "${a.texto}" cortada à direita (${a.right} > ${r.vw})`).toBeLessThanOrEqual(r.vw + 1);
+    }
+  }
+
+  it('/new?tipo=llm guiado: os 5 passos cabem sem rolar; pista de pendência à vista; completa sem rolagem', async () => {
+    const { contexto, page } = await paginaNova(VP, 'guided');
+    try {
+      await page.goto(`${url}new?tipo=llm`);
+      await esperarFormulario(page);
+      await trilhoSemRolar(page, 'Passos da configuração guiada');
+
+      // Pendência no passo 4 (Limites): treino com 4 cenários não consegue
+      // promover (web-live#5) — o ponto do trilho tem de estar VISÍVEL a
+      // 390 px, nunca atrás de uma rolagem horizontal.
+      await page.getByRole('button', { name: /Treinar um prompt/ }).first().click();
+      await page.getByRole('tab', { name: /Limites/ }).first().click();
+      await page.getByLabel('Cenários', { exact: true }).fill('4');
+      expect(await page.getByRole('tab', { name: /Limites.*pendente/ }).count()).toBe(1);
+      const ponto = await page.locator('[role="tab"] [data-pendente]').first().boundingBox();
+      expect(ponto, 'pista de pendência sem caixa').not.toBeNull();
+      expect(ponto!.x, 'pista de pendência cortada à esquerda').toBeGreaterThanOrEqual(0);
+      expect(ponto!.x + ponto!.width, 'pista de pendência cortada à direita').toBeLessThanOrEqual(VP.width + 1);
+      await trilhoSemRolar(page, 'Passos da configuração guiada');
+
+      // Superfície completa (mesmo estado, seletor LLM|JEV à vista): sem rolagem.
+      await page.getByRole('button', { name: 'Completo', exact: true }).click();
+      await page.waitForTimeout(250);
+      expect(await page.getByRole('group', { name: 'Tipo de benchmark' }).isVisible()).toBe(true);
+      const sw = await page.evaluate(() => document.documentElement.scrollWidth);
+      expect(sw, `rolagem horizontal na completa (${sw} > ${VP.width})`).toBeLessThanOrEqual(VP.width);
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('/new?tipo=jev: o trilho dos passos JEV cabe sem rolar (com o seletor no JEV)', async () => {
+    const { contexto, page } = await paginaNova(VP, 'guided');
+    try {
+      await page.goto(`${url}new?tipo=jev`);
+      await page.waitForSelector('[aria-label="Passos da configuração JEV"]', { timeout: 30_000 });
+      await page.waitForTimeout(250);
+      expect(await page.locator('[data-bench="jev"]').isVisible(), 'o seletor não abriu o JEV').toBe(true);
+      await trilhoSemRolar(page, 'Passos da configuração JEV');
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('left#11 + web-live#13: /runs com linhas REAIS (import exchange@1) cabe em 390 px', async () => {
+    const { contexto, page } = await paginaNova(VP, 'guided');
+    try {
+      await page.goto(`${url}runs`);
+      await page.getByRole('group', { name: 'Filtrar por status' }).waitFor({ timeout: 30_000 });
+      // Import pela UI (o mesmo caminho do botão «Importar») — 3 runs + 1 treino.
+      await page.setInputFiles('input[aria-label="Pacote exchange@1 ou JSON de run/treino"]', {
+        name: 'pacote.json',
+        mimeType: 'application/json',
+        buffer: Buffer.from(JSON.stringify(pacoteDeTroca()), 'utf8'),
+      });
+      await page.locator('a[href^="/runs/"]').first().waitFor({ timeout: 15_000 });
+      const r = await page.evaluate(() => {
+        const vw = window.innerWidth;
+        const linhas = [...document.querySelectorAll('a[href^="/runs/"], a[href^="/training/"]')].map((a) => {
+          const b = a.getBoundingClientRect();
+          return { href: a.getAttribute('href') ?? '', left: b.left, right: b.right };
+        });
+        return { vw, sw: document.documentElement.scrollWidth, linhas };
+      });
+      expect(r.sw, `rolagem horizontal em /runs com linhas (${r.sw} > ${r.vw})`).toBeLessThanOrEqual(r.vw);
+      expect(r.linhas.length, 'import não trouxe linhas para a lista').toBeGreaterThanOrEqual(4);
+      for (const l of r.linhas) {
+        expect(l.left, `linha ${l.href} cortada à esquerda`).toBeGreaterThanOrEqual(-1);
+        expect(l.right, `linha ${l.href} cortada à direita (${l.right} > ${r.vw})`).toBeLessThanOrEqual(r.vw + 1);
+      }
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+});
+
+/**
+ * Pacote `prompt-builder-exchange@1` em arquivo único (o MESMO do CLI —
+ * `runs export --format exchange -o pacote.json`): manifesto + um JSONL por
+ * entidade, cada um com o header na primeira linha. Temas compridos de
+ * propósito: é o conteúdo real que a lista de 390 px tem de acomodar.
+ */
+function pacoteDeTroca(): unknown {
+  const exportedAt = new Date().toISOString();
+  const manifesto = [
+    { kind: 'run', file: 'runs.jsonl', count: 3 },
+    { kind: 'session', file: 'sessions.jsonl', count: 1 },
+  ];
+  const header = (kind: string) =>
+    JSON.stringify({ format: 'prompt-builder-exchange@1', kind, exportedAt, producer: 'ux-nova-run-e2e', manifest: manifesto });
+  const tema = 'Tema comprido para esticar a linha da lista de histórico a 390 px — sem transbordar';
+  const run = (i: number) =>
+    JSON.stringify({
+      id: `run_e2e390_${i}`,
+      status: i === 3 ? 'error' : 'finished',
+      startedAt: exportedAt,
+      config: { mode: 'compare', theme: `${tema} (#${i})`, stages: 10 },
+      stages: Array.from({ length: 10 }, (_, s) => ({ index: s, status: 'done' })),
+      contestants: ['provedor/modelo-001', 'provedor/modelo-002'],
+    });
+  return {
+    format: 'prompt-builder-exchange@1',
+    exportedAt,
+    producer: 'ux-nova-run-e2e',
+    manifest: manifesto,
+    files: {
+      'manifest.json': JSON.stringify({ format: 'prompt-builder-exchange@1', exportedAt, producer: 'ux-nova-run-e2e', manifest: manifesto }),
+      'runs.jsonl': [header('run'), run(1), run(2), run(3)].join('\n'),
+      'sessions.jsonl': [
+        header('session'),
+        JSON.stringify({
+          id: 'sessao_e2e390_1',
+          status: 'finished',
+          startedAt: exportedAt,
+          config: { mode: 'training', theme: tema },
+          runIds: ['run_e2e390_1'],
+          bestPromptByIteration: [],
+        }),
+      ].join('\n'),
+    },
+  };
+}

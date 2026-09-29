@@ -40,8 +40,8 @@ vi.mock('@/components/motion-ui/smooth-tabs', async () => {
   const { createElement } = await import(pathToFileURL(WEB_REACT).href);
   return {
     SmoothTabs: (p: { children?: unknown }) => createElement('div', null, p.children),
-    SmoothTabsList: (p: { ariaLabel?: string; children?: unknown }) =>
-      createElement('div', { role: 'tablist', 'aria-label': p.ariaLabel }, p.children),
+    SmoothTabsList: (p: { ariaLabel?: string; className?: string; children?: unknown }) =>
+      createElement('div', { role: 'tablist', 'aria-label': p.ariaLabel, className: p.className }, p.children),
     SmoothTabsTab: (p: { value?: string; children?: unknown }) =>
       createElement('button', { type: 'button', role: 'tab', 'data-passo': p.value }, p.children),
     SmoothTabsPanels: (p: { children?: unknown }) => createElement('div', null, p.children),
@@ -311,5 +311,16 @@ describe.skipIf(!temWebDeps)('web-live#5 no guiado — poder do gate do treino �
     const limites = accessibleText(painel(await render({ mode: 'training', stages: 10, plannedStages: 10 }), 'limites'));
     expect(limites).not.toMatch(/Cinco é um bom começo/);
     expect(limites).toMatch(/O padrão é 10/);
+  });
+});
+
+describe.skipIf(!temWebDeps)('left#16 — o trilho dos passos QUEBRA em linhas (390 px)', () => {
+  it('SmoothTabsList leva `flex-wrap`: os 5 passos empilham em vez de rolar na horizontal', async () => {
+    const html = await render();
+    const trilho = /<div[^>]*role="tablist"[^>]*>/.exec(html);
+    expect(trilho, 'trilho de passos').not.toBeNull();
+    // O gate real (medição num browser) vive em test/ux-nova-run-e2e.test.ts;
+    // aqui fica a classe que impede a rolagem escondida de voltar.
+    expect(trilho![0]).toContain('flex-wrap');
   });
 });

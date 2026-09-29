@@ -48,7 +48,7 @@ vi.mock('@/components/motion-ui/smooth-tabs', async () => {
   const { createElement } = await import(pathToFileURL(WEB_REACT).href);
   return {
     SmoothTabs: (p: { children?: unknown }) => createElement('div', null, p.children),
-    SmoothTabsList: (p: { ariaLabel?: string; children?: unknown }) => createElement('div', { role: 'tablist', 'aria-label': p.ariaLabel }, p.children),
+    SmoothTabsList: (p: { ariaLabel?: string; className?: string; children?: unknown }) => createElement('div', { role: 'tablist', 'aria-label': p.ariaLabel, className: p.className }, p.children),
     SmoothTabsTab: (p: { value?: string; children?: unknown }) => createElement('button', { type: 'button', role: 'tab', 'data-passo': p.value }, p.children),
     SmoothTabsPanels: (p: { children?: unknown }) => createElement('div', null, p.children),
     SmoothTabsPanel: (p: { value?: string; children?: unknown }) => createElement('div', { role: 'tabpanel', 'data-passo': p.value }, p.children),
@@ -210,6 +210,9 @@ describe('(b) Nova run JEV — guiado e completo', () => {
     const html = await render('?tipo=jev', memoria());
     for (const passo of ['Objetivo', 'Decisão', 'Casos', 'Participantes', 'Limites e revisão']) expect(html).toContain(passo);
     expect(html).toMatch(/role="tablist" aria-label="Passos da configuração JEV"/);
+    // left#16: o trilho JEV QUEBRA em linhas a 390 px (como o do guiado LLM) —
+    // nada de rolagem horizontal escondendo passo/pista de pendência.
+    expect(/<div[^>]*role="tablist"[^>]*>/.exec(html)![0]).toContain('flex-wrap');
     for (const g of ['Avaliar', 'Comparar', 'Treinar']) expect(html).toContain(g);
     expect(html).toContain('Triagem de tickets de suporte');
     // Rodapé: pendência (sem casos) + custo + Iniciar.
