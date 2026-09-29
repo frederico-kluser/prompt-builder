@@ -109,6 +109,22 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
   o lugar errado. Configurado em 2026-07-30.
 - **Não rode o backend `src/` em serverless (Vercel):** ele grava runs no filesystem (`storage.ts`), efêmero/isolado no serverless → `GET /v1/benchmark/runs/:id` vira `Run nao encontrada`. Produção = **SPA estática** (`npm run web:build`); o backend é só dev/self-host. Deploy errado se denuncia quando `/health` responde JSON em vez do `index.html`. Ver memória CoALA (`coala.py search "arquitetura shim mirror"`).
 
+## Modo JEV (decisões tipadas: `jev …`, `jev-config@1`)
+- Mede e evolui definições de decisão (`noul`/`choice`/`score`) do Jev e de outros modelos de
+  decisão em casos ROTULADOS. Motor = fonte única em `src/engine/jev/` (shim
+  `web/src/engine/jev.ts`, classificado em `engine-sync`); persistência Node em `src/jev/store.ts`
+  (`<data-dir>/jev-runs|jev-sessions`, com dono → órfã vira `aborted`); job/MCP em `src/jev/job.ts`.
+- ⚠️ O ÚNICO caminho até o endpoint de decisões é `decide()` em `src/openrouter.ts`
+  (`buildDecisionBody` = `protectDeep` + `applySensitiveRouting`; mesmo limitador, reserva e
+  `account`). Nada de fetch solto. Reserva de decisão = tokens do JSON + 300, saída 0; decisão
+  NUNCA vira amostra de calibração de custo; 400 com `x-generation-id` fica pendente.
+- Sem `CostRole` novo: decisão e LLM sob teste = `competitor`; proponente do treino = `rewriter`.
+- `jev-config@1` fica FORA do `arena-config`/`RunConfigBase` e dos dois whitelists silenciosos.
+- O Jev NÃO é ZDR: em área LGPD sensível o modo fica indisponível (fail-closed no pré-voo).
+- Métrica: ECE/Brier sobre a probabilidade top-label; o `confidence` da API é opaco e só decide a
+  banda. Estatística pareada por `caseId`, valores 0–1 (nunca `brierScore` em p.p. no teste).
+- Docs para agentes: `agent-docs/jev.md` (`prompt-builder docs jev`).
+
 ## CLI (`src/cli/`, publicado como `prompt-builder`)
 - Mora em `src/cli/` e compila pelo MESMO `tsconfig.json` → `dist/cli/`. **Não** é uma terceira
   cópia do motor: importa `../orchestrator.js` como qualquer arquivo de `src/`.
