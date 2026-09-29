@@ -83,6 +83,21 @@ describe('IMPL-084 — matriz de eras (initialize/discover/-32022)', () => {
     }
   });
 
+  // mcp#7: o SDK antigo que só fala 2024-11-05 DESCONECTA se receber outra
+  // versão — e o dialecto (initialize/tools/list/tools/call com texto) é o
+  // mesmo. Explícito para a versão não sumir da lista em silêncio.
+  it('initialize 2024-11-05 (SDK antigo) é ECOADO, sem supportedVersions (nunca vira 2026-07-28)', () => {
+    const s = novaSessao();
+    const r = pedir(s, 'v2024', 'initialize', { protocolVersion: '2024-11-05', capabilities: {} });
+    expect(r.error).toBeUndefined();
+    expect(r.result?.protocolVersion).toBe('2024-11-05');
+    expect(r.result?.supportedVersions).toBeUndefined();
+    // aceita pela regra legacy, mas NÃO anunciada como implementada
+    expect(SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).not.toContain('2024-11-05');
+    const disc = pedir(s, 'disc', 'server/discover');
+    expect(disc.result?.supportedVersions).toEqual([...SUPPORTED_PROTOCOL_VERSIONS]);
+  });
+
   it('initialize "1999-01-01" (legacy): NÃO ecoa — responde a mais recente implementada listando as suportadas', () => {
     const s = novaSessao();
     const r = pedir(s, 1, 'initialize', { protocolVersion: '1999-01-01', capabilities: {} });
@@ -139,6 +154,103 @@ describe('IMPL-084 — matriz de eras (initialize/discover/-32022)', () => {
     expect(r.result).toEqual({});
     expect(ms).toBeLessThan(200);
     soltar();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcp#8 — batches JSON-RPC (a 2025-03-26, aceita, manda RECEBER batches)
+// ---------------------------------------------------------------------------
+
+describe('mcp#8 — batch JSON-RPC', () => {
+  function sessaoComBatch(tools?: readonly McpTool[]) {
+    const avulsas: Msg[] = [];
+    const lotes: Msg[][] = [];
+    const session = new McpSession({
+      write: (m) => avulsas.push(m as Msg),
+      writeBatch: (ms) => lotes.push(ms as Msg[]),
+      log: () => undefined,
+      tools,
+    });
+    const enviar = (v: unknown): void => session.handleLine(JSON.stringify(v));
+    return { session, avulsas, lotes, enviar };
+  }
+
+  it('[ping, tools/list] → UMA resposta em array com os dois ids (antes: um -32600 e nenhum respondido)', async () => {
+    const s = sessaoComBatch();
+    s.enviar([
+      { jsonrpc: '2.0', id: 'b1', method: 'ping' },
+      { jsonrpc: '2.0', id: 'b2', method: 'tools/list' },
+    ]);
+    await vi.waitFor(() => expect(s.lotes).toHaveLength(1));
+    expect(s.avulsas).toHaveLength(0);
+    const [lote] = s.lotes;
+    expect(lote.map((m) => m.id).sort()).toEqual(['b1', 'b2']);
+    expect(lote.find((m) => m.id === 'b1')?.result).toEqual({});
+    expect(((lote.find((m) => m.id === 'b2')?.result ?? {}) as { tools?: unknown[] }).tools?.length).toBeGreaterThan(0);
+    expect(lote.every((m) => m.error === undefined)).toBe(true);
+  });
+
+  it('batch com tools/call assíncrona espera a ferramenta; notificação no batch não responde', async () => {
+    let soltar: () => void = () => undefined;
+    const trava = new Promise<void>((r) => (soltar = r));
+    const lenta: McpTool = {
+      name: 'lenta',
+      description: 'segura a resposta',
+      inputSchema: { type: 'object' },
+      outputSchema: { type: 'object', additionalProperties: true },
+      run: async () => {
+        await trava;
+        return { ok: true };
+      },
+    };
+    const s = sessaoComBatch([lenta]);
+    s.enviar([
+      { jsonrpc: '2.0', id: 1, method: 'ping' },
+      { jsonrpc: '2.0', method: 'notifications/initialized' },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'lenta', arguments: {} } },
+    ]);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(s.lotes).toHaveLength(0); // o array só sai quando TODAS assentam
+    soltar();
+    await vi.waitFor(() => expect(s.lotes).toHaveLength(1));
+    const [lote] = s.lotes;
+    expect(lote.map((m) => m.id)).toEqual([1, 2]);
+    expect((lote[1].result as { structuredContent?: unknown }).structuredContent).toEqual({ ok: true });
+  });
+
+  it('[] → um único -32600; elemento inválido/aninhado vira erro SÓ dele; batch só de notificações não escreve nada', async () => {
+    const vazio = sessaoComBatch();
+    vazio.enviar([]);
+    expect(vazio.avulsas).toHaveLength(1);
+    expect(vazio.avulsas[0]).toMatchObject({ id: null, error: { code: -32600 } });
+    expect(vazio.lotes).toHaveLength(0);
+
+    const misto = sessaoComBatch();
+    misto.enviar([1, [{ jsonrpc: '2.0', id: 'x', method: 'ping' }], { jsonrpc: '2.0', id: 'ok', method: 'ping' }]);
+    await vi.waitFor(() => expect(misto.lotes).toHaveLength(1));
+    const [lote] = misto.lotes;
+    expect(lote).toHaveLength(3);
+    expect(lote.filter((m) => m.error?.code === -32600 && m.id === null)).toHaveLength(2);
+    expect(lote.find((m) => m.id === 'ok')?.result).toEqual({});
+    expect(lote.some((m) => m.id === 'x')).toBe(false); // sem recursão no aninhado
+
+    const soNotificacoes = sessaoComBatch();
+    soNotificacoes.enviar([{ jsonrpc: '2.0', method: 'notifications/initialized' }]);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(soNotificacoes.lotes).toHaveLength(0);
+    expect(soNotificacoes.avulsas).toHaveLength(0);
+  });
+
+  it('transporte sem writeBatch: cada resposta sai avulsa (o id casa do mesmo jeito)', async () => {
+    const s = novaSessao();
+    s.session.handleLine(
+      JSON.stringify([
+        { jsonrpc: '2.0', id: 'p1', method: 'ping' },
+        { jsonrpc: '2.0', id: 'p2', method: 'ping' },
+      ]),
+    );
+    await vi.waitFor(() => expect(s.out).toHaveLength(2));
+    expect(s.out.map((m) => m.id)).toEqual(['p1', 'p2']);
   });
 });
 

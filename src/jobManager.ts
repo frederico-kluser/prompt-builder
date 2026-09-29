@@ -246,6 +246,26 @@ export function agentSummary(rec: {
   return { executions, failed, incomplete, limitCut, avgTurns, avgCostUsd, oracleRate, verdictTreeVersion, judgeErrors, unscoredReps };
 }
 
+/**
+ * Vencedor da run pela MESMA régua do `runs winner` do CLI: a classificação
+ * dos duelos das finais (`standings`, já ordenada por winRate) e, sem finais,
+ * o judge-score. `tie` = o 2º colocado empata na régua — o agente não deve
+ * ler um desempate arbitrário como vitória. `null` = run sem nota nenhuma.
+ */
+export function runWinner(
+  rec: RunRecord,
+): { contestantId: string; label?: string; ruler: 'duels' | 'judge-score'; tie: boolean } | null {
+  const rotulo = (id: string): string | undefined => rec.contestants?.find((c) => c.id === id)?.label;
+  if (rec.standings?.length) {
+    const [a, b] = rec.standings;
+    return { contestantId: a.id, label: a.label ?? rotulo(a.id), ruler: 'duels', tie: b !== undefined && b.winRate === a.winRate };
+  }
+  const notas = Object.entries(rec.judgeScoreByContestant ?? {}).sort((x, y) => y[1] - x[1]);
+  if (notas.length === 0) return null;
+  const [[id, nota], segundo] = notas;
+  return { contestantId: id, label: rotulo(id), ruler: 'judge-score', tie: segundo !== undefined && segundo[1] === nota };
+}
+
 export function benchmarkSummary(rec: RunRecord): Record<string, unknown> {
   return {
     runId: rec.id,
@@ -259,6 +279,7 @@ export function benchmarkSummary(rec: RunRecord): Record<string, unknown> {
     stoppedAtPhase: rec.stoppedAtPhase,
     standings: rec.standings,
     judgeScoreByContestant: rec.judgeScoreByContestant,
+    winner: runWinner(rec),
   };
 }
 

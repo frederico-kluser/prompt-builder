@@ -562,10 +562,15 @@ describe('IMPL-024 — MCP (get_result/read_docs/get_agent_dossier) e CLI docs',
     },
   );
 
-  it('get_result com id válido inexistente continua "não encontrado" (não é erro)', async () => {
+  // IMPL-086: "não encontrado" é RECUSA — isError com mensagem acionável (antes
+  // saía como sucesso `{error}` e o agente seguia como se tivesse lido algo).
+  it('get_result com id válido inexistente é isError "não encontrada" (sem caminho absoluto)', async () => {
     const r = await callTool('get_result', { id: randomUUID() });
-    expect(r?.isError).toBeUndefined();
-    expect(JSON.parse(r!.content[0].text)).toEqual({ error: 'não encontrado' });
+    expect(r?.isError).toBe(true);
+    const out = JSON.parse(r!.content[0].text) as Record<string, unknown>;
+    expect(out).toMatchObject({ ok: false, code: 'not_found' });
+    expect(String(out.error)).toMatch(/não encontrada/u);
+    expect(r!.content[0].text).not.toMatch(ABS_PATH_RE);
   });
 
   it('get_agent_dossier com runId malicioso é rejeitado', async () => {
