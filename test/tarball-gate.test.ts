@@ -19,7 +19,7 @@
 // do CI no tarball real e confere a allowlist contra `src/` sem depender de build.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +35,7 @@ import {
   isAllowedPath,
   listSources,
   readAllowlist,
+  walk,
 } from '../scripts/tarball-gate.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -271,6 +272,29 @@ describe('IMPL-103 allowlist versionada: drift reprova o npm test (não só o jo
       const local = gate({ strict: false, packed: packedReal(), allowlistFile: file });
       expect(local.diffProblems.length).toBeGreaterThan(0);
       expect(local.failed).toBe(local.errors.length > 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('varredura do repositório (walk): não segue links nem entra em node_modules', () => {
+  it('link de diretório que aponta para si mesmo não dá ELOOP; node_modules e pastas ocultas são podados', () => {
+    // O caso real: worktree com `web/node_modules` linkado e, dentro do alvo, um
+    // `node_modules -> .` criado por um `ln -s` repetido — o readdirSync
+    // recursivo seguia o link até ELOOP e o gate caía antes de checar qualquer coisa.
+    const dir = mkdtempSync(path.join(tmpdir(), 'pb-walk-'));
+    try {
+      for (const f of ['a.md', 'sub/b.md', 'node_modules/pkg/index.js', '.git/HEAD', 'web/node_modules/x/y.js', 'web/src/c.ts']) {
+        mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+        writeFileSync(path.join(dir, f), 'x');
+      }
+      symlinkSync(path.join(dir, 'web', 'node_modules'), path.join(dir, 'web', 'node_modules', 'node_modules'));
+      symlinkSync(dir, path.join(dir, 'sub', 'loop')); // diretório → ancestral
+      symlinkSync(path.join(dir, 'a.md'), path.join(dir, 'link.md')); // link de ARQUIVO conta
+      expect(walk(dir, '').sort()).toEqual(['a.md', 'link.md', 'sub/b.md', 'web/src/c.ts']);
+      expect(walk(path.join(dir, 'sub'), 'sub').sort()).toEqual(['sub/b.md']);
+      expect(walk(path.join(dir, 'nao-existe'), 'x')).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

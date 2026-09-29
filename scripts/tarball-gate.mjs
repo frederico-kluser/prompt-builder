@@ -228,15 +228,43 @@ export function packList(root = ROOT) {
   return parsed[0].files.map((f) => f.path).sort();
 }
 
-function walk(dir, prefix) {
-  if (!existsSync(dir)) return [];
+/**
+ * Arquivos sob `dir` (caminhos com `/`, prefixados por `prefix`). NÃO segue
+ * symlink de diretório e poda `node_modules` e pastas ocultas (`.git`,
+ * `.claude/worktrees` com outros checkouts…): o `readdirSync({recursive})`
+ * seguia links — num worktree com `node_modules` linkado, um link que aponta
+ * para si mesmo dava ELOOP e derrubava o gate, e na raiz ele varria centenas
+ * de milhares de arquivos que nunca embarcam.
+ */
+export function walk(dir, prefix) {
   const out = [];
-  for (const nome of readdirSync(dir, { recursive: true })) {
-    const abs = path.join(dir, nome);
-    if (!statSync(abs).isFile()) continue;
-    out.push(prefix ? `${prefix}/${String(nome).split(path.sep).join('/')}` : String(nome).split(path.sep).join('/'));
-  }
+  const visitar = (abs, rel) => {
+    let entradas;
+    try {
+      entradas = readdirSync(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entradas) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+        visitar(path.join(abs, e.name), r);
+      } else if (e.isFile() || (e.isSymbolicLink() && ehArquivo(path.join(abs, e.name)))) {
+        out.push(prefix ? `${prefix}/${r}` : r);
+      }
+    }
+  };
+  if (existsSync(dir)) visitar(dir, '');
   return out;
+}
+
+function ehArquivo(abs) {
+  try {
+    return statSync(abs).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /** Fontes `.ts` de `src/` (relativas à raiz, ordenadas). */
