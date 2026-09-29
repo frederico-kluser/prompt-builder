@@ -261,6 +261,12 @@ export type PendingReason = 'timeout' | 'aborted' | 'no_usage';
  * (IMPL-074 concilia via GET /api/v1/generation?id=…).
  */
 export interface PendingCall {
+  /**
+   * Id de geração para conciliar. `''` (left#14) = chamada interrompida pelo
+   * CANCELAR sem id recuperável (nenhuma resposta chegou): não é conciliável
+   * pelo /generation — segue pendente (limite superior, fora do gasto) e uma
+   * conciliação posterior a lança como conservadora.
+   */
   generationId: string;
   role: CostRole;
   modelId: string;

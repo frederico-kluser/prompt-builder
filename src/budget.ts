@@ -673,8 +673,18 @@ export class BudgetLedger implements CostSink {
    * nao-streaming ele segue gerando depois do abort).
    * - com `generationId`: fica PENDENTE (committed estavel; nem gasto nem
    *   devolvida) ate `settlePending` conciliar pelo GET /generation;
-   * - sem id: vira gasto CONSERVADOR — a reserva inteira, `source: 'unknown'`
-   *   (nao medido nao e "custou zero").
+   * - sem id e `reason: 'aborted'` (o CANCELAR — Ctrl-C, botão, `runs
+   *   cancel`, cancel do MCP): tambem PENDENTE, com id `''` (left#14). Antes a
+   *   reserva inteira (o PIOR caso, max_tokens x preco) virava gasto: cancelar
+   *   no datagen mostrava US$ 0,0622 "gastos" numa chamada que nem respondeu.
+   *   O desfecho e desconhecido — limite superior FORA do gasto, como o do
+   *   cancelado que ja tinha id (o Cancelar nao concilia; ninguem vira
+   *   "custou zero": fica em `pendingUsd`/`committedUsd`, na porta e no teto
+   *   diario). Uma conciliacao posterior o lanca como conservador (id `''`
+   *   nao e conciliavel pelo /generation);
+   * - sem id nos demais casos (timeout, 200 sem usage): vira gasto
+   *   CONSERVADOR — a reserva inteira, `source: 'unknown'` (nao medido nao e
+   *   "custou zero"; a run segue e o gasto tem de pesar ja).
    */
   pending(
     reservation: Reservation,
@@ -698,18 +708,20 @@ export class BudgetLedger implements CostSink {
         tallyFinish((n.finishByRole[entry.role] ??= emptyFinishCounts()), entry.finish);
       }
     }
-    const generationId = entry.generationId?.trim();
+    const idLido = entry.generationId?.trim();
+    // left#14: cancelado sem id = pendente NAO conciliavel (id '').
+    const generationId = idLido || (entry.reason === 'aborted' ? '' : undefined);
     const logBase = {
       role: entry.role,
       modelId: entry.modelId,
-      ...generationIdFields(generationId),
+      ...generationIdFields(idLido),
       usd,
       source: 'unknown' as const,
       ...(entry.provider?.name ? { provider: entry.provider.name } : {}),
       ...(typeof entry.latencyMs === 'number' ? { latencyMs: entry.latencyMs } : {}),
       ...(entry.auditable ? { auditable: true } : {}),
     };
-    if (state && generationId) {
+    if (state && generationId !== undefined) {
       this.close(state, 'pending');
       state.log = BudgetLedger.log(owner, { ...logBase, status: 'pending' });
       const item = {
