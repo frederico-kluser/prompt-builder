@@ -229,13 +229,20 @@ export async function writePrivateFileAtomic(target: string, data: string | Buff
 //   5. POSIX que não seja parte de URL (`https://x/y`) nem de relativo (`a/b`,
 //      `./x`, `../x`): a barra inicial não pode vir depois de palavra, `:`,
 //      `/`, `.`, `~` ou `-`.
+// Rotas DESTA API (`/v1/...`, `/health`) não são caminho de disco: a dica
+// "use POST /v1/benchmark/sessions" de um 400 saía como "POST <caminho>/sessions"
+// (http-api#4). Só o PRIMEIRO segmento exato conta — `/v1x/a` e
+// `<home>/v1/a` continuam redigidos.
 const PATH_END = String.raw`[^\s'"\x60<>|]*`;
-const QUOTED_ABS = String.raw`(['"\x60])((?:file:\/\/|\\\\|[A-Za-z]:[\\/]|\/)[^'"\x60\r\n]*)\1`;
+const NOT_API_ROUTE = String.raw`(?!(?:v1|health)(?![^\s'"\x60<>|/]))`;
+const QUOTED_ABS = String.raw`(['"\x60])((?:file:\/\/|\\\\|[A-Za-z]:[\\/]|\/${NOT_API_ROUTE})[^'"\x60\r\n]*)\1`;
 const GENERIC_ABS = [
   String.raw`file:\/\/[^\s'"\x60<>]*`,
   String.raw`\\\\[^\s'"\x60<>|]+`,
   String.raw`(?<![\w])[A-Za-z]:[\\/]${PATH_END}`,
-  String.raw`(?<![\w:/.~-])\/(?:[^\s'"\x60<>|/]+\/)*[^\s'"\x60<>|/]*`,
+  // `(?<!<[\w-]+>)`: a barra depois de um marcador (`runs/<id>/cancel`) é
+  // continuação de rota, não a raiz do disco.
+  String.raw`(?<![\w:/.~-])(?<!<[\w-]+>)\/${NOT_API_ROUTE}(?:[^\s'"\x60<>|/]+\/)*[^\s'"\x60<>|/]*`,
 ];
 
 function escapeRegExp(s: string): string {

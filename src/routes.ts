@@ -314,7 +314,7 @@ router.post('/sessions', requireKey, ah(async (req, res) => {
     return;
   }
   if (parsed.data.mode !== 'training') {
-    res.status(400).json({ error: 'POST /sessions exige mode "training".' });
+    res.status(400).json({ error: 'POST /v1/benchmark/sessions exige mode "training".' });
     return;
   }
   const apiKey = (req as Request & { apiKey: string }).apiKey;
