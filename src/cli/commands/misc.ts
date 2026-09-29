@@ -42,6 +42,7 @@ import {
   type ContestantRepetitionReport,
 } from '../../stats.js';
 import { convergenceReasonText, sessionConfirmationText } from '../../engine/sessionDecision.js';
+import { plannedTrainingStages, trainingPromotionPower } from '../../engine/trainingPolicy.js';
 import { judgeScaleWarning } from '../../engine/verdictAggregate.js';
 import { winnerFromStandings } from '../../engine/duelCore.js';
 import { groupVerdictFailures, verdictFailuresFromStages } from '../../refJudge.js';
@@ -229,6 +230,15 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   // IMPL-050/IMPL-054: poder e desenho de amostra junto do custo — estimar
   // dinheiro sem estimar poder produz run cara que não decide nada.
   const power = planPower({ n: config.stages });
+  // web-live#5: no treino, o gate da melhor de K precisa CONSEGUIR promover.
+  const trainingPower =
+    config.mode === 'training'
+      ? trainingPromotionPower({
+          stages: plannedTrainingStages(config),
+          holdoutRatio: config.holdoutRatio,
+          techniques: config.techniqueIds?.length,
+        })
+      : undefined;
   const reps =
     config.mode === 'compare'
       ? Math.max(1, Math.round(config.repeats ?? 1))
@@ -241,6 +251,7 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
     out.line();
     out.line('Poder (IMPL-050):');
     for (const l of formatPowerPlan(power)) out.line(`  ${l}`);
+    if (trainingPower?.message) out.warn(`poder do gate: ${trainingPower.message}`);
     if (config.stages <= 5) {
       out.warn(
         `modo econômico (stages=${config.stages}): com n=${power.n} só se detectam efeitos ≥ ${power.deltaDetectavelPp.toFixed(1)} p.p. (poder 80%, α=0,05 unilateral) — suba --stages para decidir Δ menores`,
@@ -268,6 +279,7 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   out.result(true, 'estimate', {
     estimate: est,
     power,
+    ...(trainingPower ? { trainingPower } : {}),
     sample: { stages: config.stages, repeats: reps, economicMode: config.stages <= 5 },
     catalog: { source: ctx.catalogSource, scope: ctx.catalogScope, models: ctx.models.length },
   });

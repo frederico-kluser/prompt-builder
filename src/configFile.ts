@@ -159,6 +159,14 @@ export interface ArenaConfigFile {
     reflection?: 'off' | 'deterministic' | 'llm';
     /** Pool Pareto (F4.1): >1 = população de prompts em vez do campeão único. */
     paretoPool?: number;
+    /** IMPL-062: pai ∝ cobertura (matriz candidato × cenário) — só com fatias múltiplas e n ≥ 20. */
+    paretoCoverageSampling?: boolean;
+    /** IMPL-060: teto do dossiê de lições em TOKENS (200..4000; default 4000). */
+    maxLessonTokens?: number;
+    /** IMPL-060: gabarito no dossiê de lições (default OFF — risco de exploração do juiz). */
+    lessonsIncludeReference?: boolean;
+    /** IMPL-065: piso de itens CURADOS (âncora humana) para declarar campeão (default 20, calibrar). */
+    minCuratedItems?: number;
     // `halving` foi descontinuado (IMPL-012): arquivo antigo que o traga ainda
     // é aceito — o zod descarta a chave e `parseArenaConfig` devolve um aviso.
     /** Aceito aqui por compat; o lugar canônico é a raiz do arquivo. */
@@ -172,7 +180,8 @@ export interface ArenaConfigFile {
   repeats?: 1 | 2 | 3;
   /** Nº de finalistas que duelam entre si em cada cenário (0 = sem finais). Default 3. */
   finalists?: number; // int 0..12
-  judging?: { reference?: boolean; passes?: 1 | 2 };
+  /** `auditable` (IMPL-075): juiz e gabarito com provedor travado, sem fallback e `require_parameters`. */
+  judging?: { reference?: boolean; passes?: 1 | 2; auditable?: boolean };
   limits?: { maxOutputTokens?: number; timeoutMs?: number; concurrency?: number }; // int positivos
   compliance?: { area: string; includeRessalvas: boolean };
   /** Dado pessoal (IMPL-042): 'synthetic' = "só sintético" (recusa dado de aparência real). */
@@ -478,6 +487,22 @@ export const arenaConfigSchema = z
               .enum(['off', 'deterministic', 'llm'], "deve ser 'off', 'deterministic' ou 'llm'")
               .optional(),
             paretoPool: z.number().int().min(0).max(8).optional(),
+            // IMPL-062/IMPL-060/IMPL-065 — campos do LAÇO (o runConfigSchema os aceita
+            // também; antes o zod os stripava e o CLI rodava sempre o default).
+            paretoCoverageSampling: z.boolean('deve ser boolean').optional(),
+            maxLessonTokens: z
+              .number('deve ser número inteiro')
+              .int('deve ser número inteiro')
+              .min(200, 'mínimo 200')
+              .max(4000, 'máximo 4000')
+              .optional(),
+            lessonsIncludeReference: z.boolean('deve ser boolean').optional(),
+            minCuratedItems: z
+              .number('deve ser número inteiro')
+              .int('deve ser número inteiro')
+              .min(0, 'mínimo 0')
+              .max(1000, 'máximo 1000')
+              .optional(),
             // `halving`: descontinuado (IMPL-012) — fora do schema de propósito; o
             // zod descarta a chave (qualquer valor) e o aviso sai de
             // `deprecationWarnings`, então arquivo antigo nunca quebra.
@@ -508,6 +533,8 @@ export const arenaConfigSchema = z
           {
             reference: z.boolean('deve ser boolean').optional(),
             passes: z.union([z.literal(1), z.literal(2)], 'deve ser 1 ou 2').optional(),
+            // IMPL-075: modo auditável (juiz + gabarito com provedor travado).
+            auditable: z.boolean('deve ser boolean').optional(),
           },
           'judging deve ser um objeto',
         )

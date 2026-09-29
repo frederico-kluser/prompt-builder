@@ -18,6 +18,7 @@ import { hasGabarito, labelIssue, toStageSpec } from '../../engine/libraryCore.j
 import { formatGateSummary, formatSignificance } from '../../stats.js';
 import { holdoutSkipReasonText } from '../../holdout.js';
 import { holdoutSkipReasonOf } from '../../engine/sessionDecision.js';
+import { TRAINING_DEFAULT_STAGES } from '../../engine/trainingPolicy.js';
 import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, toCliError, type Output } from '../output.js';
 import { fatalGatewayErrorFromRecord } from '../../openrouter.js';
 import {
@@ -131,6 +132,9 @@ const OPTIONS = {
   'allow-pii': { type: 'boolean' },
   // IMPL-030: roda num processo destacado; acompanhe por `runs status/wait/cancel`.
   detach: { type: 'boolean' },
+  // IMPL-075: modo AUDITÁVEL — juiz e gabarito com provedor travado
+  // (`allow_fallbacks:false`, `require_parameters:true`); vale sobre o --config.
+  auditable: { type: 'boolean' },
 } as const;
 
 /** `--pii-mode` validado (uso errado = exit 2, nada gasto). */
@@ -372,7 +376,9 @@ export async function buildFromFlags(
 
   const common: Record<string, unknown> = {
     theme,
-    stages: n(values.stages, '--stages') ?? 5,
+    // web-live#5: no treino o default é o que deixa o gate CONSEGUIR promover
+    // (com 5 cenários um único empate já segura) — ver trainingPromotionPower.
+    stages: n(values.stages, '--stages') ?? (mode === 'training' ? TRAINING_DEFAULT_STAGES : 5),
     datagenModelId:
       (typeof values.datagen === 'string' && values.datagen.trim()) || judges[0],
     judgeModelIds: judges,
@@ -761,9 +767,17 @@ function sessionOutcome(out: Output, record: SessionRecord, sessionId: string, x
           'pode estar sobreajustado aos cenários de treino.',
       );
     }
+    // IMPL-065: sem âncora humana suficiente a sessão NÃO declara campeão — a
+    // recusa sai citando os itens curados e o piso (stderr), e o prompt é
+    // rotulado como o melhor do bootstrap.
+    const naoDeclarado = record.championDeclaration?.declared === false;
+    if (naoDeclarado) {
+      out.line();
+      out.warn(record.championDeclaration!.message);
+    }
     if (campeao) {
       out.line();
-      out.line('--- prompt campeão ---');
+      out.line(naoDeclarado ? '--- melhor prompt do bootstrap (campeão NÃO declarado) ---' : '--- prompt campeão ---');
       out.line(campeao.systemPrompt);
     }
   }
@@ -798,6 +812,9 @@ function sessionOutcome(out: Output, record: SessionRecord, sessionId: string, x
     // cli#9: por que não houve holdout (null = houve).
     holdoutSkipReason: holdoutSkipReasonOf(record) ?? null,
     championPrompt: campeao?.systemPrompt,
+    // IMPL-065: campeão só DECLARADO sob âncora humana (itens curados ≥ piso);
+    // `declared:false` = o prompt acima é o melhor do bootstrap, não campeão.
+    championDeclaration: record.championDeclaration ?? null,
     holdout: record.holdout,
     significance: record.significance,
     ...extrasData(x),
@@ -996,7 +1013,12 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
 
   const budget = resolveBudget(values, (m) => out.warn(m));
   const budgetUsd = budgetUsdOf(budget);
-  const configComOrcamento: RunConfig = { ...config, ...(budgetUsd !== undefined ? { budgetUsd } : {}) };
+  const configComOrcamento: RunConfig = {
+    ...config,
+    ...(budgetUsd !== undefined ? { budgetUsd } : {}),
+    // IMPL-075: `--auditable` liga o modo (nunca desliga o do arquivo).
+    ...(values.auditable === true ? { auditable: true } : {}),
+  };
   const hash = configHash(configComOrcamento);
 
   // IMPL-031 — IDEMPOTENCIA ANTES DE TUDO: a key ja usada com a MESMA config

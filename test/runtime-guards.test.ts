@@ -224,6 +224,12 @@ describe('whitelists silenciosos — os campos NÃO podem sumir', () => {
       iterations: 2,
       reflection: 'llm', // proposital: consumido pelo trainer, NÃO copiado p/ a run
       paretoPool: 3,
+      // IMPL-062/IMPL-060/IMPL-065: campos do LAÇO (consumidos pelo trainer).
+      paretoCoverageSampling: true,
+      maxLessonTokens: 1200,
+      lessonsIncludeReference: true,
+      minCuratedItems: 5,
+      auditable: true, // IMPL-075: vale em toda iteração/holdout (COPIADO)
       // Campos "esquecíveis" — os que já sumiram uma vez:
       compliance: { area: 'saude', includeRessalvas: true },
       piiMode: 'synthetic', // IMPL-042
@@ -266,6 +272,10 @@ describe('whitelists silenciosos — os campos NÃO podem sumir', () => {
       'feedbackDriven',
       'reflection', // consumido pelo trainingLoop (reflexão GEPA), não pela run
       'paretoPool', // idem (pool Pareto do loop)
+      'paretoCoverageSampling', // idem (amostragem do pai no pool)
+      'maxLessonTokens', // dossiê de lições (montado pelo loop)
+      'lessonsIncludeReference', // idem
+      'minCuratedItems', // declaração de campeão (fim da sessão)
       'budgetUsd',
     ]);
     for (const [key, value] of Object.entries(cfg)) {
