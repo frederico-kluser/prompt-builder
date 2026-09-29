@@ -643,6 +643,12 @@ function rotaDoPipeline(req: FakeRequest, n: number): { text: string; usage: { p
     };
   }
   if (req.model === 'fake/ref') return { text: `Gabarito: ${req.user.slice(0, 30)}`, usage };
+  // IMPL-072: o CLI real manda TODO papel em streaming — o juiz é roteado pelo
+  // MODELO, não por `stream` (que agora é verdadeiro para todos).
+  if (req.model === 'fake/judge') {
+    if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
+    return { text: pointwiseReply(req, 'resolve', 'confere'), usage };
+  }
   if (req.stream) return { text: `Resposta de ${req.model}`, usage };
   if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
   return { text: pointwiseReply(req, 'resolve', 'confere'), usage };

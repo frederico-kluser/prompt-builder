@@ -56,7 +56,8 @@ describe('IMPL-021 (a) — o gateway não lê o ambiente; os pontos de entrada i
   });
 
   it('gatewayConfigFromEnv traduz OPENROUTER_* (e ignora concorrência não numérica)', () => {
-    expect(gatewayConfigFromEnv({})).toEqual({});
+    // IMPL-072: streaming é o DEFAULT de runtime (a válvula é OPENROUTER_STREAM_TRANSPORT=0).
+    expect(gatewayConfigFromEnv({})).toEqual({ streamTransport: true });
     const cfg = gatewayConfigFromEnv({
       OPENROUTER_BASE_URL: 'http://proxy.local/api/v1///',
       OPENROUTER_APP_URL: 'https://app.exemplo',
@@ -70,8 +71,8 @@ describe('IMPL-021 (a) — o gateway não lê o ambiente; os pontos de entrada i
     expect(gw.config.maxConcurrency).toBe(4);
     expect(gw.currentConcurrency().limit).toBe(4); // min(8, teto)
     // Antes: Number('abc') = NaN travava o semáforo para sempre.
-    expect(gatewayConfigFromEnv({ OPENROUTER_MAX_CONCURRENCY: 'abc' })).toEqual({});
-    expect(gatewayConfigFromEnv({ OPENROUTER_BASE_URL: '   ' })).toEqual({});
+    expect(gatewayConfigFromEnv({ OPENROUTER_MAX_CONCURRENCY: 'abc' })).toEqual({ streamTransport: true });
+    expect(gatewayConfigFromEnv({ OPENROUTER_BASE_URL: '   ' })).toEqual({ streamTransport: true });
   });
 
   it('base URL e headers de atribuição vêm da config injetada', async () => {
@@ -130,6 +131,8 @@ describe('IMPL-021 (a) — o gateway não lê o ambiente; os pontos de entrada i
         baseUrl: DEFAULT_OPENROUTER_BASE_URL,
         appUrl: 'https://spa.vercel.app',
         appTitle: 'Prompt Builder',
+        // IMPL-072: no navegador todo papel vai em streaming.
+        streamTransport: true,
       });
     } finally {
       vi.unstubAllGlobals();
@@ -313,12 +316,12 @@ describe('IMPL-021 (c) — limitador AIMD por instância', () => {
     }
   });
 
-  it('429 persistente com a janela avançando: metade por janela (8→4→2→1), piso 1, 7 envios no máximo', async () => {
+  it('429 persistente com a janela avançando: metade por janela (8→4→2→1), piso 1, 5 envios no máximo (IMPL-073)', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
-      // Cada resposta do provedor chega numa janela NOVA (+1,1 s): 6 recuos
-      // cabem em 6 janelas distintas — e o piso do limite continua 1.
+      // Cada resposta do provedor chega numa janela NOVA (+1,1 s): 4 recuos
+      // cabem em 4 janelas distintas — e o piso do limite continua 1.
       const fake = fakeOpenRouter({
         chat: () => {
           vi.setSystemTime(new Date(Date.now() + AIMD_DECREASE_WINDOW_MS + 100));
@@ -329,7 +332,8 @@ describe('IMPL-021 (c) — limitador AIMD por instância', () => {
       await expect(gw.chatCompletion({ apiKey: KEY, modelId: 'x/y', messages: msgs })).rejects.toThrow(
         /rate limit \(HTTP 429\)/,
       );
-      expect(MAX_RETRIES).toBe(6);
+      // IMPL-073 (R-07a:REC-3): teto de mercado — <= 5 tentativas HTTP por resposta.
+      expect(MAX_RETRIES).toBe(4);
       expect(fake.chatRequests()).toHaveLength(1 + MAX_RETRIES);
       expect(gw.currentConcurrency()).toEqual({ limit: 1, active: 0, queued: 0 });
     } finally {

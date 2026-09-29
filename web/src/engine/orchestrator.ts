@@ -26,7 +26,7 @@ import { runCompleteness } from './stats';
 import { emitEvent } from './events';
 import { saveRun } from './storage';
 import { contestantsFromConfig } from './normalize';
-import { listModels } from './openrouter';
+import { gatewayErrorFields, listModels, reconcileAtRunEnd } from './openrouter';
 import { enforceRunCompliance } from '../lgpd';
 import { BudgetLedger, isControlSignal, RunCancelled, toControlSignal } from './budget';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
@@ -154,6 +154,9 @@ function syncLedger(record: RunRecord, ledger: BudgetLedger): void {
   record.costByRole = snap.byRole;
   record.costAccuracy = snap.accuracy;
   record.costLedger = ledger.summary(); // IMPL-017: spent/committed/pending
+  // IMPL-074 (espelho do Node): registo por chamada (id de geração/provedor/conciliação).
+  record.callLog = ledger.callLog();
+  if (ledger.callLogDropped > 0) record.callLogDropped = ledger.callLogDropped;
   if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
   // IMPL-014 (espelho do Node): sinais de fim por papel + taxa de truncamento
   // da run, do MESMO ponto unico do custo — 100% das chamadas, juiz inclusive.
@@ -266,6 +269,8 @@ async function executeRun(
     // As portas suaves saem do runLoop com `return` (sem lançar) — é o que
     // preserva o parcial. O fechamento terminal acontece aqui.
     if (record.status === 'running') {
+      // IMPL-074 (espelho do Node): pendentes conciliadas pela fatura antes da escrita terminal.
+      if (state.ledger && record.stoppedReason !== 'cancelled') await reconcileAtRunEnd(state.ledger, apiKey);
       if (state.ledger) syncLedger(record, state.ledger);
       record.status = record.stoppedReason ? 'aborted' : 'finished';
       record.finishedAt = nowIso();
@@ -276,6 +281,9 @@ async function executeRun(
       });
     }
   } catch (err) {
+    // IMPL-074: concilia as pendentes (menos no Cancelar: sai na hora).
+    const cancelou = isControlSignal(err) && err.benchControl !== 'budget';
+    if (state.ledger && !cancelou) await reconcileAtRunEnd(state.ledger, apiKey);
     // Mesmo falhando, o que já foi gasto aparece no record.
     if (state.ledger) syncLedger(record, state.ledger);
     if (isControlSignal(err)) {
@@ -302,6 +310,8 @@ async function executeRun(
       console.error(`[bench ${record.id}] run.error:`, err);
       record.status = 'error';
       record.error = err instanceof Error ? err.message : String(err);
+      // cli#3 (espelho do Node): a classe da falha do gateway, estruturada.
+      Object.assign(record, gatewayErrorFields(err));
       record.finishedAt = nowIso();
       await saveRun(record);
       emitEvent({ type: 'run.error', runId: record.id, error: record.error });
@@ -1273,6 +1283,7 @@ async function runLoop(
   record.verdictIntegrity = integridade.integrity;
   for (const motivo of integridade.integrity.reasons) log(runId, `inconclusiva: ${motivo}`);
 
+  await reconcileAtRunEnd(ledger, apiKey); // IMPL-074: pendentes conciliadas antes da escrita terminal
   syncLedger(record, ledger);
   // Parou numa porta (finais sem orçamento): o resultado é PARCIAL e diz isso —
   // `aborted` + `stoppedReason`, nunca 'finished' com cara de completo. Sem

@@ -50,6 +50,10 @@ export interface FakeChatReply {
   nativeFinishReason?: string;
   /** `message.refusal` (JSON) / `delta.refusal` (SSE) — recusa declarada pelo modelo. */
   refusal?: string;
+  /** Id da geração (`gen-…`) em todo chunk/no corpo — como o OpenRouter manda (IMPL-074). */
+  id?: string;
+  /** Campo `provider` (nome do provedor que serviu) em todo chunk/no corpo (IMPL-075). */
+  provider?: string;
 }
 
 export interface FakeOpenRouterOptions {
@@ -87,7 +91,15 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
     let body: Record<string, unknown> | null = null;
     if (typeof init?.body === 'string') body = JSON.parse(init.body) as Record<string, unknown>;
     const path = new URL(url).pathname;
-    const messages = (body?.messages ?? []) as { role: string; content: string }[];
+    const messages = (body?.messages ?? []) as { role: string; content: unknown }[];
+    // Conteúdo em PARTES (`[{ type: 'text', text, cache_control }]` — IMPL-114)
+    // vira o texto concatenado: o roteamento dos testes lê texto, não a forma.
+    const textOf = (c: unknown): string =>
+      typeof c === 'string'
+        ? c
+        : Array.isArray(c)
+          ? c.map((p) => (p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string' ? (p as { text: string }).text : '')).join('')
+          : '';
     const req: FakeRequest = {
       url,
       path,
@@ -95,8 +107,8 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
       headers,
       body,
       model: String(body?.model ?? ''),
-      system: messages.find((m) => m.role === 'system')?.content ?? '',
-      user: messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n'),
+      system: textOf(messages.find((m) => m.role === 'system')?.content),
+      user: messages.filter((m) => m.role === 'user').map((m) => textOf(m.content)).join('\n'),
       stream: body?.stream === true,
     };
     requests.push(req);
@@ -128,16 +140,22 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
     billedCalls += 1;
     const text = reply.text ?? '';
 
+    // Campos que o OpenRouter repete em TODO chunk (e no corpo JSON).
+    const meta: Record<string, unknown> = {
+      ...(reply.id ? { id: reply.id } : {}),
+      ...(reply.provider ? { provider: reply.provider } : {}),
+    };
     if (req.stream) {
       const frames: string[] = [];
       const meio = Math.ceil(text.length / 2);
       for (const pedaco of [text.slice(0, meio), text.slice(meio)]) {
-        if (pedaco) frames.push(JSON.stringify({ choices: [{ delta: { content: pedaco } }] }));
+        if (pedaco) frames.push(JSON.stringify({ ...meta, choices: [{ delta: { content: pedaco } }] }));
       }
-      if (reply.refusal) frames.push(JSON.stringify({ choices: [{ delta: { refusal: reply.refusal } }] }));
+      if (reply.refusal) frames.push(JSON.stringify({ ...meta, choices: [{ delta: { refusal: reply.refusal } }] }));
       if (reply.finishReason || reply.nativeFinishReason) {
         frames.push(
           JSON.stringify({
+            ...meta,
             choices: [
               {
                 delta: {},
@@ -148,8 +166,8 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
           }),
         );
       }
-      if (reply.error) frames.push(JSON.stringify({ error: reply.error }));
-      if (usage) frames.push(JSON.stringify({ choices: [], usage }));
+      if (reply.error) frames.push(JSON.stringify({ ...meta, error: reply.error }));
+      if (usage) frames.push(JSON.stringify({ ...meta, choices: [], usage }));
       frames.push(...(reply.trailing ?? []));
       frames.push('[DONE]');
       return new Response(sse(frames), {
@@ -162,7 +180,7 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
     };
     if (reply.finishReason) choice.finish_reason = reply.finishReason;
     if (reply.nativeFinishReason) choice.native_finish_reason = reply.nativeFinishReason;
-    const json: Record<string, unknown> = { choices: [choice] };
+    const json: Record<string, unknown> = { ...meta, choices: [choice] };
     if (usage) json.usage = usage;
     if (reply.error) json.error = reply.error;
     return new Response(JSON.stringify(json), { status: 200 });

@@ -2,6 +2,7 @@ import {
   catalogDeniesReasoning,
   chatCompletionStream,
   guessPromptTokens,
+  isCallerRetryable,
   isGatewayBlocked,
   peekModelsCache,
   type ChatMessage,
@@ -244,6 +245,11 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
       lastError = err;
       attempt += 1;
       console.error(`[competitor ${modelId}] tentativa ${attempt} falhou:`, err);
+      // IMPL-073 (R-07a:REC-3): UM nível de retry por resposta. HTTP
+      // classificado (429/5xx já re-tentados pelo gateway; 4xx não muda) e
+      // desfecho desconhecido depois do despacho (pode ter sido cobrado) NÃO
+      // repetem aqui — antes 429 em rajada virava 2 × 7 = 14 POSTs.
+      if (!isCallerRetryable(err)) break;
     }
   }
 

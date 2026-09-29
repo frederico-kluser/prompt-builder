@@ -1,6 +1,6 @@
 import { applyReasoning } from './reasoning.js';
 import { parseLifecycleMeta } from './engine/modelLifecycle.js';
-import { isControlSignal, toControlSignal } from './budget.js';
+import { isControlSignal, isGenerationId, toControlSignal, type SettleDetails } from './budget.js';
 import { classifyPrice, priceTokens, type PriceFieldKind } from './engine/pricing.js';
 import { effortLabelOf, finishSignalsOf, isTruncated, truncationSignals } from './engine/truncation.js';
 import { createPiiGuard, type PiiGuardStats } from './engine/pii.js';
@@ -15,9 +15,11 @@ import type {
   CallCost,
   CallFinishSignals,
   CallProviderInfo,
+  CostLedgerSummary,
   CostRole,
   CostSink,
   ModelReasoningMeta,
+  PendingCall,
   PendingReason,
   OpenRouterModel,
   PricingTier,
@@ -55,8 +57,14 @@ const DEFAULT_APP_TITLE = 'Prompt Builder';
 const DEFAULT_MAX_CONCURRENCY = 32;
 const INITIAL_CONCURRENCY = 8;
 const MIN_CONCURRENCY = 1;
-/** Re-tentativas de transientes (429/5xx/rede). 1 + 6 = no maximo 7 tentativas. */
-export const MAX_RETRIES = 6;
+/**
+ * Re-tentativas de transientes (429/5xx/rede ANTES do envio). IMPL-073
+ * (R-07a:REC-3): 1 + 4 = no maximo 5 tentativas HTTP por RESPOSTA — o teto
+ * de mercado (2-4 re-tentativas) somando os dois niveis: o laco do competidor
+ * NAO repete o que o gateway ja re-tentou (`isCallerRetryable`). Antes eram
+ * 7 por chamada e 14 por resposta do competidor. `Retry-After` e piso.
+ */
+export const MAX_RETRIES = 4;
 /**
  * Teto de saida quando o chamador nao passa `maxTokens` (IMPL-017): o corpo
  * SEMPRE leva `max_tokens` e a reserva usa o MESMO numero. Antes a reserva
@@ -73,7 +81,12 @@ export function effectiveMaxTokens(maxTokens: number | undefined): number {
   return typeof maxTokens === 'number' && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS;
 }
 
-/** Id da geracao (`gen-…`) no corpo/chunk — chave da conciliacao via GET /generation. */
+/**
+ * Id da geracao (`gen-…`) no corpo/chunk — chave da conciliacao via GET
+ * /generation. Devolve o id CRU (qualquer texto nao vazio): quem decide se ele
+ * e conciliavel e `isGenerationId` (formato do OpenRouter) — o registo guarda
+ * os dois (id + validade), a conciliacao so consulta os validos.
+ */
 function generationIdOf(payload: unknown): string | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
   const id = (payload as { id?: unknown }).id;
@@ -124,6 +137,14 @@ export interface GatewayConfig {
   appUrl: string;
   /** Header `X-Title` de atribuicao. */
   appTitle: string;
+  /**
+   * IMPL-120 (R-01b:REC-9) — headers de ATRIBUICAO (`HTTP-Referer`/`X-Title`)
+   * sao DADO enviado ao OpenRouter (terceiro): `false` = nenhum dos dois vai no
+   * fio. Ausente/true = enviados (comportamento historico). No Node quem liga a
+   * supressao e `PROMPT_BUILDER_NO_ATTRIBUTION` (src/gatewayEnv.ts); na SPA, a
+   * preferencia salva no navegador (shim web/src/engine/openrouter.ts).
+   */
+  attribution?: boolean;
   /** Teto do limitador adaptativo (>= 1). */
   maxConcurrency: number;
   /** TTL do cache de catalogo em memoria. */
@@ -142,11 +163,15 @@ export interface GatewayConfig {
    */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /**
-   * IMPL-072 — transporte STREAMING (`stream: true` + SSE) também para
-   * `chatCompletion` (juiz, duelo, gabarito, datagen, reescritor): em abort/
-   * timeout o provedor PARA de gerar (e cobra só o gerado) — no não-streaming
-   * ele continua e cobra a resposta inteira. Default false = caminho JSON
-   * histórico; os papéis migram passando `streamTransport` ou ligando aqui.
+   * IMPL-072 (R-07a:REC-1) — transporte STREAMING (`stream: true` + SSE)
+   * também para `chatCompletion` (juiz, duelo, gabarito, datagen, reescritor):
+   * em abort/timeout o provedor PARA de gerar (e cobra só o gerado) — no
+   * não-streaming ele continua e cobra a resposta inteira (~98,7% do gasto
+   * ficava exposto a abort cobrado). LIGADO em todo ponto de entrada de
+   * runtime (Node: `gatewayConfigFromEnv`, com a válvula de escape
+   * `OPENROUTER_STREAM_TRANSPORT=0`; SPA: `browserGatewayConfig`); a instância
+   * crua de `createGateway()` fica no caminho JSON histórico. O parser aceita
+   * um corpo JSON mesmo pedindo stream (proxy/mock que ignora `stream: true`).
    */
   streamTransport?: boolean;
   /**
@@ -209,6 +234,13 @@ const DEFAULT_CONFIG: GatewayConfig = {
   appTitle: DEFAULT_APP_TITLE,
   maxConcurrency: DEFAULT_MAX_CONCURRENCY,
   modelsCacheTtlMs: MODELS_CACHE_TTL_MS,
+  attribution: true,
+  // IMPL-072: a instância CRUA (`createGateway()` sem config — testes com
+  // transporte falso) fica no caminho JSON; TODO ponto de entrada de runtime
+  // liga o streaming: Node por `gatewayConfigFromEnv` (CLI, servidor, MCP,
+  // biblioteca — src/index.ts) e a SPA por `browserGatewayConfig`. Contrato
+  // em test/gateway-transport.test.ts ("default de RUNTIME").
+  streamTransport: false,
   metaTimeoutMs: DEFAULT_META_TIMEOUT_MS,
   resendGuardTtlMs: 120_000,
   // IMPL-075 (iii): 'missing' por omissao — toda chamada com id de geracao
@@ -237,6 +269,7 @@ function mergeConfig(base: GatewayConfig, patch: Partial<GatewayConfig>): Gatewa
   }
   if (typeof patch.appUrl === 'string') out.appUrl = patch.appUrl;
   if (typeof patch.appTitle === 'string') out.appTitle = patch.appTitle;
+  if (typeof patch.attribution === 'boolean') out.attribution = patch.attribution;
   if (typeof patch.maxConcurrency === 'number' && Number.isFinite(patch.maxConcurrency)) {
     out.maxConcurrency = Math.max(MIN_CONCURRENCY, Math.floor(patch.maxConcurrency));
   }
@@ -857,6 +890,52 @@ export function gatewayErrorKind(err: unknown): GatewayErrorKind | undefined {
   return (err as GatewayError).gatewayError;
 }
 
+/**
+ * cli#3 — campos ESTRUTURADOS de uma falha classificada, para o record da
+ * run: sem eles o record guardava so a mensagem e o CLI saia com exit 1
+ * (`internal`) em vez do 4/5 documentado.
+ */
+export function gatewayErrorFields(err: unknown): { errorKind?: GatewayErrorKind; errorHttpStatus?: number } {
+  const kind = gatewayErrorKind(err);
+  if (!kind) return {};
+  const status = (err as { httpStatus?: unknown }).httpStatus;
+  return { errorKind: kind, ...(typeof status === 'number' ? { errorHttpStatus: status } : {}) };
+}
+
+/**
+ * Classe FATAL (auth/sem credito) reconhecida numa MENSAGEM — para records
+ * que so guardaram o texto (sessao de treino, records antigos). Casa pelo
+ * inicio canonico das mensagens de `classifyHttpError`, em qualquer posicao
+ * (o treino pode prefixar a mensagem da run).
+ */
+export function gatewayErrorKindFromMessage(message: string | undefined): 'auth' | 'no_credit' | undefined {
+  if (!message) return undefined;
+  if (message.includes(FATAL_MESSAGE_PREFIX.auth)) return 'auth';
+  if (message.includes(FATAL_MESSAGE_PREFIX.noCredit402) || message.includes(FATAL_MESSAGE_PREFIX.noCredit403)) {
+    return 'no_credit';
+  }
+  return undefined;
+}
+
+/**
+ * Reconstrói a falha FATAL do gateway a partir de um record (`errorKind` ou a
+ * mensagem canonica) — o CLI a passa pelo MESMO classificador de exit
+ * (auth = 4, sem credito = 5). Outras classes/sem falha = `undefined`.
+ */
+export function fatalGatewayErrorFromRecord(rec: {
+  error?: string;
+  errorKind?: string;
+  errorHttpStatus?: number;
+}): GatewayError | undefined {
+  const kind =
+    rec.errorKind === 'auth' || rec.errorKind === 'no_credit' ? rec.errorKind : gatewayErrorKindFromMessage(rec.error);
+  if (!kind) return undefined;
+  const status = typeof rec.errorHttpStatus === 'number' ? rec.errorHttpStatus : kind === 'auth' ? 401 : 402;
+  return new GatewayError(kind, rec.error ?? (kind === 'auth' ? FATAL_MESSAGE_PREFIX.auth : FATAL_MESSAGE_PREFIX.noCredit402), {
+    httpStatus: status,
+  });
+}
+
 /** true = a chamada foi bloqueada por moderacao/guardrail (nao e erro de infra nem de key). */
 export function isGatewayBlocked(err: unknown): err is GatewayError & { block: GatewayBlock } {
   return gatewayErrorKind(err) === 'blocked';
@@ -943,6 +1022,17 @@ export function describeOpenRouterError(status: number, body: string): string {
   return classifyHttpError(status, body).message;
 }
 
+/**
+ * Inicio CANONICO das mensagens das falhas FATAIS (cli#3): o mesmo texto monta
+ * o erro e o reconhece num record que so guardou a mensagem (ver
+ * `gatewayErrorKindFromMessage`) — mudar um sem o outro quebra o contrato.
+ */
+const FATAL_MESSAGE_PREFIX = {
+  auth: 'OpenRouter recusou a key (HTTP 401)',
+  noCredit402: 'OpenRouter sem credito (HTTP 402)',
+  noCredit403: 'OpenRouter recusou por limite de gasto (HTTP 403)',
+} as const;
+
 /** Erro HTTP do OpenRouter => `GatewayError` classificado (puro; exportado p/ testes). */
 export function classifyHttpError(status: number, body: string): GatewayError {
   const parsed = parseErrorBody(body);
@@ -951,7 +1041,7 @@ export function classifyHttpError(status: number, body: string): GatewayError {
   if (status === 401) {
     return new GatewayError(
       'auth',
-      `OpenRouter recusou a key (HTTP 401): a key e invalida, expirou ou foi revogada. Reconfigure em Configuracoes.${detalhe}`,
+      `${FATAL_MESSAGE_PREFIX.auth}: a key e invalida, expirou ou foi revogada. Reconfigure em Configuracoes.${detalhe}`,
       { httpStatus: status },
     );
   }
@@ -960,12 +1050,12 @@ export function classifyHttpError(status: number, body: string): GatewayError {
     if (block) return new GatewayError('blocked', block.message, { httpStatus: status, block });
     return new GatewayError(
       'no_credit',
-      `OpenRouter recusou por limite de gasto (HTTP 403): o limite de credito da key/conta foi atingido.${detalhe}`,
+      `${FATAL_MESSAGE_PREFIX.noCredit403}: o limite de credito da key/conta foi atingido.${detalhe}`,
       { httpStatus: status },
     );
   }
   if (status === 402) {
-    return new GatewayError('no_credit', `OpenRouter sem credito (HTTP 402): adicione creditos na sua conta.${detalhe}`, {
+    return new GatewayError('no_credit', `${FATAL_MESSAGE_PREFIX.noCredit402}: adicione creditos na sua conta.${detalhe}`, {
       httpStatus: status,
     });
   }
@@ -1274,11 +1364,31 @@ export function modelFamilyOf(modelId: string): string {
 const COST_SAMPLE_LIMIT = 5000;
 const costSamples: CostCalibrationSample[] = [];
 
+/**
+ * Ouvintes de amostra (IMPL-113): quem PERSISTE a calibração entre processos
+ * (CLI: arquivo no diretório de dados; SPA: armazenamento do navegador) —
+ * antes o anel só vivia em memória e cada CLI nascia sem nada para calibrar.
+ */
+const costSampleListeners = new Set<(sample: CostCalibrationSample) => void>();
+
+/** Assina as amostras novas; devolve a função que cancela a assinatura. */
+export function subscribeCostSamples(listener: (sample: CostCalibrationSample) => void): () => void {
+  costSampleListeners.add(listener);
+  return () => costSampleListeners.delete(listener);
+}
+
 /** Regista uma amostra estimado × real (IMPL-113). Só o chamador medido chega aqui. */
 export function recordCostSample(sample: CostCalibrationSample): void {
   costSamples.push(sample);
   if (costSamples.length > COST_SAMPLE_LIMIT) {
     costSamples.splice(0, costSamples.length - COST_SAMPLE_LIMIT);
+  }
+  for (const l of costSampleListeners) {
+    try {
+      l(sample);
+    } catch {
+      // persistência é best-effort: nunca derruba a chamada já cobrada
+    }
   }
 }
 
@@ -1327,7 +1437,33 @@ function applyCacheControl(body: Record<string, unknown>, afterIndex: number): v
   if (!Number.isInteger(afterIndex) || afterIndex < 0 || afterIndex >= msgs.length) return;
   const alvo = msgs[afterIndex];
   if (!alvo || typeof alvo !== 'object') return;
-  msgs[afterIndex] = { ...(alvo as Record<string, unknown>), cache_control: { type: 'ephemeral' } };
+  // Forma DOCUMENTADA pelo OpenRouter para Anthropic: o `cache_control` vai
+  // numa PARTE de conteúdo (`{ type: 'text', text, cache_control }`), não na
+  // mensagem — no nível da mensagem o provedor ignora a marca em silêncio.
+  const marca = { type: 'ephemeral' };
+  const content = (alvo as Record<string, unknown>).content;
+  let parts: unknown[] | undefined;
+  if (typeof content === 'string') {
+    parts = [{ type: 'text', text: content, cache_control: marca }];
+  } else if (Array.isArray(content) && content.length > 0) {
+    const ultima = content[content.length - 1];
+    if (ultima && typeof ultima === 'object') {
+      parts = [...content.slice(0, -1), { ...(ultima as Record<string, unknown>), cache_control: marca }];
+    }
+  }
+  if (!parts) return;
+  msgs[afterIndex] = { ...(alvo as Record<string, unknown>), content: parts };
+}
+
+/**
+ * IMPL-114 — o modelo aceita a quebra EXPLÍCITA de cache de prompt
+ * (`cache_control`)? Só a família Anthropic via OpenRouter: nos provedores de
+ * cache automático (OpenAI, DeepSeek…) a marca não muda nada, e marcar um
+ * prefixo que ninguém reusa custa a ESCRITA do cache (1,25× a entrada na
+ * Anthropic) — por isso o juiz só pede o `cache_control` quando isto é true.
+ */
+export function supportsPromptCacheControl(modelId: string): boolean {
+  return /^anthropic\//i.test(modelId.trim());
 }
 
 /**
@@ -1497,6 +1633,40 @@ export class GatewayTimeoutError extends Error {
 /** true = falha por timeout do gateway (ERRO, não controle). */
 export function isGatewayTimeout(err: unknown): err is GatewayTimeoutError {
   return typeof err === 'object' && err !== null && GATEWAY_TIMEOUT in err && (err as Record<string, unknown>)[GATEWAY_TIMEOUT] === true;
+}
+
+/**
+ * IMPL-073 (R-07a:REC-3) — um laço de retry do CHAMADOR (ex.: competidor) pode
+ * repetir esta falha? NÃO quando:
+ *   - é sinal de controle (orçamento/cancelamento);
+ *   - é HTTP classificado (`GatewayError`): 429/5xx o gateway JÁ re-tentou até
+ *     `MAX_RETRIES` — repetir por cima multiplicava as tentativas (2×7 = 14) —
+ *     e 400/401/402/403 não mudam repetindo;
+ *   - o desfecho é desconhecido depois do despacho (`isUpstreamSent`): pode
+ *     ter sido COBRADO; sem verificação no /generation, reenviar é cobrança dupla;
+ *   - é erro de rede ANTES do envio que o gateway já esgotou.
+ * Sobra o que o gateway não repete e é seguro repetir: timeout (em stream o
+ * provedor para de gerar no abort) e falha in-band (200 com corpo de erro, já
+ * contabilizada).
+ */
+export function isCallerRetryable(err: unknown): boolean {
+  if (isControlSignal(err)) return false;
+  if (gatewayErrorKind(err) !== undefined) return false;
+  if (isUpstreamSent(err)) return false;
+  if (preSendError(err)) return false;
+  return true;
+}
+
+/**
+ * cli#3 — falha que NENHUM retry nem outro modelo conserta: key recusada (401)
+ * ou sem crédito (402 / 403 de limite de gasto). Quem degrada exceção
+ * (datagen, juiz, competidor) deve PROPAGAR estas — degradar deixaria a run
+ * seguir e morrer depois com uma mensagem genérica, sem o código de saída
+ * documentado (4 = auth, 5 = sem crédito).
+ */
+export function isFatalGatewayError(err: unknown): boolean {
+  const k = gatewayErrorKind(err);
+  return k === 'auth' || k === 'no_credit';
 }
 
 /**
@@ -1852,20 +2022,28 @@ export interface ChatCompletionParams {
    * a cada chamada (o candidato do julgamento) e fica fora do prefixo cacheado.
    *
    * LAYOUT DE MENSAGENS DO JULGAMENTO — v1 (versionado; mudar = novo layout e
-   * cache invalidado nas primeiras chamadas):
-   *   [0..k] REFERENCIA → PERGUNTA → RUBRICA  ← prefixo ESTÁVEL (cacheável)
-   *   [k]    RUBRICA leva o `cache_control` (fim do prefixo)
-   *   [k+1..] CANDIDATO (muda por chamada/par) ← fora do prefixo
+   * cache invalidado nas primeiras chamadas). É o que `refJudge.judgeOne` envia
+   * a juiz com cache explícito (`supportsPromptCacheControl` — Anthropic):
+   *   [0] system — contrato do juiz (fixo)
+   *   [1] user   — REFERENCIA → PERGUNTA → RUBRICA (CRITÉRIO)
+   *       ← prefixo ESTÁVEL (cacheável): leva o `cache_control` (`cacheControlAfter: 1`),
+   *       com o marcador de bloco COMPARTILHADO pela etapa (byte a byte igual
+   *       entre candidatos)
+   *   [2] user   — CANDIDATO + INSTRUÇÕES (canário novo por veredito) ← fora do prefixo
+   * O `cache_control` vai numa PARTE de conteúdo (`{type:'text', text,
+   * cache_control}`), a forma documentada pelo OpenRouter para Anthropic.
    * No DUELO o prefixo útil vai só até a RÚBRICA: o cache ajuda ENTRE PARES
    * (mesma rúbrica), não entre as duas ordens do mesmo par (o candidato entra
-   * antes da 2ª ordem). O aquecimento (1 chamada por cenário antes do
-   * `Promise.all`) e a rota estável por provedor são do chamador (refJudge).
+   * antes da 2ª ordem). AQUECIMENTO: o gateway segura as chamadas de um mesmo
+   * prefixo até a 1ª terminar (`withCacheWarmup`) — uma por cenário × juiz
+   * antes do resto do `Promise.all`, sem teto de concorrência.
    *
    * ⚠️ NENHUM ganho é prometido sem isto: só há efeito em provedor com cache de
-   * prompt (Anthropic via OpenRouter) E prefixo idêntico no mesmo provedor. A
-   * medição é `usage.prompt_tokens_details.cached_tokens` (já extraído como
-   * `cachedTokensIn`); índice fora do alcance = nada muda (sem cache, nunca
-   * cache errado).
+   * prompt (Anthropic via OpenRouter) E prefixo idêntico no mesmo provedor
+   * (e acima do mínimo cacheável do provedor). A medição é
+   * `usage.prompt_tokens_details.cached_tokens` (já extraído como
+   * `cachedTokensIn`, somado por papel no ledger); índice fora do alcance =
+   * nada muda (sem cache, nunca cache errado).
    */
   cacheControlAfter?: number;
 }
@@ -1924,6 +2102,131 @@ interface GuardedResponse {
  */
 interface DispatchTrack {
   abortedInFlight?: PendingReason;
+}
+
+/**
+ * O que uma resposta 200 trouxe — lido do corpo JSON ou acumulado do SSE (os
+ * MESMOS campos, fechados por `finalizeReply`). `text` e o texto CRU do fio
+ * (pseudonimizado): a reidratacao acontece so no resultado.
+ */
+interface CollectedReply {
+  text: string;
+  usageRaw: unknown;
+  finishReason?: string;
+  nativeFinishReason?: string;
+  refusal: string;
+  error: OpenRouterErrorBody | null;
+  generationId?: string;
+  provider?: CallProviderInfo;
+  /** Payload do fio: o corpo JSON inteiro ou o ultimo chunk SSE. */
+  raw: unknown;
+}
+
+/** Campos de uma resposta JSON (`chat.completion`) no formato comum. */
+function collectJsonReply(json: unknown): CollectedReply {
+  const j = (json && typeof json === 'object' ? json : {}) as {
+    choices?: {
+      message?: { content?: unknown; refusal?: unknown };
+      finish_reason?: unknown;
+      native_finish_reason?: unknown;
+    }[];
+    usage?: unknown;
+    error?: unknown;
+  };
+  const choice = Array.isArray(j.choices) ? j.choices[0] : undefined;
+  const content = choice?.message?.content;
+  const err = j.error;
+  return {
+    text: typeof content === 'string' ? content : '',
+    usageRaw: j.usage,
+    finishReason: finishText(choice?.finish_reason),
+    nativeFinishReason: finishText(choice?.native_finish_reason),
+    refusal: typeof choice?.message?.refusal === 'string' ? choice.message.refusal : '',
+    error: err ? (typeof err === 'object' ? (err as OpenRouterErrorBody) : { message: String(err) }) : null,
+    generationId: generationIdOf(json),
+    provider: extractProviderInfo(json),
+    raw: json,
+  };
+}
+
+/** JSON tolerante: corpo ilegível vira `{}` (os leitores tratam campo ausente). */
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return {};
+  }
+}
+
+/** Ficha de UMA geração no GET /api/v1/generation (IMPL-074/IMPL-075). */
+export interface GenerationInfo {
+  generationId: string;
+  provider?: CallProviderInfo;
+  /** `total_cost` — o valor da FATURA desta geração. */
+  totalCostUsd?: number;
+  cancelled?: boolean;
+  /** `generation_time` (ms) no provedor. */
+  generationTimeMs?: number;
+  /** `latency` (ms) medida pelo OpenRouter. */
+  latencyMs?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+}
+
+/** `{ data: {...} }` do GET /generation => ficha (puro; exportado p/ testes). */
+export function parseGenerationInfo(id: string, json: unknown): GenerationInfo | undefined {
+  const d = (json as { data?: unknown } | null)?.data;
+  if (!d || typeof d !== 'object') return undefined;
+  const r = d as Record<string, unknown>;
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const provider = extractProviderInfo(r);
+  const totalCostUsd = num(r.total_cost) ?? num(r.cost);
+  const tokensIn = num(r.tokens_prompt) ?? num(r.native_tokens_prompt);
+  const tokensOut = num(r.tokens_completion) ?? num(r.native_tokens_completion);
+  return {
+    generationId: id,
+    ...(provider ? { provider } : {}),
+    ...(typeof totalCostUsd === 'number' ? { totalCostUsd } : {}),
+    ...(typeof r.cancelled === 'boolean' ? { cancelled: r.cancelled } : {}),
+    ...(num(r.generation_time) !== undefined ? { generationTimeMs: num(r.generation_time) } : {}),
+    ...(num(r.latency) !== undefined ? { latencyMs: num(r.latency) } : {}),
+    ...(tokensIn !== undefined ? { tokensIn } : {}),
+    ...(tokensOut !== undefined ? { tokensOut } : {}),
+  };
+}
+
+/**
+ * O que a conciliação precisa do ledger (IMPL-074) — `BudgetLedger` cumpre.
+ * Declarado aqui para o gateway não importar a classe (só o contrato).
+ */
+export interface ReconcilableLedger {
+  pendingEntries(): PendingCall[];
+  settlePending(
+    generationId: string,
+    cost: CallCost | null,
+    tokens?: { tokensIn?: number; tokensOut?: number },
+    details?: SettleDetails,
+  ): boolean;
+  noteReconciliation?(r: NonNullable<CostLedgerSummary['reconciliation']>): void;
+}
+
+/** Espera `p` OU o abort de `signal` (que sai como sinal de controle — IMPL-020). */
+async function waitOrAbort(p: Promise<unknown>, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    await p;
+    return;
+  }
+  if (signal.aborted) throw toControlSignal(signal.reason);
+  let onAbort: () => void = () => undefined;
+  const abortou = new Promise<never>((_, reject) => {
+    onAbort = () => reject(toControlSignal(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    await Promise.race([p, abortou]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 /**
@@ -2107,13 +2410,21 @@ export class OpenRouterGateway {
     return this;
   }
 
+  /**
+   * Headers do fio. Os de ATRIBUIÇÃO (`HTTP-Referer`/`X-Title`) são dado
+   * partilhado com o OpenRouter e saem com `attribution: false` (IMPL-120 —
+   * `PROMPT_BUILDER_NO_ATTRIBUTION`); valor vazio também não vai no fio.
+   */
   private headers(apiKey: string): Record<string, string> {
-    return {
+    const out: Record<string, string> = {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': this.cfg.appUrl,
-      'X-Title': this.cfg.appTitle,
     };
+    if (this.cfg.attribution !== false) {
+      if (this.cfg.appUrl) out['HTTP-Referer'] = this.cfg.appUrl;
+      if (this.cfg.appTitle) out['X-Title'] = this.cfg.appTitle;
+    }
+    return out;
   }
 
   /** Chama o transporte SEM `this` do objeto de config (ver GatewayConfig.fetch). */
@@ -2126,8 +2437,16 @@ export class OpenRouterGateway {
    * IMPL-077 — transporte de METADADOS (/models, /key, /generation) com teto
    * (default 20 s, dentro dos 15-30 s pedidos): um servidor mudo não pode mais
    * pendurar o processo para sempre. Timeout sai como `GatewayTimeoutError`.
+   *
+   * O teto cobre a requisição INTEIRA — headers E corpo: o corpo é lido aqui
+   * dentro, sob o mesmo relógio. Antes o timer caía assim que os headers
+   * chegavam e um servidor que mandava `200` e travava o corpo pendurava o
+   * `listModels` para sempre.
    */
-  private async metaFetch(url: string, init: RequestInit): Promise<Response> {
+  private async metaRequest(
+    url: string,
+    init: RequestInit,
+  ): Promise<{ ok: boolean; status: number; statusText: string; text: string }> {
     const controller = new AbortController();
     const ms = this.cfg.metaTimeoutMs ?? DEFAULT_META_TIMEOUT_MS;
     let timedOut = false;
@@ -2136,7 +2455,24 @@ export class OpenRouterGateway {
       controller.abort(new GatewayTimeoutError('total', ms));
     }, ms);
     try {
-      return await this.transport(url, { ...init, signal: controller.signal });
+      const res = await this.transport(url, { ...init, signal: controller.signal });
+      // O corpo sob o MESMO teto; um leitor que ignore o abort ainda perde a
+      // corrida para o timer (nada fica pendurado).
+      let onAbort: () => void = () => undefined;
+      const abortou = new Promise<never>((_, reject) => {
+        onAbort = () => reject(new GatewayTimeoutError('total', ms));
+        if (controller.signal.aborted) onAbort();
+        else controller.signal.addEventListener('abort', onAbort, { once: true });
+      });
+      const corpo = res.text();
+      corpo.catch(() => undefined); // perdeu a corrida: a rejeição tardia não vaza
+      try {
+        const text = await Promise.race([corpo, abortou]);
+        return { ok: res.ok, status: res.status, statusText: res.statusText, text };
+      } finally {
+        controller.signal.removeEventListener('abort', onAbort);
+        abortou.catch(() => undefined);
+      }
     } catch (err) {
       if (timedOut) throw new GatewayTimeoutError('total', ms);
       throw err;
@@ -2204,17 +2540,16 @@ export class OpenRouterGateway {
       return cached.data;
     }
 
-    const res = await this.metaFetch(`${this.cfg.baseUrl}/models`, {
+    const res = await this.metaRequest(`${this.cfg.baseUrl}/models`, {
       method: 'GET',
       headers: this.headers(apiKey),
     });
 
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`OpenRouter /models falhou: ${res.status} ${res.statusText} ${text.slice(0, 200)}`);
+      throw new Error(`OpenRouter /models falhou: ${res.status} ${res.statusText} ${res.text.slice(0, 200)}`);
     }
 
-    const { models: data, issues } = validateModelsPayload(await res.json());
+    const { models: data, issues } = validateModelsPayload(JSON.parse(res.text) as unknown);
     this.modelsCache.set(ck, { fetchedAt: Date.now(), data });
     this.modelsIssues.set(ck, issues);
     return data;
@@ -2431,11 +2766,16 @@ export class OpenRouterGateway {
     return body;
   }
 
-  /** IMPL-075 — esta chamada vai no modo auditável? (preset do papel ou flag da chamada). */
+  /**
+   * IMPL-075 — esta chamada vai no modo auditável? Flag da chamada, preset do
+   * gateway (`auditableRoles`, env `OPENROUTER_AUDITABLE`) ou a política da
+   * run/sessão no ledger (`sink.auditableRoles`).
+   */
   private auditableFor(params: ChatCompletionParams): boolean {
     if (params.auditable === true) return true;
     const role = params.role ?? 'competitor';
-    return (this.cfg.auditableRoles ?? []).includes(role);
+    if ((this.cfg.auditableRoles ?? []).includes(role)) return true;
+    return (params.sink?.auditableRoles?.() ?? []).includes(role);
   }
 
   /**
@@ -2489,7 +2829,7 @@ export class OpenRouterGateway {
     reservation: ReturnType<CostSink['reserve']> | undefined,
     usage: UsageInfo,
     finish?: CallFinishSignals,
-    extra?: { latencyMs?: number; provider?: CallProviderInfo },
+    extra?: { latencyMs?: number; provider?: CallProviderInfo; generationId?: string },
   ): CallCost {
     const role = params.role ?? 'competitor';
     const cost = priceUsage(usage, this.cachedModel(params.apiKey, params.modelId));
@@ -2519,6 +2859,10 @@ export class OpenRouterGateway {
         ...(typeof usage.reasoningTokens === 'number' ? { reasoningTokens: usage.reasoningTokens } : {}),
         ...(typeof extra?.latencyMs === 'number' ? { latencyMs: extra.latencyMs } : {}),
         ...(extra?.provider ? { provider: extra.provider } : {}),
+        // IMPL-074: o id de geração de TODA chamada 200 vai ao registo (a ponte
+        // com a fatura — conferência de cobrança dupla por id).
+        ...(extra?.generationId ? { generationId: extra.generationId } : {}),
+        ...(this.auditableFor(params) ? { auditable: true } : {}),
         // Estimado x real (IMPL-078): a MESMA conta da reserva (catálogo), contra `cost.usd`.
         ...(estimado !== null ? { estimatedUsd: estimado } : {}),
         ...(finish ? { finish } : {}),
@@ -2590,6 +2934,7 @@ export class OpenRouterGateway {
         ...(generationId ? { generationId } : {}),
         ...(extra?.provider ? { provider: extra.provider } : {}),
         ...(typeof extra?.latencyMs === 'number' ? { latencyMs: extra.latencyMs } : {}),
+        ...(this.auditableFor(params) ? { auditable: true } : {}),
         ...(finish ? { finish } : {}),
       });
     }
@@ -2631,11 +2976,12 @@ export class OpenRouterGateway {
 
   async chatCompletion(params: ChatCompletionParams): Promise<ChatCompletionResult> {
     // IMPL-080: cache EXATO de vereditos ANTES de qualquer reserva/fetch.
-    return this.withVerdictCache(params, () => this.chatCompletionDirect(params));
+    // IMPL-114: aquecimento do prefixo cacheável DEPOIS dele (hit não aquece).
+    return this.withVerdictCache(params, () => this.withCacheWarmup(params, () => this.chatCompletionDirect(params)));
   }
 
   async chatCompletionStream(params: ChatStreamParams): Promise<ChatCompletionResult> {
-    return this.withVerdictCache(params, () => this.chatCompletionStreamDirect(params));
+    return this.withVerdictCache(params, () => this.withCacheWarmup(params, () => this.chatCompletionStreamDirect(params)));
   }
 
   /**
@@ -2733,12 +3079,139 @@ export class OpenRouterGateway {
     };
   }
 
+  /**
+   * IMPL-114 (R-08:REC-4) — AQUECIMENTO do prefixo cacheável: a PRIMEIRA
+   * chamada com um dado prefixo (modelo + mensagens até `cacheControlAfter`)
+   * vai sozinha; as outras com o MESMO prefixo esperam ela terminar e só então
+   * saem — em paralelo, já achando o cache escrito. Sem isto o `Promise.all`
+   * do julgamento dispara N chamadas idênticas no mesmo instante e todas
+   * ESCREVEM o cache (nenhuma lê). Só vale quando o chamador pediu a quebra
+   * (`cacheControlAfter`); não é teto de concorrência — cada prefixo espera
+   * UMA chamada, uma vez, e prefixos diferentes nunca se esperam.
+   */
+  private readonly warmups = new Map<string, Promise<void> | true>();
+
+  private async withCacheWarmup<T>(params: ChatCompletionParams, run: () => Promise<T>): Promise<T> {
+    const k = params.cacheControlAfter;
+    if (typeof k !== 'number' || !Number.isInteger(k) || k < 0 || k >= params.messages.length) return run();
+    const key = this.guardKey(
+      [cacheKey(params.apiKey), params.modelId, ...params.messages.slice(0, k + 1).map((m) => `${m.role}\u0000${m.content}`)].join('\u0000'),
+    );
+    const estado = this.warmups.get(key);
+    if (estado === true) return run();
+    if (estado) {
+      await waitOrAbort(estado, params.signal);
+      return run();
+    }
+    let aquecido: () => void = () => undefined;
+    this.warmups.set(key, new Promise<void>((resolve) => (aquecido = resolve)));
+    try {
+      return await run();
+    } finally {
+      // Falhou ou não, quem espera segue: o aquecimento é otimização, nunca porta.
+      this.warmups.set(key, true);
+      aquecido();
+      if (this.warmups.size > 1024) {
+        for (const [chave, v] of this.warmups) {
+          if (this.warmups.size <= 768) break;
+          if (v === true) this.warmups.delete(chave);
+        }
+      }
+    }
+  }
+
+  /**
+   * Fecha uma resposta 200 (JSON ou SSE, os MESMOS campos): bloqueio/recusa,
+   * truncamento, sinais de fim, proveniência, CONTABILIDADE e o resultado.
+   * Contabiliza ANTES de lançar a falha in-band — uma resposta 200 com corpo
+   * de erro JÁ foi cobrada (sem isto ela saía de graça nos livros e cara na
+   * fatura). `st.accounted` avisa o chamador de que o custo já foi lançado.
+   */
+  private async finalizeReply(
+    params: ChatCompletionParams,
+    reservation: ReturnType<CostSink['reserve']> | undefined,
+    body: Record<string, unknown>,
+    maxTokens: number,
+    startedAt: number,
+    reply: CollectedReply,
+    st: { accounted: boolean },
+  ): Promise<ChatCompletionResult> {
+    const usage = extractUsage(reply.usageRaw);
+    // Erro no MEIO do stream chega como chunk `{ error, finish_reason: 'error' }`
+    // (o HTTP ja foi 200); no JSON, como `{ error }` no corpo 200. Moderacao
+    // aqui e bloqueio, nao "resposta vazia".
+    const inBandBlock = reply.error ? blockFromErrorBody(reply.error, undefined, 'in_band') : undefined;
+    // OpenRouter as vezes devolve 200 com um corpo de erro (ex.: provider
+    // rejeitou um parametro). Sem isto a falha viraria "resposta vazia" muda.
+    const inBandFailure = !reply.text && Boolean(reply.error);
+    const blocked = inBandBlock ?? blockFromFinishReason(reply.finishReason, reply.nativeFinishReason);
+    const refusal = refusalText(reply.refusal);
+    // O finish_reason (penultimo chunk no SSE) e o usage (com reasoning_tokens,
+    // ultimo chunk) so estao completos aqui: e aqui que se decide o truncamento.
+    const trunc = this.truncationOf(
+      maxTokens,
+      usage,
+      reply.text,
+      reply.finishReason,
+      reply.nativeFinishReason,
+      Boolean(blocked || refusal),
+    );
+    // Sinais de fim so quando a chamada completou (a falha in-band nao tem fim a medir).
+    const fim = inBandFailure
+      ? undefined
+      : withEffort(
+          finishSignalsOf(
+            {
+              text: reply.text,
+              tokensOut: usage.tokensOut,
+              reasoningTokens: usage.reasoningTokens,
+              finishReason: reply.finishReason,
+              nativeFinishReason: reply.nativeFinishReason,
+              ...trunc,
+            },
+            maxTokens,
+          ),
+          body,
+        );
+    // IMPL-075: completa provider_name/upstream_id/service_tier via
+    // GET /generation quando o modo pedir (best-effort, nunca derruba a chamada).
+    const provider = mergeProviderInfo(reply.provider, await this.lookupProvider(params, reply.generationId, reply.provider));
+    const latencyMs = Date.now() - startedAt;
+    // Sem bloco `usage` nao ha custo medido: pendente pelo id (IMPL-017).
+    const cost = hasUsage(reply.usageRaw)
+      ? this.account(params, reservation, usage, fim, { latencyMs, provider, generationId: reply.generationId })
+      : this.accountUnmeasured(params, reservation, 'no_usage', reply.generationId, fim, { latencyMs, provider });
+    st.accounted = true;
+    if (inBandFailure && reply.error) {
+      if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
+      throw new Error(`OpenRouter: ${reply.error.message ?? JSON.stringify(reply.error)}`);
+    }
+    return {
+      // Reidratado: o papel recebe o valor original, nunca o token (LGPD, IMPL-042).
+      text: this.restoreText(reply.text, params.sink),
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      latencyMs,
+      raw: reply.raw,
+      cost,
+      cachedTokensIn: usage.cachedTokensIn,
+      reasoningTokens: usage.reasoningTokens,
+      ...(reply.finishReason ? { finishReason: reply.finishReason } : {}),
+      ...(reply.nativeFinishReason ? { nativeFinishReason: reply.nativeFinishReason } : {}),
+      ...(refusal ? { refusal } : {}),
+      ...(blocked ? { blocked } : {}),
+      ...(provider ? { provider } : {}),
+      ...(this.auditableFor(params) ? { auditable: true } : {}),
+      ...trunc,
+    };
+  }
+
   private async chatCompletionDirect(params: ChatCompletionParams): Promise<ChatCompletionResult> {
-    // IMPL-072: transporte STREAMING quando o papel/chamada pedir — o parser SSE
-    // é ÚNICO (o de `chatCompletionStream`), e em abort/timeout o provedor PARA
-    // de gerar em vez de concluir e cobrar a resposta inteira.
+    // IMPL-072: transporte STREAMING (default de runtime — ver `streamTransport`)
+    // — o parser é ÚNICO (o de `chatCompletionStream`) e em abort/timeout o
+    // provedor PARA de gerar em vez de concluir e cobrar a resposta inteira.
     if (params.streamTransport ?? this.cfg.streamTransport) return this.chatCompletionStreamDirect(params);
-    const { signal: externalSignal, sink } = params;
+    const { signal: externalSignal } = params;
     const maxTokens = effectiveMaxTokens(params.maxTokens);
     const role = params.role ?? 'competitor';
     const timeouts = this.timeoutsFor(params, false);
@@ -2776,105 +3249,28 @@ export class OpenRouterGateway {
     }
     const { res, startedAt, finish } = guarded;
 
-    let ok = false;
     // A partir daqui o provedor ja respondeu 200: qualquer saida sem custo
     // lancado e "despachada sem usage" — nunca devolucao da reserva.
-    let accounted = false;
-    let generationId: string | undefined;
-    let provider: CallProviderInfo | undefined;
+    const st = { accounted: false };
+    let ok = false;
+    let lido: CollectedReply | undefined;
     try {
-      const latencyMs = Date.now() - startedAt;
-      const json = (await res.json()) as {
-        id?: unknown;
-        choices?: {
-          message?: { content?: string | null; refusal?: string | null };
-          finish_reason?: string | null;
-          native_finish_reason?: string | null;
-        }[];
-        usage?: unknown;
-        error?: OpenRouterErrorBody;
-      };
-      generationId = generationIdOf(json);
-      // IMPL-075: provedor que serviu esta chamada (payload; /generation sob demanda).
-      provider = extractProviderInfo(json);
-
-      const usage = extractUsage(json.usage);
-      const choice = json.choices?.[0];
-      // Reidratada: o papel recebe o valor original, nunca o token (LGPD, IMPL-042).
-      const text = this.restoreText(choice?.message?.content ?? '', sink);
-      const finishReason = finishText(choice?.finish_reason);
-      const nativeFinishReason = finishText(choice?.native_finish_reason);
-      const inBandBlock = json.error ? blockFromErrorBody(json.error, undefined, 'in_band') : undefined;
-      // OpenRouter as vezes devolve 200 com um corpo de erro (ex.: provider
-      // rejeitou um parametro). Sem isto a falha viraria "resposta vazia" muda.
-      const inBandFailure = !text && Boolean(json.error);
-      const blocked = inBandBlock ?? blockFromFinishReason(finishReason, nativeFinishReason);
-      const refusal = refusalText(choice?.message?.refusal);
-      const trunc = this.truncationOf(
-        maxTokens,
-        usage,
-        text,
-        finishReason,
-        nativeFinishReason,
-        Boolean(blocked || refusal),
-      );
-      // IMPL-075: completa provider_name/upstream_id/service_tier via
-      // GET /generation quando o modo pedir (best-effort, nunca derruba a chamada).
-      provider = mergeProviderInfo(provider, await this.lookupProvider(params, generationId, provider));
-      const extra = { latencyMs, provider };
-      // Contabiliza ANTES do throw in-band: uma resposta 200 com corpo de erro
-      // (provider rejeitou um parametro) JA foi cobrada. Sem isto ela sai de
-      // graca nos livros e cara na fatura. Os sinais de fim so vao junto
-      // quando a chamada completou (a falha in-band nao tem fim a medir).
-      const fim = inBandFailure
-        ? undefined
-        : withEffort(
-            finishSignalsOf(
-              { text, tokensOut: usage.tokensOut, reasoningTokens: usage.reasoningTokens, finishReason, nativeFinishReason, ...trunc },
-              maxTokens,
-            ),
-            body,
-          );
-      // Sem bloco `usage` nao ha custo medido: pendente pelo id (IMPL-017).
-      const cost = hasUsage(json.usage)
-        ? this.account(params, reservation, usage, fim, extra)
-        : this.accountUnmeasured(params, reservation, 'no_usage', generationId, fim, extra);
-      accounted = true;
-      if (inBandFailure && json.error) {
-        if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
-        throw new Error(`OpenRouter: ${json.error.message ?? JSON.stringify(json.error)}`);
-      }
-
+      lido = collectJsonReply(await res.json());
+      const result = await this.finalizeReply(params, reservation, body, maxTokens, startedAt, lido, st);
       ok = true;
-      return {
-        text,
-        tokensIn: usage.tokensIn,
-        tokensOut: usage.tokensOut,
-        latencyMs,
-        raw: json,
-        cost,
-        cachedTokensIn: usage.cachedTokensIn,
-        reasoningTokens: usage.reasoningTokens,
-        ...(finishReason ? { finishReason } : {}),
-        ...(nativeFinishReason ? { nativeFinishReason } : {}),
-        ...(refusal ? { refusal } : {}),
-        ...(blocked ? { blocked } : {}),
-        ...(provider ? { provider } : {}),
-        ...(this.auditableFor(params) ? { auditable: true } : {}),
-        ...trunc,
-      };
+      return result;
     } catch (err) {
       // IMPL-073: falha DEPOIS do 200 (corpo ilegível/cortado) tem desfecho
       // desconhecido e PODE ter sido cobrada: marca o erro e guarda o corpo
       // contra reenvio sem verificação.
-      if (!accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
+      if (!st.accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
       throw controlIfAborted(err, externalSignal);
     } finally {
       // Corpo abortado/ilegivel depois do 200: o provedor gerou (e cobra) —
       // no nao-streaming ele segue gerando apos o abort (IMPL-017).
-      if (!accounted) {
-        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
-          provider,
+      if (!st.accounted) {
+        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', lido?.generationId, undefined, {
+          provider: lido?.provider,
           latencyMs: Date.now() - startedAt,
         });
       }
@@ -2918,30 +3314,24 @@ export class OpenRouterGateway {
     }
     const { res, startedAt, finish, touch } = guarded;
 
+    const st = { accounted: false };
     let ok = false;
-    let accounted = false;
-    // Id da geracao: vem em TODO chunk — e o que permite conciliar um stream
-    // cortado no meio pelo GET /generation (IMPL-017).
-    let generationId: string | undefined;
-    let provider: CallProviderInfo | undefined;
-    let fullText = '';
-    let lastRaw: unknown = null;
-    // Guardado SEPARADO de `lastRaw`: hoje o ultimo chunk *por acaso* e o de
-    // usage (porque `[DONE]` e ignorado), mas basta um provedor emitir um
-    // keep-alive depois do frame de usage para o custo sumir em silencio.
-    let usageRaw: unknown = null;
-    let streamError: OpenRouterErrorBody | null = null;
-    // Sinais de fim: chegam num chunk proprio perto do fim (antes do frame de
-    // usage). Guarda o ULTIMO nao-nulo — chunks intermediarios trazem null.
-    let finishReason: string | undefined;
-    let nativeFinishReason: string | undefined;
-    let refusal = '';
+    // Acumulado do stream. O id da geracao vem em TODO chunk — e o que permite
+    // conciliar um stream cortado no meio pelo GET /generation (IMPL-017).
+    // `usageRaw` e guardado SEPARADO do `raw`: hoje o ultimo chunk *por acaso*
+    // e o de usage (porque `[DONE]` e ignorado), mas basta um provedor emitir
+    // um keep-alive depois do frame de usage para o custo sumir em silencio.
+    const acc: CollectedReply = { text: '', usageRaw: null, refusal: '', error: null, raw: null };
 
     try {
       if (!res.body) throw new Error('OpenRouter retornou stream sem corpo de resposta.');
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
+      // IMPL-072: pedir `stream: true` nao garante SSE — proxy/mock/provedor
+      // pode devolver o JSON inteiro. O 1o caractere util decide: `{` = corpo
+      // JSON (lido inteiro, mesmos campos); qualquer outro = SSE.
+      let modo: 'sse' | 'json' | undefined;
 
       while (true) {
         const { value, done } = await reader.read();
@@ -2949,6 +3339,12 @@ export class OpenRouterGateway {
         // IMPL-077: qualquer byte recebido zera o watchdog de inatividade.
         touch();
         buffer += decoder.decode(value, { stream: true });
+        if (!modo) {
+          const inicio = buffer.trimStart();
+          if (!inicio) continue;
+          modo = inicio.startsWith('{') ? 'json' : 'sse';
+        }
+        if (modo === 'json') continue; // acumula o corpo inteiro
 
         // SSE lines separadas por \n. OpenRouter usa data: <json>\n\n
         let idx;
@@ -2970,116 +3366,54 @@ export class OpenRouterGateway {
               error?: OpenRouterErrorBody;
               id?: unknown;
             };
-            lastRaw = chunk;
-            generationId ??= generationIdOf(chunk);
+            acc.raw = chunk;
+            acc.generationId ??= generationIdOf(chunk);
             // IMPL-075: o provedor vem em todo chunk (campo `provider`).
-            provider ??= extractProviderInfo(chunk);
-            if (chunk.error && !streamError) {
-              streamError =
-                typeof chunk.error === 'object' ? chunk.error : { message: String(chunk.error) };
+            acc.provider ??= extractProviderInfo(chunk);
+            if (chunk.error && !acc.error) {
+              acc.error = typeof chunk.error === 'object' ? chunk.error : { message: String(chunk.error) };
             }
             const choice = chunk.choices?.[0];
             const delta = choice?.delta?.content;
             if (typeof delta === 'string' && delta.length > 0) {
-              fullText += delta;
+              acc.text += delta;
               // Previa ja reidratada (sem contar: e a mesma resposta a cada pedaco).
               // `delta` e o pedaco cru do provedor — pode trazer token parcial.
-              onDelta?.(delta, this.restoreText(fullText, sink, false));
+              onDelta?.(delta, this.restoreText(acc.text, sink, false));
             }
-            if (typeof choice?.delta?.refusal === 'string') refusal += choice.delta.refusal;
-            finishReason = finishText(choice?.finish_reason) ?? finishReason;
-            nativeFinishReason = finishText(choice?.native_finish_reason) ?? nativeFinishReason;
-            if (chunk.usage) usageRaw = chunk.usage;
+            if (typeof choice?.delta?.refusal === 'string') acc.refusal += choice.delta.refusal;
+            // Sinais de fim: chegam num chunk proprio perto do fim (antes do
+            // frame de usage). Guarda o ULTIMO nao-nulo.
+            acc.finishReason = finishText(choice?.finish_reason) ?? acc.finishReason;
+            acc.nativeFinishReason = finishText(choice?.native_finish_reason) ?? acc.nativeFinishReason;
+            if (chunk.usage) acc.usageRaw = chunk.usage;
           } catch {
             // chunk JSON invalido, ignora
           }
         }
       }
 
-      const usage = extractUsage(usageRaw);
-
-      // Erro no MEIO do stream chega como chunk `{ error, finish_reason: 'error' }`
-      // (o HTTP ja foi 200): moderacao aqui e bloqueio, nao "resposta vazia".
-      const inBandBlock = streamError ? blockFromErrorBody(streamError, undefined, 'in_band') : undefined;
-      const inBandFailure = !fullText && Boolean(streamError);
-      const blocked = inBandBlock ?? blockFromFinishReason(finishReason, nativeFinishReason);
-      const refusalFinal = refusalText(refusal);
-      // No stream o finish_reason chega no penultimo chunk e o usage (com
-      // reasoning_tokens) no ultimo: so aqui, com o fluxo inteiro lido, da
-      // para decidir o truncamento.
-      const trunc = this.truncationOf(
-        maxTokens,
-        usage,
-        fullText,
-        finishReason,
-        nativeFinishReason,
-        Boolean(blocked || refusalFinal),
-      );
-      // Contabiliza antes do throw in-band — a chamada ja foi cobrada. Sinais
-      // de fim so quando a chamada completou.
-      const fim = inBandFailure
-        ? undefined
-        : withEffort(
-            finishSignalsOf(
-              {
-                text: fullText,
-                tokensOut: usage.tokensOut,
-                reasoningTokens: usage.reasoningTokens,
-                finishReason,
-                nativeFinishReason,
-                ...trunc,
-              },
-              maxTokens,
-            ),
-            body,
-          );
-      // IMPL-075: completa provider_name/upstream_id/service_tier via
-      // GET /generation quando o modo pedir (best-effort, nunca derruba o stream).
-      provider = mergeProviderInfo(provider, await this.lookupProvider(params, generationId, provider));
-      const extra = { latencyMs: Date.now() - startedAt, provider };
-      // Stream sem frame de usage: pendente pelo id dos chunks (IMPL-017).
-      const cost = hasUsage(usageRaw)
-        ? this.account(params, reservation, usage, fim, extra)
-        : this.accountUnmeasured(params, reservation, 'no_usage', generationId, fim, extra);
-      accounted = true;
-      // Resposta vazia + erro in-band (provider rejeitou parametro etc.): falha alto.
-      if (inBandFailure && streamError) {
-        if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
-        throw new Error(`OpenRouter: ${streamError.message ?? JSON.stringify(streamError)}`);
+      if (modo === 'json') {
+        buffer += decoder.decode();
+        Object.assign(acc, collectJsonReply(JSON.parse(buffer)));
+        if (acc.text) onDelta?.(acc.text, this.restoreText(acc.text, sink, false));
       }
 
-      const latencyMs = Date.now() - startedAt;
+      const result = await this.finalizeReply(params, reservation, body, maxTokens, startedAt, acc, st);
       ok = true;
-      return {
-        // Texto final acumulado, reidratado (LGPD, IMPL-042).
-        text: this.restoreText(fullText, sink),
-        tokensIn: usage.tokensIn,
-        tokensOut: usage.tokensOut,
-        latencyMs,
-        raw: lastRaw,
-        cost,
-        cachedTokensIn: usage.cachedTokensIn,
-        reasoningTokens: usage.reasoningTokens,
-        ...(finishReason ? { finishReason } : {}),
-        ...(nativeFinishReason ? { nativeFinishReason } : {}),
-        ...(refusalFinal ? { refusal: refusalFinal } : {}),
-        ...(blocked ? { blocked } : {}),
-        ...(provider ? { provider } : {}),
-        ...(this.auditableFor(params) ? { auditable: true } : {}),
-        ...trunc,
-      };
+      return result;
     } catch (err) {
       // IMPL-073: stream cortado/abortado DEPOIS do 200 = desfecho desconhecido
       // (o provedor pode ter concluído e cobrado): marca o erro e guarda o corpo
       // contra reenvio sem verificação.
-      if (!accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
+      if (!st.accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
       throw controlIfAborted(err, externalSignal);
     } finally {
       // Stream cortado no meio (abort/timeout/rede): tokens ja gerados foram
       // cobrados — pendente pelo id dos chunks, conservador sem ele (IMPL-017).
-      if (!accounted) {
-        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
-          provider,
+      if (!st.accounted) {
+        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', acc.generationId, undefined, {
+          provider: acc.provider,
           latencyMs: Date.now() - startedAt,
         });
       }
@@ -3103,9 +3437,9 @@ export class OpenRouterGateway {
       return { ok: false, error: 'Key vazia ou muito curta. Cole a key completa do OpenRouter.' };
     }
 
-    let res: Response;
+    let res: Awaited<ReturnType<OpenRouterGateway['metaRequest']>>;
     try {
-      res = await this.metaFetch(`${this.cfg.baseUrl}/key`, {
+      res = await this.metaRequest(`${this.cfg.baseUrl}/key`, {
         method: 'GET',
         headers: this.headers(key),
       });
@@ -3124,11 +3458,10 @@ export class OpenRouterGateway {
       };
     }
     if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      return { ok: false, error: describeOpenRouterError(res.status, body) };
+      return { ok: false, error: describeOpenRouterError(res.status, res.text) };
     }
 
-    const json = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown> };
+    const json = safeJson(res.text) as { data?: Record<string, unknown> };
     const d = json.data ?? {};
     return {
       ok: true,
@@ -3149,44 +3482,123 @@ export class OpenRouterGateway {
    * provedor que efetivamente serviu a chamada (`provider_name`, `upstream_id`,
    * `service_tier`), o custo cobrado (`total_cost`) e se a geração foi
    * cancelada. É o MESMO endpoint da conciliação de pendentes
-   * (`BudgetLedger.settlePending`); aqui fica acessível a qualquer papel.
-   * Best-effort: id vazio, 404 ou falha de rede => `undefined`.
+   * (`reconcilePending` → `BudgetLedger.settlePending`); aqui fica acessível a
+   * qualquer papel. Best-effort, UMA tentativa: id vazio, 404 ou falha de rede
+   * => `undefined` (quem precisa de retry usa `fetchGenerationDetail`).
    */
-  async fetchGenerationInfo(
+  async fetchGenerationInfo(apiKey: string, generationId: string): Promise<GenerationInfo | undefined> {
+    const r = await this.fetchGenerationDetail(apiKey, generationId, { attempts: 1 });
+    return r.status === 'ok' ? r.info : undefined;
+  }
+
+  /**
+   * IMPL-074 — GET /generation com RETRY: o 404 logo depois da chamada é
+   * TRANSITÓRIO (a fatura ainda não propagou — R-07a DEC-4), assim como
+   * 429/5xx; backoff exponencial (1 s, 2 s, 4 s… — `sleep` injetável) até
+   * `attempts`. 404 persistente => `not_found` (o id não existe na conta).
+   */
+  async fetchGenerationDetail(
     apiKey: string,
     generationId: string,
-  ): Promise<
-    { generationId: string; provider?: CallProviderInfo; totalCostUsd?: number; cancelled?: boolean } | undefined
-  > {
+    opts: { attempts?: number; baseDelayMs?: number; signal?: AbortSignal } = {},
+  ): Promise<{ status: 'ok' | 'not_found' | 'error'; info?: GenerationInfo; error?: string }> {
     const id = (generationId ?? '').trim();
-    if (!id) return undefined;
-    let res: Response;
-    try {
-      res = await this.metaFetch(`${this.cfg.baseUrl}/generation?id=${encodeURIComponent(id)}`, {
-        method: 'GET',
-        headers: this.headers(apiKey),
-      });
-    } catch {
-      return undefined;
+    if (!id) return { status: 'error', error: 'id vazio' };
+    const attempts = Math.max(1, Math.floor(opts.attempts ?? 4));
+    const base = Math.max(0, opts.baseDelayMs ?? 1000);
+    let last: { status: 'not_found' | 'error'; error: string } = { status: 'error', error: 'sem tentativa' };
+    for (let i = 0; i < attempts; i++) {
+      if (i > 0) {
+        if (opts.signal?.aborted) break;
+        await this.sleep(base * 2 ** (i - 1), opts.signal);
+        if (opts.signal?.aborted) break;
+      }
+      let res: Awaited<ReturnType<OpenRouterGateway['metaRequest']>>;
+      try {
+        res = await this.metaRequest(`${this.cfg.baseUrl}/generation?id=${encodeURIComponent(id)}`, {
+          method: 'GET',
+          headers: this.headers(apiKey),
+        });
+      } catch (err) {
+        last = { status: 'error', error: (err as Error).message };
+        continue;
+      }
+      if (res.ok) {
+        const info = parseGenerationInfo(id, safeJson(res.text));
+        if (info) return { status: 'ok', info };
+        last = { status: 'error', error: 'resposta sem data' };
+        continue;
+      }
+      last = res.status === 404 ? { status: 'not_found', error: 'HTTP 404' } : { status: 'error', error: `HTTP ${res.status}` };
+      // 401/403/400: repetir não muda nada.
+      if (res.status !== 404 && res.status !== 429 && res.status < 500) break;
     }
-    if (!res.ok) return undefined;
-    const json = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown> };
-    const d = json.data;
-    if (!d || typeof d !== 'object') return undefined;
-    const provider = extractProviderInfo(d);
-    const totalCostUsd =
-      typeof d.total_cost === 'number' && Number.isFinite(d.total_cost)
-        ? d.total_cost
-        : typeof d.cost === 'number' && Number.isFinite(d.cost)
-          ? d.cost
-          : undefined;
-    const cancelled = typeof d.cancelled === 'boolean' ? d.cancelled : undefined;
-    return {
-      generationId: id,
-      ...(provider ? { provider } : {}),
-      ...(typeof totalCostUsd === 'number' ? { totalCostUsd } : {}),
-      ...(typeof cancelled === 'boolean' ? { cancelled } : {}),
+    return last;
+  }
+
+  /**
+   * IMPL-074 / IMPL-017 (iv) — CONCILIA as pendentes do ledger pela fatura:
+   * para cada chamada despachada sem custo medido (abort/timeout/sem usage)
+   * com id de geração, busca o `total_cost` no GET /generation e troca a
+   * reserva mantida pelo valor COBRADO (`settlePending`, source `usage`),
+   * gravando provedor/cancelled/generation_time/latency no registo da
+   * chamada. 404 persistente (ou id fora do formato `gen-…`, que o
+   * /generation nunca acharia) => a reserva vira gasto CONSERVADOR — não
+   * medido não é "custou zero". Falha de rede => segue pendente (a conciliação
+   * pode rodar de novo depois). Concorrência pequena de propósito: o endpoint
+   * tem rate limit próprio. Não é chamada de LLM: não passa pelo ledger.
+   */
+  async reconcilePending(
+    ledger: ReconcilableLedger,
+    apiKey: string,
+    opts: { attempts?: number; baseDelayMs?: number; concurrency?: number; signal?: AbortSignal } = {},
+  ): Promise<NonNullable<CostLedgerSummary['reconciliation']>> {
+    const pendentes = ledger.pendingEntries();
+    const out = { attempted: pendentes.length, settled: 0, notFound: 0, failed: 0 };
+    if (pendentes.length === 0) return out;
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < pendentes.length) {
+        const p = pendentes[next++];
+        if (opts.signal?.aborted) {
+          out.failed += 1;
+          continue;
+        }
+        if (!isGenerationId(p.generationId)) {
+          // Id sintetizado/malformado: o /generation devolveria 404 para sempre.
+          ledger.settlePending(p.generationId, null);
+          out.notFound += 1;
+          continue;
+        }
+        const r = await this.fetchGenerationDetail(apiKey, p.generationId, opts).catch(
+          (err: unknown) => ({ status: 'error' as const, error: (err as Error).message, info: undefined }),
+        );
+        if (r.status === 'ok' && r.info && typeof r.info.totalCostUsd === 'number') {
+          const details: SettleDetails = {
+            ...(r.info.provider ? { provider: r.info.provider } : {}),
+            ...(typeof r.info.cancelled === 'boolean' ? { cancelled: r.info.cancelled } : {}),
+            ...(typeof r.info.generationTimeMs === 'number' ? { generationTimeMs: r.info.generationTimeMs } : {}),
+            ...(typeof r.info.latencyMs === 'number' ? { latencyMs: r.info.latencyMs } : {}),
+          };
+          ledger.settlePending(
+            p.generationId,
+            { usd: r.info.totalCostUsd, source: 'usage' },
+            { tokensIn: r.info.tokensIn, tokensOut: r.info.tokensOut },
+            details,
+          );
+          out.settled += 1;
+        } else if (r.status === 'not_found') {
+          ledger.settlePending(p.generationId, null);
+          out.notFound += 1;
+        } else {
+          out.failed += 1;
+        }
+      }
     };
+    const width = Math.max(1, Math.min(opts.concurrency ?? 4, pendentes.length));
+    await Promise.all(Array.from({ length: width }, worker));
+    ledger.noteReconciliation?.(out);
+    return out;
   }
 
   /**
@@ -3284,4 +3696,31 @@ export function pseudonymize<T>(value: T, sink?: CostSink): T {
 
 export function validateKey(apiKey: string): Promise<ValidateKeyResult> {
   return defaultGateway.validateKey(apiKey);
+}
+
+/**
+ * IMPL-074 / IMPL-017 (iv) — concilia as pendentes do ledger pela fatura (GET
+ * /generation) na instância padrão. Os orquestradores chamam isto no fim da
+ * run, antes da escrita terminal (ver `OpenRouterGateway.reconcilePending`).
+ */
+export function reconcilePendingGenerations(
+  ledger: ReconcilableLedger,
+  apiKey: string,
+  opts?: Parameters<OpenRouterGateway['reconcilePending']>[2],
+): Promise<NonNullable<CostLedgerSummary['reconciliation']>> {
+  return defaultGateway.reconcilePending(ledger, apiKey, opts);
+}
+
+/**
+ * Conciliação do FIM DE RUN (os dois orquestradores): poucas tentativas
+ * curtas — no fim da run as pendentes já têm segundos de idade e o 404
+ * transitório passou; o que seguir sem resposta fica pendente no record
+ * (`costLedger.pendingEntries`, conciliável depois). Nunca lança: falha aqui
+ * não pode transformar uma run concluída em erro.
+ */
+export const RUN_END_RECONCILE = { attempts: 3, baseDelayMs: 500, concurrency: 4 } as const;
+
+export async function reconcileAtRunEnd(ledger: ReconcilableLedger, apiKey: string): Promise<void> {
+  if (ledger.pendingEntries().length === 0) return;
+  await reconcilePendingGenerations(ledger, apiKey, RUN_END_RECONCILE).catch(() => undefined);
 }

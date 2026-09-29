@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { chatCompletion } from './openrouter.js';
+import { chatCompletion, supportsPromptCacheControl } from './openrouter.js';
 import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { matchExpected } from './engine/groundTruth.js';
 import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
@@ -125,6 +125,14 @@ export function parseJudgeReply(
 export interface ReferenceJudgePrompt {
   system: string;
   user: string;
+  /**
+   * IMPL-114 — `user` partido no fim do prefixo ESTÁVEL (layout v1):
+   * `prefix` = REFERÊNCIA + PERGUNTA + CRITÉRIO (igual para todo candidato da
+   * etapa quando o marcador é compartilhado); `suffix` = CANDIDATO +
+   * INSTRUÇÕES. `user === prefix + '\n\n' + suffix`.
+   */
+  prefix: string;
+  suffix: string;
   guard: JudgeGuard;
   formatReminder: string;
 }
@@ -139,18 +147,27 @@ export function buildReferenceJudgePrompt(
   stage: StageSpec,
   reference: string,
   candidateText: string,
+  opts: { sharedNonce?: string } = {},
 ): ReferenceJudgePrompt {
   const rubric = stage.rubric?.trim();
-  const guard = newJudgeGuard([reference, stage.question, rubric ?? '', candidateText]);
-  const partes = [
+  const dados = [reference, stage.question, rubric ?? '', candidateText];
+  // IMPL-114: marcador COMPARTILHADO pela etapa (o prefixo fica byte a byte
+  // igual entre candidatos e o cache de prompt do provedor acerta); o canário
+  // segue novo por veredito. O escape de `⟦`/`⟧` é o que impede fechar bloco —
+  // o marcador comum não enfraquece a blindagem.
+  const guard: JudgeGuard = opts.sharedNonce
+    ? { nonce: opts.sharedNonce, canary: newJudgeGuard([...dados, opts.sharedNonce]).canary }
+    : newJudgeGuard(dados);
+  const prefixo = [
     'REFERÊNCIA (resposta CANDIDATA de outro modelo — pode estar errada):',
     markedBlock('REFERÊNCIA', guard.nonce, reference),
     'PERGUNTA:',
     markedBlock('PERGUNTA', guard.nonce, stage.question),
   ];
   if (rubric) {
-    partes.push('CRITÉRIO DE CORRETUDE DESTA ETAPA (tem prioridade):', markedBlock('CRITÉRIO', guard.nonce, rubric));
+    prefixo.push('CRITÉRIO DE CORRETUDE DESTA ETAPA (tem prioridade):', markedBlock('CRITÉRIO', guard.nonce, rubric));
   }
+  const partes: string[] = [];
   partes.push(
     'CANDIDATO (resposta a julgar):',
     markedBlock('CANDIDATO', guard.nonce, candidateText),
@@ -169,7 +186,9 @@ export function buildReferenceJudgePrompt(
   );
   return {
     system: SYSTEM_PROMPT,
-    user: partes.join('\n\n'),
+    user: [...prefixo, ...partes].join('\n\n'),
+    prefix: prefixo.join('\n\n'),
+    suffix: partes.join('\n\n'),
     guard,
     formatReminder: formatReminderFor(guard, REFERENCE_JUDGE_SCHEMA),
   };
@@ -225,22 +244,36 @@ async function judgeOne(params: {
   timeoutMs: number;
   ctx?: RunCtx;
   maxPricePerMTok?: { prompt?: number; completion?: number };
+  /** IMPL-114: marcador da ETAPA (prefixo cacheável); só vale p/ juiz com `cache_control`. */
+  sharedNonce?: string;
 }): Promise<SingleVerdict> {
   const { apiKey, judgeModelId, stage, reference, response, reasoningLevel, timeoutMs, ctx, maxPricePerMTok } =
     params;
-  // Marcador + canario sorteados AQUI: um par novo por veredito (as
-  // re-tentativas do MESMO veredito reusam o par).
-  const prompt = buildReferenceJudgePrompt(stage, reference, response.text);
+  // IMPL-114: cache de prompt EXPLÍCITO só onde o provedor o aceita
+  // (Anthropic): lá o prefixo estável vai numa mensagem própria com
+  // `cache_control`. Nos outros, a montagem de sempre (uma mensagem só).
+  const cacheavel = params.sharedNonce !== undefined && supportsPromptCacheControl(judgeModelId);
+  // Canario sorteado AQUI: um novo por veredito (as re-tentativas do MESMO
+  // veredito reusam o par); o marcador e o da etapa quando cacheavel.
+  const prompt = buildReferenceJudgePrompt(stage, reference, response.text, cacheavel ? { sharedNonce: params.sharedNonce } : {});
   const attempt = await callJudgeWithRetry({
     call: async (reminder) =>
       // Resultado INTEIRO (texto + finish_reason): o truncamento e checado antes do parse (IMPL-015).
       await chatCompletion({
         apiKey,
         modelId: judgeModelId,
-        messages: [
-          { role: 'system', content: prompt.system },
-          { role: 'user', content: withReminder(prompt.user, reminder) },
-        ],
+        messages: cacheavel
+          ? [
+              { role: 'system', content: prompt.system },
+              // Layout v1 (IMPL-114): prefixo ESTÁVEL (com o cache_control) → candidato.
+              { role: 'user', content: prompt.prefix },
+              { role: 'user', content: withReminder(prompt.suffix, reminder) },
+            ]
+          : [
+              { role: 'system', content: prompt.system },
+              { role: 'user', content: withReminder(prompt.user, reminder) },
+            ],
+        ...(cacheavel ? { cacheControlAfter: 1 } : {}),
         temperature: 0,
         // Teto TOTAL com sala p/ raciocinio (IMPL-016): 1024 virava `length` vazio.
         maxTokens: ROLE_MAX_TOKENS.judge,
@@ -369,8 +402,14 @@ export async function judgeStageReference(
     return result(true);
   }
 
+  // IMPL-114: marcador da ETAPA para os juízes com cache de prompt explícito —
+  // sorteado contra TODOS os dados da etapa (nenhum texto o contém).
+  const sharedNonce = judgeIds.some(supportsPromptCacheControl)
+    ? newJudgeGuard([reference, stage.question, stage.rubric?.trim() ?? '', ...judgeable.map((r) => r.text)]).nonce
+    : undefined;
   // UMA chamada por (juiz x competidor), TODAS em paralelo — sem cap local;
-  // o limitador global de openrouter.ts gateia.
+  // o limitador global de openrouter.ts gateia (e o aquecimento do prefixo,
+  // IMPL-114, segura só a 1a chamada de cada prefixo).
   const singles = await Promise.all(
     judgeIds.flatMap((jid) =>
       judgeable.map((r) =>
@@ -384,6 +423,7 @@ export async function judgeStageReference(
           timeoutMs,
           ctx,
           maxPricePerMTok,
+          sharedNonce,
         }),
       ),
     ),
