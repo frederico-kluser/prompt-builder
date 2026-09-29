@@ -106,7 +106,10 @@ const USO: Record<string, string> = {
   --free --lgpd-area --expiring --format table|json|ndjson|csv|ids
   Listas: --limit <N> (default 50) · --all (lista inteira)`,
   estimate: `  estimate -c <arquivo>    estima o custo antes de gastar (sem key)
-  O arquivo pode ser arena-config@1 ou RunConfig cru.`,
+  O arquivo pode ser arena-config@1 ou RunConfig cru.
+  estimate -c <arq> --pilot-run <runId> | --pilot-session <id>
+                           plano de poder com σd calibrado pelo IC95% MEDIDO do
+                           piloto gravado (sem a flag: σd de tabela, não calibrado)`,
   key: `  key check                valida a key e mostra o saldo
   key set --stdin          grava a key (leia da entrada padrão, nunca de argv)
   key path | rm            onde está a key gravada | remove`,

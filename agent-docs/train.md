@@ -57,10 +57,12 @@ referência rápida é esta (α=0,05 unilateral, poder 80%, σd=0,5):
 | 30 | 22,7 | | | |
 | 50 | 17,6 | | | |
 
-- ⚠️ σd=0,5 é **estimativa não calibrada** (tabela): calibre com uma run-piloto —
-  o `estimate` ainda NÃO lê a run-piloto (só `--config`): calcule à mão
-  σd ≈ (meia-amplitude do IC95 do piloto ÷ 1,96)·√n e planeje pelo **limite
-  superior** do IC desse σd (conservador com n pequeno).
+- ⚠️ σd=0,5 é **estimativa não calibrada** (tabela): calibre com um piloto
+  GRAVADO — `estimate --config <arq> --pilot-run <runId>` (IC95% recomputado das
+  etapas da run: régua × vencedor; num compare, 1º × 2º) ou `--pilot-session
+  <id>` (a significância gravada da sessão). O σd sai do **limite superior** do
+  IC (conservador com n pequeno); piloto com menos de 5 pares efetivos é
+  recusado (exit 3, `estimate.pilot_unusable`).
 - `stages ≤ 5` = **modo econômico**: com 5 cenários só se decide Δ ≥ 45 p.p.
 - **Repetição ≠ observação independente** (ICC/design effect): com `repeats`/`repetitions`
   ≥ 2, `runs show` reporta ICC, DE=1+(m−1)·ICC e nEfetivo = n·m/DE (no texto **e**

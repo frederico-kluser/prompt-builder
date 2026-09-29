@@ -93,6 +93,7 @@ import type { RunRecord, SessionRecord } from '../../types.js';
 import { buildSessionReport, renderSessionReportMarkdown } from '../../engine/sessionReport.js';
 import { renderSessionReportHtml } from '../../engine/sessionReportHtml.js';
 import { readConfigFile, resolveArenaLibrary } from './run.js';
+import { loadPilot } from '../pilot.js';
 import {
   importRecords,
   retentionSweep,
@@ -231,7 +232,17 @@ export async function cmdKey(argv: string[]): Promise<number> {
 // --- estimate ----------------------------------------------------------------
 
 export async function cmdEstimate(argv: string[]): Promise<number> {
-  const parsed = parse(argv, { config: { type: 'string', short: 'c' } });
+  const parsed = parse(argv, {
+    config: { type: 'string', short: 'c' },
+    // IMPL-050: σd calibrado por um piloto GRAVADO (IC95% medido), não pela tabela.
+    'pilot-run': { type: 'string' },
+    'pilot-session': { type: 'string' },
+  });
+  assertNoPositionals(
+    'estimate',
+    parsed.positionals,
+    'prompt-builder estimate --config <arq> [--pilot-run <runId> | --pilot-session <id>]',
+  );
   const file = parsed.values.config;
   if (typeof file !== 'string') {
     throw new CliError('Uso: prompt-builder estimate --config <arquivo.json>', EXIT.USAGE, undefined, {
@@ -246,6 +257,8 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   setDataDir(resolveHome(parsed.values));
   // Estimar não executa nada: config de modo agente é aceita (só roda pelo portão).
   const config = await readConfigFile(file, {}, { inspectOnly: true });
+  // O piloto é disco local: recusa (id errado, IC ausente) ANTES da rede.
+  const pilot = await loadPilot(parsed.values);
   // Estimar e ler preco do catalogo PUBLICO: nao exige key (IMPL-029).
   const ctx = await buildCatalogContext(parsed);
   const { out } = ctx;
@@ -253,7 +266,10 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   const est = estimateRunCost(estimateInputFromConfig(config), ctx.models);
   // IMPL-050/IMPL-054: poder e desenho de amostra junto do custo — estimar
   // dinheiro sem estimar poder produz run cara que não decide nada.
-  const power = planPower({ n: config.stages });
+  const power = planPower({
+    n: config.stages,
+    ...(pilot ? { pilotCi95Pp: pilot.ci95Pp, pilotN: pilot.n } : {}),
+  });
   const reps =
     config.mode === 'compare'
       ? Math.max(1, Math.round(config.repeats ?? 1))
@@ -266,6 +282,12 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
     out.line();
     out.line('Poder (IMPL-050):');
     for (const l of formatPowerPlan(power)) out.line(`  ${l}`);
+    if (pilot) {
+      const par = pilot.championId ? ` — ${pilot.championId} × ${pilot.controlId}` : '';
+      out.line(
+        `  piloto: ${pilot.source === 'run' ? 'run' : 'sessão'} ${pilot.id}${par} (IC95% [${pilot.ci95Pp[0].toFixed(1)}; ${pilot.ci95Pp[1].toFixed(1)}] p.p., n=${pilot.n}${pilot.pOrigin ? `, p de ${pilot.pOrigin}` : ''})`,
+      );
+    }
     if (config.stages <= 5) {
       out.warn(
         `modo econômico (stages=${config.stages}): com n=${power.n} só se detectam efeitos ≥ ${power.deltaDetectavelPp.toFixed(1)} p.p. (poder 80%, α=0,05 unilateral) — suba --stages para decidir Δ menores`,
@@ -293,6 +315,7 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   out.result(true, 'estimate', {
     estimate: est,
     power,
+    ...(pilot ? { pilot } : {}),
     sample: { stages: config.stages, repeats: reps, economicMode: config.stages <= 5 },
     catalog: { source: ctx.catalogSource, scope: ctx.catalogScope, models: ctx.models.length },
   });
