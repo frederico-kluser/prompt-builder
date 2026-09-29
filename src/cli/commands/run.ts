@@ -157,6 +157,8 @@ const OPTIONS = {
   // (`allow_fallbacks:false`, `require_parameters:true`); vale sobre o --config.
   auditable: { type: 'boolean' },
 } as const;
+/** Spec das flags de compare/vary/train — o docs-lint roda os exemplos da doc nela (IMPL-119). */
+export { OPTIONS as RUN_OPTIONS };
 
 /** `--pii-mode` validado (uso errado = exit 2, nada gasto). */
 function piiModeFlag(v: unknown): 'redact' | 'synthetic' | undefined {

@@ -21,11 +21,19 @@
 //   (d) todo arquivo embarcado casa a regra positiva derivada de `src/`
 //       (arquivo EXTRA injetado reprova — é a prova negativa do critério);
 //   (e) completude: todo módulo de `src/` já compilado em `dist/` tem de estar
-//       no tarball (pegava o `agentRoutes` e pegaria qualquer `files` incompleto).
+//       no tarball — ERRO (um módulo fora do `files` quebra o CLI instalado ao
+//       ser importado: foi o `dist/costSamplesStore`); `dist/` órfão (sem a
+//       fonte em `src/`, build velho) fica como aviso.
 //
 // O diff contra `scripts/tarball-allowlist.json` (allowlist VERSIONADA) trava
 // só em `--strict`/CI para não entupir o fluxo local: arquivo a mais ⇒ "rode
 // node scripts/tarball-gate.mjs --update"; arquivo a menos ⇒ sumiu do pacote.
+// O `npm test` (test/tarball-gate.test.ts) roda ESTE mesmo `gate({strict})` e
+// ainda confere a allowlist contra `src/` sem depender de build
+// (`allowlistContract`) — o drift reprova antes de chegar ao job de release.
+//
+// `--update` recusa regravar a allowlist com `dist/` ausente ou incompleto
+// (sem build o `npm pack` sairia sem o código e a allowlist "encolheria").
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
@@ -136,14 +144,20 @@ export function checkTarball({ packed, files, sources, built = [], existing = pa
 
   // Completude: o que já está compilado tem de ir no tarball (só faz sentido
   // com dist/ preenchido — local pode estar velho; CI/prepublish roda no build).
+  const fontes = new Set(sources);
   for (const b of built) {
     const m = /^dist\/(.+)\.js$/u.exec(b);
     if (!m || FORBIDDEN_DIST_STEMS.includes(m[1])) continue;
     const rel = m[1];
     if (NOT_SHIPPED.includes(`src/${rel}.ts`)) continue;
+    const temFonte = fontes.has(`src/${rel}.ts`);
     for (const out of [`dist/${rel}.js`, `dist/${rel}.d.ts`]) {
       if (built.includes(out) && !packed.includes(out)) {
-        warnings.push(`compilado mas NÃO embarcado (files incompleto): ${out}`);
+        if (temFonte) {
+          errors.push(`módulo de src/ compilado mas NÃO embarcado (files incompleto — o CLI instalado quebra ao importá-lo): ${out}`);
+        } else {
+          warnings.push(`compilado mas NÃO embarcado (dist/ velho? não existe src/${rel}.ts): ${out}`);
+        }
       }
     }
   }
@@ -161,14 +175,51 @@ export function diffAllowlist(packed, allowlist) {
   };
 }
 
+/**
+ * O `dist/` que o tarball TEM de levar, derivado só das fontes (sem build):
+ * cada `src/<rel>.ts` (menos declarações `.d.ts` e o que é só servidor) vira
+ * `dist/<rel>.js` + `dist/<rel>.d.ts`.
+ */
+export function expectedDist(sources) {
+  const out = [];
+  for (const s of sources) {
+    if (!s.endsWith('.ts') || s.endsWith('.d.ts') || NOT_SHIPPED.includes(s)) continue;
+    const rel = s.replace(/^src\//u, '').replace(/\.ts$/u, '');
+    out.push(`dist/${rel}.js`, `dist/${rel}.d.ts`);
+  }
+  return out.sort();
+}
+
+/**
+ * Contrato da allowlist versionada que NÃO depende de build (roda no `npm test`
+ * mesmo com `dist/` velho): a parte `dist/` tem de ser exatamente
+ * {@link expectedDist} e o resto (docs, skills, scripts, dados) exatamente o
+ * que o `npm pack` embarca fora de `dist/`. Módulo novo em `src/` sem
+ * `--update` (ou fora do `files`) e doc nova sem `--update` reprovam aqui.
+ */
+export function allowlistContract({ allowlist, sources, packed }) {
+  const esperado = [...expectedDist(sources), ...packed.filter((p) => !p.startsWith('dist/'))];
+  return diffAllowlist(esperado, allowlist);
+}
+
+/** Lê a allowlist versionada (`null` = ausente/ilegível). */
+export function readAllowlist(file = ALLOWLIST_FILE) {
+  try {
+    const v = JSON.parse(readFileSync(file, 'utf-8'));
+    return Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
 /** Lista REAL do que o npm embarcaria (sem ciclo de vida: nada de build aqui). */
-export function packList() {
+export function packList(root = ROOT) {
   const out = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
-    cwd: ROOT,
+    cwd: root,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 120_000,
@@ -177,27 +228,62 @@ export function packList() {
   return parsed[0].files.map((f) => f.path).sort();
 }
 
-function walk(dir, prefix) {
-  if (!existsSync(dir)) return [];
+/**
+ * Arquivos sob `dir` (caminhos com `/`, prefixados por `prefix`). NÃO segue
+ * symlink de diretório e poda `node_modules` e pastas ocultas (`.git`,
+ * `.claude/worktrees` com outros checkouts…): o `readdirSync({recursive})`
+ * seguia links — num worktree com `node_modules` linkado, um link que aponta
+ * para si mesmo dava ELOOP e derrubava o gate, e na raiz ele varria centenas
+ * de milhares de arquivos que nunca embarcam.
+ */
+export function walk(dir, prefix) {
   const out = [];
-  for (const nome of readdirSync(dir, { recursive: true })) {
-    const abs = path.join(dir, nome);
-    if (!statSync(abs).isFile()) continue;
-    out.push(prefix ? `${prefix}/${String(nome).split(path.sep).join('/')}` : String(nome).split(path.sep).join('/'));
-  }
+  const visitar = (abs, rel) => {
+    let entradas;
+    try {
+      entradas = readdirSync(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entradas) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+        visitar(path.join(abs, e.name), r);
+      } else if (e.isFile() || (e.isSymbolicLink() && ehArquivo(path.join(abs, e.name)))) {
+        out.push(prefix ? `${prefix}/${r}` : r);
+      }
+    }
+  };
+  if (existsSync(dir)) visitar(dir, '');
   return out;
 }
 
-function main(argv) {
-  const strict = argv.includes('--strict') || process.env.CI === 'true';
-  const update = argv.includes('--update');
-  const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf-8'));
-  const packed = packList();
-  const sources = walk(path.join(ROOT, 'src'), 'src').filter((p) => p.endsWith('.ts')).sort();
-  const built = walk(path.join(ROOT, 'dist'), 'dist').sort();
+function ehArquivo(abs) {
+  try {
+    return statSync(abs).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Fontes `.ts` de `src/` (relativas à raiz, ordenadas). */
+export function listSources(root = ROOT) {
+  return walk(path.join(root, 'src'), 'src').filter((p) => p.endsWith('.ts')).sort();
+}
+
+/**
+ * O gate inteiro — o MESMO caminho do `prepublishOnly`/CI e do teste de
+ * contrato. `packed` pode vir pronto (o teste reaproveita um `npm pack`).
+ * Devolve os achados; quem imprime/decide o exit é o `main`.
+ */
+export function gate({ root = ROOT, strict = false, packed = packList(root), allowlistFile = ALLOWLIST_FILE } = {}) {
+  const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf-8'));
+  const sources = listSources(root);
+  const built = walk(path.join(root, 'dist'), 'dist').sort();
   const existing = [
     ...packed,
-    ...walk(ROOT),
+    ...walk(root),
     ...built,
     ...sources,
     'agent-docs', 'skills', 'README.md', 'LICENSE', 'package.json',
@@ -205,37 +291,54 @@ function main(argv) {
 
   const { errors, warnings } = checkTarball({ packed, files: pkg.files ?? [], sources, built, existing });
 
-  if (update) {
-    writeFileSync(ALLOWLIST_FILE, `${JSON.stringify(packed, null, 2)}\n`, 'utf-8');
-    process.stderr.write(
-      `[tarball-gate] allowlist atualizada: ${packed.length} arquivos em scripts/tarball-allowlist.json\n`,
-    );
-    for (const e of errors) process.stderr.write(`[tarball-gate] ERRO: ${e}\n`);
-    return errors.length ? 1 : 0;
-  }
-
-  let allowlist = [];
-  try {
-    allowlist = JSON.parse(readFileSync(ALLOWLIST_FILE, 'utf-8'));
-  } catch {
-    warnings.push('allowlist versionada ausente/ilegível — rode: node scripts/tarball-gate.mjs --update');
-  }
-  const { extra, missing } = diffAllowlist(packed, allowlist);
+  const allowlist = readAllowlist(allowlistFile);
   const diffProblems = [];
-  for (const p of extra) diffProblems.push(`a MAIS no tarball (allowlist desatualizada?): ${p}`);
-  for (const p of missing) diffProblems.push(`a MENOS no tarball (sumiu?): ${p}`);
-
-  for (const w of warnings) process.stderr.write(`[tarball-gate] aviso: ${w}\n`);
-  if (diffProblems.length && !strict) {
-    for (const d of diffProblems) process.stderr.write(`[tarball-gate] aviso (diff): ${d}\n`);
-    process.stderr.write('[tarball-gate] diff só reprova em --strict/CI (nada travado localmente)\n');
+  if (allowlist === null) {
+    diffProblems.push('allowlist versionada ausente/ilegível — rode: npm run build && node scripts/tarball-gate.mjs --update');
+  } else {
+    const { extra, missing } = diffAllowlist(packed, allowlist);
+    for (const p of extra) diffProblems.push(`a MAIS no tarball (allowlist desatualizada? rode --update): ${p}`);
+    for (const p of missing) diffProblems.push(`a MENOS no tarball (sumiu? build velho?): ${p}`);
   }
-  for (const e of errors) process.stderr.write(`[tarball-gate] ERRO: ${e}\n`);
-  if (strict) for (const d of diffProblems) process.stderr.write(`[tarball-gate] ERRO (diff): ${d}\n`);
+
+  // Sem build o tarball sai sem o código: o que falta de dist/ é dito como tal.
+  const semBuild = expectedDist(sources).filter((p) => !packed.includes(p));
 
   const failed = errors.length > 0 || (strict && diffProblems.length > 0);
-  process.stderr.write(`[tarball-gate] ${packed.length} arquivos no tarball — ${failed ? 'REPROVADO' : 'ok'}\n`);
-  return failed ? 1 : 0;
+  return { packed, sources, errors, warnings, diffProblems, semBuild, strict, failed };
+}
+
+function main(argv) {
+  const strict = argv.includes('--strict') || process.env.CI === 'true';
+  const update = argv.includes('--update');
+  const r = gate({ strict });
+
+  if (update) {
+    for (const e of r.errors) process.stderr.write(`[tarball-gate] ERRO: ${e}\n`);
+    if (r.semBuild.length > 0) {
+      process.stderr.write(
+        `[tarball-gate] --update RECUSADO: ${r.semBuild.length} arquivo(s) de dist/ esperados fora do tarball ` +
+          `(ex.: ${r.semBuild[0]}) — rode \`npm run build\` (e confira o files do package.json) antes.\n`,
+      );
+      return 1;
+    }
+    writeFileSync(ALLOWLIST_FILE, `${JSON.stringify(r.packed, null, 2)}\n`, 'utf-8');
+    process.stderr.write(
+      `[tarball-gate] allowlist atualizada: ${r.packed.length} arquivos em scripts/tarball-allowlist.json\n`,
+    );
+    return r.errors.length ? 1 : 0;
+  }
+
+  for (const w of r.warnings) process.stderr.write(`[tarball-gate] aviso: ${w}\n`);
+  if (r.diffProblems.length && !strict) {
+    for (const d of r.diffProblems) process.stderr.write(`[tarball-gate] aviso (diff): ${d}\n`);
+    process.stderr.write('[tarball-gate] diff só reprova em --strict/CI (nada travado localmente)\n');
+  }
+  for (const e of r.errors) process.stderr.write(`[tarball-gate] ERRO: ${e}\n`);
+  if (strict) for (const d of r.diffProblems) process.stderr.write(`[tarball-gate] ERRO (diff): ${d}\n`);
+
+  process.stderr.write(`[tarball-gate] ${r.packed.length} arquivos no tarball — ${r.failed ? 'REPROVADO' : 'ok'}\n`);
+  return r.failed ? 1 : 0;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

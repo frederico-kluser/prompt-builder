@@ -7,6 +7,7 @@ de engenharia de prompt, roda todas no **mesmo** modelo e julga.
 prompt-builder vary \
   --model openai/gpt-5-mini \
   --judge anthropic/claude-sonnet-5 \
+  --reference deepseek/deepseek-v4-pro \
   --theme "Classificação de tickets de suporte" \
   --base-prompt-file prompt.md \
   --techniques persona,constraints,format,fewshot \
