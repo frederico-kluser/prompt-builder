@@ -927,6 +927,39 @@ describe('CLI em processo — a run inteira passa pelo ledger da máquina', { ti
     expect(b.json!.data.idempotency).toEqual({ key: 'verbo-2', reused: true, attached: false });
     expect(fake.billedCalls()).toBe(chamadas);
   });
+
+  it('cli#7 — train NDJSON: `budget` de cada iteração leva `totalSpentUsd` da SESSÃO (nunca zera) contra o `budgetUsd`', async () => {
+    const dir = tmp('pb-cli-train-nd-');
+    const fake = fakeOpenRouter({ catalog: CATALOGO, chat: rotaDoPipeline });
+    const f = path.join(dir, 'train.json');
+    writeFileSync(f, JSON.stringify(TRAIN_CONFIG));
+    const nd = await invocar(fake, dir, ['--config', f, '--budget', '5', '--yes', '--force', '--key', VALID_KEY], 'training', 'ndjson');
+    expect(nd.exit, JSON.stringify(nd.linhas?.at(-1))).toBe(EXIT.OK);
+    const budget = nd.linhas!.filter((l) => l.type === 'budget') as Array<{
+      runId: string;
+      spentUsd: number;
+      totalSpentUsd: number;
+      budgetUsd: number;
+    }>;
+    const runs = new Set(budget.map((b) => b.runId));
+    expect(runs.size).toBeGreaterThanOrEqual(2); // ≥ 2 iterações com eventos de gasto
+    let anterior = 0;
+    for (const b of budget) {
+      expect(typeof b.totalSpentUsd).toBe('number');
+      expect(b.totalSpentUsd).toBeGreaterThanOrEqual(b.spentUsd - 1e-12);
+      expect(b.totalSpentUsd).toBeGreaterThanOrEqual(anterior - 1e-12); // acumulado: monotônico
+      expect(b.budgetUsd).toBe(5);
+      anterior = b.totalSpentUsd;
+    }
+    // O `spentUsd` é só da iteração: na 2ª ele NÃO inclui o gasto da 1ª — o
+    // total da sessão inclui (antes era só o `spentUsd`, contra o teto inteiro).
+    const primeiroDaSegunda = budget.find((b) => b.runId !== budget[0].runId)!;
+    const ultimoDaPrimeira = budget.filter((b) => b.runId === budget[0].runId).at(-1)!;
+    expect(primeiroDaSegunda.totalSpentUsd).toBeGreaterThan(primeiroDaSegunda.spentUsd);
+    expect(primeiroDaSegunda.totalSpentUsd).toBeGreaterThanOrEqual(ultimoDaPrimeira.totalSpentUsd);
+    // Nunca passa do que foi de fato cobrado.
+    expect(anterior).toBeLessThanOrEqual(fake.billedUsd() + 1e-9);
+  });
 });
 
 // --- 4. CLI com 2 processos reais ---------------------------------------------------

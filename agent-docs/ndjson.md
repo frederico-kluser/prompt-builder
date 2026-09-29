@@ -47,7 +47,7 @@ Erro é a linha `result` com `ok: false` e o **mesmo** objeto `error` do
 | `stage.judging` / `stage.judged` | julgamento | `verdicts`, `missing` (id → motivo do veredito **ausente**), `ranked`, `scoreboard`, `totalCostUsd` |
 | `finals.started` | finais | `finalists[]` |
 | `stage.dueled` | duelos de um cenário | `pairs[]`, `failedPairs[]` (sem resultado — não pontuam) |
-| `budget` | gasto acumulado | `spentUsd`, `budgetUsd`, `byRole` |
+| `budget` | gasto acumulado | `spentUsd` (da run/iteração), `totalSpentUsd` (só no `train`: a sessão inteira — é ele que se compara com `budgetUsd`), `budgetUsd` (teto do comando), `byRole` |
 | `budget.gate` | uma porta decidiu | `phase`, `projectedUsd`, `remainingUsd`, `decision` |
 | `run.finished` | run terminou | `status` (`finished` \| `inconclusive` \| …), `totalCostUsd`, `standings`, `failureCountByRole`, `inconclusiveReasons`, `competitorOutcomeCounts`, `truncationRate`/`truncationCounts`/`truncationByRole` (todos os papéis; + `truncationAlert` acima de 2%) |
 | `iteration.started` / `iteration.finished` / `iteration.promoted` | treino | `iteration`, `runId`, `gain` (bruto); no `promoted` também `gainCorrected`, `pAdjusted`, `k`, `method`, `minGain` |
@@ -67,9 +67,10 @@ Para o conteúdo completo use `runs show <id> --json` (lê do disco) ou
 ## Consumindo
 
 ```bash
-# acompanhar só o custo
+# acompanhar só o custo (no train, `spentUsd` é da iteração e zera a cada uma;
+# o acumulado da sessão é `totalSpentUsd`)
 prompt-builder train --config a.json --budget 3 --output-format ndjson \
-  | jq -r 'select(.type=="budget") | "\(.spentUsd)/\(.budgetUsd)"'
+  | jq -r 'select(.type=="budget") | "\(.totalSpentUsd // .spentUsd)/\(.budgetUsd)"'
 
 # guardar tudo e ler o resultado no fim
 prompt-builder train --config a.json --budget 3 --output-format ndjson | tee run.ndjson

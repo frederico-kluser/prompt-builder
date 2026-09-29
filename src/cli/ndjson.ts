@@ -33,6 +33,13 @@ export interface NdjsonMapperOptions {
   verbose?: boolean;
   /** Marca as linhas de run com o sessionId, quando dentro de um treino. */
   sessionId?: string;
+  /**
+   * cli#7: gasto acumulado do COMANDO inteiro (a raiz do ledger — a sessão
+   * de treino), o número que se compara com `budgetUsd`. No `train` cada
+   * iteração tem ledger próprio (fork): o `spentUsd` do evento `budget` é da
+   * ITERAÇÃO e "zerava" a cada uma contra o teto da sessão inteira.
+   */
+  totalSpentUsd?: () => number;
 }
 
 export interface AgentSummary extends ReturnType<typeof infraSummaryFields> {
@@ -293,14 +300,18 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
     case 'duel.progress':
       out.event('progress', { ...base, phase: 'duels', done: e.done, total: e.total });
       break;
-    case 'run.spend':
+    case 'run.spend': {
+      const total = opts.totalSpentUsd?.();
       out.event('budget', {
         ...base,
         spentUsd: e.spentUsd,
+        // cli#7: o acumulado da sessão (o que o `budgetUsd` limita) vai junto.
+        ...(total !== undefined && Number.isFinite(total) ? { totalSpentUsd: Math.max(total, e.spentUsd) } : {}),
         ...(e.budgetUsd !== undefined ? { budgetUsd: e.budgetUsd } : {}),
         byRole: e.byRole,
       });
       break;
+    }
     case 'run.budget':
       out.event('budget.gate', {
         ...base,

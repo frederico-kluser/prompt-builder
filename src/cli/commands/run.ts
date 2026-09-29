@@ -1315,7 +1315,12 @@ async function runTraining(
         if (e.type === 'iteration.started') {
           unsubRuns.push(
             subscribe(e.runId, (re) =>
-              emitRunEvent(out, re, { verbose: ctx.verbose, sessionId: id }),
+              emitRunEvent(out, re, {
+                verbose: ctx.verbose,
+                sessionId: id,
+                // cli#7: `budget` da iteração leva o acumulado da SESSÃO.
+                totalSpentUsd: () => guards.root.spentUsd,
+              }),
             ),
           );
         }
