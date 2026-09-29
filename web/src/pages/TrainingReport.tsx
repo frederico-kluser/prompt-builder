@@ -28,6 +28,7 @@ import {
   type SessionReport,
 } from '../engine/sessionReport';
 import { renderSessionReportHtml } from '../engine/sessionReportHtml';
+import { sessionExchangeJson } from '../recordExchange';
 import { diffLines } from '../diff';
 import { CopyButton } from '@/components/motion-ui/copy-button';
 import { Skeleton } from '@/components/motion-ui/skeleton';
@@ -364,6 +365,15 @@ export function TrainingReport() {
           </CopyButton>
           <Button variant="outline" size="sm" onClick={() => download(`${baseName}.md`, markdown, 'text/markdown')}>
             <FileText className="size-4" aria-hidden="true" /> Markdown
+          </Button>
+          {/* left#11: a sessão + as runs dela em exchange@1 — o `sessions import` do terminal lê igual. */}
+          <Button
+            variant="outline"
+            size="sm"
+            title="Pacote prompt-builder-exchange@1 com a sessão e as runs dela (sessions import no terminal)"
+            onClick={() => download(`treino-${s.id.slice(0, 8)}.json`, sessionExchangeJson(session, runs).json, 'application/json')}
+          >
+            <Download className="size-4" aria-hidden="true" /> JSON
           </Button>
           <Button size="sm" onClick={() => download(`${baseName}.html`, renderSessionReportHtml(report), 'text/html')}>
             <Download className="size-4" aria-hidden="true" /> Baixar HTML
