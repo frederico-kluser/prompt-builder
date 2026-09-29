@@ -108,7 +108,10 @@ const USO: Record<string, string> = {
   --free --lgpd-area --expiring --format table|json|ndjson|csv|ids
   Listas: --limit <N> (default 50) · --all (lista inteira)`,
   estimate: `  estimate -c <arquivo>    estima o custo antes de gastar (sem key)
-  O arquivo pode ser arena-config@1 ou RunConfig cru.`,
+  O arquivo pode ser arena-config@1 ou RunConfig cru.
+  estimate -c <arq> --pilot-run <runId> | --pilot-session <id>
+                           plano de poder com σd calibrado pelo IC95% MEDIDO do
+                           piloto gravado (sem a flag: σd de tabela, não calibrado)`,
   key: `  key check                valida a key e mostra o saldo
   key set --stdin          grava a key (leia da entrada padrão, nunca de argv)
   key path | rm            onde está a key gravada | remove`,
@@ -116,6 +119,7 @@ const USO: Record<string, string> = {
   compare --config <arq>   usa um arena-config@1 (ver: docs config)
   Comuns: --theme --stages --judge --budget <usd|none> --dry-run
   --output-format ndjson --idempotency-key <k> --allow-concurrent --detach
+  --require-approved       biblioteca: item não aprovado recusa (exit 3)
   --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR —
                            cenário fora da política vira aviso no record)
   --judge-cascade b1,b2:forte  modo econômico: 2 juízes baratos; o forte só
@@ -124,10 +128,14 @@ const USO: Record<string, string> = {
   vary: `  vary --model <id>        testa variações de prompt num modelo
   vary --config <arq>      usa um arena-config@1 (ver: docs config)
   Comuns: --theme --stages --judge --techniques --budget --dry-run --detach
+  --require-approved       biblioteca: item não aprovado recusa (exit 3)
   --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR)`,
   train: `  train --model <id>       treina um prompt ao longo de iterações
   train --config <arq>     usa um arena-config@1 (ver: docs config)
   Comuns: --iterations --holdout-ratio --budget --dry-run --detach
+  --require-approved       biblioteca: item não aprovado recusa (exit 3); sem a flag
+                           a run relata curatedKofN e avisa (run.warning); o holdout
+                           exige 100% aprovados quando o perfil usa curadoria
   --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR)
   --stages N               default 10 no treino: com poucos cenários o gate não
                            consegue promover (o pré-voo avisa)
@@ -141,13 +149,32 @@ const USO: Record<string, string> = {
   runs winner <id> [--prompt-only]
   runs reproduce <id>      config reconstruído + comando p/ re-rodar
   runs reproduce <id> --replay  re-pontua as respostas gravadas a US$ 0 (exit 3 se divergir)
-  runs export <id> [-o <arq>]
+  runs export <id> [-o <arq>]  artefato auditável (record + gabaritos + vereditos)
+  runs export <id> --format exchange [-o <dir|arq.json>]
+                           pacote prompt-builder-exchange@1 (record VERBATIM)
+  runs import <dir|arq.json> [--overwrite]
+                           importa runs/sessões de um pacote exchange@1; conflito
+                           (mesmo id, outro conteúdo) recusa (exit 3) sem --overwrite
+  runs delete <id…>        apaga de verdade: record + job + journal + chaves +
+                           agent-runs/<id>/ (zero resíduo)
+  runs prune [--older-than 30d] [--dry-run]
+                           TTL agora; o TTL (90 dias, PB_RETENTION_DAYS; 0 desliga)
+                           também roda sozinho no \`runs list\` e antes de cada run
   runs status|wait|cancel <id>  job (--detach), run ou sessão`,
   sessions: `  sessions list            lista sessões (teto 50; --all/--limit N)
   sessions show <id>
   sessions winner <id> [--prompt-only | --apply <arq> [--commit] [--override "<motivo>"]]
            handoff com backup + diff; holdout regredido BLOQUEIA (exit 10)
            salvo --override com motivo (gravado na auditoria + trailer)
+  sessions winner <id> --apply <arq> [--record] [--commit] [--approver "Nome <email>"]
+           registro prompt-approval@1 (hashes do prompt/dataset/config +
+           evidência) em <repo>/.prompt-approvals/; --commit implica --record e
+           leva os trailers Approved-by:/Prompt-Approval: no mesmo commit
+  sessions export <id> [-o <dir|arq.json>]
+           pacote prompt-builder-exchange@1 com a sessão E as runs dela
+  sessions import <dir|arq.json> [--overwrite]
+  sessions delete <id…> [--keep-runs]
+           apaga a sessão (e as runs dela, salvo --keep-runs)
   sessions report <id> [--html <arq>] [--markdown <arq>] [--calls-per-month N] [--annotate]
            relatório de ciclos: quanto melhorou (original × campeão, por ciclo
            e no holdout) e quanto a mudança muda o custo por chamada; --html
@@ -205,7 +232,7 @@ const USO: Record<string, string> = {
   techniques: `  techniques               lista as técnicas de variação (id — o que faz)`,
   lgpd: `  lgpd                     áreas de dado pessoal, allowlist LGPD e cobertura
            da pseudonimização (IMPL-042)`,
-  config: `  config validate <arq>    valida arena-config@1 ou RunConfig cru (exit 3 se inválido)
+  config: `  config validate <arq>    valida arena-config@1, arena-agent-config@1|@2 ou RunConfig cru (exit 3 se inválido)
   config example [--mode compare|variation|training] [-o <arq>]
            gera um exemplo VÁLIDO para o modo pedido (aliases: train, vary)
   config schema [--dialect arena|run] [-o <arq>]

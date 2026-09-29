@@ -148,3 +148,44 @@ aviso `override.applied`) e no trailer `Override-Reason:` do commit
 `sessions winner <sid> --json` já traz o laudo em `data.handoff`
 (`wouldBlock`, `blocks`, `warnings`). `--prompt-only` imprime o prompt cru e
 **não** passa pelo gate (só avisa no stderr).
+
+## Levar para outra máquina e apagar (troca e LGPD)
+
+```bash
+prompt-builder runs export <id> --format exchange -o pacote/   # prompt-builder-exchange@1, record VERBATIM
+prompt-builder sessions export <sid> -o sessao.json            # a sessão E as runs dela (um arquivo só)
+prompt-builder runs import pacote/                             # noutro --data-dir: ida e volta = identidade
+prompt-builder runs delete <id>                                # apaga de verdade (zero resíduo)
+prompt-builder sessions delete <sid> [--keep-runs]
+prompt-builder runs prune --older-than 30d --dry-run           # o que o TTL apagaria agora
+```
+
+O import grava runs **e** sessões do pacote, sem normalizar (campo que esta
+versão não conhece sobrevive). Mesmo id com conteúdo diferente recusa o pacote
+inteiro (exit `3`, `records.import_conflict`) — `--overwrite` substitui; o
+idêntico é pulado (reimportar é idempotente). O `runs delete` leva record,
+dono, `.tmp`, journal de chamadas, job (inclusive o do `--detach`), chave de
+idempotência e `agent-runs/<id>/`; record `running` com dono vivo é recusado
+(pare antes com `runs cancel`). O TTL de retenção é de **90 dias por default**
+(`PB_RETENTION_DAYS`; `0` desliga) e roda sozinho no `runs list`/`sessions
+list` e antes de cada run real — o que venceu some das listas e do disco.
+
+### Registro de aprovação (`prompt-approval@1`)
+
+```bash
+prompt-builder sessions winner <sid> --apply prompt.md --commit --approver "Ana <ana@empresa.com>"
+prompt-builder sessions winner <sid> --apply prompt.md --record   # grava o registro sem commitar
+```
+
+Toda aplicação monta um registro `prompt-approval@1`: `promptHash` (sha256 dos
+bytes gravados — confere com `sha256sum`), `datasetHash` (JCS do **conjunto**
+de cenários: ordem e formatação não mudam o hash), `configHash`, sessão, runs,
+aprovador, instante, evidência (holdout n/Δ/regressed, IC95%/p e a origem do p,
+custo, k de n curados) e o override. Ele vai **sempre** na linha da trilha
+local (`handoffs.jsonl`); com `--record` também em
+`<repo>/.prompt-approvals/<approvalId>.json`, e o `--commit` (que implica
+`--record`) commita o registro junto do prompt com os trailers
+`Approved-by:`, `Prompt-Approval:`, `Prompt-Hash:` e `Dataset-Hash:`
+(`git interpret-trailers --parse`). O aprovador é `--approver` ou a identidade
+que o git usaria no commit; sem nenhum dos dois, `--record`/`--commit` recusam
+com exit `2` (`usage.approver_required`) antes de tocar o destino.

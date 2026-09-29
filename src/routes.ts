@@ -22,6 +22,8 @@ import { csvCell } from './engine/csv.js';
 import type { CompareConfig, CompetitorResponse, RunRecord } from './types.js';
 import { buildSessionReport, renderSessionReportMarkdown } from './engine/sessionReport.js';
 import { renderSessionReportHtml } from './engine/sessionReportHtml.js';
+import { unknownKeyIssues, unknownKeysMessage } from './configKeys.js';
+import { autoPrune } from './lgpd.js';
 
 const router = Router();
 
@@ -118,6 +120,25 @@ function refuseAgentExec(body: unknown, res: Response): boolean {
   return true;
 }
 
+/**
+ * IMPL-093 — fail-closed na API HTTP, com a MESMA regra do CLI e do MCP: chave
+ * que o `runConfigSchema` (strip) descartaria em silêncio é 400, citando o
+ * caminho JSON e o "você quis dizer". Antes um typo como `judgePases` sumia do
+ * body e a run PAGA rodava com o default. O SPA servido junto do backend só LÊ
+ * runs/sessões (web/src/backend.ts) — nenhum POST dele passa por aqui.
+ * `true` = já respondeu.
+ */
+function refuseUnknownKeys(body: unknown, parsed: unknown, res: Response): boolean {
+  const issues = unknownKeyIssues(body, parsed);
+  if (issues.length === 0) return false;
+  res.status(400).json({
+    error: unknownKeysMessage(issues),
+    code: 'config.unknown_key',
+    unknownKeys: issues,
+  });
+  return true;
+}
+
 router.post('/runs', requireKey, ah(async (req, res) => {
   // Antes do parse: a recusa não pode depender de a config agente ser válida.
   if (refuseAgentExec(req.body, res)) return;
@@ -127,6 +148,7 @@ router.post('/runs', requireKey, ah(async (req, res) => {
     return;
   }
   if (refuseAgentExec(parsed.data, res)) return;
+  if (refuseUnknownKeys(req.body, parsed.data, res)) return;
   const apiKey = (req as Request & { apiKey: string }).apiKey;
 
   // Pre-flight: valida a key ANTES de iniciar a run, pra falhar rapido com
@@ -177,8 +199,14 @@ router.get('/lgpd', (_req, res) => {
   res.json({ data: getLgpdData() });
 });
 
+/**
+ * IMPL-100 — TTL de retenção LIGADO por default (90 dias, `PB_RETENTION_DAYS`;
+ * 0 desliga): as listagens rodam o prune antes de ler — no máximo uma varredura
+ * por hora por processo (`autoPrune`), que nunca lança. Runs E sessões.
+ */
 router.get('/runs', ah(async (_req, res) => {
   try {
+    await autoPrune();
     const data = await listRuns();
     res.json({ data });
   } catch (err) {
@@ -369,6 +397,7 @@ router.post('/sessions', requireKey, ah(async (req, res) => {
     return;
   }
   if (refuseAgentExec(parsed.data, res)) return;
+  if (refuseUnknownKeys(req.body, parsed.data, res)) return;
   if (parsed.data.mode !== 'training') {
     res.status(400).json({ error: 'POST /v1/benchmark/sessions exige mode "training".' });
     return;
@@ -391,6 +420,7 @@ router.post('/sessions', requireKey, ah(async (req, res) => {
 
 router.get('/sessions', ah(async (_req, res) => {
   try {
+    await autoPrune(); // IMPL-100 (ver GET /runs)
     res.json({ data: await listSessions() });
   } catch (err) {
     fail500(res, err);

@@ -15,6 +15,7 @@ import { ensureCatalog } from '../modelsCache.js';
 import { validateKey, type KeyInfo } from '../openrouter.js';
 import { Output, CliError, DEFAULT_HINT, EXIT, type OutputFormat } from './output.js';
 import type { OpenRouterModel } from '../types.js';
+import { closestMatch, unknownKeyIssues as unknownKeyIssuesPure, unknownKeysMessage } from '../configKeys.js';
 
 export const GLOBAL_OPTIONS = {
   json: { type: 'boolean' },
@@ -55,42 +56,9 @@ export function parse(
   }
 }
 
-/**
- * Distancia de edicao (Levenshtein) — base do "voce quis dizer". Entradas
- * curtas (nomes de flag/comando), entao O(n·m) em memoria e irrelevante.
- */
-function editDistance(a: string, b: string): number {
-  const prev = Array.from({ length: b.length + 1 }, (_, j) => j);
-  for (let i = 1; i <= a.length; i++) {
-    let diag = prev[0];
-    prev[0] = i;
-    for (let j = 1; j <= b.length; j++) {
-      const tmp = prev[j];
-      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
-      diag = tmp;
-    }
-  }
-  return prev[b.length];
-}
-
-/**
- * Candidato mais proximo de `input`, ou `undefined` se nenhum e plausivel
- * (tolerancia: 1 edicao ate 4 letras, 2 acima; ou prefixo com 3+ letras).
- */
-export function closestMatch(input: string, candidates: readonly string[]): string | undefined {
-  const alvo = input.toLowerCase();
-  if (!alvo) return undefined;
-  let melhor: { c: string; d: number } | undefined;
-  for (const c of candidates) {
-    const d = editDistance(alvo, c.toLowerCase());
-    if (!melhor || d < melhor.d) melhor = { c, d };
-  }
-  if (!melhor) return undefined;
-  const tolerancia = alvo.length <= 4 ? 1 : 2;
-  if (melhor.d <= tolerancia) return melhor.c;
-  const prefixo = alvo.length >= 3 ? candidates.find((c) => c.toLowerCase().startsWith(alvo)) : undefined;
-  return prefixo;
-}
+// "Você quis dizer" (Levenshtein + prefixo): fonte única em src/configKeys.ts —
+// o mesmo critério para flag, comando, subcomando e chave de config.
+export { closestMatch } from '../configKeys.js';
 
 /**
  * Erro do `parseArgs` do Node -> CliError com `error.code` estavel, a flag
@@ -278,11 +246,136 @@ const FAMILIAS_COM_SUB = new Set(['models', 'key', 'runs', 'sessions', 'library'
  * `set`) — um id de run no lugar do subcomando nao vira rotulo.
  */
 export function commandLabel(argv: readonly string[]): string {
-  const cmd = argv[0] && !argv[0].startsWith('-') ? argv[0] : undefined;
+  const { cmd, rest } = locateCommand(argv);
   if (!cmd) return '?';
-  const sub = argv[1];
+  const sub = rest[0];
   if (FAMILIAS_COM_SUB.has(cmd) && sub && /^[a-z]+(?:-[a-z]+)*$/.test(sub)) return `${cmd}.${sub}`;
   return cmd;
+}
+
+/**
+ * Flags globais que CONSOMEM o token seguinte (o valor). `--budget` não é
+ * global no parse, mas o help o lista como tal — sem ele aqui, em
+ * `--budget 5 compare …` o "5" viraria o comando.
+ */
+const FLAGS_GLOBAIS_COM_VALOR = new Set(['--output-format', '--data-dir', '--key', '--budget']);
+
+/**
+ * O comando é o PRIMEIRO token que não é flag nem valor de flag global
+ * (IMPL-028): antes só `argv[0]` contava, e `prompt-builder --json compare
+ * --bogus` caía no help em TEXTO com exit 0 — o consumidor-máquina via stdout
+ * não-JSON e "sucesso". `rest` = os argumentos do comando com as flags de
+ * ANTES dele no fim (antes de um `--`), para o subcomando continuar em
+ * `rest[0]` (`--json runs show <id>` → `show <id> --json`).
+ */
+export function locateCommand(argv: readonly string[]): { cmd: string | undefined; rest: string[] } {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--') break;
+    if (a.startsWith('-')) {
+      if (!a.includes('=') && FLAGS_GLOBAIS_COM_VALOR.has(a)) i += 1;
+      continue;
+    }
+    const antes = argv.slice(0, i);
+    const depois = argv.slice(i + 1);
+    const sep = depois.indexOf('--');
+    const rest = sep === -1 ? [...depois, ...antes] : [...depois.slice(0, sep), ...antes, ...depois.slice(sep)];
+    return { cmd: a, rest };
+  }
+  return { cmd: undefined, rest: [...argv] };
+}
+
+/**
+ * Sem comando, só `prompt-builder`, `--help`/`-h` (e enfeites de saída em
+ * texto) mostram o help com exit 0. Qualquer outra coisa — `--json` sozinho,
+ * `--output-format ndjson`, uma flag solta — é uso inválido (IMPL-028): exit 2
+ * e o envelope no formato pedido, nunca o help em texto com "sucesso".
+ */
+export function isBareHelpRequest(argv: readonly string[]): boolean {
+  if (sniffOutputFormat(argv) !== 'text') return false;
+  const inofensivas = new Set(['--help', '-h', '--no-color', '--quiet', '--verbose', '--pretty']);
+  return argv.every((a) => inofensivas.has(a));
+}
+
+/** Erro de comando ausente (flags sem comando) — `usage.missing_command`. */
+export function missingCommandError(commands: readonly string[]): CliError {
+  return new CliError(
+    'Comando ausente: as flags vieram sem um comando.',
+    EXIT.USAGE,
+    { commands: [...commands] },
+    {
+      code: 'usage.missing_command',
+      hint: 'Use `prompt-builder <comando> [opções]` (ex.: `prompt-builder runs list --json`); a lista está em `prompt-builder --help`.',
+    },
+  );
+}
+
+/**
+ * Recusa subcomando desconhecido (cli#13) ANTES de parse, disco ou rede — exit
+ * 2 com `usage.unknown_subcommand`, os aceitos em `details` e "você quis dizer".
+ * Antes `runs delete <id>` caía no `runs show` (exit 0, nada apagado),
+ * `models shwo x` listava o catálogo e `key remove` validava a key na rede.
+ * `aliases` mapeia palavras naturais para o subcomando real (`remove` → `rm`);
+ * `hint` dá a dica específica quando o "subcomando" é outra coisa (um id, um
+ * arquivo).
+ */
+export function assertKnownSubcommand(
+  family: string,
+  sub: string,
+  subs: readonly string[],
+  opts: { usage: string; aliases?: Readonly<Record<string, string>>; hint?: (sub: string) => string | undefined } = {
+    usage: '',
+  },
+): void {
+  if (subs.includes(sub)) return;
+  const sugestao = opts.aliases?.[sub.toLowerCase()] ?? closestMatch(sub, subs);
+  const especifica = opts.hint?.(sub);
+  throw new CliError(
+    `Subcomando desconhecido: "${family} ${sub}".`,
+    EXIT.USAGE,
+    { subcommand: sub, accepted: [...subs], suggestion: sugestao ?? null },
+    {
+      code: 'usage.unknown_subcommand',
+      hint:
+        especifica ??
+        ((sugestao ? `Quis dizer \`prompt-builder ${family} ${sugestao}\`? ` : '') +
+          `Use: ${opts.usage || subs.map((s) => `${family} ${s}`).join(' | ')}.`),
+    },
+  );
+}
+
+/**
+ * Comando SEM subcomandos (`lgpd`, `techniques`, `doctor`, `estimate`) com um
+ * argumento solto (cli#13): antes `lgpd delete` mostrava as áreas com exit 0 e
+ * o agente achava que tinha apagado algo. Exit 2 `usage.unexpected_argument`.
+ */
+export function assertNoPositionals(command: string, positionals: readonly string[], usage: string): void {
+  if (positionals.length === 0) return;
+  throw new CliError(
+    `Argumento inesperado para "${command}": "${positionals[0]}" — este comando não tem subcomandos.`,
+    EXIT.USAGE,
+    { command, positionals: [...positionals] },
+    { code: 'usage.unexpected_argument', hint: `Use: ${usage}.` },
+  );
+}
+
+/**
+ * cli#19 — consumidor que fecha o pipe cedo (`docs --all | head -1`) NÃO é
+ * falha de rede: o que ele queria já saiu. Sem listener, o EPIPE assíncrono da
+ * escrita no stdout virava `uncaughtException` → `toCliError` → "Falha de
+ * rede: write EPIPE" com exit 8 (EPIPE também é errno de socket) — e o
+ * `failAndExit` ainda tentava escrever o envelope no stdout morto. Com o
+ * listener, EPIPE no stdout chama `onClosed` (o main sai 0 em silêncio: não há
+ * a quem entregar mais nada); erro no stderr é engolido (narração é opcional).
+ * Outro erro de escrita no stdout segue para `onOtherError` (o envelope).
+ */
+export function installPipeGuards(handlers: { onClosed: () => void; onOtherError: (err: Error) => void }): void {
+  process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') handlers.onClosed();
+    else handlers.onOtherError(err);
+  });
+  // stderr morto: nada a fazer — relatar o erro escreveria no MESMO stderr (laço).
+  process.stderr.on('error', () => undefined);
 }
 
 /** true quando quem chama e um agente/script, nao um humano num terminal. */
@@ -394,130 +487,25 @@ export async function readJsonFile(file: string): Promise<unknown> {
 
 // --- config fail-closed (IMPL-093, R-12:REC-2) --------------------------------
 //
-// Os schemas zod são `strip`: chave desconhecida é descartada EM SILÊNCIO e um
-// typo como "trainig" sumia do config sem ninguém saber (nota/custo mudavam).
-// O CLI fecha o circuito comparando a ÁRVORE LIDA com a árvore PARSEADA: toda
-// chave de entrada que não sobrevive ao parse foi descartada pelo schema —
-// recusa (exit 3) citando o caminho JSON e o "você quis dizer". Chaves
-// descontinuadas/alias legado continuam aceitas (com o aviso de sempre) e
-// moram na allowlist abaixo (IMPL-012: chave descontinuada é aviso, não erro).
+// A comparação árvore LIDA × árvore PARSEADA (e o "você quis dizer" tirado das
+// chaves válidas do MESMO objeto) mora em src/configKeys.ts — a API HTTP usa a
+// mesma. Aqui fica só a recusa com o envelope do CLI (exit 3).
 
-export interface UnknownKeyIssue {
-  /** Caminho JSON da chave (ex.: `training.trainig`). */
-  path: string;
-  key: string;
-  /** Chave irmã mais plausível (did-you-mean), quando existe. */
-  suggestion: string | null;
-}
-
-/**
- * Chaves aceitas e IGNORADAS de propósito pelo parser (não são typo):
- * descontinuada com aviso (IMPL-012) e alias legado renomeado pelo preprocess.
- */
-export const CHAVES_LEGADO_ACEITAS: readonly string[] = ['training.halving', 'judgeModelId'];
-
-/**
- * Chaves canônicas dos três dialetos (arena-config@1, arena-agent-config@1 e
- * RunConfig cru). ALIMENTA SÓ o "você quis dizer" — a recusa vem da comparação
- * entrada × saída do parse, então uma chave de menos aqui apenas deixa a
- * sugestão mais pobre, nunca aprova nada errado. Mantenha em par com
- * src/configFile.ts / src/runConfigSchema.ts.
- */
-const CHAVES_CANONICAS: readonly string[] = [
-  // raiz (arena-config@1 / arena-agent-config@1 / RunConfig cru)
-  'format', 'mode', 'theme', 'scenarioBrief', 'languages', 'stages', 'scenarios', 'prompt', 'models', 'effort',
-  'variation', 'training', 'judging', 'limits', 'compliance', 'piiMode', 'allowPii', 'agent',
-  'duels', 'repeats', 'finalists', 'budgetUsd',
-  // RunConfig cru
-  'datagenModelId', 'judgeModelIds', 'judgeModelId', 'contestantModelId', 'basePrompt',
-  'techniqueIds', 'manualVariants', 'temperature', 'promptGroup', 'promptId', 'competitorModelIds',
-  'competitorConfigs', 'competitorAnchor', 'customStages', 'scenarioSeed', 'reasoning', 'referenceModelId',
-  'referenceJudging', 'promptOptimization', 'optimizerModelId', 'judgePasses', 'maxPricePerMTok',
-  'maxOutputTokens', 'timeoutMs', 'concurrency',
-  // cenário / etapa
-  'id', 'question', 'productContext', 'maxTokens', 'rubric', 'reference', 'expected', 'labelSet',
-  'origin', 'agentTask', 'tier', 'dimensionTags', 'language', 'persona', 'difficultyEstimate',
-  'invarianceGroup', 'adversarialCategory', 'turnLabel', 'basePromptHash',
-  // biblioteca / prompt
-  'from', 'profile', 'ids', 'text', 'generateFrom', 'contracts', 'group',
-  // models
-  'datagen', 'judges', 'contestant', 'competitors', 'rewriter', 'model', 'modelId', 'reasoningLevel',
-  // effort / variation / training / judging
-  'competitor', 'judge', 'rewriter', 'optimize', 'techniques', 'iterations', 'minGain',
-  'holdoutRatio', 'feedbackDriven', 'reflection', 'paretoPool', 'passes', 'dossierTokens',
-  // agente
-  'executor', 'executorVersion', 'install', 'provider', 'promptMode', 'thinking', 'tools',
-  'repetitions', 'maxParallel', 'isolation', 'kind', 'keepWorkspace', 'image', 'runtime',
-  'maxTurns', 'maxCostUsd', 'maxOutputBytes', 'maxDiffBytes',
-  'repo', 'setup', 'files', 'verify', 'forbiddenPaths', 'rebuild', 'detectors', 'contextFiles',
-  'url', 'path', 'ref', 'shallow', 'cmd', 'content', 'label', 'expectExit', 'weight',
-  'lockfiles', 'protect',
-  // contracts (IMPL-011) + preço
-  'neverBreak', 'placeholders', 'minLengthRatio', 'judgeDiff', 'canaries', 'input',
-  'prompt', 'completion',
-];
-
-/** "Você quis dizer" sobre as chaves irmãs REAIS + as canônicas do dialeto. */
-function sugestaoDeChave(key: string, irmaos: readonly string[]): string | null {
-  return closestMatch(key, [...irmaos, ...CHAVES_CANONICAS]) ?? null;
-}
-
-function walkUnknownKeys(
-  raw: unknown,
-  parsed: unknown,
-  base: string,
-  allow: ReadonlySet<string>,
-  out: UnknownKeyIssue[],
-): void {
-  if (Array.isArray(raw)) {
-    if (!Array.isArray(parsed)) return;
-    raw.forEach((item, i) => walkUnknownKeys(item, parsed[i], `${base}[${i}]`, allow, out));
-    return;
-  }
-  if (typeof raw !== 'object' || raw === null) return;
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return;
-  const r = raw as Record<string, unknown>;
-  const p = parsed as Record<string, unknown>;
-  const irmaos = Object.keys(p);
-  for (const [k, v] of Object.entries(r)) {
-    const caminho = base ? `${base}.${k}` : k;
-    if (allow.has(caminho)) continue;
-    if (!(k in p)) {
-      out.push({ path: caminho, key: k, suggestion: sugestaoDeChave(k, irmaos) });
-      continue;
-    }
-    walkUnknownKeys(v, p[k], caminho, allow, out);
-  }
-}
-
-/**
- * Chaves do JSON de entrada que o parser descartaria em silêncio (comparação
- * entrada × saída do parse). Pura: testável sem disco nem CLI.
- */
-export function unknownKeyIssues(
-  raw: unknown,
-  parsed: unknown,
-  allow: readonly string[] = CHAVES_LEGADO_ACEITAS,
-): UnknownKeyIssue[] {
-  const out: UnknownKeyIssue[] = [];
-  walkUnknownKeys(raw, parsed, '', new Set(allow), out);
-  return out;
-}
+export {
+  CHAVES_LEGADO_ACEITAS,
+  unknownKeyIssues,
+  type UnknownKeyIssue,
+} from '../configKeys.js';
 
 /**
  * Recusa (exit 3) se o config tem chave que o parser descartaria em silêncio —
  * `config validate` e todo `--config` do CLI passam por aqui (fail-closed).
  */
 export function assertNoUnknownConfigKeys(raw: unknown, parsed: unknown): void {
-  const issues = unknownKeyIssues(raw, parsed);
+  const issues = unknownKeyIssuesPure(raw, parsed);
   if (issues.length === 0) return;
-  const citadas = issues
-    .slice(0, 5)
-    .map((i) => `"${i.path}"${i.suggestion ? ` (você quis dizer "${i.suggestion}"?)` : ''}`)
-    .join('; ');
-  const mais = issues.length > 5 ? ` (+${issues.length - 5})` : '';
   throw new CliError(
-    `Chave(s) desconhecida(s) no config: ${citadas}${mais}. Nada é descartado em silêncio.`,
+    unknownKeysMessage(issues),
     EXIT.CONFIG,
     { unknownKeys: issues },
     {

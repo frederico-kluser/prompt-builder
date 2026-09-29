@@ -93,8 +93,8 @@ Antes de gastar, na ordem (a primeira recusa encerra a execução real):
 | 3 | todo modelo chamado existe no catálogo | `config.unknown_model` (3) |
 | 4 | com `--budget`, todo modelo tem preço exato | `config.unpriced_models` (3) |
 | 5 | `--max-price-in/out` cobre o preço dos modelos | `config.price_cap_below_model` (3) |
-| 6 | teto abaixo do piso estimado (sem `--force`) | `usage.budget_below_estimate` (2) |
-| 6 | teto dentro da faixa, fora de TTY, sem `--yes` | `usage.confirmation_required` (2) |
+| 6 | teto abaixo do piso estimado (sem `--force`; fora de TTY a dica já pede `--force --yes`) | `usage.budget_below_estimate` (2) |
+| 6 | teto dentro da faixa — ou abaixo do piso com `--force` —, fora de TTY, sem `--yes` | `usage.confirmation_required` (2, `details.belowFloor`) |
 | 6b | teto diário da máquina não esgotado (e ≥ piso, salvo `--force`) | `control.daily_cap_reached` (7) |
 | 7 | key presente | `auth.key_missing` (4) |
 | 7 | key aceita pelo OpenRouter (`GET /key`) | `auth.key_invalid` (4) · sem rede: `network.key_check_failed` (8) |

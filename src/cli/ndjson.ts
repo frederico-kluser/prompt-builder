@@ -33,6 +33,13 @@ export interface NdjsonMapperOptions {
   verbose?: boolean;
   /** Marca as linhas de run com o sessionId, quando dentro de um treino. */
   sessionId?: string;
+  /**
+   * cli#7: gasto acumulado do COMANDO inteiro (a raiz do ledger — a sessão
+   * de treino), o número que se compara com `budgetUsd`. No `train` cada
+   * iteração tem ledger próprio (fork): o `spentUsd` do evento `budget` é da
+   * ITERAÇÃO e "zerava" a cada uma contra o teto da sessão inteira.
+   */
+  totalSpentUsd?: () => number;
 }
 
 export interface AgentSummary extends ReturnType<typeof infraSummaryFields> {
@@ -315,14 +322,18 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
       });
       break;
     }
-    case 'run.spend':
+    case 'run.spend': {
+      const total = opts.totalSpentUsd?.();
       out.event('budget', {
         ...base,
         spentUsd: e.spentUsd,
+        // cli#7: o acumulado da sessão (o que o `budgetUsd` limita) vai junto.
+        ...(total !== undefined && Number.isFinite(total) ? { totalSpentUsd: Math.max(total, e.spentUsd) } : {}),
         ...(e.budgetUsd !== undefined ? { budgetUsd: e.budgetUsd } : {}),
         byRole: e.byRole,
       });
       break;
+    }
     case 'run.budget':
       out.event('budget.gate', {
         ...base,
@@ -436,6 +447,30 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
       out.event('run.error', { ...base, error: e.error });
       break;
   }
+}
+
+/**
+ * IMPL-090: `run.warning` AGREGADO da curadoria — UMA linha para todos os
+ * itens não aprovados (nunca uma por item) e FORA dos eventos de etapa: é
+ * emitido pelo CLI antes da run, não pelo motor, então nenhum reducer de
+ * etapas o vê. A lista de ids vai com teto (o stream é de agente).
+ */
+export function emitCurationWarning(
+  out: Output,
+  c: { profile: string; curated: number; total: number; curatedKofN: string; unapproved: Array<{ id: string; state: string }>; warnings: string[] },
+): void {
+  if (!out.isNdjson || c.warnings.length === 0) return;
+  out.event('run.warning', {
+    scope: 'run',
+    code: 'library.unapproved_items',
+    message: c.warnings.join(' '),
+    profile: c.profile,
+    curated: c.curated,
+    total: c.total,
+    curatedKofN: c.curatedKofN,
+    unapproved: c.unapproved.slice(0, 20),
+    ...(c.unapproved.length > 20 ? { unapprovedTruncated: c.unapproved.length - 20 } : {}),
+  });
 }
 
 export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {

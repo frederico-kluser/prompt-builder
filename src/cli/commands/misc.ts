@@ -22,7 +22,14 @@ import { z } from 'zod';
 import { listTechniques } from '../../techniques.js';
 import { allowlistHealth, getLgpdData, isSensitiveArea, PII_COVERAGE, PII_MODES } from '../../lgpd.js';
 import { parseRunConfig, runConfigSchema } from '../../runConfigSchema.js';
-import { parseArenaConfig, arenaConfigSummary, arenaConfigSchema, ARENA_CONFIG_FORMAT } from '../../configFile.js';
+import {
+  parseArenaConfig,
+  arenaConfigSummary,
+  arenaConfigSchema,
+  ARENA_CONFIG_FORMAT,
+  isArenaAgentConfigFormat,
+} from '../../configFile.js';
+import { loadAgentConfigFile } from './agents.js';
 import { arenaConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost, formatAssumptions, formatRoleBreakdown } from '../../estimate.js';
 import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
@@ -49,6 +56,8 @@ import { groupVerdictFailures, verdictFailuresFromStages } from '../../refJudge.
 import { replayRun, replayUnsupportedReason } from '../replay.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import {
+  assertKnownSubcommand,
+  assertNoPositionals,
   assertNoUnknownConfigKeys,
   buildCatalogContext,
   buildContext,
@@ -80,11 +89,30 @@ import {
   ensureHandoffAuditWritable,
   handoffAuditPath,
   overrideTrailers,
+  type HandoffAuditEntry,
 } from '../handoff.js';
 import type { RunRecord, SessionRecord } from '../../types.js';
 import { buildSessionReport, renderSessionReportMarkdown } from '../../engine/sessionReport.js';
 import { renderSessionReportHtml } from '../../engine/sessionReportHtml.js';
-import { readConfigFile, resolveArenaLibrary } from './run.js';
+import { readConfigFile, resolveArenaLibrary, type LibraryCuration } from './run.js';
+import { loadPilot } from '../pilot.js';
+import {
+  approvalTrailers,
+  buildPromptApproval,
+  PROMPT_APPROVAL_FORMAT,
+  resolveApprover,
+  writePromptApproval,
+  type PromptApproval,
+} from '../approval.js';
+import {
+  importRecords,
+  retentionSweep,
+  runsDelete,
+  runsExportExchange,
+  runsPrune,
+  sessionsDelete,
+  sessionsExportExchange,
+} from '../records.js';
 
 /**
  * Veredito + confirmação da sessão (IMPL-046/IMPL-050): o objeto ESTÁVEL de
@@ -151,8 +179,15 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf-8').trim();
 }
 
+const KEY_SUBS = ['check', 'path', 'rm', 'set'] as const;
+
 export async function cmdKey(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'check';
+  // cli#13: ANTES de parse/rede — `key remove` validava a key no OpenRouter.
+  assertKnownSubcommand('key', sub, KEY_SUBS, {
+    usage: 'key check | key path | key rm | key set --stdin',
+    aliases: { remove: 'rm', delete: 'rm', del: 'rm', unset: 'rm', show: 'path', validate: 'check', add: 'set' },
+  });
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, { stdin: { type: 'boolean' } });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -207,7 +242,17 @@ export async function cmdKey(argv: string[]): Promise<number> {
 // --- estimate ----------------------------------------------------------------
 
 export async function cmdEstimate(argv: string[]): Promise<number> {
-  const parsed = parse(argv, { config: { type: 'string', short: 'c' } });
+  const parsed = parse(argv, {
+    config: { type: 'string', short: 'c' },
+    // IMPL-050: σd calibrado por um piloto GRAVADO (IC95% medido), não pela tabela.
+    'pilot-run': { type: 'string' },
+    'pilot-session': { type: 'string' },
+  });
+  assertNoPositionals(
+    'estimate',
+    parsed.positionals,
+    'prompt-builder estimate --config <arq> [--pilot-run <runId> | --pilot-session <id>]',
+  );
   const file = parsed.values.config;
   if (typeof file !== 'string') {
     throw new CliError('Uso: prompt-builder estimate --config <arquivo.json>', EXIT.USAGE, undefined, {
@@ -222,6 +267,8 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   setDataDir(resolveHome(parsed.values));
   // Estimar não executa nada: config de modo agente é aceita (só roda pelo portão).
   const config = await readConfigFile(file, {}, { inspectOnly: true });
+  // O piloto é disco local: recusa (id errado, IC ausente) ANTES da rede.
+  const pilot = await loadPilot(parsed.values);
   // Estimar e ler preco do catalogo PUBLICO: nao exige key (IMPL-029).
   const ctx = await buildCatalogContext(parsed);
   const { out } = ctx;
@@ -229,7 +276,10 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   const est = estimateRunCost(estimateInputFromConfig(config), ctx.models);
   // IMPL-050/IMPL-054: poder e desenho de amostra junto do custo — estimar
   // dinheiro sem estimar poder produz run cara que não decide nada.
-  const power = planPower({ n: config.stages });
+  const power = planPower({
+    n: config.stages,
+    ...(pilot ? { pilotCi95Pp: pilot.ci95Pp, pilotN: pilot.n } : {}),
+  });
   // web-live#5: no treino, o gate da melhor de K precisa CONSEGUIR promover.
   const trainingPower =
     config.mode === 'training'
@@ -251,6 +301,12 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
     out.line();
     out.line('Poder (IMPL-050):');
     for (const l of formatPowerPlan(power)) out.line(`  ${l}`);
+    if (pilot) {
+      const par = pilot.championId ? ` — ${pilot.championId} × ${pilot.controlId}` : '';
+      out.line(
+        `  piloto: ${pilot.source === 'run' ? 'run' : 'sessão'} ${pilot.id}${par} (IC95% [${pilot.ci95Pp[0].toFixed(1)}; ${pilot.ci95Pp[1].toFixed(1)}] p.p., n=${pilot.n}${pilot.pOrigin ? `, p de ${pilot.pOrigin}` : ''})`,
+      );
+    }
     if (trainingPower?.message) out.warn(`poder do gate: ${trainingPower.message}`);
     if (config.stages <= 5) {
       out.warn(
@@ -280,6 +336,7 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
     estimate: est,
     power,
     ...(trainingPower ? { trainingPower } : {}),
+    ...(pilot ? { pilot } : {}),
     sample: { stages: config.stages, repeats: reps, economicMode: config.stages <= 5 },
     catalog: { source: ctx.catalogSource, scope: ctx.catalogScope, models: ctx.models.length },
   });
@@ -288,8 +345,31 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
 
 // --- runs / sessions ---------------------------------------------------------
 
+const RUNS_SUBS = [
+  'list',
+  'show',
+  'winner',
+  'status',
+  'wait',
+  'cancel',
+  'reproduce',
+  'export',
+  'import',
+  'delete',
+  'prune',
+] as const;
+
+/** Parece um id de record (e não um verbo)? — para a dica `runs show <id>`. */
+const pareceId = (x: string): boolean => isValidRecordId(x) && (/\d/.test(x) || x.length >= 16);
+
 export async function cmdRuns(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
+  // cli#13: antes `runs delete <id>` caía no `runs show` (exit 0, nada apagado).
+  assertKnownSubcommand('runs', sub, RUNS_SUBS, {
+    usage: `runs ${RUNS_SUBS.join('|')} (ver \`prompt-builder runs --help\`)`,
+    aliases: { rm: 'delete', remove: 'delete', del: 'delete', get: 'show', ls: 'list', gc: 'prune' },
+    hint: (x) => (pareceId(x) ? `Para ver a run, use \`prompt-builder runs show ${x}\`.` : undefined),
+  });
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     limit: { type: 'string' },
     // IMPL-092: --all devolve a lista inteira (o default tem teto de 50).
@@ -301,6 +381,13 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     reason: { type: 'string' },
     // IMPL-117: `runs reproduce <id> --replay` re-pontua a run gravada a US$ 0.
     replay: { type: 'boolean' },
+    // IMPL-089: `runs export --format exchange` (prompt-builder-exchange@1).
+    format: { type: 'string' },
+    // IMPL-089: `runs import --overwrite` substitui registro conflitante.
+    overwrite: { type: 'boolean' },
+    // IMPL-100: `runs prune [--older-than 30d] [--dry-run]`.
+    'older-than': { type: 'string' },
+    'dry-run': { type: 'boolean' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -310,7 +397,17 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   if (sub === 'wait') return runsWait(ctx);
   if (sub === 'cancel') return runsCancel(ctx);
 
+  // IMPL-100: apagamento de verdade (record + resíduos) e o TTL sob demanda.
+  if (sub === 'delete') return runsDelete(out, parsed.positionals);
+  if (sub === 'prune') return runsPrune(out, parsed.values);
+  // IMPL-089: pacote prompt-builder-exchange@1 (runs e sessões, verbatim).
+  if (sub === 'import') {
+    return importRecords(out, 'runs.import', parsed.positionals[0], { overwrite: parsed.values.overwrite === true });
+  }
+
   if (sub === 'list') {
+    // IMPL-100: TTL ligado por default — a lista nunca mostra o que já venceu.
+    await retentionSweep(out);
     // IMPL-030: run 'running' cujo processo dono morreu (SIGKILL do host) sai
     // como 'aborted' — a lista nunca mostra 'running' para sempre.
     await sweepOrphanRecords({ locklessAfterMs: LOCKLESS_ORPHAN_AFTER_MS });
@@ -411,6 +508,25 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   }
 
   if (sub === 'export') {
+    const formato = typeof parsed.values.format === 'string' ? parsed.values.format.trim() : 'artifact';
+    if (formato !== 'artifact' && formato !== 'exchange') {
+      throw new CliError(
+        `--format deve ser "artifact" ou "exchange" (recebi "${formato}").`,
+        EXIT.USAGE,
+        { flag: '--format', value: formato, accepted: ['artifact', 'exchange'] },
+        {
+          code: 'usage.invalid_flag_value',
+          hint: 'artifact (default) é o artefato auditável; exchange é o pacote reimportável sem perda (`runs import`).',
+        },
+      );
+    }
+    if (formato === 'exchange') {
+      // IMPL-089: o record VERBATIM (campo desconhecido incluso) — `runs import`
+      // num data-dir novo devolve exatamente o mesmo record.
+      const alvoEx =
+        typeof parsed.values.out === 'string' && parsed.values.out.trim() ? parsed.values.out.trim() : undefined;
+      return runsExportExchange(out, record.id, alvoEx);
+    }
     // Artefato auto-contido: record + etapas com gabaritos + system prompts +
     // vereditos do juiz — auditável/reproduzível sem o disco original.
     const artifact = buildRunArtifact(record);
@@ -624,7 +740,13 @@ function gitNoIndexDiff(antes: string, depois: string): GitResult {
  * `trailers` (ex.: `Override-Reason:`) viram o último parágrafo da mensagem —
  * o formato que `git interpret-trailers --parse` lê.
  */
-function commitAppliedFile(file: string, sessionId: string, out: Output, trailers: string[] = []): boolean {
+function commitAppliedFile(
+  file: string,
+  sessionId: string,
+  out: Output,
+  trailers: string[] = [],
+  extraFiles: string[] = [],
+): boolean {
   const dir = path.dirname(file);
   const base = path.basename(file);
   const top = git(['-C', dir, 'rev-parse', '--show-toplevel']);
@@ -632,14 +754,16 @@ function commitAppliedFile(file: string, sessionId: string, out: Output, trailer
     out.warn('destino fora de um repositório git — commit pulado.');
     return false;
   }
-  const add = git(['-C', dir, 'add', '--', base]);
+  // IMPL-088: o registro prompt-approval@1 vai no MESMO commit do prompt.
+  const caminhos = [base, ...extraFiles];
+  const add = git(['-C', dir, 'add', '--', ...caminhos]);
   if (!add.ok) {
     out.warn(`git add falhou (${add.error}) — commit pulado.`);
     return false;
   }
   const assunto = `prompt: atualiza ${base} (sessão ${sessionId})`;
   const mensagem = trailers.length > 0 ? `${assunto}\n\n${trailers.join('\n')}` : assunto;
-  const commit = git(['-C', dir, 'commit', '-m', mensagem, '--', base]);
+  const commit = git(['-C', dir, 'commit', '-m', mensagem, '--', ...caminhos]);
   if (!commit.ok) {
     out.warn(`git commit falhou (${commit.error}) — o prompt já está aplicado em ${file}.`);
     return false;
@@ -688,7 +812,14 @@ function handoffBlockedError(record: SessionRecord, file: string, guards: Handof
 async function applyPromptFile(
   destino: string,
   prompt: string,
-  opts: { commit: boolean; record: SessionRecord; guards: HandoffGuardReport; out: Output },
+  opts: {
+    commit: boolean;
+    record: SessionRecord;
+    guards: HandoffGuardReport;
+    out: Output;
+    /** IMPL-088: registro versionado (vai no commit) e os trailers dele. */
+    approval?: { file: string | null; trailers: string[] };
+  },
 ): Promise<ApplyReport> {
   const { out } = opts;
   const file = path.resolve(destino);
@@ -722,23 +853,28 @@ async function applyPromptFile(
   }
 
   const committed = opts.commit
-    ? commitAppliedFile(file, opts.record.id, out, overrideTrailers(opts.guards.override))
+    ? commitAppliedFile(
+        file,
+        opts.record.id,
+        out,
+        [...(opts.approval?.trailers ?? []), ...overrideTrailers(opts.guards.override)],
+        opts.approval?.file ? [opts.approval.file] : [],
+      )
     : false;
   return { applied: true, file, backup, committed };
 }
 
-const SESSIONS_SUBS = new Set(['list', 'show', 'winner', 'report']);
+const SESSIONS_SUBS = ['list', 'show', 'winner', 'report', 'export', 'import', 'delete'] as const;
 
 export async function cmdSessions(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
-  if (!SESSIONS_SUBS.has(sub)) {
-    // Antes um subcomando desconhecido caía em silêncio no `show` (com o nome
-    // do subcomando lido como id): o agente achava que rodou outra coisa.
-    throw new CliError(
-      `Subcomando desconhecido: "sessions ${sub}". Use: sessions list | show <id> | winner <id> | report <id>.`,
-      EXIT.USAGE,
-    );
-  }
+  // Antes um subcomando desconhecido caía em silêncio no `show` (com o nome
+  // do subcomando lido como id): o agente achava que rodou outra coisa.
+  assertKnownSubcommand('sessions', sub, SESSIONS_SUBS, {
+    usage: 'sessions list | show <id> | winner <id> | report <id> | export <id> | import <arq> | delete <id>',
+    aliases: { rm: 'delete', remove: 'delete', del: 'delete', get: 'show', ls: 'list' },
+    hint: (x) => (pareceId(x) ? `Para ver a sessão, use \`prompt-builder sessions show ${x}\`.` : undefined),
+  });
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     'prompt-only': { type: 'boolean' },
     limit: { type: 'string' },
@@ -752,11 +888,27 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     markdown: { type: 'string' },
     'calls-per-month': { type: 'string' },
     annotate: { type: 'boolean' },
+    // IMPL-089: `sessions export -o <dir|arq.json>` / `sessions import --overwrite`.
+    out: { type: 'string', short: 'o' },
+    overwrite: { type: 'boolean' },
+    // IMPL-100: `sessions delete <id> --keep-runs` preserva as runs da sessão.
+    'keep-runs': { type: 'boolean' },
+    // IMPL-088: registro prompt-approval@1 versionado no repo (o --commit implica).
+    record: { type: 'boolean' },
+    approver: { type: 'string' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
 
+  if (sub === 'delete') {
+    return sessionsDelete(out, parsed.positionals, { keepRuns: parsed.values['keep-runs'] === true });
+  }
+  if (sub === 'import') {
+    return importRecords(out, 'sessions.import', parsed.positionals[0], { overwrite: parsed.values.overwrite === true });
+  }
+
   if (sub === 'list') {
+    await retentionSweep(out); // IMPL-100: TTL ligado por default
     await sweepOrphanRecords({ locklessAfterMs: LOCKLESS_ORPHAN_AFTER_MS }); // IMPL-030
     const todas = await listSessions();
     // IMPL-092: teto default de 50 (--limit N / --all; truncar avisa no stderr).
@@ -781,6 +933,10 @@ export async function cmdSessions(argv: string[]): Promise<number> {
   const campeao = record.bestPromptByIteration.at(-1);
 
   if (sub === 'report') return sessionsReport(record, parsed.values, out);
+  if (sub === 'export') {
+    const alvo = typeof parsed.values.out === 'string' && parsed.values.out.trim() ? parsed.values.out.trim() : undefined;
+    return sessionsExportExchange(out, record.id, alvo);
+  }
 
   if (sub === 'winner') {
     // Handoff versionado: --apply leva o campeão para um arquivo de produção,
@@ -800,6 +956,14 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     }
     if (wantCommit && !applyTo) {
       throw new CliError('--commit só faz sentido junto de --apply <arquivo>.', EXIT.USAGE);
+    }
+    const wantRecord = parsed.values.record === true;
+    const approverRaw = typeof parsed.values.approver === 'string' ? parsed.values.approver : undefined;
+    if ((wantRecord || approverRaw !== undefined) && !applyTo) {
+      throw new CliError('--record/--approver só fazem sentido junto de --apply <arquivo>.', EXIT.USAGE, undefined, {
+        code: 'usage.record_without_apply',
+        hint: 'Use `sessions winner <id> --apply <arquivo> --record [--approver "Nome <email>"]`.',
+      });
     }
     if (typeof overrideRaw === 'string' && !applyTo) {
       throw new CliError('--override só faz sentido junto de --apply <arquivo>.', EXIT.USAGE, undefined, {
@@ -852,6 +1016,32 @@ export async function cmdSessions(argv: string[]): Promise<number> {
       // Override sem registro não passa: a trilha precisa ser gravável ANTES
       // de o destino ser tocado.
       if (guards.override) await ensureHandoffAuditWritable();
+      // IMPL-088: prompt-approval@1. O `--commit` IMPLICA o registro versionado
+      // (o commit leva `Approved-by:` e o arquivo); sem aprovador identificável
+      // recusa ANTES de tocar o destino.
+      const versionar = wantRecord || wantCommit;
+      const approver = resolveApprover(approverRaw, path.dirname(destino));
+      if (versionar && !approver) {
+        throw new CliError(
+          'Registro de aprovação sem aprovador: não há `--approver` nem identidade git (user.name/user.email) aqui.',
+          EXIT.USAGE,
+          { file: destino },
+          {
+            code: 'usage.approver_required',
+            hint: 'Passe `--approver "Nome <email>"` (ou configure user.name/user.email no repo do destino).',
+          },
+        );
+      }
+      const primeiraRun = record.runIds[0] ? await loadRun(record.runIds[0]).catch(() => null) : null;
+      const approval = buildPromptApproval({
+        record,
+        firstRun: primeiraRun,
+        prompt,
+        destino,
+        approver,
+        override: guards.override,
+      });
+      const approvalFile = versionar ? await writePromptApproval(destino, approval) : null;
       for (const w of guards.warnings) {
         // O override é parte do RESULTADO (quem lê só o stdout tem de vê-lo);
         // o resto é narração no stderr. Sob --json/ndjson ele vai no payload.
@@ -863,20 +1053,26 @@ export async function cmdSessions(argv: string[]): Promise<number> {
         record,
         guards,
         out,
+        approval: { file: approvalFile, trailers: approvalFile ? approvalTrailers(approval) : [] },
       });
-      const auditLog = await appendHandoffAudit(
-        buildHandoffAuditEntry(record, guards, {
+      // A trilha local leva o registro INTEIRO em toda aplicação (100%), com ou
+      // sem a cópia versionada no repo.
+      const entrada: HandoffAuditEntry & { approval: PromptApproval; approvalFile: string | null } = {
+        ...buildHandoffAuditEntry(record, guards, {
           outcome: 'applied',
           file: report.file,
           backup: report.backup,
           committed: report.committed,
           prompt,
         }),
-        out,
-      );
+        approval,
+        approvalFile,
+      };
+      const auditLog = await appendHandoffAudit(entrada, out);
       out.info(
         `prompt aplicado em ${report.file}${report.backup ? ` (backup: ${report.backup})` : ''}`,
       );
+      if (approvalFile) out.info(`registro ${PROMPT_APPROVAL_FORMAT} ${approval.approvalId} em ${approvalFile}`);
       if (wantCommit) out.info(report.committed ? 'commit criado.' : 'commit não criado (ver aviso).');
       out.result(true, 'sessions.winner', {
         applied: report.applied,
@@ -888,6 +1084,9 @@ export async function cmdSessions(argv: string[]): Promise<number> {
         blocks: guards.blocks,
         warnings: guards.warnings,
         auditLog,
+        // IMPL-088: o registro de aprovação (hashes + evidência) e onde ficou.
+        approval,
+        approvalFile,
       });
       return EXIT.OK;
     }
@@ -1080,6 +1279,7 @@ function openInPlannotator(file: string, out: Output): boolean {
 
 export async function cmdTechniques(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
+  assertNoPositionals('techniques', parsed.positionals, 'prompt-builder techniques [--json]');
   const ctx = buildContext(parsed);
   const techs = listTechniques();
   if (ctx.out.isText) {
@@ -1091,6 +1291,12 @@ export async function cmdTechniques(argv: string[]): Promise<number> {
 
 export async function cmdLgpd(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
+  // cli#13: `lgpd delete` mostrava as áreas (exit 0) — apagar é `runs delete`.
+  assertNoPositionals(
+    'lgpd',
+    parsed.positionals,
+    'prompt-builder lgpd [--json] (apagar dados: `runs delete <id>`, `sessions delete <id>`, `runs prune`)',
+  );
   const ctx = buildContext(parsed);
   const data = getLgpdData();
   // IMPL-041: área sensível é FAIL-CLOSED (allowlist de endpoints ZDR); a
@@ -1117,8 +1323,19 @@ export async function cmdLgpd(argv: string[]): Promise<number> {
   return EXIT.OK;
 }
 
+const CONFIG_SUBS = ['validate', 'schema', 'example'] as const;
+
 export async function cmdConfig(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'validate';
+  // cli#13: `config explain f.json` validava em silêncio (exit 0).
+  assertKnownSubcommand('config', sub, CONFIG_SUBS, {
+    usage: 'config validate <arq> | config schema [--dialect arena|run] | config example [--mode …]',
+    aliases: { check: 'validate', lint: 'validate', verify: 'validate', explain: 'validate', init: 'example', new: 'example' },
+    hint: (x) =>
+      /\.json$/i.test(x) || x.includes('/')
+        ? `Para validar o arquivo, use \`prompt-builder config validate ${x}\`.`
+        : undefined,
+  });
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     mode: { type: 'string' },
     dialect: { type: 'string' },
@@ -1252,6 +1469,19 @@ export async function cmdConfig(argv: string[]): Promise<number> {
   const json = await readJsonFile(file);
   const formato = (json as Record<string, unknown>)?.format;
 
+  if (isArenaAgentConfigFormat(formato)) {
+    // cli#20: o arquivo de AGENTE valida aqui também — antes saía "não é uma
+    // configuração do prompt-builder" (exit 3), e a dica de erro do `agents
+    // run` mandava justamente para este comando. Mesma leitura do `agents run`
+    // (schema, chave desconhecida, `files[].path` contido, `testsDir`).
+    const { config } = await loadAgentConfigFile(file);
+    out.info(
+      `válido (${formato}) — ${config.customStages?.length ?? 0} cenário(s), executor ${config.agent?.executor ?? '?'}`,
+    );
+    out.result(true, 'config.validate', { format: formato, config });
+    return EXIT.OK;
+  }
+
   if (typeof formato === 'string') {
     const p = parseArenaConfig(json);
     if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
@@ -1262,9 +1492,16 @@ export async function cmdConfig(argv: string[]): Promise<number> {
     const c = arenaConfigToRunConfig(p.config);
     if (!c.ok) throw new CliError(c.error, EXIT.CONFIG);
     // `scenarios.from: 'library'`: mesma resolução/checagem do `vary --config`.
-    const config = await resolveArenaLibrary(p.config, c.config);
+    let curation: LibraryCuration | undefined;
+    const config = await resolveArenaLibrary(p.config, c.config, { onCuration: (x) => (curation = x) });
     out.info(`válido — ${arenaConfigSummary(p.config)}`);
-    out.result(true, 'config.validate', { format: formato, config });
+    // IMPL-090: o validate já diz o k de n curados (e avisa o que a run avisaria).
+    if (curation) for (const w of curation.warnings) out.warn(w);
+    out.result(true, 'config.validate', {
+      format: formato,
+      config,
+      ...(curation ? { curatedKofN: curation.curatedKofN, curation } : {}),
+    });
     return EXIT.OK;
   }
   const p = parseRunConfig(json);
@@ -1277,8 +1514,13 @@ export async function cmdConfig(argv: string[]): Promise<number> {
 
 // --- registry (guarda de drift de prompts) -----------------------------------
 
+const REGISTRY_SUBS = ['validate', 'init'] as const;
+
 export async function cmdRegistry(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'validate';
+  assertKnownSubcommand('registry', sub, REGISTRY_SUBS, {
+    usage: 'registry validate [--file <arq>] | registry init [-o <arq>]',
+  });
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     file: { type: 'string' },
     out: { type: 'string', short: 'o' },
@@ -1309,13 +1551,6 @@ export async function cmdRegistry(argv: string[]): Promise<number> {
     out.info(`registro-exemplo gravado em ${alvo}`);
     out.result(true, 'registry.init', { file: alvo });
     return EXIT.OK;
-  }
-
-  if (sub !== 'validate') {
-    throw new CliError(
-      `Subcomando desconhecido: "${sub}". Uso: prompt-builder registry <validate|init>.`,
-      EXIT.USAGE,
-    );
   }
 
   const file =
@@ -1422,6 +1657,7 @@ export function keyLimitAdvice(info: KeyInfo | null, localDailyCapUsd: number | 
 
 export async function cmdDoctor(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
+  assertNoPositionals('doctor', parsed.positionals, 'prompt-builder doctor [--json]');
   const ctx = buildContext(parsed);
   const { out, dataDir } = ctx;
   const checks: Record<string, unknown> = {
