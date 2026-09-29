@@ -109,7 +109,7 @@ describe('llmVariants.ts — identidade da tripla e fairness', () => {
 });
 
 describe('budget.ts — teto honesto e sinais de controle', () => {
-  const call = (usd: number) => ({ usd, source: 'usage' as const, upstreamUsd: 0 });
+  const call = (usd: number) => ({ usd, source: 'usage' as const });
 
   it('contabilidade é por papel e o snapshot soma todos os papéis', () => {
     const ledger = new BudgetLedger({ budgetUsd: 10 });
@@ -224,6 +224,12 @@ describe('whitelists silenciosos — os campos NÃO podem sumir', () => {
       iterations: 2,
       reflection: 'llm', // proposital: consumido pelo trainer, NÃO copiado p/ a run
       paretoPool: 3,
+      // IMPL-062/IMPL-060/IMPL-065: campos do LAÇO (consumidos pelo trainer).
+      paretoCoverageSampling: true,
+      maxLessonTokens: 1200,
+      lessonsIncludeReference: true,
+      minCuratedItems: 5,
+      auditable: true, // IMPL-075: vale em toda iteração/holdout (COPIADO)
       // Campos "esquecíveis" — os que já sumiram uma vez:
       compliance: { area: 'saude', includeRessalvas: true },
       piiMode: 'synthetic', // IMPL-042
@@ -231,7 +237,12 @@ describe('whitelists silenciosos — os campos NÃO podem sumir', () => {
       reasoning: { competitor: 'low', judge: 'high', rewriter: 'medium', datagen: 'off' },
       referenceModelId: 'r/x',
       referenceJudging: true,
+      verbosityProbes: true, // IMPL-053
+      validateReferences: true, // IMPL-055
+      secondReferenceModelId: 's/x', // IMPL-055
       scenarioBrief: 'brief',
+      scenarioDedup: { semantic: true, cosineThreshold: 0.92 }, // IMPL-063
+      judgeCascade: { cheap: ['b/1', 'b/2'], strong: 'f/1' }, // IMPL-115
       duels: false,
       finalists: 4,
       temperature: 0.3,
@@ -263,6 +274,10 @@ describe('whitelists silenciosos — os campos NÃO podem sumir', () => {
       'feedbackDriven',
       'reflection', // consumido pelo trainingLoop (reflexão GEPA), não pela run
       'paretoPool', // idem (pool Pareto do loop)
+      'paretoCoverageSampling', // idem (amostragem do pai no pool)
+      'maxLessonTokens', // dossiê de lições (montado pelo loop)
+      'lessonsIncludeReference', // idem
+      'minCuratedItems', // declaração de campeão (fim da sessão)
       'budgetUsd',
     ]);
     for (const [key, value] of Object.entries(cfg)) {

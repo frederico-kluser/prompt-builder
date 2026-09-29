@@ -2,21 +2,21 @@
 //
 // Subcomandos:
 //   doctor   [--deep] [--container] [--config <arq>] [--json]   pré-voo do executor (pi) + canário de sala limpa
-//   run      --config <arq> --budget .. roda a arena até o fim (+ --dry-run)
+//   run      --config <arq> --budget .. [--allow-exec-config] roda a arena até o fim (+ --dry-run)
 //   show     <runId> [--json]           record (loadRun) + execução via store
 //   list     [--json]                   varre <dataDir>/agent-runs/<runId>
 //   logs     <runId> --stage N --contestant <id> [--rep N] [--what ...]
 //   replay   <runId> --stage N --contestant <id> [--rep N]
 //   reconcile <runId> [--generations] [--json]  custo medido (proxy) × derivado × cobrado (§20.4, IMPL-035)
 //   gc       [--older-than 30d] [--dry-run]
-//   task     validate <arq> [--repetitions N]   as 6 checagens bloqueantes de uma tarefa (IMPL-097) — SÓ aqui, nunca na run
+//   task     validate <arq> [--repetitions N] [--allow-exec-config]   as 6 checagens bloqueantes de uma tarefa (IMPL-097) — SÓ aqui, nunca na run
 //   task     compile  <arq> --out-dir <dir>     compila a tarefa para o layout Harbor pinado (IMPL-098)
 //
 // Contrato de saída idêntico ao resto do CLI: stdout é PAYLOAD, stderr é narração.
 // A regra de ouro: NENHUM destes comandos interfere nos comandos existentes de
 // chat — isto é um arquivo novo, e `index.ts` só ganha um `case` + um bloco de HELP.
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -27,10 +27,16 @@ import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { runPreflight, type PreflightOpts } from '../../agent/doctor.js';
 import { agentVerdictTreeVersionOf, classifyStop } from '../../agent/verdictTree.js';
+import { assessInfraErrorRate, infraSummaryFields } from '../../agent/infraError.js';
 import { defaultPiImageTag } from '../../agent/container.js';
 import { compileAgentTaskToHarbor, HARBOR_VERSION } from '../../agent/harbor.js';
 import { parseAgentTaskSpec } from '../../agent/taskSchema.js';
-import { validateAgentTask, type TaskValidationReport } from '../../agent/taskValidate.js';
+import {
+  listTestsDirFiles,
+  resolveTestsDir,
+  validateAgentTask,
+  type TaskValidationReport,
+} from '../../agent/taskValidate.js';
 import {
   COST_FIDELITY_TOLERANCE,
   reconcileGenerations,
@@ -62,18 +68,25 @@ import {
   type LoadedCatalog,
 } from '../context.js';
 import { budgetRequiredError, budgetUsdOf, keyRequirement, toRefusal, type BudgetChoice } from '../preflight.js';
+import { fatalGatewayOutcome } from './run.js';
 import { CliError, EXIT, failAndExit, fmtUsd, isCliError, renderSpend } from '../output.js';
 import { emitRunEvent } from '../ndjson.js';
 import { openSpendGuards, spendGuardRefusals, type SpendGuards } from '../spendGuards.js';
 import { forceExitNow, installGracefulStop } from '../runControl.js';
 import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
 import type { RunRecord, RunConfig, OpenRouterModel } from '../../types.js';
-import type { AgentRunnerConfig, ExecutionRef } from '../../agent/types.js';
+import type { AgentRunnerConfig, AgentTaskSpec, ExecutionRef } from '../../agent/types.js';
 
 /** Versão pinada do executor `pi` (plano §22/§26). Divergência => doctor falha. */
 const EXPECTED_PI_VERSION = '0.84.2';
-/** Modelo usado no canário real (`--deep`). Barato, usado UMA vez. */
-const DEFAULT_CANARY_MODEL = 'google/gemini-2.5-flash';
+/**
+ * Modelo usado no canário real (`--deep`). Barato, usado UMA vez. skill-install#14:
+ * o `google/gemini-2.5-flash` sai do catálogo em 2026-10-20 — o sucessor nomeado
+ * pelo próprio catálogo (via `~google/gemini-flash-latest`) é o 3.8-flash.
+ * Exportado para o teste que trava isso (`test/model-lifecycle.test.ts`): o
+ * default tem de ser um modelo SEM expiração anunciada, sempre.
+ */
+export const DEFAULT_CANARY_MODEL = 'google/gemini-3.8-flash';
 /** Default do `--what` em `logs`. */
 const DEFAULT_WHAT = 'dossier';
 
@@ -110,12 +123,21 @@ function resolveBudget(value: unknown, warn: (m: string) => void): BudgetChoice 
   return { kind: 'unset' };
 }
 
+/** Config de agente lido do disco + o que o portão de config executável hasheia. */
+export interface LoadedAgentConfigFile {
+  config: RunConfig;
+  /** Conteúdo do hash do portão (IMPL-099): texto cru + manifesto dos `testsDir`. */
+  gateContent: string;
+}
+
 /**
- * Lê e valida um `arena-agent-config@1` -> RunConfig (nunca lança por config).
- * Além do schema: fail-closed de chaves desconhecidas (IMPL-093) e contenção
- * de `files[]` ao workspace (IMPL-099/E6) — ANTES de qualquer execução.
+ * Lê e valida um `arena-agent-config@1|@2` -> RunConfig (nunca lança por config).
+ * Além do schema: fail-closed de chaves desconhecidas (IMPL-093), contenção
+ * de `files[]` ao workspace (IMPL-099/E6) e o `testsDir` de cada tarefa
+ * (IMPL-098) resolvido pelo diretório DO ARQUIVO (existente, contido) — tudo
+ * ANTES de qualquer execução.
  */
-export async function readAgentConfigFile(file: string): Promise<RunConfig> {
+export async function loadAgentConfigFile(file: string): Promise<LoadedAgentConfigFile> {
   // Leitor comum do CLI: caminho errado = uso (2), JSON quebrado = config (3).
   const json = await readJsonFile(file);
   const parsed = parseArenaAgentConfig(json);
@@ -126,7 +148,49 @@ export async function readAgentConfigFile(file: string): Promise<RunConfig> {
   assertAgentFilesContained(parsed.config);
   const conv = arenaAgentConfigToRunConfig(parsed.config);
   if (!conv.ok) throw new CliError(conv.error, EXIT.CONFIG);
-  return conv.config;
+  const baseDir = path.dirname(path.resolve(file));
+  const testsDirs = parsed.config.scenarios.flatMap((s) => (s.agentTask?.testsDir ? [s.agentTask.testsDir] : []));
+  const config = resolveConfigTestsDirs(conv.config, baseDir);
+  const rawText = await fs.readFile(file, 'utf-8');
+  return { config, gateContent: execGateContent(rawText, baseDir, testsDirs) };
+}
+
+/** Só o RunConfig (doctor, testes) — ver `loadAgentConfigFile`. */
+export async function readAgentConfigFile(file: string): Promise<RunConfig> {
+  return (await loadAgentConfigFile(file)).config;
+}
+
+/**
+ * IMPL-098: o `testsDir` do arquivo é relativo ao diretório DA CONFIGURAÇÃO —
+ * o motor não sabe de onde o arquivo veio (a run pode rodar destacada, com
+ * outro cwd), então o CLI o resolve aqui para ABSOLUTO. Ausente/fora do
+ * diretório/não-diretório = config inválida (exit 3), antes de gastar.
+ */
+function resolveConfigTestsDirs(config: RunConfig, baseDir: string): RunConfig {
+  const stages = config.customStages;
+  if (!stages?.some((s) => s.agentTask?.testsDir)) return config;
+  const customStages = stages.map((s, i) => {
+    const td = s.agentTask?.testsDir;
+    if (!s.agentTask || !td) return s;
+    let abs: string;
+    try {
+      abs = resolveTestsDir(td, baseDir);
+      if (!statSync(abs).isDirectory()) throw new Error(`"${td}" não é um diretório`);
+    } catch (err) {
+      const motivo = (err as NodeJS.ErrnoException).code === 'ENOENT' ? `"${td}" não existe` : (err as Error).message;
+      throw new CliError(
+        `cenário ${i + 1}: testsDir inválido — ${motivo}.`,
+        EXIT.CONFIG,
+        { scenario: i + 1, testsDir: td },
+        {
+          code: 'config.tests_dir_invalid',
+          hint: 'testsDir é um diretório RELATIVO ao arquivo de config (sem "../"), copiado para o verificador DEPOIS do agente.',
+        },
+      );
+    }
+    return { ...s, agentTask: { ...s.agentTask, testsDir: abs } };
+  });
+  return { ...config, customStages };
 }
 
 /**
@@ -197,14 +261,21 @@ function execApprovalsPath(dataDir: string): string {
   return path.join(dataDir, EXEC_APPROVALS_FILE);
 }
 
-/**
- * Confere (e grava) a aprovação de um config executável. `identity` é estável
- * por config (caminho absoluto do arquivo ou `mcp:<tool>`); `content` é o que
- * vai para o hash. Sem aceite pinado ⇒ recusa `config.exec_not_approved`;
- * conteúdo mudou desde o aceite ⇒ recusa `config.exec_hash_changed`. Ambas
- * exit 3 e com a instrução EXATA de como aprovar.
- */
-export async function ensureExecConfigApproved(opts: {
+/** Lê o store de aprovações (ausente/ilegível = vazio). Só LEITURA. */
+async function readExecApprovalStore(file: string): Promise<ExecApprovalStore> {
+  try {
+    const lido = JSON.parse(await fs.readFile(file, 'utf-8')) as ExecApprovalStore;
+    if (lido && typeof lido === 'object' && typeof lido.approvals === 'object' && lido.approvals) {
+      return lido;
+    }
+  } catch {
+    /* primeiro uso: sem store ainda */
+  }
+  return { version: 1, approvals: {} };
+}
+
+/** Parâmetros do portão (idênticos na checagem e no aceite). */
+export interface ExecGateOpts {
   dataDir: string;
   content: string;
   identity: string;
@@ -213,36 +284,55 @@ export async function ensureExecConfigApproved(opts: {
   /** Comando exato a citar na dica (ex.: `agents run --config x.json`). */
   command: string;
   allowExecConfig: boolean;
-}): Promise<{ hash: string; firstApproval: boolean }> {
+}
+
+/**
+ * Estado do portão para um conteúdo:
+ * - `approved` — o SHA-256 já está pinado (passa sem flag);
+ * - `would_approve` — sem pin, mas com `--allow-exec-config` (a execução real
+ *   pinaria agora);
+ * - `not_approved` — recusa (`refusal` preenchido: `config.exec_not_approved`
+ *   ou `config.exec_hash_changed`, ambos exit 3).
+ */
+export interface ExecGateCheck {
+  hash: string;
+  state: 'approved' | 'would_approve' | 'not_approved';
+  refusal: CliError | null;
+}
+
+/**
+ * Checagem SÓ-LEITURA do portão (cli#6): a MESMA decisão de
+ * `ensureExecConfigApproved`, sem gravar o pin — é o que o `--dry-run` usa para
+ * recusar com o MESMO error.code/exit da execução real (paridade) sem aprovar
+ * nada por tabela. Nunca lança por falta de aprovação: devolve a recusa.
+ */
+export async function checkExecConfigApproval(opts: ExecGateOpts): Promise<ExecGateCheck> {
   const hash = sha256Hex(opts.content);
-  const file = execApprovalsPath(opts.dataDir);
-  let store: ExecApprovalStore = { version: 1, approvals: {} };
-  try {
-    const lido = JSON.parse(await fs.readFile(file, 'utf-8')) as ExecApprovalStore;
-    if (lido && typeof lido === 'object' && typeof lido.approvals === 'object' && lido.approvals) {
-      store = lido;
-    }
-  } catch {
-    /* primeiro uso: sem store ainda */
-  }
-  const pinado = store.approvals[hash];
-  if (pinado) return { hash, firstApproval: false };
+  const store = await readExecApprovalStore(execApprovalsPath(opts.dataDir));
+  if (store.approvals[hash]) return { hash, state: 'approved', refusal: null };
+  if (opts.allowExecConfig) return { hash, state: 'would_approve', refusal: null };
 
   const anterior = Object.values(store.approvals).find((a) => a.identity === opts.identity);
-  if (!opts.allowExecConfig) {
-    if (anterior) {
-      throw new CliError(
+  if (anterior) {
+    return {
+      hash,
+      state: 'not_approved',
+      refusal: new CliError(
         `O conteúdo de "${opts.label}" mudou desde a aprovação de ${anterior.approvedAt.slice(0, 10)}: ` +
-          'a revisão revive (setup/verify/files executam comandos).',
+          'a revisão revive (setup/verify/files/testsDir executam comandos).',
         EXIT.CONFIG,
         { label: opts.label, previousApprovedAt: anterior.approvedAt, currentHash: hash },
         {
           code: 'config.exec_hash_changed',
           hint: `Revise o que mudou e aprove de novo: \`${opts.command} --allow-exec-config\`.`,
         },
-      );
-    }
-    throw new CliError(
+      ),
+    };
+  }
+  return {
+    hash,
+    state: 'not_approved',
+    refusal: new CliError(
       `Config executável SEM aprovação: "${opts.label}" traz comandos (setup[]/verify[]) que rodam ` +
         'nesta máquina e ninguém aprovou este conteúdo.',
       EXIT.CONFIG,
@@ -253,11 +343,62 @@ export async function ensureExecConfigApproved(opts: {
           `Aprove UMA vez com \`${opts.command} --allow-exec-config\` — o SHA-256 fica pinado e o MESMO ` +
           'conteúdo passa sem flag depois; qualquer mudança exige nova aprovação.',
       },
-    );
-  }
-  store.approvals[hash] = { identity: opts.identity, approvedAt: new Date().toISOString(), command: opts.command };
+    ),
+  };
+}
+
+/**
+ * Confere (e grava) a aprovação de um config executável. `identity` é estável
+ * por config (caminho absoluto do arquivo ou `mcp:<tool>`); `content` é o que
+ * vai para o hash. Sem aceite pinado ⇒ recusa `config.exec_not_approved`;
+ * conteúdo mudou desde o aceite ⇒ recusa `config.exec_hash_changed`. Ambas
+ * exit 3 e com a instrução EXATA de como aprovar. A decisão é a de
+ * `checkExecConfigApproval` (fonte única); aqui só se acrescenta a escrita do pin.
+ */
+export async function ensureExecConfigApproved(opts: ExecGateOpts): Promise<{ hash: string; firstApproval: boolean }> {
+  const check = await checkExecConfigApproval(opts);
+  if (check.refusal) throw check.refusal;
+  if (check.state === 'approved') return { hash: check.hash, firstApproval: false };
+  // `would_approve`: relê o store no momento da escrita (outro processo pode
+  // ter pinado outro conteúdo entre a checagem e aqui — não o apagamos).
+  const file = execApprovalsPath(opts.dataDir);
+  const store = await readExecApprovalStore(file);
+  store.approvals[check.hash] = { identity: opts.identity, approvedAt: new Date().toISOString(), command: opts.command };
   await writePrivateDataFile(file, `${JSON.stringify(store, null, 2)}\n`);
-  return { hash, firstApproval: true };
+  return { hash: check.hash, firstApproval: true };
+}
+
+/**
+ * O que vai para o hash do portão (IMPL-098 × IMPL-099): o texto CRU do config
+ * e, quando alguma tarefa aponta `testsDir`, o manifesto (caminho + SHA-256)
+ * dos arquivos de teste — eles também EXECUTAM (no verificador, depois do
+ * agente) e trocar um deles tem de reviver a revisão. Sem `testsDir` o conteúdo
+ * é o texto cru, byte a byte o de antes: os pins existentes continuam valendo.
+ */
+export function execGateContent(rawText: string, baseDir: string, testsDirs: readonly string[]): string {
+  const dirs = [...new Set(testsDirs)].sort();
+  if (dirs.length === 0) return rawText;
+  const partes = [rawText];
+  for (const rel of dirs) {
+    partes.push(`\n\u0000testsDir ${rel}\n`);
+    let abs: string;
+    try {
+      abs = resolveTestsDir(rel, baseDir);
+    } catch (err) {
+      partes.push(`(inválido: ${(err as Error).message})\n`);
+      continue;
+    }
+    for (const f of listTestsDirFiles(abs)) {
+      let digest: string;
+      try {
+        digest = createHash('sha256').update(readFileSync(path.join(abs, f))).digest('hex');
+      } catch {
+        digest = '(ilegível)';
+      }
+      partes.push(`${digest}  ${f.split(path.sep).join('/')}\n`);
+    }
+  }
+  return partes.join('');
 }
 
 /** Ajusta `config.agent` pelas flags `--repetitions/--max-parallel/--keep-workspace`. */
@@ -297,6 +438,16 @@ export interface AgentRunSummary {
   judgeErrors?: number;
   /** IMPL-033: reps sem veredito (execução inválida / juiz falho sem oráculo). */
   unscoredReps?: number;
+  /** IMPL-094: tentativas feitas (inclui retentativas cegas e etapas invalidadas). */
+  attempts?: number;
+  /** IMPL-094: retentativas CEGAS por falha transitória (429/5xx/rede/sandbox morto). */
+  retries?: number;
+  /** IMPL-094: execuções SEM veredito por infraestrutura (fora dos denominadores). */
+  infraErrors?: number;
+  /** IMPL-094: infraErrors / execuções que valem (0..1) — > 5% alerta, > 10% run inválida. */
+  infraErrorRate?: number;
+  /** IMPL-094: etapas invalidadas para TODOS por defeito da tarefa/ambiente. */
+  defectStages?: number;
 }
 
 function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
@@ -339,6 +490,8 @@ function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
     ...(record.agentUnscoredRepsByContestant
       ? { unscoredReps: Object.values(record.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0) }
       : {}),
+    // IMPL-094: tentativas/retentativas/infra_error (fonte única dos 3 resumos).
+    ...infraSummaryFields(record),
   };
 }
 
@@ -565,8 +718,18 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
   if (typeof file !== 'string') {
     throw new CliError('Uso: prompt-builder agents run --config <arena-agent-config.json>', EXIT.USAGE);
   }
-  const config = await readAgentConfigFile(file);
+  const { config, gateContent } = await loadAgentConfigFile(file);
   const budget = resolveBudget(values.budget, (m) => out.warn(m));
+  // IMPL-099: os parâmetros do portão são UM objeto só para o dry-run (checagem
+  // sem gravar) e para a execução real (aceite) — a paridade depende disso.
+  const execGate: ExecGateOpts = {
+    dataDir: ctx.dataDir,
+    content: gateContent,
+    identity: path.resolve(file),
+    label: file,
+    command: `agents run --config ${file}`,
+    allowExecConfig: values['allow-exec-config'] === true,
+  };
   const budgetUsd = budgetUsdOf(budget);
   const configComOrcamento: RunConfig = {
     ...config,
@@ -575,9 +738,12 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
 
   // --dry-run: valida, estima COM o catálogo (público sem key — IMPL-029; antes
   // saía sem catálogo e a estimativa dava $0) e espelha as recusas da execução
-  // real de agentes: orçamento ausente fora de TTY, lock da mesma config e teto
-  // diário esgotado (recusas, na ordem da real — IMPL-031) e key ausente
-  // (pré-condição em `requires`). Nada é gasto.
+  // real de agentes, NA ORDEM dela: orçamento ausente fora de TTY, portão de
+  // config executável (IMPL-099 — `config.exec_not_approved`/
+  // `config.exec_hash_changed`, exit 3; cli#6: antes o dry-run dizia "passaria"
+  // e a real recusava), lock da mesma config e teto diário esgotado (IMPL-031);
+  // key ausente é pré-condição em `requires`. Nada é gasto e NADA é pinado —
+  // nem com `--allow-exec-config` (o dry-run só diz `would_approve`).
   if (values['dry-run'] === true) {
     const apiKey = await tryResolveKey(values);
     let catalog: LoadedCatalog | null = null;
@@ -594,8 +760,10 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
       config: applyAgentOverrides(configComOrcamento, values),
       lock: values['allow-concurrent'] !== true,
     });
+    const portao = await checkExecConfigApproval(execGate);
     const wouldRefuse = [
       ...(budget.kind === 'missing' ? [toRefusal(budgetRequiredError())] : []),
+      ...(portao.refusal ? [toRefusal(portao.refusal)] : []),
       ...guardas.map(toRefusal),
     ];
     const requires = apiKey ? [] : [keyRequirement()];
@@ -609,6 +777,8 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
           ? { source: catalog.catalogSource, scope: catalog.catalogScope, models: catalog.models.length }
           : null,
         key: apiKey ? 'present' : 'missing',
+        // `approved` (pin existe) · `would_approve` (a real pinaria com a flag) · `not_approved` (recusa).
+        execConfig: portao.state,
       },
     };
     if (out.isText) {
@@ -649,16 +819,10 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
   // IMPL-099: portão de config EXECUTÁVEL — o arena-agent-config manda rodar
   // setup[]/verify[] NESTA máquina e config de origem LLM não é confiável. Sem
   // hash SHA-256 aprovado nada executa; o aceite é ÚNICO por conteúdo (mudou ⇒
-  // a revisão revive). Fica DEPOIS do --dry-run (que não executa nada) e da
-  // recusa por orçamento ausente (a ordem das recusas é a de sempre).
-  const pin = await ensureExecConfigApproved({
-    dataDir: ctx.dataDir,
-    content: await fs.readFile(file, 'utf-8'),
-    identity: path.resolve(file),
-    label: file,
-    command: `agents run --config ${file}`,
-    allowExecConfig: values['allow-exec-config'] === true,
-  });
+  // a revisão revive). Fica DEPOIS da recusa por orçamento ausente e da key (a
+  // ordem das recusas é a de sempre — o --dry-run espelha a MESMA checagem, sem
+  // gravar o pin).
+  const pin = await ensureExecConfigApproved(execGate);
   if (pin.firstApproval) {
     out.info(
       `config aprovado (SHA-256 ${pin.hash.slice(0, 12)}…) — o pin fica em ${EXEC_APPROVALS_FILE} e o MESMO ` +
@@ -765,10 +929,16 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
           `${summary.limitCut} cortadas por limite (contam 'nao') · ${summary.incomplete} canceladas · ` +
           `média ${summary.avgTurns.toFixed(1)} turnos · ${fmtUsd(summary.avgCostUsd)} · oráculo ${(summary.oracleRate * 100).toFixed(0)}%` +
           (summary.judgeErrors ? ` · ${summary.judgeErrors} falha(s) do juiz (nota do oráculo)` : '') +
-          (summary.unscoredReps ? ` · ${summary.unscoredReps} sem veredito (fora do placar)` : ''),
+          (summary.unscoredReps ? ` · ${summary.unscoredReps} sem veredito (fora do placar)` : '') +
+          (summary.retries ? ` · ${summary.retries} retentativa(s) cega(s)` : '') +
+          (summary.infraErrors ? ` · ${summary.infraErrors} infra_error` : '') +
+          (summary.defectStages ? ` · ${summary.defectStages} etapa(s) inválida(s) por defeito da tarefa` : ''),
       );
     }
   }
+  // IMPL-094: taxa de infra_error acima de 5% = alerta (acima de 10% a run é inválida — exit 6).
+  const infraRate = assessInfraErrorRate(record.agentInfra);
+  if (infraRate?.warn && !infraRate.invalid) out.warn(`infra_error: ${infraRate.message}`);
   const resumo = {
     runId: record.id,
     status: record.status,
@@ -787,6 +957,12 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
   // Falha sai SÓ pelo envelope de erro (resumo em `details`) — antes saía um
   // `result` ok:false E depois o erro: dois objetos no stdout (IMPL-028).
   if (code === EXIT.ERROR) {
+    // cli#3 (left#5): key recusada / sem crédito derrubou a run → o MESMO
+    // classificador das runs de chat (exit 4 `auth.failed` / 5
+    // `credit.insufficient`), com o resumo em `details` — antes `run.failed`
+    // (exit 1): o agente trocava a key boa ou repetia a run sem crédito.
+    const fatal = record.status === 'error' ? fatalGatewayOutcome(record, resumo) : undefined;
+    if (fatal) throw fatal;
     const todasFalharam = summary && summary.executions > 0 && summary.failed === summary.executions;
     throw new CliError(
       todasFalharam
@@ -802,16 +978,28 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
     );
   }
   // IMPL-004 × IMPL-028: inconclusiva (6) também sai pelo envelope — há
-  // resultado (em `details`), mas ele não sustenta conclusão.
+  // resultado (em `details`), mas ele não sustenta conclusão. IMPL-094: com
+  // infra_error > 10% a run é INVÁLIDA — o MESMO exit 6, código próprio
+  // (`run.infra_invalid`): o conserto é a infraestrutura, não a tarefa/prompt.
   if (code === EXIT.INCONCLUSIVE) {
+    const infraInvalida = infraRate?.invalid === true;
     throw new CliError(
-      `Run de agentes ${record.id} inconclusiva: ${(record.verdictIntegrity?.reasons ?? []).join('; ') || 'o resultado não sustenta conclusão'}.`,
+      infraInvalida
+        ? `Run de agentes ${record.id} INVÁLIDA: ${infraRate!.message}.`
+        : `Run de agentes ${record.id} inconclusiva: ${(record.verdictIntegrity?.reasons ?? []).join('; ') || 'o resultado não sustenta conclusão'}.`,
       code,
       resumo,
-      {
-        code: 'run.inconclusive',
-        hint: `Não promova com base nela; veja \`prompt-builder agents show ${record.id} --json\` (verdictIntegrity, failureCountByRole).`,
-      },
+      infraInvalida
+        ? {
+            code: 'run.infra_invalid',
+            hint:
+              'Falhas de provedor/rede/sandbox passaram de 10% das execuções (mesmo após 2 retentativas cegas): ' +
+              `conserte a infraestrutura (\`prompt-builder agents doctor --deep\`) e rode de novo; veja \`prompt-builder agents show ${record.id} --json\` (agentInfra).`,
+          }
+        : {
+            code: 'run.inconclusive',
+            hint: `Não promova com base nela; veja \`prompt-builder agents show ${record.id} --json\` (verdictIntegrity, failureCountByRole).`,
+          },
     );
   }
   out.result(true, 'agents.run', resumo);
@@ -1361,7 +1549,11 @@ function renderTaskReport(out: ReturnType<typeof buildContext>['out'], entry: Ta
  * relatório completo em `error.details.tasks` — `unstable` fica FORA do placar.
  */
 async function cmdTaskValidate(argv: string[]): Promise<number> {
-  const parsed = parse(argv, { repetitions: { type: 'string' } });
+  const parsed = parse(argv, {
+    repetitions: { type: 'string' },
+    // IMPL-099: aceite do config EXECUTÁVEL — o MESMO portão do `agents run`.
+    'allow-exec-config': { type: 'boolean' },
+  });
   const ctx = buildContext(parsed);
   const { out, positionals } = ctx;
   const file = positionals[0];
@@ -1371,7 +1563,8 @@ async function cmdTaskValidate(argv: string[]): Promise<number> {
   const repetitions = n(parsed.values.repetitions, '--repetitions');
   const { baseDir, entries } = await loadTaskNodes(file);
 
-  const tasks: TaskReportEntry[] = [];
+  // 1) Estrutura de TODAS as tarefas antes de executar qualquer coisa (exit 3).
+  const parsedTasks: { label: string; task: AgentTaskSpec; warnings: string[] }[] = [];
   for (const { label, node } of entries) {
     const t = parseAgentTaskSpec(node, { mode: 'validate' });
     if (!t.ok) {
@@ -1385,6 +1578,34 @@ async function cmdTaskValidate(argv: string[]): Promise<number> {
         },
       );
     }
+    parsedTasks.push({ label, task: t.task, warnings: t.warnings });
+  }
+
+  // 2) IMPL-099: a validação EXECUTA setup[], a solution e os checks NESTA
+  //    máquina (host, env mínimo) — a mesma superfície do `agents run`, e
+  //    tarefa escrita por LLM é conteúdo não confiável. Sem o SHA-256 aprovado
+  //    (texto do arquivo + manifesto dos `testsDir`) nada roda; o pin é o
+  //    MESMO store e a MESMA identidade do `agents run` (aprovar um conteúdo
+  //    num comando vale no outro; mudou ⇒ `config.exec_hash_changed` em ambos).
+  const pin = await ensureExecConfigApproved({
+    dataDir: ctx.dataDir,
+    content: execGateContent(
+      await fs.readFile(file, 'utf-8'),
+      baseDir,
+      parsedTasks.flatMap((t) => (t.task.testsDir ? [t.task.testsDir] : [])),
+    ),
+    identity: path.resolve(file),
+    label: file,
+    command: `agents task validate ${file}`,
+    allowExecConfig: parsed.values['allow-exec-config'] === true,
+  });
+  if (pin.firstApproval) {
+    out.info(`tarefa aprovada (SHA-256 ${pin.hash.slice(0, 12)}…) — o MESMO conteúdo passa sem --allow-exec-config.`);
+  }
+
+  const tasks: TaskReportEntry[] = [];
+  for (const t of parsedTasks) {
+    const { label } = t;
     for (const w of t.warnings) out.warn(`[${label}] ${w}`);
     out.info(`validando ${label} (build, fail-before, pass-after, flakiness, trivialidade, oráculo fraco)…`);
     const report = await validateAgentTask(t.task, {
@@ -1437,7 +1658,7 @@ async function cmdTaskCompile(argv: string[]): Promise<number> {
       EXIT.USAGE,
     );
   }
-  const { entries } = await loadTaskNodes(file);
+  const { baseDir, entries } = await loadTaskNodes(file);
   let entry = entries[0];
   if (entries.length > 1) {
     const idx = n(values.scenario, '--scenario');
@@ -1471,13 +1692,29 @@ async function cmdTaskCompile(argv: string[]): Promise<number> {
   }
 
   const name = typeof values.name === 'string' && values.name.trim() ? values.name : undefined;
-  const result = compileAgentTaskToHarbor(t.task, { outDir, instruction, ...(name ? { name } : {}) });
-  out.info(`árvore Harbor ${HARBOR_VERSION} escrita em ${result.outDir} (${result.files.length} arquivo(s)).`);
+  // left#12: o `testsDir` é relativo ao arquivo — o material dele vai para
+  // tests/files/ e o test.sh o materializa depois do agente.
+  let result: ReturnType<typeof compileAgentTaskToHarbor>;
+  try {
+    result = compileAgentTaskToHarbor(t.task, { outDir, instruction, baseDir, ...(name ? { name } : {}) });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/testsDir/.test(msg)) throw err;
+    throw new CliError(`Tarefa inválida em ${entry.label}: ${msg}.`, EXIT.CONFIG, { testsDir: t.task.testsDir ?? null, baseDir }, {
+      code: 'config.tests_dir_invalid',
+      hint: 'O `testsDir` é relativo ao diretório do arquivo de configuração e não pode sair dele (nem por symlink).',
+    });
+  }
+  out.info(
+    `árvore Harbor ${HARBOR_VERSION} escrita em ${result.outDir} (${result.files.length} arquivo(s)` +
+      `${result.testsMaterial ? `; ${result.testsMaterial.length} do testsDir em tests/files/` : ''}).`,
+  );
   out.result(true, 'agents.task.compile', {
     outDir: result.outDir,
     harborVersion: HARBOR_VERSION,
     files: result.files,
     rewardSpec: result.rewardSpec,
+    testsMaterial: result.testsMaterial,
   });
   return EXIT.OK;
 }

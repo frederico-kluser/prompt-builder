@@ -150,8 +150,12 @@ describe('IMPL-008 — o grounding do perfil chega ao gerador (bug E5)', () => {
       rules: RULES,
     });
     const chamadas = mensagensDatagen();
-    expect(chamadas).toHaveLength(3); // 2 lotes + 1 backfill
-    expect(chamadas.filter((m) => userDe(m).includes('LACUNAS DE VARIEDADE'))).toHaveLength(1);
+    // 2 lotes + o laço de reposição (web-live#7): o gerador só repete, então
+    // as DATAGEN_MAX_BACKFILL_ROUNDS rodadas rodam — todas com o grounding.
+    expect(chamadas).toHaveLength(2 + datagenSrc.DATAGEN_MAX_BACKFILL_ROUNDS);
+    expect(chamadas.filter((m) => userDe(m).includes('LACUNAS DE VARIEDADE'))).toHaveLength(
+      datagenSrc.DATAGEN_MAX_BACKFILL_ROUNDS,
+    );
     for (const msgs of chamadas) {
       for (const trecho of GROUNDING) expect(systemDe(msgs)).toContain(trecho);
       expect(systemDe(msgs)).not.toMatch(PLACEHOLDER_CRU);

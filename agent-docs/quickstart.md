@@ -22,15 +22,30 @@ npx prompt-builder-cli models list --search claude --json | jq '.data[0]'
 npx prompt-builder-cli config example --mode train -o arena.json
 
 # 4. PRÉ-VOO sem gastar nada. Sempre faça isto antes (mesmo --budget da run).
-npx prompt-builder-cli train --config arena.json --budget 3 --dry-run --json
+npx prompt-builder-cli train --config arena.json --budget 10 --dry-run --json
 
 # 5. Rode. Com --output-format ndjson você acompanha evento a evento.
-npx prompt-builder-cli train --config arena.json --budget 3 --output-format ndjson
+npx prompt-builder-cli train --config arena.json --budget 10 --output-format ndjson
 
 # 6. Promova o vencedor para o arquivo: backup + diff, e BLOQUEIA (exit 10)
 #    se o campeão regrediu no holdout. `--prompt-only` imprime cru, SEM o gate.
 npx prompt-builder-cli sessions winner <sessionId> --apply prompt.md
 ```
+
+O exemplo gerado (8 cenários, 3 iterações, 2 juízes) estima ~US$ 6–8 com os
+preços de 2026-09. Preço muda: se o passo 4 sair `usage.budget_below_estimate`
+(orçamento abaixo do piso) ou `usage.confirmation_required` (orçamento dentro da
+faixa, sem `--yes`), use `error.details.estimate.high` como `--budget` — ou
+reduza `stages`/`training.iterations`/juízes no arquivo. Nada foi gasto.
+
+Depois do treino, `sessions report <sessionId>` diz quanto o prompt melhorou e
+quanto a mudança muda o custo por chamada (`docs report`).
+
+No checkout do repositório, `npm run agent-setup` deixa `prompt-builder` no PATH
+(lançadores em `.local/bin` do seu home, ou `PB_BIN_DIR`, que executam ESTE
+`dist/`), liga a skill em todos
+os agentes e instala o Plannotator do relatório; `npm run agent-setup:doctor`
+confere. Fora do repo, `npx prompt-builder-cli` baixa a versão publicada.
 
 ## Regras que evitam os erros mais comuns
 

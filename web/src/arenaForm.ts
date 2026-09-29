@@ -21,6 +21,15 @@ import {
   type ArenaConfigScenario,
 } from './engine/configFile';
 import { AREA_LIVRE, type PiiMode } from './lgpd';
+import { HOLDOUT_RATIO_DEFAULT } from './engine/holdout';
+import { GATE_ALPHA } from './engine/rank';
+import {
+  minAchievableGateP,
+  minPairsForPromotion,
+  selectionScenariosFor,
+  TRAINING_DEFAULT_STAGES as ENGINE_TRAINING_DEFAULT_STAGES,
+  TRAINING_MIN_STAGES_RECOMMENDED,
+} from '../../src/engine/trainingPolicy.js';
 import type {
   ManualVariant,
   PromptContracts,
@@ -95,6 +104,11 @@ export interface ArenaFormState {
   mode: RunMode;
   theme: string;
   scenarioBrief: string;
+  /**
+   * IMPL-056: idiomas do datagen como TEXTO da tela ("pt-BR, en"); '' = só
+   * pt-BR (o default do motor). `parseLanguages` valida e vira `languages`.
+   */
+  languages: string;
   stages: number;
   pack: ScenarioPack | null;
   customStages: StageSpec[] | null;
@@ -144,6 +158,7 @@ export function defaultArenaFormState(): ArenaFormState {
     mode: 'compare',
     theme: DEFAULT_THEME,
     scenarioBrief: '',
+    languages: '',
     stages: 5,
     pack: null,
     customStages: null,
@@ -170,7 +185,9 @@ export function defaultArenaFormState(): ArenaFormState {
     ],
     iterations: 3,
     minGain: '',
-    holdoutRatio: 0.2,
+    // web-code#17: o default canônico do trainer (0,3 — IMPL-050); 0,2 aqui
+    // mandava a SPA reservar menos holdout que o CLI e a documentação.
+    holdoutRatio: HOLDOUT_RATIO_DEFAULT,
     feedbackDriven: true,
     duelsOn: true,
     finalists: DEFAULT_FINALISTS,
@@ -232,6 +249,9 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
   mode: { kind: 'ui', control: 'seletor de modo (topo)' },
   theme: { kind: 'ui', control: 'Cenários › Tema' },
   scenarioBrief: { kind: 'ui', control: 'Cenários › Briefing' },
+  // IMPL-056: idiomas do datagen (opt-in). Antes era só-JSON `ignorado` (a SPA
+  // gerava só pt-BR); o motor do navegador já o aplica — agora a tela também.
+  languages: { kind: 'ui', control: 'Avançado › Idiomas dos cenários' },
   stages: { kind: 'ui', control: 'Cenários › Nº de cenários' },
   'scenarios[].id': { kind: 'ui', control: 'Cenários › lista importada' },
   'scenarios[].question': { kind: 'ui', control: 'Cenários › lista importada' },
@@ -285,6 +305,13 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
   'training.feedbackDriven': { kind: 'ui', control: 'Avançado › Lições das falhas', modes: TRAINING },
   'training.reflection': { kind: 'json-only', status: 'aplicado', note: "reflexão GEPA ('deterministic' | 'llm' | 'off')", modes: TRAINING },
   'training.paretoPool': { kind: 'json-only', status: 'aplicado', note: 'pool Pareto (>1 = população de prompts)', modes: TRAINING },
+  // IMPL-060/062/065/075 (w2 trainer-features): aceitos pelo schema e aplicados
+  // pelo CLI/servidor (`train --config`); a tela ainda não os repassa — ficam
+  // `ignorado` (com aviso no import) até ganharem controle/patch próprio.
+  'training.paretoCoverageSampling': { kind: 'json-only', status: 'ignorado', note: 'pai ∝ cobertura no pool Pareto (n ≥ 20) — aplicado pelo CLI; a tela não repassa' },
+  'training.maxLessonTokens': { kind: 'json-only', status: 'ignorado', note: 'teto do dossiê de lições em tokens (200–4000) — aplicado pelo CLI; a tela não repassa' },
+  'training.lessonsIncludeReference': { kind: 'json-only', status: 'ignorado', note: 'gabarito no dossiê de lições (default off) — aplicado pelo CLI; a tela não repassa' },
+  'training.minCuratedItems': { kind: 'json-only', status: 'ignorado', note: 'piso de itens curados p/ declarar campeão (default 20) — aplicado pelo CLI; a tela não repassa' },
   // IMPL-012 remove o sequential halving: o campo segue aceito por compat, mas
   // NÃO vai para a run — o import avisa em vez de engolir.
   'training.halving': { kind: 'json-only', status: 'ignorado', note: 'sequential halving descontinuado (IMPL-012)', modes: TRAINING, discontinued: true },
@@ -296,9 +323,13 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
   finalists: { kind: 'ui', control: 'Avançado › Finalistas' },
   'judging.reference': { kind: 'json-only', status: 'aplicado', note: 'força ligar/desligar o julgamento por gabarito (sem ele: default do modo)' },
   'judging.passes': { kind: 'ui', control: 'Avançado › Juiz em 2 ordens' },
+  'judging.auditable': { kind: 'json-only', status: 'ignorado', note: 'modo auditável (juiz + duelo + gabarito com provedor travado) — aplicado pelo CLI; a tela não repassa' },
   'limits.maxOutputTokens': { kind: 'ui', control: 'Avançado › Máx. tokens por resposta' },
   'limits.timeoutMs': { kind: 'ui', control: 'Avançado › Timeout' },
-  'limits.concurrency': { kind: 'ui', control: 'Avançado › Concorrência' },
+  // web-code#13: só REGISTRADO na run — nenhum motor limita chamadas por ele (o
+  // paralelismo é do limitador global adaptativo do gateway; AGENTS.md proíbe
+  // cap local). O controle fica pelo round-trip do arena-config, com a cópia honesta.
+  'limits.concurrency': { kind: 'ui', control: 'Avançado › Concorrência (só registrada; o paralelismo é do limitador global)' },
   'compliance.area': { kind: 'ui', control: 'Avançado › Conformidade (área)' },
   'compliance.includeRessalvas': { kind: 'ui', control: 'Avançado › Conformidade (ressalvas)' },
   // LGPD (IMPL-040).
@@ -309,6 +340,15 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
     note: 'revisão de PII do arquivo (dados sintéticos) — vale só para o dado deste arquivo; não é exportado',
     oneShot: true,
   },
+  // IMPL-063/IMPL-115 (left#4, onda 3): aceitos pelo schema e aplicados pelo
+  // CLI/servidor (`--config`); a tela ainda não os repassa — `ignorado` com
+  // aviso no import, como o `judging.auditable`, até ganharem controle próprio.
+  'scenarioDedup.semantic': { kind: 'json-only', status: 'ignorado', note: 'dedup semântico dos cenários gerados (embeddings) — aplicado pelo CLI; a tela não repassa' },
+  'scenarioDedup.embedModelId': { kind: 'json-only', status: 'ignorado', note: 'modelo de embeddings do dedup — aplicado pelo CLI; a tela não repassa' },
+  'scenarioDedup.cosineThreshold': { kind: 'json-only', status: 'ignorado', note: 'limiar de cosseno do dedup (0.5–1) — aplicado pelo CLI; a tela não repassa' },
+  'scenarioDedup.echoThreshold': { kind: 'json-only', status: 'ignorado', note: 'limiar do eco de template (0.5–1) — aplicado pelo CLI; a tela não repassa' },
+  'judgeCascade.cheap': { kind: 'json-only', status: 'ignorado', note: 'modo econômico: os 2 juízes baratos — aplicado pelo CLI; a tela não repassa' },
+  'judgeCascade.strong': { kind: 'json-only', status: 'ignorado', note: 'modo econômico: o juiz forte da escalada — aplicado pelo CLI; a tela não repassa' },
 };
 
 /** A lista visível "só pelo arquivo JSON" (Avançado). */
@@ -536,6 +576,7 @@ export function applyArenaConfigToForm(
   s.mode = mode;
   s.theme = config.theme;
   if (config.scenarioBrief !== undefined) s.scenarioBrief = config.scenarioBrief;
+  if (config.languages !== undefined) s.languages = formatLanguages(config.languages);
   if (config.stages !== undefined) s.stages = config.stages;
   // Cenários pinados: viram seed no MESMO estado do pacote de cenários.
   if (Array.isArray(config.scenarios)) {
@@ -813,11 +854,22 @@ export function exportArenaConfig(s: ArenaFormState): { config: ArenaConfigFile;
   // reimportada gerar cenários a mais (e custar mais) sem aviso.
   const stages = !s.pack && s.customStages?.length ? Math.min(50, s.customStages.length) : s.stages;
 
+  // IMPL-056: idiomas válidos vão para o arquivo; texto inválido na tela é
+  // NOMEADO (o arquivo sairia recusado pelo próprio import).
+  const idiomas = parseLanguages(s.languages);
+  if (!idiomas.ok) {
+    omitted.push({
+      path: 'languages',
+      message: `"${s.languages.trim()}" não é uma lista de idiomas válida — ficou fora do arquivo (corrija em Avançado › Idiomas dos cenários)`,
+    });
+  }
+
   const config: ArenaConfigFile = {
     format: ARENA_CONFIG_FORMAT,
     mode: s.mode,
     theme: s.theme,
     ...(s.scenarioBrief ? { scenarioBrief: s.scenarioBrief } : {}),
+    ...(idiomas.ok && idiomas.languages ? { languages: idiomas.languages } : {}),
     stages,
     ...(scenarios?.length ? { scenarios: scenarios.map(toArenaScenario) } : {}),
     models,
@@ -944,4 +996,174 @@ export function promptGroupProblem(
   if (s.mode === 'compare' || !s.promptGroup) return null;
   const r = validatePromptGroup(s.promptGroup, s.promptId);
   return r.ok ? null : `Grupo multi-prompt do arquivo inválido — ${r.error} Reimporte o JSON corrigido.`;
+}
+
+// ----------------------------------------------------------------------------
+// Idiomas dos cenários (IMPL-056) — texto da tela ⇄ `languages` da run
+// ----------------------------------------------------------------------------
+
+/**
+ * Tag de idioma curta (BCP 47: 'pt-BR', 'en', 'es-419') — a MESMA regex do
+ * `languages` no runConfigSchema do Node e no arena-config@1 (web/src/engine/
+ * configFile.ts); test/newrun-form-2.test.ts confere que as três concordam.
+ */
+const LANGUAGE_TAG = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+/** Teto de idiomas por run (o `.max(10)` dos dois schemas). */
+export const MAX_LANGUAGES = 10;
+
+/**
+ * Texto da tela ("pt-BR, en") → `languages` da run. Vazio = sem opt-in (o
+ * motor gera só pt-BR). Separador: vírgula (a MESMA regra do `--languages` do
+ * CLI) ou ponto e vírgula; repetição (sem caixa) sai. Espaço NÃO separa: "pt
+ * BR" viraria ['pt', 'BR'] — duas tags válidas e erradas ('br' é bretão). Nunca
+ * corrige calado: tag inválida é erro.
+ */
+export function parseLanguages(
+  text: string,
+): { ok: true; languages?: string[] } | { ok: false; error: string } {
+  const vistos = new Set<string>();
+  const itens: string[] = [];
+  for (const t of text.split(/[,;]/)) {
+    const tag = t.trim();
+    if (!tag || vistos.has(tag.toLowerCase())) continue;
+    vistos.add(tag.toLowerCase());
+    itens.push(tag);
+  }
+  if (itens.length === 0) return { ok: true };
+  const ruins = itens.filter((t) => !LANGUAGE_TAG.test(t));
+  if (ruins.length) {
+    return {
+      ok: false,
+      error: `Idiomas dos cenários: ${ruins.map((r) => `"${r}"`).join(', ')} ${ruins.length === 1 ? 'não é tag' : 'não são tags'} de idioma — use BCP 47 separado por vírgula, ex.: pt-BR, en.`,
+    };
+  }
+  if (itens.length > MAX_LANGUAGES) {
+    return { ok: false, error: `Idiomas dos cenários: no máximo ${MAX_LANGUAGES} (hoje ${itens.length}).` };
+  }
+  return { ok: true, languages: itens };
+}
+
+/** `languages` → texto da tela (o inverso de {@link parseLanguages}). */
+export function formatLanguages(languages: readonly string[]): string {
+  return languages.join(', ');
+}
+
+// ----------------------------------------------------------------------------
+// Poder do gate de promoção do treino (web-live#5)
+// ----------------------------------------------------------------------------
+//
+// FONTE ÚNICA: `src/engine/trainingPolicy.ts` (a mesma regra do pré-voo/
+// estimate do CLI e do log do trainer). Na onda 2 isto nasceu como cópia local
+// porque o helper do motor ainda não existia; na integração virou re-export —
+// os nomes da tela ficam, a conta é uma só (test/newrun-form-2.test.ts a amarra
+// ao `bestOfKTest` REAL).
+//
+// A conta: o gate da melhor de K (IMPL-002, src/engine/bestOfK.ts) é um max-T
+// por troca de sinais EXATA sobre os n cenários de treino. O menor p possível
+// é 1/2ⁿ — a variante vence a régua em TODOS os cenários, sem nenhum empate (um
+// cenário empatado em todas as variantes não muda o T e dobra o peso da
+// identidade). Com 5 cenários (o default antigo) isso dá 1/32 = 0,031: um
+// único empate ou derrota já leva o p a 0,0625 > α — medido na auditoria
+// (web-live#5): duas rodadas com a variante +50 p.p. à frente em todos os
+// cenários e 0 promoções. Com 4, nem vencendo tudo.
+
+/** Cenários do treino quando o usuário escolhe o modo (antes: 5 — ver acima). */
+export const TRAINING_DEFAULT_STAGES = ENGINE_TRAINING_DEFAULT_STAGES;
+/**
+ * Abaixo disto o gate costuma segurar a promoção por UMA derrota: com 8
+ * cenários de treino uma derrota (ou dois empates) ainda passa em α = 0,05.
+ */
+export const TRAINING_RECOMMENDED_STAGES = TRAINING_MIN_STAGES_RECOMMENDED;
+
+/**
+ * Cenários que o GATE vê no treino: a seleção sem a fatia de holdout — que só
+ * existe com o piso cumprido (`splitHoldout`: abaixo dele, tudo treina).
+ */
+export const trainingGateScenarios: (stages: number, holdoutRatio: number) => number = selectionScenariosFor;
+
+/** Menor p ajustado que o gate consegue dar com n cenários de treino: 1/2ⁿ. */
+export const minAchievablePAdjusted: (n: number) => number = minAchievableGateP;
+
+/**
+ * Menor nº de PARES de seleção com que ALGUMA promoção é possível (1/2ⁿ ≤ α) —
+ * reexport da régua do motor com o MESMO nome. Revisão w2: aqui ela se chamava
+ * `minScenariosForPromotion`, homônimo de outra função do motor (cenários
+ * CONFIGURADOS com folga de empates, depois do holdout) — fácil pegar o piso
+ * errado. Um nome, um significado.
+ */
+export { minPairsForPromotion };
+
+/** Nº de cenários que o modo treino subiu sozinho (de → para). */
+export interface AutoStages {
+  from: number;
+  to: number;
+}
+
+/**
+ * Nº de cenários ao TROCAR de modo (web-live#5). Entrar no treino com menos de
+ * {@link TRAINING_DEFAULT_STAGES} sobe para ele (e lembra de onde veio); sair
+ * do treino devolve o valor anterior SE o usuário não mexeu no que foi subido.
+ * Qualquer outra troca não toca no nº. Puro: o NewRun guarda o `auto` num ref.
+ */
+export function stagesForModeChange(p: {
+  from: RunMode;
+  to: RunMode;
+  stages: number;
+  auto: AutoStages | null;
+}): { stages: number; auto: AutoStages | null } {
+  if (p.to === 'training' && p.from !== 'training') {
+    return p.stages < TRAINING_DEFAULT_STAGES
+      ? { stages: TRAINING_DEFAULT_STAGES, auto: { from: p.stages, to: TRAINING_DEFAULT_STAGES } }
+      : { stages: p.stages, auto: null };
+  }
+  if (p.from === 'training' && p.to !== 'training') {
+    return { stages: p.auto && p.stages === p.auto.to ? p.auto.from : p.stages, auto: null };
+  }
+  return { stages: p.stages, auto: p.auto };
+}
+
+/** Aviso de poder do treino: `blocking` = nenhuma variante pode ser promovida. */
+export interface TrainingPowerNotice {
+  blocking: boolean;
+  /** Cenários que o gate vê (treino, sem o holdout). */
+  gateScenarios: number;
+  text: string;
+}
+
+/**
+ * O que dizer (e se trava) sobre o poder do treino com `stages` cenários no
+ * total. null = poder suficiente. `blocking` vira pendência: sessão paga que
+ * não consegue promover nada não sai; o resto é aviso (a sessão roda).
+ */
+export function trainingPowerNotice(stages: number, holdoutRatio: number): TrainingPowerNotice | null {
+  const n = trainingGateScenarios(stages, holdoutRatio);
+  const pMin = minAchievablePAdjusted(n);
+  const holdout = Math.max(0, Math.floor(stages)) - n;
+  const deTreino = holdout > 0 ? ` de treino (${holdout} ficam no teste cego)` : '';
+  // Número em PT-BR (vírgula decimal): 0,0625 — a tela inteira fala português.
+  const fmtP = (p: number) => String(Number(p.toFixed(4))).replace('.', ',');
+  const alfa = fmtP(GATE_ALPHA);
+  if (pMin > GATE_ALPHA) {
+    return {
+      blocking: true,
+      gateScenarios: n,
+      text:
+        `Com ${n} cenário${n === 1 ? '' : 's'}${deTreino} o treino não consegue promover nenhuma variante: ` +
+        `o menor p ajustado possível é ${fmtP(pMin)} (> ${alfa}). Use ao menos ${minPairsForPromotion()} — ` +
+        `o recomendado é ${TRAINING_DEFAULT_STAGES}.`,
+    };
+  }
+  if (n < TRAINING_RECOMMENDED_STAGES) {
+    return {
+      blocking: false,
+      gateScenarios: n,
+      text:
+        n <= minPairsForPromotion()
+          ? `Com ${n} cenários${deTreino} a variante só é promovida se vencer em TODOS: um único empate ou derrota ` +
+            `já segura a promoção (p ajustado mínimo ${fmtP(pMin)}, precisa ≤ ${alfa}). Use ${TRAINING_DEFAULT_STAGES} ou mais.`
+          : `Com ${n} cenários${deTreino} uma única derrota da variante costuma bastar para segurar a promoção ` +
+            `(teste de significância, p ajustado ≤ ${alfa}). Use ${TRAINING_DEFAULT_STAGES} ou mais.`,
+    };
+  }
+  return null;
 }

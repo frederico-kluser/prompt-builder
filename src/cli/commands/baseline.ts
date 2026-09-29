@@ -25,19 +25,22 @@ import {
   type JudgeBaseline,
   type JudgeSetup,
 } from '../../engine/judgeBaseline.js';
-import { judgeContractHash } from '../../engine/judgeCalibration.js';
+import { judgeContractHash, pipelineContractComponents } from '../../engine/judgeCalibration.js';
 import { DUEL_HEAD } from '../../engine/duelPrompt.js';
+import { DUEL_AGENT_TRUST } from '../../duels.js';
+import { AGENT_JUDGE_SYSTEM_PROMPT } from '../../agent/agentJudge.js';
 import { JUDGE_LISTWISE_CONTRACT_TEXT } from '../../judge.js';
 import { JUDGE_CONTRACT_TEXT } from '../../refJudge.js';
+import { reasoningLevelForRole } from '../../modelCaps.js';
 import { getGateway } from '../../openrouter.js';
 import { loadCatalogFile, loadPublicCatalog } from '../../publicCatalog.js';
 import { getDataDir, loadRun } from '../../storage.js';
-import { parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
+import { isArenaAgentConfigFormat, parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
 import { arenaAgentConfigToRunConfig, arenaConfigToRunConfig } from '../../arenaConfig.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
 import { CliError, EXIT } from '../output.js';
 import { buildContext, parse, type CliContext } from '../context.js';
-import type { OpenRouterModel } from '../../types.js';
+import type { OpenRouterModel, ReasoningConfig, ReasoningLevel } from '../../types.js';
 
 const OPTIONS = {
   file: { type: 'string' },
@@ -52,25 +55,57 @@ const OPTIONS = {
 } as const;
 
 /**
- * Hash do contrato do juiz EM VIGOR neste binário para um setup. Mesmo cálculo
- * do orquestrador (`pinJudgeContract`) no caminho DEFAULT (chat sem esforço de
- * raciocínio explícito nem roteamento ZDR): juízes + prompt pointwise + prompt
- * do duelo + prompt listwise + modelo de referência (IMPL-049 — trocar qualquer
- * um destes muda o hash). Se uma versão nova do CLI mudar QUALQUER prompt de
+ * Setup do gate + o que muda o hash além de juízes/gabarito: o think level
+ * EFETIVO do juiz (config `reasoning.judge`, ou o default do papel) e se a run
+ * é de AGENTE (o prompt que o juiz lê é outro). Campos extras de `JudgeSetup`
+ * sobrevivem ao `checkJudgeBaseline` (ele espalha o setup em vigor).
+ */
+export type BaselineSetup = JudgeSetup & { judgeReasoningLevel?: ReasoningLevel; agent?: boolean };
+
+/** Setup a partir de uma config (run gravada ou arquivo): juízes + gabarito + esforço + modo agente. */
+function baselineSetupOf(cfg: {
+  judgeModelIds?: readonly string[];
+  referenceModelId?: string;
+  reasoning?: ReasoningConfig;
+  agent?: unknown;
+}): BaselineSetup | null {
+  const setup = judgeSetupFromConfig(cfg);
+  if (!setup) return null;
+  return {
+    ...setup,
+    judgeReasoningLevel: reasoningLevelForRole(cfg.reasoning, 'judge'),
+    ...(cfg.agent ? { agent: true } : {}),
+  };
+}
+
+/**
+ * Hash do contrato do juiz EM VIGOR neste binário para um setup — o MESMO
+ * cálculo do orquestrador (`pipelineContractComponents` é a fonte única dos
+ * dois lados): juízes + prompt pointwise + prompt do duelo + prompt listwise +
+ * modelo de referência + think level EFETIVO do juiz + temperatura do juízo
+ * (IMPL-049/IMPL-117). Se uma versão nova do CLI mudar QUALQUER prompt de
  * julgamento, o gate acusa.
  *
- * GRANULARIDADE (IMPL-049, decisão consciente): o gate compara no espaço de
- * SETUP — think level e política de provedor entram no hash DA RUN (o pin do
- * `judgeDiagnostics.contract`) e no drift `judge.contract.changed`/`runs show`.
- * Uma run pinada com esforço/roteamento fora do default vai exigir re-baseline
- * declarada: as notas dela não são comparáveis com as do default sem dizer.
+ * cli#0: antes o think level ficava de fora aqui, mas o orquestrador SEMPRE o
+ * pina (o default do papel, 'medium', quando a config não diz) — o `check`
+ * recalculava um hash que nenhuma run produz e o gate reprovava logo depois do
+ * `pin` da mesma run. Sem `--config`, vale o default do papel; uma run pinada
+ * com esforço fora do default passa com `--config` da própria run (ou exige
+ * re-baseline declarada). Política de provedor (roteamento ZDR) continua só no
+ * hash DA RUN — o setup não a conhece.
  */
-function contractHashFor(setup: JudgeSetup): string {
-  return judgeContractHash(setup.judgeModelIds, JUDGE_CONTRACT_TEXT, {
-    duelPromptText: DUEL_HEAD,
-    listwisePromptText: JUDGE_LISTWISE_CONTRACT_TEXT,
-    referenceModelId: setup.referenceModelId,
-  });
+export function contractHashFor(setup: BaselineSetup): string {
+  const agente = setup.agent === true;
+  return judgeContractHash(
+    setup.judgeModelIds,
+    agente ? AGENT_JUDGE_SYSTEM_PROMPT : JUDGE_CONTRACT_TEXT,
+    pipelineContractComponents({
+      duelPromptText: agente ? `${DUEL_HEAD}\n\n${DUEL_AGENT_TRUST}` : DUEL_HEAD,
+      listwisePromptText: JUDGE_LISTWISE_CONTRACT_TEXT,
+      referenceModelId: setup.referenceModelId,
+      judgeReasoningLevel: setup.judgeReasoningLevel ?? reasoningLevelForRole(undefined, 'judge'),
+    }),
+  );
 }
 
 function defaultFile(): string {
@@ -125,7 +160,7 @@ async function writeBaseline(file: string, baseline: JudgeBaseline): Promise<voi
 }
 
 /** Juízes/gabarito de um arquivo de config (arena-config@1, arena-agent-config@1 ou RunConfig cru). */
-async function setupFromConfigFile(file: string): Promise<JudgeSetup> {
+async function setupFromConfigFile(file: string): Promise<BaselineSetup> {
   let json: unknown;
   try {
     json = JSON.parse(await fs.readFile(file, 'utf-8'));
@@ -133,8 +168,8 @@ async function setupFromConfigFile(file: string): Promise<JudgeSetup> {
     throw new CliError(`Não consegui ler a config "${file}": ${(err as Error).message}`, EXIT.CONFIG);
   }
   const formato = (json as Record<string, unknown> | null)?.format;
-  let cfg: { judgeModelIds?: string[]; referenceModelId?: string };
-  if (formato === 'arena-agent-config@1') {
+  let cfg: { judgeModelIds?: string[]; referenceModelId?: string; reasoning?: ReasoningConfig; agent?: unknown };
+  if (isArenaAgentConfigFormat(formato)) {
     const p = parseArenaAgentConfig(json);
     if (!p.ok) throw new CliError(p.error, EXIT.CONFIG);
     const conv = arenaAgentConfigToRunConfig(p.config);
@@ -151,7 +186,7 @@ async function setupFromConfigFile(file: string): Promise<JudgeSetup> {
     if (!p.ok) throw new CliError(p.error, EXIT.CONFIG, p.details);
     cfg = p.config;
   }
-  const setup = judgeSetupFromConfig(cfg);
+  const setup = baselineSetupOf(cfg);
   if (!setup) throw new CliError(`A config "${file}" não declara juízes.`, EXIT.CONFIG);
   return setup;
 }
@@ -198,8 +233,22 @@ export async function cmdBaseline(argv: string[]): Promise<number> {
     if (!runId) throw new CliError('Uso: prompt-builder baseline pin <runId> [-o <arquivo>]', EXIT.USAGE);
     const record = await loadRun(runId);
     if (!record) throw new CliError(`Run "${runId}" não encontrada em ${getDataDir()}.`, EXIT.USAGE);
-    const setup = judgeSetupFromConfig(record.config);
+    const setup = baselineSetupOf(record.config);
     if (!setup) throw new CliError(`A run "${runId}" não tem juízes na config.`, EXIT.CONFIG);
+    // O pin guarda o hash DA RUN; sem `--config` o `check` recalcula no setup
+    // default (chat, esforço default do papel) — diga o que passar no CI.
+    const foraDoDefault = [
+      ...(setup.agent ? ['modo agente'] : []),
+      ...(setup.judgeReasoningLevel !== reasoningLevelForRole(undefined, 'judge')
+        ? [`esforço do juiz '${setup.judgeReasoningLevel}'`]
+        : []),
+    ];
+    if (foraDoDefault.length) {
+      out.warn(
+        `a run usa ${foraDoDefault.join(' e ')} — rode \`baseline check --config <a config desta run>\` ` +
+          '(sem ela o check compara com o setup default e reprova).',
+      );
+    }
     const temSnapshot = record.modelLifecycle?.source === 'catalog';
     const catalogo = temSnapshot ? null : (await catalogFor(ctx, values)).models;
     const { baseline, usedCatalogFallback } = buildJudgeBaseline({

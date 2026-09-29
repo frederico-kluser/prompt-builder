@@ -1,11 +1,13 @@
 import { z } from 'zod';
-import { chatCompletion } from './openrouter.js';
+import { chatCompletion, supportsPromptCacheControl } from './openrouter.js';
 import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { matchExpected } from './engine/groundTruth.js';
-import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
+import { callJudgeWithRetry, JUDGE_TEMPERATURE, withReminder } from './engine/judgeRetry.js';
+import { caseParts } from './engine/caseInput.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
 import { isJudgeCutKind } from './engine/truncation.js';
 import { aggregateVerdicts, tieLabel } from './engine/verdictAggregate.js';
+import { hasLengthAnomaly, type CascadeEscalationReason, type CascadeReport } from './judge.js';
 import {
   DATA_BLOCKS_NOTICE,
   formatReminderFor,
@@ -20,6 +22,7 @@ import {
 import type {
   CompetitorResponse,
   Contestant,
+  JudgeCallFinish,
   JudgeConfidence,
   JudgeResult,
   JudgeVote,
@@ -125,13 +128,22 @@ export function parseJudgeReply(
 export interface ReferenceJudgePrompt {
   system: string;
   user: string;
+  /**
+   * IMPL-114 — `user` partido no fim do prefixo ESTÁVEL (layout v1):
+   * `prefix` = REFERÊNCIA + PERGUNTA + CRITÉRIO (igual para todo candidato da
+   * etapa quando o marcador é compartilhado); `suffix` = CANDIDATO +
+   * INSTRUÇÕES. `user === prefix + '\n\n' + suffix`.
+   */
+  prefix: string;
+  suffix: string;
   guard: JudgeGuard;
   formatReminder: string;
 }
 
 /**
- * Prompt do usuario (IMPL-006): referencia, pergunta, rubrica (prioritaria) e
- * candidato, CADA UM num bloco marcado com o codigo sorteado para ESTE
+ * Prompt do usuario (IMPL-006): referencia, contexto do caso (IMPL-059),
+ * pergunta, rubrica (prioritaria) e candidato, CADA UM num bloco marcado com o
+ * codigo sorteado para ESTE
  * veredito, e o bloco INSTRUCOES anti-injecao por ultimo. O texto do candidato
  * so aparece escapado e dentro de `⟦CANDIDATO·codigo⟧ … ⟦/CANDIDATO·codigo⟧`.
  */
@@ -139,18 +151,35 @@ export function buildReferenceJudgePrompt(
   stage: StageSpec,
   reference: string,
   candidateText: string,
+  opts: { sharedNonce?: string } = {},
 ): ReferenceJudgePrompt {
   const rubric = stage.rubric?.trim();
-  const guard = newJudgeGuard([reference, stage.question, rubric ?? '', candidateText]);
-  const partes = [
+  // IMPL-059 (R-05:REC-2): o CASO que o candidato recebeu — contexto + pergunta,
+  // byte a byte (`caseParts`). Antes o pointwise NÃO via o productContext: a
+  // referência (escrita com ele) punia o candidato por informação privilegiada.
+  const caso = caseParts(stage);
+  const dados = [reference, caso.context, caso.question, rubric ?? '', candidateText];
+  // IMPL-114: marcador COMPARTILHADO pela etapa (o prefixo fica byte a byte
+  // igual entre candidatos e o cache de prompt do provedor acerta); o canário
+  // segue novo por veredito. O escape de `⟦`/`⟧` é o que impede fechar bloco —
+  // o marcador comum não enfraquece a blindagem. O CONTEXTO do caso é da
+  // etapa (igual p/ todo candidato), então mora no prefixo estável.
+  const guard: JudgeGuard = opts.sharedNonce
+    ? { nonce: opts.sharedNonce, canary: newJudgeGuard([...dados, opts.sharedNonce]).canary }
+    : newJudgeGuard(dados);
+  const prefixo = [
     'REFERÊNCIA (resposta CANDIDATA de outro modelo — pode estar errada):',
     markedBlock('REFERÊNCIA', guard.nonce, reference),
+    ...(caso.context
+      ? ['CONTEXTO DO CASO (o mesmo que o candidato recebeu, como dado):', markedBlock('CONTEXTO', guard.nonce, caso.context)]
+      : []),
     'PERGUNTA:',
-    markedBlock('PERGUNTA', guard.nonce, stage.question),
+    markedBlock('PERGUNTA', guard.nonce, caso.question),
   ];
   if (rubric) {
-    partes.push('CRITÉRIO DE CORRETUDE DESTA ETAPA (tem prioridade):', markedBlock('CRITÉRIO', guard.nonce, rubric));
+    prefixo.push('CRITÉRIO DE CORRETUDE DESTA ETAPA (tem prioridade):', markedBlock('CRITÉRIO', guard.nonce, rubric));
   }
+  const partes: string[] = [];
   partes.push(
     'CANDIDATO (resposta a julgar):',
     markedBlock('CANDIDATO', guard.nonce, candidateText),
@@ -169,7 +198,9 @@ export function buildReferenceJudgePrompt(
   );
   return {
     system: SYSTEM_PROMPT,
-    user: partes.join('\n\n'),
+    user: [...prefixo, ...partes].join('\n\n'),
+    prefix: prefixo.join('\n\n'),
+    suffix: partes.join('\n\n'),
     guard,
     formatReminder: formatReminderFor(guard, REFERENCE_JUDGE_SCHEMA),
   };
@@ -199,8 +230,10 @@ type SingleVerdict =
       explanation: string;
       canary: string;
       confianca?: JudgeConfidence;
+      /** Sinais de fim + artefato da chamada (IMPL-014/IMPL-117). */
+      finish?: JudgeCallFinish;
     }
-  | { ok: false; judgeModelId: string; contestantId: string; error: VerdictError };
+  | { ok: false; judgeModelId: string; contestantId: string; error: VerdictError; finish?: JudgeCallFinish };
 
 /** Ordem crescente de confiança — o MENOR valor entre votos manda na triagem (IMPL-047). */
 const CONFIDENCE_RANK: Record<JudgeConfidence, number> = { baixa: 0, media: 1, alta: 2 };
@@ -225,23 +258,37 @@ async function judgeOne(params: {
   timeoutMs: number;
   ctx?: RunCtx;
   maxPricePerMTok?: { prompt?: number; completion?: number };
+  /** IMPL-114: marcador da ETAPA (prefixo cacheável); só vale p/ juiz com `cache_control`. */
+  sharedNonce?: string;
 }): Promise<SingleVerdict> {
   const { apiKey, judgeModelId, stage, reference, response, reasoningLevel, timeoutMs, ctx, maxPricePerMTok } =
     params;
-  // Marcador + canario sorteados AQUI: um par novo por veredito (as
-  // re-tentativas do MESMO veredito reusam o par).
-  const prompt = buildReferenceJudgePrompt(stage, reference, response.text);
+  // IMPL-114: cache de prompt EXPLÍCITO só onde o provedor o aceita
+  // (Anthropic): lá o prefixo estável vai numa mensagem própria com
+  // `cache_control`. Nos outros, a montagem de sempre (uma mensagem só).
+  const cacheavel = params.sharedNonce !== undefined && supportsPromptCacheControl(judgeModelId);
+  // Canario sorteado AQUI: um novo por veredito (as re-tentativas do MESMO
+  // veredito reusam o par); o marcador e o da etapa quando cacheavel.
+  const prompt = buildReferenceJudgePrompt(stage, reference, response.text, cacheavel ? { sharedNonce: params.sharedNonce } : {});
   const attempt = await callJudgeWithRetry({
     call: async (reminder) =>
       // Resultado INTEIRO (texto + finish_reason): o truncamento e checado antes do parse (IMPL-015).
       await chatCompletion({
         apiKey,
         modelId: judgeModelId,
-        messages: [
-          { role: 'system', content: prompt.system },
-          { role: 'user', content: withReminder(prompt.user, reminder) },
-        ],
-        temperature: 0,
+        messages: cacheavel
+          ? [
+              { role: 'system', content: prompt.system },
+              // Layout v1 (IMPL-114): prefixo ESTÁVEL (com o cache_control) → candidato.
+              { role: 'user', content: prompt.prefix },
+              { role: 'user', content: withReminder(prompt.suffix, reminder) },
+            ]
+          : [
+              { role: 'system', content: prompt.system },
+              { role: 'user', content: withReminder(prompt.user, reminder) },
+            ],
+        ...(cacheavel ? { cacheControlAfter: 1 } : {}),
+        temperature: JUDGE_TEMPERATURE,
         // Teto TOTAL com sala p/ raciocinio (IMPL-016): 1024 virava `length` vazio.
         maxTokens: ROLE_MAX_TOKENS.judge,
         responseFormatJson: true,
@@ -257,10 +304,11 @@ async function judgeOne(params: {
     formatReminder: prompt.formatReminder,
     signal: ctx?.signal,
   });
+  const finish = attempt.finish ? { finish: attempt.finish } : {};
   if (!attempt.ok) {
-    return { ok: false, judgeModelId, contestantId: response.contestantId, error: attempt.error };
+    return { ok: false, judgeModelId, contestantId: response.contestantId, error: attempt.error, ...finish };
   }
-  return { ok: true, judgeModelId, contestantId: response.contestantId, ...attempt.value };
+  return { ok: true, judgeModelId, contestantId: response.contestantId, ...attempt.value, ...finish };
 }
 
 /**
@@ -369,8 +417,22 @@ export async function judgeStageReference(
     return result(true);
   }
 
+  // IMPL-114: marcador da ETAPA para os juízes com cache de prompt explícito —
+  // sorteado contra TODOS os dados da etapa (nenhum texto o contém) — inclui o
+  // CONTEXTO do caso (IMPL-059), que também entra num bloco marcado.
+  const casoEtapa = caseParts(stage);
+  const sharedNonce = judgeIds.some(supportsPromptCacheControl)
+    ? newJudgeGuard([
+        reference,
+        casoEtapa.context,
+        casoEtapa.question,
+        stage.rubric?.trim() ?? '',
+        ...judgeable.map((r) => r.text),
+      ]).nonce
+    : undefined;
   // UMA chamada por (juiz x competidor), TODAS em paralelo — sem cap local;
-  // o limitador global de openrouter.ts gateia.
+  // o limitador global de openrouter.ts gateia (e o aquecimento do prefixo,
+  // IMPL-114, segura só a 1a chamada de cada prefixo).
   const singles = await Promise.all(
     judgeIds.flatMap((jid) =>
       judgeable.map((r) =>
@@ -384,6 +446,7 @@ export async function judgeStageReference(
           timeoutMs,
           ctx,
           maxPricePerMTok,
+          sharedNonce,
         }),
       ),
     ),
@@ -393,7 +456,9 @@ export async function judgeStageReference(
   for (const r of judgeable) {
     const vs = singles.filter((s) => s.contestantId === r.contestantId);
     // IMPL-057: persiste o voto de CADA juiz (inclusive a falha — badge
-    // 'avaliador falhou' é do juiz, nunca nota do candidato).
+    // 'avaliador falhou' é do juiz, nunca nota do candidato). IMPL-014: com os
+    // sinais de fim da chamada daquele voto (qual veredito terminou em qual
+    // `finish_reason`) + o artefato da resposta (IMPL-117).
     judgeVotesByContestant[r.contestantId] = vs.map(
       (s): JudgeVote =>
         s.ok
@@ -403,8 +468,9 @@ export async function judgeStageReference(
               explanation: s.explanation,
               ...(s.confianca ? { confianca: s.confianca } : {}),
               canary: s.canary,
+              ...(s.finish ?? {}),
             }
-          : { judgeModelId: s.judgeModelId, error: s.error },
+          : { judgeModelId: s.judgeModelId, error: s.error, ...(s.finish ?? {}) },
     );
     const oks = vs.filter((s): s is Extract<SingleVerdict, { ok: true }> => s.ok);
     if (oks.length === 0) {
@@ -439,6 +505,151 @@ export async function judgeStageReference(
 
   // Nenhum veredito de juiz na etapa inteira: a etapa nao pontua no placar.
   return result(!algumVeredito);
+}
+
+// ----------------------------------------------------------------------------
+// MODO ECONÔMICO do julgamento pointwise (IMPL-115 / R-08:REC-2). O papel juiz
+// domina o custo do pipeline; aqui os DOIS juízes baratos votam em paralelo e
+// o forte é chamado POR VEREDITO, só onde há dúvida:
+//   • `disagreement` — os baratos divergem (ou um deles não votou);
+//   • `parcial`      — algum voto barato saiu 'parcial' (nível intermediário);
+//   • `length-anomaly` — a resposta é um extremo (maior/menor) de uma etapa
+//     com razão de comprimento > 3× (viés de verbosidade derruba juiz barato).
+// Sem gatilho, o consenso dos baratos decide. A fração escalonada vai no
+// relatório; o custo por veredito continua MEDIDO pelo ledger (papel judge).
+// Nenhum sinal estatístico por token é pedido ou lido (só vereditos + comprimento).
+// ----------------------------------------------------------------------------
+
+export interface JudgeStageReferenceCascadeParams extends Omit<JudgeStageReferenceParams, 'judgeModelIds'> {
+  /** Os 2 juízes BARATOS (a 1ª camada, em paralelo). */
+  cheapJudgeIds: string[];
+  /** O juiz FORTE — só nos vereditos em dúvida. */
+  strongJudgeId: string;
+}
+
+/** Contestants cujo veredito vai ao juiz forte, com os gatilhos da etapa. */
+function pointwiseEscalation(
+  cheap: string[],
+  barato: ReferenceJudgeResult,
+  responses: CompetitorResponse[],
+): { ids: string[]; reasons: CascadeEscalationReason[] } {
+  const votos = barato.judgeVotesByContestant ?? {};
+  const julgados = Object.keys(votos);
+  const motivos = new Set<CascadeEscalationReason>();
+  const escalar = new Set<string>();
+  for (const id of julgados) {
+    const porJuiz = new Map(votos[id].map((v) => [v.judgeModelId, v.verdict]));
+    const vs = cheap.map((j) => porJuiz.get(j));
+    if (cheap.length < 2 || vs.some((v) => v === undefined) || new Set(vs).size > 1) {
+      motivos.add('disagreement');
+      escalar.add(id);
+    }
+    if (vs.includes('parcial')) {
+      motivos.add('parcial');
+      escalar.add(id);
+    }
+  }
+  // Anomalia de comprimento: SÓ os extremos da etapa (maior e menor resposta)
+  // vão ao forte — escalar a etapa inteira anularia a economia.
+  const comTexto = responses.filter((r) => julgados.includes(r.contestantId) && r.text.trim().length > 0);
+  const tamanhos = comTexto.map((r) => r.text.length);
+  if (hasLengthAnomaly(tamanhos)) {
+    const max = Math.max(...tamanhos);
+    const min = Math.min(...tamanhos);
+    for (const r of comTexto) {
+      if (r.text.length === max || r.text.length === min) {
+        motivos.add('length-anomaly');
+        escalar.add(r.contestantId);
+      }
+    }
+  }
+  const ordem: CascadeEscalationReason[] = ['disagreement', 'parcial', 'length-anomaly'];
+  return { ids: julgados.filter((id) => escalar.has(id)), reasons: ordem.filter((m) => motivos.has(m)) };
+}
+
+/**
+ * Julgamento pointwise em modo econômico (IMPL-115). Mesma regra de origem e
+ * mesmo contrato de `judgeStageReference` (é ele que roda nas duas camadas); o
+ * resultado carrega `cascade` com o que cada camada decidiu. Juiz forte que
+ * falha num veredito escalonado: vale o consenso barato, marcado 'degraded'.
+ */
+export async function judgeStageReferenceCascade(
+  opts: JudgeStageReferenceCascadeParams,
+): Promise<ReferenceJudgeResult & { cascade?: CascadeReport }> {
+  const { cheapJudgeIds, strongJudgeId, ...rest } = opts;
+  const cheap = [...new Set(cheapJudgeIds)];
+  const barato = await judgeStageReference({ ...rest, judgeModelIds: cheap });
+  const julgados = Object.keys(barato.judgeVotesByContestant ?? {});
+  // Etapa sem juiz LLM (ground-truth, sem gabarito, nada julgável): a cascata
+  // não se aplica — nada a relatar.
+  if (julgados.length === 0) return barato;
+
+  const { ids, reasons } = pointwiseEscalation(cheap, barato, rest.responses);
+  const base = {
+    reasons,
+    cheapJudgeIds: cheap,
+    strongJudgeId,
+    cheapVerdictByContestant: { ...barato.verdictByContestant },
+    verdicts: julgados.length,
+  };
+  if (ids.length === 0) {
+    return { ...barato, cascade: { ...base, escalated: false, strongDecided: false, escalatedContestantIds: [] } };
+  }
+
+  const alvo = new Set(ids);
+  const forte = await judgeStageReference({
+    ...rest,
+    responses: rest.responses.filter((r) => alvo.has(r.contestantId)),
+    contestants: rest.contestants.filter((c) => alvo.has(c.id)),
+    judgeModelIds: [strongJudgeId],
+  });
+
+  const out: ReferenceJudgeResult = {
+    ...barato,
+    verdictByContestant: { ...barato.verdictByContestant },
+    explanationByContestant: { ...barato.explanationByContestant },
+    verdictSourceByContestant: { ...(barato.verdictSourceByContestant ?? {}) },
+    verdictErrorByContestant: { ...(barato.verdictErrorByContestant ?? {}) },
+    judgeVotesByContestant: { ...(barato.judgeVotesByContestant ?? {}) },
+    ...(barato.verdictTieByContestant ? { verdictTieByContestant: { ...barato.verdictTieByContestant } } : {}),
+    ...(barato.canaryByContestant ? { canaryByContestant: { ...barato.canaryByContestant } } : {}),
+    ...(barato.confidenceByContestant ? { confidenceByContestant: { ...barato.confidenceByContestant } } : {}),
+    judgeModelId: `${cheap.join('+')}>${strongJudgeId}`,
+  };
+  let fortesDecidiram = 0;
+  for (const id of ids) {
+    // O voto do forte fica AO LADO dos baratos (auditável: quem decidiu o quê).
+    const votosForte = forte.judgeVotesByContestant?.[id] ?? [];
+    out.judgeVotesByContestant![id] = [...(out.judgeVotesByContestant![id] ?? []), ...votosForte];
+    const v = forte.verdictByContestant[id];
+    if (v) {
+      fortesDecidiram += 1;
+      out.verdictByContestant[id] = v;
+      out.explanationByContestant[id] = forte.explanationByContestant[id] ?? '';
+      out.verdictSourceByContestant![id] = forte.verdictSourceByContestant?.[id] ?? 'judge';
+      delete out.verdictErrorByContestant![id];
+      delete out.verdictTieByContestant?.[id];
+      if (forte.canaryByContestant?.[id]) out.canaryByContestant = { ...(out.canaryByContestant ?? {}), [id]: forte.canaryByContestant[id] };
+      if (forte.confidenceByContestant?.[id]) {
+        out.confidenceByContestant = { ...(out.confidenceByContestant ?? {}), [id]: forte.confidenceByContestant[id] };
+      } else if (out.confidenceByContestant) {
+        delete out.confidenceByContestant[id];
+      }
+    } else if (out.verdictByContestant[id]) {
+      // Forte falhou: vale o consenso barato, com a marca de painel reduzido.
+      out.verdictSourceByContestant![id] = 'degraded';
+    }
+  }
+  if (Object.keys(out.verdictByContestant).length > 0) delete out.inconclusive;
+  return {
+    ...out,
+    cascade: {
+      ...base,
+      escalated: true,
+      strongDecided: fortesDecidiram === ids.length,
+      escalatedContestantIds: ids,
+    },
+  };
 }
 
 // ----------------------------------------------------------------------------
@@ -562,7 +773,10 @@ export function verdictFailuresFromStages(
   const entradas: VerdictFailureEntry[] = [];
   stages.forEach((st, stageIndex) => {
     const scenario = st.spec?.question;
-    for (const res of [st.referenceJudge, st.judge]) {
+    // Etapa POR REFERÊNCIA: o `judge` dela é o SINTETIZADO a partir do
+    // `referenceJudge` (mesmos erros copiados) — ler os dois contava cada falha
+    // duas vezes. Só a etapa sem referência (listwise) usa o `judge`.
+    for (const res of st.referenceJudge ? [st.referenceJudge] : [st.judge]) {
       const erros = res?.verdictErrorByContestant;
       if (!erros) continue;
       for (const [contestantId, error] of Object.entries(erros)) {

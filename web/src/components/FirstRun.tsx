@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { ArrowRight, Check, MessageSquareText, Scale, Trophy } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { getStoredKey } from '../api';
@@ -59,6 +59,19 @@ export function keyAskSkipped(): boolean {
   }
 }
 
+/**
+ * Rota de onde o gate (`KeyFirstGate`, main.tsx) trouxe o usuário — para
+ * devolvê-lo a ela depois da key (recarregar `/runs/:id` sem key lembrada não
+ * pode perder a run aberta). Só caminhos internos; a raiz e o próprio
+ * `/welcome` não contam.
+ */
+export function returnPathFrom(state: unknown): string | null {
+  const from = (state as { from?: unknown } | null)?.from;
+  if (typeof from !== 'string' || !from.startsWith('/') || from.startsWith('//')) return null;
+  if (from === '/' || from.startsWith('/welcome')) return null;
+  return from;
+}
+
 /** As 4 figuras do pipeline, em linguagem de quem nunca viu um benchmark. */
 const PIPELINE = [
   {
@@ -74,19 +87,30 @@ const PIPELINE = [
   {
     icon: Check,
     title: 'Juiz',
-    text: 'Um modelo juiz compara cada resposta com o gabarito: resolve, parcial ou não resolve.',
+    // web-live#10: comparando modelos (o default) não há gabarito — o juiz
+    // ranqueia as respostas lado a lado; não prometa régua que não existe.
+    text: 'Um modelo juiz compara cada resposta com o gabarito (ou com as rivais, quando não há gabarito): resolve, parcial ou não resolve.',
   },
   {
     icon: Trophy,
     title: 'Vencedor',
-    text: 'O placar mostra quem resolveu mais — e os melhores ainda duelam no fim.',
+    text: 'O placar mostra quem resolveu mais — e, havendo gabarito, os melhores ainda duelam no fim.',
   },
 ];
 
 export function FirstRun() {
   const navigate = useNavigate();
+  const location = useLocation();
+  // Volta para onde estava (ex.: recarregou `/runs/:id` e a key era só da aba).
+  const voltarPara = returnPathFrom(location.state);
   const [step, setStep] = useState<Step>(seenOnboard() ? 'key' : 'intro');
   const [hasKey, setHasKey] = useState(!!getStoredKey());
+
+  /** Depois da key: de volta à rota de origem, ou o passo de objetivo. */
+  function continuar() {
+    if (voltarPara) navigate(voltarPara, { replace: true });
+    else setStep('objetivo');
+  }
 
   function pickGoal(id: RunMode) {
     markOnboarded();
@@ -137,7 +161,8 @@ export function FirstRun() {
               onClick={() => {
                 markOnboarded();
                 skipKeyAsk();
-                navigate('/runs');
+                // Explorar = histórico local; a Nova Run pediria a key de novo.
+                navigate(voltarPara && !voltarPara.startsWith('/new') ? voltarPara : '/runs');
               }}
             >
               Explorar sem chave (histórico local)
@@ -170,8 +195,8 @@ export function FirstRun() {
             . Qualquer key válida serve — o sistema aceita-a como está.
           </p>
           <div className="mt-5 flex flex-wrap items-center gap-3">
-            <Button disabled={!hasKey} onClick={() => setStep('objetivo')}>
-              Continuar
+            <Button disabled={!hasKey} onClick={continuar}>
+              {voltarPara ? 'Voltar para onde estava' : 'Continuar'}
               <ArrowRight aria-hidden="true" />
             </Button>
             <Button variant="ghost" onClick={() => setStep('intro')}>

@@ -12,7 +12,7 @@
 // usuário confirma é a mesma conta que o ledger usa para parar a run.
 
 import { estimateInputFromConfig, estimateRunCost, type CostEstimate, type EstimateInput } from '../estimate.js';
-import { splitHoldout } from '../holdout.js';
+import { HOLDOUT_RATIO_DEFAULT, splitHoldout } from '../holdout.js';
 import type { CostRole, OpenRouterModel, RunConfig } from '../types.js';
 import { COST_ROLES } from '../types.js';
 
@@ -80,17 +80,25 @@ export function requiresCostConfirmation(
  * preço desconhecido a faixa pode caber no limiar, e dizer "pode custar mais de
  * US$ 1" seria falso: o que falta é poder LIMITAR o custo, não um custo alto.
  * `null` = não precisa confirmar.
+ *
+ * web-code#7: `unknown` = modelo NO catálogo com preço VARIÁVEL (roteador,
+ * "-1"): fica fora da soma, então a faixa é parcial. O portão já o contava
+ * (`requiresConfirmation`), mas o motivo não — o diálogo abria dizendo "pode
+ * custar mais de US$ 1" ao lado de uma faixa de centavos.
  */
-export type CostConfirmationReason = 'threshold' | 'unpriced' | 'both';
+export type CostConfirmationReason = 'threshold' | 'unpriced' | 'unknown' | 'both';
 
 export function costConfirmationReason(
-  e: Pick<LaunchCostEstimate, 'high' | 'thresholdUsd' | 'unpricedModelIds'>,
+  e: Pick<LaunchCostEstimate, 'high' | 'thresholdUsd' | 'unpricedModelIds'> &
+    Partial<Pick<LaunchCostEstimate, 'unknownPriceModelIds'>>,
 ): CostConfirmationReason | null {
   const acima = e.high > e.thresholdUsd;
   const semPreco = e.unpricedModelIds.length > 0;
-  if (acima && semPreco) return 'both';
+  const variavel = (e.unknownPriceModelIds?.length ?? 0) > 0;
+  if (acima && (semPreco || variavel)) return 'both';
   if (acima) return 'threshold';
   if (semPreco) return 'unpriced';
+  if (variavel) return 'unknown';
   return null;
 }
 
@@ -104,8 +112,9 @@ export function plannedHoldoutStages(config: RunConfig): number {
   const pinned = config.customStages?.length ?? 0;
   const seed = config.scenarioSeed?.length ?? 0;
   const planned = pinned > 0 ? pinned : Math.max(config.stages, seed);
-  return splitHoldout(Array.from({ length: planned }, (_, i) => i), config.holdoutRatio ?? 0.2).holdout
-    .length;
+  // web-code#17: o MESMO default do trainer (0,3 — IMPL-050), não 0,2.
+  return splitHoldout(Array.from({ length: planned }, (_, i) => i), config.holdoutRatio ?? HOLDOUT_RATIO_DEFAULT)
+    .holdout.length;
 }
 
 /** Chamadas por papel em UMA iteração (mesma contabilidade de `estimateRunCost`). */

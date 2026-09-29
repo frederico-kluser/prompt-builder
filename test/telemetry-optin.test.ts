@@ -5,10 +5,10 @@
 //   (3) nenhum envio em CI/agente salvo opt-in explícito;
 //   (4) `PROMPT_BUILDER_NO_ATTRIBUTION` suprime os headers de atribuição
 //       (HTTP-Referer/X-Title/X-OpenRouter-Categories — dado enviado ao
-//       OpenRouter). ⚠️ A aplicação da flag no gateway (src/openrouter.ts e o
-//       shim web) e a menção em help/agent-docs ficaram FORA da fronteira do
-//       lote O-p2-resto: aqui se prova o contrato canónico que o gateway passa
-//       a consumir (`attributionHeadersFor`), não o fio ainda por ligar.
+//       OpenRouter). Aqui se prova o contrato canónico (`attributionHeadersFor`);
+//       a flag NO FIO (gateway Node + shim da SPA) e a menção em help/agent-docs
+//       são provadas em test/gateway-transport.test.ts e
+//       test/gateway-cli-surface.test.ts.
 //
 // Tudo com transporte falso: zero rede, zero gasto.
 
@@ -206,5 +206,62 @@ describe('IMPL-120 (4) — flag PROMPT_BUILDER_NO_ATTRIBUTION suprime os headers
       { PROMPT_BUILDER_NO_ATTRIBUTION: 'on' },
     );
     for (const h of ATTRIBUTION_HEADER_NAMES) expect(suprimido[h]).toBeUndefined();
+  });
+});
+describe('IMPL-120 — honestidade dos contadores: a flag `hooksWired` bate com o código', () => {
+  it('TELEMETRY_FUNNEL_HOOKS_WIRED é true SE E SÓ SE algum comando chama um gancho de funil', async () => {
+    const { readdirSync, readFileSync, statSync } = await import('node:fs');
+    const { join, relative } = await import('node:path');
+    const { TELEMETRY_FUNNEL_HOOKS_WIRED } = await import('../src/cli/commands/telemetry.js');
+    const raiz = join(process.cwd(), 'src');
+    const GANCHO = /\b(?:recordTelemetryEvent|recordExitTelemetry|recordRunCompletedTelemetry)\s*\(/u;
+    const chamadores: string[] = [];
+    const varrer = (dir: string): void => {
+      for (const nome of readdirSync(dir)) {
+        const p = join(dir, nome);
+        if (statSync(p).isDirectory()) varrer(p);
+        else if (p.endsWith('.ts') && !p.endsWith(join('commands', 'telemetry.ts'))) {
+          if (GANCHO.test(readFileSync(p, 'utf-8'))) chamadores.push(relative(raiz, p).split('\\').join('/'));
+        }
+      }
+    };
+    varrer(raiz);
+    expect(TELEMETRY_FUNNEL_HOOKS_WIRED).toBe(chamadores.length > 0);
+    // Os 4 funis da allowlist, cada um com o seu gancho.
+    expect(chamadores.sort()).toEqual(
+      ['cli/commands/knowledge.ts', 'cli/commands/misc.ts', 'cli/commands/run.ts', 'cli/index.ts'].sort(),
+    );
+  });
+
+  it('`telemetry counters` devolve hooksWired e avisa que zero não é medida', async () => {
+    const { cmdTelemetry } = await import('../src/cli/commands/telemetry.js');
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'pb-telemetry-counters-'));
+    const saida: string[] = [];
+    const erro: string[] = [];
+    const wOut = process.stdout.write.bind(process.stdout);
+    const wErr = process.stderr.write.bind(process.stderr);
+    process.stdout.write = ((c: string) => (saida.push(String(c)), true)) as typeof process.stdout.write;
+    process.stderr.write = ((c: string) => (erro.push(String(c)), true)) as typeof process.stderr.write;
+    const optInAntes = process.env.PROMPT_BUILDER_TELEMETRY;
+    delete process.env.PROMPT_BUILDER_TELEMETRY;
+    try {
+      const code = await cmdTelemetry(['counters', '--json', '--data-dir', dir]);
+      expect(code).toBe(0);
+    } finally {
+      process.stdout.write = wOut;
+      process.stderr.write = wErr;
+      if (optInAntes !== undefined) process.env.PROMPT_BUILDER_TELEMETRY = optInAntes;
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const payload = JSON.parse(saida.join('').trim().split('\n').at(-1)!) as {
+      data: { hooksWired: boolean; enabled: boolean };
+    };
+    expect(payload.data.hooksWired).toBe(true);
+    expect(payload.data.enabled).toBe(false);
+    // Desligada, zero continua não sendo medida — e a narração diz isso.
+    expect(erro.join('')).toContain('telemetria desligada: nada é contado');
   });
 });

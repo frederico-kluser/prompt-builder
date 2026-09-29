@@ -1,4 +1,4 @@
-import { chatCompletion } from './openrouter.js';
+import { chatCompletion, isFatalGatewayError } from './openrouter.js';
 import type { ChatCompletionResult, ChatMessage } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { finishSignalsOf, retryMaxTokens } from './engine/truncation.js';
@@ -12,7 +12,8 @@ import {
   parseStrictJudgeJson,
   strictObjectSchema,
 } from './engine/judgeGuard.js';
-import { callJudgeWithRetry, withReminder } from './engine/judgeRetry.js';
+import { callJudgeWithRetry, JUDGE_TEMPERATURE, withReminder } from './engine/judgeRetry.js';
+import { caseParts, renderCaseInput } from './engine/caseInput.js';
 import {
   DEFAULT_AUDIT_SAMPLE_RATE,
   checkReferenceAgainstRubric,
@@ -68,22 +69,30 @@ export interface GenerateReferencesParams {
   stageNumbers?: number[];
 }
 
-// System = productContext da etapa (idêntico ao que os competidores recebem) +
-// o papel de modelo de referência. User = pergunta + rubrica (quando houver)
-// como critério obrigatório + instrução de saída limpa (sem meta-comentários,
-// para o gabarito poder ser comparado diretamente com as respostas).
-function buildMessages(stage: StageSpec): ChatMessage[] {
+/** Instrução de PAPEL do gabarito (system) — o caso NÃO mora aqui (IMPL-059). */
+export const GABARITO_ROLE_PROMPT =
+  'Você é o MODELO DE REFERÊNCIA deste benchmark: sua tarefa é produzir o GABARITO — a resposta ideal que servirá de régua para julgar as respostas dos competidores. O contexto do caso chega como DADO no início da mensagem do usuário, exatamente como os competidores o recebem.';
+
+/**
+ * System do VERIFICADOR de gabaritos dirigido pela rubrica (IMPL-055). Constante
+ * para entrar no fingerprint dos meta-prompts (`src/metaPrompts.ts`, IMPL-070).
+ */
+export const GABARITO_VERIFIER_SYSTEM_PROMPT = `Você é o VERIFICADOR de gabaritos deste benchmark: confere, com a rubrica da etapa como régua, se o gabarito gerado a satisfaz. ${DATA_BLOCKS_NOTICE} Responde APENAS com o JSON pedido.`;
+
+// IMPL-059 (R-05:REC-2): System = SÓ a instrução de papel. User = o CASO byte a
+// byte como o competidor o recebe (`renderCaseInput`: bloco delimitado do
+// contexto + pergunta) + rubrica (quando houver) como critério obrigatório +
+// instrução de saída limpa (sem meta-comentários, para o gabarito poder ser
+// comparado diretamente com as respostas). Antes o productContext ia no SYSTEM
+// do gabarito e como bloco de dado no user do competidor — o input do caso não
+// era o mesmo entre quem escreve a régua e quem é medido por ela.
+export function buildGabaritoMessages(stage: StageSpec): ChatMessage[] {
   const rubrica = stage.rubric?.trim();
   return [
-    {
-      role: 'system',
-      content: `${stage.productContext}
-
-Você é o MODELO DE REFERÊNCIA deste benchmark: sua tarefa é produzir o GABARITO — a resposta ideal que servirá de régua para julgar as respostas dos competidores.`,
-    },
+    { role: 'system', content: GABARITO_ROLE_PROMPT },
     {
       role: 'user',
-      content: `${stage.question}${
+      content: `${renderCaseInput(stage)}${
         rubrica
           ? `\n\nCRITÉRIO DE CORRETUDE (rubrica) — a resposta ideal DEVE satisfazer:\n${rubrica}`
           : ''
@@ -120,7 +129,7 @@ export async function generateReferences(
         chatCompletion({
           apiKey,
           modelId,
-          messages: buildMessages(stage),
+          messages: buildGabaritoMessages(stage),
           temperature: 0,
           maxTokens,
           timeoutMs,
@@ -167,7 +176,8 @@ export async function generateReferences(
       } catch (err) {
         // Orcamento/cancelamento nao sao "falha de gabarito": deixar passar aqui
         // faria a run seguir SEM referencia e o juiz degradar tudo p/ 'parcial'.
-        if (isControlSignal(err)) throw err;
+        // Key recusada/sem credito (cli#3) tambem: nenhuma etapa conserta.
+        if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
         // Degradação, nunca crash: sem gabarito o juiz pointwise cai para 'parcial'.
         console.warn(
           `[gabarito] falha ao gerar referência da etapa ${etapa(index)}: ${(err as Error).message}`,
@@ -182,7 +192,7 @@ export async function generateReferences(
   // allSettled em vez de all: com `all`, a primeira rejeicao desenrola o
   // chamador enquanto as irmas continuam gastando e perdendo o resultado.
   for (const s of settled) {
-    if (s.status === 'rejected' && isControlSignal(s.reason)) throw s.reason;
+    if (s.status === 'rejected' && (isControlSignal(s.reason) || isFatalGatewayError(s.reason))) throw s.reason;
   }
   return out;
 }
@@ -249,12 +259,17 @@ export async function verifyReferenceAgainstRubric(params: {
   if (!rubrica && stage.expected === undefined) {
     return inconclusivo('sem rubrica nem rótulo esperado: nada contra o que verificar o gabarito.');
   }
-  const guard = newJudgeGuard([referencia, stage.question, rubrica]);
+  // IMPL-059: o CASO byte a byte como o competidor o recebe (contexto + pergunta).
+  const caso = caseParts(stage);
+  const guard = newJudgeGuard([referencia, caso.context, caso.question, rubrica]);
   const partes = [
     'REFERÊNCIA (gabarito gerado por outro modelo — pode estar errada):',
     markedBlock('REFERÊNCIA', guard.nonce, referencia),
+    ...(caso.context
+      ? ['CONTEXTO DO CASO (o mesmo que os competidores recebem, como dado):', markedBlock('CONTEXTO', guard.nonce, caso.context)]
+      : []),
     'PERGUNTA:',
-    markedBlock('PERGUNTA', guard.nonce, stage.question),
+    markedBlock('PERGUNTA', guard.nonce, caso.question),
   ];
   if (rubrica) {
     partes.push(
@@ -280,10 +295,10 @@ export async function verifyReferenceAgainstRubric(params: {
         apiKey,
         modelId,
         messages: [
-          { role: 'system', content: `Você é o VERIFICADOR de gabaritos deste benchmark: confere, com a rubrica da etapa como régua, se o gabarito gerado a satisfaz. ${DATA_BLOCKS_NOTICE} Responde APENAS com o JSON pedido.` },
+          { role: 'system', content: GABARITO_VERIFIER_SYSTEM_PROMPT },
           { role: 'user', content: withReminder(user, reminder) },
         ],
-        temperature: 0,
+        temperature: JUDGE_TEMPERATURE,
         maxTokens: ROLE_MAX_TOKENS.judge,
         responseFormatJson: true,
         responseSchema: { name: 'verificacao_gabarito', schema: RUBRIC_CHECK_SCHEMA },
@@ -327,7 +342,7 @@ async function generateSecondReference(params: {
     chatCompletion({
       apiKey,
       modelId,
-      messages: buildMessages(stage),
+      messages: buildGabaritoMessages(stage),
       temperature: 0,
       maxTokens,
       timeoutMs,
@@ -348,7 +363,7 @@ async function generateSecondReference(params: {
     const text = result.text.trim();
     return text || null;
   } catch (err) {
-    if (isControlSignal(err)) throw err;
+    if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
     return null;
   }
 }
@@ -471,7 +486,7 @@ export async function validateGeneratedReferences(
         }
         resultados[ordem] = { index, stage, check, ...(second ? { second } : {}) };
       } catch (err) {
-        if (isControlSignal(err)) throw err;
+        if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
         console.warn(
           `[gabarito] validação da etapa ${etapa(index)} falhou: ${(err as Error).message}`,
         );
@@ -482,7 +497,7 @@ export async function validateGeneratedReferences(
     }),
   );
   for (const s of settled) {
-    if (s.status === 'rejected' && isControlSignal(s.reason)) throw s.reason;
+    if (s.status === 'rejected' && (isControlSignal(s.reason) || isFatalGatewayError(s.reason))) throw s.reason;
   }
 
   // 3) fila needs-human-review: divergência + discordância + amostra humana

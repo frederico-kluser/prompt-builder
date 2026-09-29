@@ -17,23 +17,36 @@
 //   - allowlist versionada: evento fora de `TELEMETRY_ALLOWLIST` NUNCA entra no
 //     payload (nem é engolido em silêncio — fica em `droppedUnknown`, auditável).
 //
-// Em paralelo (R-01b:REC-9) este módulo é a fonte única da flag
-// `PROMPT_BUILDER_NO_ATTRIBUTION`, que suprime os headers de atribuição
-// HTTP-Referer / X-Title / X-OpenRouter-Categories — DADO partilhado com o
-// OpenRouter (terceiro) e por isso documentado. ⚠️ A aplicação da flag no fio
-// (src/openrouter.ts headers + shim web/src/engine/openrouter.ts) e a menção em
-// help/agent-docs ficaram FORA da fronteira deste lote e estão registadas como
-// pendência — a função canónica `attributionHeadersFor` é o que os consumidores
-// têm de chamar.
+// Em paralelo (R-01b:REC-9): a flag `PROMPT_BUILDER_NO_ATTRIBUTION` suprime os
+// headers de atribuição HTTP-Referer / X-Title — DADO partilhado com o
+// OpenRouter (terceiro). A flag vale NO FIO: `src/gatewayEnv.ts` a traduz em
+// `GatewayConfig.attribution: false` e o gateway (`src/openrouter.ts`
+// `headers()`) deixa de enviar os dois; na SPA a mesma supressão é a
+// preferência `pb.noAttribution` do shim `web/src/engine/openrouter.ts`. A
+// fonte única da leitura da variável é `isAttributionSuppressedEnv`
+// (gatewayEnv); este módulo re-exporta. Documentada em `--help` (AMBIENTE),
+// `telemetry --help` e `docs troubleshooting`.
 //
-// Funis que os contadores medem (os que a auditoria achou invisíveis):
-// `docs.list`, `run.first_completed`, `budget.exhausted` (exit 7) e
-// `runs.export` — quem os incrementa são os comandos do CLI (fora desta
-// fronteira); aqui vive a contabilidade, o schema e o transporte.
+// Funis que os contadores medem (os que a auditoria achou invisíveis), cada um
+// com UM gancho no CLI:
+//   - `docs.list`           → `cmdDocs` (knowledge.ts), `docs --list`/`docs`;
+//   - `runs.export`         → `cmdRuns export` (misc.ts);
+//   - `run.first_completed` → run/sessão recém-terminada NESTE processo
+//     (`recordRunCompletedTelemetry`, run.ts) — uma vez por data dir, só se
+//     nenhuma OUTRA run concluída existe ali;
+//   - `budget.exhausted`    → saída 7 do processo (`recordExitTelemetry`,
+//     index.ts), fora das releituras (`runs wait`/`sessions …` relatam a run
+//     de outro processo — contar ali duplicaria o `--detach`).
+// Todos são NO-OP sem o opt-in (nada contado, nada lido nem gravado, zero
+// requisições). `TELEMETRY_FUNNEL_HOOKS_WIRED` diz se há gancho ligado — o
+// teste confere a flag contra o código.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { CliError, EXIT } from '../output.js';
 import { buildContext, parse } from '../context.js';
+import { isAttributionSuppressedEnv } from '../../gatewayEnv.js';
+import { listRuns } from '../../storage.js';
 
 // ---------------------------------------------------------------------------
 // Allowlist versionada e publicada (o schema sobe de versão junto)
@@ -276,16 +289,16 @@ export async function uploadTelemetry(
  */
 export const ATTRIBUTION_HEADER_NAMES = ['HTTP-Referer', 'X-Title', 'X-OpenRouter-Categories'] as const;
 
-/** `PROMPT_BUILDER_NO_ATTRIBUTION=on` suprime TODOS os headers de atribuição. */
+/** `PROMPT_BUILDER_NO_ATTRIBUTION=on` suprime TODOS os headers de atribuição (fonte: gatewayEnv). */
 export function isAttributionSuppressed(env: Env = process.env): boolean {
-  return flagAtiva(env[TELEMETRY_ENV.noAttribution]);
+  return isAttributionSuppressedEnv(env);
 }
 
 /**
  * Forma canónica dos headers de atribuição: suprimidos = objeto VAZIO (nenhum
- * header é enviado). Os consumidores do gateway (`src/openrouter.ts` e o shim
- * web) têm de passar por aqui — hoje constroem os headers à mão (pendência
- * registada do lote O-p2-resto, fora da fronteira).
+ * header é enviado). O gateway aplica a MESMA regra no fio pela config
+ * (`attribution: false` — ver `gatewayConfigFromEnv`); esta função é o
+ * contrato de referência que o teste confere contra o gateway.
  */
 export function attributionHeadersFor(
   opts: { appUrl?: string; appTitle?: string; categories?: string },
@@ -299,8 +312,115 @@ export function attributionHeadersFor(
   return out;
 }
 
+/** Arquivo dos contadores locais (só existe com opt-in). */
+export const TELEMETRY_COUNTERS_FILE = 'telemetry-counters.json';
+
+/**
+ * Os comandos do CLI já chamam os ganchos dos funis da allowlist? SIM (IMPL-120):
+ * docs --list, runs export, 1ª run concluída e saída 7. Com opt-in os contadores
+ * medem; sem ele nada é contado. `test/telemetry-optin.test.ts` confere a flag
+ * contra o código.
+ */
+export const TELEMETRY_FUNNEL_HOOKS_WIRED = true;
+
+/**
+ * Conta UM evento de funil — NO-OP sem opt-in explícito (default): nada é
+ * contado, nada é gravado, nenhuma requisição sai. Com opt-in, soma no
+ * contador de processo e persiste em `<dataDir>/telemetry-counters.json`.
+ * Nunca derruba o comando (falha de disco = contador perdido).
+ */
+export function recordTelemetryEvent(event: TelemetryEvent, dataDir: string, env: Env = process.env): boolean {
+  if (!isTelemetryEnabled(env)) return false;
+  const file = join(dataDir, TELEMETRY_COUNTERS_FILE);
+  try {
+    // O data dir pode ainda não existir (1º comando da instalação é `docs`):
+    // sem o mkdir o contador se perderia calado no ENOENT.
+    mkdirSync(dataDir, { recursive: true });
+    const persistido = new TelemetryCounters();
+    persistido.load(file);
+    persistido.record(event);
+    persistido.save(file);
+  } catch {
+    // contador é best-effort
+  }
+  return telemetryCounters.record(event);
+}
+
+/**
+ * Comandos que só RELEEM o desfecho de uma run de outro processo (`runs wait`
+ * de um `--detach`, `sessions show`…): a saída 7 deles não é um orçamento
+ * esgotado novo — contar ali duplicaria o evento do processo que gastou.
+ */
+const READBACK_COMMANDS: ReadonlySet<string> = new Set(['runs', 'sessions']);
+
+/** Evento de funil de uma saída do processo (`null` = saída sem funil). */
+export function telemetryEventForExit(command: string | undefined, code: unknown): TelemetryEvent | null {
+  if (code !== EXIT.BUDGET) return null;
+  if (command !== undefined && READBACK_COMMANDS.has(command)) return null;
+  return 'budget.exhausted';
+}
+
+/**
+ * Gancho ÚNICO da saída do processo (index.ts, depois do dispatch): saída 7 =
+ * `budget.exhausted`, venha do `runOutcome`, da sessão, do modo agente ou do
+ * teto diário. NO-OP sem opt-in; nunca lança.
+ */
+export function recordExitTelemetry(
+  command: string | undefined,
+  code: unknown,
+  dataDir: string,
+  env: Env = process.env,
+): boolean {
+  const evento = telemetryEventForExit(command, code);
+  return evento ? recordTelemetryEvent(evento, dataDir, env) : false;
+}
+
+/** Status em que a run chegou ao FIM do pipeline (o funil de ativação conta estes). */
+const CONCLUDED_STATUSES: ReadonlySet<string> = new Set(['finished', 'inconclusive']);
+
+/** O mínimo de um resumo de run que o funil lê (o `RunSummary` do storage serve). */
+export interface TelemetryRunLike {
+  id: string;
+  status: string;
+  sessionId?: string;
+}
+
+/**
+ * Funil de ativação: `run.first_completed` conta UMA vez por instalação (data
+ * dir), quando a run/sessão que acabou de terminar NESTE processo é a
+ * primeira concluída dali — nenhuma OUTRA run concluída existe no data dir
+ * (as iterações da própria sessão não contam como "outra"). Quem já tinha
+ * runs antes do opt-in nunca conta: não foi medido, e o contador não inventa.
+ *
+ * NO-OP sem opt-in: nem o disco é lido. Nunca lança (best-effort).
+ */
+export async function recordRunCompletedTelemetry(
+  current: { runId?: string; sessionId?: string; status: string },
+  dataDir: string,
+  env: Env = process.env,
+  listPrior: () => Promise<TelemetryRunLike[]> = listRuns,
+): Promise<boolean> {
+  if (!isTelemetryEnabled(env)) return false;
+  if (!CONCLUDED_STATUSES.has(current.status)) return false;
+  try {
+    const persistido = new TelemetryCounters();
+    persistido.load(join(dataDir, TELEMETRY_COUNTERS_FILE));
+    if (persistido.snapshot()['run.first_completed'] > 0) return false;
+    const outra = (await listPrior()).some(
+      (r) =>
+        CONCLUDED_STATUSES.has(r.status) &&
+        r.id !== current.runId &&
+        !(current.sessionId !== undefined && r.sessionId === current.sessionId),
+    );
+    if (outra) return false;
+  } catch {
+    return false;
+  }
+  return recordTelemetryEvent('run.first_completed', dataDir, env);
+}
+
 // ---------------------------------------------------------------------------
-// Comando `telemetry` (pronto para ligar ao dispatch — index.ts fora do lote)
+// Comando `telemetry`
 // ---------------------------------------------------------------------------
 
 /**
@@ -324,9 +444,22 @@ export async function cmdTelemetry(argv: string[]): Promise<number> {
     return EXIT.OK;
   }
   if (sub === 'counters') {
+    // Os contadores persistidos (só existem com opt-in) — o de processo nasce vazio.
+    const persistido = new TelemetryCounters();
+    persistido.load(join(ctx.dataDir, TELEMETRY_COUNTERS_FILE));
+    if (!TELEMETRY_FUNNEL_HOOKS_WIRED) {
+      out.info('ganchos de funil ainda não ligados: nenhum comando conta eventos hoje (zeros não são medida).');
+    } else if (!isTelemetryEnabled(env)) {
+      out.info(
+        `telemetria desligada: nada é contado (zeros não são medida). ${TELEMETRY_ENV.optIn}=on liga a contagem local.`,
+      );
+    }
     out.result(true, 'telemetry.counters', {
-      counters: telemetryCounters.snapshot(),
-      droppedUnknown: telemetryCounters.droppedUnknown,
+      enabled: isTelemetryEnabled(env),
+      // Honestidade: com `false`, zero é "não medido", não "não aconteceu".
+      hooksWired: TELEMETRY_FUNNEL_HOOKS_WIRED,
+      counters: persistido.snapshot(),
+      droppedUnknown: persistido.droppedUnknown,
     });
     return EXIT.OK;
   }

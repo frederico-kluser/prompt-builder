@@ -1,7 +1,21 @@
 import { z } from 'zod';
-import { chatCompletion } from './openrouter.js';
+import { chatCompletion, isFatalGatewayError, peekModelsCache } from './openrouter.js';
+import { roleTimeoutMs } from './roleLimits.js';
 import { isControlSignal } from './budget.js';
-import { getTechnique, filterTechniquesForTarget, TECHNIQUE_LIBRARY, type TechniqueTarget, type TargetModelInfo } from './techniques.js';
+import {
+  applyFewShotDemos,
+  FEWSHOT_MIN_DEMOS,
+  fewshotMetaInstruction,
+  getTechnique,
+  filterTechniquesForTarget,
+  selectFewShotDemos,
+  targetModelFor,
+  TECHNIQUE_LIBRARY,
+  type FewShotDemo,
+  type LabeledScenario,
+  type TechniqueTarget,
+  type TargetModelInfo,
+} from './techniques.js';
 import { modelFamily } from './llmVariants.js';
 import { modelCaps } from './modelCaps.js';
 import { extractPlaceholders, isInfraViolation, redactGuardSpans, stripFences } from './engine/contracts.js';
@@ -88,9 +102,20 @@ export interface GenerateContestantsParams {
    * IMPL-066 (R-20:REC-2): capacidades do modelo SOB TESTE, direto do catálogo
    * (`supported_parameters` + `reasoning` parseados). Filtra as técnicas
    * classe-dependentes ANTES da reescrita e informa o reescritor no payload.
-   * Ausente = sem metadados (só o think level decide).
+   * Ausente = o item do catálogo EM CACHE do gateway (`peekModelsCache`, sem
+   * rede — os trainers e o orquestrador já o aqueceram antes de gerar); sem
+   * catálogo em cache, sem metadados (só o think level decide).
    */
   targetModel?: TargetModelInfo;
+  /**
+   * IMPL-061 (R-02a:REC-3): conjunto ROTULADO (traces reais com âncora humana —
+   * ver `labeledScenariosFrom`) de onde a técnica `fewshot` tira as demos
+   * (padrão BootstrapFewShot). Com ≥ 3 itens o payload leva
+   * `<demonstracoes_reais>` e o prompt final recebe o bloco canônico
+   * `<exemplos_reais>` verbatim; com menos, a técnica decai para formato sem
+   * demos — nunca inventa exemplo. Quem chama já tirou holdout e guarda.
+   */
+  labeledScenarios?: LabeledScenario[];
   /**
    * IMPL-069 (R-21:REC-2/REC-3): conjunto de guarda — cenários de segurança
    * INVISÍVEIS ao otimizador. Nenhum trecho deles pode entrar no payload do
@@ -261,9 +286,21 @@ Reescreva o prompt agora, aplicando a tecnica.`;
 
 async function generateOneVariant(
   p: GenerateContestantsParams,
-  technique: PromptTechnique,
+  tecnica: PromptTechnique,
   gate: ContractGate,
 ): Promise<string | null> {
+  // IMPL-061: few-shot com demos REAIS do conjunto rotulado. As demos vão no
+  // payload (o reescritor ajusta o texto ao formato delas) e o variator as
+  // ANEXA verbatim ao prompt final — todo exemplo do bloco é real por
+  // construção. Sem ≥ 3 itens rotulados, `demos` = [] e a técnica decai.
+  const selecionadas: FewShotDemo[] = tecnica.id === 'fewshot' ? selectFewShotDemos(p.labeledScenarios ?? []) : [];
+  // O teto de caracteres pode cortar abaixo do mínimo: aí a técnica DECAI
+  // inteira (instrução sem demos e prompt sem bloco) — nunca meio-termo.
+  const demos: FewShotDemo[] = selecionadas.length >= FEWSHOT_MIN_DEMOS ? selecionadas : [];
+  const technique: PromptTechnique = demos.length
+    ? { ...tecnica, metaInstruction: fewshotMetaInstruction(demos) }
+    : tecnica;
+  const comDemos = (texto: string): string => (demos.length ? applyFewShotDemos(texto, demos) : texto);
   const lessonsBlock = p.analysisHint?.trim()
     ? `\n<licoes_da_iteracao_anterior>\n${p.analysisHint.trim()}\n</licoes_da_iteracao_anterior>\n`
     : '';
@@ -308,7 +345,8 @@ async function generateOneVariant(
         { role: 'user', content: safeUserPrompt },
       ],
       temperature: 0.4,
-      timeoutMs: p.timeoutMs ?? 90_000,
+      // extra#2: piso do papel — 60 s cortava reescrita com raciocinio.
+      timeoutMs: roleTimeoutMs('rewriter', p.timeoutMs, p.reasoningLevel),
       // IMPL-017: teto explicito — sem ele a saida era ilimitada. Constante
       // unica: a porta suave (estimate.ts) projeta com o MESMO teto.
       maxTokens: MAX_TOKENS_REWRITER,
@@ -318,7 +356,7 @@ async function generateOneVariant(
       sink: p.ctx?.sink,
       maxPricePerMTok: p.maxPricePerMTok,
     });
-    let texto = stripFences(result.text);
+    let texto = comDemos(stripFences(result.text));
     // Gate de CONTRATO em 3 camadas (F2/P0.3 + IMPL-011): regras locais →
     // juiz LLM do diff (neverBreak) → canários no modelo sob teste. Antes era
     // só a camada local, e substring aprovava "… salvo se o usuario pedir".
@@ -351,7 +389,7 @@ async function generateOneVariant(
           },
         ],
         temperature: 0.3,
-        timeoutMs: p.timeoutMs ?? 90_000,
+        timeoutMs: roleTimeoutMs('rewriter', p.timeoutMs, p.reasoningLevel),
         maxTokens: MAX_TOKENS_REWRITER, // IMPL-017
         reasoningLevel: p.reasoningLevel,
         role: 'rewriter',
@@ -359,7 +397,7 @@ async function generateOneVariant(
         sink: p.ctx?.sink,
         maxPricePerMTok: p.maxPricePerMTok,
       });
-      texto = stripFences(retry.text);
+      texto = comDemos(stripFences(retry.text));
       check = await gate.check(texto);
       if (!check.ok) {
         console.warn(
@@ -374,7 +412,8 @@ async function generateOneVariant(
   } catch (err) {
     // Sem o rethrow, orcamento estourado produziria uma lista de variantes
     // menor do que o pedido — o treino "converge" por falta de candidatos.
-    if (isControlSignal(err)) throw err;
+    // 401/402 (cli#3) idem: nenhuma outra técnica conserta key/crédito.
+    if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
     console.warn(`[variator] tecnica ${technique.id} falhou: ${(err as Error).message}`);
     return null;
   }
@@ -387,8 +426,15 @@ async function generateOneVariant(
  * o chamador deve exigir >= 2 contestants.
  */
 export async function generateContestants(
-  p: GenerateContestantsParams,
+  params: GenerateContestantsParams,
 ): Promise<Contestant[]> {
+  // IMPL-066: capacidades do modelo-alvo do CATÁLOGO quando o chamador não as
+  // trouxe (a SPA monta o `prepare` da variation em api.ts): o item em cache
+  // do gateway, sem rede. Sem isto `reasoning.mandatory` nunca era lido e
+  // cot/fewshot eram propostas a modelos que SEMPRE raciocinam.
+  const p: GenerateContestantsParams = params.targetModel
+    ? params
+    : { ...params, targetModel: targetModelFor(peekModelsCache(params.apiKey)?.data, params.modelId) };
   const contestants: Contestant[] = [];
   // Multi-prompt (F2/P0.4): com grupo, o contestant carrega o FRAGMENTO em
   // `promptFragment` (o que o treino evolui/reusa) e o COMPOSTO em
@@ -557,7 +603,7 @@ export async function generateBasePrompt(p: GenerateBasePromptParams): Promise<s
       { role: 'user', content: userPrompt },
     ],
     temperature: 0.4,
-    timeoutMs: p.timeoutMs ?? 90_000,
+    timeoutMs: roleTimeoutMs('rewriter', p.timeoutMs),
     maxTokens: MAX_TOKENS_REWRITER, // IMPL-017
     responseFormatJson: true,
     role: 'rewriter',
@@ -646,7 +692,7 @@ Produza o bloco de licoes para a proxima rodada de reescrita.`;
       { role: 'user', content: userPrompt },
     ],
     temperature: 0.3,
-    timeoutMs: p.timeoutMs ?? 90_000,
+    timeoutMs: roleTimeoutMs('rewriter', p.timeoutMs, p.reasoningLevel),
     maxTokens: MAX_TOKENS_REWRITER, // IMPL-017
     reasoningLevel: p.reasoningLevel,
     role: 'rewriter',

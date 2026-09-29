@@ -1,8 +1,11 @@
 // Shape do rotulo esperado e da validacao do gabarito vem do motor
 // compartilhado (fonte unica).
 import type { ExpectedSpec, ReferenceValidation } from '../../../src/engine/groundTruth.js';
-import type { PromptContracts } from '../../../src/engine/contracts.js';
+import type { PromptContracts, ResponseSecurity, SecuritySummary } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
+import type { DatagenReport, ItemSaturationReport } from '../../../src/datagen.js';
+import type { CascadeReport, JudgeCascadeConfig, JudgeCascadeSummary } from '../../../src/judge.js';
+import type { ScenarioDedupConfig } from '../../../src/dedup.js';
 import type { PiiRunReport } from '../../../src/engine/pii.js';
 import type {
   CallFinishSignals,
@@ -66,12 +69,19 @@ export type {
   StoredSignificance,
 } from '../../../src/types.js';
 // Pareamento honesto (IMPL-005): FONTE ÚNICA em src/types.ts, como a significância.
-import type { IterationGate, MultiplicityMethod, RunCompleteness, SessionPairing } from '../../../src/types.js';
+import type {
+  HoldoutSkipReason,
+  IterationGate,
+  MultiplicityMethod,
+  RunCompleteness,
+  SessionPairing,
+} from '../../../src/types.js';
 export type {
   BestOfKEntry,
   BestOfKTest,
   GateConclusion,
   GateHoldReason,
+  HoldoutSkipReason,
   IterationGate,
   MultiplicityMethod,
   ObservationCoverage,
@@ -109,6 +119,7 @@ export type {
 export type {
   HumanReviewItem,
   HumanReviewReason,
+  JudgeCallFinish,
   JudgeVote,
   VerbosityDiag,
 } from '../../../src/types.js';
@@ -117,6 +128,7 @@ import type {
   DuelFailure,
   DuelOrderResult,
   HumanReviewItem,
+  JudgeCallFinish,
   JudgeConfidence,
   JudgeContractComponents,
   JudgeVote,
@@ -320,8 +332,48 @@ export interface RunConfigBase {
   referenceModelId?: string;
   /** Julgamento por referencia (pointwise vs gabarito + duelos). Default: true em variation/training, false em compare. */
   referenceJudging?: boolean;
+  /**
+   * IMPL-053 (R-03b:REC-1) — sondas CONTRAFACTUAIS do diagnóstico de
+   * verbosidade: re-julga ~20% das respostas com o texto truncado/preenchido
+   * em 20% e publica a taxa de INVERSÃO (`verbosityDiag.taxaInversaoSondas`,
+   * bom < 10%). OPT-IN: custa chamadas extras de juiz (papel `judge`, no
+   * ledger). Ausente/false = sem sondas (taxa `null`).
+   */
+  verbosityProbes?: boolean;
+  /**
+   * IMPL-055 (R-03a:REC-1) — valida os gabaritos GERADOS antes do julgamento:
+   * verificação dirigida pela rubrica (1º juiz) + amostra humana de 5–10% →
+   * `RunRecord.needsHumanReview`. OPT-IN (chamadas extras). Implícito quando
+   * `secondReferenceModelId` está presente.
+   */
+  validateReferences?: boolean;
+  /**
+   * IMPL-055 — modelo do 2º GABARITO (família DISTINTA do `referenceModelId`),
+   * disparado só quando a verificação acusa 'parcial'/divergência. Liga a
+   * validação dos gabaritos.
+   */
+  secondReferenceModelId?: string;
   /** Descricao detalhada do que testar — guia o datagen na geracao de cenarios. */
   scenarioBrief?: string;
+  /**
+   * Idiomas permitidos no datagen (IMPL-056, R-03a:REC-6) — opt-in,
+   * OFF-BY-DEFAULT. Ausente = produto monolíngue: 100% dos cenários em pt-BR e
+   * nenhuma variação de idioma pedida. Cenário (de QUALQUER fonte) com idioma
+   * fora desta lista vira aviso em `RunRecord.languageWarnings`.
+   */
+  languages?: string[];
+  /**
+   * IMPL-063 — dedup SEMÂNTICO dos cenários gerados: `semantic: true` liga
+   * os embeddings do OpenRouter (mesmo gateway/ledger do chat, custo no papel
+   * datagen) com limiares calibráveis. Ausente = só a passe exata do par.
+   */
+  scenarioDedup?: ScenarioDedupConfig;
+  /**
+   * IMPL-115 — modo ECONÔMICO do julgamento: 2 juízes baratos em paralelo e o
+   * forte só nos vereditos em dúvida (discordância, 'parcial', anomalia de
+   * comprimento). Ausente = julgamento normal por `judgeModelIds`.
+   */
+  judgeCascade?: JudgeCascadeConfig;
   /** Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`. */
   scenarioSeed?: StageSpec[];
   /**
@@ -347,6 +399,11 @@ export interface RunConfigBase {
    * sessao (parentLedger) e quem controla.
    */
   budgetUsd?: number;
+  /**
+   * IMPL-075 — modo AUDITÁVEL (juiz + duelo + gabarito com provedor travado, sem
+   * fallback, `require_parameters`). Espelho de src/types.ts.
+   */
+  auditable?: boolean;
 }
 
 /** Campos comuns aos modos de 1 LLM (variation/training). */
@@ -382,6 +439,15 @@ export interface CompareConfig extends RunConfigBase {
   competitorModelIds: string[];
   /** compare-llms: variantes de config {modelo, temperatura, reasoning} no eixo de contestants (identidade = tripla). */
   competitorConfigs?: { modelId: string; temperature?: number; reasoningLevel?: ReasoningLevel }[];
+  /**
+   * Ancora (web-code#16): com `competitorConfigs`, o 1º concorrente vira o
+   * controle (`isOriginal` — "base" no heatmap, "controlo" na narrativa). Vale
+   * para o eixo compare-llms (configs do MESMO modelo). `false` = ninguém é
+   * controle: a lista é de MODELOS diferentes promovida a configs só para
+   * carregar o ajuste por competidor (Nova Run) ou os agentes do compare.
+   * Ausente = ancorado (comportamento de sempre).
+   */
+  competitorAnchor?: boolean;
 }
 export interface VariationConfig extends RunConfigBase, SingleModelFields {
   mode: 'variation';
@@ -483,6 +549,16 @@ export interface StageSpec {
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
   /**
+   * Aprovacao HUMANA vigente do item de origem (biblioteca — IMPL-065/087):
+   * presente so quando o item estava `aprovado` E o `contentHash` gravado ainda
+   * era o do conteudo (a aprovacao cobre pergunta + gabarito). E o que faz um
+   * item gerado por IA (`origin: 'ai'`) e revisado por gente contar como
+   * ANCORA humana (`trainingPolicy.isCuratedItem`). Ausente = sem aprovacao.
+   * QUEM aprovou fica na biblioteca (o `contentHash` liga os dois): o nome/
+   * e-mail do revisor nao viaja para config/record da run (LGPD).
+   */
+  humanApproval?: { reviewedAt?: string; contentHash: string };
+  /**
    * Metadados de CURRICULO (F1/F4.1): tier curatorial e dimensoes medidas.
    * Sobrevivem da biblioteca (`toStageSpec`) e alimentam a selecao Pareto por
    * fatia — sem eles a populacao nao sabe onde cada prompt e especialista.
@@ -558,6 +634,8 @@ export interface CompetitorResponse {
   truncationRetried?: boolean;
   /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
   firstAttempt?: CallFinishSignals;
+  /** IMPL-075: provedor que serviu a resposta final (espelho de src/types.ts). */
+  provider?: { name?: string; upstreamId?: string; serviceTier?: string };
 }
 
 /**
@@ -593,6 +671,8 @@ export interface SingleJudgeResult {
   /** letra -> contestantId desta avaliacao (cosmetico p/ a UI "(era X)"). */
   blindMap: Record<string, string>;
   inconclusive?: boolean;
+  /** Sinais de fim de CADA passagem deste juiz (IMPL-014) — espelho de src/types.ts. */
+  passFinish?: JudgeCallFinish[];
 }
 
 /**
@@ -602,6 +682,8 @@ export interface SingleJudgeResult {
  * tambem o resultado individual de cada juiz (placar aditivo + justificativas).
  */
 export interface JudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /** Consenso entre juizes (posicao media): melhor -> pior. Placar/heatmap/CSV usam isto. */
   rankedContestantIds: string[];
   /**
@@ -638,6 +720,8 @@ export interface JudgeResult {
  * sem comparar contestants entre si. Base do judge-score.
  */
 export interface ReferenceJudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /**
    * Veredito ternario por contestant (consenso entre juizes, quando ha mais de
    * um). SO vereditos legitimos: falha do juiz/competidor deixa a chave AUSENTE
@@ -758,6 +842,12 @@ export interface CompetitorLiveState {
 }
 
 export interface StageRecord {
+  /**
+   * IMPL-069 — estado de SEGURANÇA de cada resposta (contestantId → estado)
+   * nos cenários do conjunto de guarda (tier adversarial/benign-twin), separado
+   * do judge-score. Ausente nos demais cenários e em records antigos.
+   */
+  security?: Record<string, ResponseSecurity>;
   index: number;
   spec?: StageSpec;
   responses: CompetitorResponse[];
@@ -790,6 +880,14 @@ export interface StageRecord {
 /** `inconclusive` (IMPL-004): terminou, mas a evidência não sustenta conclusão. É TERMINAL. */
 export type RunStatus = 'running' | 'finished' | 'inconclusive' | 'error' | 'aborted';
 
+/**
+ * ATENÇÃO (sincronia com `src/types.ts`): os campos do modo agente
+ * (`agentVerdictTreeVersion`, `agentJudgeErrorCount`, `agentUnscoredRepsBy…`,
+ * `agentInfra`, `infraErrorRate`, …) são SÓ do Node de propósito — o modo
+ * agente não roda no navegador. Records de agente importados para cá não têm
+ * declaração de tipo aqui, mas o dado sobrevive em runtime (`normalizeRunRecord`
+ * espalha `...raw`).
+ */
 export interface RunRecord {
   id: string;
   status: RunStatus;
@@ -815,12 +913,51 @@ export interface RunRecord {
   /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
   fairnessWarnings?: string[];
   /**
+   * Cenários com idioma DECLARADO fora da política da run (IMPL-056): todas as
+   * fontes (datagen, seed/pacote, customStages, biblioteca). Idioma diferente
+   * é confundidor no veredito. Ausente = record antigo; [] = tudo na política.
+   */
+  languageWarnings?: string[];
+  /**
+   * Cobertura ADVERSARIAL das specs da run (IMPL-068): cenários por categoria
+   * (6 mínimas), lacunas abaixo do mínimo e o rótulo de turno (ASR@1
+   * single-turn = limite inferior). Ausente = run sem item adversarial.
+   */
+  adversarialCoverage?: {
+    byCategory: Record<string, number>;
+    gaps: string[];
+    minPerCategory: number;
+    total: number;
+    turnLabel: string;
+  };
+  /**
    * Fila `needs-human-review` (IMPL-055): gabarito divergente da rubrica, 2º
    * gabarito discordante ou amostra humana de auditoria (5–10%). Sai de
    * `humanReviewQueueFromStages` (src/engine/groundTruth.ts); o re-read preserva
    * o campo (`normalizeRunRecord` espalha `...raw`).
    */
   needsHumanReview?: HumanReviewItem[];
+  /**
+   * IMPL-112 (R-05:REC-8) — taxa de acerto POR ITEM × contestants da run e a
+   * fila de REVISÃO HUMANA do gabarito (100% 'resolve' ou 100% 'nao' em k
+   * execuções — nunca descarte automático). Sai de `itemSaturationReport`
+   * (src/datagen.ts) no fim do julgamento. Ausente em records antigos.
+   */
+  itemSaturation?: ItemSaturationReport;
+  /** web-live#7 — relatório da geração de cenários (espelho de src/types.ts). */
+  datagenReport?: DatagenReport;
+  /**
+   * IMPL-115 — resumo do modo econômico: vereditos julgados/escalonados ao
+   * juiz forte, fração escalonada e histograma dos gatilhos. O custo por
+   * veredito sai MEDIDO do ledger (`costByRole.judge`). Ausente = sem cascata.
+   */
+  judgeCascade?: JudgeCascadeSummary;
+  /**
+   * IMPL-069 — resumo de segurança por contestant (ataques, violações,
+   * recusas; gêmeos benignos e recusa excessiva). `classifier: 'none'`: só o
+   * detector determinístico (canário/span do system prompt) está ligado.
+   */
+  securitySummary?: SecuritySummary;
   /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
@@ -840,6 +977,19 @@ export interface RunRecord {
       modelIds: string[];
       pinnedAt: string;
       components?: JudgeContractComponents;
+    };
+    /**
+     * Auditoria do contrato ENTRE runs (IMPL-049/IMPL-057): o pin da última
+     * run gravada antes desta (a âncora sobrevive a processos/abas) e a linha
+     * curta "juiz: <modelo> (mesmo contrato desde a última run)" — `detail`
+     * (12 chars do hash) é o que vai no detalhe/export.
+     */
+    contractAudit?: {
+      changed: boolean;
+      previousHash?: string;
+      previousRunId?: string;
+      line: string;
+      detail: string;
     };
     /**
      * Viés de verbosidade (IMPL-052): regressão só com amostras VÁLIDAS da
@@ -899,7 +1049,16 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** Ledger: spent/committed/pending (IMPL-017). Ausente em records antigos. */
   costLedger?: import('../../../src/types.js').CostLedgerSummary;
-  /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
+  /** IMPL-074: registo por chamada (id de geração/provedor/conciliação), fora do ledger enxuto. */
+  callLog?: import('../../../src/types.js').CallLogEntry[];
+  callLogDropped?: number;
+  /**
+   * @deprecated LEGADO — não é mais escrito. Records antigos somavam aqui o
+   * `upstream_inference_cost` de TODA chamada, e o OpenRouter o devolve também
+   * nas não-BYOK (onde já está dentro de `totalCostUsd`): semântica
+   * desconhecida. Nunca somar ao gasto nem rotular de BYOK. O gasto BYOK
+   * medido vive em `costLedger.byok`.
+   */
   upstreamCostUsd?: number;
   /** Teto de gasto configurado (ausente = sem limite). */
   budgetUsd?: number;
@@ -928,10 +1087,20 @@ export interface RunRecord {
   startedAt: string;
   finishedAt?: string;
   error?: string;
+  /**
+   * cli#3 — classe da falha do gateway que derrubou a run (`auth` = key
+   * recusada, `no_credit` = sem crédito…) e o status HTTP. Com isto o CLI sai
+   * com o código documentado (4/5) em vez de 1; ausente = falha não
+   * classificada ou record antigo.
+   */
+  errorKind?: 'auth' | 'blocked' | 'no_credit' | 'rate_limit' | 'http';
+  errorHttpStatus?: number;
   // Lineage de treino (ausente em compare/variation):
   sessionId?: string;
   iteration?: number; // 0-based
   parentRunId?: string;
+  /** IMPL-081 — execução RETOMADA (espelho de src/types.ts; tipo lá). */
+  resume?: import('../../../src/types.js').RunResumeInfo;
 }
 
 // ----------------------------------------------------------------------------
@@ -989,8 +1158,9 @@ export interface SessionRecord {
   /** Soma do `failureCountByRole` de todas as runs da sessão (IMPL-004). */
   failureCountByRole?: Partial<Record<CostRole, number>>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
-  /** Ledger da sessão: spent/committed/pending (IMPL-017). */
+  /** Ledger da sessão: spent/committed/pending (IMPL-017). Gasto BYOK em `costLedger.byok`. */
   costLedger?: import('../../../src/types.js').CostLedgerSummary;
+  /** @deprecated LEGADO, semântica desconhecida — ver `RunRecord.upstreamCostUsd`. Não é mais escrito. */
   upstreamCostUsd?: number;
   budgetUsd?: number;
   budgetExhausted?: boolean;
@@ -999,10 +1169,16 @@ export interface SessionRecord {
   /** Iteracao em que o orcamento/cancelamento interrompeu a sessao. */
   stoppedAtIteration?: number;
   /**
-   * true = o campeao NAO passou pelo gate de holdout (pulado por orcamento ou
-   * cancelamento): nao validado contra sobreajuste — a UI precisa dizer isso.
+   * true = o campeao NAO passou pelo gate de holdout (seleção < 20 cenários,
+   * orçamento, cancelamento ou run de holdout sem veredito): nao validado
+   * contra sobreajuste — a UI precisa dizer isso, com o MOTIVO de
+   * `holdoutSkipReason` (espelho de src/types.ts).
    */
   holdoutSkipped?: boolean;
+  /** Por que a sessão terminou sem resultado de holdout (espelho de src/types.ts). */
+  holdoutSkipReason?: HoldoutSkipReason;
+  /** Runs de re-avaliação limpa (IMPL-013) — fora de `runIds` de propósito (espelho de src/types.ts). */
+  reevalRunIds?: string[];
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -1081,7 +1257,10 @@ export interface SavedPrompt {
     sessionId?: string;
     runId?: string;
     techniqueId?: string;
+    /** Iteração 0-based da rodada (a UI mostra "rodada N+1"). */
     iteration?: number;
+    /** Salvo da run de HOLDOUT (não é rodada de treino — web-code#14). */
+    holdout?: boolean;
   };
   createdAt: string;
   updatedAt: string;
@@ -1166,6 +1345,8 @@ export type RunEvent =
     }
   | { type: 'stage.dueled'; runId: string; stageIndex: number; duels: StageDuels }
   | { type: 'duel.progress'; runId: string; done: number; total: number }
+  /** web-live#7 — relatório da geração (agregado, fora do reducer de etapas). */
+  | { type: 'datagen.report'; runId: string; report: DatagenReport }
   /** Gasto acumulado (espelho de src/types.ts). */
   | {
       type: 'run.spend';

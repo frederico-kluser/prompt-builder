@@ -115,8 +115,12 @@ describe('IMPL-049 — drift do contrato entre runs (memória do processo)', () 
     const a = judgeContractHash(JUIZES, PROMPT_POINTWISE, COMPONENTES);
     const b = judgeContractHash(JUIZES, PROMPT_POINTWISE, { ...COMPONENTES, judgeReasoningLevel: 'low' });
 
-    expect(noteJudgeContract(a)).toMatchObject({ changed: false, message: '' });
-    expect(noteJudgeContract(a)).toMatchObject({ changed: false, message: '' });
+    const primeira = noteJudgeContract(a);
+    expect(primeira).toMatchObject({ changed: false, message: '' });
+    expect(primeira.previousHash).toBeUndefined();
+    // Mesmo contrato: silêncio, MAS com a âncora (reserva dos orquestradores
+    // quando não há run gravada legível — antes vinha sem previousHash).
+    expect(noteJudgeContract(a)).toEqual({ changed: false, previousHash: a, message: '' });
 
     const drift = noteJudgeContract(b);
     expect(drift.changed).toBe(true);
@@ -125,9 +129,11 @@ describe('IMPL-049 — drift do contrato entre runs (memória do processo)', () 
     expect(drift.message).toContain('contrato do juiz mudou');
 
     // Continua estável depois do aviso (o novo hash vira âncora).
-    expect(noteJudgeContract(b)).toMatchObject({ changed: false });
+    expect(noteJudgeContract(b)).toMatchObject({ changed: false, previousHash: b });
     resetJudgeContractMemory();
-    expect(noteJudgeContract(b)).toMatchObject({ changed: false, message: '' });
+    const zerada = noteJudgeContract(b);
+    expect(zerada).toMatchObject({ changed: false, message: '' });
+    expect(zerada.previousHash).toBeUndefined();
   });
 });
 

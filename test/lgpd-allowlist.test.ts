@@ -143,10 +143,18 @@ describe('IMPL-041 (1) — snapshot regenerado (≤ 90 dias) e consumido em runt
       for (const ep of p.endpoints!) expect(tags.has(ep.tag)).toBe(true);
     }
     // Todo modelo SEM endpoint ZDR no snapshot está bloqueado com esse motivo
-    // (ou um motivo anterior: criador desconhecido / não recomendado).
+    // (ou um motivo anterior: a forma do id — IMPL-101 `:batch`/`:free`/
+    // `openrouter/*` —, criador desconhecido ou não recomendado).
     for (const id of ids.filter((i) => data.allowlist!.modelos[i].length === 0)) {
       expect(blockedIds.has(id), id).toBe(true);
-      expect(['sem_endpoint_zdr', 'criador_desconhecido', 'nao_recomendado']).toContain(reasons.get(id));
+      expect([
+        'sem_endpoint_zdr',
+        'criador_desconhecido',
+        'nao_recomendado',
+        'variante_batch',
+        'variante_free',
+        'roteador_openrouter',
+      ]).toContain(reasons.get(id));
     }
   });
 

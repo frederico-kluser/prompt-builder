@@ -17,6 +17,8 @@ import {
 import { CancelHoldButton, OwnershipBanner, StopBanner } from '../components/RunControls';
 import { RunNarrative } from '../components/RunNarrative';
 import { StorageNotice } from '../components/StorageNotice';
+import { csvCell } from '../engine/csv';
+import { runExchangeJson } from '../recordExchange';
 import {
   Accordion,
   AccordionItem,
@@ -36,7 +38,18 @@ import {
   StatusPill,
   Tag,
 } from '../components/primitives';
-import { VERDICT_META, verdictOf, trunc, denseStages, applyEvent, ScoreHeatmap, FinalsPanel } from './runShared';
+import {
+  VERDICT_META,
+  verdictOf,
+  trunc,
+  denseStages,
+  applyEvent,
+  ScoreHeatmap,
+  FinalsPanel,
+  panelInfo,
+  runWinner,
+} from './runShared';
+import { executedStageCount } from '../components/RunNarrative';
 import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
 import { TruncationNotice } from '../components/TruncationNotice';
 import { cn } from '@/lib/utils';
@@ -80,10 +93,9 @@ function download(filename: string, text: string, type: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function csvEscape(value: unknown): string {
-  const s = value === undefined || value === null ? '' : String(value);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
+// Célula CSV: fonte única com as rotas /v1 (src/engine/csv.ts) — aspas RFC
+// 4180 e neutralização de fórmula: `question`/`text` são saída de LLM.
+const csvEscape = csvCell;
 
 // CSV plano: uma linha por resposta (cenario × competidor), com o veredito.
 function runToCsv(record: RunRecord, byId: Map<string, Contestant>): string {
@@ -144,8 +156,10 @@ export function RunView() {
     setCancelRequested(false);
     setOwnership(null);
 
+    // Cópias rasas: o record vivo é MUTADO no lugar pelo motor desta aba — o
+    // estado do React precisa de referências novas para re-renderizar.
     fetchRun(id)
-      .then((r) => !cancelled && setRecord(r))
+      .then((r) => !cancelled && setRecord({ ...r }))
       .catch((e) => !cancelled && setError(e.message));
 
     const close = openRunStream(
@@ -157,7 +171,7 @@ export function RunView() {
           return;
         }
         if (event.type === 'snapshot') {
-          setRecord(event.record);
+          setRecord({ ...event.record });
           if (event.record.status !== 'running') setOwnership(null);
           void cacheRun(event.record);
           return;
@@ -174,7 +188,7 @@ export function RunView() {
         setRecord((prev) => prev && applyEvent(prev, event));
       },
       () => {
-        fetchRun(id).then((r) => !cancelled && setRecord(r)).catch(() => undefined);
+        fetchRun(id).then((r) => !cancelled && setRecord({ ...r })).catch(() => undefined);
       },
     );
 
@@ -221,17 +235,15 @@ export function RunView() {
   }, [stages]);
   const packRefCount = packScenarios.filter((s) => s.reference?.trim()).length;
 
-  // Prompt do pacote: o do CAMPEAO (maior judge-score entre nao-controle);
-  // sem campeao com prompt, cai para o prompt base da run.
+  // Prompt do pacote: o do VENCEDOR pela régua única (`runWinner` = a mesma do
+  // `runs winner`: duelo final, senão judge-score — web-live#4). Se o vencedor
+  // é o controle, ou o empate não tem vencedor claro, vai o prompt base: não
+  // se exporta como "campeão" uma variante que perdeu (ou empatou).
   const packPrompt = useMemo(() => {
     if (!record) return null;
-    const scores = record.judgeScoreByContestant;
-    const champion = scores
-      ? contestants
-          .filter((c) => !c.isOriginal && c.systemPrompt?.trim() && scores[c.id] !== undefined)
-          .sort((a, b) => (scores[b.id] ?? 0) - (scores[a.id] ?? 0))[0]
-      : undefined;
-    if (champion && champion.systemPrompt && champion.systemPrompt.trim()) {
+    const w = runWinner(record);
+    const champion = !w.unresolved && w.contestantId ? contestants.find((c) => c.id === w.contestantId) : undefined;
+    if (champion && !champion.isOriginal && champion.systemPrompt && champion.systemPrompt.trim()) {
       return { text: champion.systemPrompt, source: 'champion' as const, label: champion.label };
     }
     const base = record.config.basePrompt?.trim();
@@ -261,11 +273,19 @@ export function RunView() {
   const mode = runMode(record);
   const isSingle = mode !== 'compare';
   const isRunning = record.status === 'running';
-  const totalStages = record.config.stages;
+  // web-code#11: cenários EXECUTADOS (slots da run), não `config.stages` —
+  // rodada de treino pinada roda só a fatia de treino e `repeats` multiplica
+  // os slots ("cenários 10/20" nunca fechava; "15/5" passava de 100%).
+  const totalStages = executedStageCount(record);
   const piiNote = describePiiReport(record.piiReport, {
     agent: (record.config as { agent?: unknown }).agent != null,
   });
-  const doneStages = stages.filter((s) => s.judge || s.error).length;
+  // web-live#16: julgado, pulado (falha na geração) e fora do placar (cortado)
+  // são contagens DIFERENTES — "5/5" com 2 pulados era mentira.
+  const judgedStages = stages.filter((s) => !s.error && (s.judge || s.referenceJudge)).length;
+  const skippedStages = stages.filter((s) => s.error && !s.judge && !s.referenceJudge).length;
+  const cutStages = stages.filter((s) => s.incomplete && !s.error && !s.judge && !s.referenceJudge).length;
+  const doneStages = judgedStages + skippedStages + cutStages;
   // Bloco "Final": mesma condicao de nulidade do FinalsPanel (evita o rotulo orfao).
   const hasFinals = Boolean(record.finalists?.length) || stages.some((s) => s.duels);
   // Pacote de cenarios: SO variation terminada e com gabaritos. Compare nao
@@ -288,7 +308,9 @@ export function RunView() {
     <Screen wide>
       <header className="rounded-xl bg-card p-5 ring-1 ring-foreground/10">
         <div className="flex flex-wrap items-start justify-between gap-6">
-          <div className="min-w-0 flex-1">
+          {/* Base de 16rem: no celular os números descem para a linha de baixo em
+              vez de espremer o tema numa coluna de 1 palavra. */}
+          <div className="min-w-0 flex-[1_1_16rem]">
             <div className="flex flex-wrap items-center gap-2.5">
               <h1 className="font-heading text-xl font-medium tracking-tight">
                 Run <code className="font-mono text-[17px] text-muted-foreground">{record.id.slice(0, 8)}</code>
@@ -311,8 +333,18 @@ export function RunView() {
           </div>
 
           <div className="flex shrink-0 flex-wrap items-start gap-6">
-            <Stat label="cenários">
-              {doneStages}/{totalStages}
+            <Stat label="cenários julgados">
+              {judgedStages}/{totalStages}
+              {(skippedStages > 0 || cutStages > 0) && (
+                <span className="block text-[12px] font-normal text-muted-foreground">
+                  {[
+                    skippedStages ? `${skippedStages} pulado${skippedStages > 1 ? 's' : ''}` : '',
+                    cutStages ? `${cutStages} fora do placar` : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </span>
+              )}
             </Stat>
             {/* Em run de rodada de treino o teto é o da SESSÃO (ledger da sessão):
                 sem o rótulo, "custo desta run / teto" leria como folga que não existe. */}
@@ -336,10 +368,10 @@ export function RunView() {
         {isRunning && (
           <ProgressBar
             className="mt-4"
-            value={totalStages ? doneStages / totalStages : 0}
+            value={totalStages ? Math.min(1, doneStages / totalStages) : 0}
             size="sm"
             progressbar
-            aria-label="Cenários julgados"
+            aria-label="Cenários concluídos (julgados, pulados ou fora do placar)"
           />
         )}
 
@@ -347,7 +379,8 @@ export function RunView() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => download(`run-${record.id}.json`, JSON.stringify(record, null, 2), 'application/json')}
+            // left#11 (IMPL-089): exchange@1 — o `runs import` do terminal e o «Importar» do Histórico leem.
+            onClick={() => download(`run-${record.id}.json`, runExchangeJson(record), 'application/json')}
           >
             <Download aria-hidden="true" />
             JSON
@@ -361,7 +394,16 @@ export function RunView() {
             CSV
           </Button>
           {canExportPack && (
-            <Button variant="outline" size="sm" onClick={exportScenarioPack}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={exportScenarioPack}
+              title={
+                packPrompt?.source === 'champion'
+                  ? `Cenários + gabaritos com o prompt vencedor (${packPrompt.label})`
+                  : 'Cenários + gabaritos com o prompt base (nenhuma variação venceu com clareza)'
+              }
+            >
               <Download aria-hidden="true" />
               Pacote
             </Button>
@@ -618,6 +660,11 @@ function StageRow({ stage, byId, contestants, interrupted }: StageRowProps) {
               const v = stageVerdict(stage, r.contestantId);
               const meta = v ? VERDICT_META[v] : undefined;
               const explanation = stage.referenceJudge?.explanationByContestant?.[r.contestantId];
+              // IMPL-057: o painel gravado por juiz — concordância, divergente
+              // destacado e 'avaliador falhou' (do JUIZ, nunca nota do candidato).
+              const painel = panelInfo(stage, r.contestantId);
+              const votos = stage.referenceJudge?.judgeVotesByContestant?.[r.contestantId] ?? [];
+              const avaliadorFalhou = painel.degraded || (!v && painel.judgeFailed !== undefined);
               return (
                 <div key={r.contestantId} className="rounded-lg border border-border p-3">
                   <div className="flex flex-wrap items-center gap-2">
@@ -634,7 +681,54 @@ function StageRow({ stage, byId, contestants, interrupted }: StageRowProps) {
                         {meta.label}
                       </span>
                     )}
+                    {avaliadorFalhou && (
+                      <span
+                        title={
+                          painel.degraded
+                            ? 'Um juiz do painel falhou: o veredito saiu do painel reduzido. É falha do avaliador, não nota do candidato.'
+                            : `O avaliador falhou (${painel.judgeFailed}): sem veredito — fica fora da nota, nunca vira 'não resolve'.`
+                        }
+                      >
+                        <Tag>avaliador falhou</Tag>
+                      </span>
+                    )}
                   </div>
+                  {painel.agreement && (
+                    <div className="mt-1.5 text-[12px] text-muted-foreground">
+                      <span className="text-foreground">
+                        {painel.agreement.verdict ? (
+                          <>
+                            Painel {painel.agreement.agreeCount} de {painel.agreement.total}:{' '}
+                            {VERDICT_META[painel.agreement.verdict].label}
+                          </>
+                        ) : (
+                          // Todos os juízes falharam: sem veredito — e o painel
+                          // mostra QUEM falhou (o motivo fica no título de cada voto).
+                          <>
+                            Painel sem veredito: {painel.agreement.failedJudgeIds.length} de{' '}
+                            {painel.agreement.total} juízes falharam
+                          </>
+                        )}
+                      </span>
+                      <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1" aria-label="Voto de cada juiz">
+                        {votos.map((voto, k) => {
+                          const agregado = painel.agreement!.verdict;
+                          const divergente = agregado !== undefined && voto.verdict !== undefined && voto.verdict !== agregado;
+                          return (
+                            <li
+                              key={`${voto.judgeModelId}-${k}`}
+                              title={voto.explanation ?? voto.error?.message}
+                              className={cn(divergente && 'font-medium text-foreground')}
+                            >
+                              <span className="font-mono">{voto.judgeModelId}</span>:{' '}
+                              {voto.verdict ? VERDICT_META[voto.verdict].label : 'falhou'}
+                              {divergente ? ' — divergente' : ''}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
                   <div className="mt-1 font-mono text-[11.5px] text-muted-foreground tabular">
                     {formatMs(r.latencyMs)} · {r.tokensIn}→{r.tokensOut} tok · {formatUsd(r.costUsd)}
                     {r.status === 'error' && <span className="text-destructive"> · ERRO: {r.errorMsg}</span>}

@@ -15,6 +15,9 @@
 
 @theme inline {
     --font-heading: var(--font-sans);
+    /* Títulos do relatório de ciclos: a serifa do design system do Plannotator
+       (skill plannotator-visual-explainer) — contraste com o corpo em Geist. */
+    --font-display: ui-serif, Georgia, 'Times New Roman', serif;
     --font-sans: 'Geist Variable', system-ui, sans-serif;
     --font-mono: 'Geist Mono Variable', ui-monospace, monospace;
 

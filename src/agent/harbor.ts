@@ -14,12 +14,16 @@
 //   sem API Python);
 // - `tests/test.sh` pontua EXATAMENTE como o oráculo (`scoreChecks`):
 //   Σ(ok·peso)/Σ(peso) dos F2P (ou P2P se não há F2P); P2P quebrado ⇒ 0;
-// - `tests/` só chega ao workspace DEPOIS do agente (isolamento, IMPL-098);
+// - `tests/` só chega ao workspace DEPOIS do agente (isolamento, IMPL-098); o
+//   material do `testsDir` vai em `tests/files/` (com o `baseDir` da config) e
+//   o `test.sh` o materializa na raiz do workspace antes dos checks — a mesma
+//   semântica de `materializeTestsDir` na run local;
 // - `solution/solve.sh` é a golden do Harbor ("golden solve must pass all tests").
 // ----------------------------------------------------------------------------
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { splitCommandLine } from './workspace.js';
+import { listTestsDirFiles, resolveTestsDir } from './taskValidate.js';
 import type { AgentTaskCheck, AgentTaskSolution, AgentTaskSpec } from './types.js';
 
 /**
@@ -49,6 +53,12 @@ export interface HarborCompileResult {
   files: string[];
   /** O reward que a `solution` produziria — igual ao score local. */
   rewardSpec: HarborReward;
+  /**
+   * left#12: material do `testsDir` copiado para `tests/files/` (caminhos
+   * relativos ao testsDir). `null` = tarefa sem testsDir OU compilada sem
+   * `baseDir` (o testsDir fica só declarado no task.toml).
+   */
+  testsMaterial: string[] | null;
 }
 
 /** O que `readHarborTask` devolve: o `AgentTaskSpec` reconstruído + o enunciado. */
@@ -91,14 +101,36 @@ function solveScriptFor(solution: AgentTaskSolution): { script: string; patch?: 
  * pontuam exatamente como `scoreChecks` e escrevem `reward.json` no cwd.
  * Os nomes/itens viajam por ENV (o `awk -v` interpretaria escapes do JSON).
  */
-function testScriptFor(checks: AgentTaskCheck[]): string {
+function testScriptFor(checks: AgentTaskCheck[], material: readonly string[] = []): string {
   const lines: string[] = [
     '#!/bin/sh',
     '# Gerado por prompt-builder (IMPL-098) — NÃO editar.',
     '# Pontua como o oráculo do produto (scoreChecks): Σ(ok·peso)/Σ(peso) dos F2P',
     '# (ou P2P se não há F2P); P2P quebrado ⇒ 0. Escreve ./reward.json.',
     'set -u',
-    'cd "$(dirname "$0")/.."',
+  ];
+  if (material.length === 0) {
+    lines.push('cd "$(dirname "$0")/.."');
+  } else {
+    // left#12: o material do `testsDir` (em tests/files/) entra na RAIZ do
+    // workspace AQUI — depois do agente, como `materializeTestsDir` faz na run
+    // local (os checks o referenciam relativo à raiz). O que o agente deixou no
+    // mesmo caminho é SUBSTITUÍDO (rm antes do cp: symlink plantado não
+    // redireciona a escrita).
+    lines.push(
+      'TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"',
+      'cd "$TESTS_DIR/.."',
+      'materialize() {',
+      '  rm -f -- "$1"',
+      '  mkdir -p -- "$(dirname -- "$1")"',
+      '  cp -- "$TESTS_DIR/files/$1" "$1"',
+      '}',
+      '# --- material do testsDir (chega DEPOIS do agente) ------------------------',
+      ...material.map((rel) => `materialize ${shQuote(rel.split(path.sep).join('/'))}`),
+      '',
+    );
+  }
+  lines.push(
     'ITEMS=""',
     'NAMES=""',
     'run_check() {',
@@ -111,7 +143,7 @@ function testScriptFor(checks: AgentTaskCheck[]): string {
     '}',
     '',
     '# --- checks (ordem canônica: verify[] e depois regression[]) --------------',
-  ];
+  );
   for (const c of checks) {
     const kind = c.kind ?? 'fail_to_pass';
     const weight = c.weight ?? 1;
@@ -155,7 +187,19 @@ function testScriptFor(checks: AgentTaskCheck[]): string {
  */
 export function compileAgentTaskToHarbor(
   task: AgentTaskSpec,
-  opts: { outDir: string; instruction: string; name?: string },
+  opts: {
+    outDir: string;
+    instruction: string;
+    name?: string;
+    /**
+     * left#12: diretório da CONFIGURAÇÃO — base do `testsDir` relativo. Com
+     * ele, o material do `testsDir` é copiado para `tests/files/` e o
+     * `tests/test.sh` o materializa na raiz do workspace antes dos checks (a
+     * mesma semântica da run local). Sem ele (chamador que só quer o layout),
+     * `tests_dir` fica só declarado no `task.toml` e `testsMaterial` sai `null`.
+     */
+    baseDir?: string;
+  },
 ): HarborCompileResult {
   const outDir = opts.outDir;
   const files: string[] = [];
@@ -165,6 +209,26 @@ export function compileAgentTaskToHarbor(
     writeFileSync(abs, content, 'utf8');
     files.push(rel);
   };
+
+  // left#12 — material do testsDir: mesma contenção (relativo, sem `..`, sem
+  // symlink para fora) e o MESMO walk da run local/portão (`listTestsDirFiles`).
+  // Diretório declarado que não existe é ERRO: compilar sem ele geraria um
+  // test.sh que referencia arquivos ausentes (reward 0 calado).
+  let material: string[] | null = null;
+  if (task.testsDir !== undefined && opts.baseDir !== undefined) {
+    const src = resolveTestsDir(task.testsDir, opts.baseDir);
+    if (!existsSync(src) || !statSync(src).isDirectory()) {
+      throw new Error(`testsDir "${task.testsDir}" não encontrado em ${path.resolve(opts.baseDir)}`);
+    }
+    material = listTestsDirFiles(src);
+    for (const rel of material) {
+      const alvo = path.join(outDir, 'tests', 'files', rel);
+      mkdirSync(path.dirname(alvo), { recursive: true });
+      // Bytes exatos (o material pode ser binário: fixture, snapshot).
+      copyFileSync(path.join(src, rel), alvo);
+      files.push(path.join('tests', 'files', rel).split(path.sep).join('/'));
+    }
+  }
 
   const checks = [...(task.verify ?? []), ...(task.regression ?? []).map((c) => ({ ...c, kind: 'pass_to_pass' as const }))];
 
@@ -241,8 +305,9 @@ export function compileAgentTaskToHarbor(
   write('solution/solve.sh', solved.script);
   if (solved.patch !== undefined) write('solution/solution.diff', solved.patch);
 
-  // --- tests/ (test.sh + reward-spec.json + material de testsDir) ------------
-  write('tests/test.sh', testScriptFor(checks));
+  // --- tests/ (test.sh + reward-spec.json; o material do testsDir já foi ---
+  //     copiado para tests/files/ acima, quando há baseDir) --------------------
+  write('tests/test.sh', testScriptFor(checks, material ?? []));
   // Campos guardados CRUS (JSON.stringify omite o `undefined`): é o que torna o
   // `readHarborTask` uma volta EXATA (perda canônica 0) — o `checks` fundido
   // fica como documentação/consumo externo (a ordem canônica do test.sh).
@@ -273,7 +338,7 @@ export function compileAgentTaskToHarbor(
     p2p: { passed: 0, total: checks.filter((c) => c.kind === 'pass_to_pass').length, broken: false },
   };
 
-  return { outDir, files, rewardSpec };
+  return { outDir, files, rewardSpec, testsMaterial: material };
 }
 
 /**

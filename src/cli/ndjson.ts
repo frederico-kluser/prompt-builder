@@ -15,6 +15,8 @@ import {
   type TruncationCell,
 } from '../engine/truncation.js';
 import { agentVerdictTreeVersionOf, classifyStop } from '../agent/verdictTree.js';
+import { infraSummaryFields } from '../agent/infraError.js';
+import { holdoutSkipReasonOf } from '../engine/sessionDecision.js';
 
 /**
  * Ledger SEM a lista de pendentes: no stream vao so os 6 numeros (um run com
@@ -31,9 +33,16 @@ export interface NdjsonMapperOptions {
   verbose?: boolean;
   /** Marca as linhas de run com o sessionId, quando dentro de um treino. */
   sessionId?: string;
+  /**
+   * cli#7: gasto acumulado do COMANDO inteiro (a raiz do ledger — a sessão
+   * de treino), o número que se compara com `budgetUsd`. No `train` cada
+   * iteração tem ledger próprio (fork): o `spentUsd` do evento `budget` é da
+   * ITERAÇÃO e "zerava" a cada uma contra o teto da sessão inteira.
+   */
+  totalSpentUsd?: () => number;
 }
 
-export interface AgentSummary {
+export interface AgentSummary extends ReturnType<typeof infraSummaryFields> {
   /** Quantas respostas carregam ExecutionRef (execuções de agente). */
   executions: number;
   /** Execuções que morreram em erro de infra/processo (stopReason 'error'). */
@@ -114,6 +123,8 @@ function buildAgentSummary(record: RunRecord): AgentSummary | undefined {
     ...(record.agentUnscoredRepsByContestant
       ? { unscoredReps: Object.values(record.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0) }
       : {}),
+    // IMPL-094: tentativas/retentativas cegas/infra_error (mesma fonte do `result`).
+    ...infraSummaryFields(record),
   };
 }
 
@@ -289,14 +300,40 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
     case 'duel.progress':
       out.event('progress', { ...base, phase: 'duels', done: e.done, total: e.total });
       break;
-    case 'run.spend':
+    case 'datagen.report': {
+      // web-live#7: contagens da geração (sem texto de cenário, salvo as
+      // perguntas truncadas das rubricas não-respondíveis, já cortadas).
+      const r = e.report;
+      out.event('datagen.report', {
+        ...base,
+        requested: r.requested,
+        generated: r.generated,
+        final: r.final,
+        shortfall: r.shortfall,
+        dedupedExact: r.dedupedExact,
+        dedupedSemantic: r.dedupedSemantic,
+        droppedVsSeed: r.droppedVsSeed,
+        backfillRounds: r.backfillRounds,
+        stoppedBy: r.stoppedBy,
+        semantic: r.semantic,
+        effectiveCosineThreshold: r.effectiveCosineThreshold,
+        rubricUnanswerable: r.rubricUnanswerable,
+        ...(r.warning ? { warning: r.warning } : {}),
+      });
+      break;
+    }
+    case 'run.spend': {
+      const total = opts.totalSpentUsd?.();
       out.event('budget', {
         ...base,
         spentUsd: e.spentUsd,
+        // cli#7: o acumulado da sessão (o que o `budgetUsd` limita) vai junto.
+        ...(total !== undefined && Number.isFinite(total) ? { totalSpentUsd: Math.max(total, e.spentUsd) } : {}),
         ...(e.budgetUsd !== undefined ? { budgetUsd: e.budgetUsd } : {}),
         byRole: e.byRole,
       });
       break;
+    }
     case 'run.budget':
       out.event('budget.gate', {
         ...base,
@@ -329,6 +366,19 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
         // IMPL-014: taxa de truncamento + alerta acima de 2%.
         ...truncationFields(e.record),
         ...(e.record.failureCountByRole ? { failureCountByRole: e.record.failureCountByRole } : {}),
+        // IMPL-069: métrica de segurança SEPARADA do judge-score (contagens por
+        // contestant — ataques, violações, recusas, recusa excessiva).
+        ...(e.record.securitySummary ? { securitySummary: e.record.securitySummary } : {}),
+        // IMPL-115: fração escalonada do modo econômico (números, cabem no stream).
+        ...(e.record.judgeCascade
+          ? {
+              judgeCascade: {
+                verdicts: e.record.judgeCascade.verdicts,
+                escalatedVerdicts: e.record.judgeCascade.escalatedVerdicts,
+                escalatedFraction: e.record.judgeCascade.escalatedFraction,
+              },
+            }
+          : {}),
         ...(e.record.status === 'inconclusive'
           ? { inconclusiveReasons: e.record.verdictIntegrity?.reasons ?? [] }
           : {}),
@@ -399,6 +449,30 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
   }
 }
 
+/**
+ * IMPL-090: `run.warning` AGREGADO da curadoria — UMA linha para todos os
+ * itens não aprovados (nunca uma por item) e FORA dos eventos de etapa: é
+ * emitido pelo CLI antes da run, não pelo motor, então nenhum reducer de
+ * etapas o vê. A lista de ids vai com teto (o stream é de agente).
+ */
+export function emitCurationWarning(
+  out: Output,
+  c: { profile: string; curated: number; total: number; curatedKofN: string; unapproved: Array<{ id: string; state: string }>; warnings: string[] },
+): void {
+  if (!out.isNdjson || c.warnings.length === 0) return;
+  out.event('run.warning', {
+    scope: 'run',
+    code: 'library.unapproved_items',
+    message: c.warnings.join(' '),
+    profile: c.profile,
+    curated: c.curated,
+    total: c.total,
+    curatedKofN: c.curatedKofN,
+    unapproved: c.unapproved.slice(0, 20),
+    ...(c.unapproved.length > 20 ? { unapprovedTruncated: c.unapproved.length - 20 } : {}),
+  });
+}
+
 export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {
   if (!out.isNdjson) return;
   const base = { scope: 'session' as const, sessionId: e.sessionId };
@@ -452,6 +526,8 @@ export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {
         // IMPL-005: n nominal × efetivo do pareamento final (mesmo sem significância).
         ...(e.record.pairing ? { pairing: e.record.pairing } : {}),
         ...(e.record.holdoutSkipped ? { holdoutSkipped: true } : {}),
+        // cli#9: motivo do holdout pulado (também em sessões antigas, derivado).
+        ...(holdoutSkipReasonOf(e.record) ? { holdoutSkipReason: holdoutSkipReasonOf(e.record) } : {}),
         ...(e.record.budgetExhausted ? { budgetExhausted: true } : {}),
       });
       break;

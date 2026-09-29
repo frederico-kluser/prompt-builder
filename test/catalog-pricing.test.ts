@@ -193,7 +193,6 @@ describe('IMPL-018 (i) — "-1" nunca produz valor negativo em computeCost/estim
     expect(priceUsage({ tokensIn: 500, tokensOut: 800, cost: 0.0123 }, router)).toEqual({
       usd: 0.0123,
       source: 'usage',
-      upstreamUsd: undefined,
     });
     expect(priceUsage({ tokensIn: 500, tokensOut: 800 }, router)).toEqual({ usd: 0, source: 'unknown' });
   });

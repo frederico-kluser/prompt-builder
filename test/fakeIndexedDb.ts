@@ -153,7 +153,8 @@ class FakeTransaction {
     const work = new Map<string, Map<string, unknown>>();
     for (const s of this.storeNames) work.set(s, new Map(this.idb.data.get(s)));
     for (const op of this.pending) {
-      const injected = op.kind === 'put' || op.kind === 'delete' ? this.idb.takePutFailure(op.store) : undefined;
+      const injected =
+        op.kind === 'put' || op.kind === 'delete' ? this.idb.takePutFailure(op.store) : this.idb.takeReadFailure();
       if (injected) {
         op.req.readyState = 'done';
         op.req.error = new DOMException(`falha injetada em ${op.store}`, injected);
@@ -246,6 +247,7 @@ export class FakeIdb {
   private readonly connections: FakeDatabase[] = [];
   private putFailures: { store: string; name: string; times: number }[] = [];
   private commitFailures: string[] = [];
+  private readFailures: string[] = [];
 
   /** A próxima put/delete em `store` falha na requisição (erro borbulha e aborta). */
   failNextPut(store: string, name = 'ConstraintError', times = 1): void {
@@ -255,6 +257,15 @@ export class FakeIdb {
   /** Os próximos `times` commits abortam com `name`. */
   failNextCommit(name = 'QuotaExceededError', times = 1): void {
     for (let i = 0; i < times; i++) this.commitFailures.push(name);
+  }
+
+  /** As próximas `times` leituras (get/getAll) falham na requisição com `name`. */
+  failNextRead(name = 'UnknownError', times = 1): void {
+    for (let i = 0; i < times; i++) this.readFailures.push(name);
+  }
+
+  takeReadFailure(): string | undefined {
+    return this.readFailures.shift();
   }
 
   takePutFailure(store: string): string | undefined {

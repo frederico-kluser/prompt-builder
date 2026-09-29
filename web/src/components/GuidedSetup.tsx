@@ -10,9 +10,11 @@ import {
 import { Button } from '@/components/ui/button';
 import { ModelSelector, type ModelTuning } from './ModelSelector';
 import { AreaRow, NumRow, SwitchRow, TxtNumRow } from './formRows';
-import { SettingGroup, SettingRow } from './primitives';
+import { Banner, SettingGroup, SettingRow } from './primitives';
 import { cn } from '@/lib/utils';
 import type { OpenRouterModel, RunMode } from '../api';
+import { MIN_SCENARIOS_FOR_HOLDOUT } from '../engine/holdout';
+import { TRAINING_DEFAULT_STAGES } from '../arenaForm';
 
 /**
  * Fluxo GUIADO da Nova Run (pedido do dono: "configuração totalmente guiada").
@@ -25,6 +27,14 @@ import type { OpenRouterModel, RunMode } from '../api';
  * `SmoothTabs` faz de trilho de passos: 5 painéis estáveis (os MESMOS em todos
  * os modos — nada de painel condicional), navegação livre (voltar/avançar e
  * clique direto no trilho), pois nada aqui é obrigatório antes do envio.
+ *
+ * IMPL-106 (d) na superfície GUIADA (decisão do dono, ef07ce2: o guiado é o
+ * default e é um assistente — os campos de um passo não ficam à vista nos
+ * outros). O critério "nenhum obrigatório oculto" vira aqui "nenhum obrigatório
+ * oculto SEM pista visível": o passo com pendência ganha um ponto no TRILHO
+ * (sempre à vista, com "pendente" no nome acessível), o rodapé fixo nomeia a
+ * 1ª pendência e leva ao passo, e a Revisão lista todas com link. Contrato E2E
+ * em test/ux-nova-run-e2e.test.ts (superfície guiada).
  */
 
 /** As 5 seções da página única (IMPL-106) — mesmo vocabulário do NewRun. */
@@ -34,6 +44,10 @@ export type FormSection = 'cenarios' | 'sujeitos' | 'juizes' | 'avancado';
 export interface GuidedProblem {
   section: FormSection;
   text: string;
+  /** Passo que mostra o campo, quando não é o da seção (ver `stepOfProblem`). */
+  step?: GuidedStep;
+  /** O campo só existe na configuração completa: o link a abre. */
+  onlyComplete?: boolean;
 }
 
 export type GuidedStep = 'objetivo' | 'teste' | 'participantes' | 'limites' | 'revisao';
@@ -55,6 +69,15 @@ export const SECTION_STEP: Record<FormSection, GuidedStep> = {
   juizes: 'participantes',
   avancado: 'limites',
 };
+
+/**
+ * Passo que RESOLVE a pendência: o explícito (campo que mora num passo diferente
+ * do da sua seção — ex.: o gabarito, no Avançado da completa e em
+ * "Participantes" aqui) ou o da seção.
+ */
+export function stepOfProblem(pr: GuidedProblem): GuidedStep {
+  return pr.step ?? SECTION_STEP[pr.section];
+}
 
 /* ---------------------------------------------------------------- objetivos */
 
@@ -89,7 +112,8 @@ export const GOALS: GuidedGoal[] = [
     icon: TrendingUp,
     title: 'Treinar um prompt',
     question: 'Melhore o meu prompt automaticamente.',
-    detail: 'O prompt evolui rodada a rodada, com campeã só quando há ganho real, e termina num teste cego.',
+    // web-code#8: o teste cego (holdout) só existe com ≥ 20 cenários (piso de 10 reservados).
+    detail: 'O prompt evolui rodada a rodada, com campeã só quando há ganho real; com 20+ cenários, termina num teste cego.',
   },
 ];
 
@@ -105,8 +129,28 @@ export interface GuidedSetupProps {
   basePrompt: string;
   setBasePrompt: (v: string) => void;
   stages: number;
+  /** Nº de cenários EFETIVO (clamp 1–50 + seeds) — o que o plano descreve. */
+  plannedStages: number;
   setStages: (v: number) => void;
+  /** Cenários vindos de arquivo (pacote/seed ou etapas cruas) — web-live#14. */
+  importedCount: number;
+  /** Quantos dos importados já trazem gabarito (referência) próprio. */
+  importedRefs: number;
+  /** Etapas cruas importadas: o arquivo FIXA o total (o nº de cenários não vale). */
+  importedFixed: boolean;
+  /** O gerador vai ser chamado (ainda falta cenário para o total). */
+  precisaGerar: boolean;
+  /**
+   * Julgamento por referência efetivo (gabarito gerado por cenário). Desligado
+   * — comparar modelos, o default — o juiz ranqueia lado a lado e não há final
+   * (web-live#10), salvo nos cenários importados com referência.
+   */
+  referenceJudging: boolean;
+  /** web-live#5: aviso de poder do treino (null = suficiente). */
+  trainingPower?: { blocking: boolean; text: string } | null;
   budget: string;
+  /** Teto EFETIVO (vazio/inválido = undefined) — o plano não repete texto inválido. */
+  budgetNum?: number;
   setBudget: (v: string) => void;
   competitors: string[];
   setCompetitors: (v: string[]) => void;
@@ -116,6 +160,9 @@ export interface GuidedSetupProps {
   setDatagen: (v: string[]) => void;
   judge: string[];
   setJudge: (v: string[]) => void;
+  /** Gabarito (IMPL-048): obrigatório em teste/treino, distinto de juízes e do modelo sob teste. */
+  referenceModel: string[];
+  setReferenceModel: (v: string[]) => void;
   duelsOn: boolean;
   setDuelsOn: (v: boolean) => void;
   finalists: number;
@@ -129,6 +176,8 @@ export interface GuidedSetupProps {
   estimate: { low: number; high: number } | null;
   /** Sai para o formulário completo (mesmo estado). */
   onOpenClassic: () => void;
+  /** Já tentou iniciar: o ponto de pendência do trilho fica vermelho (como nas seções). */
+  tried?: boolean;
 }
 
 function usd(v: number): string {
@@ -199,18 +248,61 @@ function RunPlan({ p }: { p: GuidedSetupProps }) {
       ? `${competidores.slice(0, -1).join(', ')} e ${competidores.at(-1)}`
       : competidores[0] ?? '—';
 
+  const cen = (n: number) => `${n} cenário${n === 1 ? '' : 's'}`;
+  const sobreTema = tema ? `sobre “${tema.slice(0, 90)}${tema.length > 90 ? '…' : ''}”` : 'a partir do tema';
+  // web-live#14: o plano descreve o que a run VAI fazer — com cenários do
+  // arquivo o gerador cria só o que falta (ou nem é chamado).
+  // Concordância: "1 cenário vem", "2 cenários vêm".
+  const vem = (n: number) => (n === 1 ? 'vem' : 'vêm');
+  const cenarios =
+    p.importedCount > 0 && !p.precisaGerar
+      ? p.importedCount === 1
+        ? 'O cenário importado é usado como está — o gerador não é chamado.'
+        : `Os ${cen(p.importedCount)} importados são usados como estão — o gerador não é chamado.`
+      : p.importedCount > 0
+        ? `${cen(p.importedCount)} ${vem(p.importedCount)} do arquivo; o gerador ${gerador} cria mais ${p.plannedStages - p.importedCount} ${sobreTema}.`
+        : `O gerador ${gerador} cria ${cen(p.plannedStages)} ${sobreTema}.`;
+  // web-live#10: comparando modelos (default) NÃO há gabarito — o juiz ranqueia
+  // lado a lado e não há final. Só cenário importado com referência tem régua.
+  const temGabarito = p.referenceJudging || p.importedRefs > 0;
+  const quemGabarita = p.referenceModel[0]
+    ? labelOf(p.models, p.referenceModel[0])
+    : juizes[0]
+      ? `${juizes[0]} (o 1º juiz)`
+      : null;
+  const gabaritoPasso = !p.referenceJudging
+    ? null
+    : p.importedRefs >= p.plannedStages
+      ? 'Todos os cenários já trazem o gabarito — a resposta ideal — do arquivo.'
+      : quemGabarita
+        ? `O modelo ${quemGabarita} escreve o gabarito — a resposta ideal — de cada cenário${p.importedRefs > 0 ? ` que ainda não o traz (${p.importedRefs} já ${vem(p.importedRefs)} do arquivo)` : ''}.`
+        : null;
+  const juiz = `O juiz ${juizes.join(' + ') || '—'}`;
+  const julgamento = p.referenceJudging
+    ? `${juiz} compara cada resposta com o gabarito e dá um veredito: resolve, parcial ou não resolve.`
+    : p.importedRefs > 0
+      ? `${juiz} compara com o gabarito ${p.importedRefs === 1 ? 'no cenário importado que o traz' : `nos ${cen(p.importedRefs)} importados que o trazem`} (resolve, parcial ou não resolve); nos demais, compara as respostas lado a lado e as ranqueia.`
+      : `${juiz} compara as respostas lado a lado — sem gabarito — e as ranqueia em cada cenário.`;
+  const final = !temGabarito
+    ? 'Sem duelo final: os duelos exigem gabarito — o vencedor sai do ranking do juiz.'
+    : p.duelsOn && p.finalists > 0
+      ? `No fim, os ${p.finalists} melhores duelam entre si em todos os cenários${p.referenceJudging ? '' : ' com gabarito'} — o duelo final confirma o vencedor.`
+      : 'Sem duelo final: o vencedor sai do placar de vereditos.';
   const passos = [
-    `O gerador ${gerador} cria ${p.stages} cenário${p.stages > 1 ? 's' : ''} ${tema ? `sobre “${tema.slice(0, 90)}${tema.length > 90 ? '…' : ''}”` : 'a partir do tema'}.`,
+    cenarios,
+    gabaritoPasso,
     isCompare
       ? `Os modelos ${lista} respondem a todos os cenários, nas mesmas condições.`
-      : `O modelo ${lista} responde a cada cenário ${p.mode === 'training' ? 'com o prompt que evolui a cada rodada' : 'com cada versão do prompt'}.`,
-    `O juiz ${juizes.join(' + ') || '—'} compara cada resposta com o gabarito e dá um veredito: resolve, parcial ou não resolve.`,
-    p.duelsOn && p.finalists > 0
-      ? `No fim, os ${p.finalists} melhores duelam entre si em todos os cenários — o duelo final confirma o vencedor.`
-      : 'Sem duelo final: o vencedor sai do placar de vereditos.',
+      : `O modelo ${lista} responde a cada cenário ${p.mode === 'training' ? 'com o prompt atual e as variantes que o desafiam, rodada a rodada' : 'com cada versão do prompt'}.`,
+    julgamento,
+    final,
     p.mode === 'training'
-      ? 'No treino, uma variante só vira campeã se superar a atual com margem real; a sessão termina num teste cego (holdout).'
+      ? p.plannedStages >= MIN_SCENARIOS_FOR_HOLDOUT
+        ? 'No treino, uma variante só vira campeã se superar a atual com margem e passar no teste de significância; a sessão termina num teste cego (holdout).'
+        : `No treino, uma variante só vira campeã se superar a atual com margem e passar no teste de significância. Com menos de ${MIN_SCENARIOS_FOR_HOLDOUT} cenários não há teste cego (holdout): o campeão sai só com confirmação fraca.`
       : null,
+    // web-live#5: poucos cenários = o teste de significância não deixa promover.
+    p.mode === 'training' && p.trainingPower ? p.trainingPower.text : null,
   ].filter(Boolean) as string[];
 
   return (
@@ -226,9 +318,12 @@ function RunPlan({ p }: { p: GuidedSetupProps }) {
         ))}
       </ol>
       <p className="border-t border-border pt-3 text-[13px] text-muted-foreground">
-        {p.budget.trim()
-          ? `A run para sozinha antes de passar de ${p.budget.trim()} US$.`
-          : 'Sem teto de gasto definido — recomenda-se colocar um.'}{' '}
+        {/* web-live#14: só o teto VÁLIDO vira promessa; o inválido é pendência. */}
+        {p.budgetNum !== undefined
+          ? `A run para sozinha antes de passar de ${usd(p.budgetNum)}.`
+          : p.budget.trim()
+            ? 'Teto de gasto inválido — corrija no passo Limites.'
+            : 'Sem teto de gasto definido — recomenda-se colocar um.'}{' '}
         {p.estimate ? `Estimativa desta configuração: ${usd(p.estimate.low)} – ${usd(p.estimate.high)}.` : ''}
       </p>
     </div>
@@ -244,7 +339,7 @@ export function GuidedSetup(p: GuidedSetupProps) {
   const pendentes = useMemo(() => {
     const por = new Map<GuidedStep, GuidedProblem[]>();
     for (const pr of p.problems) {
-      const s = SECTION_STEP[pr.section];
+      const s = stepOfProblem(pr);
       por.set(s, [...(por.get(s) ?? []), pr]);
     }
     return por;
@@ -252,6 +347,11 @@ export function GuidedSetup(p: GuidedSetupProps) {
 
   function resolvido(step: GuidedStep): boolean {
     return step !== 'revisao' && step !== 'objetivo' && !(pendentes.get(step)?.length);
+  }
+
+  /** Passo com campo obrigatório pendente (a Revisão só lista, não pisca). */
+  function pendente(step: GuidedStep): boolean {
+    return step !== 'revisao' && !!pendentes.get(step)?.length;
   }
 
   function go(delta: number) {
@@ -269,13 +369,30 @@ export function GuidedSetup(p: GuidedSetupProps) {
   return (
     <div className="mt-5">
       <SmoothTabs value={p.step} onValueChange={(v) => p.onStepChange(v as GuidedStep)}>
-        <SmoothTabsList ariaLabel="Passos da configuração guiada" className="w-fit max-w-full overflow-x-auto">
+        {/* left#16: a 390 px os 5 passos não cabem numa linha — o trilho media
+            548 px e ROLAVA, escondendo "Limites"/"Revisão" e a pista de
+            pendência deles atrás da rolagem horizontal. Em tela estreita o
+            trilho QUEBRA em linhas, como os filtros do Histórico (web-live#13):
+            tudo à vista, sem rolagem escondida. O `overflow-x-auto` fica só
+            como rede de segurança para rótulo maior que a linha. */}
+        <SmoothTabsList ariaLabel="Passos da configuração guiada" className="w-fit max-w-full flex-wrap overflow-x-auto">
           {GUIDED_STEPS.map((s, i) => (
             <SmoothTabsTab key={s} value={s} className="px-3 py-1.5 text-[13px]">
               <span className="flex items-center gap-1.5 whitespace-nowrap">
                 <span className="font-mono text-[11px] tabular opacity-70">{i + 1}</span>
                 {STEP_LABEL[s]}
                 {resolvido(s) && <Check className="size-3.5 text-resolve" aria-hidden="true" />}
+                {pendente(s) && (
+                  <>
+                    {/* Pista VISÍVEL de obrigatório pendente neste passo (IMPL-106 d). */}
+                    <span
+                      data-pendente=""
+                      aria-hidden="true"
+                      className={cn('size-1.5 rounded-full', p.tried ? 'bg-destructive' : 'bg-muted-foreground/60')}
+                    />
+                    <span className="sr-only">(pendente)</span>
+                  </>
+                )}
               </span>
             </SmoothTabsTab>
           ))}
@@ -361,7 +478,9 @@ export function GuidedSetup(p: GuidedSetupProps) {
                     hint={isCompare ? 'Selecione 2 ou mais.' : 'Selecione 1.'}
                     value={isCompare ? p.competitors : p.contestantModel}
                     onChange={(ids) => (isCompare ? p.setCompetitors(ids) : p.setContestantModel(ids))}
-                    excludeIds={isCompare ? [...p.datagen, ...p.judge] : undefined}
+                    excludeIds={
+                      isCompare ? [...p.datagen, ...p.judge, ...p.referenceModel] : [...p.judge, ...p.referenceModel]
+                    }
                     models={p.models}
                     loading={p.modelsLoading}
                     tuning={p.tuning}
@@ -389,7 +508,11 @@ export function GuidedSetup(p: GuidedSetupProps) {
                 <SettingRow
                   wide
                   label="Juízes"
-                  sub="Comparam cada resposta com o gabarito e dão o veredito. Com dois ou mais, a nota vira consenso."
+                  sub={
+                    p.referenceJudging
+                      ? 'Comparam cada resposta com o gabarito e dão o veredito. Com dois ou mais, a nota vira consenso.'
+                      : 'Sem gabarito (o padrão ao comparar modelos), comparam as respostas lado a lado e as ranqueiam. Com dois ou mais, a nota vira consenso.'
+                  }
                 >
                   <ModelSelector
                     multi
@@ -397,7 +520,11 @@ export function GuidedSetup(p: GuidedSetupProps) {
                     hint="Selecione 1 ou mais."
                     value={p.judge}
                     onChange={p.setJudge}
-                    excludeIds={p.datagen}
+                    excludeIds={[
+                      ...p.datagen,
+                      ...(isCompare ? p.competitors : p.contestantModel),
+                      ...p.referenceModel,
+                    ]}
                     models={p.models}
                     loading={p.modelsLoading}
                     tuning={p.tuning}
@@ -405,6 +532,35 @@ export function GuidedSetup(p: GuidedSetupProps) {
                     tuningFields={['effort']}
                   />
                 </SettingRow>
+                {/* Gabarito (IMPL-048): obrigatório em teste/treino e distinto de
+                    juízes e do modelo sob teste — por isso mora AQUI, à vista.
+                    No compare é opcional (vazio = 1º juiz) e só aparece se já
+                    vier escolhido (import/completa), para poder ser corrigido. */}
+                {(!isCompare || p.referenceModel.length > 0) && (
+                  <SettingRow
+                    wide
+                    label="Gabarito"
+                    sub={
+                      isCompare
+                        ? 'Escreve a resposta ideal de cada cenário. Opcional aqui (vazio = o primeiro juiz), mas nunca juiz nem competidor.'
+                        : 'Escreve a resposta ideal de cada cenário — a régua do juiz. Obrigatório, e diferente dos juízes e do modelo sob teste.'
+                    }
+                  >
+                    <ModelSelector
+                      multi={false}
+                      title="Gabarito"
+                      hint="Selecione 1."
+                      value={p.referenceModel}
+                      onChange={p.setReferenceModel}
+                      excludeIds={[...p.judge, ...(isCompare ? p.competitors : p.contestantModel)]}
+                      models={p.models}
+                      loading={p.modelsLoading}
+                      tuning={p.tuning}
+                      onTuningChange={p.onTuningChange}
+                      tuningFields={['effort']}
+                    />
+                  </SettingRow>
+                )}
               </SettingGroup>
             </div>
           </SmoothTabsPanel>
@@ -414,14 +570,37 @@ export function GuidedSetup(p: GuidedSetupProps) {
             <div className="flex flex-col gap-4">
               <h2 className="font-heading text-base font-medium">Quanto medir e até quanto gastar?</h2>
               <SettingGroup>
-                <NumRow
-                  label="Cenários"
-                  sub="Mais cenários dão mais confiança no resultado e mais chamadas. Cinco é um bom começo."
-                  value={p.stages}
-                  onChange={p.setStages}
-                  min={1}
-                  max={50}
-                />
+                {/* web-live#14: com etapas cruas importadas o arquivo FIXA o
+                    total — um campo que não age não é oferecido. */}
+                {p.importedFixed ? (
+                  <SettingRow
+                    label="Cenários"
+                    sub={`${p.importedCount === 1 ? '1 cenário importado' : `${p.importedCount} cenários importados`} — o arquivo fixa o total (o gerador não é chamado). Para mudar, importe outro arquivo ou remova-os na configuração completa.`}
+                  />
+                ) : (
+                  <NumRow
+                    label="Cenários"
+                    sub={
+                      p.importedCount > 0
+                        ? p.precisaGerar
+                          ? `${p.importedCount} ${p.importedCount === 1 ? 'vem' : 'vêm'} do arquivo; o gerador cria mais ${p.plannedStages - p.importedCount} para completar ${p.plannedStages}.`
+                          : `${p.importedCount === 1 ? 'O cenário do arquivo já cobre' : `Os ${p.importedCount} cenários do arquivo já cobrem`} o total — nada a gerar.`
+                        : p.mode === 'training'
+                          ? `No treino, poucos cenários impedem a promoção: a variante precisa passar num teste de significância. O padrão é ${TRAINING_DEFAULT_STAGES}; mais cenários, mais confiança e mais chamadas.`
+                          : 'Mais cenários dão mais confiança no resultado e mais chamadas. Cinco é um bom começo.'
+                    }
+                    value={p.stages}
+                    onChange={p.setStages}
+                    min={1}
+                    max={50}
+                  />
+                )}
+                {/* web-live#5: aviso de poder ao lado do campo que o resolve. */}
+                {p.mode === 'training' && p.trainingPower && (
+                  <SettingRow wide>
+                    <Banner tone="warn">{p.trainingPower.text}</Banner>
+                  </SettingRow>
+                )}
                 <TxtNumRow
                   label="Teto de gasto (US$)"
                   sub="A run para sozinha antes de passar deste valor. Vazio = sem teto."
@@ -431,20 +610,32 @@ export function GuidedSetup(p: GuidedSetupProps) {
                   step={0.5}
                   placeholder="sem teto"
                 />
-                <SwitchRow
-                  label="Duelo final entre os melhores"
-                  sub="Depois de julgar todos os cenários, os melhores duelam entre si em todos eles — o duelo confirma o vencedor."
-                  checked={p.duelsOn}
-                  onChange={p.setDuelsOn}
-                />
-                {p.duelsOn && (
-                  <NumRow
-                    label="Finalistas"
-                    sub="Quantos vão ao duelo final."
-                    value={p.finalists}
-                    onChange={p.setFinalists}
-                    min={0}
-                    max={12}
+                {/* web-live#10: o duelo final só roda em cenário com gabarito.
+                    Comparando modelos (sem referência importada) não há final —
+                    o switch e o nº de finalistas não agiriam, então saem. */}
+                {p.referenceJudging || p.importedRefs > 0 ? (
+                  <>
+                    <SwitchRow
+                      label="Duelo final entre os melhores"
+                      sub="Depois de julgar todos os cenários, os melhores duelam entre si em todos eles — o duelo confirma o vencedor."
+                      checked={p.duelsOn}
+                      onChange={p.setDuelsOn}
+                    />
+                    {p.duelsOn && (
+                      <NumRow
+                        label="Finalistas"
+                        sub="Quantos vão ao duelo final."
+                        value={p.finalists}
+                        onChange={p.setFinalists}
+                        min={0}
+                        max={12}
+                      />
+                    )}
+                  </>
+                ) : (
+                  <SettingRow
+                    label="Duelo final"
+                    sub="Indisponível aqui: sem gabarito (o padrão ao comparar modelos) o juiz ranqueia as respostas lado a lado e não há duelo final. Cenários importados com referência (ou comparar configurações, na configuração completa) trazem a final."
                   />
                 )}
               </SettingGroup>
@@ -466,9 +657,10 @@ export function GuidedSetup(p: GuidedSetupProps) {
                         <button
                           type="button"
                           className="text-left text-[13px] text-primary underline-offset-4 hover:underline"
-                          onClick={() => p.onStepChange(SECTION_STEP[pr.section])}
+                          onClick={() => (pr.onlyComplete ? p.onOpenClassic() : p.onStepChange(stepOfProblem(pr)))}
                         >
                           {pr.text}
+                          {pr.onlyComplete && ' — na configuração completa'}
                         </button>
                       </li>
                     ))}

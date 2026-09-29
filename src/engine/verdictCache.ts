@@ -42,23 +42,96 @@ export interface VerdictCacheKeyFields {
   promptText: string;
 }
 
+// ---------------------------------------------------------------------------
+// Blindagem do juiz × cache (IMPL-006 × IMPL-080)
+// ---------------------------------------------------------------------------
+// Todo prompt de juiz/duelo carrega um MARCADOR (`⟦RÓTULO·código⟧`) e um
+// CANÁRIO sorteados POR VEREDITO (src/engine/judgeGuard.ts) — o juiz devolve o
+// canário e o parse estrito recusa resposta sem ele. Sem tratar isso, (a) a
+// chave pelo texto completo NUNCA se repete (0% de acerto: o cache ligado não
+// economizaria nada) e (b) um replay traria o canário ANTIGO e viraria saída
+// inválida. Aqui os dois códigos saem da chave (substituídos por marcadores
+// fixos) e, no replay, o texto guardado é RE-AMARRADO aos códigos da chamada
+// atual. A semântica fica idêntica à da chamada original: resposta que tinha o
+// canário certo continua válida; resposta forjada (sem canário) continua
+// inválida — a blindagem não afrouxa.
+
+/** Códigos da blindagem do juiz presentes num prompt (ausentes fora de juiz/duelo). */
+export interface GuardTokens {
+  nonce?: string;
+  canary?: string;
+}
+
+const NONCE_PLACEHOLDER = '\u0001NONCE\u0001';
+const CANARY_PLACEHOLDER = '\u0001CANARIO\u0001';
+
+/**
+ * Lê o marcador e o canário do bloco INSTRUÇÕES (a ÚLTIMA ocorrência — o bloco
+ * real vem depois dos dados, e um candidato pode forjar a linha dentro do dele).
+ * Mesmo formato de `judgeGuard.instructionsBlock`.
+ */
+export function guardTokensOf(promptText: string): GuardTokens {
+  const ultima = (re: RegExp): string | undefined => {
+    const all = [...promptText.matchAll(re)];
+    return all.length ? all[all.length - 1][1] : undefined;
+  };
+  const canary = ultima(/CANÁRIO deste veredito: ([a-z0-9]+)\b/g);
+  const nonce = ultima(/Só os marcadores com o código ([a-z0-9]+) delimitam blocos/g);
+  return { ...(nonce ? { nonce } : {}), ...(canary ? { canary } : {}) };
+}
+
+function replaceAllLiteral(text: string, find: string, repl: string): string {
+  return find ? text.split(find).join(repl) : text;
+}
+
+/**
+ * Texto do prompt SEM os códigos sorteados da blindagem (marcador/canário
+ * viram marcadores fixos). Os códigos têm 62 bits e nunca colidem com o dado
+ * (`newJudgeGuard` sorteia de novo se colidir), então a troca literal é exata.
+ */
+export function normalizeGuardTokens(promptText: string): string {
+  const { nonce, canary } = guardTokensOf(promptText);
+  let out = promptText;
+  if (canary) out = replaceAllLiteral(out, canary, CANARY_PLACEHOLDER);
+  if (nonce) out = replaceAllLiteral(out, nonce, NONCE_PLACEHOLDER);
+  return out;
+}
+
+/**
+ * Re-amarra um texto guardado (resposta do juiz) aos códigos da chamada ATUAL:
+ * o canário/marcador antigos viram os novos. Sem códigos de um dos lados, o
+ * texto volta intacto (papel sem blindagem, ou resposta que não os citava).
+ */
+export function rebindGuardTokens(text: string, stored: GuardTokens | undefined, current: GuardTokens): string {
+  let out = text;
+  if (stored?.canary && current.canary && stored.canary !== current.canary) {
+    out = replaceAllLiteral(out, stored.canary, current.canary);
+  }
+  if (stored?.nonce && current.nonce && stored.nonce !== current.nonce) {
+    out = replaceAllLiteral(out, stored.nonce, current.nonce);
+  }
+  return out;
+}
+
 /**
  * Chave do cache: SHA-256 do JSON canônico dos campos da requisição.
  * `apiKey`/credenciais entram de PROPÓSITO nenhum (R-08:REC-3): a chave
  * identifica a PERGUNTA feita ao modelo, não a conta que pagou. A identidade
  * por conteúdo usa o hash do texto completo (guardado só como hash — o prompt
- * pode conter dado pessoal e não fica em claro em mais lado nenhum).
+ * pode conter dado pessoal e não fica em claro em mais lado nenhum), SEM os
+ * códigos sorteados da blindagem do juiz (ver {@link normalizeGuardTokens}):
+ * a mesma pergunta ao mesmo juiz é a mesma chave em qualquer iteração.
  */
 export function verdictCacheKey(fields: VerdictCacheKeyFields): string {
   return sha256Hex(
     canonicalJson({
-      v: 1,
+      v: 2,
       modelId: fields.modelId,
       effort: fields.effort ?? null,
       temperature: fields.temperature ?? null,
       maxTokens: fields.maxTokens ?? null,
       contractHash: fields.contractHash,
-      promptHash: sha256Hex(fields.promptText),
+      promptHash: sha256Hex(normalizeGuardTokens(fields.promptText)),
     }),
   );
 }
@@ -113,6 +186,11 @@ export interface VerdictCacheEntry {
   retest: boolean;
   /** Já re-testada nesta sessão (não re-testa duas vezes). */
   retested: boolean;
+  /**
+   * Códigos da blindagem do juiz na chamada que GEROU o texto (marcador e
+   * canário daquele veredito). O replay troca-os pelos da chamada atual.
+   */
+  guard?: GuardTokens;
 }
 
 export type NewVerdictCacheEntry = Pick<
@@ -190,9 +268,12 @@ export class VerdictCache {
 
   /**
    * Lookup EXATO. Conta `cache_total`/`cache_hits` e pede re-teste amostral na
-   * primeira vez que um item sorteado volta a ser usado.
+   * primeira vez que um item sorteado volta a ser usado. Com `promptText` (o
+   * prompt da chamada ATUAL), o texto devolvido já vem re-amarrado ao
+   * marcador/canário DESTA chamada ({@link rebindGuardTokens}) — o que fica
+   * guardado não muda.
    */
-  lookup(key: string): VerdictCacheLookup | undefined {
+  lookup(key: string, promptText?: string): VerdictCacheLookup | undefined {
     this.cacheTotal += 1;
     const entry = this.entries.get(key);
     if (!entry) return undefined;
@@ -202,19 +283,23 @@ export class VerdictCache {
     }
     this.cacheHits += 1;
     const retest = entry.retest && !entry.retested;
-    return { entry, retest };
+    if (promptText === undefined) return { entry, retest };
+    const text = rebindGuardTokens(entry.text, entry.guard, guardTokensOf(promptText));
+    return { entry: text === entry.text ? entry : { ...entry, text }, retest };
   }
 
   /**
    * Guarda a resposta (carry entre iterações). A entrada nasce com o sorteio
    * do re-teste amostral da sessão (~{@link retestRate} dos itens).
    */
-  store(key: string, entry: NewVerdictCacheEntry): VerdictCacheEntry {
+  store(key: string, entry: NewVerdictCacheEntry, promptText?: string): VerdictCacheEntry {
+    const guard = promptText === undefined ? undefined : guardTokensOf(promptText);
     const full: VerdictCacheEntry = {
       ...entry,
       storedAt: this.now(),
       retest: this.sample() < this.retestRate,
       retested: false,
+      ...(guard && (guard.nonce || guard.canary) ? { guard } : {}),
     };
     this.entries.set(key, full);
     return full;
@@ -229,16 +314,19 @@ export class VerdictCache {
   noteRetest(
     key: string,
     fresh: NewVerdictCacheEntry,
+    promptText?: string,
   ): { disagreement: boolean; invalidated: boolean } {
     this.retests += 1;
     const anterior = this.entries.get(key);
     const disagreement = anterior ? verdictLabelOf(anterior.text) !== verdictLabelOf(fresh.text) : false;
     if (disagreement) this.disagreements += 1;
+    const guard = promptText === undefined ? undefined : guardTokensOf(promptText);
     this.entries.set(key, {
       ...fresh,
       storedAt: this.now(),
       retest: false,
       retested: true,
+      ...(guard && (guard.nonce || guard.canary) ? { guard } : {}),
     });
     const invalidated = this.disagreements / Math.max(1, this.retests) > this.disagreementLimit;
     if (invalidated) this.invalidateAll();

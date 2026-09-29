@@ -15,7 +15,7 @@ Nada foi gasto.
 O nível pedido não existe naquele modelo. Confira antes:
 
 ```bash
-prompt-builder models show <id> --json | jq .model.thinkLevels
+prompt-builder models show <id> --json | jq .data.model.thinkLevels
 ```
 
 `accepted` lista o que pode ser pedido; `fit` mostra o que vai no fio para cada
@@ -46,6 +46,52 @@ o que é só **aviso** (CNPJ, telefone fixo, CEP, e-mail funcional, nome) segue
 
 `prompt-builder key check` mostra uso, limite e saldo. O pré-voo recusa antes de
 gastar quando o saldo não cobre nem o piso da estimativa.
+
+O crédito também pode acabar NO MEIO da run: ela para com código `5`
+(`credit.insufficient`) e o record guarda a causa em `errorKind: "no_credit"` /
+`errorHttpStatus`. Key revogada no meio da run = código `4` (`auth.failed`,
+`errorKind: "auth"`). Nenhum retry nem outro modelo conserta essas duas — não
+repita a run antes de resolver a key/o saldo.
+
+## Headers de atribuição (dado enviado ao OpenRouter)
+
+Toda chamada ao OpenRouter leva `HTTP-Referer` e `X-Title` — atribuição do app,
+um DADO partilhado com terceiro. `PROMPT_BUILDER_NO_ATTRIBUTION=on` suprime os
+dois no fio (chat, `/models`, `/key`, `/generation`); na SPA, a mesma escolha é
+a preferência `pb.noAttribution` do navegador. `prompt-builder telemetry` mostra
+o estado; a telemetria em si é opt-in (`PROMPT_BUILDER_TELEMETRY=on`) e fica
+DESLIGADA por padrão, inclusive em CI/agente.
+
+## Custo `pendente` / `costLedger.reconciliation`
+
+Chamada cortada (timeout/abort) ou sem `usage` na resposta fica PENDENTE: a
+reserva é mantida (nunca "custou zero"). No fim da run o CLI concilia pelo id de
+geração (`GET /generation`): troca a reserva pelo valor cobrado (`settled`) ou,
+com 404 persistente, lança a reserva inteira como gasto conservador
+(`notFound`). `callLog` no record lista cada chamada com o id `gen-…`, o
+provedor e o estado. Cancelar (Ctrl-C/`runs cancel`) NÃO espera a conciliação:
+as pendentes ficam em `costLedger.pendingEntries` — inclusive a chamada cortada
+ANTES de qualquer resposta (`generationId: ""`, sem id para conciliar): o
+limite superior fica em `pendingUsd`, fora de `totalCostUsd`; uma conciliação
+posterior a lança como conservadora.
+
+## BYOK / `upstream_inference_cost` / `upstreamCostUsd`
+
+O OpenRouter devolve `cost_details.upstream_inference_cost` em TODA chamada. Sem
+BYOK (`is_byok: false`) ele é o custo do provedor **já contido** em `usage.cost`:
+somá-lo dobra o gasto. Só com `is_byok: true` (key do provedor cadastrada na
+conta OpenRouter) ele é cobrado à parte, na key do provedor — aí `usage.cost` é
+só a taxa do OpenRouter. O gasto BYOK medido fica em `costLedger.byok`
+(`calls`, `upstreamUsd`, `upstreamUnknownCalls`), FORA de `totalCostUsd` e do
+orçamento. `upstreamCostUsd` em records antigos é LEGADO de semântica
+desconhecida (somava também chamadas não-BYOK): nunca some ao gasto.
+
+## Proxy que não entende streaming
+
+Todo papel (juiz, duelo, gabarito, datagen, reescritor) vai em streaming: em
+abort o provedor para de gerar em vez de cobrar a resposta inteira. Um proxy
+que devolve o JSON inteiro funciona igual; se ele quebrar com `stream: true`,
+`OPENROUTER_STREAM_TRANSPORT=0` volta os papéis de avaliação ao JSON.
 
 ## `status: "blocked"` / `OpenRouter bloqueou a requisicao` (HTTP 403)
 
@@ -106,6 +152,11 @@ etapa e o motivo vai em `verdictErrorByContestant`. Leia
 
 Rode com `--output-format ndjson` e procure `progress` com `phase: "gabarito"`.
 
+**Modo agente, `run.infra_invalid` (código 6):** mais de 10% das execuções ficaram
+sem veredito por infraestrutura (provedor/rede/sandbox), mesmo após as 2
+retentativas cegas — a run mede a infraestrutura, não os agentes. Veja `agentInfra`
+em `agents show <runId> --json`, rode `agents doctor --deep` e repita.
+
 ## `config.unknown_model` — modelo fora do catálogo (código 3)
 
 O id não existe no catálogo carregado — provavelmente um erro de digitação ou um
@@ -130,7 +181,9 @@ variável (`openrouter/auto`) não têm. Use o id base ou `--budget none`.
 
 O teto está dentro da faixa estimada: a run pode parar no meio (código `7`).
 Fora de um terminal isso exige `--yes` — ou suba o `--budget` acima do teto
-estimado (`error.details.estimateHighUsd`).
+estimado (`error.details.estimateHighUsd`). Com `error.details.belowFloor:
+true` o teto está ABAIXO do piso e você já passou `--force`: fora de um
+terminal a run abaixo do piso exige `--force --yes` (ou suba o `--budget`).
 
 ## `run.locked` (código 2)
 
@@ -181,6 +234,30 @@ avisa no stderr. `models list` funciona offline — e sem key: o catálogo é
 público, e sem key o CLI usa o cache mais recente que houver em disco; runs,
 não.
 
+## `config.exec_not_approved` / `config.exec_hash_changed` (código 3)
+
+`arena-agent-config` **executa comandos nesta máquina** (`setup[]`, `verify[]`,
+`testsDir`; em `agents task validate`, também a `solution`) — e config escrito por
+LLM é conteúdo não confiável. Sem aprovação explícita nada roda: revise o arquivo e
+rode de novo com `--allow-exec-config` (no MCP, `allowExecConfig: true` em
+`run_agent_benchmark`/`start_run`). O SHA-256 do conteúdo (texto do arquivo +
+manifesto dos `testsDir`) fica pinado em `<data-dir>/exec-config-approvals.json` e o
+**mesmo** conteúdo passa sem a flag depois. `config.exec_hash_changed` = o arquivo
+(ou um teste do `testsDir`) mudou desde a aprovação: revise o que mudou e aprove de
+novo. O `--dry-run` recusa com o **mesmo** código (e nunca grava o pin).
+
+## `config.agent_requires_agents_run` (código 3)
+
+Uma RunConfig **crua** com `agent` ou `agentTask` (os `setup[]`/`verify[]` executam
+nesta máquina) foi entregue a um caminho **sem** o portão de execução: o `--config`
+de `compare`/`vary`/`train`, as tools MCP `start_run`/`run_benchmark`/`train_prompt`
+com RunConfig crua, ou `POST /v1/benchmark/{runs,sessions}` (HTTP 400, mesmo `code`).
+Nada roda. Modo agente entra só por `agents run --config <arena-agent-config@1>`
+(revisão + SHA-256), pelo MCP com `arena-agent-config@1` (`run_agent_benchmark`/
+`start_run`) ou por `POST /v1/agents/runs` (token + isolamento). `estimate` e
+`estimate_cost` não executam nada e continuam aceitando a config. O `testsDir` de uma
+RunConfig crua também nunca é caminho de host: absoluto ou com `../` é recusado.
+
 ## Modo container — `docker: comando não encontrado` / daemon indisponível
 
 Quando `isolation.kind` é `"container"`, o run precisa do Docker **CLI** no PATH e de um
@@ -202,7 +279,8 @@ Docker Engine no Linux). Se a rota existe mas o modelo não responde, veja o log
 pelo proxy; `502` = o HOST não alcança o provedor (rede/`OPENROUTER_BASE_URL`). O `pi`
 esgota as retentativas e sai 0 — o prompt-builder marca a execução como **erro de
 infraestrutura** (`stopReason: "error"` + `execution.infraError`) e põe a dica no
-`stderr.log`. A repetição fica **sem veredito — fora do placar e das médias, nunca `nao`**
+`stderr.log`. A execução é refeita às cegas até 2×; persistindo, a repetição fica **sem
+veredito — fora do placar e das médias, nunca `nao`**
 (exceto se o oráculo já for conclusivo: passou 100% ou violou `forbiddenPaths`). Um
 processo que **morre** sem erro do provedor continua `error` → `nao`.
 `PROMPT_BUILDER_UNSAFE_CONTAINER_NETWORK=bridge` **não** conserta a rota do modelo (ela é

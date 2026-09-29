@@ -328,6 +328,34 @@ describe('IMPL-024 — superfície HTTP (rotas + Host/Origin + bind)', () => {
 describe('IMPL-024 — entrypoint real do servidor (processo tsx)', () => {
   const { cmd: SRV_CMD, entry: SERVER } = nodeOrTsx(path.join(ROOT, 'src', 'server.ts'));
 
+  /**
+   * Desliga o servidor e SÓ depois apaga a sala: o shutdown gracioso escreve os
+   * records terminais depois do SIGTERM, e o rmSync corria com o filho ainda a
+   * gravar (ENOTEMPTY intermitente sob carga — a asserção passava, o cleanup
+   * derrubava o teste).
+   */
+  async function desligarServidor(child: ReturnType<typeof spawn>, home: string): Promise<void> {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM');
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 5_000);
+        child.once('exit', () => {
+          clearTimeout(t);
+          resolve();
+        });
+      });
+    }
+    for (let tentativa = 0; ; tentativa += 1) {
+      try {
+        rmSync(home, { recursive: true, force: true });
+        return;
+      } catch (err) {
+        if (tentativa >= 4) throw err;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+  }
+
   it('sem HOST: sobe em 127.0.0.1 (não em todas as interfaces) e aplica a guarda de Host', async () => {
     const home = mkdtempSync(path.join(tmpdir(), 'pb-impl024-srv-'));
     const child = spawn(TSX, [SERVER], {
@@ -364,8 +392,7 @@ describe('IMPL-024 — entrypoint real do servidor (processo tsx)', () => {
       expect((await rawRequest(porta, '/health')).status).toBe(200);
       expect((await rawRequest(porta, '/health', { headers: { host: 'evil.com' } })).status).toBe(400);
     } finally {
-      child.kill('SIGTERM');
-      rmSync(home, { recursive: true, force: true });
+      await desligarServidor(child, home);
     }
   }, 30_000);
 
@@ -402,8 +429,7 @@ describe('IMPL-024 — entrypoint real do servidor (processo tsx)', () => {
       expect(linha).toMatch(/\(bind 127\.0\.0\.1\)/u);
       expect(stderr).toMatch(/HOST='meu-container\.local' ignorado/u);
     } finally {
-      child.kill('SIGTERM');
-      rmSync(home, { recursive: true, force: true });
+      await desligarServidor(child, home);
     }
   }, 30_000);
 
@@ -562,10 +588,15 @@ describe('IMPL-024 — MCP (get_result/read_docs/get_agent_dossier) e CLI docs',
     },
   );
 
-  it('get_result com id válido inexistente continua "não encontrado" (não é erro)', async () => {
+  // IMPL-086: "não encontrado" é RECUSA — isError com mensagem acionável (antes
+  // saía como sucesso `{error}` e o agente seguia como se tivesse lido algo).
+  it('get_result com id válido inexistente é isError "não encontrada" (sem caminho absoluto)', async () => {
     const r = await callTool('get_result', { id: randomUUID() });
-    expect(r?.isError).toBeUndefined();
-    expect(JSON.parse(r!.content[0].text)).toEqual({ error: 'não encontrado' });
+    expect(r?.isError).toBe(true);
+    const out = JSON.parse(r!.content[0].text) as Record<string, unknown>;
+    expect(out).toMatchObject({ ok: false, code: 'not_found' });
+    expect(String(out.error)).toMatch(/não encontrada/u);
+    expect(r!.content[0].text).not.toMatch(ABS_PATH_RE);
   });
 
   it('get_agent_dossier com runId malicioso é rejeitado', async () => {

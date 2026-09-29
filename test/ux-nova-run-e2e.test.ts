@@ -16,7 +16,9 @@
 //      de aba (a validação deixou de ser atrelada a abas);
 //  IMPL-107 (a) virtualização com 459 itens: contagem de nós DOM estável;
 //  IMPL-107 (b) teclado no padrão ARIA combobox: setas movem o
-//      aria-activedescendant, Enter seleciona, Esc fecha;
+//      aria-activedescendant, Enter seleciona, Esc fecha — e o axe-core
+//      (devDependency) roda no popup aberto: zero violação `aria-*`
+//      (wcag2a/wcag2aa), antes e depois de as setas moverem o item ativo;
 //  IMPL-107 (c)+(e) ordenação default (popularidade semanal) ≠ newest e
 //      trocável na UI; "mostrando X de Y" reflete o total filtrado; preço
 //      "-1" nunca aparece como número negativo.
@@ -27,18 +29,20 @@
 // como superfície "Completa" num toggle, com o MESMO estado e o MESMO rodapé
 // fixo. Os contratos acima medem a completa; o describe final cobre o guiado.
 //
-// Sobre o "axe sem violação de aria" do IMPL-107 (b): não há axe-core no
-// projeto (adicionar dependência está fora do lote) — a conformidade de
-// estrutura ARIA (combobox/listbox/aria-activedescendant/aria-selected) é
-// assertada em test/ux-nova-run.test.ts e reconfirmada aqui pelos atributos
-// reais do DOM.
+// A superfície GUIADA (default) tem os MESMOS gates (b) e (c) — medidos em
+// todos os passos e nos 3 modos — e o (d) na forma que cabe num assistente
+// (decisão do dono, ef07ce2): nenhum obrigatório oculto SEM pista visível —
+// ponto de pendência no trilho (sempre à vista), 1ª pendência no rodapé fixo
+// com link para o passo.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -83,14 +87,63 @@ if (!alvo) {
   );
 }
 
+/* ------------------------------------------------------------------ axe */
+
+/**
+ * axe-core (devDependency — IMPL-107 (b)): o build minificado é injetado na
+ * página. Ausente = `npm install` não rodou desde que a dependência entrou:
+ * o gate FALHA com a instrução (nunca verde mudo).
+ */
+function axeScript(): string {
+  try {
+    return createRequire(import.meta.url).resolve('axe-core/axe.min.js');
+  } catch {
+    throw new Error('axe-core ausente: rode `npm install` (devDependency do IMPL-107 (b)).');
+  }
+}
+
+interface AxeViolacao {
+  id: string;
+  impact: string | null;
+  alvos: string[];
+}
+
+/** axe sobre o popup do seletor (o dialog aberto), só WCAG 2 A/AA. */
+async function axeNoPopup(page: Page): Promise<AxeViolacao[]> {
+  if (!(await page.evaluate(() => 'axe' in window))) await page.addScriptTag({ path: axeScript() });
+  return page.evaluate(async () => {
+    const alvo = document.querySelector('[role="dialog"]');
+    if (!alvo) throw new Error('popup do seletor não está aberto');
+    const axe = (window as unknown as {
+      axe: {
+        run: (
+          ctx: Element,
+          opts: object,
+        ) => Promise<{ violations: { id: string; impact: string | null; nodes: { target: string[] }[] }[] }>;
+      };
+    }).axe;
+    const r = await axe.run(alvo, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] } });
+    return r.violations.map((v) => ({
+      id: v.id,
+      impact: v.impact,
+      alvos: v.nodes.slice(0, 5).map((n) => n.target.join(' ')),
+    }));
+  });
+}
+
 /* ------------------------------------------------- build + servidor estático */
 
 /** Build atual do SPA (o teste mede o código de HOJE, não um dist velho). */
 function buildWeb(): void {
   const viteBin = join(ROOT, 'web', 'node_modules', 'vite', 'bin', 'vite.js');
+  // ⚠️ `NODE_ENV: 'production'` é OBRIGATÓRIO: o vitest põe NODE_ENV=test e o
+  // `vite build` herdado dele sai com o bundle de DESENVOLVIMENTO do React —
+  // chunk de entrada 1,42 MB em vez de 1,07 MB, e os gates mediriam o
+  // artefacto errado (não é o que a Vercel publica).
   const r = spawnSync(process.execPath, [viteBin, 'build'], {
     cwd: join(ROOT, 'web'),
     encoding: 'utf8',
+    env: { ...process.env, NODE_ENV: 'production' },
   });
   if (r.status !== 0) throw new Error(`vite build falhou:\n${r.stdout}\n${r.stderr}`);
 }
@@ -165,6 +218,8 @@ async function paginaNova(
   // Superfície do formulário (2026-09-27): os contratos IMPL-106/107 medem a
   // página única COMPLETA; a superfície GUIADA (default) tem o seu describe.
   estilo: 'guided' | 'complete' = 'complete',
+  // `key: false` = navegador SEM key (fluxo BYOK: o first-run pede a key).
+  opts: { key?: boolean } = {},
 ): Promise<{
   contexto: BrowserContext;
   page: Page;
@@ -172,11 +227,18 @@ async function paginaNova(
   const contexto = await navegador!.newContext({ viewport });
   const page = await contexto.newPage();
   // KeyGate deixa passar com key "lembrada" — sem tocar no OpenRouter de verdade.
-  await page.addInitScript((s: string) => {
-    localStorage.setItem('openrouter_api_key', 'sk-or-e2e-nao-real');
-    localStorage.setItem('openrouter_api_key:remember', '1');
-    localStorage.setItem('pb.formStyle', s);
-  }, estilo);
+  // O init roda em TODA navegação (inclusive reload): só grava a key se pedido.
+  await page.addInitScript(
+    ({ s, comKey }: { s: string; comKey: boolean }) => {
+      if (comKey) {
+        localStorage.setItem('openrouter_api_key', 'sk-or-e2e-nao-real');
+        localStorage.setItem('openrouter_api_key:remember', '1');
+      }
+      localStorage.setItem('pb.formStyle', s);
+      localStorage.setItem('pb.onboarded', '1'); // o first-run abre direto no passo da key
+    },
+    { s: estilo, comKey: opts.key !== false },
+  );
   await page.route('**/*', async (route) => {
     const alvoUrl = route.request().url();
     if (alvoUrl.includes('/api/v1/models')) {
@@ -184,6 +246,14 @@ async function paginaNova(
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify(fixtureCatalogo()),
+      });
+    }
+    // Validação da key (GET /key): resposta de key válida, sem rede real.
+    if (/\/api\/v1\/key(\?|$)/.test(alvoUrl)) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ data: { label: 'e2e', usage: 0, limit: null, is_free_tier: false } }),
       });
     }
     if (alvoUrl.startsWith(url)) return route.continue();
@@ -205,13 +275,21 @@ async function esperarFormulario(page: Page): Promise<void> {
 
 /** Paradas de Tab do PRIMEIRO controle do formulário até o "Iniciar". */
 async function paradasAteIniciar(page: Page): Promise<number> {
-  await page.evaluate(() => {
-    const form = document.querySelector('form');
-    const primeiro = form?.querySelector<HTMLElement>(
-      'button:not([tabindex="-1"]), input:not([type="hidden"]), select, textarea, a[href]',
-    );
-    primeiro?.focus();
-  });
+  // O foco inicial tem de CAIR no formulário: logo depois de uma troca de
+  // passo/rota um re-render pode engolir o focus() (a contagem começaria no
+  // <body> e mediria o cabeçalho da app, não o formulário).
+  await page.waitForFunction(
+    () => {
+      const form = document.querySelector('form');
+      const primeiro = form?.querySelector<HTMLElement>(
+        'button:not([tabindex="-1"]), input:not([type="hidden"]), select, textarea, a[href]',
+      );
+      primeiro?.focus();
+      return !!primeiro && document.activeElement === primeiro;
+    },
+    undefined,
+    { polling: 100, timeout: 10_000 },
+  );
   for (let presses = 0; presses <= 40; presses++) {
     const noIniciar = await page.evaluate(
       () => document.activeElement?.getAttribute('aria-label') === 'Iniciar a run',
@@ -268,8 +346,12 @@ describe.skipIf(!alvo)('IMPL-106 (b) — "Iniciar" + custo na viewport, todas as
               custo: caixa(custo),
               vh: window.innerHeight,
               vw: window.innerWidth,
+              sw: document.documentElement.scrollWidth,
             };
           });
+          // web-live#13: a 390 px o cabeçalho (Importar/Exportar/Guiado/Completo)
+          // e a linha de custos do rodapé empurravam a página a 466 px.
+          expect(r.sw, `rolagem horizontal em ${sec} (${r.sw} > ${r.vw})`).toBeLessThanOrEqual(r.vw);
           expect(r.botao, `sem "Iniciar" em ${sec}`).not.toBeNull();
           expect(r.custo, `sem custo estimado em ${sec}`).not.toBeNull();
           for (const [nome, b] of [
@@ -445,6 +527,11 @@ describe.skipIf(!alvo)('IMPL-107 — seletor de modelos num browser real', () =>
         await page.evaluate(() => document.activeElement?.getAttribute('role')),
       ).toBe('combobox');
 
+      // axe (IMPL-107 b): nenhuma violação de ARIA no popup aberto.
+      const semAria = (vs: AxeViolacao[]) => vs.filter((v) => v.id.startsWith('aria-'));
+      const inicial = await axeNoPopup(page);
+      expect(semAria(inicial), `axe aria-* no popup: ${JSON.stringify(inicial)}`).toEqual([]);
+
       const input = page.locator('input[role="combobox"]');
       const antes = await input.getAttribute('aria-activedescendant');
       await page.keyboard.press('ArrowDown');
@@ -452,6 +539,9 @@ describe.skipIf(!alvo)('IMPL-107 — seletor de modelos num browser real', () =>
       const depois = await input.getAttribute('aria-activedescendant');
       expect(depois, 'setas não moveram o item ativo').not.toBe(antes);
       expect(depois).toMatch(/-opt-2$/);
+      // …e continua sem violação com o item ativo movido (activedescendant válido).
+      const movido = await axeNoPopup(page);
+      expect(semAria(movido), `axe aria-* após as setas: ${JSON.stringify(movido)}`).toEqual([]);
       // Foco ≠ seleção: nada foi escolhido ainda.
       expect(await page.locator('#sec-sujeitos >> text=modelo-002').count()).toBe(0);
 
@@ -545,3 +635,468 @@ describe.skipIf(!alvo)('superfície GUIADA (default) — 5 passos, plano e rodap
     }
   }, 180_000);
 });
+
+/* ================================================================== BYOK */
+
+// web-code#3 + IMPL-082 (i)/(iv) — num browser REAL: a key só sobrevive ao
+// reload com «Lembrar neste dispositivo»; sem ela, "key sumida" é RE-PROMPT que
+// devolve o usuário à rota de onde veio (antes: a key morria em todo reload e o
+// texto dizia "salva no localStorage").
+describe.skipIf(!alvo)('BYOK — «Lembrar neste dispositivo» num browser real', () => {
+  const KEY = 'sk-or-v1-e2e-nao-real-000000000000';
+  const lida = (page: Page) => page.evaluate(() => localStorage.getItem('openrouter_api_key'));
+
+  async function conectar(page: Page, lembrar: boolean): Promise<void> {
+    await page.waitForSelector('input[aria-label="OpenRouter API key"]', { timeout: 30_000 });
+    // A transição de rota (AppShell, AnimatePresence mode="wait") remonta a
+    // página ao fim da saída do redirect → espera o MESMO input sobreviver a
+    // duas sondagens antes de digitar (senão a digitação cai na instância que sai).
+    await page.waitForFunction(
+      () => {
+        const w = window as unknown as { __pbKeyInput?: Element };
+        const el = document.querySelector('input[aria-label="OpenRouter API key"]');
+        if (el && w.__pbKeyInput === el) return true;
+        w.__pbKeyInput = el ?? undefined;
+        return false;
+      },
+      undefined,
+      { polling: 400, timeout: 10_000 },
+    );
+    const sw = page.getByRole('switch', { name: 'Lembrar neste dispositivo' });
+    // Opt-in: nasce DESLIGADO (key em memória por default).
+    expect(await sw.getAttribute('aria-checked')).toBe('false');
+    if (lembrar) await sw.click();
+    await page.fill('input[aria-label="OpenRouter API key"]', KEY);
+    await page.getByRole('button', { name: /Validar e conectar/ }).click();
+    await page.getByText('Key conectada').first().waitFor({ timeout: 10_000 });
+  }
+
+  it('sem «Lembrar»: a key morre no reload e o app pede de novo, voltando à rota de origem', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided', { key: false });
+    try {
+      await page.goto(`${url}runs`);
+      await page.waitForURL(/\/welcome$/, { timeout: 30_000 });
+      await conectar(page, false);
+      expect(await lida(page), 'sem opt-in nada vai para o disco').toBeNull();
+      await page.getByRole('button', { name: 'Voltar para onde estava' }).click();
+      await page.waitForURL(/\/runs$/);
+
+      await page.reload();
+      await page.waitForURL(/\/welcome$/, { timeout: 30_000 }); // memória da aba: o reload apagou
+      await page.getByRole('button', { name: 'Voltar para onde estava' }).waitFor({ timeout: 10_000 });
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('com «Lembrar»: sobrevive ao reload, a tela declara, e desligar tira do disco na hora', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided', { key: false });
+    try {
+      await page.goto(`${url}settings`);
+      await page.waitForURL(/\/welcome$/, { timeout: 30_000 });
+      await conectar(page, true);
+      expect(await lida(page)).toBe(KEY);
+      await page.getByRole('button', { name: 'Voltar para onde estava' }).click();
+      await page.waitForURL(/\/settings$/);
+
+      await page.reload();
+      await page.getByText(/no localStorage deste navegador, até você a remover/).first().waitFor({ timeout: 30_000 });
+      expect(page.url(), 'a key lembrada não pede first-run').toMatch(/\/settings$/);
+      const sw = page.getByRole('switch', { name: 'Lembrar neste dispositivo' });
+      expect(await sw.getAttribute('aria-checked')).toBe('true');
+
+      await sw.click();
+      await page.getByText(/só na memória desta aba — recarregar/).first().waitFor({ timeout: 10_000 });
+      expect(await lida(page), 'desmarcar remove a cópia persistida').toBeNull();
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+});
+
+/* ============================================ GUIADO — gates do IMPL-106 */
+
+// IMPL-106 (b)/(c)/(d) medidos na superfície DEFAULT (guiada). O auditor achou
+// os gates rodando só com pb.formStyle='complete' — o default nunca era medido.
+describe.skipIf(!alvo)('IMPL-106 na superfície GUIADA (default) — viewport, Tab e pendência visível', () => {
+  const PASSOS = ['Objetivo', 'Teste', 'Participantes', 'Limites', 'Revisão'];
+
+  async function irAoPasso(page: Page, passo: string): Promise<void> {
+    await page.getByRole('tab', { name: new RegExp(passo) }).first().click();
+    await page.waitForTimeout(250); // painel do SmoothTabs assenta
+  }
+
+  for (const vp of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    it(`(b) ${vp.width}×${vp.height}: "Iniciar" e custo inteiros na viewport em TODOS os passos`, async () => {
+      const { contexto, page } = await paginaNova(vp, 'guided');
+      try {
+        await page.goto(`${url}new`);
+        await esperarFormulario(page);
+        for (const passo of PASSOS) {
+          await irAoPasso(page, passo);
+          const r = await page.evaluate(() => {
+            const caixa = (el: Element | null | undefined) => {
+              const b = el?.getBoundingClientRect();
+              return b ? { top: b.top, bottom: b.bottom, left: b.left, right: b.right } : null;
+            };
+            return {
+              botao: caixa(document.querySelector('[aria-label="Iniciar a run"]')),
+              custo: caixa([...document.querySelectorAll('span')].find((s) => s.textContent?.includes('custo estimado'))),
+              barra: caixa(document.querySelector('nav[aria-label="Navegação"]')),
+              vh: window.innerHeight,
+              vw: window.innerWidth,
+              sw: document.documentElement.scrollWidth,
+            };
+          });
+          expect(r.sw, `rolagem horizontal no passo ${passo} (${r.sw} > ${r.vw})`).toBeLessThanOrEqual(r.vw);
+          for (const [nome, b] of [
+            ['Iniciar', r.botao],
+            ['custo', r.custo],
+          ] as const) {
+            expect(b, `sem ${nome} no passo ${passo}`).not.toBeNull();
+            expect(b!.top, `${nome} cortado em cima (${passo})`).toBeGreaterThanOrEqual(0);
+            expect(b!.bottom, `${nome} cortado embaixo (${passo})`).toBeLessThanOrEqual(r.vh + 1);
+            expect(b!.left, `${nome} cortado à esquerda (${passo})`).toBeGreaterThanOrEqual(0);
+            expect(b!.right, `${nome} cortado à direita (${passo})`).toBeLessThanOrEqual(r.vw + 1);
+          }
+          if (vp.width < 768 && r.barra) {
+            expect(r.botao!.bottom, `rodapé colide com a barra inferior (${passo})`).toBeLessThanOrEqual(r.barra.top + 1);
+          }
+        }
+      } finally {
+        await contexto.close();
+      }
+    }, 180_000);
+  }
+
+  it('(c) ≤ 10 paradas de Tab do topo do formulário até "Iniciar" — 3 modos × 5 passos', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided');
+    try {
+      const contagens: Record<string, number> = {};
+      for (const objetivo of ['Comparar modelos', 'Testar o meu prompt', 'Treinar um prompt']) {
+        await page.goto(`${url}new`);
+        await esperarFormulario(page);
+        await page.getByRole('button', { name: new RegExp(objetivo) }).first().click();
+        for (const passo of PASSOS) {
+          await irAoPasso(page, passo);
+          const n = (await paradasAteIniciar(page)) + 1;
+          contagens[`${objetivo} › ${passo}`] = n;
+          expect(n, `${objetivo} › ${passo}: ${n} paradas`).toBeLessThanOrEqual(10);
+        }
+      }
+      expect(Math.max(...Object.values(contagens))).toBeLessThanOrEqual(10);
+    } finally {
+      await contexto.close();
+    }
+  }, 240_000);
+
+  it('(d) obrigatório pendente nunca fica oculto sem pista: ponto no trilho + rodapé que leva ao passo', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided');
+    try {
+      await page.goto(`${url}new`);
+      await esperarFormulario(page);
+      // Defaults válidos: nenhum passo marcado como pendente.
+      expect(await page.locator('[data-pendente]').count()).toBe(0);
+
+      // Tira os juízes (obrigatórios) no passo Participantes e volta ao início.
+      await irAoPasso(page, 'Participantes');
+      // (No compare o gerador default também é o muse — o chip certo é o do toolbar Juízes.)
+      const juizes = page.getByRole('toolbar', { name: 'Juízes' }).first();
+      for (const id of ['google/gemini-3.8-flash', 'meta/muse-spark-1.3']) {
+        await juizes.getByRole('button', { name: `Remover ${id}`, exact: true }).click();
+      }
+      await irAoPasso(page, 'Objetivo');
+      expect(await page.locator('text=Selecione ao menos 1 juiz.').count(), 'no passo Objetivo o campo não está à vista').toBe(1);
+
+      // Pista visível no TRILHO (sempre à vista) — e no nome acessível do passo.
+      const aba = page.getByRole('tab', { name: /Participantes.*pendente/ });
+      expect(await aba.count()).toBe(1);
+      expect(await aba.locator('[data-pendente]').isVisible()).toBe(true);
+      // Os passos sem pendência não ganham o ponto.
+      expect(await page.locator('[data-pendente]').count()).toBe(1);
+
+      // Rodapé fixo: nomeia a pendência, dentro da viewport, e LEVA ao passo.
+      const rodape = page.getByRole('button', { name: 'Selecione ao menos 1 juiz.' });
+      expect(await rodape.isVisible()).toBe(true);
+      const caixa = await rodape.boundingBox();
+      expect(caixa!.y + caixa!.height).toBeLessThanOrEqual(900 + 1);
+      await rodape.click();
+      await page.getByText('Quem compete, quem escreve e quem avalia?').first().waitFor({ timeout: 10_000 });
+      expect(await page.getByRole('toolbar', { name: 'Juízes' }).first().isVisible()).toBe(true);
+
+      // O GERADOR também mora em Participantes no guiado: a pendência dele
+      // aponta para lá (antes apontava para "Teste", que não mostra o seletor).
+      await page
+        .getByRole('toolbar', { name: 'Gerador' })
+        .first()
+        .getByRole('button', { name: 'Remover meta/muse-spark-1.3', exact: true })
+        .click();
+      await irAoPasso(page, 'Objetivo');
+      expect(await page.getByRole('tab', { name: /Teste.*pendente/ }).count(), 'Teste não mostra o gerador').toBe(0);
+      expect(await page.getByRole('tab', { name: /Participantes.*pendente/ }).count()).toBe(1);
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('web-live#13: /runs a 390 px — os 5 filtros (com Interrompidas) à vista, sem rolagem horizontal', async () => {
+    const { contexto, page } = await paginaNova({ width: 390, height: 844 }, 'guided');
+    try {
+      await page.goto(`${url}runs`);
+      await page.getByRole('group', { name: 'Filtrar por status' }).waitFor({ timeout: 30_000 });
+      const r = await page.evaluate(() => {
+        const grupo = document.querySelector('[aria-label="Filtrar por status"]');
+        const opcoes = [...(grupo?.querySelectorAll('button') ?? [])].map((b) => {
+          const c = b.getBoundingClientRect();
+          return { texto: b.textContent ?? '', left: c.left, right: c.right };
+        });
+        return { opcoes, vw: window.innerWidth, sw: document.documentElement.scrollWidth };
+      });
+      expect(r.sw, `rolagem horizontal em /runs (${r.sw} > ${r.vw})`).toBeLessThanOrEqual(r.vw);
+      expect(r.opcoes.some((o) => o.texto.includes('Com erro'))).toBe(true);
+      expect(r.opcoes.some((o) => o.texto.includes('Interrompidas'))).toBe(true);
+      for (const o of r.opcoes) {
+        expect(o.left, `${o.texto} cortado à esquerda`).toBeGreaterThanOrEqual(0);
+        expect(o.right, `${o.texto} cortado à direita`).toBeLessThanOrEqual(r.vw + 1);
+      }
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('web-live#5: o treino nasce com 10 cenários (poder para promover); 4 vira pendência', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided');
+    try {
+      await page.goto(`${url}new`);
+      await esperarFormulario(page);
+      await page.getByRole('button', { name: /Treinar um prompt/ }).first().click();
+      await irAoPasso(page, 'Limites');
+      const campo = page.getByLabel('Cenários', { exact: true });
+      expect(await campo.inputValue()).toBe('10');
+      expect(await page.locator('text=/não consegue promover|só é promovida se vencer/').count()).toBe(0);
+      await campo.fill('4');
+      await page.getByText(/Com 4 cenários o treino não consegue promover nenhuma variante/).first().waitFor({ timeout: 10_000 });
+      expect(await page.getByRole('tab', { name: /Limites.*pendente/ }).count()).toBe(1);
+      // De volta ao compare, o nº que o usuário escolheu fica (só o default sobe/desce sozinho).
+      await irAoPasso(page, 'Objetivo');
+      await page.getByRole('button', { name: /Comparar modelos/ }).first().click();
+      await irAoPasso(page, 'Limites');
+      expect(await page.getByLabel('Cenários', { exact: true }).inputValue()).toBe('4');
+      expect(await page.locator('[data-pendente]').count()).toBe(0);
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('IMPL-048: teste de prompt nasce com gabarito próprio (sem pendência) e o plano o nomeia', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided');
+    try {
+      await page.goto(`${url}new`);
+      await esperarFormulario(page);
+      await page.getByRole('button', { name: /Testar o meu prompt/ }).first().click();
+      await irAoPasso(page, 'Participantes');
+      expect(await page.getByRole('toolbar', { name: 'Gabarito' }).first().isVisible()).toBe(true);
+      await irAoPasso(page, 'Revisão');
+      await page.getByText('Tudo pronto').first().waitFor({ timeout: 10_000 });
+      expect(await page.locator('text=/escreve o gabarito/').first().isVisible()).toBe(true);
+      expect(await page.locator('[data-pendente]').count()).toBe(0);
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+});
+
+/* ================================================== left#16 — 390 px ======== */
+
+// left#16 (notado pelo agente JEV web): a 390 px a PÁGINA não rolava, mas o
+// trilho dos passos guiados media 548 px e rolava na horizontal — "Limites" e
+// "Revisão", e a pista de pendência deles (IMPL-106 d: pista SEMPRE à vista),
+// ficavam atrás da rolagem. O trilho agora QUEBRA em linhas, como os filtros
+// do Histórico (web-live#13). O que se guarda aqui, a 390×844:
+//   • /new?tipo=llm guiado: trilho sem rolagem, os 5 passos inteiros na
+//     viewport, pista de pendência do passo 4 visível; e a completa sem rolagem;
+//   • /new?tipo=jev: o mesmo para o trilho do guiado JEV;
+//   • /runs COM linhas reais (import exchange@1 pela UI): lista e filtros sem
+//     rolagem horizontal — o gate de antes media a lista VAZIA.
+describe.skipIf(!alvo)('left#16 — 390 px: sem rolagem horizontal escondida', () => {
+  const VP = { width: 390, height: 844 };
+
+  /** Página sem rolagem horizontal + trilho de passos sem scroll, abas inteiras. */
+  async function trilhoSemRolar(page: Page, ariaLabel: string): Promise<void> {
+    const r = await page.evaluate((label) => {
+      const rail = document.querySelector(`[aria-label="${label}"]`);
+      const abas = [...(rail?.querySelectorAll('[role="tab"]') ?? [])].map((t) => {
+        const b = t.getBoundingClientRect();
+        return { texto: (t.textContent ?? '').trim(), left: b.left, right: b.right };
+      });
+      return {
+        sw: rail?.scrollWidth ?? -1,
+        cw: rail?.clientWidth ?? -1,
+        vw: window.innerWidth,
+        doc: document.documentElement.scrollWidth,
+        abas,
+      };
+    }, ariaLabel);
+    expect(r.doc, `rolagem horizontal da página (${r.doc} > ${r.vw})`).toBeLessThanOrEqual(r.vw);
+    expect(r.sw, `trilho "${ariaLabel}" rola na horizontal (${r.sw} > ${r.cw})`).toBeLessThanOrEqual(r.cw + 1);
+    expect(r.abas.length, `trilho "${ariaLabel}" sem abas`).toBeGreaterThan(1);
+    for (const a of r.abas) {
+      expect(a.left, `aba "${a.texto}" cortada à esquerda`).toBeGreaterThanOrEqual(-1);
+      expect(a.right, `aba "${a.texto}" cortada à direita (${a.right} > ${r.vw})`).toBeLessThanOrEqual(r.vw + 1);
+    }
+  }
+
+  it('/new?tipo=llm guiado: os 5 passos cabem sem rolar; pista de pendência à vista; completa sem rolagem', async () => {
+    const { contexto, page } = await paginaNova(VP, 'guided');
+    try {
+      await page.goto(`${url}new?tipo=llm`);
+      await esperarFormulario(page);
+      await trilhoSemRolar(page, 'Passos da configuração guiada');
+
+      // Pendência no passo 4 (Limites): treino com 4 cenários não consegue
+      // promover (web-live#5) — o ponto do trilho tem de estar VISÍVEL a
+      // 390 px, nunca atrás de uma rolagem horizontal.
+      await page.getByRole('button', { name: /Treinar um prompt/ }).first().click();
+      await page.getByRole('tab', { name: /Limites/ }).first().click();
+      await page.getByLabel('Cenários', { exact: true }).fill('4');
+      expect(await page.getByRole('tab', { name: /Limites.*pendente/ }).count()).toBe(1);
+      const ponto = await page.locator('[role="tab"] [data-pendente]').first().boundingBox();
+      expect(ponto, 'pista de pendência sem caixa').not.toBeNull();
+      expect(ponto!.x, 'pista de pendência cortada à esquerda').toBeGreaterThanOrEqual(0);
+      expect(ponto!.x + ponto!.width, 'pista de pendência cortada à direita').toBeLessThanOrEqual(VP.width + 1);
+      await trilhoSemRolar(page, 'Passos da configuração guiada');
+
+      // Superfície completa (mesmo estado, seletor LLM|JEV à vista): sem rolagem.
+      await page.getByRole('button', { name: 'Completo', exact: true }).click();
+      await page.waitForTimeout(250);
+      expect(await page.getByRole('group', { name: 'Tipo de benchmark' }).isVisible()).toBe(true);
+      const sw = await page.evaluate(() => document.documentElement.scrollWidth);
+      expect(sw, `rolagem horizontal na completa (${sw} > ${VP.width})`).toBeLessThanOrEqual(VP.width);
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('/new?tipo=jev: o trilho dos passos JEV cabe sem rolar (com o seletor no JEV)', async () => {
+    const { contexto, page } = await paginaNova(VP, 'guided');
+    try {
+      await page.goto(`${url}new?tipo=jev`);
+      await page.waitForSelector('[aria-label="Passos da configuração JEV"]', { timeout: 30_000 });
+      await page.waitForTimeout(250);
+      expect(await page.locator('[data-bench="jev"]').isVisible(), 'o seletor não abriu o JEV').toBe(true);
+      await trilhoSemRolar(page, 'Passos da configuração JEV');
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('left#11 + web-live#13: /runs com linhas REAIS (import exchange@1) cabe em 390 px', async () => {
+    const { contexto, page } = await paginaNova(VP, 'guided');
+    try {
+      await page.goto(`${url}runs`);
+      await page.getByRole('group', { name: 'Filtrar por status' }).waitFor({ timeout: 30_000 });
+      // Import pela UI (o mesmo caminho do botão «Importar») — 3 runs + 1 treino.
+      await page.setInputFiles('input[aria-label="Pacote exchange@1 ou JSON de run/treino"]', {
+        name: 'pacote.json',
+        mimeType: 'application/json',
+        buffer: Buffer.from(JSON.stringify(pacoteDeTroca()), 'utf8'),
+      });
+      await page.locator('a[href^="/runs/"]').first().waitFor({ timeout: 15_000 });
+      const r = await page.evaluate(() => {
+        const vw = window.innerWidth;
+        const linhas = [...document.querySelectorAll('a[href^="/runs/"], a[href^="/training/"]')].map((a) => {
+          const b = a.getBoundingClientRect();
+          return { href: a.getAttribute('href') ?? '', left: b.left, right: b.right };
+        });
+        return { vw, sw: document.documentElement.scrollWidth, linhas };
+      });
+      expect(r.sw, `rolagem horizontal em /runs com linhas (${r.sw} > ${r.vw})`).toBeLessThanOrEqual(r.vw);
+      expect(r.linhas.length, 'import não trouxe linhas para a lista').toBeGreaterThanOrEqual(4);
+      for (const l of r.linhas) {
+        expect(l.left, `linha ${l.href} cortada à esquerda`).toBeGreaterThanOrEqual(-1);
+        expect(l.right, `linha ${l.href} cortada à direita (${l.right} > ${r.vw})`).toBeLessThanOrEqual(r.vw + 1);
+      }
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+});
+
+/* ============================================ left#15 — orçamento do build === */
+
+// left#15 tirou o chunk de entrada de 1,73 MB para 1,07 MB, mas o tamanho só
+// estava registado em comentário: uma regressão de code-splitting passava em
+// silêncio. O artefacto SÓ se mede depois de um `vite build` real — por isso o
+// gate mora aqui (o `beforeAll` desta suíte constrói; sem browser, o teste
+// constrói sozinho antes de medir).
+describe('left#15 — o chunk de entrada do build real fica no orçamento', () => {
+  const viteBin = join(ROOT, 'web', 'node_modules', 'vite', 'bin', 'vite.js');
+  if (!existsSync(viteBin)) {
+    console.warn('[left#15] web/node_modules sem vite — orçamento do chunk de entrada NÃO medido.');
+  }
+
+  it.skipIf(!existsSync(viteBin))('chunk de entrada ≤ 1,20 MB (gzip ≤ 420 kB)', () => {
+    if (!alvo) buildWeb(); // sem browser o beforeAll não construiu: mede um build fresco
+    const html = readFileSync(join(DIST, 'index.html'), 'utf8');
+    const m =
+      /<script[^>]*type="module"[^>]*src="([^"]+)"/.exec(html) ??
+      /<script[^>]*src="([^"]+)"[^>]*type="module"/.exec(html);
+    expect(m, 'script de entrada não encontrado no index.html').not.toBeNull();
+    const bytes = readFileSync(join(DIST, m![1].replace(/^\/+/, '')));
+    const gz = gzipSync(bytes).length;
+    // Teto com folga sobre o medido no fechamento do left#15 (1.069.480 B /
+    // gzip 350.950 B) — e MUITO abaixo do bundle único antigo (1.734.870 B).
+    expect(bytes.length, `chunk de entrada ${bytes.length} B`).toBeLessThanOrEqual(1_200_000);
+    expect(gz, `gzip do chunk de entrada ${gz} B`).toBeLessThanOrEqual(420_000);
+  }, 180_000);
+});
+
+/**
+ * Pacote `prompt-builder-exchange@1` em arquivo único (o MESMO do CLI —
+ * `runs export --format exchange -o pacote.json`): manifesto + um JSONL por
+ * entidade, cada um com o header na primeira linha. Temas compridos de
+ * propósito: é o conteúdo real que a lista de 390 px tem de acomodar.
+ */
+function pacoteDeTroca(): unknown {
+  const exportedAt = new Date().toISOString();
+  const manifesto = [
+    { kind: 'run', file: 'runs.jsonl', count: 3 },
+    { kind: 'session', file: 'sessions.jsonl', count: 1 },
+  ];
+  const header = (kind: string) =>
+    JSON.stringify({ format: 'prompt-builder-exchange@1', kind, exportedAt, producer: 'ux-nova-run-e2e', manifest: manifesto });
+  const tema = 'Tema comprido para esticar a linha da lista de histórico a 390 px — sem transbordar';
+  const run = (i: number) =>
+    JSON.stringify({
+      id: `run_e2e390_${i}`,
+      status: i === 3 ? 'error' : 'finished',
+      startedAt: exportedAt,
+      config: { mode: 'compare', theme: `${tema} (#${i})`, stages: 10 },
+      stages: Array.from({ length: 10 }, (_, s) => ({ index: s, status: 'done' })),
+      contestants: ['provedor/modelo-001', 'provedor/modelo-002'],
+    });
+  return {
+    format: 'prompt-builder-exchange@1',
+    exportedAt,
+    producer: 'ux-nova-run-e2e',
+    manifest: manifesto,
+    files: {
+      'manifest.json': JSON.stringify({ format: 'prompt-builder-exchange@1', exportedAt, producer: 'ux-nova-run-e2e', manifest: manifesto }),
+      'runs.jsonl': [header('run'), run(1), run(2), run(3)].join('\n'),
+      'sessions.jsonl': [
+        header('session'),
+        JSON.stringify({
+          id: 'sessao_e2e390_1',
+          status: 'finished',
+          startedAt: exportedAt,
+          config: { mode: 'training', theme: tema },
+          runIds: ['run_e2e390_1'],
+          bestPromptByIteration: [],
+        }),
+      ].join('\n'),
+    },
+  };
+}

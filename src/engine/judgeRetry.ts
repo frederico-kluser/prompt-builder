@@ -5,7 +5,7 @@
 // de erro, nos dois motores. Puro (sem Node): o web importa direto daqui.
 //
 // A política, e por quê:
-//   • transientes (429/5xx/rede) — JÁ re-tentados pelo gateway (até 6× com
+//   • transientes (429/5xx/rede) — JÁ re-tentados pelo gateway (`MAX_RETRIES`, 4, com
 //     backoff) e preservam a validade: nada a fazer aqui;
 //   • timeout — re-tenta UMA vez. Timeout pode ser informativo (resposta longa
 //     → juiz lento), então insistir mais viesaria a amostra contra respostas
@@ -20,15 +20,49 @@
 //
 // `BudgetExceeded`/`RunCancelled` sobem intactos (controle, não erro), e um
 // abort externo no meio da chamada vira `RunCancelled`: cancelamento não é
-// falha do juiz e não pode inflar `failureCountByRole`.
+// falha do juiz e não pode inflar `failureCountByRole`. Key recusada (401) e
+// sem crédito (402) também sobem (cli#3): nenhum retry nem outro juiz conserta,
+// e degradar para veredito ausente deixava a run "concluir" e sair com exit 1
+// em vez do 4/5 documentado.
 
 import { isControlSignal, RunCancelled } from '../budget.js';
+import { isFatalGatewayError } from '../openrouter.js';
+import { isLgpdPolicyError } from './lgpdCore.js';
 import { judgeReplyCut, type JudgeReplyFinish } from './truncation.js';
-import type { VerdictError } from '../types.js';
+import { sha256Hex } from './hash.js';
+import type { JudgeCallFinish, VerdictError } from '../types.js';
 
+/**
+ * `finish` = sinais de fim + artefato da ÚLTIMA chamada que devolveu resposta
+ * (IMPL-014/IMPL-117): quem registra o voto/ordem copia para o record — antes
+ * só o histograma por papel sobrevivia e não dava para saber qual veredito
+ * terminou com qual `finish_reason`. Ausente = nenhuma chamada respondeu
+ * (exceção/timeout do transporte).
+ */
 export type JudgeAttempt<T> =
-  | { ok: true; value: T; calls: number }
-  | { ok: false; error: VerdictError; calls: number };
+  | { ok: true; value: T; calls: number; finish?: JudgeCallFinish }
+  | { ok: false; error: VerdictError; calls: number; finish?: JudgeCallFinish };
+
+/** Resultado do gateway que o retry sabe ler (o `ChatCompletionResult` serve). */
+export type JudgeCallReply = JudgeReplyFinish & { raw?: unknown };
+
+/**
+ * Sinais de fim + artefato de UMA resposta de juiz: `finish_reason` normalizado
+ * e o cru do provedor, `truncated` (só quando true), o id da geração (`gen-…`,
+ * do corpo — auditoria/conciliação) e o SHA-256 do texto devolvido (IMPL-117:
+ * prova de qual resposta produziu o veredito, sem guardar o texto duas vezes).
+ */
+export function judgeCallFinishOf(reply: JudgeCallReply): JudgeCallFinish {
+  const raw = reply.raw as { id?: unknown } | null | undefined;
+  const generationId = raw && typeof raw === 'object' && typeof raw.id === 'string' && raw.id ? raw.id : undefined;
+  return {
+    ...(reply.finishReason ? { finishReason: reply.finishReason } : {}),
+    ...(reply.nativeFinishReason ? { nativeFinishReason: reply.nativeFinishReason } : {}),
+    ...(reply.truncated === true ? { truncated: true } : {}),
+    ...(generationId ? { generationId } : {}),
+    responseSha256: sha256Hex(reply.text ?? ''),
+  };
+}
 
 export interface JudgeRetryOptions<T> {
   /**
@@ -37,7 +71,7 @@ export interface JudgeRetryOptions<T> {
    * `.text`: e dele que sai a checagem de truncamento ANTES do parse
    * (IMPL-015). Texto puro segue aceito (sem sinal de fim = nada a checar).
    */
-  call: (reminder: string | undefined) => Promise<string | JudgeReplyFinish>;
+  call: (reminder: string | undefined) => Promise<string | JudgeCallReply>;
   /** Parse ESTRITO: `null` = saída inválida (nunca um veredito inventado). */
   parse: (text: string) => T | null;
   /** Lembrete anexado ao pedido depois de uma saída inválida. */
@@ -48,6 +82,14 @@ export interface JudgeRetryOptions<T> {
 
 /** Máximo de chamadas por veredito: original + 1 timeout + 1 lembrete de formato. */
 export const MAX_JUDGE_CALLS = 3;
+
+/**
+ * Temperatura de amostragem de TODA chamada de juízo (pointwise, listwise,
+ * duelo e verificador de gabarito) — fonte ÚNICA (IMPL-117, R-07b:REC-5). É ela
+ * que entra no hash do contrato do juiz (`judgeTemperature`): um número
+ * espalhado em cada papel podia mudar sem o contrato perceber.
+ */
+export const JUDGE_TEMPERATURE = 0;
 
 /** Timeout do gateway (`abort(new Error('timeout'))`) ou `TimeoutError` do runtime. */
 export function isTimeoutError(err: unknown): boolean {
@@ -76,22 +118,29 @@ export async function callJudgeWithRetry<T>(opts: JudgeRetryOptions<T>): Promise
   let calls = 0;
   let timeoutRetried = false;
   let reminder: string | undefined;
+  /** Sinais da última chamada que RESPONDEU (IMPL-014) — vão junto do desfecho. */
+  let finish: JudgeCallFinish | undefined;
+  const comFinish = (): { finish?: JudgeCallFinish } => (finish ? { finish } : {});
   for (;;) {
-    let reply: JudgeReplyFinish;
+    let reply: JudgeCallReply;
     try {
       calls += 1;
       const raw = await opts.call(reminder);
       reply = typeof raw === 'string' ? { text: raw } : raw;
     } catch (err) {
-      if (isControlSignal(err)) throw err;
+      // Recusa LGPD (roteamento sensível fail-closed) também NÃO degrada: virar
+      // `judge_failed` deixava a cascata seguir com o consenso barato marcado
+      // 'degraded' — uma run sensível "concluída" com painel reduzido.
+      if (isControlSignal(err) || isFatalGatewayError(err) || isLgpdPolicyError(err)) throw err;
       if (opts.signal?.aborted) throw new RunCancelled(opts.signal.reason);
       const error = describeJudgeError(err);
       if (error.kind === 'timeout' && !timeoutRetried) {
         timeoutRetried = true;
         continue;
       }
-      return { ok: false, error, calls };
+      return { ok: false, error, calls, ...comFinish() };
     }
+    finish = judgeCallFinishOf(reply);
     // IMPL-015 (R-08:REC-11): saida CORTADA (finish_reason length/timeout)
     // e checada ANTES do parse — conteudo truncado nunca vira veredito, nem
     // quando o pedaco por acaso parseia. Truncamento nao repete (mesmo teto,
@@ -104,11 +153,11 @@ export async function callJudgeWithRetry<T>(opts: JudgeRetryOptions<T>): Promise
         timeoutRetried = true;
         continue;
       }
-      return { ok: false, error: cut, calls };
+      return { ok: false, error: cut, calls, ...comFinish() };
     }
     const text = reply.text;
     const parsed = opts.parse(text);
-    if (parsed !== null) return { ok: true, value: parsed, calls };
+    if (parsed !== null) return { ok: true, value: parsed, calls, ...comFinish() };
     if (reminder === undefined) {
       reminder = opts.formatReminder;
       continue;
@@ -120,6 +169,7 @@ export async function callJudgeWithRetry<T>(opts: JudgeRetryOptions<T>): Promise
         message: `saída fora do formato mesmo após o lembrete: ${snippet(text)}`,
       },
       calls,
+      ...comFinish(),
     };
   }
 }

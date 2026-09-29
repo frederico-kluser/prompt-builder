@@ -71,21 +71,29 @@ import {
 } from './storage.js';
 import { trainToCompletion } from './trainer.js';
 import { agentVerdictTreeVersionOf, classifyStop } from './agent/verdictTree.js';
+import { infraSummaryFields, type AgentInfraCounts } from './agent/infraError.js';
+import { winnerFromStandings, type StandingsWinner } from './engine/duelCore.js';
+import { holdoutSkipReasonOf } from './engine/sessionDecision.js';
 // IMPL-031 (revisão): as tools que GASTAM passam pelas mesmas camadas do CLI —
 // ledger da máquina (teto diário somando processos) e lock por config.
 import { withSpendGuards } from './cli/spendGuards.js';
 import type { RunConfig, RunRecord, SessionRecord } from './types.js';
+// Modo JEV: executor e progresso vivem em src/jev/job.ts (aqui só ganchos).
+import { executeJevJob, jevJobProgress, type JevJobInput } from './jev/job.js';
 
 // ---------------------------------------------------------------------------
 // Tipos
 // ---------------------------------------------------------------------------
 
 /** O trabalho pedido, já validado (config parseada, orçamento aplicado). */
-export interface RunJobInput {
-  kind: JobKind;
-  config: RunConfig;
-  budgetUsd: number;
-}
+export type RunJobInput =
+  | {
+      kind: Exclude<JobKind, 'jev'>;
+      config: RunConfig;
+      budgetUsd: number;
+    }
+  /** Modo JEV: jev-config@1 com casos INLINE (a impressão digital cobre o conteúdo). */
+  | JevJobInput;
 
 /** Progresso barato (lido do record em disco, regravado a cada ~800 ms). */
 export interface JobProgress {
@@ -94,6 +102,9 @@ export interface JobProgress {
   iterationsPlanned?: number;
   iterationsDone?: number;
   spentUsd?: number;
+  /** Modo JEV: requests de decisão planejadas/feitas. */
+  requestsPlanned?: number;
+  requestsDone?: number;
 }
 
 /** Por que um job terminou 'failed'. */
@@ -220,6 +231,8 @@ export function agentSummary(rec: {
   agentVerdictTreeVersion?: number;
   agentJudgeErrorCount?: number;
   agentUnscoredRepsByContestant?: Record<string, number>;
+  agentInfra?: AgentInfraCounts;
+  infraErrorRate?: number;
   contestants: { runner?: 'chat' | 'agent' }[];
   stages: { responses: { costUsd: number; execution?: { turns: number; stopReason: string; oracle?: { score: number } } }[] }[];
 }) {
@@ -243,7 +256,53 @@ export function agentSummary(rec: {
   const unscoredReps = rec.agentUnscoredRepsByContestant
     ? Object.values(rec.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0)
     : undefined;
-  return { executions, failed, incomplete, limitCut, avgTurns, avgCostUsd, oracleRate, verdictTreeVersion, judgeErrors, unscoredReps };
+  return {
+    executions,
+    failed,
+    incomplete,
+    limitCut,
+    avgTurns,
+    avgCostUsd,
+    oracleRate,
+    verdictTreeVersion,
+    judgeErrors,
+    unscoredReps,
+    // IMPL-094: tentativas/retentativas cegas/infra_error (mesma fonte do CLI).
+    ...infraSummaryFields(rec),
+  };
+}
+
+/**
+ * Vencedor da run pela MESMA régua do `runs winner` do CLI — literalmente a
+ * mesma função (`winnerFromStandings`, src/engine/duelCore.ts): finais
+ * re-ordenadas por winRate → vitórias → judge-score → rank cego semeado (vale
+ * também para records antigos, gravados com a ordem de cadastro no empate) e,
+ * sem finais, o judge-score. `tie` = mais de um dividiu a maior taxa;
+ * `tieBreak`/`unresolved` dizem como (ou se) o empate foi desfeito — o agente
+ * não deve ler um sorteio cego como vitória. `null` = run sem nota nenhuma.
+ */
+export function runWinner(rec: RunRecord): {
+  contestantId: string;
+  label?: string;
+  ruler: StandingsWinner['ruler'];
+  tie: boolean;
+  tiedIds: string[];
+  tieBreak: StandingsWinner['tieBreak'];
+  unresolved: boolean;
+} | null {
+  const w = winnerFromStandings(rec);
+  if (w.contestantId === undefined) return null;
+  const id = w.contestantId;
+  const label = rec.standings?.find((r) => r.id === id)?.label ?? rec.contestants?.find((c) => c.id === id)?.label;
+  return {
+    contestantId: id,
+    label,
+    ruler: w.ruler,
+    tie: w.tie,
+    tiedIds: w.tiedIds,
+    tieBreak: w.tieBreak,
+    unresolved: w.unresolved,
+  };
 }
 
 export function benchmarkSummary(rec: RunRecord): Record<string, unknown> {
@@ -259,6 +318,7 @@ export function benchmarkSummary(rec: RunRecord): Record<string, unknown> {
     stoppedAtPhase: rec.stoppedAtPhase,
     standings: rec.standings,
     judgeScoreByContestant: rec.judgeScoreByContestant,
+    winner: runWinner(rec),
   };
 }
 
@@ -289,6 +349,8 @@ export function trainingSummary(rec: SessionRecord): Record<string, unknown> {
     significance: rec.significance,
     // Sem o holdout o ganho NÃO está validado contra sobreajuste.
     holdoutSkipped: Boolean(rec.holdoutSkipped),
+    // cli#9: o PORQUÊ (cenários de menos ≠ orçamento ≠ cancelamento) — o remédio muda.
+    ...(holdoutSkipReasonOf(rec) ? { holdoutSkipReason: holdoutSkipReasonOf(rec) } : {}),
     budgetExhausted: Boolean(rec.budgetExhausted),
   };
 }
@@ -306,9 +368,11 @@ const SPEND_LABEL: Record<JobKind, string> = {
   benchmark: 'mcp run_benchmark',
   training: 'mcp train_prompt',
   agent: 'mcp run_agent_benchmark',
+  jev: 'mcp start_run (jev)',
 };
 
 export const executeRunJob: JobExecutor = async (input, apiKey, hooks) => {
+  if (input.kind === 'jev') return executeJevJob(input, apiKey, hooks);
   const cat = await ensureCatalog(apiKey);
   // Cancelado durante o catálogo (que não aceita sinal): não começa a gastar.
   throwIfAborted(hooks.signal);
@@ -1192,6 +1256,7 @@ function leituraDoResultado(rec: JobRecord, id: string | undefined): string | un
 }
 
 async function progressOf(rec: JobRecord): Promise<JobProgress | undefined> {
+  if (rec.kind === 'jev') return jevJobProgress(rec);
   if (rec.sessionId) {
     const s = await loadSession(rec.sessionId);
     if (!s) return undefined;

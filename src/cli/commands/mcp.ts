@@ -29,7 +29,9 @@
 //
 // Negociação dual-era (IMPL-084, R-13:REC-2): o mesmo processo atende as duas
 // revisões implementadas (2026-07-28 + 2025-11-25) e ACEITA as antigas
-// (2025-06-18/2025-03-26) pela regra legacy. `server/discover` responde sempre
+// (2025-06-18/2025-03-26/2024-11-05) pela regra legacy. Batches JSON-RPC (que
+// a 2025-03-26 manda RECEBER) são atendidos: a resposta sai num array só.
+// `server/discover` responde sempre
 // (antes/depois de initialize) listando as suportadas; a versão pedida NUNCA é
 // ecoada sem checar — desconhecida numa requisição moderna vira -32022
 // (UnsupportedProtocolVersion) com data.supported/data.requested, e numa
@@ -40,7 +42,9 @@
 // MESMO JSON espelhado em content de texto COMPACTO (0 espaços após ':' e ','
 // — indentação infla o contexto do agente sem dar nada). Teto de ~5 mil tokens
 // por resposta (get_result resume por padrão e pagina por cursor), dura 25 mil
-// no pico. Anotações (IMPL-085, R-13:REC-6) são honestas: um `readOnlyHint`
+// no pico. Recusa (não encontrado, portão, config inválido, job que falhou)
+// sai SEMPRE como `isError` — nunca sucesso com `{error}`/`{ok:false}`.
+// Anotações (IMPL-085, R-13:REC-6) são honestas: um `readOnlyHint`
 // NUNCA autoriza nada sozinho do lado do cliente.
 
 import { promises as fs } from 'node:fs';
@@ -60,21 +64,41 @@ import {
   processLane,
   settleWithin,
 } from '../../jobs.js';
-import { JobManager, defaultJobManager, type JobView, type RunJobInput } from '../../jobManager.js';
+import {
+  JobManager,
+  agentSummary,
+  benchmarkSummary,
+  defaultJobManager,
+  trainingSummary,
+  type JobView,
+  type RunJobInput,
+} from '../../jobManager.js';
 import { PKG_DOCS_DIR, PKG_ROOT, pkgVersion } from '../../paths.js';
-import { assertValidRecordId, isValidRecordId, publicErrorMessage } from '../../pathSafety.js';
+import { assertValidRecordId, isValidRecordId, publicErrorMessage, redactPaths } from '../../pathSafety.js';
 import { readDocTopic } from './knowledge.js';
-import { setDataDir, getDataDir, loadRun, loadSession, runSummary, sessionSummary } from '../../storage.js';
+import {
+  ensurePrivateDataDir,
+  setDataDir,
+  getDataDir,
+  loadRun,
+  loadSession,
+  runSummary,
+  sessionSummary,
+} from '../../storage.js';
+import { buildSessionReport, renderSessionReportMarkdown } from '../../engine/sessionReport.js';
+import { renderSessionReportHtml } from '../../engine/sessionReportHtml.js';
 import { ensureCatalog } from '../../modelsCache.js';
 import { toExportRow } from '../../modelCaps.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
-import { parseRunConfig } from '../../runConfigSchema.js';
-import { ARENA_AGENT_CONFIG_FORMAT, parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
-import { arenaConfigToRunConfig, arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
+import { isArenaAgentConfigFormat, parseArenaAgentConfig } from '../../configFile.js';
+import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
+// Modo JEV (jev-config@1): ganchos de 1 linha; a lógica mora em src/jev/job.ts.
+import { estimateJevForTool, isJevConfigRaw, jevJobInput, jevResultForTool, listDecisionModelsForTool } from '../../jev/job.js';
 import { readArtifact } from '../../agent/store.js';
-import { resolveHome, resolveKey, parse } from '../context.js';
-import { ensureExecConfigApproved } from './agents.js';
-import { EXIT } from '../output.js';
+import { assertNoUnknownConfigKeys, parse, resolveHome, resolveKey, tryResolveKey } from '../context.js';
+import { assertAgentFilesContained, ensureExecConfigApproved } from './agents.js';
+import { configFromJson } from './run.js';
+import { EXIT, isCliError } from '../output.js';
 import type { RunConfig, RunRecord, SessionRecord, StageRecord } from '../../types.js';
 
 // ---------------------------------------------------------------------------
@@ -92,8 +116,11 @@ export const SUPPORTED_PROTOCOL_VERSIONS = ['2026-07-28', '2025-11-25'] as const
  * Revisões antigas ACEITAS pela regra legacy: a sessão funciona (dialecto de
  * tools é compatível) e a resposta ecoa a pedida — isto NÃO é "eco cego":
  * são versões reconhecidas, o eco proibido é o de versão desconhecida.
+ * `2024-11-05` entra pelo mesmo motivo: initialize + tools/list + tools/call
+ * com conteúdo de texto são o mesmo dialecto (campo a mais é ignorado), e o
+ * SDK antigo que só fala ela DESCONECTA se receber outra versão.
  */
-export const LEGACY_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26'] as const;
+export const LEGACY_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'] as const;
 
 /** A mais recente implementada — resposta à versão desconhecida (regra legacy). */
 export const LATEST_PROTOCOL_VERSION: string = SUPPORTED_PROTOCOL_VERSIONS[0];
@@ -193,9 +220,91 @@ export interface McpTool {
   outputSchema?: Record<string, unknown>;
   /** Não precisa de key (lê disco/docs embarcadas): funciona sem OPENROUTER_API_KEY. */
   noKey?: boolean;
+  /**
+   * Key OPCIONAL (IMPL-029): usa a key se houver e, sem ela, o catálogo
+   * PÚBLICO — `list_models`/`estimate_cost` funcionam sem key, como o
+   * `models`/`estimate` do CLI. Recebe `''` quando não há key.
+   */
+  optionalKey?: boolean;
   /** Saída em JSON compacto (tools de poll: cada chamada custa tokens). */
   compact?: boolean;
+  /**
+   * Próximo passo quando a resposta estoura o teto duro — o da PRÓPRIA tool
+   * (o genérico aponta cursor/limit do get_result, que nem toda tool tem).
+   */
+  oversizeHint?: string;
   run: (args: Record<string, unknown>, apiKey: string, ctx: ToolCtx) => Promise<unknown>;
+}
+
+/**
+ * Resolve a key sob demanda. `{ optional: true }` devolve `''` quando não há
+ * key em lugar nenhum (tool de dado público); sem ele, key ausente é erro
+ * (`auth.key_missing`).
+ */
+export type KeyResolver = (opts?: { optional?: boolean }) => Promise<string>;
+
+/**
+ * Recusa de ferramenta com dados estruturados (IMPL-086): sai como `isError`
+ * com o JSON `{ok:false, error, code?, hint?, …}` no texto — NUNCA como
+ * sucesso com campo placeholder (`{error:'não encontrado'}` sem isError fazia
+ * o agente seguir como se tivesse lido um resultado).
+ */
+export class ToolFailure extends Error {
+  constructor(
+    message: string,
+    readonly data: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = 'ToolFailure';
+  }
+}
+
+/** Por FORMA, não por `instanceof` (mesma regra do `isControlSignal`). */
+function isToolFailure(e: unknown): e is ToolFailure {
+  return (
+    typeof e === 'object' &&
+    e !== null &&
+    (e as { name?: unknown }).name === 'ToolFailure' &&
+    typeof (e as { data?: unknown }).data === 'object'
+  );
+}
+
+/** Record inexistente no data dir deste servidor: isError acionável (IMPL-086). */
+function naoEncontrado(msg: string, kind: unknown): ToolFailure {
+  return new ToolFailure(msg, {
+    code: 'not_found',
+    hint:
+      kind === 'session'
+        ? 'Confira o sessionId devolvido por start_run/run_status (e o --data-dir deste servidor MCP).'
+        : 'Confira o id devolvido por start_run/run_status (e o --data-dir deste servidor MCP).',
+  });
+}
+
+/** Texto (sem caminho absoluto) de um valor de dado de erro. */
+function semCaminho(v: unknown): unknown {
+  return typeof v === 'string' ? redactPaths(v) : v;
+}
+
+/**
+ * Texto do `isError`: recusa estruturada (ToolFailure, CliError com código e
+ * dica) vira JSON compacto `{ok:false, error, code, hint}` — o agente lê o
+ * PRÓXIMO PASSO; erro comum segue como a mensagem. Sempre sem caminho
+ * absoluto (IMPL-024).
+ */
+function textoDoErro(err: unknown): string {
+  if (isToolFailure(err)) {
+    const extra = Object.fromEntries(Object.entries(err.data).map(([k, v]) => [k, semCaminho(v)]));
+    return JSON.stringify({ ok: false, error: publicErrorMessage(err), ...extra });
+  }
+  if (isCliError(err)) {
+    return JSON.stringify({
+      ok: false,
+      error: publicErrorMessage(err),
+      code: err.errorCode,
+      ...(err.hint ? { hint: redactPaths(err.hint) } : {}),
+    });
+  }
+  return publicErrorMessage(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -345,13 +454,12 @@ function emAndamento(job: JobView): Record<string, unknown> {
 
 /**
  * Resultado de uma tool longa a partir do job: terminal = o MESMO resumo que
- * a tool sempre devolveu; em andamento = o handle do job.
+ * a tool sempre devolveu; em andamento = o handle do job. Job que FALHOU é
+ * `isError` (IMPL-086) com o jobId — nunca sucesso com `{ok:false}`.
  */
-function resultadoDoJob(job: JobView, errosComoResultado: boolean): unknown {
+function resultadoDoJob(job: JobView): unknown {
   if (job.status === 'failed') {
-    const msg = job.error ?? 'o job falhou';
-    if (errosComoResultado) return { ok: false, error: msg, jobId: job.jobId };
-    throw new Error(msg);
+    throw new ToolFailure(job.error ?? 'o job falhou', { jobId: job.jobId, status: 'failed' });
   }
   if (job.result) return job.result;
   if (isTerminalJobStatus(job.status)) {
@@ -374,7 +482,6 @@ async function runLongTool(
   args: Record<string, unknown>,
   apiKey: string,
   ctx: ToolCtx,
-  errosComoResultado = false,
 ): Promise<unknown> {
   const { job } = await ctx.jobs.start(input, apiKey, {
     tool,
@@ -394,9 +501,9 @@ async function runLongTool(
     const fim = await ctx.jobs.wait(job.jobId, ctx.blockingWaitMs, ctx.signal);
     if (ctx.signal.aborted) {
       const parado = await ctx.jobs.wait(job.jobId, CANCEL_SETTLE_MS);
-      return resultadoDoJob(parado ?? job, errosComoResultado);
+      return resultadoDoJob(parado ?? job);
     }
-    return resultadoDoJob(fim ?? job, errosComoResultado);
+    return resultadoDoJob(fim ?? job);
   } finally {
     ctx.signal.removeEventListener('abort', pararJob);
   }
@@ -406,18 +513,13 @@ async function runLongTool(
  * Config de start_run: arena-agent-config@1 (objeto ou JSON string),
  * arena-config@1 ou RunConfig. O TIPO do job sai da própria config.
  */
-async function jobInputFromStartArgs(args: Record<string, unknown>): Promise<RunJobInput> {
+async function jobInputFromStartArgs(
+  raw: Record<string, unknown>,
+  args: Record<string, unknown>,
+): Promise<RunJobInput> {
   const budgetUsd = budgetOf(args.budgetUsd);
-  let raw: unknown = args.config;
-  if (typeof raw === 'string') {
-    try {
-      raw = JSON.parse(raw);
-    } catch {
-      throw new Error('config não é um JSON válido.');
-    }
-  }
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config é obrigatório (objeto).');
-  if ((raw as Record<string, unknown>).format === ARENA_AGENT_CONFIG_FORMAT) {
+  if (isJevConfigRaw(raw)) return jevJobInput(raw, budgetUsd);
+  if (isArenaAgentConfigFormat(raw.format)) {
     const cfg = parseAgentConfigRaw(raw);
     return { kind: cfg.mode === 'training' ? 'training' : 'agent', config: { ...cfg, budgetUsd }, budgetUsd };
   }
@@ -468,8 +570,77 @@ function recordRef(kind: 'run' | 'session', id: string): Record<string, unknown>
 }
 
 /**
+ * Teto do prompt campeão no RESUMO (≈ 1,1 mil tokens na heurística). O texto
+ * inteiro vem em `detail:"full"` ou no arquivo do `ref`.
+ */
+export const CHAMPION_PROMPT_SUMMARY_CHARS = 4000;
+
+/** Campos do SessionRecord que fecham o desfecho do treino (todos O(1)). */
+const DESFECHO_SESSAO = [
+  'pairing',
+  'convergedAtIteration',
+  'convergenceReason',
+  'championDeclaration',
+  'stoppedAtIteration',
+  'judgeDrift',
+] as const;
+
+/**
+ * Desfecho compacto do record (cli#12/mcp#2): o MESMO resumo que o run_status
+ * devolve no fim do job (`benchmarkSummary`/`trainingSummary`/
+ * `agentSummary`, jobManager.ts). Sem ele o get_result não dizia quem
+ * venceu nem quanto o prompt melhorou — e o run_status some com o job
+ * (retenção de 24 h; run disparada pelo CLI nem tem job). Só campos
+ * O(contestants) + o prompt campeão aparado: o resumo segue ≤ 5 mil tokens.
+ */
+function desfecho(kind: 'run' | 'session', rec: RunRecord | SessionRecord): Record<string, unknown> {
+  if (kind === 'session') {
+    const sessao = rec as SessionRecord;
+    // Os campos que o sessionSummary já traz (id/status/custo/iterações) saem daqui.
+    const {
+      sessionId: _id,
+      status: _status,
+      totalCostUsd: _custo,
+      stoppedReason: _motivo,
+      iterationsDone: _feitas,
+      championPrompt,
+      ...resto
+    } = trainingSummary(sessao);
+    const out: Record<string, unknown> = { ...resto };
+    const ultimo = sessao.bestPromptByIteration?.at(-1);
+    if (ultimo) {
+      out.champion = { iteration: ultimo.iteration, runId: ultimo.runId, contestantId: ultimo.winnerContestantId };
+    }
+    if (typeof championPrompt === 'string') {
+      out.championPrompt = championPrompt.slice(0, CHAMPION_PROMPT_SUMMARY_CHARS);
+      if (championPrompt.length > CHAMPION_PROMPT_SUMMARY_CHARS) {
+        out.championPromptTruncated = true;
+        out.championPromptChars = championPrompt.length;
+      }
+    }
+    for (const k of DESFECHO_SESSAO) if (sessao[k] !== undefined) out[k] = sessao[k];
+    return out;
+  }
+  const run = rec as RunRecord;
+  const { runId: _id, status: _status, totalCostUsd: _custo, stoppedReason: _motivo, ...resto } =
+    benchmarkSummary(run);
+  const out: Record<string, unknown> = { ...resto };
+  // Run de agentes (execuções nas respostas): o MESMO agentSummary do run_status.
+  const agentes = agentSummary(run);
+  if (agentes) out.agentSummary = agentes;
+  if (run.finalists?.length) out.finalists = run.finalists;
+  if (run.verdictIntegrity) {
+    // Só o veredito da integridade: os contadores por papel ficam no record.
+    const motivos = run.verdictIntegrity.reasons ?? [];
+    out.verdictIntegrity = { conclusive: motivos.length === 0, reasons: motivos };
+  }
+  return out;
+}
+
+/**
  * Resumo por padrão (≤ 5 mil tokens): campos do `runSummary`/`sessionSummary`
- * (o MESMO cálculo do CLI) + uma fatia paginada de etapas por cursor.
+ * (o MESMO cálculo do CLI) + o DESFECHO (placar/vencedor da run; campeão,
+ * holdout e significância do treino) + uma fatia paginada de etapas por cursor.
  */
 export function summarizeRecord(
   kind: 'run' | 'session',
@@ -486,6 +657,7 @@ export function summarizeRecord(
     // 'cancelled'): sem isto o resumo nao distingue corte de orcamento de
     // cancelamento do cliente — e o parcial so e "legivel" se denunciar o corte.
     ...(rec.stoppedReason ? { stoppedReason: rec.stoppedReason } : {}),
+    ...desfecho(kind, rec),
     ref: recordRef(kind, rec.id),
   };
   if (kind === 'run') {
@@ -541,9 +713,28 @@ const CONFIG_STRING_SCHEMA = {
   description: 'JSON string de arena-agent-config@1 (aceita também objeto)',
 };
 
+/**
+ * Teto de linhas do list_models: ~256 tokens por linha no catálogo real (460
+ * modelos; medido: pior janela de 60 linhas ≈ 15,6 mil tokens), com folga sob
+ * o teto duro de 25 mil. O antigo 200 anunciava uma faixa cuja metade de cima
+ * SEMPRE estourava.
+ */
+export const LIST_MODELS_MAX_LIMIT = 60;
+/**
+ * Página padrão: 15 linhas ≈ 3,8 mil tokens, sob o teto PADRÃO de 5 mil
+ * (IMPL-086) — as 20 de antes davam ~5,04 mil no catálogo real. O resto vem
+ * por offset/nextOffset.
+ */
+export const LIST_MODELS_DEFAULT_LIMIT = 15;
+
 const LIST_MODELS_ARGS = z.strictObject({
   search: z.string().describe('filtra por parte do id ou do nome').optional(),
-  limit: z.number().describe('máximo de resultados (padrão 20)').optional(),
+  limit: z
+    .number()
+    .describe(`máximo de resultados (padrão ${LIST_MODELS_DEFAULT_LIMIT}, máx. ${LIST_MODELS_MAX_LIMIT})`)
+    .optional(),
+  offset: z.number().describe('pula os N primeiros (paginação: use o nextOffset da resposta)').optional(),
+  modality: z.enum(['text', 'decisions']).describe('decisions = modelos de decisão (modo JEV)').optional(),
 });
 const ESTIMATE_COST_ARGS = z.strictObject({
   config: zRunConfig.describe('a configuração da run'),
@@ -587,6 +778,14 @@ const GET_RESULT_ARGS = z.strictObject({
   cursor: z.string().describe('cursor da página de etapas').optional(),
   limit: z.number().describe('etapas por página (padrão 5)').optional(),
 });
+const SESSION_REPORT_ARGS = z.strictObject({
+  sessionId: z.string('sessionId obrigatório').describe('id da sessão de treino'),
+  format: z
+    .enum(['markdown', 'json', 'html'])
+    .describe('markdown (padrão, é o brief da skill plannotator-visual-explainer), json ou html (grava em <data-dir>/reports)')
+    .optional(),
+  callsPerMonth: z.number().describe('volume da projeção de custo (padrão 10000)').optional(),
+});
 const RUN_AGENT_ARGS = z.strictObject({
   config: zRunConfig.describe('JSON string de arena-agent-config@1'),
   budgetUsd: z.number('budgetUsd é obrigatório e deve ser maior que zero.').describe('teto de gasto em USD'),
@@ -616,48 +815,54 @@ const MODELOS_OUTPUT = {
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
 const numOf = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined);
 
-async function toRunConfig(raw: unknown): Promise<RunConfig> {
-  if (typeof (raw as Record<string, unknown>)?.format === 'string') {
-    const p = parseArenaConfig(raw);
-    if (!p.ok) throw new Error(p.error);
-    const c = arenaConfigToRunConfig(p.config);
-    if (!c.ok) throw new Error(c.error);
-    return c.config;
-  }
-  const p = parseRunConfig(raw);
-  if (!p.ok) throw new Error(p.error);
-  return p.config;
-}
-
-// Config de agente chega como STRING JSON (arena-agent-config@1). Aceita tambem
-// objeto por robustez, mas o contrato do schema e a string.
-function parseAgentConfigRaw(config: unknown): RunConfig {
+/**
+ * O `config` da tool como OBJETO: o inputSchema anuncia objeto OU string JSON
+ * (mcp#3) — a string é parseada aqui, UM lugar para todas as tools (antes só
+ * o start_run parseava e as outras falhavam com "expected object").
+ */
+function configObject(config: unknown, dialeto = ''): Record<string, unknown> {
   let raw: unknown = config;
   if (typeof config === 'string') {
     try {
       raw = JSON.parse(config);
     } catch {
-      throw new Error('config não é um JSON válido de arena-agent-config@1.');
+      throw new Error(`config não é um JSON válido${dialeto ? ` de ${dialeto}` : ''}.`);
     }
   }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config é obrigatório (objeto).');
+  return raw as Record<string, unknown>;
+}
+
+/**
+ * arena-config@1 ou RunConfig cru → RunConfig pelo MESMO caminho do
+ * `--config` do CLI (`configFromJson`, run.ts): schema, fail-closed de chave
+ * desconhecida (IMPL-093 — typo nunca é descartado em silêncio) e a
+ * biblioteca (`scenarios.from: 'library'` vira customStages; perfil vazio,
+ * item sem gabarito ou sem labelSet são RECUSADOS). Antes o MCP refazia só o
+ * parse: a biblioteca era ignorada e a run caía em cenários GERADOS (mcp#0).
+ */
+async function toRunConfig(config: unknown, opts: { inspectOnly?: boolean } = {}): Promise<RunConfig> {
+  if (isJevConfigRaw(config)) throw new Error('jev-config@1 (modo JEV) roda como job: use start_run (e run_status/get_result).');
+  // Config CRUA com `agent`/`agentTask` é RECUSADA aqui (config.agent_requires_agents_run):
+  // modo agente só entra por arena-agent-config@1 + `execConfigGateForTool`.
+  return configFromJson(configObject(config), {}, opts);
+}
+
+/**
+ * arena-agent-config@1 (string JSON ou objeto) → RunConfig com as MESMAS
+ * guardas do `readAgentConfigFile` do CLI: fail-closed de chave desconhecida
+ * (IMPL-093) e `files[].path` contido ao workspace (IMPL-099/E6) — recusa
+ * de VALIDAÇÃO, antes de qualquer execução.
+ */
+function parseAgentConfigRaw(config: unknown): RunConfig {
+  const raw = configObject(config, 'arena-agent-config@1');
   const p = parseArenaAgentConfig(raw);
   if (!p.ok) throw new Error(p.error);
+  assertNoUnknownConfigKeys(raw, p.config);
+  assertAgentFilesContained(p.config);
   const c = arenaAgentConfigToRunConfig(p.config);
   if (!c.ok) throw new Error(c.error);
   return c.config;
-}
-
-/** O `config` da tool como OBJETO (string JSON parseada); `null` se não der. */
-function rawConfigObject(config: unknown): Record<string, unknown> | null {
-  let raw: unknown = config;
-  if (typeof config === 'string') {
-    try {
-      raw = JSON.parse(config);
-    } catch {
-      return null;
-    }
-  }
-  return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
 }
 
 /**
@@ -665,13 +870,14 @@ function rawConfigObject(config: unknown): Record<string, unknown> | null {
  * rodam `arena-agent-config` (setup[]/verify[] na máquina de quem chama) passam
  * pelo MESMO portão do `agents run` — aceite explícito (`allowExecConfig:
  * true`) + pin SHA-256 do conteúdo, aprovação ÚNICA por conteúdo (mudou ⇒ a
- * revisão revive). Devolve a recusa estruturada ou `null` quando aprovado.
+ * revisão revive). A recusa sai como `isError` estruturado (IMPL-086):
+ * `{ok:false, code, error, hint}` — nada é executado.
  */
 async function execConfigGateForTool(
   toolName: string,
   rawConfig: Record<string, unknown>,
   args: Record<string, unknown>,
-): Promise<Record<string, unknown> | null> {
+): Promise<void> {
   try {
     await ensureExecConfigApproved({
       dataDir: getDataDir(),
@@ -681,16 +887,13 @@ async function execConfigGateForTool(
       command: `${toolName}({…, allowExecConfig: true})`,
       allowExecConfig: args.allowExecConfig === true,
     });
-    return null;
   } catch (err) {
     if (isControlSignal(err)) throw err;
     const e = err as { message?: unknown; errorCode?: unknown; hint?: unknown };
-    return {
-      ok: false,
+    throw new ToolFailure(typeof e.message === 'string' ? e.message : String(err), {
       code: typeof e.errorCode === 'string' ? e.errorCode : 'config.exec_not_approved',
-      error: typeof e.message === 'string' ? e.message : String(err),
       hint: typeof e.hint === 'string' ? e.hint : null,
-    };
+    });
   }
 }
 
@@ -810,7 +1013,14 @@ const TOOLS: McpTool[] = [
     argsSchema: LIST_MODELS_ARGS,
     inputSchema: inputSchemaFrom(LIST_MODELS_ARGS),
     outputSchema: MODELOS_OUTPUT,
+    // Catálogo PÚBLICO sem key (IMPL-029), como o `models list` do CLI.
+    optionalKey: true,
+    oversizeHint: `use um limit menor (máx. ${LIST_MODELS_MAX_LIMIT}), pagine por offset/nextOffset ou filtre por search`,
     run: async (args, apiKey) => {
+      if (args.modality === 'decisions') {
+        const teto = Math.min(Math.max(Math.trunc(numOf(args.limit) ?? LIST_MODELS_DEFAULT_LIMIT), 1), LIST_MODELS_MAX_LIMIT);
+        return listDecisionModelsForTool(apiKey, str(args.search)?.toLowerCase(), teto);
+      }
       const cat = await ensureCatalog(apiKey);
       const busca = str(args.search)?.toLowerCase();
       let rows = cat.models;
@@ -820,11 +1030,20 @@ const TOOLS: McpTool[] = [
         );
       }
       // Teto do catálogo fatiado: sem ele, `limit: 100000` estouraria o teto de
-      // tokens da resposta de qualquer cliente.
-      const limite = Math.min(Math.max(Math.trunc(numOf(args.limit) ?? 20), 1), 200);
+      // tokens da resposta de qualquer cliente. O resto do catálogo é
+      // alcançável por offset/nextOffset (antes só por `search`).
+      const limite = Math.min(
+        Math.max(Math.trunc(numOf(args.limit) ?? LIST_MODELS_DEFAULT_LIMIT), 1),
+        LIST_MODELS_MAX_LIMIT,
+      );
+      const inicio = Math.max(Math.trunc(numOf(args.offset) ?? 0), 0);
+      const pagina = rows.slice(inicio, inicio + limite);
+      const proximo = inicio + pagina.length;
       return {
         count: rows.length,
-        models: rows.slice(0, limite).map(toExportRow),
+        offset: inicio,
+        models: pagina.map(toExportRow),
+        nextOffset: proximo < rows.length ? proximo : null,
       };
     },
   },
@@ -843,8 +1062,13 @@ const TOOLS: McpTool[] = [
     argsSchema: ESTIMATE_COST_ARGS,
     inputSchema: inputSchemaFrom(ESTIMATE_COST_ARGS, { config: CONFIG_OBJECT_SCHEMA }),
     outputSchema: { type: 'object', additionalProperties: true },
+    // Estimar não chama modelo nenhum: catálogo PÚBLICO sem key (IMPL-029),
+    // como o `estimate` do CLI.
+    optionalKey: true,
     run: async (args, apiKey) => {
-      const cfg = await toRunConfig(args.config);
+      if (isJevConfigRaw(args.config)) return estimateJevForTool(configObject(args.config), apiKey);
+      // Estimar não executa nada: aceita também a config crua de modo agente.
+      const cfg = await toRunConfig(args.config, { inspectOnly: true });
       const cat = await ensureCatalog(apiKey);
       return estimateRunCost(estimateInputFromConfig(cfg), cat.models);
     },
@@ -859,7 +1083,7 @@ const TOOLS: McpTool[] = [
       openWorldHint: true,
     },
     description:
-      'Inicia uma run (compare/vary/training/agentes) em segundo plano e devolve o jobId na hora. ' +
+      'Inicia uma run (compare/vary/training/agentes, ou jev-config@1 = modo JEV com casos inline) em segundo plano e devolve o jobId na hora. ' +
       'Depois: run_status (poll ≥ 5 s) e cancel_run. idempotencyKey obrigatória: reuse-a nos retries ' +
       '(mesma chave = mesmo job, nunca uma 2ª run paga). arena-agent-config é EXECUTÁVEL e exige ' +
       'allowExecConfig: true no primeiro aceite (pin SHA-256; ver run_agent_benchmark).',
@@ -874,13 +1098,12 @@ const TOOLS: McpTool[] = [
             'nos retries deste mesmo pedido.',
         );
       }
+      const cru = configObject(args.config);
+      // Valida ANTES do portão: config inválido (chave desconhecida, files[]
+      // fora do workspace, biblioteca vazia) é recusado sem gravar pin.
+      const input = await jobInputFromStartArgs(cru, args);
       // IMPL-099: config de agente é EXECUTÁVEL — MESMO portão do `agents run`.
-      const cru = rawConfigObject(args.config);
-      if (cru && cru.format === ARENA_AGENT_CONFIG_FORMAT) {
-        const recusa = await execConfigGateForTool('start_run', cru, args);
-        if (recusa) return recusa;
-      }
-      const input = await jobInputFromStartArgs(args);
+      if (isArenaAgentConfigFormat(cru.format)) await execConfigGateForTool('start_run', cru, args);
       // Só valida e grava: o catálogo e a run rodam no job (fora do caminho da
       // resposta — o id sai em < 500 ms). Se ESTA requisição for cancelada
       // depois daqui, o job segue: o retry com a mesma chave o reencontra.
@@ -998,14 +1221,15 @@ const TOOLS: McpTool[] = [
     },
     description:
       'Lê o resultado de uma run ou sessão pelo id. POR PADRÃO devolve um RESUMO (≤ 5 mil tokens) ' +
-      'com paginação de etapas (cursor/limit); detail:"full" devolve o record inteiro (máx. 25 mil ' +
+      'com o desfecho (run: placar, judge-score e vencedor; treino: campeão, holdout e significância) ' +
+      'e paginação de etapas (cursor/limit); detail:"full" devolve o record inteiro (máx. 25 mil ' +
       'tokens — acima disso, resumo + referência ao arquivo em disco).',
     argsSchema: GET_RESULT_ARGS,
     inputSchema: inputSchemaFrom(GET_RESULT_ARGS),
     outputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['run', 'session'] },
+        kind: { type: 'string', enum: ['run', 'session', 'jev-run', 'jev-session'] },
         detail: { type: 'string', enum: ['summary', 'full'] },
         id: { type: 'string' },
         status: { type: 'string' },
@@ -1028,7 +1252,11 @@ const TOOLS: McpTool[] = [
       if (kind === 'session') {
         rec = await loadSession(id);
         tipo = 'session';
-        if (!rec) return { error: 'sessão não encontrada' };
+        if (!rec) {
+          const jev = await jevResultForTool(id, args.detail);
+          if (jev) return jev;
+          throw naoEncontrado('sessão não encontrada', kind);
+        }
       } else {
         const run = await loadRun(id);
         if (run) {
@@ -1037,11 +1265,69 @@ const TOOLS: McpTool[] = [
         } else {
           rec = await loadSession(id);
           tipo = 'session';
-          if (!rec) return { error: 'não encontrado' };
+          if (!rec) {
+            const jev = await jevResultForTool(id, args.detail);
+            if (jev) return jev;
+            throw naoEncontrado('run/sessão não encontrada', kind);
+          }
         }
       }
       if (args.detail === 'full') return recordOuResumo(tipo, rec, paginacao);
       return summarizeRecord(tipo, rec, paginacao);
+    },
+  },
+  {
+    name: 'get_session_report',
+    annotations: {
+      title: 'Relatório de ciclos',
+      // format:"html" grava um arquivo DERIVADO em <data-dir>/reports — não é
+      // só leitura, mas é idempotente e não destrói nada.
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    description:
+      'Relatório de CICLOS de uma sessão de treino: quanto o prompt melhorou (original × campeão, por ciclo ' +
+      'e no holdout, com IC/p) e quanto a MUDANÇA muda o custo por chamada (custo, tokens, latência, projeção ' +
+      'mensal, retorno da otimização). markdown = brief para a skill plannotator-visual-explainer; html = página ' +
+      'pronta no tema do Plannotator (entregue com `plannotator annotate <arquivo>`).',
+    argsSchema: SESSION_REPORT_ARGS,
+    inputSchema: inputSchemaFrom(SESSION_REPORT_ARGS),
+    noKey: true,
+    run: async (args) => {
+      const id = args.sessionId;
+      assertValidRecordId(id);
+      const cpm = numOf(args.callsPerMonth);
+      if (cpm !== undefined && (!Number.isInteger(cpm) || cpm <= 0)) {
+        throw new Error('callsPerMonth deve ser um inteiro positivo.');
+      }
+      const session = await loadSession(id);
+      if (!session) throw naoEncontrado('sessão não encontrada', 'session');
+      const ids = new Set<string>(session.runIds);
+      for (const it of session.bestPromptByIteration) {
+        const rid = it.gate?.reeval?.runId;
+        if (rid) ids.add(rid);
+      }
+      const runs: RunRecord[] = [];
+      for (const rid of ids) {
+        if (!isValidRecordId(rid)) continue;
+        const r = await loadRun(rid);
+        if (r) runs.push(r);
+      }
+      const report = buildSessionReport(session, runs, {
+        generatedAt: new Date().toISOString(),
+        ...(cpm ? { callsPerMonth: cpm } : {}),
+      });
+      const format = args.format ?? 'markdown';
+      if (format === 'json') return report;
+      if (format === 'html') {
+        const dir = await ensurePrivateDataDir(path.join(getDataDir(), 'reports'));
+        const file = path.join(dir, `${session.id}.html`);
+        await fs.writeFile(file, renderSessionReportHtml(report), 'utf-8');
+        return { file, headline: report.headline, verdict: report.verdict, deliver: `plannotator annotate ${file}` };
+      }
+      return { markdown: renderSessionReportMarkdown(report), verdict: report.verdict };
     },
   },
   {
@@ -1061,31 +1347,18 @@ const TOOLS: McpTool[] = [
     inputSchema: inputSchemaFrom(RUN_AGENT_ARGS, { config: CONFIG_STRING_SCHEMA }),
     outputSchema: { type: 'object', additionalProperties: true },
     run: async (args, apiKey, ctx) => {
-      // Validacao nunca derruba o servidor: erros viram {ok:false, error}.
-      let cfg: RunConfig;
-      try {
-        cfg = parseAgentConfigRaw(args.config);
-      } catch (err) {
-        return { ok: false, error: publicErrorMessage(err) };
-      }
+      // Recusa (config inválido, portão, orçamento, job que falhou) sai como
+      // isError (IMPL-086) — nunca {ok:false} com cara de sucesso. A mensagem
+      // passa por publicErrorMessage no callTool (IMPL-024: sem caminho absoluto).
+      const cfg = parseAgentConfigRaw(args.config);
       // IMPL-099: portão de config executável — MESMO portão do `agents run`.
-      const cru = rawConfigObject(args.config);
-      if (cru) {
-        const recusa = await execConfigGateForTool('run_agent_benchmark', cru, args);
-        if (recusa) return recusa;
-      }
+      await execConfigGateForTool('run_agent_benchmark', configObject(args.config), args);
       const budgetUsd = numOf(args.budgetUsd);
       if (budgetUsd === undefined || budgetUsd <= 0) {
-        return { ok: false, error: 'budgetUsd é obrigatório e deve ser maior que zero.' };
+        throw new ToolFailure('budgetUsd é obrigatório e deve ser maior que zero.');
       }
       const input: RunJobInput = { kind: 'agent', config: { ...cfg, budgetUsd }, budgetUsd };
-      try {
-        return await runLongTool('run_agent_benchmark', input, args, apiKey, ctx, true);
-      } catch (err) {
-        if (isControlSignal(err)) throw err;
-        // IMPL-024: erro de workspace/executor costuma citar caminho absoluto.
-        return { ok: false, error: publicErrorMessage(err) };
-      }
+      return runLongTool('run_agent_benchmark', input, args, apiKey, ctx);
     },
   },
   {
@@ -1111,9 +1384,9 @@ const TOOLS: McpTool[] = [
       const ref = stage?.responses.find(
         (r) => r.contestantId === str(args.contestantId) && r.execution && r.execution.repetition === (numOf(args.repetition) ?? 0),
       )?.execution;
-      if (!ref) return { ok: false, error: 'dossier não encontrado' };
+      if (!ref) throw new ToolFailure('dossier não encontrado', { code: 'not_found' });
       const content = await readArtifact(ref, 'dossier.md');
-      if (content === null) return { ok: false, error: 'dossier não encontrado' };
+      if (content === null) throw new ToolFailure('dossier não encontrado', { code: 'not_found' });
       const sha256 = createHash('sha256').update(content).digest('hex');
       return { ok: true, dossier: content, sha256, truncated: Boolean(ref.dossierTruncated) };
     },
@@ -1189,7 +1462,7 @@ const NUNCA_ABORTA = new AbortController().signal;
 export async function callTool(
   name: unknown,
   args: Record<string, unknown>,
-  getKey: () => Promise<string> = async () => '',
+  getKey: KeyResolver = async () => '',
   opts: CallToolOptions = {},
 ): Promise<ToolCallResponse | null> {
   const tool = (opts.tools ?? TOOLS).find((t) => t.name === name);
@@ -1213,10 +1486,11 @@ export async function callTool(
     blockingWaitMs: Math.min(opts.blockingWaitMs ?? BLOCKING_TOOL_LIMIT_MS, BLOCKING_TOOL_LIMIT_MS),
   };
   try {
-    const key = tool.noKey ? '' : await getKey();
     // IMPL-085: argumentos contra o schema ESTRITO — campo desconhecido é
-    // rejeitado (com sugestão) em vez de engolido sem erro.
+    // rejeitado (com sugestão) em vez de engolido sem erro. ANTES da key
+    // (mcp#4): argumento errado tem de dizer o que está errado, não "falta key".
     const dados = tool.argsSchema ? validateToolArgs(tool.argsSchema, args) : args;
+    const key = tool.noKey ? '' : await getKey(tool.optionalKey ? { optional: true } : undefined);
     const out = await tool.run(dados, key, ctx);
     if (isRawResult(out)) return out[RAW_RESULT] as unknown as CreateTaskResult;
     // IMPL-086: JSON COMPACTO (0 espaços após ':' e ',') em toda saída — a
@@ -1232,7 +1506,9 @@ export async function callTool(
               ok: false,
               error:
                 `resposta grande demais (~${estimateTokens(text)} tokens; teto ${HARD_RESULT_TOKENS}). ` +
-                'Use paginação/verbosidade (ex.: get_result com cursor/limit) ou um filtro mais estreito.',
+                (tool.oversizeHint
+                  ? `${tool.oversizeHint[0].toUpperCase()}${tool.oversizeHint.slice(1)}.`
+                  : 'Use paginação/verbosidade (ex.: get_result com cursor/limit) ou um filtro mais estreito.'),
             }),
           },
         ],
@@ -1250,7 +1526,7 @@ export async function callTool(
       ...(estruturado ? { structuredContent: estruturado } : {}),
     };
   } catch (err) {
-    return { content: [{ type: 'text', text: publicErrorMessage(err) }], isError: true };
+    return { content: [{ type: 'text', text: textoDoErro(err) }], isError: true };
   }
 }
 
@@ -1261,8 +1537,13 @@ export async function callTool(
 export interface McpSessionOptions {
   /** Escreve UMA mensagem JSON-RPC (uma linha) no transporte. */
   write: (msg: Record<string, unknown>) => void;
+  /**
+   * Escreve a resposta de um BATCH (array, uma linha). Ausente, cada resposta
+   * sai avulsa por `write` (o id casa do mesmo jeito).
+   */
+  writeBatch?: (msgs: Record<string, unknown>[]) => void;
   /** Resolvida preguiçosamente: `read_docs` funciona sem key. */
-  getKey?: () => Promise<string>;
+  getKey?: KeyResolver;
   log?: (msg: string) => void;
   lane?: HeavyLane;
   /** Graça do encerramento (EOF/SIGTERM). Padrão SHUTDOWN_GRACE_MS (10 s). */
@@ -1280,6 +1561,13 @@ export interface ShutdownResult {
   forced: boolean;
   /** Chamadas ainda pendentes quando a espera terminou. */
   pending: number;
+}
+
+/** Destino das respostas de UMA mensagem: o transporte ou o coletor de um batch. */
+interface Saida {
+  write: (msg: Record<string, unknown>) => void;
+  /** Trabalho assíncrono cuja resposta ainda vai sair (tools/call, tasks/*). */
+  track: (p: Promise<void>) => void;
 }
 
 interface InflightCall {
@@ -1345,7 +1633,11 @@ export class McpSession {
    */
   private tasksNaSessao = false;
 
+  /** Mensagem avulsa: a resposta vai direto ao transporte. */
+  private readonly direta: Saida;
+
   constructor(private readonly opts: McpSessionOptions) {
+    this.direta = { write: (m) => this.opts.write(m), track: () => undefined };
     this.log = opts.log ?? (() => undefined);
     this.jobs = opts.jobs ?? new JobManager({ lane: opts.lane, log: this.log });
   }
@@ -1371,15 +1663,46 @@ export class McpSession {
     try {
       msg = JSON.parse(trimmed);
     } catch {
-      this.replyError(null, -32700, 'JSON inválido');
+      this.replyError(this.direta, null, -32700, 'JSON inválido');
       return;
     }
     this.handleMessage(msg);
   }
 
+  /**
+   * Uma mensagem JSON-RPC — ou um BATCH (array não vazio). A 2025-03-26, que
+   * esta sessão aceita, manda RECEBER batches: cada elemento é atendido pelo
+   * caminho normal e as respostas saem juntas num array só, depois que todas
+   * assentam (notificação não responde; batch só de notificações não escreve
+   * nada — nunca um array vazio). `[]` é UMA requisição inválida (-32600) e
+   * array dentro de batch é um elemento inválido, sem recursão.
+   */
   handleMessage(msg: unknown): void {
+    if (Array.isArray(msg) && msg.length > 0) {
+      this.handleBatch(msg);
+      return;
+    }
+    this.dispatch(msg, this.direta);
+  }
+
+  private handleBatch(itens: unknown[]): void {
+    const respostas: Record<string, unknown>[] = [];
+    const pendentes: Promise<void>[] = [];
+    const coletor: Saida = {
+      write: (m) => respostas.push(m),
+      track: (p) => pendentes.push(p),
+    };
+    for (const item of itens) this.dispatch(item, coletor);
+    void Promise.allSettled(pendentes).then(() => {
+      if (respostas.length === 0) return;
+      if (this.opts.writeBatch) this.opts.writeBatch(respostas);
+      else for (const r of respostas) this.opts.write(r);
+    });
+  }
+
+  private dispatch(msg: unknown, out: Saida): void {
     if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
-      this.replyError(null, -32600, 'Requisição inválida');
+      this.replyError(out, null, -32600, 'Requisição inválida');
       return;
     }
     const req = msg as JsonRpcRequest & { result?: unknown; error?: unknown };
@@ -1388,7 +1711,7 @@ export class McpSession {
     if (typeof req.method !== 'string') {
       // Resposta do cliente (este servidor nunca pede nada) ou lixo sem método.
       if (!isNotification && !('result' in req) && !('error' in req)) {
-        this.replyError(req.id, -32600, 'Requisição inválida');
+        this.replyError(out, req.id, -32600, 'Requisição inválida');
       }
       return;
     }
@@ -1404,7 +1727,7 @@ export class McpSession {
             : { tools: {} };
           if (pedido === undefined || VERSOES_ACEITAS.has(pedido)) {
             // Suportada (ou aceita pela regra legacy): ecoar é o correto nas duas eras.
-            this.reply(req.id, {
+            this.reply(out, req.id, {
               protocolVersion: pedido ?? LATEST_PROTOCOL_VERSION,
               // A extensão só é anunciada a quem a declarou: cliente legacy sem
               // ela não vê campo desconhecido em `capabilities`.
@@ -1418,13 +1741,13 @@ export class McpSession {
           // regra antiga: responder com uma versão suportada (a mais recente
           // implementada) e NOMEAR as suportadas no diagnóstico.
           if (requestDeclaresModernEra(params)) {
-            this.replyError(req.id, UNSUPPORTED_PROTOCOL_VERSION, 'UnsupportedProtocolVersion', {
+            this.replyError(out, req.id, UNSUPPORTED_PROTOCOL_VERSION, 'UnsupportedProtocolVersion', {
               supported: [...SUPPORTED_PROTOCOL_VERSIONS],
               requested: pedido,
             });
             return;
           }
-          this.reply(req.id, {
+          this.reply(out, req.id, {
             protocolVersion: LATEST_PROTOCOL_VERSION,
             capabilities,
             serverInfo: SERVER_INFO,
@@ -1442,7 +1765,7 @@ export class McpSession {
           // MUST da era moderna (IMPL-084): sempre disponível, antes/depois de
           // qualquer initialize, listando as duas revisões implementadas.
           if (!isNotification) {
-            this.reply(req.id, {
+            this.reply(out, req.id, {
               resultType: 'complete',
               supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
               capabilities: { tools: {}, extensions: { [TASKS_EXTENSION]: {} } },
@@ -1456,11 +1779,11 @@ export class McpSession {
           this.cancel(req.params);
           return;
         case 'ping':
-          if (!isNotification) this.reply(req.id, {});
+          if (!isNotification) this.reply(out, req.id, {});
           return;
         case 'tools/list':
           if (!isNotification) {
-            this.reply(req.id, {
+            this.reply(out, req.id, {
               tools: (this.opts.tools ?? TOOLS).map((t) => ({
                 name: t.name,
                 title: t.annotations?.title,
@@ -1491,20 +1814,20 @@ export class McpSession {
             this.log('[mcp] tools/call sem id ignorado (notificação não pode disparar ferramenta)');
             return;
           }
-          this.startCall(req.id as string | number, req.params);
+          this.startCall(req.id as string | number, req.params, out);
           return;
         case 'tasks/get':
         case 'tasks/cancel':
         case 'tasks/update':
-          if (!isNotification) this.handleTask(req.id as string | number, req.method, req.params);
+          if (!isNotification) this.handleTask(req.id as string | number, req.method, req.params, out);
           return;
         default:
           if (!isNotification) {
-            this.replyError(req.id, -32601, `Método não suportado: ${umaLinha(req.method, 80)}`);
+            this.replyError(out, req.id, -32601, `Método não suportado: ${umaLinha(req.method, 80)}`);
           }
       }
     } catch (err) {
-      if (!isNotification) this.replyError(req.id, -32603, publicErrorMessage(err));
+      if (!isNotification) this.replyError(out, req.id, -32603, publicErrorMessage(err));
     }
   }
 
@@ -1540,16 +1863,16 @@ export class McpSession {
 
   // --- interno ---------------------------------------------------------------
 
-  private startCall(id: string | number, params: unknown): void {
+  private startCall(id: string | number, params: unknown, out: Saida): void {
     if (this.closing) {
-      this.replyError(id, -32000, 'Servidor MCP encerrando: chamada recusada.');
+      this.replyError(out, id, -32000, 'Servidor MCP encerrando: chamada recusada.');
       return;
     }
     const key = requestKey(id);
     if (this.inflight.has(key)) {
       // Ids precisam ser únicos na sessão; reusar um em voo tornaria o
       // cancelamento ambíguo (qual das duas parar?).
-      this.replyError(id, -32600, 'id de requisição já em uso por uma chamada em andamento.');
+      this.replyError(out, id, -32600, 'id de requisição já em uso por uma chamada em andamento.');
       return;
     }
     const p = (params ?? {}) as { name?: unknown; arguments?: unknown };
@@ -1586,17 +1909,18 @@ export class McpSession {
           return;
         }
         if (!result) {
-          this.replyError(id, -32602, `Ferramenta desconhecida: ${call.tool}`);
+          this.replyError(out, id, -32602, `Ferramenta desconhecida: ${call.tool}`);
           return;
         }
-        this.reply(id, result);
+        this.reply(out, id, result);
       } catch (err) {
         // callTool não rejeita (erro de ferramenta vira isError); rede de segurança.
-        if (!call.cancelled) this.replyError(id, -32603, publicErrorMessage(err));
+        if (!call.cancelled) this.replyError(out, id, -32603, publicErrorMessage(err));
       } finally {
         this.inflight.delete(key);
       }
     })();
+    out.track(call.done);
   }
 
   private cancel(params: unknown): void {
@@ -1622,51 +1946,52 @@ export class McpSession {
    * não declarou a extensão recebe -32021 com `data.requiredCapabilities`
    * (MUST da spec). Assíncrono (lê disco), mas nunca prende o laço de leitura.
    */
-  private handleTask(id: string | number, method: string, params: unknown): void {
+  private handleTask(id: string | number, method: string, params: unknown, out: Saida): void {
     if (!this.tasksNaSessao && !requestDeclaresTasks(params)) {
-      this.replyError(id, MISSING_CAPABILITY, 'Missing required client capability', {
+      this.replyError(out, id, MISSING_CAPABILITY, 'Missing required client capability', {
         requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } },
       });
       return;
     }
     const taskId = (params as { taskId?: unknown } | null | undefined)?.taskId;
-    void (async () => {
+    const trabalho = (async () => {
       try {
         if (method === 'tasks/update') {
           // Nenhum job daqui pede input (nunca fica em input_required).
-          this.replyError(id, -32602, 'A task não está aguardando input (input_required).');
+          this.replyError(out, id, -32602, 'A task não está aguardando input (input_required).');
           return;
         }
         if (!isValidRecordId(taskId)) {
-          this.replyError(id, -32602, 'taskId inválido.');
+          this.replyError(out, id, -32602, 'taskId inválido.');
           return;
         }
         if (method === 'tasks/cancel') {
           // Cooperativo: reconhece o pedido; o estado vira 'cancelled' quando a
           // run gravar o parcial (tasks/get mostra).
           const v = await this.jobs.cancel(taskId, 'tasks/cancel do cliente');
-          if (!v) this.replyError(id, -32602, 'Failed to retrieve task: Task not found');
-          else this.reply(id, { resultType: 'complete' });
+          if (!v) this.replyError(out, id, -32602, 'Failed to retrieve task: Task not found');
+          else this.reply(out, id, { resultType: 'complete' });
           return;
         }
         const job = await this.jobs.status(taskId, { progress: false });
         if (!job) {
-          this.replyError(id, -32602, 'Failed to retrieve task: Task not found');
+          this.replyError(out, id, -32602, 'Failed to retrieve task: Task not found');
           return;
         }
-        this.reply(id, taskGetResult(job));
+        this.reply(out, id, taskGetResult(job));
       } catch (err) {
-        this.replyError(id, -32603, publicErrorMessage(err));
+        this.replyError(out, id, -32603, publicErrorMessage(err));
       }
     })();
+    out.track(trabalho);
   }
 
-  private reply(id: unknown, result: unknown): void {
-    this.opts.write({ jsonrpc: '2.0', id, result });
+  private reply(out: Saida, id: unknown, result: unknown): void {
+    out.write({ jsonrpc: '2.0', id, result });
   }
 
-  private replyError(id: unknown, code: number, message: string, data?: unknown): void {
-    this.opts.write({ jsonrpc: '2.0', id, error: data === undefined ? { code, message } : { code, message, data } });
+  private replyError(out: Saida, id: unknown, code: number, message: string, data?: unknown): void {
+    out.write({ jsonrpc: '2.0', id, error: data === undefined ? { code, message } : { code, message, data } });
   }
 }
 
@@ -1696,24 +2021,41 @@ function flushStdout(maxMs: number): Promise<void> {
   });
 }
 
+/**
+ * Key resolvida PREGUIÇOSAMENTE (`--key` → OPENROUTER_API_KEY → `key set`):
+ * `read_docs` funciona sem key nenhuma, e um servidor MCP não deve morrer no
+ * boot por causa disso. `{ optional: true }` (list_models/estimate_cost)
+ * devolve `''` sem key — catálogo público, como `models`/`estimate` do CLI
+ * (IMPL-029); sem o `optional`, key ausente é `auth.key_missing`.
+ */
+export function lazyKeyResolver(values: Record<string, unknown>): KeyResolver {
+  let apiKeyCache: string | null = null;
+  return async (opts) => {
+    if (apiKeyCache) return apiKeyCache;
+    if (opts?.optional) {
+      const k = await tryResolveKey(values);
+      if (k) apiKeyCache = k;
+      return k ?? '';
+    }
+    apiKeyCache = await resolveKey(values);
+    return apiKeyCache;
+  };
+}
+
 export async function cmdMcp(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
   setDataDir(resolveHome(parsed.values));
 
-  // A key e resolvida preguicosamente: `read_docs` funciona sem nenhuma key, e
-  // um servidor MCP nao deve morrer no boot por causa disso.
-  let apiKeyCache: string | null = null;
-  const getKey = async (): Promise<string> => {
-    if (apiKeyCache) return apiKeyCache;
-    apiKeyCache = await resolveKey(parsed.values);
-    return apiKeyCache;
-  };
+  const getKey = lazyKeyResolver(parsed.values);
 
   // stdout é o canal JSON-RPC; narração vai para o stderr (o cliente a loga).
   let stdoutQuebrado = false;
   const session = new McpSession({
     write: (msg) => {
       if (!stdoutQuebrado) process.stdout.write(`${JSON.stringify(msg)}\n`);
+    },
+    writeBatch: (msgs) => {
+      if (!stdoutQuebrado) process.stdout.write(`${JSON.stringify(msgs)}\n`);
     },
     getKey,
     log: (m) => {

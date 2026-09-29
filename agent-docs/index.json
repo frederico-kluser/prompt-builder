@@ -2,85 +2,103 @@
   {
     "topic": "quickstart",
     "title": "Começo rápido",
-    "summary": "o caminho de 6 passos e as 6 regras que evitam erro (inclui retentativa com --idempotency-key). COMECE AQUI.",
-    "approxTokens": 900
+    "summary": "o caminho de 6 passos (com orçamento que passa no pré-voo), as 6 regras que evitam erro (inclui retentativa com --idempotency-key) e o `npm run agent-setup` do checkout. COMECE AQUI.",
+    "approxTokens": 1400
   },
   {
     "topic": "overview",
     "title": "Como funciona",
     "summary": "o pipeline, o conceito de contestant e o laço do treino",
-    "approxTokens": 700
+    "approxTokens": 950
   },
   {
     "topic": "models",
     "title": "Modelos e think levels",
     "summary": "filtros, allowlist LGPD por endpoint, schema de export e como não tomar HTTP 400 no esforço",
-    "approxTokens": 1300
+    "approxTokens": 1750
   },
   {
     "topic": "lifecycle",
     "title": "Ciclo de vida dos modelos",
-    "summary": "o que a run grava do catálogo, alertas 30/14/7 dias, política de remoção e o gate `baseline check`",
-    "approxTokens": 1300
+    "summary": "o que a run grava do catálogo, alertas 30/14/7 dias, política de remoção, o gate `baseline check` e a regressão dos meta-prompts (`prompts regression`, exit 10)",
+    "approxTokens": 1450
+  },
+  {
+    "topic": "calibration",
+    "title": "Calibração juiz × humano",
+    "summary": "`calib report`: o juiz serve neste domínio? Formato calibration-jsonl@1, piloto anotador × anotador primeiro, α ordinal de Krippendorff + AC2 de Gwet + IC95%, sensibilidade/especificidade e o portão (exit 10)",
+    "approxTokens": 1600
   },
   {
     "topic": "budget",
     "title": "Orçamento e custo",
     "summary": "como o teto para a run sem corromper o resultado; pré-voo em ordem, códigos de recusa, o --dry-run com paridade e a defesa anti-gasto N× (lock da config, --idempotency-key, teto diário da máquina, limite da key)",
-    "approxTokens": 1900
+    "approxTokens": 2250
   },
   {
     "topic": "compare",
     "title": "compare",
-    "summary": "qual modelo (ou qual configuração) responde melhor",
-    "approxTokens": 600
+    "summary": "qual modelo (ou qual configuração) responde melhor; modo econômico do juiz (`--judge-cascade`)",
+    "approxTokens": 700
   },
   {
     "topic": "vary",
     "title": "vary",
     "summary": "uma rodada de variações de prompt no mesmo modelo",
-    "approxTokens": 450
+    "approxTokens": 500
   },
   {
     "topic": "train",
     "title": "train",
     "summary": "evoluir um prompt com holdout e significância estatística",
-    "approxTokens": 800
+    "approxTokens": 4050
+  },
+  {
+    "topic": "report",
+    "title": "Relatório de ciclos",
+    "summary": "sessions report: quanto o prompt melhorou (original × campeão, por ciclo e no holdout) e quanto a mudança muda o custo por chamada; HTML no tema do Plannotator e entrega pela skill plannotator-visual-explainer",
+    "approxTokens": 1050
   },
   {
     "topic": "ndjson",
     "title": "Saída NDJSON",
-    "summary": "tabela completa de eventos, o envelope de erro (kind/code/hint) e o que não vem no stream",
-    "approxTokens": 1000
+    "summary": "tabela completa de eventos (run, treino, agente, avisos), o envelope de erro (kind/code/hint) e o que não vem no stream",
+    "approxTokens": 1600
   },
   {
     "topic": "results",
     "title": "Lendo os resultados",
-    "summary": "as duas réguas de ranking e os campos que importam nos records",
-    "approxTokens": 700
+    "summary": "as duas réguas de ranking e os campos que importam nos records (inclui relatório da geração, cascata do juiz, segurança e ledger)",
+    "approxTokens": 3600
   },
   {
     "topic": "troubleshooting",
     "title": "Problemas comuns",
-    "summary": "400 no esforço, 402 sem crédito, 403 = bloqueio (não é key), dado pessoal recusado (--allow-pii/--pii-mode), modelo fora do catálogo, run.locked, teto diário, doctor exit 4, truncamento > 2%, run inconclusiva (código 6), tudo 'parcial', run travada",
-    "approxTokens": 1700
+    "summary": "400 no esforço, 402 sem crédito (também no meio da run: código 5), 403 = bloqueio (não é key), headers de atribuição (PROMPT_BUILDER_NO_ATTRIBUTION), custo pendente e conciliação, proxy sem streaming, dado pessoal recusado (--allow-pii/--pii-mode), modelo fora do catálogo, run.locked, teto diário, doctor exit 4, truncamento > 2%, run inconclusiva (código 6), tudo 'parcial', run travada",
+    "approxTokens": 3850
   },
   {
     "topic": "config",
     "title": "Contrato arena-config@1",
-    "summary": "o documento completo do arquivo de configuração declarativo (longo)",
-    "approxTokens": 9000
+    "summary": "o arquivo de configuração de run campo a campo (derivado do schema zod real): papéis, cenários/gabarito/rótulos, contratos, treino/holdout, LGPD, exemplos que passam no `config validate`, os erros reais e o formato do modo agente",
+    "approxTokens": 4750
   },
   {
     "topic": "agents",
     "title": "Modo agente (Agent Arena)",
     "summary": "o que é o modo agente, o caminho feliz em 5 comandos, os limites obrigatórios, a tabela de stopReason e o modo container (sandbox + proxy de inferência)",
-    "approxTokens": 3800
+    "approxTokens": 4500
   },
   {
     "topic": "agent-task",
     "title": "Contrato arena-agent-config@1",
     "summary": "o contrato do modo agente inteiro, campo a campo, com JSON e os erros comuns (longo)",
-    "approxTokens": 4700
+    "approxTokens": 5100
+  },
+  {
+    "topic": "jev",
+    "title": "Modo JEV (decisões tipadas)",
+    "summary": "benchmark e evolução de definições de decisão do Jev (noul/choice/score) em casos rotulados: jev-config@1, métricas de calibração e bandas, custo por decisão, comparação com LLM e cascata",
+    "approxTokens": 4300
   }
 ]

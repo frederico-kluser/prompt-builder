@@ -167,9 +167,10 @@ describe('IMPL-106 — Nova Run: página única COMPLETA + superfície GUIADA', 
     expect(src).toMatch(/section:\s*'sujeitos'/);
     expect(src).toMatch(/section:\s*'avancado'/);
     // O submit nunca troca de aba: leva à seção (rolagem + foco) — ou, na
-    // superfície guiada, ao PASSO que resolve (SECTION_STEP).
-    expect(src).toMatch(/irPara\(faltas\[0\]\.section\)/);
-    expect(src).toMatch(/SECTION_STEP\[section\]/);
+    // superfície guiada, ao PASSO que resolve (SECTION_STEP, ou o passo
+    // explícito da pendência — ex.: o gabarito mora em "Participantes").
+    expect(src).toMatch(/irPara\(faltas\[0\]\.section, faltas\[0\]\.step, faltas\[0\]\.onlyComplete\)/);
+    expect(src).toMatch(/step \?\? SECTION_STEP\[section\]/);
   });
 
   it.skipIf(!temWebDeps)('render guiado (default): trilho de 5 passos + rodapé sempre visível', async () => {

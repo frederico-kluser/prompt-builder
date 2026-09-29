@@ -83,7 +83,8 @@ describe('IMPL-056 — sem a flag, o datagen NÃO pede variação de idioma', ()
     await datagen.generateStages({ apiKey: KEY, theme: 'trocas', count: 8, modelId: 'fake/gen' });
 
     const chamadas = mensagensDatagen();
-    expect(chamadas.length).toBe(3); // 2 lotes + 1 backfill
+    // 2 lotes + o laço de reposição (web-live#7): o gerador só repete.
+    expect(chamadas.length).toBe(2 + datagen.DATAGEN_MAX_BACKFILL_ROUNDS);
     for (const msgs of chamadas) {
       const texto = todoTexto(msgs);
       expect(texto).not.toMatch(/idiomas? (ainda )?sub-representados/i);
@@ -92,7 +93,7 @@ describe('IMPL-056 — sem a flag, o datagen NÃO pede variação de idioma', ()
     }
     // O backfill cobre variedade de tarefa/dificuldade, sem tocar em idioma.
     const backfills = chamadas.filter((m) => userDe(m).includes('LACUNAS DE VARIEDADE'));
-    expect(backfills).toHaveLength(1);
+    expect(backfills).toHaveLength(datagen.DATAGEN_MAX_BACKFILL_ROUNDS);
     expect(userDe(backfills[0])).toContain('tipos de tarefa e dificuldades ainda sub-representados');
     expect(userDe(backfills[0])).not.toMatch(/idioma/i);
     // E o system FIXA o idioma do produto.

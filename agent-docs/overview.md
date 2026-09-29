@@ -35,8 +35,9 @@ HTTP 429) — não existe cap por comando.
 - **Iteração 0** — gera variantes do prompt base aplicando técnicas de
   engenharia de prompt. O prompt base entra como **controle**.
 - **Split de holdout** — depois da iteração 0, uma fatia dos cenários
-  (`holdoutRatio`, padrão 0,2) é **reservada** e fica fora do treino. Com menos
-  de 5 cenários reservados, o holdout é descartado e tudo treina.
+  (`holdoutRatio`, padrão 0,3) é **reservada** e fica fora do treino. Piso
+  absoluto de 10 cenários reservados (seleção ≥ 20): abaixo disso não há
+  holdout — é "confirmação fraca" (`holdoutSkipped`) e tudo treina.
 - **Promoção com margem E teste** — a melhor variante só vira campeã se superar
   o controle por pelo menos `minGain` pontos de judge-score (padrão
   `max(1; 50/n)`, meia granularidade) E passar no teste da **melhor de K**: max-T
@@ -54,10 +55,17 @@ HTTP 429) — não existe cap por comando.
   significância estatística (teste pareado exato por troca de sinais). É o que
   separa "melhorou" de "sobreajustou aos cenários de treino".
 
-Se o holdout for pulado (orçamento), o resultado traz `holdoutSkipped: true` e
-um aviso: **o campeão não está validado contra sobreajuste**.
+Se o holdout for pulado (poucos cenários, orçamento, cancelamento), o resultado
+traz `holdoutSkipped: true`, o motivo em `holdoutSkipReason` e um aviso: **o
+campeão não está validado contra sobreajuste**.
 
 ## Onde ficam os dados
 
-`~/.prompt-builder/` — `runs/`, `sessions/`, `cache/` e `key` (modo 0600).
-Mude com `--data-dir` ou `$PROMPT_BUILDER_HOME`.
+`~/.prompt-builder/` — `runs/`, `sessions/`, `cache/` e `key` (modo 0600), mais
+`library/` (dataset estável), `jev-runs/`/`jev-sessions/` (modo JEV, `docs jev`),
+`agent-runs/` (modo agente) e `handoffs.jsonl` (auditoria do `sessions winner
+--apply`). Mude com `--data-dir` ou `$PROMPT_BUILDER_HOME`. Retenção: TTL de 90
+dias por default (`runs prune`, `docs results`).
+
+Depois de um `train`, `sessions report <id>` resume os ciclos: quanto o prompt
+melhorou e quanto a mudança muda o custo por chamada (`docs report`).

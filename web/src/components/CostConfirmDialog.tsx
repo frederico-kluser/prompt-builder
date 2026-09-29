@@ -2,7 +2,12 @@ import { useRef } from 'react';
 import { Modal } from './Modal';
 import { Banner } from './primitives';
 import { Button } from '@/components/ui/button';
-import { costConfirmationReason, type LaunchCostEstimate } from '../api';
+import {
+  costConfirmationReason,
+  UNESTIMABLE_COST_LABEL,
+  UNKNOWN_PRICE_LABEL,
+  type LaunchCostEstimate,
+} from '../api';
 
 // Confirmação de custo ANTES de rodar (IMPL-020, R-10:REC-3 Q5c): acima de
 // US$ 1 (faixa alta) — ou com preço desconhecido — a run só começa com um "sim"
@@ -47,10 +52,22 @@ export function CostConfirmDialog({
                   Esta {alvo} usa modelo sem preço no catálogo: a faixa abaixo o conta como zero, então o custo
                   real pode passar dela sem aviso.
                 </>
+              ) : motivo === 'unknown' ? (
+                // web-code#7: a faixa CABE no limiar — o que falta é poder limitar
+                // o custo do modelo de preço variável, não um custo alto.
+                <>
+                  Esta {alvo} usa modelo de preço {UNKNOWN_PRICE_LABEL} (ex.: roteado pelo OpenRouter): ele
+                  fica fora da faixa abaixo ({UNESTIMABLE_COST_LABEL}), então o custo real pode passar dela.
+                </>
               ) : (
                 <>
                   Esta {alvo} pode custar mais de {usd(estimate.thresholdUsd)}
-                  {motivo === 'both' ? ' — e usa modelo sem preço no catálogo, contado como zero' : ''}.
+                  {motivo === 'both'
+                    ? estimate.unpricedModelIds.length > 0
+                      ? ' — e usa modelo sem preço no catálogo, contado como zero'
+                      : ` — e usa modelo de preço ${UNKNOWN_PRICE_LABEL}, fora da soma`
+                    : ''}
+                  .
                 </>
               )}{' '}
               A faixa é larga de propósito: não dá para saber quantos tokens cada resposta vai usar.
@@ -95,6 +112,12 @@ export function CostConfirmDialog({
             <Banner tone="warn">
               Sem preço no catálogo (contados como zero — o custo real pode ser maior):{' '}
               {estimate.unpricedModelIds.join(', ')}.
+            </Banner>
+          )}
+          {(estimate.unknownPriceModelIds?.length ?? 0) > 0 && (
+            <Banner tone="warn">
+              Preço {UNKNOWN_PRICE_LABEL} (fora da soma — o custo real pode ser maior):{' '}
+              {estimate.unknownPriceModelIds.join(', ')}.
             </Banner>
           )}
           {estimate.budgetUsd !== undefined ? (

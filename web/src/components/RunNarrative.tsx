@@ -1,9 +1,9 @@
 import { useMemo } from 'react';
-import { Check, CircleDashed, LoaderCircle, Trophy } from 'lucide-react';
+import { Check, CircleDashed, Equal, LoaderCircle, Trophy } from 'lucide-react';
 import { ProgressBar } from '@/components/motion-ui/progress-bar';
 import type { RunRecord } from '../api';
 import { normalizeContestants, runMode } from '../api';
-import { heatRows, type HeatRow } from '../pages/runShared';
+import { denseStages, heatRows, runWinner, tieMarks, type HeatRow, type RunWinnerView } from '../pages/runShared';
 import { cn } from '@/lib/utils';
 
 /**
@@ -14,6 +14,11 @@ import { cn } from '@/lib/utils';
  * simples, em que FASE está o pipeline, quem vai à frente, quanto já custou e
  * — no fim — quem venceu e porquê. Números brutos (tokens, latências, vereditos
  * por célula) ficam nas seções de detalhe abaixo.
+ *
+ * O vencedor sai da MESMA régua do `runs winner`/MCP (`runWinner` →
+ * `winnerFromStandings`): com finais, o duelo final decide; sem finais, o
+ * judge-score — e empate é dito como empate, nunca coroado pela ordem de
+ * cadastro (web-code#10 / web-live#4).
  */
 
 export interface RunNarrativeProps {
@@ -33,27 +38,43 @@ function usd(v: number): string {
   return `US$ ${v.toFixed(v < 1 ? 4 : 2)}`;
 }
 
+/**
+ * Cenários que a run EXECUTA (web-code#11): os slots alocados em
+ * `record.stages`, não `config.stages` — rodada de treino pinada roda só a
+ * fatia de treino, `repeats` multiplica os slots e o seed pode passar do alvo.
+ * `config.stages` só enquanto os slots ainda não chegaram.
+ */
+export function executedStageCount(record: Pick<RunRecord, 'stages' | 'config'>): number {
+  return denseStages(record.stages ?? []).length || (record.config?.stages ?? 0);
+}
+
 /** As 4 fases do pipeline, com contagem — a espinha da narrativa. */
-function pipelinePhases(record: RunRecord, duelProgress: RunNarrativeProps['duelProgress']): Phase[] {
-  const stages = record.stages ?? [];
-  const totalStages = Math.max(record.config?.stages ?? 0, stages.length);
+export function pipelinePhases(record: RunRecord, duelProgress: RunNarrativeProps['duelProgress']): Phase[] {
+  const stages = denseStages(record.stages ?? []);
+  const totalStages = executedStageCount(record);
   const contestants = normalizeContestants(record);
-  const gerados = stages.filter((s) => s.spec).length;
-  const respostas = stages.reduce((n, s) => n + (s.responses?.length ?? 0), 0);
-  const esperadas = totalStages * Math.max(contestants.length, 1);
-  const julgados = stages.filter((s) => s.judge || s.referenceJudge).length;
-  const duelosTotal = duelProgress?.total ?? (record.standings?.length ? 1 : record.finalists?.length ? 0 : 0);
+  // Etapa PULADA (falha no datagen) é terminal: não gera respostas nem
+  // julgamento — contá-la no alvo deixava a fase aberta para sempre.
+  const pulados = stages.filter((s) => s.error).length;
+  const ativos = Math.max(0, totalStages - pulados);
+  const gerados = stages.filter((s) => s.spec || s.error).length;
+  const respostas = stages.reduce((n, s) => n + (s.error ? 0 : (s.responses?.length ?? 0)), 0);
+  const esperadas = ativos * Math.max(contestants.length, 1);
+  // Terminal no julgamento: julgada, ou cortada (`incomplete` — orçamento,
+  // cancelamento, truncamento) — esta nunca vai ter veredito.
+  const julgados = stages.filter((s) => !s.error && (s.judge || s.referenceJudge || s.incomplete)).length;
+  const duelosTotal = duelProgress?.total ?? (record.standings?.length ? 1 : 0);
   const duelosFeitos = duelProgress?.done ?? (record.standings?.length ? 1 : 0);
   return [
     { label: 'Cenários', done: gerados, total: totalStages },
-    { label: 'Respostas', done: respostas, total: esperadas },
-    { label: 'Julgamento', done: julgados, total: totalStages },
+    { label: 'Respostas', done: Math.min(respostas, esperadas), total: esperadas },
+    { label: 'Julgamento', done: julgados, total: ativos },
     { label: 'Duelo final', done: duelosFeitos, total: Math.max(duelosTotal, record.standings?.length ? 1 : 0) },
   ];
 }
 
 /** 1 frase sobre onde está (ou onde parou) o processo. */
-function statusLine(record: RunRecord, phases: Phase[]): string {
+export function statusLine(record: RunRecord, phases: Phase[]): string {
   if (record.status === 'running') {
     const atual = phases.find((p) => p.total > 0 && p.done < p.total);
     if (!atual) return 'A concluir…';
@@ -68,8 +89,100 @@ function statusLine(record: RunRecord, phases: Phase[]): string {
   return 'Run concluída.';
 }
 
-/** Placar em linguagem simples, melhor primeiro. */
-function Leaderboard({ rows, record }: { rows: HeatRow[]; record: RunRecord }) {
+/** Desfecho em 1 frase + se houve vencedor claro. */
+export interface Outcome {
+  text: string;
+  /** Id do vencedor (ausente = empate sem vencedor claro). */
+  winnerId?: string;
+}
+
+/**
+ * Quem venceu, pela régua única — com o empate NUNCA escondido e a régua dita.
+ * `null` enquanto roda ou sem nenhuma nota.
+ */
+export function runOutcome(record: RunRecord, rows: HeatRow[], w: RunWinnerView = runWinner(record)): Outcome | null {
+  if (record.status === 'running' || !w.contestantId) return null;
+  const labelOf = (id: string): string =>
+    rows.find((r) => r.contestantId === id)?.label ??
+    normalizeContestants(record).find((c) => c.id === id)?.label ??
+    id;
+  const nomes = (ids: string[]): string =>
+    ids.length <= 2 ? ids.map(labelOf).join(' e ') : `${ids.slice(0, -1).map(labelOf).join(', ')} e ${labelOf(ids[ids.length - 1])}`;
+  const modo = runMode(record);
+  const ehModelo = modo === 'compare';
+  const comNota = rows.filter((r) => r.score !== null).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+
+  if (w.unresolved) {
+    // Empate que resistiu a todos os desempates que medem algo: o "vencedor"
+    // seria o sorteio cego — a tela não coroa ninguém.
+    const nota = comNota.find((r) => w.tiedIds.includes(r.contestantId))?.score;
+    if (w.ruler !== 'judge-score') {
+      return {
+        text: `Empate no duelo final entre ${nomes(w.tiedIds)} (mesma taxa de vitória e mesmo judge-score) — nenhum vencedor claro; rode mais cenários.`,
+      };
+    }
+    if (w.tiedIds.length === comNota.length && comNota.length > 1) {
+      return {
+        text: `Nenhum${ehModelo ? ' modelo' : 'a variação'} se destacou: todos empataram com nota ${Math.round(nota ?? 0)}.`,
+      };
+    }
+    return {
+      text: `Empate entre ${nomes(w.tiedIds)} com nota ${Math.round(nota ?? 0)} — nenhum vencedor claro; rode mais cenários.`,
+    };
+  }
+
+  const id = w.contestantId;
+  const linha = rows.find((r) => r.contestantId === id);
+  const liderNota = comNota[0];
+  const segundo = comNota.find((r) => r.contestantId !== id);
+
+  if (w.ruler === 'duels' || w.ruler === 'duels+judge-score') {
+    const st = (record.standings ?? []).find((s) => s.id === id);
+    const desempate =
+      w.tieBreak === 'wins'
+        ? ' (empate na taxa de vitória desfeito pelo nº de vitórias)'
+        : w.tieBreak === 'judge-score'
+          ? ' (empate nos duelos desfeito pelo judge-score)'
+          : '';
+    const placar = st ? ` com taxa de vitória de ${Math.round(st.winRate * 100)}% (${st.wins}V–${st.ties}E–${st.losses}D)` : '';
+    let text = `${ehModelo ? 'O melhor modelo foi' : 'A melhor variação foi'} ${labelOf(id)}: venceu o duelo final${placar}${desempate}.`;
+    // As réguas podem discordar (pointwise × pareado): dito, não escondido.
+    const liderUnico = liderNota && comNota.filter((r) => r.score === liderNota.score).length === 1;
+    if (liderUnico && liderNota.contestantId !== id) {
+      text += ` No placar de vereditos quem vai à frente é ${liderNota.label} — as réguas discordam, o que é esperado com poucos cenários.`;
+    } else if (linha && linha.judged) {
+      text += ` No placar de vereditos resolveu ${linha.resolve} de ${linha.judged} cenários.`;
+    }
+    return { text, winnerId: id };
+  }
+
+  // Régua: judge-score (sem finais, ou rodada de treino).
+  const nota = linha?.score ?? record.judgeScoreByContestant?.[id] ?? 0;
+  const margem =
+    segundo && segundo.score !== null ? ` (margem de ${Math.round(nota - segundo.score)} pontos sobre ${segundo.label})` : '';
+  const resolveu = linha && linha.judged ? `resolveu ${linha.resolve} de ${linha.judged} cenários, nota ${Math.round(nota)}` : `nota ${Math.round(nota)}`;
+  if (w.training) {
+    return {
+      text: `À frente no placar desta rodada: ${labelOf(id)} — ${resolveu}${margem}. Quem vira campeão é o gate da sessão (margem mínima + teste).`,
+      winnerId: id,
+    };
+  }
+  return {
+    text: `${ehModelo ? 'O melhor modelo foi' : 'A melhor variação foi'} ${labelOf(id)}: ${resolveu}${margem}.`,
+    winnerId: id,
+  };
+}
+
+/** Placar em linguagem simples, melhor primeiro (placar de VEREDITOS). */
+function Leaderboard({
+  rows,
+  record,
+  winnerId,
+}: {
+  rows: HeatRow[];
+  record: RunRecord;
+  winnerId?: string;
+}) {
   const comNota = rows.filter((r) => r.score !== null);
   if (!comNota.length) {
     return (
@@ -78,51 +191,70 @@ function Leaderboard({ rows, record }: { rows: HeatRow[]; record: RunRecord }) {
       </p>
     );
   }
-  // Sem duelo final, o placar de vereditos é quem decide; com standings, os
-  // duelos confirmam (eles vêm ordenados por taxa de vitória).
+  // Ordem = judge-score (é o placar de VEREDITOS). Quem VENCEU é outra
+  // pergunta — com finais, decide o duelo final (`winnerId`); o troféu só vai
+  // para ele, e empate na nota vira texto ("empatado com X"), nunca 1º lugar
+  // dado pela ordem de cadastro (o controle vem 1º no array).
   const ordenado = [...comNota].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
   const total = ordenado[0]?.judged ?? 0;
   const modo = runMode(record);
+  const running = record.status === 'running';
+  const empates = tieMarks(
+    ordenado.map((r) => r.contestantId),
+    (id) => ordenado.find((r) => r.contestantId === id)?.score ?? undefined,
+    (id) => ordenado.find((r) => r.contestantId === id)?.label ?? id,
+  );
+  // Posição por competição: empatados dividem o número.
+  const posicao = (r: HeatRow): number => 1 + ordenado.filter((o) => (o.score ?? 0) > (r.score ?? 0)).length;
+  const lider = ordenado[0];
+  const liderUnico = lider && !empates.has(lider.contestantId);
   return (
     <ul className="flex flex-col gap-2.5">
-      {ordenado.map((r, i) => (
-        <li key={r.contestantId} className="flex items-center gap-3">
-          <span
-            className={cn(
-              'grid size-5 shrink-0 place-items-center rounded-full text-[11px] font-medium tabular',
-              i === 0 ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground',
-            )}
-            aria-hidden="true"
-          >
-            {i + 1}
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="flex flex-wrap items-baseline gap-x-2">
-              <span className="truncate text-sm font-medium">{r.label}</span>
-              {r.isControl && <span className="text-[11px] text-muted-foreground">controlo</span>}
-              {i === 0 && (
-                <span className="inline-flex items-center gap-1 text-[11px] text-primary">
-                  <Trophy className="size-3" aria-hidden="true" />
-                  {modo === 'compare' ? 'à frente' : 'melhor prompt'}
-                </span>
+      {ordenado.map((r) => {
+        const vence = !running && r.contestantId === winnerId;
+        const aFrente = running && liderUnico && r.contestantId === lider.contestantId;
+        const empate = empates.get(r.contestantId);
+        return (
+          <li key={r.contestantId} className="flex items-center gap-3">
+            <span
+              className={cn(
+                'grid size-5 shrink-0 place-items-center rounded-full text-[11px] font-medium tabular',
+                vence || aFrente ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground',
               )}
+              aria-hidden="true"
+            >
+              {posicao(r)}
             </span>
-            <span className="mt-0.5 block text-[12px] text-muted-foreground">
-              resolveu {r.resolve} de {r.judged || total}
-              {r.parcial ? ` · ${r.parcial} parcial` : ''}
-              {r.nao ? ` · ${r.nao} não resolveu` : ''}
-              {' · nota '}
-              {Math.round(r.score ?? 0)}
+            <span className="min-w-0 flex-1">
+              <span className="flex flex-wrap items-baseline gap-x-2">
+                <span className="truncate text-sm font-medium">{r.label}</span>
+                {r.isControl && <span className="text-[11px] text-muted-foreground">controle</span>}
+                {vence && (
+                  <span className="inline-flex items-center gap-1 text-[11px] text-primary">
+                    <Trophy className="size-3" aria-hidden="true" />
+                    {modo === 'compare' ? 'vencedor' : 'melhor prompt'}
+                  </span>
+                )}
+                {aFrente && <span className="text-[11px] text-primary">à frente</span>}
+                {empate && <span className="text-[11px] text-muted-foreground">{empate.summary}</span>}
+              </span>
+              <span className="mt-0.5 block text-[12px] text-muted-foreground">
+                resolveu {r.resolve} de {r.judged || total}
+                {r.parcial ? ` · ${r.parcial} parcial` : ''}
+                {r.nao ? ` · ${r.nao} não resolveu` : ''}
+                {' · nota '}
+                {Math.round(r.score ?? 0)}
+              </span>
             </span>
-          </span>
-          <ProgressBar
-            className="w-24 shrink-0"
-            size="sm"
-            value={(r.score ?? 0) / 100}
-            aria-label={`Nota de ${r.label}`}
-          />
-        </li>
-      ))}
+            {/* web-live#3: a largura vai num WRAPPER — o ProgressBar monta
+                `w-full` na raiz e, com `w-24` no mesmo nó, o w-full vencia e a
+                coluna do nome colapsava a 0 px. */}
+            <div className="w-24 shrink-0">
+              <ProgressBar size="sm" value={(r.score ?? 0) / 100} aria-label={`Nota de ${r.label}`} />
+            </div>
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -133,21 +265,9 @@ export function RunNarrative({ record, duelProgress }: RunNarrativeProps) {
   const running = record.status === 'running';
   const julgados = stages.filter((s) => s.judge || s.referenceJudge).length;
 
-  // Desfecho final, em 1 frase: quem venceu e por quanto (só com veredito real).
-  const vencedor = useMemo(() => {
-    if (running) return null;
-    const ordenado = rows.filter((r) => r.score !== null).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-    const top = ordenado[0];
-    if (!top) return null;
-    const segundo = ordenado[1];
-    const modo = runMode(record);
-    const verbo = modo === 'compare' ? 'O melhor modelo foi' : 'A melhor variação foi';
-    const margem =
-      segundo && top.score !== null && segundo.score !== null
-        ? ` (margem de ${Math.round(top.score - segundo.score)} pontos sobre ${segundo.label})`
-        : '';
-    return `${verbo} ${top.label}: resolveu ${top.resolve} de ${top.judged} cenários${margem}.`;
-  }, [rows, record, running]);
+  // Desfecho final, em 1 frase: quem venceu, por qual régua (só com veredito real).
+  const outcome = useMemo(() => runOutcome(record, rows), [record, rows]);
+  const temFinais = Boolean(record.standings?.length) && !record.sessionId;
 
   const outcomes = record.competitorOutcomeCounts;
   const desfechos = outcomes
@@ -191,7 +311,7 @@ export function RunNarrative({ record, duelProgress }: RunNarrativeProps) {
             <li key={p.label} className="flex flex-col gap-1.5">
               <span className="flex items-baseline gap-1.5">
                 <span className="font-mono text-[11px] text-muted-foreground tabular">{i + 1}</span>
-                <span className={cn('text-[13px] font-medium', atual && 'text-primary')}>{p.label}</span>
+                <span className={cn('text-[13px] font-medium', atual && running && 'text-primary')}>{p.label}</span>
                 {completo && <Check className="size-3.5 text-resolve" aria-hidden="true" />}
               </span>
               <ProgressBar
@@ -208,17 +328,28 @@ export function RunNarrative({ record, duelProgress }: RunNarrativeProps) {
         })}
       </ol>
 
-      {vencedor && (
+      {outcome && (
         <p className="mt-4 border-t border-border pt-3 text-sm leading-relaxed">
-          <Trophy className="mr-1.5 inline size-4 text-primary" aria-hidden="true" />
-          {vencedor}
+          {outcome.winnerId ? (
+            <Trophy className="mr-1.5 inline size-4 text-primary" aria-hidden="true" />
+          ) : (
+            <Equal className="mr-1.5 inline size-4 text-muted-foreground" aria-hidden="true" />
+          )}
+          {outcome.text}
         </p>
       )}
 
       <div className="mt-4 border-t border-border pt-4">
-        <h3 className="text-[12px] tracking-wide text-muted-foreground uppercase">Placar</h3>
+        <h3 className="text-[12px] tracking-wide text-muted-foreground uppercase">
+          {temFinais ? 'Placar de vereditos' : 'Placar'}
+        </h3>
+        {temFinais && (
+          <p className="mt-1 text-[12px] text-muted-foreground">
+            Ordem pelo judge-score; quem vence é decidido no duelo final (abaixo).
+          </p>
+        )}
         <div className="mt-2.5">
-          <Leaderboard rows={rows} record={record} />
+          <Leaderboard rows={rows} record={record} winnerId={outcome?.winnerId} />
         </div>
       </div>
 

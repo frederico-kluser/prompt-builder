@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowRight, Download } from 'lucide-react';
-import type { RunRecord, SessionRecord, StageSpec } from '../api';
+import { ArrowRight, Download, FileBarChart } from 'lucide-react';
+import type { RunRecord, SavedPrompt, SessionRecord, StageSpec } from '../api';
 import {
   cacheSession,
   canCancelSession,
@@ -12,7 +12,9 @@ import {
   fetchRun,
   getLiveRun,
   subscribeRunLive,
+  listPrompts,
   savePrompt,
+  updatePrompt,
   buildScenarioPack,
   downloadScenarioPack,
 } from '../api';
@@ -20,7 +22,15 @@ import { applyEvent, denseStages, EvolutionHeatmap, ScoreHeatmap, FinalsPanel } 
 import { RunNarrative } from '../components/RunNarrative';
 import { FailureDigest, DeltaBars, VariantPromptDrawer, JudgeDiagnostics } from '../components/RunInsights';
 import { diffLines } from '../diff';
-import { formatIterationGate, formatPValue, reportPValue } from '../engine/stats';
+import { formatIterationGate, formatPValue, formatSignificanceOrigin, reportPValue } from '../engine/stats';
+import { holdoutSkipReasonText } from '../engine/holdout';
+import {
+  convergenceReasonText,
+  holdoutSkipReasonOf,
+  reevalRunIdsOf,
+  sessionConfirmationText,
+  sessionRecommendationOf,
+} from '../../../src/engine/sessionDecision.js';
 import {
   SmoothTabs,
   SmoothTabsList,
@@ -100,6 +110,10 @@ function BestPromptStudio({
   const [saveName, setSaveName] = useState('');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  // web-code#14: prompts JÁ salvos desta sessão — salvar de novo pode virar uma
+  // VERSÃO nova de um deles (o histórico/diff da biblioteca) em vez de duplicata.
+  const [sameSession, setSameSession] = useState<SavedPrompt[]>([]);
+  const [saveTarget, setSaveTarget] = useState<string>('new');
 
   // Quem o usuario ja escolheu a mao manda; enquanto ele nao escolheu, a
   // selecao SEGUE o campeao sugerido. Acompanhando a sessao ao vivo, `defaultRunId`
@@ -131,32 +145,56 @@ function BestPromptStudio({
     setSaved(false);
   }, [selRunId, selCid]);
 
+  const roundTag = (it: number) => (it === holdoutAt ? 'holdout' : `rodada ${it + 1}`);
+
   function openSaveForm() {
     if (!selRound) return;
-    const tag = selRound.iteration === holdoutAt ? 'holdout' : `rodada ${selRound.iteration + 1}`;
-    setSaveName(`Prompt ${selVariant?.label ?? selCid ?? 'variante'} · ${tag}`);
+    setSaveName(`Prompt ${selVariant?.label ?? selCid ?? 'variante'} · ${roundTag(selRound.iteration)}`);
     setSaveOpen(true);
+    setSameSession([]);
+    setSaveTarget('new');
+    listPrompts()
+      .then((list) => {
+        const mine = list.filter((p) => p.origin?.kind === 'training' && p.origin.sessionId === sessionId);
+        setSameSession(mine);
+        // Já existe prompt desta sessão: o default é a versão nova do mais recente.
+        if (mine.length) setSaveTarget(mine[0].id);
+      })
+      .catch(() => undefined); // sem biblioteca legível: só "novo prompt"
   }
 
   async function saveToLibrary() {
     const name = saveName.trim();
-    if (!selRound || !selPrompt || !name || saving) return;
+    if (!selRound || !selPrompt || saving) return;
+    const alvo = saveTarget === 'new' ? undefined : sameSession.find((p) => p.id === saveTarget);
+    if (!alvo && !name) return;
     setSaving(true);
     try {
-      await savePrompt({
-        name,
-        text: selPrompt,
-        origin: {
-          kind: 'training',
-          sessionId,
-          runId: selRound.runId,
-          techniqueId: selVariant?.techniqueId,
-          iteration: selRound.iteration,
-        },
-      });
+      if (alvo) {
+        const before = alvo.version;
+        const updated = await updatePrompt(alvo.id, {
+          text: selPrompt,
+          note: `treino ${sessionId.slice(0, 8)} · ${roundTag(selRound.iteration)} · ${selVariant?.label ?? selCid ?? 'variante'}`,
+        });
+        if (updated && updated.version > before) notify(`Salvo como v${updated.version} de “${updated.name}”.`);
+        else notify(`O texto é igual à versão atual de “${alvo.name}” — nada a salvar.`);
+      } else {
+        await savePrompt({
+          name,
+          text: selPrompt,
+          origin: {
+            kind: 'training',
+            sessionId,
+            runId: selRound.runId,
+            techniqueId: selVariant?.techniqueId,
+            iteration: selRound.iteration,
+            ...(selRound.iteration === holdoutAt ? { holdout: true } : {}),
+          },
+        });
+        notify('Prompt salvo na biblioteca.');
+      }
       setSaved(true);
       setSaveOpen(false);
-      notify('Prompt salvo na biblioteca.');
     } catch (err) {
       // IMPL-022: agora a falha do IndexedDB chega aqui (antes o idbPut a engolia
       // e este aviso nunca aparecia) — com a causa (ex.: sem espaço).
@@ -268,14 +306,35 @@ function BestPromptStudio({
 
       {saveOpen && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Input
-            className="h-8 min-w-[16rem] flex-1"
-            aria-label="Nome na biblioteca"
-            value={saveName}
-            onChange={(e) => setSaveName(e.target.value)}
-            placeholder="Nome na biblioteca"
-          />
-          <Button size="sm" onClick={() => void saveToLibrary()} disabled={saving || !saveName.trim()}>
+          {sameSession.length > 0 && (
+            <select
+              className="h-8 rounded-lg border border-input bg-background px-2 text-[13px] outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+              aria-label="Salvar como"
+              value={saveTarget}
+              onChange={(e) => setSaveTarget(e.target.value)}
+            >
+              {sameSession.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {`Nova versão de “${p.name}” (hoje v${p.version})`}
+                </option>
+              ))}
+              <option value="new">Novo prompt</option>
+            </select>
+          )}
+          {saveTarget === 'new' && (
+            <Input
+              className="h-8 min-w-[16rem] flex-1"
+              aria-label="Nome na biblioteca"
+              value={saveName}
+              onChange={(e) => setSaveName(e.target.value)}
+              placeholder="Nome na biblioteca"
+            />
+          )}
+          <Button
+            size="sm"
+            onClick={() => void saveToLibrary()}
+            disabled={saving || (saveTarget === 'new' && !saveName.trim())}
+          >
             {saving ? 'Salvando…' : 'Salvar'}
           </Button>
           <Button variant="ghost" size="sm" onClick={() => setSaveOpen(false)}>
@@ -294,6 +353,18 @@ function BestPromptStudio({
       )}
     </div>
   );
+}
+
+/**
+ * web-live#2 / web-code#9: o record da sessão que o trainer MUTA em lugar
+ * (`fetchSession`/snapshot devolvem a referência viva) nunca vira estado do
+ * React como está — com a mesma referência, `setSession(vivo)` no
+ * `session.finished` caía no bail-out do Object.is e a tela ficava "running",
+ * "— ao vivo" e com o botão de cancelar para sempre. Uma cópia rasa por
+ * evento basta: a página lê os arrays aninhados no render.
+ */
+function sessionSnapshot(rec: SessionRecord): SessionRecord {
+  return { ...rec };
 }
 
 export function TrainingView() {
@@ -322,7 +393,7 @@ export function TrainingView() {
       fetchSession(sessionId)
         .then((s) => {
           if (cancelled) return;
-          setSession(s);
+          setSession(sessionSnapshot(s));
           // Mesma regra do snapshot: mais runs do que iteracoes concluidas => a
           // ultima e a corrente (cobre a run de holdout, que NAO emite iteration.started).
           const doneN = s.bestPromptByIteration.length;
@@ -341,7 +412,7 @@ export function TrainingView() {
         }
         if (event.type === 'snapshot') {
           const rec = event.record as SessionRecord;
-          setSession(rec);
+          setSession(sessionSnapshot(rec));
           if (rec.status !== 'running') setOwnership(null);
           void cacheSession(rec);
           const doneN = rec.bestPromptByIteration.length;
@@ -360,12 +431,21 @@ export function TrainingView() {
             .catch(() => undefined);
         }
         if (event.type === 'session.converged') {
-          setSession((prev) => (prev ? { ...prev, convergedAtIteration: event.iteration } : prev));
+          setSession((prev) =>
+            prev ? { ...prev, convergedAtIteration: event.iteration, convergenceReason: event.reason } : prev,
+          );
         }
         if (event.type === 'session.holdout') {
           setSession((prev) => (prev ? { ...prev, holdout: event.holdout } : prev));
         }
-        if (event.type === 'session.finished') void cacheSession(event.record);
+        if (event.type === 'session.finished') {
+          // O fim chega com o record final: vira estado JÁ (sem esperar o
+          // refetch), e a posse da aba deixa de importar.
+          const rec = event.record as SessionRecord;
+          setSession(sessionSnapshot(rec));
+          setOwnership(null);
+          void cacheSession(rec);
+        }
         refetch();
       },
       () => refetch(),
@@ -482,9 +562,12 @@ export function TrainingView() {
   // A run de holdout e marcada com iteracao == planned ("rodada H"): em toda
   // lista de rodadas ela vira "Holdout", nunca "Rodada N+1".
   const holdoutAt = planned > 0 ? planned : undefined;
-  const best = session.bestPromptByIteration.length
-    ? session.bestPromptByIteration.reduce((a, b) => (b.score >= a.score ? b : a))
-    : undefined;
+  // web-live#1 / web-code#5: o campeão da SESSÃO é o pós-gate da ÚLTIMA rodada
+  // (cada entrada já carrega a última promoção) — a mesma regra do CLI
+  // (`sessions winner`), do job manager e do "Pacote". Nunca ranquear rodadas
+  // por `score`: são ouros de minibatches/elencos diferentes, não comparáveis
+  // (o argmax abria o estúdio no ORIGINAL de uma rodada 1 cheia de ouros).
+  const best = session.bestPromptByIteration.at(-1);
   const originalPrompt = session.config.basePrompt ?? '';
   // Rodada em foco: a corrente ao vivo, ou a ultima conhecida quando acabou.
   const roundShown = liveRun ?? rounds[rounds.length - 1];
@@ -501,7 +584,15 @@ export function TrainingView() {
   // Gates (holdout / significancia / convergencia) em UMA linha.
   const signed = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(1)}`;
   const gates: string[] = [];
-  if (session.convergedAtIteration != null) gates.push(`Convergiu na rodada ${session.convergedAtIteration + 1}`);
+  // IMPL-051: a convergência diz a rodada E o motivo (platão vs paciência).
+  if (session.convergedAtIteration != null) {
+    gates.push(
+      `Convergiu na rodada ${session.convergedAtIteration + 1} (${convergenceReasonText(
+        session.convergenceReason,
+        session.config.patience,
+      )})`,
+    );
+  }
   if (session.holdout) {
     const h = session.holdout;
     gates.push(
@@ -512,23 +603,41 @@ export function TrainingView() {
     const sig = session.significance;
     // IMPL-001: relatório mostra o p BILATERAL do teste exato (o unilateral é o do gate).
     const rep = sig === null ? null : reportPValue(sig);
+    // IMPL-050: toda saída de significância traz a ORIGEM do p (holdout |
+    // seleção | sem p) — o mesmo rótulo do CLI.
     gates.push(
       rep === null
-        ? 'amostra insuficiente p/ significância'
-        : `${formatPValue(rep.p)} ${rep.kind === 'two-sided' ? 'bilateral' : '(bootstrap, legado)'}`,
+        ? `amostra insuficiente p/ significância (${formatSignificanceOrigin(null)})`
+        : `${formatPValue(rep.p)} ${rep.kind === 'two-sided' ? 'bilateral' : '(bootstrap, legado)'} · ${formatSignificanceOrigin(sig)}`,
     );
   }
+  // web-code#8: por que não houve holdout — gravado pelo motor (derivado em record antigo).
+  const holdoutSkipReason = holdoutSkipReasonOf(session);
+  // IMPL-050: a confirmação do campeão ("validado" só com holdout que CONFIRMOU).
+  // Holdout pulado já tem o aviso próprio (abaixo); aqui entram o resultado do
+  // holdout e a ausência por desenho (desligado, campeão = base).
+  if (session.status !== 'running' && (session.holdout || (!session.holdoutSkipped && holdoutSkipReason))) {
+    gates.push(`Confirmação: ${sessionConfirmationText(session)}`);
+  }
+  // IMPL-046: o veredito de recomendação com recusa honesta — o MESMO objeto
+  // de `sessions show`/`sessions winner` (empate técnico diz Δ, IC, P e o n
+  // sugerido; nunca "vencedor" sem evidência). Só com a sessão encerrada.
+  const recommendation = session.status !== 'running' ? sessionRecommendationOf(session) : null;
 
   // IMPL-002: gate de cada rodada — ganho bruto × corrigido × p ajustado (max-T).
+  // web-code#18: a run PAGA da re-avaliação limpa fica alcançável pelo link.
   const gateLines = session.bestPromptByIteration
     .filter((it) => it.gate?.test)
-    .map((it) => ({ key: it.iteration, text: `Rodada ${it.iteration + 1} — ${formatIterationGate(it.gate!)}` }));
+    .map((it) => ({
+      key: it.iteration,
+      text: `Rodada ${it.iteration + 1} — ${formatIterationGate(it.gate!)}`,
+      reevalRunId: it.gate?.reeval?.runId,
+    }));
 
   function downloadPack() {
     if (!session || !packScenarios.length) return;
-    const lastBest = session.bestPromptByIteration[session.bestPromptByIteration.length - 1];
-    const prompt = lastBest?.systemPrompt
-      ? { text: lastBest.systemPrompt, source: 'champion' as const, label: `Campeão da rodada ${lastBest.iteration + 1}` }
+    const prompt = best?.systemPrompt
+      ? { text: best.systemPrompt, source: 'champion' as const, label: `Campeão da rodada ${best.iteration + 1}` }
       : { text: session.config.basePrompt ?? '', source: 'base' as const, label: 'Prompt base' };
     downloadScenarioPack(buildScenarioPack({ theme: session.config.theme, prompt, scenarios: packScenarios }));
   }
@@ -576,6 +685,11 @@ export function TrainingView() {
             <Download aria-hidden="true" />
             Pacote
           </Button>
+          {/* Relatório de ciclos: quanto melhorou × quanto a mudança muda o custo. */}
+          <Button size="sm" onClick={() => navigate(`/training/${session.id}/report`)} disabled={done === 0}>
+            <FileBarChart aria-hidden="true" />
+            Relatório de ciclos
+          </Button>
           {cancellable && (
             <div className="ml-auto">
               <CancelHoldButton
@@ -609,7 +723,7 @@ export function TrainingView() {
         onMarkInterrupted={() => {
           void markSessionInterrupted(session.id).then((s) => {
             if (!s) return;
-            setSession(s);
+            setSession(sessionSnapshot(s));
             if (s.status !== 'running') setOwnership(null);
           });
         }}
@@ -620,12 +734,17 @@ export function TrainingView() {
         targets={[
           { subject: 'session', id: session.id },
           ...session.runIds.map((id) => ({ subject: 'run' as const, id })),
+          // web-code#18: a re-avaliação limpa também grava — falha dela aparece aqui.
+          ...reevalRunIdsOf(session).map((id) => ({ subject: 'run' as const, id })),
         ]}
       />
       {session.holdoutSkipped && (
         <Banner tone="warn" className="mt-4">
-          <strong>Holdout pulado</strong> (orçamento/cancelamento): o campeão NÃO foi validado nos cenários
-          reservados — o ganho pode ser sobreajuste à seleção de treino.
+          {/* web-live#11: seleção < 20 cenários NÃO é "pulado" (nunca houve
+              fatia reservada) — o título e o motivo vêm do registro. */}
+          <strong>{holdoutSkipReason === 'min-scenarios' ? 'Sem holdout' : 'Holdout pulado'}</strong> (
+          {holdoutSkipReason ? holdoutSkipReasonText(holdoutSkipReason) : 'motivo não registrado'}): o campeão NÃO foi
+          validado em cenários reservados — o ganho pode ser sobreajuste à seleção de treino.
         </Banner>
       )}
       {gates.length > 0 && (
@@ -633,10 +752,31 @@ export function TrainingView() {
           {gates.join(' · ')}
         </Banner>
       )}
+      {recommendation && (
+        <p className="mt-2 text-[13px] text-muted-foreground" data-testid="session-recommendation">
+          {/* Mesma linha do `sessions show` ("recomendação (judge-score+ci): …"),
+              com o veredito por extenso — a recusa ("inconclusiva") é resposta. */}
+          <strong className="font-medium text-foreground">
+            Recomendação {recommendation.verdict === 'conclusivo' ? 'conclusiva' : 'inconclusiva'} (
+            {recommendation.ruler}):
+          </strong>{' '}
+          {recommendation.text}
+        </p>
+      )}
       {gateLines.length > 0 && (
         <ul className="mt-2 space-y-0.5 text-xs text-muted-foreground" aria-label="Gate de promoção por rodada">
           {gateLines.map((l) => (
-            <li key={l.key}>{l.text}</li>
+            <li key={l.key}>
+              {l.text}
+              {l.reevalRunId && (
+                <>
+                  {' · '}
+                  <Link className="underline underline-offset-2 hover:text-foreground" to={`/runs/${l.reevalRunId}`}>
+                    ver re-avaliação
+                  </Link>
+                </>
+              )}
+            </li>
           ))}
         </ul>
       )}
@@ -688,11 +828,12 @@ export function TrainingView() {
         <EmptyState>Preparando a rodada…</EmptyState>
       )}
 
-      <VariantPromptDrawer
-        record={roundShown ?? rounds[rounds.length - 1]}
-        variantId={drawerVariant}
-        onClose={() => setDrawerVariant(null)}
-      />
+      {/* Sem rodada carregada ainda (sessão recém-aberta: runs chegam depois) não
+          há variante para mostrar — antes o drawer lia `undefined.contestants`
+          e derrubava a tela inteira. */}
+      {roundShown && (
+        <VariantPromptDrawer record={roundShown} variantId={drawerVariant} onClose={() => setDrawerVariant(null)} />
+      )}
 
       {rounds.length > 1 && (
         <>

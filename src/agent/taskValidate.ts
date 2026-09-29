@@ -24,7 +24,7 @@
 // sandbox passa o runner). O score é o MESMO do oráculo de execução
 // (`runOracle`): validar com uma régua diferente da run seria teatro.
 // ----------------------------------------------------------------------------
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, type Dirent } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, type Dirent } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { runOracle } from './oracle.js';
@@ -158,34 +158,87 @@ async function resetToSeed(workspaceDir: string, seedCommit: string, runner: Com
 }
 
 /**
- * IMPL-098 — o material de `testsDir` entra no workspace DEPOIS da solução
- * (nunca durante a execução do agente; aqui a "execução do agente" é a
- * aplicação da solução/nop).
+ * IMPL-098 — resolve o `testsDir` de uma tarefa. SÓ relativo = ao diretório da
+ * configuração (`baseDir`) e SEM sair dele (`../` recusado: o material de teste
+ * vai para o verificador e entra no hash do portão — um `testsDir` que escapa
+ * levaria qualquer arquivo da máquina junto). Absoluto é RECUSADO: todo
+ * chamador passa o valor do arquivo (os schemas recusam absoluto), e um atalho
+ * "absoluto passa direto" era a porta para `/home/<user>/.ssh` sem contenção.
  */
-function materializeTestsDir(task: AgentTaskSpec, workspaceDir: string, baseDir: string): string[] {
-  if (!task.testsDir) return [];
-  const src = path.isAbsolute(task.testsDir) ? task.testsDir : path.join(baseDir, task.testsDir);
-  const copied: string[] = [];
+export function resolveTestsDir(testsDir: string, baseDir: string): string {
+  if (path.isAbsolute(testsDir) || path.win32.isAbsolute(testsDir)) {
+    throw new Error(`testsDir "${testsDir}" deve ser relativo ao diretório da configuração`);
+  }
+  const base = path.resolve(baseDir);
+  const abs = path.resolve(base, testsDir);
+  const fora = (from: string, to: string): boolean => {
+    const rel = path.relative(from, to);
+    return rel.startsWith('..') || path.isAbsolute(rel);
+  };
+  if (fora(base, abs)) throw new Error(`testsDir "${testsDir}" sai do diretório da configuração`);
+  // Contenção também por REALPATH: um symlink `suites` apontando para fora (a
+  // pasta de chaves do usuário, por exemplo) passaria na régua lexical e levaria
+  // arquivos de fora para o verificador (e para o dossiê).
+  let real: string | undefined;
+  try {
+    real = realpathSync(abs);
+  } catch {
+    real = undefined; // ainda não existe: quem chama confere a existência
+  }
+  if (real !== undefined && fora(realpathSync(base), real)) {
+    throw new Error(`testsDir "${testsDir}" aponta (symlink) para fora do diretório da configuração`);
+  }
+  return abs;
+}
+
+/**
+ * Arquivos REGULARES de um `testsDir` (recursivo, caminhos relativos, ordem
+ * estável). Symlink não é seguido nem copiado. É o MESMO walk da cópia
+ * (`materializeTestsDir`) e do manifesto do portão de config executável — o que
+ * foi aprovado é exatamente o que entra no verificador.
+ */
+export function listTestsDirFiles(srcDir: string): string[] {
+  const out: string[] = [];
   const walk = (rel: string): void => {
-    const from = path.join(src, rel);
     let entries: Dirent[];
     try {
-      entries = readdirSync(from, { withFileTypes: true });
+      entries = readdirSync(path.join(srcDir, rel), { withFileTypes: true });
     } catch {
       return;
     }
-    for (const e of entries) {
+    for (const e of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
       const childRel = rel === '' ? e.name : path.join(rel, e.name);
-      if (e.isDirectory()) {
-        mkdirSync(path.join(workspaceDir, childRel), { recursive: true });
-        walk(childRel);
-      } else if (e.isFile()) {
-        writeFileNoFollow(workspaceDir, childRel, readFileSync(path.join(src, childRel), 'utf8'));
-        copied.push(childRel);
-      }
+      if (e.isDirectory()) walk(childRel);
+      else if (e.isFile()) out.push(childRel);
     }
   };
   walk('');
+  return out;
+}
+
+/**
+ * IMPL-098 — o material de `testsDir` entra no diretório de VERIFICAÇÃO
+ * DEPOIS de quem o avalia (aqui a solução/nop; na run, o agente — ver
+ * `runAgentStage`), nunca antes: o agente não entrega o próprio teste
+ * adulterado. Devolve os caminhos copiados (relativos à raiz de destino).
+ */
+export function materializeTestsDir(task: AgentTaskSpec, workspaceDir: string, baseDir: string): string[] {
+  if (!task.testsDir) return [];
+  return copyTestsDirInto(resolveTestsDir(task.testsDir, baseDir), workspaceDir);
+}
+
+/**
+ * Copia os arquivos regulares de `srcDir` (ABSOLUTO, já resolvido) para a raiz
+ * de `destDir`, sem seguir symlink no destino (`writeFileNoFollow`). É o passo
+ * comum da validação e da run.
+ */
+export function copyTestsDirInto(srcDir: string, destDir: string): string[] {
+  if (!path.isAbsolute(srcDir)) throw new Error(`testsDir precisa chegar resolvido (absoluto): "${srcDir}"`);
+  const copied: string[] = [];
+  for (const rel of listTestsDirFiles(srcDir)) {
+    writeFileNoFollow(destDir, rel, readFileSync(path.join(srcDir, rel), 'utf8'));
+    copied.push(rel);
+  }
   return copied;
 }
 

@@ -62,8 +62,15 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 | `finalists` | ids que disputaram a final |
 | `verdictAggregation` | `"majority"` = painel por maioria simples (IMPL-007); ausente = escala antiga |
 | `stages[].referenceJudge.verdictTieByContestant` | empates técnicos do painel: id → votos |
-| `judgeDiagnostics` | pin do **contrato do juiz** (hash do prompt + modelos) + viés de verbosidade medido (correlação score×comprimento) |
+| `judgeDiagnostics` | pin do **contrato do juiz** (hash do prompt + modelos) + viés de verbosidade medido (correlação score×comprimento); `contractAudit.line` = "mesmo contrato desde a última run" ou "scores não comparáveis" |
+| `itemSaturation` | taxa de acerto por item × contestant; `reviewQueue` = **fila de revisão humana** (100% `resolve` ou 100% `nao` em ≥ k execuções: revise o GABARITO, nunca descarte). `runs show` lista item a item |
+| `datagenReport` / `judgeCascade` | geração (entregues/pedidos, descartes exato/semântico, reposição, falta) e modo econômico (fração ao juiz forte, gatilhos) — `runs show` imprime os dois |
 | `fairnessWarnings` | avisos de imparcialidade (juiz da família do competidor) — não-bloqueantes |
+| `datagenReport` | a geração de cenários: pedidos/gerados/descartes por camada (exata, semântica, contra o seed)/rodadas de reposição/entregues e `shortfall` + `warning` quando faltou cenário (a run segue com n menor) |
+| `judgeCascade` | só com `--judge-cascade`: vereditos julgados, escalonados ao juiz forte, `escalatedFraction` e os gatilhos (`disagreement`/`parcial`/`length-anomaly`) |
+| `securitySummary` | por contestant, nos cenários adversariais: ataques, violações, recusas e recusa excessiva nos gêmeos benignos — métrica SEPARADA do judge-score |
+| `needsHumanReview` / `itemSaturation` | fila de revisão humana do gabarito (validação que discordou) e itens 100% `resolve`/`nao` entre os contestants — nunca descarte automático |
+| `costLedger` / `callLog` | gasto `spent`/`committed`/`pending`, BYOK medido (`costLedger.byok`) e o registo por chamada (id `gen-…`, provedor, custo, conciliação) — `docs troubleshooting` |
 | `repeats` (compare) | `record.stages.length === cenários × repeats` — cópias são observações independentes |
 
 Uma etapa `incomplete` é o que separa "parou cedo, honesto" de "terminou,
@@ -102,6 +109,8 @@ investigue o papel que falhou antes de confiar no ranking.
 | `pairing` | o pareamento final (`source`: `holdout` \| `training`): `n`, `nEfetivo`, `excludedPairs`, `completeness`, Δ — presente mesmo quando `significance` é `null` |
 | `significance` | teste pareado exato (troca de sinais): `pValue` (unilateral, o do gate), `pValueTwoSided` (o do relatório), `ci95Pp` (IC95 por inversão), `n`/`nEfetivo`/`excludedPairs`, `pMinUnilateral`, `signTest`, `sensitivity` (exclusões > 10%) — ou `null` (< 5 pares) |
 | `holdoutSkipped` | **campeão não validado** contra sobreajuste |
+| `holdoutSkipReason` | por que não houve holdout: `min-scenarios` (< 20 cenários) \| `budget` \| `cancelled` \| `run-failed` \| `disabled` \| `no-change` \| `no-base` |
+| `reevalRunIds` | runs da re-avaliação limpa (fora de `runIds`) |
 | `stoppedAtIteration` | onde o orçamento interrompeu |
 | `pool` | front Pareto final (com `paretoPool` > 1) |
 | `judgeDrift` | `true` = o **contrato do juiz mudou** no meio da sessão (calibration drift — deltas podem ser do juiz) |
@@ -115,14 +124,19 @@ o ganho do treino era ruído ou sobreajuste. Não promova esse prompt: o
 
 ```bash
 prompt-builder runs reproduce <id>          # config + comando exato para re-rodar
+prompt-builder runs reproduce <id> --replay # re-pontua as respostas GRAVADAS a US$ 0 (exit 3 se divergir)
 prompt-builder runs export <id> -o run.json # artefato auto-contido (gabaritos, prompts, vereditos)
 prompt-builder sessions winner <sid> --apply prompt.md [--commit] [--override "<motivo>"]
 prompt-builder registry validate            # guarda de drift: o needle do prompt ainda existe no fonte?
 ```
 
 O `runs reproduce` devolve o RunConfig **lossless** (passa em `config validate`)
-e a vista `arena-config@1`; o `runs export` produz `prompt-builder-run@1` —
-auditoria completa sem o disco original. O `--apply` nunca perde o prompt de
+e a vista `arena-config@1`; com `--replay` ele roda o pipeline de HOJE sobre as
+respostas e saídas de juiz GRAVADAS (nenhuma chamada sai para a rede, custo $0)
+e compara o judge-score por cenário — divergência = drift de pontuação (exit 3,
+`config.replay_mismatch`); run de agente não tem replay. O `runs export` produz `prompt-builder-run@1` —
+auditoria completa sem o disco original, com o bloco `audit` explícito (linha do
+contrato do juiz e as filas de revisão humana do gabarito). O `--apply` nunca perde o prompt de
 produção: backup `<destino>.bak-<ts>` antes de sobrescrever, diff sempre.
 
 ### Gate do handoff (`--apply`)
@@ -142,3 +156,68 @@ aviso `override.applied`) e no trailer `Override-Reason:` do commit
 `sessions winner <sid> --json` já traz o laudo em `data.handoff`
 (`wouldBlock`, `blocks`, `warnings`). `--prompt-only` imprime o prompt cru e
 **não** passa pelo gate (só avisa no stderr).
+
+### Retomar sem pagar de novo (`runs resume`)
+
+```bash
+prompt-builder runs resume <id>              # teto = o que SOBROU do original
+prompt-builder runs resume <id> --budget 2   # teto só da continuação
+```
+
+Run que parou sem terminar — processo morto (órfã), Ctrl-C/`runs cancel`,
+orçamento, erro de key/crédito/rede — roda de novo com o MESMO id e a MESMA
+config: cada chamada já concluída volta do journal (`<data-dir>/runs/<id>.journal`,
+1 linha por resposta, fsync) a US$ 0 e só o que faltava é pago. A etapa é
+refeita inteira (resposta + veredito) — nunca "meia etapa". No resultado:
+`resume.attempt`, `resume.replayedCalls` (US$ 0 nesta tentativa, `callLog`
+com `status: "replayed"`), `resume.priorSpentUsd` (gasto das tentativas
+anteriores, FORA de `totalCostUsd` — nunca somar os dois como gasto novo).
+Recusa (exit 2, `run.not_resumable`): run concluída/inconclusiva, ainda
+rodando, rodada de treino ou modo agente. Run concluída apaga o journal.
+
+## Levar para outra máquina e apagar (troca e LGPD)
+
+```bash
+prompt-builder runs export <id> --format exchange -o pacote/   # prompt-builder-exchange@1, record VERBATIM
+prompt-builder sessions export <sid> -o sessao.json            # a sessão E as runs dela (um arquivo só)
+prompt-builder runs import pacote/                             # noutro --data-dir: ida e volta = identidade
+prompt-builder runs delete <id>                                # apaga de verdade (zero resíduo)
+prompt-builder sessions delete <sid> [--keep-runs]
+prompt-builder runs prune --older-than 30d --dry-run           # o que o TTL apagaria agora
+```
+
+O import grava runs **e** sessões do pacote, sem normalizar (campo que esta
+versão não conhece sobrevive). Mesmo id com conteúdo diferente recusa o pacote
+inteiro (exit `3`, `records.import_conflict`) — `--overwrite` substitui; o
+idêntico é pulado (reimportar é idempotente). O `runs delete` leva record,
+dono, `.tmp`, journal de chamadas, job (inclusive o do `--detach`), chave de
+idempotência e `agent-runs/<id>/`; record `running` com dono vivo é recusado
+(pare antes com `runs cancel`). O TTL de retenção é de **90 dias por default**
+(`PB_RETENTION_DAYS`; `0` desliga) e roda sozinho no `runs list`/`sessions
+list` e antes de cada run real — o que venceu some das listas e do disco. A
+idade conta do **mais recente** entre `startedAt` e `importedAt`: o import
+carimba `importedAt` no record gravado (metadado local — o `export` não o
+leva), então importar o arquivo de uma run antiga não a condena ao próximo
+`runs list`.
+
+### Registro de aprovação (`prompt-approval@1`)
+
+```bash
+prompt-builder sessions winner <sid> --apply prompt.md --commit --approver "Ana <ana@empresa.com>"
+prompt-builder sessions winner <sid> --apply prompt.md --record   # grava o registro sem commitar
+```
+
+Toda aplicação monta um registro `prompt-approval@1`: `promptHash` (sha256 dos
+bytes gravados — confere com `sha256sum`), `datasetHash` (JCS do **conjunto**
+de cenários: ordem e formatação não mudam o hash), `configHash`, sessão, runs,
+aprovador, instante, evidência (holdout n/Δ/regressed, IC95%/p e a origem do p,
+custo, k de n curados) e o override. Ele vai **sempre** na linha da trilha
+local (`handoffs.jsonl`); com `--record` também em
+`<repo>/.prompt-approvals/<approvalId>.json` (`--record-dir <dir>` escolhe
+outro diretório e implica `--record`), e o `--commit` (que implica
+`--record`; com `--record-dir`, ele tem de ficar dentro do repo do destino,
+senão exit `2`) commita o registro junto do prompt com os trailers
+`Approved-by:`, `Prompt-Approval:`, `Prompt-Hash:` e `Dataset-Hash:`
+(`git interpret-trailers --parse`). O aprovador é `--approver` ou a identidade
+que o git usaria no commit; sem nenhum dos dois, `--record`/`--commit` recusam
+com exit `2` (`usage.approver_required`) antes de tocar o destino.

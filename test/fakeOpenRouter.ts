@@ -22,13 +22,26 @@ export interface FakeRequest {
   system: string;
   user: string;
   stream: boolean;
+  /** Modo JEV: perguntas e estado do corpo de decisão (quando for decisão). */
+  questions?: Record<string, unknown>;
+  state?: unknown;
 }
 
 export interface FakeUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   cost?: number;
-  cost_details?: { upstream_inference_cost?: number };
+  /**
+   * O OpenRouter manda `is_byok` e `cost_details` em TODA resposta (medido
+   * 2026-09-29): na não-BYOK `upstream_inference_cost` == `cost` (já contido
+   * nele); na BYOK `cost` é só a taxa e o upstream foi cobrado na key do provedor.
+   */
+  is_byok?: boolean;
+  cost_details?: {
+    upstream_inference_cost?: number;
+    upstream_inference_prompt_cost?: number;
+    upstream_inference_completions_cost?: number;
+  };
   prompt_tokens_details?: { cached_tokens?: number };
   completion_tokens_details?: { reasoning_tokens?: number };
 }
@@ -50,11 +63,34 @@ export interface FakeChatReply {
   nativeFinishReason?: string;
   /** `message.refusal` (JSON) / `delta.refusal` (SSE) — recusa declarada pelo modelo. */
   refusal?: string;
+  /** Id da geração (`gen-…`) em todo chunk/no corpo — como o OpenRouter manda (IMPL-074). */
+  id?: string;
+  /** Campo `provider` (nome do provedor que serviu) em todo chunk/no corpo (IMPL-075). */
+  provider?: string;
+}
+
+/** Modo JEV — resposta do endpoint de decisões. */
+export interface FakeDecisionReply {
+  /** Default 200. Diferente de 200 => corpo `bodyText` (e `headers`) e nenhum custo. */
+  status?: number;
+  bodyText?: string;
+  /** `answers` por id de pergunta. Ausente = resposta default determinística do fake. */
+  answers?: Record<string, unknown>;
+  /** Snapshot devolvido em `model` (default `<pedido>-20260917`). */
+  model?: string;
+  provider?: string;
+  /** `null` = resposta sem bloco usage. Ausente = input_tokens pelo tamanho do corpo e custo a 0,042/Mtok. */
+  usage?: { input_tokens?: number; output_tokens?: number; cost?: number } | null;
+  headers?: Record<string, string>;
 }
 
 export interface FakeOpenRouterOptions {
   /** Itens CRUS de /models (formato do OpenRouter). */
   catalog?: unknown[];
+  /** Modo JEV: itens CRUS de `GET /models?output_modalities=decisions`. */
+  decisionCatalog?: unknown[];
+  /** Modo JEV: resposta de cada decisão. `n` = índice do pedido de decisão (0-based). */
+  decisions?: (req: FakeRequest, n: number) => FakeDecisionReply | Response | Promise<FakeDecisionReply | Response>;
   /** Resposta de cada chat. `n` = índice do pedido de chat (0-based). */
   chat?: (req: FakeRequest, n: number) => FakeChatReply | Response | Promise<FakeChatReply | Response>;
   /** `data` de GET /key. */
@@ -65,6 +101,8 @@ export interface FakeOpenRouter {
   fetch: FetchLike;
   requests: FakeRequest[];
   chatRequests(): FakeRequest[];
+  /** Modo JEV: pedidos ao endpoint de decisões. */
+  decisionRequests(): FakeRequest[];
   /** Soma do `usage.cost` servido em respostas 200 (a "fatura"). */
   billedUsd(): number;
   /** Quantas respostas de chat 200 foram servidas. */
@@ -78,6 +116,7 @@ function sse(frames: string[]): string {
 export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter {
   const requests: FakeRequest[] = [];
   let chatN = 0;
+  let decisionN = 0;
   let billed = 0;
   let billedCalls = 0;
 
@@ -87,7 +126,15 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
     let body: Record<string, unknown> | null = null;
     if (typeof init?.body === 'string') body = JSON.parse(init.body) as Record<string, unknown>;
     const path = new URL(url).pathname;
-    const messages = (body?.messages ?? []) as { role: string; content: string }[];
+    const messages = (body?.messages ?? []) as { role: string; content: unknown }[];
+    // Conteúdo em PARTES (`[{ type: 'text', text, cache_control }]` — IMPL-114)
+    // vira o texto concatenado: o roteamento dos testes lê texto, não a forma.
+    const textOf = (c: unknown): string =>
+      typeof c === 'string'
+        ? c
+        : Array.isArray(c)
+          ? c.map((p) => (p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string' ? (p as { text: string }).text : '')).join('')
+          : '';
     const req: FakeRequest = {
       url,
       path,
@@ -95,15 +142,41 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
       headers,
       body,
       model: String(body?.model ?? ''),
-      system: messages.find((m) => m.role === 'system')?.content ?? '',
-      user: messages.filter((m) => m.role === 'user').map((m) => m.content).join('\n'),
+      system: textOf(messages.find((m) => m.role === 'system')?.content),
+      user: messages.filter((m) => m.role === 'user').map((m) => textOf(m.content)).join('\n'),
       stream: body?.stream === true,
+      ...(body && typeof body.questions === 'object' ? { questions: body.questions as Record<string, unknown>, state: body.state } : {}),
     };
     requests.push(req);
     if (init?.signal?.aborted) throw init.signal.reason ?? new Error('aborted');
 
     if (method === 'GET' && path.endsWith('/models')) {
-      return new Response(JSON.stringify({ data: opts.catalog ?? [] }), { status: 200 });
+      const decisoes = new URL(url).searchParams.get('output_modalities') === 'decisions';
+      return new Response(JSON.stringify({ data: (decisoes ? opts.decisionCatalog : opts.catalog) ?? [] }), { status: 200 });
+    }
+    if (method === 'POST' && path.endsWith('/alpha/decisions')) {
+      const n = decisionN++;
+      const reply = (await opts.decisions?.(req, n)) ?? {};
+      if (reply instanceof Response) return reply;
+      const status = reply.status ?? 200;
+      if (status !== 200) return new Response(reply.bodyText ?? '', { status, headers: reply.headers ?? {} });
+      const inTok = Math.max(270, Math.ceil(JSON.stringify(body ?? {}).length / 3));
+      const usage =
+        reply.usage === null ? undefined : { input_tokens: inTok, output_tokens: 22, cost: inTok * 0.042e-6, ...(reply.usage ?? {}) };
+      if (typeof usage?.cost === 'number') billed += usage.cost;
+      billedCalls += 1;
+      const answers = reply.answers ?? defaultDecisionAnswers(req.questions ?? {});
+      const json: Record<string, unknown> = {
+        model: reply.model ?? `${String(body?.model ?? '').replace(/^~/, '')}-20260917`,
+        answers,
+        id: `gen-dec-${n}`,
+        provider: reply.provider ?? 'TypeSafe',
+      };
+      if (usage) json.usage = usage;
+      return new Response(JSON.stringify(json), {
+        status: 200,
+        headers: { 'x-generation-id': `gen-dec-${n}`, 'x-provider-name': reply.provider ?? 'TypeSafe', ...(reply.headers ?? {}) },
+      });
     }
     if (method === 'GET' && path.endsWith('/key')) {
       return new Response(JSON.stringify({ data: opts.keyData ?? { label: 'fake', usage: 0, limit: null } }), {
@@ -123,21 +196,35 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
     const usage: FakeUsage | undefined =
       reply.usage === null
         ? undefined
-        : (reply.usage ?? { prompt_tokens: 10, completion_tokens: 5, cost: 0.001 });
+        : (reply.usage ?? {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            cost: 0.001,
+            // Forma REAL de uma chamada não-BYOK: o upstream repete o custo que
+            // JÁ está em `cost` — quem somá-lo dobra o gasto (extra#1).
+            is_byok: false,
+            cost_details: { upstream_inference_cost: 0.001 },
+          });
     if (typeof usage?.cost === 'number') billed += usage.cost;
     billedCalls += 1;
     const text = reply.text ?? '';
 
+    // Campos que o OpenRouter repete em TODO chunk (e no corpo JSON).
+    const meta: Record<string, unknown> = {
+      ...(reply.id ? { id: reply.id } : {}),
+      ...(reply.provider ? { provider: reply.provider } : {}),
+    };
     if (req.stream) {
       const frames: string[] = [];
       const meio = Math.ceil(text.length / 2);
       for (const pedaco of [text.slice(0, meio), text.slice(meio)]) {
-        if (pedaco) frames.push(JSON.stringify({ choices: [{ delta: { content: pedaco } }] }));
+        if (pedaco) frames.push(JSON.stringify({ ...meta, choices: [{ delta: { content: pedaco } }] }));
       }
-      if (reply.refusal) frames.push(JSON.stringify({ choices: [{ delta: { refusal: reply.refusal } }] }));
+      if (reply.refusal) frames.push(JSON.stringify({ ...meta, choices: [{ delta: { refusal: reply.refusal } }] }));
       if (reply.finishReason || reply.nativeFinishReason) {
         frames.push(
           JSON.stringify({
+            ...meta,
             choices: [
               {
                 delta: {},
@@ -148,8 +235,8 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
           }),
         );
       }
-      if (reply.error) frames.push(JSON.stringify({ error: reply.error }));
-      if (usage) frames.push(JSON.stringify({ choices: [], usage }));
+      if (reply.error) frames.push(JSON.stringify({ ...meta, error: reply.error }));
+      if (usage) frames.push(JSON.stringify({ ...meta, choices: [], usage }));
       frames.push(...(reply.trailing ?? []));
       frames.push('[DONE]');
       return new Response(sse(frames), {
@@ -162,7 +249,7 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
     };
     if (reply.finishReason) choice.finish_reason = reply.finishReason;
     if (reply.nativeFinishReason) choice.native_finish_reason = reply.nativeFinishReason;
-    const json: Record<string, unknown> = { choices: [choice] };
+    const json: Record<string, unknown> = { ...meta, choices: [choice] };
     if (usage) json.usage = usage;
     if (reply.error) json.error = reply.error;
     return new Response(JSON.stringify(json), { status: 200 });
@@ -172,6 +259,7 @@ export function fakeOpenRouter(opts: FakeOpenRouterOptions = {}): FakeOpenRouter
     fetch,
     requests,
     chatRequests: () => requests.filter((r) => r.path.endsWith('/chat/completions')),
+    decisionRequests: () => requests.filter((r) => r.path.endsWith('/alpha/decisions')),
     billedUsd: () => billed,
     billedCalls: () => billedCalls,
   };
@@ -192,6 +280,33 @@ export function catalogItem(
     supported_parameters: ['temperature', 'seed', 'max_tokens', 'response_format'],
     ...extra,
   };
+}
+
+/**
+ * Modo JEV — respostas default de um corpo de decisão: noul 0,9; choice na 1ª
+ * opção com 0,8 (resto dividido), confidence 0,7; score no último nível com 0,9.
+ */
+export function defaultDecisionAnswers(questions: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [qid, raw] of Object.entries(questions)) {
+    const q = (raw ?? {}) as { type?: string; criteria?: unknown };
+    if (q.type === 'noul') out[qid] = { type: 'noul', noul: 0.9 };
+    else if (q.type === 'choice') {
+      const keys = Object.keys((q.criteria ?? {}) as Record<string, unknown>);
+      const resto = keys.length > 1 ? 0.2 / (keys.length - 1) : 0;
+      out[qid] = {
+        type: 'choice',
+        choice: keys[0],
+        probabilities: Object.fromEntries(keys.map((k, i) => [k, i === 0 ? (keys.length > 1 ? 0.8 : 1) : resto])),
+        confidence: 0.7,
+      };
+    } else if (q.type === 'score') {
+      const L = Array.isArray(q.criteria) ? q.criteria.length : 1;
+      const probs = Object.fromEntries(Array.from({ length: L }, (_, i) => [String(i), i === L - 1 ? (L > 1 ? 0.9 : 1) : L > 1 ? 0.1 / (L - 1) : 0]));
+      out[qid] = { type: 'score', score: Object.entries(probs).reduce((s, [k, p]) => s + Number(k) * p, 0), probabilities: probs, confidence: 0.8 };
+    }
+  }
+  return out;
 }
 
 /** Espera nula para o backoff (injeta em `createGateway({ sleep })`). */

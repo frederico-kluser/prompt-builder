@@ -11,9 +11,10 @@
 // muda quando qualquer prompt de juízo/esforço/temperatura/modelo de
 // referência/provider policy mudar".
 //
-// ⚠️ O `runs reproduce --replay` (re-pontuar respostas gravadas a US$ 0) e o
-// artefato por chamada (pedido canônico + resposta + hash) são do orquestrador/
-// CLI — FORA da fronteira deste lote (ver notas de entrega).
+// O `runs reproduce --replay` (re-pontuar respostas gravadas a US$ 0) é provado
+// em test/runs-replay.test.ts; o artefato por chamada de juízo (finish_reason,
+// id da geração, SHA-256 da resposta) em test/judge-finish-per-vote.test.ts; a
+// temperatura no pin REAL da run em test/baseline-contract-roundtrip.test.ts.
 
 import { describe, expect, it } from 'vitest';
 import {

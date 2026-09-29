@@ -1,11 +1,14 @@
 #!/usr/bin/env tsx
-// IMPL-119 (R-19:REC-1) — lint da documentação embarcada (agent-docs/), que viaja
-// no tarball e é lida por agentes: os exemplos de configuração passam pelo
-// VALIDADOR REAL (`prompt-builder config validate` / parser de arena-agent-config),
-// os comandos dos blocos bash são conferidos contra a tabela COMMANDS + help, e o
-// snapshot de `--help` por subcomando é regenerado e comparado ("gerado ≠
-// commitado" reprova). Antes nenhum exemplo de doc passava por validador nenhum
-// — os agent-docs podiam ensinar configurações que o CLI recusa.
+// IMPL-119 (R-19:REC-1) — lint da documentação embarcada (agent-docs/ e skills/,
+// ambas viajam no tarball e são lidas por agentes): os exemplos de configuração
+// passam pelo VALIDADOR REAL (`prompt-builder config validate` / parser de
+// arena-agent-config), os comandos dos blocos bash são conferidos contra a tabela
+// COMMANDS + help, os exemplos de `compare`/`vary`/`train` por FLAGS passam pelo
+// parser de flags e pelo `buildFromFlags` reais (o mesmo caminho do CLI antes do
+// pre-voo — exit 2/3 aqui = exit 2/3 para quem copiar o exemplo), e o snapshot
+// de `--help` por subcomando é regenerado e comparado ("gerado ≠ commitado"
+// reprova). Antes nenhum exemplo de doc passava por validador nenhum — os docs
+// ensinavam configurações que o CLI recusa (os três exemplos por flags saíam 3).
 //
 // MARCAÇÕES EXPLÍCITAS (na info da cerca ou em comentário HTML imediatamente
 // antes dela — `<!-- docs-lint: … -->`):
@@ -24,24 +27,30 @@
 // código e tabela de comandos/exit codes.
 
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { COMMANDS, renderCommandHelp } from '../src/cli/help.js';
 import { cmdConfig } from '../src/cli/commands/misc.js';
+import { RUN_OPTIONS, buildFromFlags } from '../src/cli/commands/run.js';
 import { parseArenaAgentConfig } from '../src/configFile.js';
-import { assertNoUnknownConfigKeys } from '../src/cli/context.js';
+import { assertNoUnknownConfigKeys, parse } from '../src/cli/context.js';
 import { EXIT } from '../src/cli/output.js';
+import type { RunMode } from '../src/types.js';
+import { lintResolved, parseJevConfig, resolveJevConfig } from '../src/engine/jev/index.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const DOCS_DIR = join(ROOT, 'agent-docs');
+/** Raízes da doc embarcada (todas vão no tarball — `files` do package.json). */
+export const DOC_ROOTS = ['agent-docs', 'skills'] as const;
 /** Snapshot commitado do `--help` por subcomando ("gerado ≠ commitado" reprova). */
 export const HELP_SNAPSHOT_PATH = join(ROOT, 'scripts', 'docs-lint.help.json');
 
 /** Formatos de configuração que a doc pode exemplificar. */
 const ARENA_FORMAT = 'arena-config@1';
 const ARENA_AGENT_FORMAT = 'arena-agent-config@1';
+/** Modo JEV: jev-config@1 (casos INLINE nos exemplos — o validador não lê arquivo). */
+const JEV_FORMAT = 'jev-config@1';
 
 // ---------------------------------------------------------------------------
 // Extração dos blocos da doc
@@ -180,6 +189,15 @@ async function muted<T>(f: () => Promise<T>): Promise<T> {
  * o validador do `agents run --config`). Nunca lança: vira `ConfigValidation`.
  */
 export async function validateConfigExample(json: unknown, format: string): Promise<ConfigValidation> {
+  if (format === JEV_FORMAT) {
+    // Modo JEV: parse + resolve + lint (erro de lint = o `jev run` recusaria com exit 3).
+    const p = parseJevConfig(json);
+    if (!p.ok) return { ok: false, code: EXIT.CONFIG, error: p.error };
+    const r = resolveJevConfig(p.config);
+    if (!r.ok) return { ok: false, code: EXIT.CONFIG, error: r.issues.map((i) => `${i.code}: ${i.message}`).join('; ') };
+    const erros = lintResolved(r.resolved).filter((i) => i.level === 'error');
+    return erros.length ? { ok: false, code: EXIT.CONFIG, error: erros.map((i) => `${i.code}: ${i.message}`).join('; ') } : { ok: true, code: EXIT.OK };
+  }
   if (format === ARENA_AGENT_FORMAT) {
     try {
       const p = parseArenaAgentConfig(json);
@@ -290,6 +308,8 @@ export interface LintFinding {
     | 'config-unknown-format'
     | 'command-unknown'
     | 'subcommand-unknown'
+    | 'command-flag-invalid'
+    | 'command-config-invalid'
     | 'help-missing'
     | 'help-extra'
     | 'help-changed';
@@ -322,32 +342,9 @@ export interface KnownDrift {
 }
 
 export const KNOWN_DOC_DRIFT: KnownDrift[] = [
-  {
-    file: 'agent-docs/compare.md',
-    kind: 'config-invalid',
-    // Exemplo `competitorConfigs` com datagen igual ao modelo dos concorrentes.
-    blockHash: blockHash(`{
-  "format": "arena-config@1",
-  "mode": "compare",
-  "theme": "…",
-  "models": {
-    "datagen": "openai/gpt-5-mini",
-    "judges": ["anthropic/claude-sonnet-5"],
-    "competitorConfigs": [
-      { "model": "openai/gpt-5-mini", "reasoning": "low" },
-      { "model": "openai/gpt-5-mini", "reasoning": "high" }
-    ]
-  }
-}`),
-    reason:
-      'O exemplo ensina `competitorConfigs` com o MESMO modelo do datagen, que o validador real recusa ' +
-      '(runConfigSchema: "O gerador de cenarios nao pode ser tambem um competidor") — a doc contradiz a ' +
-      'própria regra que lista 3 linhas acima. Drift já existente quando o lint nasceu.',
-    fix:
-      'Corrigir agent-docs/compare.md: usar um `models.datagen` DISTINTO dos modelos dos competitorConfigs ' +
-      '(ex.: datagen "openai/gpt-5.1-nano"), mantendo o mesmo modelo concorrendo consigo mesmo. ' +
-      'Pendente: arquivo fora da fronteira do lote O-p2-resto.',
-  },
+  // Vazio de propósito: o único drift que já esteve aqui (compare.md ensinando
+  // `competitorConfigs` com o datagen igual aos concorrentes) foi CORRIGIDO na
+  // doc. Isenção nova só com motivo + correção + hash do bloco exato.
 ];
 
 /**
@@ -401,6 +398,89 @@ export function checkCommandInvocation(invocation: string, file: string, line: n
   return achados;
 }
 
+/** Tira as aspas de shell de um token (`--theme="a b"` → `--theme=a b`). */
+export function unquoteToken(token: string): string {
+  let out = '';
+  let aspas: string | null = null;
+  for (const ch of token) {
+    if (aspas) {
+      if (ch === aspas) aspas = null;
+      else out += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      aspas = ch;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** Verbo do CLI → modo da run (o mesmo mapa do dispatch em src/cli/index.ts). */
+const RUN_VERBS: Record<string, RunMode> = { compare: 'compare', vary: 'variation', train: 'training' };
+
+/** Valor que é placeholder da doc (`<id>`, `…`) — não dá para validar o conteúdo. */
+const PLACEHOLDER = /<[^>]*>|…|\.\.\./u;
+
+/**
+ * Um exemplo de `compare`/`vary`/`train` por FLAGS roda pelo caminho REAL do CLI
+ * até antes do pre-voo: `parse` (flag desconhecida = exit 2) + `buildFromFlags`
+ * (regras cruzadas do schema = exit 3). `--config <arq>` não é validado aqui (o
+ * arquivo do exemplo não existe; os blocos JSON da doc já passam pelo
+ * `config validate`), nem exemplos com placeholder num valor.
+ */
+export async function checkRunInvocation(invocation: string, file: string, line: number): Promise<LintFinding[]> {
+  let tokens = tokenizeCommand(invocation);
+  while (tokens.length && !['prompt-builder-cli', 'prompt-builder', 'pbuilder'].includes(tokens[0])) tokens = tokens.slice(1);
+  const verbo = tokens[1];
+  const mode = verbo !== undefined && Object.hasOwn(RUN_VERBS, verbo) ? RUN_VERBS[verbo] : undefined;
+  if (!mode) return [];
+  const args = tokens.slice(2).map(unquoteToken);
+  let values: Record<string, unknown>;
+  try {
+    values = parse(args, RUN_OPTIONS).values;
+  } catch (err) {
+    const e = err as { code?: number; message?: string };
+    return [
+      {
+        file,
+        line,
+        kind: 'command-flag-invalid',
+        message: `flags recusadas pelo parser real (exit ${e.code ?? EXIT.USAGE}): ${e.message ?? ''} (comando: ${invocation.replace(/\s+/gu, ' ')})`,
+      },
+    ];
+  }
+  if (typeof values.config === 'string') return [];
+  if (args.some((a) => !a.startsWith('-') && PLACEHOLDER.test(a))) return [];
+  // O arquivo do exemplo não existe aqui: o conteúdo não importa para as regras do schema.
+  if (typeof values['base-prompt-file'] === 'string') {
+    delete values['base-prompt-file'];
+    values['base-prompt'] = 'Prompt de exemplo da doc.';
+  }
+  try {
+    await buildFromFlags(mode, values);
+    return [];
+  } catch (err) {
+    const e = err as { code?: number; message?: string };
+    return [
+      {
+        file,
+        line,
+        kind: 'command-config-invalid',
+        message: `exemplo recusado pelo CLI real (exit ${e.code ?? EXIT.CONFIG}): ${e.message ?? ''} (comando: ${invocation.replace(/\s+/gu, ' ')})`,
+      },
+    ];
+  }
+}
+
+/** A invocação é de compare/vary/train (contagem do relatório)? */
+function isRunInvocation(invocation: string): boolean {
+  const t = tokenizeCommand(invocation);
+  const i = t.findIndex((x) => x === 'prompt-builder-cli' || x === 'prompt-builder' || x === 'pbuilder');
+  return i >= 0 && t[i + 1] !== undefined && Object.hasOwn(RUN_VERBS, t[i + 1]);
+}
+
 // ---------------------------------------------------------------------------
 // Lint dos fontes da doc
 // ---------------------------------------------------------------------------
@@ -420,16 +500,28 @@ export interface LintReport {
     files: number;
     configExamples: number;
     commandInvocations: number;
+    /** Invocações de compare/vary/train passadas pelo parser + buildFromFlags reais. */
+    runExamples: number;
     snippets: number;
   };
 }
 
-/** Todos os `agent-docs/*.md` embarcados, em ordem estável. */
-export function readDocSources(docsDir: string = DOCS_DIR): DocSource[] {
-  return readdirSync(docsDir)
-    .filter((f) => f.endsWith('.md'))
-    .sort()
-    .map((f) => ({ file: `agent-docs/${f}`, markdown: readFileSync(join(docsDir, f), 'utf-8') }));
+/**
+ * Todo `.md` embarcado sob {@link DOC_ROOTS} (`agent-docs/` e `skills/`, com
+ * subpastas — a SKILL.md e o models.md da skill incluídos), em ordem estável.
+ */
+export function readDocSources(root: string = ROOT): DocSource[] {
+  const out: DocSource[] = [];
+  for (const dir of DOC_ROOTS) {
+    const base = join(root, dir);
+    if (!existsSync(base)) continue;
+    for (const nome of readdirSync(base, { recursive: true }) as string[]) {
+      const abs = join(base, nome);
+      if (!nome.endsWith('.md') || !statSync(abs).isFile()) continue;
+      out.push({ file: relative(root, abs).split(sep).join('/'), markdown: readFileSync(abs, 'utf-8') });
+    }
+  }
+  return out.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
 }
 
 /**
@@ -437,9 +529,12 @@ export function readDocSources(docsDir: string = DOCS_DIR): DocSource[] {
  * negativos marcados têm de ser recusados) e comandos conferidos contra a
  * tabela COMMANDS + help. `snippet` documenta um fragmento e não roda.
  */
-export async function lintDocs(sources: DocSource[] = readDocSources()): Promise<LintReport> {
+export async function lintDocs(
+  sources: DocSource[] = readDocSources(),
+  known: readonly KnownDrift[] = KNOWN_DOC_DRIFT,
+): Promise<LintReport> {
   const findings: LintFinding[] = [];
-  const checked = { files: sources.length, configExamples: 0, commandInvocations: 0, snippets: 0 };
+  const checked = { files: sources.length, configExamples: 0, commandInvocations: 0, runExamples: 0, snippets: 0 };
 
   for (const { file, markdown } of sources) {
     for (const block of collectDocBlocks(markdown, file)) {
@@ -479,7 +574,7 @@ export async function lintDocs(sources: DocSource[] = readDocSources()): Promise
         }
         const format = (json as Record<string, unknown>)?.format;
         const esperadoInvalido = block.marks.expectInvalid;
-        if (typeof format !== 'string' || (format !== ARENA_FORMAT && format !== ARENA_AGENT_FORMAT)) {
+        if (typeof format !== 'string' || (format !== ARENA_FORMAT && format !== ARENA_AGENT_FORMAT && format !== JEV_FORMAT)) {
           if (esperadoInvalido) {
             // Exemplo negativo por "format" desconhecido/ausente: o validador real
             // recusa — está de acordo com a marcação.
@@ -529,7 +624,12 @@ export async function lintDocs(sources: DocSource[] = readDocSources()): Promise
         }
         for (const inv of commandInvocations(block.body)) {
           checked.commandInvocations += 1;
-          findings.push(...checkCommandInvocation(inv, block.file, block.line).map(ancla));
+          const porNome = checkCommandInvocation(inv, block.file, block.line);
+          findings.push(...porNome.map(ancla));
+          if (porNome.length === 0 && isRunInvocation(inv)) {
+            checked.runExamples += 1;
+            findings.push(...(await checkRunInvocation(inv, block.file, block.line)).map(ancla));
+          }
         }
       }
     }
@@ -538,7 +638,7 @@ export async function lintDocs(sources: DocSource[] = readDocSources()): Promise
   // auditável, keyed por hash do bloco) do que reprova o CI.
   findings.sort((a, b) => (a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1));
   const isentos = (f: LintFinding): boolean =>
-    KNOWN_DOC_DRIFT.some((d) => d.file === f.file && d.kind === f.kind && d.blockHash === f.blockHash);
+    known.some((d) => d.file === f.file && d.kind === f.kind && d.blockHash === f.blockHash);
   return {
     findings: findings.filter((f) => !isentos(f)),
     waived: findings.filter(isentos),
@@ -622,7 +722,7 @@ async function main(argv: string[]): Promise<number> {
     }
     process.stderr.write(
       findings.length === 0
-        ? `docs-lint OK — ${report.checked.files} arquivos, ${report.checked.configExamples} exemplos de config no validador real, ${report.checked.commandInvocations} comandos, snapshot --help de ${COMMANDS.length} subcomandos` +
+        ? `docs-lint OK — ${report.checked.files} arquivos, ${report.checked.configExamples} exemplos de config no validador real, ${report.checked.commandInvocations} comandos (${report.checked.runExamples} de run no parser/buildFromFlags reais), snapshot --help de ${COMMANDS.length} subcomandos` +
             `${report.waived.length ? ` (+${report.waived.length} drift(s) conhecido(s) e pendente(s))` : ''}.\n`
         : `docs-lint: ${findings.length} achado(s) — corrija a doc ou rode --update-help para o snapshot de --help.\n`,
     );

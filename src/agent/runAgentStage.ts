@@ -23,7 +23,7 @@
 //   injetado (fake no smoke) devolve a MESMA forma.
 // - A `CompetitorResponse.execution` é um `ExecutionRef` RELATIVO a getDataDir().
 // ----------------------------------------------------------------------------
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ensurePrivateSubtree } from '../pathSafety.js';
@@ -47,7 +47,16 @@ import {
   type SettledRepVerdict,
   type VerdictPath,
 } from './verdictTree.js';
-import { decideInfraError } from './infraError.js';
+import {
+  classifyAgentFailure,
+  decideInfraError,
+  failureExplanation,
+  INFRA_RETRIES,
+  shouldRetryAttempt,
+  type AgentFailure,
+  type AgentFailureClass,
+  type FailurePhase,
+} from './infraError.js';
 import { acquireRunInferenceProxy, type InferenceProxyLease } from './inferenceProxy.js';
 import {
   acquireRunCostMeter,
@@ -57,11 +66,12 @@ import {
   type RunCostMeterLease,
 } from './costProxy.js';
 import { hostCommandRunner, removeTreeBestEffort, writeFileNoFollow, type CommandRunner } from './sandboxExec.js';
+import { combinedChecks, copyTestsDirInto } from './taskValidate.js';
 import { isDigestRef, sandboxCommandRunner, sandboxProfile } from './container.js';
 import { BudgetExceeded, isControlSignal, RunCancelled } from '../budget.js';
 import { emitEvent } from '../events.js';
 import { blindRankMap, seedFromId } from '../duels.js';
-import { getGateway, tierFor } from '../openrouter.js';
+import { getGateway, isFatalGatewayError, tierFor } from '../openrouter.js';
 import { isKnownPrice } from '../engine/pricing.js';
 import type {
   AgentCostSource,
@@ -98,12 +108,14 @@ export interface AgentRepResult {
   /** Resultado do oráculo (quando houve). */
   oracle?: AgentOracleResult;
   /**
-   * null = sem observação: cancelamento (controle — a etapa inteira sai) OU
-   * rep SEM oráculo cujo juiz falhou/não foi chamado (IMPL-033). Corte por
-   * limite (timeout/maxTurns/maxCost/maxOutput) NÃO é null: conta 'nao'
-   * (IMPL-032); check do oráculo que não terminou também não: conta como check
-   * falho (ou a ETAPA inteira sai para todos, se o comando não rodou em
-   * nenhuma execução — `oracleCellDefect` no orquestrador).
+   * null = sem observação: cancelamento (controle — a etapa inteira sai), rep
+   * SEM oráculo cujo juiz falhou/não foi chamado (IMPL-033) OU falha que não é
+   * do agente (IMPL-094: `infraClass` — infra/transitória esgotada fica fora
+   * dos denominadores; `defect` invalida a etapa para TODOS). Corte por limite
+   * (timeout/maxTurns/maxCost/maxOutput) NÃO é null: conta 'nao' (IMPL-032);
+   * check do oráculo que não terminou também não: conta como check falho (ou a
+   * ETAPA inteira sai para todos, se o comando não rodou em nenhuma execução —
+   * `oracleCellDefect` no orquestrador).
    */
   verdict: Verdict | null;
   /** Caminho da árvore de veredito que decidiu esta repetição (1 dos 9). */
@@ -131,7 +143,28 @@ export interface AgentRepResult {
    * agente nem do juiz: a procedência vira `competitor_error`.
    */
   infraError?: string;
+  /**
+   * IMPL-094 — classe da falha que deixou a rep SEM veredito (não é do
+   * agente): `transient` (retentativas cegas esgotadas) e `infra` ficam fora
+   * dos denominadores e contam no `infraErrorRate`; `defect` invalida a etapa
+   * para TODOS (`stageInfraDefect` no orquestrador).
+   */
+  infraClass?: AgentFailureClass;
+  /** IMPL-094 — tentativas desta rep (1 + retentativas cegas por falha transitória). */
+  attempts?: number;
+  /** IMPL-094 — tentativas DESCARTADAS (falha transitória), com o dir arquivado para auditoria. */
+  discardedAttempts?: DiscardedAttempt[];
+  /** Custo desta rep — soma de TODAS as tentativas (dinheiro gasto é medido, descartado ou não). */
   costUsd: number;
+}
+
+/** Uma tentativa descartada por falha TRANSITÓRIA (retentativa cega, IMPL-094). */
+export interface DiscardedAttempt {
+  attempt: number;
+  reason: string;
+  costUsd: number;
+  /** Dir da tentativa arquivada (relativo ao data dir), quando o arquivamento deu certo. */
+  dir?: string;
 }
 
 export interface RunAgentStageParams {
@@ -275,7 +308,8 @@ const DEFAULT_DOSSIER_TOKENS = 12_000;
  * está quebrado (`oracleCellDefect` → etapa inválida para TODOS). Reexecutar a
  * rep INTEIRA (novo agente) não ajuda aqui: defeito do ambiente é determinístico,
  * e repetir a execução de quem quebrou o verificador seria retry dependente de
- * resultado; a reexecução por infra transitória é da taxonomia do IMPL-094.
+ * resultado; a reexecução por infra transitória é a do laço de tentativas
+ * (IMPL-094, `shouldRetryAttempt`), que roda a execução INTEIRA de novo.
  */
 const ORACLE_RETRIES = 2;
 
@@ -350,18 +384,33 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
   const judgeModelIds = opts.judgeModelIds ?? [];
   const reps = Math.max(1, agentConfig.repetitions ?? 1);
 
-  // Falha ANTES de qualquer execução (sem tarefa / executor não preparou): cada
-  // repetição conta 'nao' pelo caminho 'error' — a MESMA regra de um workspace
-  // que falha no meio da rep. Antes virava `incomplete` e o contestant sumia do
-  // denominador daquela etapa; `incomplete` agora é só controle (IMPL-032). A
-  // taxonomia transient × defect (defect invalida a célula de todos) é IMPL-094.
+  // Falha ANTES de qualquer execução (sem tarefa, testsDir inválido, executor
+  // que não prepara, sandbox/proxy que não sobe) é DEFEITO da tarefa/ambiente
+  // (IMPL-094, R-14a DEC-2): cada rep sai SEM veredito com `infraClass:
+  // 'defect'` e o orquestrador invalida a etapa para TODOS os contestants —
+  // antes cada rep contava 'nao' (a falha do ambiente virava nota de alguém).
+  // `incomplete` continua só controle (IMPL-032).
   if (!task) {
     const errorMsg = 'Etapa sem agentTask para contestant com runner=agent';
     return {
       response: { ...responseError(contestant, contestant.modelId, errorMsg, 0), text: 'agente: sem tarefa executável nesta etapa' },
-      repResults: failedReps(runId, stageIndex, contestant.id, reps, errorMsg),
+      repResults: defectReps(runId, stageIndex, contestant.id, reps, errorMsg),
       incomplete: false,
       errorMsg,
+    };
+  }
+
+  // IMPL-098: `testsDir` chega RESOLVIDO pelo CLI (absoluto, existente) — é
+  // conferido ANTES de executar qualquer coisa. Relativo (config vinda sem
+  // diretório de origem: MCP/HTTP) nunca é resolvido contra o cwd nem contra o
+  // workspace — o agente plantaria o próprio "teste".
+  const testsDirErr = testsDirIssue(task);
+  if (testsDirErr) {
+    return {
+      response: responseError(contestant, contestant.modelId, testsDirErr, 0),
+      repResults: defectReps(runId, stageIndex, contestant.id, reps, testsDirErr),
+      incomplete: false,
+      errorMsg: testsDirErr,
     };
   }
 
@@ -392,10 +441,12 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
     });
   } catch (err) {
     if (isControlSignal(err)) throw err;
-    const errorMsg = `Falha ao preparar o executor (${agentConfig.executorVersion})`;
+    const errorMsg =
+      `Falha ao preparar o executor (${agentConfig.executorVersion}): ` +
+      `${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`;
     return {
       response: responseError(contestant, modelId, errorMsg, 0),
-      repResults: failedReps(runId, stageIndex, contestant.id, reps, errorMsg),
+      repResults: defectReps(runId, stageIndex, contestant.id, reps, errorMsg),
       incomplete: false,
       errorMsg,
     };
@@ -407,10 +458,12 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
   } catch (err) {
     if (isControlSignal(err)) throw err;
     const errorMsg = `Falha ao preparar o sandbox de setup/verify: ${(err as Error).message}`;
+    // Ambiente que não serve (sem digest pinado, runtime ausente): defeito —
+    // antes saía `incomplete` sem reps (o contestant sumia da etapa).
     return {
       response: responseError(contestant, modelId, errorMsg, 0),
-      repResults: [],
-      incomplete: true,
+      repResults: defectReps(runId, stageIndex, contestant.id, reps, errorMsg),
+      incomplete: false,
       errorMsg,
     };
   }
@@ -455,11 +508,11 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
     meterLease.release();
     if (isControlSignal(err)) throw err;
     const errorMsg = `Falha ao subir o proxy de inferência local: ${(err as Error).message}`;
-    // Mesma regra do executor que não preparou (IMPL-032): cada rep conta pelo
-    // caminho 'error' — `incomplete` é só controle.
+    // Mesma regra do executor que não preparou: defeito do ambiente (IMPL-094)
+    // — `incomplete` é só controle.
     return {
       response: responseError(contestant, modelId, errorMsg, 0),
-      repResults: failedReps(runId, stageIndex, contestant.id, reps, errorMsg),
+      repResults: defectReps(runId, stageIndex, contestant.id, reps, errorMsg),
       incomplete: false,
       errorMsg,
     };
@@ -483,7 +536,9 @@ export async function runAgentStage(opts: RunAgentStageParams): Promise<RunAgent
   } catch (err) {
     // Falha fora de uma rep (bug do produto): o contestant NÃO pode sumir da
     // etapa em silêncio (o orquestrador descarta rejeição que não é controle).
-    if (isControlSignal(err)) throw err;
+    // cli#3 (left#5): 401/402 do gateway sobe — o orquestrador o propaga e a
+    // run sai 4/5 (não é bug do produto nem falha deste contestant).
+    if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
     const errorMsg = `Falha inesperada na etapa do agente: ${(err as Error)?.message ?? String(err)}`;
     return { response: responseError(contestant, modelId, errorMsg, 0), repResults: [], incomplete: true, errorMsg };
   } finally {
@@ -511,6 +566,34 @@ interface RepsContext {
   runners: StageRunners;
 }
 
+/** Desfecho de UMA tentativa de uma rep (IMPL-094: o laço decide se re-executa). */
+interface AttemptOutcome {
+  rep: AgentRepResult;
+  /** Resposta candidata da etapa (só a da rep 0 vira a `CompetitorResponse`). */
+  response?: CompetitorResponse;
+  execFailed: boolean;
+  costUsd: number;
+  tokensIn: number;
+  tokensOut: number;
+  /** Falha que não é do agente (a CLASSE decide a retentativa — nunca o resultado). */
+  failure?: AgentFailure;
+}
+
+/**
+ * Arquiva o dir de uma tentativa DESCARTADA ao lado do canônico
+ * (`<rep>.attempt-<n>`) — a auditoria fica, e a tentativa seguinte nasce num dir
+ * limpo (o `writeExecution` não mistura artefatos). Melhor esforço.
+ */
+function archiveAttemptDir(repAbs: string, attempt: number): string | undefined {
+  const dest = `${repAbs}.attempt-${attempt}`;
+  try {
+    renameSync(repAbs, dest);
+    return dest;
+  } catch {
+    return undefined;
+  }
+}
+
 /** As N repetições da etapa (o laço do §10), com o proxy da run já no ar. */
 async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise<RunAgentStageResult> {
   const { runId, stageIndex, contestant, stage, agentConfig, apiKey, ctx, dataDir, catalog } = opts;
@@ -531,11 +614,19 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
   let totalTokensOut = 0;
   let anyError = false;
   let response: CompetitorResponse | null = null;
+  const container = runners.mode === 'container';
 
-  for (let rep = 0; rep < reps; rep++) {
-      const relativeDir = execDir(runId, stageIndex, contestant.id, rep);
-      const repAbs = path.join(dataDir, relativeDir);
+  /**
+   * UMA tentativa de UMA repetição (IMPL-094): workspace, agente, coleta,
+   * oráculo e adjudicação. Não lança por falha comum — devolve a rep com a
+   * CLASSE da falha que não é do agente (quando houve) para o laço decidir, às
+   * cegas quanto ao resultado, se re-executa. Controle (orçamento/cancelamento) SOBE.
+   */
+  const attemptOnce = async (rep: number, relativeDir: string, repAbs: string): Promise<AttemptOutcome> => {
       mkdirSync(repAbs, { recursive: true });
+      // Fase corrente: decide a CLASSE de uma exceção (prepare = defeito da
+      // tarefa; execute = por tipo do erro; harness = infra).
+      let phase: FailurePhase = 'prepare';
 
       let workspaceDir = '';
       let seedCommit = '';
@@ -561,6 +652,7 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         seedCommit = ws.seedCommit;
         cacheRepoDir = ws.cacheRepoDir;
         auditGitDir = ws.auditGitDir;
+        phase = 'harness';
         // SHA-256 dos protegidos NO SEED, antes do agente acordar (IMPL-039):
         // pelo filesystem, não pelo git — pega arquivo ignorado e rename.
         const seedGuard = await captureSeedGuard(workspaceDir, task);
@@ -589,6 +681,7 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
 
         // IMPL-095: TODO o contrato viaja em `AgentRunOpts` — UM argumento, sem
         // canal `PI_*` de env e sem 2º parâmetro fora do contrato.
+        phase = 'execute';
         const rawOutcome = await gateway.run({
           execId,
           task,
@@ -639,6 +732,7 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         // As chamadas em voo desta execução terminam de ser anotadas (o agente
         // morto no meio de um stream fecha a troca logo em seguida).
         await execMeter.settled();
+        phase = 'harness';
 
         // §18.3/§29.3: cancelamento da RUN é sinal de controle e SOBE — não vira
         // 'incomplete' mudo (o pipeline precisa saber que a run foi abortada).
@@ -667,7 +761,10 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
         //    PRÍSTINOS da tarefa reescritos DEPOIS do agente (padrão Harbor/
         //    SWE-bench) — o agente não entrega o próprio teste adulterado.
         // `rebuild` (IMPL-039) também roda na cópia: nunca no workspace do agente.
-        const needsVerifier = (task.verify?.length ?? 0) > 0 || task.rebuild !== undefined;
+        // IMPL-098: `regression[]` entra no oráculo como PASS_TO_PASS e o
+        // `testsDir` só existe no verificador — os dois exigem a cópia.
+        const checks = combinedChecks(task);
+        const needsVerifier = checks.length > 0 || task.rebuild !== undefined || task.testsDir !== undefined;
         const collect = await workspaceMgr.collect(workspaceDir, seedCommit, limits.maxDiffBytes, {
           keepSnapshot: needsVerifier,
         });
@@ -675,11 +772,17 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
 
         let oracle: AgentOracleResult | undefined;
         let oracleAttempts = 0;
-        if (task.verify?.length || task.forbiddenPaths?.length || task.rebuild) {
-          const verify = task.verify ?? [];
+        if (checks.length || task.forbiddenPaths?.length || task.rebuild) {
+          const verify = checks;
           oracleAttempts = 1;
           if (verifierDir) {
             for (const f of task.files ?? []) writeFileNoFollow(verifierDir, f.path, f.content);
+            // IMPL-098: o material de `testsDir` entra DEPOIS do agente e SÓ na
+            // cópia do verificador (padrão Harbor/SWE-bench) — durante a
+            // execução ele não existe no workspace. Mesma função da validação
+            // (`task validate`): régua igual nos dois lados. O CLI já o resolveu
+            // para absoluto (a etapa recusa relativo antes de executar).
+            if (task.testsDir) copyTestsDirInto(task.testsDir, verifierDir);
           }
           // Checks (e rebuild) na CÓPIA com os fixtures prístinos; o hash dos
           // protegidos olha o workspace que o agente deixou (`guardDir`).
@@ -762,7 +865,17 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
           oracle?.rebuild && !oracle.rebuild.ok && classifyStop(outcome.stopReason) !== 'cancelled'
             ? `rebuild de dependências falhou (\`${oracle.rebuild.cmd}\`, exit ${oracle.rebuild.exitCode}); checks não rodaram`
             : undefined;
-        const infra = decideInfraError(outcome.infraError ?? rebuildFalhou, oracle);
+        // IMPL-094: a CLASSE da falha do executor — transitória (provedor
+        // 429/5xx, rede, sandbox morto) ou infra (erro do provedor que repetir não
+        // conserta) —, decidida pelo TIPO do erro, nunca pelo resultado.
+        const execFailure = classifyAgentFailure({ phase: 'execute', outcome, container });
+        const infra = decideInfraError(execFailure?.reason ?? rebuildFalhou, oracle);
+        // Sem veredito ⇒ a falha classificada (rebuild falho = infra, sem retry:
+        // o agente não é refeito por causa do registry).
+        const failure: AgentFailure | undefined =
+          infra.kind !== 'no-verdict'
+            ? undefined
+            : (execFailure ?? { class: 'infra', reason: rebuildFalhou ?? 'falha de infraestrutura' });
         // A execução "falhou" de verdade? Infra resgatada pelo oráculo NÃO: ela
         // tem resultado verificável, fica `ok` e duela nas finais.
         const execFailed = stopReason === 'error' && infra.kind !== 'oracle-decides';
@@ -941,7 +1054,7 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
           toolCalls: outcome.toolCalls,
           durationMs,
           stopReason,
-          ...(outcome.infraError ? { infraError: outcome.infraError } : {}),
+          ...(execFailure ? { infraError: execFailure.reason } : {}),
           diffStat: { files: collect.files, added: collect.added, removed: collect.removed },
           oracle: oracle
             ? {
@@ -996,13 +1109,10 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
           ...(oracleAttempts > 0 ? { oracleAttempts } : {}),
           costUsd: trajectory.usage.costUsd,
           ...(infra.kind === 'no-verdict' ? { infraError: infra.explanation } : {}),
+          ...(failure ? { infraClass: failure.class } : {}),
         };
-        repResults.push(repResult);
-        // Auditoria POR REP depois da run: o exec.json é gravado ANTES da
-        // adjudicação e o RunRecord só guarda contagens — sem isto não dá para
-        // saber qual execução teve o juiz falho ou confinado.
-        writeVerdictArtifact(repAbs, repResult);
-        anyError = anyError || execFailed;
+        // O `verdict.json` (auditoria POR REP) é gravado pelo laço, que sabe das
+        // tentativas — o exec.json fica aqui, na coleta.
 
         // 7) Ledger. Com chamadas pelo proxy, CADA uma já foi anotada lá (papel
         //    'agent', `usage.cost` medido) — anotar de novo aqui contaria em
@@ -1042,10 +1152,6 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
           }
         }
 
-        totalCostUsd += trajectory.usage.costUsd;
-        totalTokensIn += trajectory.usage.tokensIn;
-        totalTokensOut += trajectory.usage.tokensOut;
-
         emitEvent({
           type: 'agent.finished',
           runId,
@@ -1058,43 +1164,65 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
           diffStat: { files: collect.files, added: collect.added, removed: collect.removed },
         });
 
-        if (rep === 0) {
-          response = {
-            contestantId: contestant.id,
-            modelId,
-            text: summarizeResponse(repResults[repResults.length - 1]),
-            latencyMs: durationMs,
-            tokensIn: trajectory.usage.tokensIn,
-            tokensOut: trajectory.usage.tokensOut,
-            costUsd: trajectory.usage.costUsd,
-            status: execFailed ? 'error' : 'ok',
-            errorMsg: execFailed ? (outcome.stderrTail ?? 'execução falhou') : undefined,
-            execution,
-          };
-        }
+        return {
+          rep: repResult,
+          response:
+            rep === 0
+              ? {
+                  contestantId: contestant.id,
+                  modelId,
+                  text: summarizeResponse(repResult),
+                  latencyMs: durationMs,
+                  tokensIn: trajectory.usage.tokensIn,
+                  tokensOut: trajectory.usage.tokensOut,
+                  costUsd: trajectory.usage.costUsd,
+                  status: execFailed ? 'error' : 'ok',
+                  errorMsg: execFailed ? (outcome.stderrTail ?? 'execução falhou') : undefined,
+                  execution,
+                }
+              : undefined,
+          execFailed,
+          costUsd: trajectory.usage.costUsd,
+          tokensIn: trajectory.usage.tokensIn,
+          tokensOut: trajectory.usage.tokensOut,
+          ...(failure ? { failure } : {}),
+        };
       } catch (err) {
-        // Qualquer falha não-controlada numa rep => 'nao' com status error (a rep
-        // inteira foi perdida — caminho 'error', A5 até o IMPL-094). Controle
-        // (orçamento/cancelamento) SOBE: é o único caminho para `incomplete`.
-        if (isControlSignal(err)) throw err;
+        // Falha não-controlada numa tentativa (IMPL-094 — fim do A5): NUNCA
+        // vira 'nao'. A fase diz a classe: workspace (clone/setup/fixtures) =
+        // DEFEITO da tarefa (a etapa sai para todos); executor que lançou =
+        // pelo tipo (429/5xx/rede/sandbox morto = transitória, refeita às cegas;
+        // comando ausente = defeito; resto = infra); coleta/oráculo/escrita =
+        // infra. Controle (orçamento/cancelamento) SOBE: é o único caminho para
+        // `incomplete`. cli#3 (left#5): 401/402 do NOSSO gateway (juiz) também
+        // sobe — derruba a run com o exit 4/5, não vira infra_error da célula.
+        if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
         const msg = err instanceof Error ? err.message : String(err);
-        anyError = true;
+        const failure = classifyAgentFailure({ phase, error: err, container }) ?? { class: 'infra' as const, reason: msg };
+        // Dinheiro é medido: o que o proxy já anotou desta tentativa (no ledger,
+        // por chamada) entra no custo da rep — nunca "custou zero" por ter lançado.
+        const medido = execMeter?.measured();
         const perdida: AgentRepResult = {
           repetition: rep,
           execution: emptyExecution(relativeDir, rep, 0, 0, 0, 'error'),
           stopReason: 'error',
-          verdict: 'nao',
+          verdict: null,
           path: 'error',
-          explanation: msg,
+          explanation: failureExplanation(failure),
           judgeUsed: false,
-          source: 'auto',
-          costUsd: 0,
+          infraError: failure.reason,
+          infraClass: failure.class,
+          costUsd: medido?.usd ?? 0,
         };
-        repResults.push(perdida);
-        writeVerdictArtifact(repAbs, perdida);
-        if (rep === 0) {
-          response = responseError(contestant, modelId, msg, 0);
-        }
+        return {
+          rep: perdida,
+          response: rep === 0 ? responseError(contestant, modelId, msg, medido?.usd ?? 0) : undefined,
+          execFailed: true,
+          costUsd: medido?.usd ?? 0,
+          tokensIn: medido?.tokensIn ?? 0,
+          tokensOut: medido?.tokensOut ?? 0,
+          failure,
+        };
       } finally {
         // NADA aqui pode lançar (revisão IMPL-038): o `verify` roda código do
         // agente na cópia e pode deixar diretório 0555/0000 lá dentro — um
@@ -1126,7 +1254,60 @@ async function runAgentReps(opts: RunAgentStageParams, rc: RepsContext): Promise
           /* melhor esforço */
         }
       }
+  };
+
+  for (let rep = 0; rep < reps; rep++) {
+    const relativeDir = execDir(runId, stageIndex, contestant.id, rep);
+    const repAbs = path.join(dataDir, relativeDir);
+    // IMPL-094: retentativa CEGA — decidida pela CLASSE da falha (transitória)
+    // e pelo teto (2), nunca pelo resultado: tentativa que produziu observação
+    // (qualquer veredito) jamais é refeita. As descartadas ficam arquivadas e
+    // pagas (o custo delas soma na rep e na resposta).
+    const descartadas: DiscardedAttempt[] = [];
+    let custoRep = 0;
+    let a = await attemptOnce(rep, relativeDir, repAbs);
+    for (let attempt = 1; ; attempt++) {
+      totalCostUsd += a.costUsd;
+      totalTokensIn += a.tokensIn;
+      totalTokensOut += a.tokensOut;
+      custoRep += a.costUsd;
+      if (!shouldRetryAttempt(a.failure?.class, attempt) || ctx.signal?.aborted) break;
+      writeVerdictArtifact(repAbs, { ...a.rep, attempts: attempt }, { discarded: true });
+      const arquivado = archiveAttemptDir(repAbs, attempt);
+      descartadas.push({
+        attempt,
+        reason: a.failure!.reason,
+        costUsd: a.costUsd,
+        ...(arquivado ? { dir: path.relative(dataDir, arquivado) } : {}),
+      });
+      console.error(
+        `[agent] etapa ${stageIndex + 1} · ${contestant.id} · rep ${rep}: falha transitória ` +
+          `(${a.failure!.reason.slice(0, 160)}) — retentativa cega ${attempt}/${INFRA_RETRIES}`,
+      );
+      a = await attemptOnce(rep, relativeDir, repAbs);
     }
+    const attempts = descartadas.length + 1;
+    const repResult: AgentRepResult = {
+      ...a.rep,
+      // Sem veredito por infra depois das retentativas: a explicação diz quantas.
+      ...(a.rep.verdict === null && a.failure && a.failure.class !== 'defect' && attempts > 1
+        ? { explanation: failureExplanation(a.failure, attempts) }
+        : {}),
+      attempts,
+      costUsd: custoRep,
+      ...(descartadas.length > 0 ? { discardedAttempts: descartadas } : {}),
+    };
+    repResults.push(repResult);
+    // Auditoria POR REP depois da run: o exec.json é gravado ANTES da
+    // adjudicação e o RunRecord só guarda contagens — sem isto não dá para
+    // saber qual execução teve o juiz falho/confinado ou quantas tentativas.
+    writeVerdictArtifact(repAbs, repResult);
+    anyError = anyError || a.execFailed;
+    if (rep === 0 && a.response) response = a.response;
+    // Defeito da tarefa/ambiente: a etapa sai para TODOS (orquestrador) — as
+    // reps seguintes deste contestant só gastariam.
+    if (a.failure?.class === 'defect') break;
+  }
 
   // `incomplete` é SÓ cancelamento (e ele sobe antes daqui). Rep sem veredito
   // (sem oráculo, juiz falho/não chamado) é "sem observação", não controle.
@@ -1242,7 +1423,8 @@ async function callJudge(opts: {
       ...(j.rubric ? { rubric: j.rubric } : {}),
     };
   } catch (err) {
-    if (isControlSignal(err)) throw err;
+    // cli#3 (left#5): 401/402 não é "falha do juiz" — é a run que não pode seguir.
+    if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
     if (ctx.signal?.aborted) throw new RunCancelled(ctx.signal.reason);
     const message = (err instanceof Error ? err.message : String(err)).slice(0, 160);
     return { status: 'failed', error: { kind: 'judge_failed', message }, attempts: 1 };
@@ -1308,10 +1490,11 @@ function summarizeArgs(args?: Record<string, unknown>): string {
  * adjudicação. A invalidação da etapa inteira (defeito do ambiente) é decidida
  * depois, na célula, e fica no `StageRecord.error` do RunRecord.
  */
-function writeVerdictArtifact(absDir: string, rep: AgentRepResult): void {
+function writeVerdictArtifact(absDir: string, rep: AgentRepResult, extra: { discarded?: boolean } = {}): void {
   const payload = {
     format: 'agent-verdict@1',
     verdictTreeVersion: AGENT_VERDICT_TREE_VERSION,
+    ...(extra.discarded ? { discarded: true } : {}),
     execId: rep.execution.execId,
     repetition: rep.repetition,
     stopReason: rep.stopReason,
@@ -1335,6 +1518,10 @@ function writeVerdictArtifact(absDir: string, rep: AgentRepResult): void {
         }
       : {}),
     explanation: rep.explanation,
+    // IMPL-094: tentativas contadas; classe da falha que não é do agente.
+    ...(rep.attempts !== undefined ? { attempts: rep.attempts } : {}),
+    ...(rep.infraClass ? { infraClass: rep.infraClass } : {}),
+    ...(rep.discardedAttempts?.length ? { discardedAttempts: rep.discardedAttempts } : {}),
   };
   const target = path.join(absDir, 'verdict.json');
   const tmp = `${target}.${randomUUID()}.tmp`;
@@ -1344,6 +1531,24 @@ function writeVerdictArtifact(absDir: string, rep: AgentRepResult): void {
   } catch {
     /* melhor esforço — a nota já está no AgentRepResult */
   }
+}
+
+/** IMPL-098: problema do `testsDir` da tarefa na RUN (absoluto e diretório), ou `undefined`. */
+function testsDirIssue(task: NonNullable<StageSpec['agentTask']>): string | undefined {
+  const td = task.testsDir;
+  if (!td) return undefined;
+  if (!path.isAbsolute(td)) {
+    return (
+      `testsDir "${td}" relativo sem diretório de origem — só \`agents run --config <arq>\` o resolve ` +
+      '(pelo diretório do arquivo)'
+    );
+  }
+  try {
+    if (!statSync(td).isDirectory()) return `testsDir "${td}" não é um diretório`;
+  } catch {
+    return `testsDir "${td}" não existe`;
+  }
+  return undefined;
 }
 
 function responseError(contestant: Contestant, modelId: string, errorMsg: string, costUsd: number): CompetitorResponse {
@@ -1361,25 +1566,31 @@ function responseError(contestant: Contestant, modelId: string, errorMsg: string
 }
 
 /**
- * Repetições perdidas ANTES de executar (sem tarefa / executor não preparou):
- * uma por rep, todas 'nao' pelo caminho 'error' — nunca `incomplete`.
+ * Repetições perdidas ANTES de executar por DEFEITO da tarefa/ambiente (sem
+ * tarefa, testsDir inválido, executor/sandbox/proxy que não sobe): uma por rep,
+ * SEM veredito e com `infraClass: 'defect'` — o orquestrador invalida a etapa
+ * para TODOS (IMPL-094). Nunca 'nao' (a falha não é do contestant) e nunca
+ * `incomplete` (não é controle).
  */
-function failedReps(
+function defectReps(
   runId: string,
   stageIndex: number,
   contestantId: string,
   reps: number,
   msg: string,
 ): AgentRepResult[] {
+  const failure: AgentFailure = { class: 'defect', reason: msg };
   return Array.from({ length: reps }, (_, rep) => ({
     repetition: rep,
     execution: emptyExecution(execDir(runId, stageIndex, contestantId, rep), rep, 0, 0, 0, 'error'),
     stopReason: 'error' as const,
-    verdict: 'nao' as const,
+    verdict: null,
     path: 'error' as const,
-    explanation: msg,
+    explanation: failureExplanation(failure),
     judgeUsed: false,
-    source: 'auto' as const,
+    infraError: msg,
+    infraClass: 'defect' as const,
+    attempts: 0,
     costUsd: 0,
   }));
 }

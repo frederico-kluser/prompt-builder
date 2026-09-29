@@ -20,21 +20,42 @@ import {
 } from './engine/modelLifecycle.js';
 import { seedFromId } from './engine/duelCore.js';
 import {
+  championDeclarationFor,
+  demoQuestionsOf,
+  humanReferenceIndex,
   pickReevalMinibatch,
+  plannedTrainingStages,
+  questionKey,
   reevalDecision,
   shouldStopForPatience,
   techniquesForIteration,
+  trainingLabeledPool,
+  trainingPromotionPower,
   TRAINING_PATIENCE,
 } from './engine/trainingPolicy.js';
+import { VerdictCache } from './engine/verdictCache.js';
+import { assertRoleSeparation } from './engine/roleSeparation.js';
+import { withStageCountInRange } from './engine/stageCount.js';
+import { targetModelFor, type LabeledScenario } from './techniques.js';
 import { emitSessionEvent } from './events.js';
 import { saveSession } from './storage.js';
 import { computeMedals } from './medals.js';
-import { judgeScoreFromVerdicts, pickWinner, promotionEventFields, type RankEntry } from './rank.js';
+import {
+  contaminationInputFromRun,
+  judgeScoreFromVerdicts,
+  pickWinner,
+  promotionEventFields,
+  safetyInputFromRun,
+  type RankEntry,
+} from './rank.js';
 import {
   holdoutConfirmationText,
   HOLDOUT_RATIO_DEFAULT,
+  holdoutSkipLeavesUnvalidated,
   MIN_HOLDOUT_SCENARIOS,
+  selectionView,
   splitHoldout,
+  trainOnlyView,
 } from './holdout.js';
 import { meanCiSummary, pairCoverage, pairDiffs, pairedStageScores, stageScoresByContestant, type PairScore } from './stats.js';
 import { formatIterationGate, pairedSignificance, VERDICT_SCORE } from './stats.js';
@@ -42,11 +63,11 @@ import { BudgetLedger, isControlSignal } from './budget.js';
 import { mergeFailureCounts } from './engine/verdictIntegrity.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { reasoningLevelForRole } from './modelCaps.js';
-import { listModels } from './openrouter.js';
+import { AUDITABLE_ROLES, listModels, reconcileAtRunEnd } from './openrouter.js';
 import { enforceRunCompliance } from './lgpd.js';
 import type {
-  ChampionDeclaration,
   Contestant,
+  HoldoutSkipReason,
   IterationGate,
   PromotionReeval,
   RunCtx,
@@ -140,58 +161,15 @@ export function buildRankEntries(
   });
 }
 
-/** IMPL-065 (R-05:REC-4): piso DEFAULT de itens curados (ancora humana). Proposta sem fonte — calibrar. */
-export const DEFAULT_MIN_CURATED_ITEMS = 20;
-
-/**
- * IMPL-065 (R-05:REC-4) — item CURADO (ancora humana): proveniencia humana
- * (`origin` !== 'ai' — o datagen marca os sintéticos como 'ai') E gabarito
- * acompanhando o item (`reference`/`expected`). Gabarito gerado por IA junto do
- * item sintético NAO serve de ancora: benchmarks bem-sucedidos mantêm
- * verificação humana mesmo com dados sintéticos (IFEval/IFBench).
- */
-export function isCuratedItem(spec: StageSpec): boolean {
-  return spec.origin !== 'ai' && Boolean(spec.reference ?? spec.expected);
-}
-
-/**
- * IMPL-065 (R-05:REC-4) — declaração de campeão sob ancora HUMANA. Com
- * `curatedItems < minCuratedItems` (default {@link DEFAULT_MIN_CURATED_ITEMS})
- * o treino NAO declara campeão: o zero-dataset e BOOTSTRAP, nao evidência
- * (84–89% em sintético vs 25–34% em real). Itens sintéticos entram como
- * treino/apoio; a recusa cita o numero de itens curados e o piso.
- */
-export function championDeclarationFor(
-  specs: readonly StageSpec[],
-  opts: { minCuratedItems?: number; scoreCi95Pp?: [number, number] | null } = {},
-): ChampionDeclaration {
-  const raw = opts.minCuratedItems;
-  const minCuratedItems =
-    typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_MIN_CURATED_ITEMS;
-  const curatedItems = specs.filter(isCuratedItem).length;
-  const scoreCi95Pp = opts.scoreCi95Pp ?? null;
-  if (curatedItems >= minCuratedItems) {
-    return {
-      declared: true,
-      curatedItems,
-      minCuratedItems,
-      message: `campeao declarado com ${curatedItems} itens curados (ancora humana; piso ${minCuratedItems})`,
-      scoreCi95Pp,
-    };
-  }
-  return {
-    declared: false,
-    curatedItems,
-    minCuratedItems,
-    reason: 'sem-ancora-humana',
-    message:
-      `campeao NAO declarado: ${curatedItems} itens curados (ancora humana) < piso ${minCuratedItems} — ` +
-      'o dataset e sintetico demais para ancorar um campeao (84-89% em sintetico vs 25-34% em tarefas reais); ' +
-      'a sessao vale como bootstrap/treino (itens sinteticos entram como apoio). ' +
-      'Gabaritos exigem verificacao humana para servir de ancora; o piso N e uma PROPOSTA sem fonte (calibrar).',
-    scoreCi95Pp,
-  };
-}
+// IMPL-065 (R-05:REC-4): a régua de item CURADO e a declaração de campeão são
+// FONTE ÚNICA em `engine/trainingPolicy.ts` (os dois trainers re-exportam) — a
+// cópia por motor já tinha divergido uma vez; aqui ela ganhou o índice de
+// gabaritos HUMANOS (gabarito gerado por IA na run não é âncora).
+export {
+  DEFAULT_MIN_CURATED_ITEMS,
+  championDeclarationFor,
+  isCuratedItem,
+} from './engine/trainingPolicy.js';
 
 /** Fatias (tier/dimensionTags) dos cenarios — 'geral' quando o cenario nao traz curriculo. */
 function sliceKeysOf(specs: readonly (StageSpec | undefined)[]): string[] {
@@ -575,6 +553,22 @@ export interface StartTrainingOpts {
    * Seam so do Node: o mirror web nao tem ledger de maquina.
    */
   parentLedger?: BudgetLedger;
+  /**
+   * IMPL-080: cache de vereditos da sessão. Ausente = um novo por sessão
+   * (default); `false` = desligado; instância = injetada (testes/diagnóstico).
+   */
+  verdictCache?: VerdictCache | false;
+}
+
+/**
+ * Registra POR QUE a sessão fica sem holdout (web-code#8/cli#9) — o texto de
+ * CLI/UI/handoff sai daqui, nunca é adivinhado. O 1º motivo vence (a fatia que
+ * nunca se formou explica mais que uma parada posterior) e `holdoutSkipped`
+ * liga só para os motivos que deixam o campeão NÃO validado.
+ */
+function markHoldoutSkip(record: SessionRecord, reason: HoldoutSkipReason): void {
+  record.holdoutSkipReason ??= reason;
+  if (holdoutSkipLeavesUnvalidated(record.holdoutSkipReason)) record.holdoutSkipped = true;
 }
 
 function newSessionRecord(config: TrainingConfig): SessionRecord {
@@ -594,7 +588,12 @@ export async function startTraining(
   apiKey: string,
   opts: StartTrainingOpts = {},
 ): Promise<StartTrainingResult> {
-  const record = newSessionRecord(config);
+  // IMPL-048: papéis separados (referência/2º gabarito × juiz × modelo sob
+  // teste) — defesa em profundidade para quem chama o motor sem o schema.
+  assertRoleSeparation(config);
+  // left#13: nº de cenários na faixa documentada (inteiro 1–50) — o schema
+  // barra na entrada; isto cobre quem chama o motor direto.
+  const record = newSessionRecord(withStageCountInRange(config));
   const sessionId = record.id;
   // Persiste ANTES de responder ao cliente, para a TrainingView nunca pegar 404.
   await saveSession(record);
@@ -619,7 +618,8 @@ export async function trainToCompletion(
   apiKey: string,
   opts: StartTrainingOpts = {},
 ): Promise<SessionRecord> {
-  const record = newSessionRecord(config);
+  assertRoleSeparation(config); // IMPL-048 (ver startTraining)
+  const record = newSessionRecord(withStageCountInRange(config)); // left#13 (ver startTraining)
   await saveSession(record);
   opts.onSession?.(record.id, record);
   await trainingLoop(record, apiKey, opts);
@@ -657,7 +657,20 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     reasoning: cfg.reasoning,
     referenceModelId: cfg.referenceModelId,
     referenceJudging: cfg.referenceJudging,
+    // IMPL-053/IMPL-055: sondas de verbosidade e validação dos gabaritos são
+    // escolhas da SESSÃO — valem em toda iteração e no holdout.
+    verbosityProbes: cfg.verbosityProbes,
+    validateReferences: cfg.validateReferences,
+    secondReferenceModelId: cfg.secondReferenceModelId,
     scenarioBrief: cfg.scenarioBrief,
+    // IMPL-056: sem repassar, TODA iteracao (e o holdout) voltaria ao pt-BR
+    // exclusivo e os avisos de idioma usariam a politica errada.
+    languages: cfg.languages,
+    // IMPL-063/IMPL-115: dedup semântico e modo econômico do juiz são escolhas
+    // da SESSÃO — sem repassar, a iteração 0 (que gera os cenários) e todas as
+    // outras voltariam ao exato/ao juiz normal em silêncio.
+    scenarioDedup: cfg.scenarioDedup,
+    judgeCascade: cfg.judgeCascade,
     scenarioSeed: cfg.scenarioSeed,
     // Fase de finais: sem repassar, TODA iteracao (e o holdout) cairia no
     // default de 3 finalistas — a escolha do usuario era descartada em silencio.
@@ -687,6 +700,10 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     // o bug mais caro e mais silencioso do plano. O runner='agent' dos
     // contestants e marcado pelo variator/trainer quando `agent` presente.
     agent: cfg.agent,
+    // IMPL-075: o modo AUDITÁVEL (juiz + duelo + gabarito com provedor travado) vale
+    // para toda iteração, a re-avaliação e o holdout — sem esta linha a flag da
+    // sessão sumia na run e o artefato dizia "auditável" sem ter sido.
+    auditable: cfg.auditable,
   };
 }
 
@@ -698,11 +715,13 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
  * max(5, ceil(0,3·n)) cenários de TREINO (o holdout nunca entra), sem finais.
  * Confirma só com melhora ESTRITA. O custo entra no ledger da sessão
  * (`parentLedger`) e na estimativa pré-iteração (`estimateInputFromConfig`).
+ * A run é paga e persistida: o id entra em `record.reevalRunIds` ANTES de ela
+ * começar (web-code#18) — fora de `runIds`, que é "uma run por iteração".
  */
 async function reevaluateCandidate(args: {
   cfg: TrainingConfig;
   apiKey: string;
-  sessionId: string;
+  record: SessionRecord;
   iteration: number;
   selectionRun: RunRecord;
   controlId: string;
@@ -711,8 +730,9 @@ async function reevaluateCandidate(args: {
   ledger: BudgetLedger;
   signal?: AbortSignal;
 }): Promise<{ reeval: PromotionReeval; run?: RunRecord }> {
-  const { cfg, selectionRun, controlId, candidateId, trainStages } = args;
-  const minibatch = pickReevalMinibatch(trainStages, seedFromId(`reeval:${args.sessionId}:${args.iteration}`));
+  const { cfg, selectionRun, controlId, candidateId, trainStages, record } = args;
+  const sessionId = record.id;
+  const minibatch = pickReevalMinibatch(trainStages, seedFromId(`reeval:${sessionId}:${args.iteration}`));
   const base = { candidateId, controlId, size: minibatch.length, poolSize: trainStages.length };
   const control = selectionRun.contestants.find((c) => c.id === controlId);
   const candidate = selectionRun.contestants.find((c) => c.id === candidateId);
@@ -721,6 +741,8 @@ async function reevaluateCandidate(args: {
     return { reeval: { ...base, gainPp: 0, confirmed: false } };
   }
   const runId = randomUUID();
+  (record.reevalRunIds ??= []).push(runId);
+  await saveSession(record);
   const run = await runToCompletion(
     {
       ...variationConfigFrom(cfg),
@@ -735,7 +757,7 @@ async function reevaluateCandidate(args: {
       runId,
       contestants: [{ ...control }, { ...candidate }],
       pinnedStages: minibatch,
-      sessionId: args.sessionId,
+      sessionId,
       iteration: args.iteration,
       parentRunId: selectionRun.id,
       parentLedger: args.ledger,
@@ -783,6 +805,31 @@ async function trainingLoop(
     });
   const ctx: RunCtx = { signal: opts.signal, sink: ledger };
   record.budgetUsd = cfg.budgetUsd;
+  // IMPL-075: modo AUDITÁVEL da sessão — juiz, duelo e gabarito com provedor travado
+  // (só liga; as runs das iterações são forks e herdam, além de lerem
+  // `config.auditable` repassado por variationConfigFrom).
+  if (cfg.auditable) ledger.setAuditableRoles(AUDITABLE_ROLES);
+  // IMPL-080 (R-08:REC-3): cache EXATO de vereditos com escopo da SESSÃO — a
+  // régua (carry/original) re-julgada a cada iteração com a MESMA pergunta, o
+  // MESMO gabarito e a MESMA resposta não paga o juiz de novo. Re-teste
+  // amostral (~10%) obrigatório dentro do cache; área sensível desliga no
+  // gateway (fail-closed). A re-avaliação limpa e o holdout rodam SEM ele
+  // (`semCache`): reusar veredito ali reintroduziria a correlação com a
+  // seleção que eles existem para quebrar.
+  const verdictCache = opts.verdictCache === false ? undefined : (opts.verdictCache ?? new VerdictCache());
+  if (verdictCache) ledger.setVerdictCache(verdictCache);
+  const semCache = (): BudgetLedger => {
+    const f = ledger.fork();
+    f.setVerdictCache(null);
+    return f;
+  };
+  // IMPL-065/IMPL-061: gabaritos HUMANOS (os que o usuário trouxe na config).
+  // O orchestrator preenche `reference` por IA onde falta — só o índice separa.
+  const humanRefs = humanReferenceIndex(cfg.customStages, cfg.scenarioSeed);
+  // IMPL-066 (R-20:REC-2): capacidades do modelo sob teste DIRETO do catálogo
+  // (reasoning.mandatory, degraus aceitos) — antes nenhum chamador as passava
+  // e cot/fewshot eram propostas a modelos que sempre raciocinam.
+  const targetModel = targetModelFor(catalogo, cfg.contestantModelId);
 
   // Porta de orcamento: preco desconhecido pelo pior caso (IMPL-018).
   const estIter = estimateRunCost(estimateInputFromConfig(cfg), catalogo, { unknownPrice: 'worst-case' })
@@ -794,17 +841,30 @@ async function trainingLoop(
     record.costByRole = snap.byRole;
     record.costAccuracy = snap.accuracy;
     record.costLedger = ledger.summary(); // IMPL-017: spent/committed/pending
-    if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
   };
 
   await saveSession(record);
   emitSessionEvent({ type: 'session.started', sessionId, record });
   log(sessionId, `started: ${cfg.iterations} iteracoes (minGain=${minGain ?? 'auto max(1; 50/n)'}, gate max-T a 5%, paciencia ${patience})`);
+  // web-live#5: o gate da melhor de K é exato — com poucos cenários de SELEÇÃO
+  // ele matematicamente não promove (ou promove só sem nenhum empate). Avisa
+  // ALTO no início, antes de gastar: a sessão roda (o usuário pode querer só
+  // o diagnóstico), mas ninguém lê "0 promoções" como "o prompt já era ótimo".
+  const poder = trainingPromotionPower({
+    stages: plannedTrainingStages(cfg),
+    holdoutRatio: cfg.holdoutRatio,
+    techniques: cfg.techniqueIds?.length,
+  });
+  if (poder.message) log(sessionId, `AVISO (poder do gate): ${poder.message}`);
 
   let pinnedStages: StageSpec[] | undefined;
   // Fatia de holdout (split anti-overfit na iteracao 0): fica so EM MEMORIA —
   // sessoes nao resumem entre processos hoje, entao nao precisa ir para o disco.
   let holdoutStages: StageSpec[] = [];
+  // Holdout ainda devido: há fatia reservada sem resultado, ou a sessão parou
+  // antes de os cenários congelarem (fatia não decidida, holdout ligado).
+  const holdoutPendente = (): boolean =>
+    !record.holdout && (holdoutStages.length > 0 || (!record.pinnedStages && cfg.holdoutRatio !== 0));
   let prevRun: RunRecord | undefined;
   // F4.1: pool Pareto (populacao diversa). maxSize 1 = elitismo classico.
   const poolSize = Math.max(1, Math.round(cfg.paretoPool ?? 1));
@@ -834,6 +894,22 @@ async function trainingLoop(
   let promovidas = 0;
   // IMPL-013: K ≤ 6 técnicas por iteração; acima disso elas rodam na sessão.
   const techSeed = seedFromId(`techniques:${sessionId}`);
+  // IMPL-061: conjunto rotulado (demos few-shot REAIS) da iteração 0. Os
+  // cenários só congelam DEPOIS da run 0 — então aqui só entra lista EXATA da
+  // config (customStages, ou seed que já cobre `stages`) e só quando NENHUMA
+  // fatia de holdout vai sair dela: demo tirada de um futuro cenário de holdout
+  // tornaria o teste cego visível. Da iteração 1 em diante: o treino pinado.
+  const labeledIt0 = ((): LabeledScenario[] => {
+    const exata = cfg.customStages?.length
+      ? cfg.customStages
+      : (cfg.scenarioSeed?.length ?? 0) >= cfg.stages
+        ? cfg.scenarioSeed
+        : undefined;
+    if (!exata) return [];
+    const reservaria =
+      cfg.holdoutRatio === 0 ? 0 : splitHoldout(exata, cfg.holdoutRatio ?? HOLDOUT_RATIO_DEFAULT).holdout.length;
+    return reservaria > 0 ? [] : trainingLabeledPool(exata, humanRefs);
+  })();
 
   // IMPL-062: escolha do PAI da próxima derivação. Elitismo explícito (fatia
   // única) não tem pai — o campeão é a base. Com pool, o pai sai do pool:
@@ -850,6 +926,18 @@ async function trainingLoop(
       : pickParent(pool, usoPai);
     if (pai) usoPai[pai.id] = (usoPai[pai.id] ?? 0) + 1;
     return pai;
+  };
+
+  // IMPL-080: o cache de vereditos da sessão no log (hits/total e re-testes).
+  const logVerdictCache = (): void => {
+    const st = verdictCache?.stats();
+    if (!st) return;
+    if (st.cacheTotal === 0) return;
+    log(
+      sessionId,
+      `cache de vereditos: ${st.cacheHits}/${st.cacheTotal} reusados, ${st.retests} re-teste(s) amostral(is), ` +
+        `${st.disagreements} discordancia(s)${st.invalidations ? `, ${st.invalidations} invalidacao(oes)` : ''}`,
+    );
   };
 
   // IMPL-062: métricas do pool reportadas (fração de pares não dominados +
@@ -921,6 +1009,10 @@ async function trainingLoop(
           promptId: cfg.promptId,
           // Fase 4: sem `runner='agent'` o treino com agente rodaria como chat (§29.2).
           runner: cfg.agent ? 'agent' : undefined,
+          // IMPL-066: capacidades do catálogo do modelo sob teste.
+          targetModel,
+          // IMPL-061: demos few-shot REAIS (vazio = a técnica decai sem inventar).
+          labeledScenarios: labeledIt0,
         });
       } else {
         // IMPL-060/IMPL-062: a base de derivação é o PAI (pool Pareto com
@@ -1005,6 +1097,10 @@ async function trainingLoop(
           promptId: cfg.promptId,
           // Fase 4: mesmo runner nas iteracoes seguintes (agente quando config.agent).
           runner: cfg.agent ? 'agent' : undefined,
+          // IMPL-066: capacidades do catálogo do modelo sob teste.
+          targetModel,
+          // IMPL-061: demos do TREINO pinado (holdout fora; só âncora humana).
+          labeledScenarios: trainingLabeledPool(pinnedStages ?? [], humanRefs),
         });
       }
 
@@ -1030,16 +1126,24 @@ async function trainingLoop(
       emitSessionEvent({ type: 'iteration.started', sessionId, iteration: i, runId });
       log(sessionId, `iteracao ${i + 1}/${cfg.iterations} -> run ${runId} (${contestants.length} variantes)`);
 
-      const runRec = await runToCompletion(variationConfigFrom(cfg), apiKey, {
-        runId,
-        contestants,
-        pinnedStages,
-        sessionId,
-        iteration: i,
-        parentRunId: prevRun?.id,
-        parentLedger: ledger,
-        signal: opts.signal,
-      });
+      // web-code#11: a rodada pinada roda SÓ a fatia de treino — `stages` diz
+      // isso (como o holdout e a re-avaliação já faziam). Com `cfg.stages` a
+      // tela mostrava "10/20" para sempre e a estimativa das portas de
+      // orçamento contava cenários que não rodam. Espelho do web.
+      const runRec = await runToCompletion(
+        { ...variationConfigFrom(cfg), stages: pinnedStages?.length ?? cfg.stages },
+        apiKey,
+        {
+          runId,
+          contestants,
+          pinnedStages,
+          sessionId,
+          iteration: i,
+          parentRunId: prevRun?.id,
+          parentLedger: ledger,
+          signal: opts.signal,
+        },
+      );
 
       // IMPL-004: vereditos perdidos da sessao = soma das runs (iteracoes,
       // triagem e holdout) — a mesma conta que cada run carrega.
@@ -1079,12 +1183,10 @@ async function trainingLoop(
         const specs = runRec.stages
           .map((s) => s.spec)
           .filter((s): s is StageSpec => Boolean(s));
-        // IMPL-062/IMPL-065: os cenários da sessão congelam aqui — é deles que
-        // vêm as fatias do pool (elitismo vs Pareto) e a contagem de itens
-        // curados (âncora humana) da declaração de campeão.
+        // IMPL-065: os cenários da sessão congelam aqui — é deles que vem a
+        // contagem de itens curados (âncora humana) da declaração de campeão.
+        // As fatias do pool (IMPL-062) saem só do TREINO, logo abaixo.
         todasSpecs = specs;
-        nInstancias = specs.length;
-        fatiasMultiplas = sliceKeysOf(specs).length > 1;
         if (cfg.holdoutRatio !== 0) {
           // IMPL-050: piso ABSOLUTO de 10 cenários + ratio default 0,3. Fatia
           // curta não é holdout: é "confirmação fraca" (`strength`), o campeão
@@ -1094,14 +1196,46 @@ async function trainingLoop(
           pinnedStages = split.train;
           holdoutStages = split.holdout;
           if (split.strength === 'confirmacao-fraca') {
-            record.holdoutSkipped = true;
+            // web-code#8/cli#9: o MOTIVO fica gravado — sessão pequena não é
+            // "pulada por orçamento".
+            markHoldoutSkip(record, 'min-scenarios');
             log(sessionId, holdoutConfirmationText(split.reserved.length, { strength: split.strength }));
           }
         } else {
           pinnedStages = specs;
+          markHoldoutSkip(record, 'disabled');
         }
         record.pinnedStages = pinnedStages;
+        // O pool/diagnóstico Pareto medem a SELEÇÃO: instâncias e fatias do
+        // TREINO (a fatia de holdout não entra na matriz candidato × cenário).
+        nInstancias = pinnedStages.length;
+        fatiasMultiplas = sliceKeysOf(pinnedStages).length > 1;
       }
+
+      // web-code#1: a SELEÇÃO nunca vê a fatia de holdout. A run da iteração 0
+      // cobriu todos os cenários (é nela que eles nascem); daqui em diante o
+      // gate, a re-avaliação, as medalhas, o pool e as lições da próxima
+      // iteração leem só as etapas de TREINO — senão o campeão seria escolhido
+      // em parte nos mesmos cenários que o gate final depois "valida". Só na
+      // iteração 0: as seguintes já rodam pinadas no treino (e o orchestrator
+      // clona as specs pinadas — a identidade de objeto só vale aqui).
+      // IMPL-061 — leave-demos-out: a pergunta que algum prompt da run carrega
+      // como demo (bloco <exemplos_reais>) sai da SELEÇÃO para todos (o prompt
+      // a acertaria de graça). O holdout nunca é fonte de demo; por defesa, se
+      // uma demo coincidir com ele, a pergunta sai também do teste cego.
+      const demoQs = demoQuestionsOf(runRec.contestants.map((c) => c.systemPrompt));
+      if (demoQs.size && holdoutStages.some((s) => demoQs.has(questionKey(s.question)))) {
+        holdoutStages = holdoutStages.filter((s) => !demoQs.has(questionKey(s.question)));
+        log(sessionId, `holdout: pergunta(s) usada(s) como demo removida(s) do teste cego (${holdoutStages.length} restam)`);
+      }
+      const visaoTreino = i === 0 && holdoutStages.length > 0 ? trainOnlyView(runRec, pinnedStages ?? []) : runRec;
+      const selRun = demoQs.size
+        ? selectionView(visaoTreino, (spec) => !demoQs.has(questionKey((spec as StageSpec).question)))
+        : visaoTreino;
+      if (demoQs.size) {
+        log(sessionId, `few-shot: ${demoQs.size} cenario(s) usados como demo fora da selecao desta iteracao (leave-demos-out)`);
+      }
+      runsById.set(selRun.id, selRun);
 
       // 4) Gate de promocao (port do evolve.mjs + IMPL-002): a melhor variante
       //    so vira campea se superar a REGUA desta iteracao por >= minGain
@@ -1114,16 +1248,22 @@ async function trainingLoop(
       // lados; ausente nunca vira 'nao') e, com >10% de pares excluidos, a
       // promocao so vale se sobreviver ao pior/melhor caso (ver pickWinner).
       const scoresById = stageScoresByContestant(
-        runRec.stages,
-        runRec.contestants.map((c) => c.id),
+        selRun.stages,
+        selRun.contestants.map((c) => c.id),
       );
       // IMPL-071: o desempate por tamanho só vale entre variantes com o
       // contrato never-break v2 verde (ver buildRankEntries).
       const pick = pickWinner(
-        buildRankEntries(runRec, controlId, { contractsActive: Boolean(cfg.contracts) }),
+        buildRankEntries(selRun, controlId, { contractsActive: Boolean(cfg.contracts) }),
         {
           minGain,
           scoresById,
+          // IMPL-067: campeã que cola span ≥ 8 tokens de cenário/gabarito/
+          // explicação do juiz NÃO é promovida; o containment vai no gate.
+          contamination: contaminationInputFromRun(selRun, controlId),
+          // IMPL-069: nova violação em âncora crítica (adversarial) = fora da
+          // disputa antes da utilidade (segurança → utilidade).
+          safety: safetyInputFromRun(selRun),
         },
       );
       // IMPL-013: passou no gate da melhor de K → re-avaliação LIMPA num
@@ -1137,13 +1277,15 @@ async function trainingLoop(
         const r = await reevaluateCandidate({
           cfg,
           apiKey,
-          sessionId,
+          record,
           iteration: i,
-          selectionRun: runRec,
+          selectionRun: selRun,
           controlId,
           candidateId: pick.best.id,
-          trainStages: pinnedStages ?? [],
-          ledger,
+          // IMPL-061: cenário usado como demo não re-avalia (seria acerto de graça).
+          trainStages: (pinnedStages ?? []).filter((s) => !demoQs.has(questionKey(s.question))),
+          // IMPL-080: re-avaliação LIMPA = vereditos novos (sem o cache da sessão).
+          ledger: semCache(),
           signal: opts.signal,
         });
         reevalRun = r.run;
@@ -1192,7 +1334,7 @@ async function trainingLoop(
       // 5) Linhagem: registra o CAMPEAO POS-GATE de cada iteracao (score e
       //    medalhas seguem de computeMedals apenas para a UI — a decisao de
       //    promocao e do gate por margem, nao do quadro de medalhas).
-      const medalRow = computeMedals(runRec).find((r) => r.contestantId === championIdInLastRun);
+      const medalRow = computeMedals(selRun).find((r) => r.contestantId === championIdInLastRun);
       record.bestPromptByIteration.push({
         iteration: i,
         runId: runRec.id,
@@ -1220,7 +1362,7 @@ async function trainingLoop(
             {
               id: `it-${i}`,
               label: champion.label,
-              bySlice: sliceScoresOf(runRec, championIdInLastRun),
+              bySlice: sliceScoresOf(selRun, championIdInLastRun),
               text: champion.systemPrompt,
               // Proveniência: o dossiê de lições do membro vem DESTE run/id.
               runId: runRec.id,
@@ -1236,7 +1378,9 @@ async function trainingLoop(
       }
       registrarDiagnostico();
 
-      prevRun = runRec;
+      // web-code#1: as lições da próxima iteração (e a significância de
+      // fallback) leem a visão de SELEÇÃO — sem as perguntas do holdout.
+      prevRun = selRun;
       emitSessionEvent({
         type: 'iteration.finished',
         sessionId,
@@ -1330,27 +1474,41 @@ async function trainingLoop(
       const estHoldout =
         holdoutStages.length > 0 ? estIter * (holdoutStages.length / Math.max(1, cfg.stages)) : 0;
       if (record.stoppedReason || (estHoldout > 0 && !ledger.canAfford(estHoldout))) {
-        record.holdoutSkipped = true;
-        log(sessionId, holdoutConfirmationText(0, { skipped: true }));
+        // Só há o que "pular" se havia fatia de holdout reservada — ou se a
+        // sessão parou antes de os cenários congelarem (sem fatia decidida, o
+        // motivo já foi gravado na iteração 0: piso de cenários ou desligado).
+        if (holdoutPendente()) {
+          markHoldoutSkip(record, record.stoppedReason === 'cancelled' ? 'cancelled' : 'budget');
+        }
+        log(
+          sessionId,
+          holdoutConfirmationText(holdoutStages.length, {
+            skipped: true,
+            skipReason: record.holdoutSkipReason,
+          }),
+        );
       } else {
         const gateFinal = await finalizeHoldout(record, apiKey, champion, championIdInLastRun, holdoutStages, prevRun, {
           ledger,
+          // IMPL-080: o teste cego mede de novo — sem o cache de vereditos.
+          runLedger: semCache(),
           signal: opts.signal,
         });
         scoreCi95Pp = gateFinal.scoreCi95Pp ?? null;
       }
     } catch (err) {
       if (isControlSignal(err)) {
-        record.holdoutSkipped = true;
         record.stoppedReason =
           record.stoppedReason ?? (err.benchControl === 'budget' ? 'budget' : 'cancelled');
         if (err.benchControl === 'budget') record.budgetExhausted = true;
+        if (holdoutPendente()) markHoldoutSkip(record, err.benchControl === 'budget' ? 'budget' : 'cancelled');
       } else {
         console.warn(
           `[train ${sessionId}] gate de holdout/significancia falhou (sessao segue): ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
+        if (holdoutStages.length > 0 && !record.holdout) markHoldoutSkip(record, 'run-failed');
       }
     }
 
@@ -1364,9 +1522,17 @@ async function trainingLoop(
     record.championDeclaration = championDeclarationFor(specsDeclaracao, {
       minCuratedItems: cfg.minCuratedItems,
       scoreCi95Pp,
+      // Gabarito gerado por IA na run não é âncora: só os da config contam.
+      humanReferences: humanRefs,
     });
     log(sessionId, record.championDeclaration.message);
 
+    // IMPL-074: pendentes lançadas DIRETO no ledger da sessão (reescritor,
+    // reflexão LLM, gate de contrato) — e as das runs que seguiram pendentes —
+    // conciliadas pela fatura antes da escrita terminal. Nunca lança; o
+    // Cancelar pula (sair rápido é o pedido; as pendentes ficam no record).
+    if (record.stoppedReason !== 'cancelled') await reconcileAtRunEnd(ledger, apiKey);
+    logVerdictCache();
     syncLedger();
     record.status = record.stoppedReason ? 'aborted' : 'finished';
     record.finishedAt = nowIso();
@@ -1374,12 +1540,17 @@ async function trainingLoop(
     emitSessionEvent({ type: 'session.finished', sessionId, record });
     log(sessionId, `finished: custo ${record.totalCostUsd}`);
   } catch (err) {
+    // IMPL-074: a conciliação da sessão vale em todo desfecho, menos o Cancelar.
+    const cancelou = isControlSignal(err) && err.benchControl !== 'budget';
+    if (!cancelou) await reconcileAtRunEnd(ledger, apiKey);
     syncLedger();
     if (isControlSignal(err)) {
       // Orcamento/cancelamento: sessao interrompida COM resultado parcial.
       record.status = 'aborted';
       record.stoppedReason = err.benchControl === 'budget' ? 'budget' : 'cancelled';
       if (err.benchControl === 'budget') record.budgetExhausted = true;
+      // A fatia reservada nunca chegou ao teste final: o motivo é a parada.
+      if (holdoutPendente()) markHoldoutSkip(record, record.stoppedReason);
       record.finishedAt = nowIso();
       await saveSession(record);
       emitSessionEvent({ type: 'session.finished', sessionId, record });
@@ -1410,7 +1581,12 @@ async function finalizeHoldout(
   championIdInLastRun: string,
   holdoutStages: StageSpec[],
   lastRun: RunRecord | undefined,
-  ctxOpts: { ledger?: BudgetLedger; signal?: AbortSignal } = {},
+  ctxOpts: {
+    ledger?: BudgetLedger;
+    /** Ledger PAI da run de holdout (default `ledger`) — o trainer passa um fork sem cache de vereditos. */
+    runLedger?: BudgetLedger;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<{ scoreCi95Pp?: [number, number] | null }> {
   const cfg = record.config;
   const sessionId = record.id;
@@ -1431,6 +1607,11 @@ async function finalizeHoldout(
   // So ha o que re-testar se a fatia de holdout e confiavel, existe um prompt
   // base p/ servir de controle e o campeao final e uma VARIANTE (se o treino
   // convergiu sem ganho, campeao == base e a run compararia ele consigo mesmo).
+  // web-code#8: quando não roda, o MOTIVO fica gravado.
+  if (champion && holdoutStages.length >= MIN_HOLDOUT_SCENARIOS) {
+    if (!basePrompt.trim()) markHoldoutSkip(record, 'no-base');
+    else if (champion.systemPrompt === basePrompt) markHoldoutSkip(record, 'no-change');
+  }
   if (
     champion &&
     holdoutStages.length >= MIN_HOLDOUT_SCENARIOS &&
@@ -1476,7 +1657,7 @@ async function finalizeHoldout(
         // a run de holdout aparece como uma iteracao extra (N+1).
         iteration: cfg.iterations,
         parentRunId: lastRun?.id,
-        parentLedger: ctxOpts.ledger,
+        parentLedger: ctxOpts.runLedger ?? ctxOpts.ledger,
         signal: ctxOpts.signal,
       },
     );
@@ -1495,6 +1676,19 @@ async function finalizeHoldout(
       console.warn(
         `[train ${sessionId}] run de holdout terminou com status ${holdoutRun.status}; gate descartado`,
       );
+      // Holdout cortado por orçamento/cancelamento: o gate não aconteceu — o
+      // campeão fica sem confirmação e o motivo sobe para a sessão (resultado
+      // PARCIAL, como no espelho web); erro/inconclusiva = run sem veredito.
+      if (holdoutRun.stoppedReason) {
+        record.stoppedReason ??= holdoutRun.stoppedReason;
+        if (holdoutRun.stoppedReason === 'budget') {
+          record.budgetExhausted = true;
+          record.stoppedAtPhase ??= 'holdout';
+        }
+        markHoldoutSkip(record, holdoutRun.stoppedReason === 'budget' ? 'budget' : 'cancelled');
+      } else {
+        markHoldoutSkip(record, 'run-failed');
+      }
       holdoutRun = undefined; // cai no fallback de significancia abaixo
     }
   }
@@ -1532,7 +1726,18 @@ async function finalizeHoldout(
     // é o ÚNICO p de confirmação da sessão — e ele vem ROTULADO com a origem
     // ('holdout'); a UI e o CLI exibem o rótulo em todo relatório.
     record.significance = pairedSignificance(controlScores, championScores, { pOrigin: 'holdout' });
-    log(sessionId, holdoutConfirmationText(holdoutStages.length));
+    // IMPL-050: "validado" só se o holdout CONFIRMOU (sem regressão, p ≤ α).
+    log(
+      sessionId,
+      holdoutConfirmationText(holdoutStages.length, {
+        outcome: {
+          regressed: record.holdout.regressed,
+          gainPp: record.holdout.gain,
+          pValue: record.significance?.pValue ?? null,
+          pOrigin: 'holdout',
+        },
+      }),
+    );
   } else if (lastRun && champion) {
     // Sem run de holdout (split invalido, campeao == base ou run falhou): a
     // significancia vem da ultima run de treino, pareando a BASE ('original',

@@ -15,11 +15,23 @@
 
 const DB_NAME = 'prompt-builder';
 // v2: adiciona a store 'prompts' (biblioteca de prompts salvos/evoluídos).
+// v3: modo JEV (decisões tipadas) — 'jevRuns', 'jevSessions' e 'jevSummaries'
+// (records do `src/engine/jev/` + o resumo da lista, gravados na mesma
+// transação por `web/src/jev/store.ts`).
 // O upgrade de clientes existentes já está coberto: o onupgradeneeded itera
-// STORES e cria apenas as stores que faltam, então quem vem da v1 ganha a
-// store nova sem perder os dados das demais.
-const DB_VERSION = 2;
-export const STORES = ['runs', 'sessions', 'runSummaries', 'sessionSummaries', 'prompts'] as const;
+// STORES e cria apenas as stores que faltam, então quem vem da v1/v2 ganha as
+// stores novas sem perder os dados das demais.
+export const DB_VERSION = 3;
+export const STORES = [
+  'runs',
+  'sessions',
+  'runSummaries',
+  'sessionSummaries',
+  'prompts',
+  'jevRuns',
+  'jevSessions',
+  'jevSummaries',
+] as const;
 export type Store = (typeof STORES)[number];
 
 /** quota = sem espaço · unavailable = não abriu (bloqueado/privado/ausente) · failed = o resto. */
@@ -289,6 +301,59 @@ export async function idbGet<T>(store: Store, key: string): Promise<T | undefine
   } catch (err) {
     warnRead(store, err);
     return undefined;
+  }
+}
+
+/**
+ * Só as CHAVES de uma store (left#6: o prune do TTL acha as entradas de journal
+ * de uma run sem trazer para a memória os records inteiros, que chegam a
+ * centenas de KB cada). Sem `getAllKeys` (IndexedDB 1.0), cai no `getAll`.
+ * Degrada para vazio, como as outras leituras.
+ */
+export async function idbGetAllKeys(store: Store): Promise<string[]> {
+  try {
+    return await idbGetAllKeysRaw(store);
+  } catch (err) {
+    warnRead(store, err);
+    return [];
+  }
+}
+
+async function idbGetAllKeysRaw(store: Store): Promise<string[]> {
+  const db = await openDb();
+  const os = db.transaction(store, 'readonly').objectStore(store);
+  if (typeof (os as { getAllKeys?: unknown }).getAllKeys === 'function') {
+    const keys = (await reqProm(os.getAllKeys())) ?? [];
+    return keys.filter((k): k is string => typeof k === 'string');
+  }
+  const all = (await reqProm<{ id?: unknown }[]>(os.getAll() as IDBRequest<{ id?: unknown }[]>)) ?? [];
+  return all.map((r) => r?.id).filter((k): k is string => typeof k === 'string');
+}
+
+/**
+ * Leituras que NÃO degradam em silêncio — o journal da retomada (IMPL-081):
+ * calar um erro de leitura faria a retomada pagar de novo chamadas já pagas.
+ * 'unavailable' (sem IndexedDB no ambiente: Node dos testes, modo privado)
+ * devolve vazio/undefined, como na gravação; falha real SOBE.
+ */
+export async function idbGetAllKeysStrict(store: Store): Promise<string[]> {
+  try {
+    return await idbGetAllKeysRaw(store);
+  } catch (err) {
+    if (classifyIdbError(err) === 'unavailable') return [];
+    throw err;
+  }
+}
+
+/** `idbGet` com a mesma disciplina de `idbGetAllKeysStrict`. */
+export async function idbGetStrict<T>(store: Store, key: string): Promise<T | undefined> {
+  try {
+    const db = await openDb();
+    const tx = db.transaction(store, 'readonly');
+    return await reqProm<T>(tx.objectStore(store).get(key) as IDBRequest<T>);
+  } catch (err) {
+    if (classifyIdbError(err) === 'unavailable') return undefined;
+    throw err;
   }
 }
 

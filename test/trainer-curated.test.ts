@@ -26,6 +26,8 @@ import {
   isCuratedItem,
 } from '../src/trainer.js';
 import * as webTrainer from '../web/src/engine/trainer.js';
+import { humanReferenceIndex, isCuratedItem as policyIsCurated } from '../src/engine/trainingPolicy.js';
+import { evaluateHandoffGuards } from '../src/engine/handoffGuards.js';
 
 function specDe(i: number, over: Partial<StageSpec> = {}): StageSpec {
   return { question: `Pergunta ${i}?`, productContext: 'ctx', maxTokens: 100, ...over };
@@ -59,6 +61,40 @@ describe('IMPL-065 — item curado (âncora humana)', () => {
       expect(api.isCuratedItem(specDe(0))).toBe(false);
     });
   }
+});
+
+describe('IMPL-065 — gabarito HUMANO × gabarito gerado por IA (índice da config)', () => {
+  it('só o gabarito que a config trouxe (mesmo texto, mesma pergunta) é âncora', () => {
+    const idx = humanReferenceIndex(
+      [specDe(0, { reference: 'humano 0' }), specDe(1, { origin: 'ai', reference: 'ia 1' }), specDe(2)],
+      [specDe(3, { origin: 'import', reference: '  humano 3 ' })],
+    );
+    expect([...idx.entries()]).toEqual([
+      ['Pergunta 0?', 'humano 0'],
+      ['Pergunta 3?', 'humano 3'],
+    ]);
+    for (const [nome, api] of MOTORES) {
+      // Mesma pergunta, gabarito da config: âncora.
+      expect(api.isCuratedItem(specDe(0, { reference: 'humano 0' }), idx), nome).toBe(true);
+      expect(api.isCuratedItem(specDe(3, { origin: 'import', reference: 'humano 3' }), idx), nome).toBe(true);
+      // Mesma pergunta, gabarito TROCADO pela run (IA): não é âncora.
+      expect(api.isCuratedItem(specDe(0, { reference: 'gabarito do modelo de referência' }), idx), nome).toBe(false);
+      // Pergunta que a config trouxe SEM gabarito (a run gerou): não é âncora.
+      expect(api.isCuratedItem(specDe(2, { reference: 'gerado' }), idx), nome).toBe(false);
+      // `expected` nunca é gerado por IA: segue âncora com o índice.
+      expect(api.isCuratedItem(specDe(9, { expected: 'rotulo' }), idx), nome).toBe(true);
+      expect(api.championDeclarationFor([specDe(0, { reference: 'humano 0' }), specDe(2, { reference: 'gerado' })], {
+        minCuratedItems: 1,
+        humanReferences: idx,
+      }).curatedItems).toBe(1);
+    }
+  });
+
+  it('os dois motores usam a MESMA função (fonte única em engine/trainingPolicy)', () => {
+    expect(webTrainer.isCuratedItem).toBe(isCuratedItem);
+    expect(webTrainer.championDeclarationFor).toBe(championDeclarationFor);
+    expect(policyIsCurated).toBe(isCuratedItem);
+  });
 });
 
 describe('IMPL-065 (1/2/4) — declaração de campeão sob piso de itens curados', () => {
@@ -158,8 +194,12 @@ const dubles = vi.hoisted(() => {
       : config.duels === false
         ? 'reeval'
         : 'selection';
+    // Como o orchestrator real: pinadas > customStages da config (e o
+    // GABARITO POR IA preenche `reference` onde o usuário não trouxe) > datagen.
+    const custom = config.customStages as StageSpec[] | undefined;
     const specs: StageSpec[] =
       pinned ??
+      custom?.map((s) => (s.reference?.trim() ? s : { ...s, reference: `gabarito gerado por IA para ${s.question}` })) ??
       Array.from({ length: estado.nCenarios }, (_, i) => ({
         question: `cenario ${i}`,
         productContext: 'ctx',
@@ -357,13 +397,54 @@ describe('IMPL-065 — integração: o RESULTADO da sessão carrega a declaraç�
     });
 
     it(`${nome}: ≥ N itens curados ⇒ campeão declarado no resultado`, async () => {
-      dubles.estado.specsSinteticos = false;
-      const rec = await treinar(config());
+      // Âncora humana = pergunta E gabarito trazidos pelo usuário (customStages).
+      const humanos = Array.from({ length: 20 }, (_, i) => ({
+        question: `cenario ${i}`,
+        productContext: 'ctx',
+        maxTokens: 100,
+        reference: `gabarito humano ${i}`,
+        origin: 'import' as const,
+      }));
+      const rec = await treinar(config({ customStages: humanos }));
       expect(rec.status, rec.error).toBe('finished');
       const d = rec.championDeclaration!;
       expect(d.declared).toBe(true);
       expect(d.curatedItems).toBe(20);
       expect(d.message).toContain('campeao declarado com 20 itens curados');
+    });
+
+    it(`${nome}: perguntas humanas com gabarito gerado por IA NÃO são âncora (IMPL-065, bug do gabarito)`, async () => {
+      // 20 perguntas escritas à mão SEM gabarito: a run preenche `reference`
+      // pelo modelo de referência. Antes: "campeão declarado com 20 itens
+      // curados (âncora humana)". Agora: 0 curados — o gabarito é de IA.
+      const semGabarito = Array.from({ length: 20 }, (_, i) => ({
+        question: `cenario ${i}`,
+        productContext: 'ctx',
+        maxTokens: 100,
+        origin: 'import' as const,
+      }));
+      const rec = await treinar(config({ customStages: semGabarito }));
+      expect(rec.status, rec.error).toBe('finished');
+      // A run preencheu mesmo a referência (o dublê imita o gabarito.ts)...
+      expect(rec.pinnedStages?.every((s) => s.reference?.startsWith('gabarito gerado por IA'))).toBe(true);
+      // ...e isso não conta como âncora humana.
+      const d = rec.championDeclaration!;
+      expect(d.declared).toBe(false);
+      expect(d.curatedItems).toBe(0);
+      expect(d.message).toContain('gabarito gerado por IA na run nao conta');
+    });
+
+    it(`${nome}: mistura — só os gabaritos que o usuário trouxe contam (7 humanos + 13 por IA)`, async () => {
+      const mistos = Array.from({ length: 20 }, (_, i) => ({
+        question: `cenario ${i}`,
+        productContext: 'ctx',
+        maxTokens: 100,
+        ...(i < 7 ? { reference: `gabarito humano ${i}` } : {}),
+      }));
+      const rec = await treinar(config({ customStages: mistos }));
+      expect(rec.championDeclaration!.curatedItems).toBe(7);
+      expect(rec.championDeclaration!.declared).toBe(false);
+      expect(rec.championDeclaration!.message).toContain('7 itens curados (ancora humana) < piso 20');
     });
 
     it(`${nome}: minCuratedItems configurável vale para a sessão inteira`, async () => {
@@ -377,4 +458,21 @@ describe('IMPL-065 — integração: o RESULTADO da sessão carrega a declaraç�
       expect(liberado.championDeclaration!.declared).toBe(true);
     });
   }
+});
+
+describe('IMPL-065 — o handoff respeita a recusa (sessions winner --apply)', () => {
+  it('declared:false BLOQUEIA o handoff (override justificado libera); record antigo sem o campo não bloqueia', () => {
+    const recusa = championDeclarationFor([], { minCuratedItems: 20 });
+    const base = { status: 'finished', significance: { ci95Pp: [2, 9] as [number, number] } };
+    const r = evaluateHandoffGuards({ ...base, championDeclaration: recusa });
+    expect(r.blocked).toBe(true);
+    expect(r.blocks.map((b) => b.code)).toEqual(['champion.undeclared']);
+    expect(r.blocks[0].message).toContain('0 itens curados');
+    const comOverride = evaluateHandoffGuards({ ...base, championDeclaration: recusa }, { overrideReason: 'piloto interno' });
+    expect(comOverride.blocked).toBe(false);
+    expect(comOverride.override?.bypassed).toEqual(['champion.undeclared']);
+    const declarado = championDeclarationFor(Array.from({ length: 20 }, (_, i) => specDe(i, { expected: 'x' })));
+    expect(evaluateHandoffGuards({ ...base, championDeclaration: declarado }).blocks).toEqual([]);
+    expect(evaluateHandoffGuards(base).blocks).toEqual([]);
+  });
 });

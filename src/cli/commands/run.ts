@@ -9,16 +9,32 @@ import { prepareOptsFor } from '../../prepareRun.js';
 import { subscribe, subscribeSession } from '../../events.js';
 import { loadRun, loadSession } from '../../storage.js';
 import { makeCallEstimator } from '../../estimate.js';
-import { parseRunConfig } from '../../runConfigSchema.js';
+import { agentExecFields, agentExecRefusalMessage, parseRunConfig } from '../../runConfigSchema.js';
 import { parseArenaConfig, type ArenaConfigFile } from '../../configFile.js';
 import { checkRunPii, describeRunPii } from '../../engine/pii.js';
 import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
-import { hasGabarito, labelIssue, toStageSpec } from '../../engine/libraryCore.js';
+import {
+  curatedKofN,
+  curationStatus,
+  curationWarnings,
+  hasGabarito,
+  labelIssue,
+  requireApprovedIssue,
+  toStageSpec,
+  type LibraryItem,
+} from '../../engine/libraryCore.js';
+import { HOLDOUT_RATIO_DEFAULT, splitHoldout } from '../../holdout.js';
 import { formatGateSummary, formatSignificance } from '../../stats.js';
-import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, type Output } from '../output.js';
+import { holdoutSkipReasonText } from '../../holdout.js';
+import { holdoutSkipReasonOf } from '../../engine/sessionDecision.js';
+import { TRAINING_DEFAULT_STAGES } from '../../engine/trainingPolicy.js';
+import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, toCliError, type Output } from '../output.js';
+import { fatalGatewayErrorFromRecord } from '../../openrouter.js';
+import { effectiveRoleTimeouts } from '../../roleLimits.js';
 import {
   assertNoUnknownConfigKeys,
+  closestMatch,
   buildContext,
   checkKey,
   isAgentContext,
@@ -63,10 +79,14 @@ import {
   type MachineBudgetLedger,
 } from '../spendLedger.js';
 import { pruneSpendState } from '../spendGuards.js';
-import { emitRunEvent, emitSessionEventNdjson, truncationFields } from '../ndjson.js';
+import { seedFromId, sortStandings, winnerFromStandings } from '../../engine/duelCore.js';
+import { emitCurationWarning, emitRunEvent, emitSessionEventNdjson, truncationFields } from '../ndjson.js';
 import { ROLE_LABEL } from '../../budget.js';
 import { forceExitNow, installGracefulStop } from '../runControl.js';
 import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
+import { REASONING_LEVELS } from '../../reasoning.js';
+import { retentionSweep } from '../records.js';
+import { recordRunCompletedTelemetry } from './telemetry.js';
 import type {
   CostRole,
   RunConfig,
@@ -93,6 +113,12 @@ const OPTIONS = {
   'base-prompt': { type: 'string' },
   'base-prompt-file': { type: 'string' },
   'scenario-brief': { type: 'string' },
+  // IMPL-056: idiomas do datagen (opt-in, lista por vírgula). Sem a flag, 100% pt-BR.
+  languages: { type: 'string' },
+  // IMPL-115: modo ECONÔMICO do juiz — `barato1,barato2:forte`.
+  'judge-cascade': { type: 'string' },
+  // IMPL-063: dedup SEMÂNTICO dos cenários gerados (embeddings; custo no datagen).
+  'semantic-dedup': { type: 'boolean' },
   'effort-competitor': { type: 'string' },
   'effort-judge': { type: 'string' },
   'effort-datagen': { type: 'string' },
@@ -123,9 +149,16 @@ const OPTIONS = {
   // = revisei o dado apontado e pode seguir pseudonimizado (modo 'redact').
   'pii-mode': { type: 'string' },
   'allow-pii': { type: 'boolean' },
+  // IMPL-090: item de biblioteca não aprovado recusa a run (exit 3) — opt-in.
+  'require-approved': { type: 'boolean' },
   // IMPL-030: roda num processo destacado; acompanhe por `runs status/wait/cancel`.
   detach: { type: 'boolean' },
+  // IMPL-075: modo AUDITÁVEL — juiz, duelo e gabarito com provedor travado
+  // (`allow_fallbacks:false`, `require_parameters:true`); vale sobre o --config.
+  auditable: { type: 'boolean' },
 } as const;
+/** Spec das flags de compare/vary/train — o docs-lint roda os exemplos da doc nela (IMPL-119). */
+export { OPTIONS as RUN_OPTIONS };
 
 /** `--pii-mode` validado (uso errado = exit 2, nada gasto). */
 function piiModeFlag(v: unknown): 'redact' | 'synthetic' | undefined {
@@ -135,6 +168,33 @@ function piiModeFlag(v: unknown): 'redact' | 'synthetic' | undefined {
     code: 'usage.invalid_flag_value',
     hint: 'Use `--pii-mode redact` (pseudonimiza no envio) ou `--pii-mode synthetic` (só dado sintético).',
   });
+}
+
+/**
+ * `--judge-cascade barato1,barato2:forte` (IMPL-115) validado — uso errado =
+ * exit 2, nada gasto. Os 3 modelos distintos (o forte não pode ser barato).
+ */
+function judgeCascadeFlag(v: unknown): { cheap: string[]; strong: string } | undefined {
+  if (typeof v !== 'string' || !v.trim()) return undefined;
+  const [baratos, forte, ...resto] = v.split(':').map((x) => x.trim());
+  const cheap = (baratos ?? '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (resto.length > 0 || !forte || cheap.length !== 2 || new Set([...cheap, forte]).size !== 3) {
+    throw new CliError(
+      '--judge-cascade deve ser `barato1,barato2:forte` (3 modelos distintos).',
+      EXIT.USAGE,
+      { flag: '--judge-cascade', value: v },
+      {
+        code: 'usage.invalid_flag_value',
+        // Exemplo SEM modelos com expiração anunciada (skill-install#14): o
+        // antigo `google/gemini-2.5-flash-lite` sai do catálogo em 2026-10-20.
+        hint: 'Ex.: `--judge-cascade google/gemini-3.8-flash,openai/gpt-5-nano:anthropic/claude-sonnet-4.5`.',
+      },
+    );
+  }
+  return { cheap, strong: forte };
 }
 
 function n(v: unknown, campo: string): number | undefined {
@@ -154,8 +214,25 @@ function list(v: unknown): string[] | undefined {
     .filter(Boolean);
 }
 
-function effort(v: unknown): ReasoningLevel | undefined {
-  return typeof v === 'string' && v.trim() ? (v.trim() as ReasoningLevel) : undefined;
+/**
+ * `--effort-*`: valor fora dos 7 degraus é USO (exit 2) citando a flag —
+ * cli#20: antes seguia para o schema e voltava como `config.invalid` com a
+ * dica "valide o arquivo", sem arquivo nenhum na história.
+ */
+function effort(v: unknown, flag: string): ReasoningLevel | undefined {
+  if (typeof v !== 'string' || !v.trim()) return undefined;
+  const nivel = v.trim();
+  if ((REASONING_LEVELS as readonly string[]).includes(nivel)) return nivel as ReasoningLevel;
+  const sugestao = closestMatch(nivel, REASONING_LEVELS);
+  throw new CliError(
+    `${flag} "${nivel}" inválido: use ${REASONING_LEVELS.join('|')}.`,
+    EXIT.USAGE,
+    { flag, value: nivel, accepted: [...REASONING_LEVELS] },
+    {
+      code: 'usage.invalid_flag_value',
+      hint: `${sugestao ? `Quis dizer \`${flag} ${sugestao}\`? ` : ''}O que cada modelo aceita: \`prompt-builder models show <id>\`.`,
+    },
+  );
 }
 
 /**
@@ -191,7 +268,60 @@ function resolveBudget(values: Record<string, unknown>, warn: (m: string) => voi
  * (misc.ts) — revisão IMPL-003: antes só o `readConfigFile` conferia, e
  * `config validate` dizia "válido" para um arquivo que `vary --config` recusa.
  */
-export async function resolveArenaLibrary(file: ArenaConfigFile, config: RunConfig): Promise<RunConfig> {
+/**
+ * IMPL-090 (R-22:REC-7) — curadoria dos itens de biblioteca que a run usa:
+ * `k de n` curados (aprovado E com o `contentHash` do conteúdo atual) e o
+ * aviso AGREGADO dos não aprovados. Sem bloqueio por default (bloqueio total =
+ * curadoria nunca acontece com mantenedor solo).
+ */
+export interface LibraryCuration {
+  profile: string;
+  curated: number;
+  total: number;
+  /** `"k de n itens curados"` (o texto do resultado). */
+  curatedKofN: string;
+  unapproved: Array<{ id: string; state: string }>;
+  /** Aviso agregado (um só, nunca um por item) — vira `run.warning`. */
+  warnings: string[];
+}
+
+export interface ResolveLibraryOptions {
+  /** `--require-approved`: QUALQUER item não aprovado recusa (exit 3). */
+  requireApproved?: boolean;
+  /** Recebe a curadoria dos itens selecionados (só quando a config usa a biblioteca). */
+  onCuration?: (c: LibraryCuration) => void;
+}
+
+/**
+ * Holdout com item não aprovado (IMPL-090 crit. 3): a confirmação final não
+ * pode se apoiar em cenário que ninguém revisou. Vale quando o perfil USA
+ * curadoria (algum item selecionado tem `state`) — sem curadoria nenhuma,
+ * recusar travaria toda sessão de mantenedor solo; aí só avisa. O split é o
+ * MESMO do trainer (`splitHoldout` sobre os cenários na ordem da seleção).
+ */
+function holdoutCurationIssue(
+  selecionados: LibraryItem[],
+  config: RunConfig,
+): { issue: string; holdoutIds: string[]; enforced: boolean } | null {
+  if (config.mode !== 'training') return null;
+  const ratio = (config as TrainingConfig).holdoutRatio;
+  if (ratio === 0) return null;
+  const split = splitHoldout(selecionados, ratio ?? HOLDOUT_RATIO_DEFAULT);
+  if (split.strength !== 'holdout') return null;
+  const issue = requireApprovedIssue(split.holdout);
+  if (!issue) return null;
+  return {
+    issue,
+    holdoutIds: split.holdout.map((i) => i.id),
+    enforced: selecionados.some((i) => typeof i.state === 'string'),
+  };
+}
+
+export async function resolveArenaLibrary(
+  file: ArenaConfigFile,
+  config: RunConfig,
+  opts: ResolveLibraryOptions = {},
+): Promise<RunConfig> {
   // F1/P0.1: `scenarios.from: 'library'` — o config aponta o banco curado
   // estável em <data-dir>/library/. Resolvido AQUI (fs é assíncrono): os
   // itens viram customStages e os SEM GABARITO são RECUSADOS (paridade com o
@@ -231,6 +361,45 @@ export async function resolveArenaLibrary(file: ArenaConfigFile, config: RunConf
         EXIT.CONFIG,
       );
     }
+    // IMPL-090: curadoria (k de n) + recusas opt-in/holdout ANTES de gastar.
+    const status = curationStatus(selecionados);
+    const curation: LibraryCuration = {
+      profile: lib.profile,
+      curated: status.curated,
+      total: status.total,
+      curatedKofN: curatedKofN(selecionados),
+      unapproved: status.unapproved,
+      warnings: curationWarnings(selecionados),
+    };
+    if (opts.requireApproved) {
+      const issue = requireApprovedIssue(selecionados);
+      if (issue) {
+        throw new CliError(`--require-approved: ${issue}.`, EXIT.CONFIG, { curation }, {
+          code: 'library.unapproved_items',
+          hint:
+            'Aprove os itens na curadoria (estado `aprovado` com o contentHash do conteúdo atual) ou rode sem ' +
+            '--require-approved — a run relata `k de n` curados e avisa, sem bloquear.',
+        });
+      }
+    }
+    const holdout = holdoutCurationIssue(selecionados, config);
+    if (holdout?.enforced) {
+      throw new CliError(`Holdout com item não aprovado — a confirmação final exige 100% aprovados: ${holdout.issue}.`, EXIT.CONFIG, {
+        curation,
+        holdoutIds: holdout.holdoutIds,
+      }, {
+        code: 'library.unapproved_holdout',
+        hint:
+          'Aprove os itens do holdout (details.holdoutIds) ou selecione só itens aprovados (`scenarios.ids`); ' +
+          '`training.holdoutRatio: 0` roda sem holdout — e o campeão sai NÃO validado.',
+      });
+    }
+    if (holdout) {
+      curation.warnings.push(
+        `o holdout usa ${holdout.holdoutIds.length} cenário(s) sem curadoria — a confirmação final não se apoia em item revisado.`,
+      );
+    }
+    opts.onCuration?.(curation);
     config.customStages = selecionados.map((i) => toStageSpec(i));
     config.stages = selecionados.length;
   }
@@ -245,11 +414,61 @@ export async function resolveArenaLibrary(file: ArenaConfigFile, config: RunConf
 export async function readConfigFile(
   file: string,
   pii: { allowPii?: boolean; piiMode?: 'redact' | 'synthetic' } = {},
+  opts: ConfigFromJsonOptions = {},
 ): Promise<RunConfig> {
-  let json = await readJsonFile(file);
+  return configFromJson(await readJsonFile(file), pii, opts);
+}
 
-  // Detecta o dialeto pela chave `format`: arena-config@1 (declarativo, o que a
-  // ARENA-CONFIG.md documenta) vs RunConfig cru.
+export interface ConfigFromJsonOptions {
+  /**
+   * Só LÊ/estima (nada executa): aceita config de modo agente. Default false —
+   * quem vai RODAR a config recusa `agent`/`agentTask` (ver `agentExecFields`).
+   */
+  inspectOnly?: boolean;
+  /** IMPL-090: `--require-approved` e o relato de curadoria (ver `resolveArenaLibrary`). */
+  library?: ResolveLibraryOptions;
+}
+
+/**
+ * O MESMO caminho do `--config`, a partir do JSON já lido: dialeto, schema,
+ * fail-closed de chave desconhecida (IMPL-093), avisos de chave descontinuada
+ * e a biblioteca (`scenarios.from: 'library'`). Exportado para o servidor MCP
+ * — antes ele refazia só o parse e perdia a biblioteca e o fail-closed.
+ */
+export async function configFromJson(
+  input: unknown,
+  pii: { allowPii?: boolean; piiMode?: 'redact' | 'synthetic' } = {},
+  opts: ConfigFromJsonOptions = {},
+): Promise<RunConfig> {
+  // Modo agente EXECUTA comando nesta máquina (setup[]/verify[]): pelo
+  // `--config` de compare/vary/train (e pelo MCP, que usa este caminho) ele
+  // pulava o portão de config executável do `agents run` (IMPL-099). A recusa
+  // olha o JSON cru ANTES do parse (a mensagem não depende de a config agente
+  // ser válida — arena-agent-config@1 também cai aqui) e o resultado depois.
+  if (!opts.inspectOnly) refuseAgentExec(input);
+  const config = await configFromJsonUnchecked(input, pii, opts.library);
+  if (!opts.inspectOnly) refuseAgentExec(config);
+  return config;
+}
+
+function refuseAgentExec(config: unknown): void {
+  const campos = agentExecFields(config);
+  if (campos.length === 0) return;
+  throw new CliError(agentExecRefusalMessage(campos), EXIT.CONFIG, { fields: campos }, {
+    code: 'config.agent_requires_agents_run',
+    hint: 'Use `prompt-builder agents run --config <arena-agent-config@1>` — o portão revisa e pina o SHA-256 do que vai executar.',
+  });
+}
+
+async function configFromJsonUnchecked(
+  input: unknown,
+  pii: { allowPii?: boolean; piiMode?: 'redact' | 'synthetic' },
+  library: ResolveLibraryOptions = {},
+): Promise<RunConfig> {
+  let json = input;
+
+  // Detecta o dialeto pela chave `format`: arena-config@1 (declarativo, o que o
+  // agent-docs/config.md documenta — `docs config`) vs RunConfig cru.
   // As flags de dado pessoal valem sobre o arquivo (o dialeto cru e o arena).
   if (pii.piiMode && json && typeof json === 'object') {
     json = { ...(json as Record<string, unknown>), piiMode: pii.piiMode };
@@ -264,7 +483,7 @@ export async function readConfigFile(
     for (const w of parsed.warnings ?? []) process.stderr.write(`! ${w}\n`);
     const conv = arenaConfigToRunConfig(parsed.config);
     if (!conv.ok) throw new CliError(conv.error, EXIT.CONFIG);
-    return resolveArenaLibrary(parsed.config, conv.config);
+    return resolveArenaLibrary(parsed.config, conv.config, library);
   }
   // RunConfig cru também é importação: o schema recusa dado pessoal de
   // aparência real nomeando o campo, até a revisão explícita (`--allow-pii`).
@@ -276,7 +495,8 @@ export async function readConfigFile(
   return parsed.config;
 }
 
-async function buildFromFlags(
+/** Flags → RunConfig validado. Exportado para o teste de contrato das flags (IMPL-056). */
+export async function buildFromFlags(
   mode: RunMode,
   values: Record<string, unknown>,
 ): Promise<RunConfig> {
@@ -297,13 +517,13 @@ async function buildFromFlags(
   }
 
   const reasoning: Record<string, ReasoningLevel> = {};
-  const ec = effort(values['effort-competitor']);
+  const ec = effort(values['effort-competitor'], '--effort-competitor');
   if (ec) reasoning.competitor = ec;
-  const ej = effort(values['effort-judge']);
+  const ej = effort(values['effort-judge'], '--effort-judge');
   if (ej) reasoning.judge = ej;
-  const ed = effort(values['effort-datagen']);
+  const ed = effort(values['effort-datagen'], '--effort-datagen');
   if (ed) reasoning.datagen = ed;
-  const er = effort(values['effort-rewriter']);
+  const er = effort(values['effort-rewriter'], '--effort-rewriter');
   if (er) reasoning.rewriter = er;
 
   let basePrompt: string | undefined;
@@ -318,7 +538,9 @@ async function buildFromFlags(
 
   const common: Record<string, unknown> = {
     theme,
-    stages: n(values.stages, '--stages') ?? 5,
+    // web-live#5: no treino o default é o que deixa o gate CONSEGUIR promover
+    // (com 5 cenários um único empate já segura) — ver trainingPromotionPower.
+    stages: n(values.stages, '--stages') ?? (mode === 'training' ? TRAINING_DEFAULT_STAGES : 5),
     datagenModelId:
       (typeof values.datagen === 'string' && values.datagen.trim()) || judges[0],
     judgeModelIds: judges,
@@ -326,6 +548,9 @@ async function buildFromFlags(
     ...(typeof values['scenario-brief'] === 'string'
       ? { scenarioBrief: values['scenario-brief'] }
       : {}),
+    ...(list(values.languages) ? { languages: list(values.languages) } : {}),
+    ...(judgeCascadeFlag(values['judge-cascade']) ? { judgeCascade: judgeCascadeFlag(values['judge-cascade']) } : {}),
+    ...(values['semantic-dedup'] === true ? { scenarioDedup: { semantic: true } } : {}),
     ...(Object.keys(reasoning).length ? { reasoning } : {}),
     ...(piiModeFlag(values['pii-mode']) ? { piiMode: piiModeFlag(values['pii-mode']) } : {}),
     ...(values['allow-pii'] === true ? { allowPii: true } : {}),
@@ -398,7 +623,15 @@ async function buildFromFlags(
   }
 
   const parsed = parseRunConfig(candidate);
-  if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG, parsed.details);
+  if (!parsed.ok) {
+    // cli#20: a config veio das FLAGS — a dica padrão ("valide o arquivo")
+    // mandava validar um arquivo que não existe.
+    throw new CliError(parsed.error, EXIT.CONFIG, parsed.details, {
+      hint:
+        'A config veio das flags (não de um arquivo): corrija a flag citada no erro, ou use `--config <arquivo.json>` ' +
+        '(`prompt-builder config example -o arena.json` gera um; `config validate` confere).',
+    });
+  }
   return parsed.config;
 }
 
@@ -419,6 +652,12 @@ function renderDryRun(out: Output, config: RunConfig, rep: PreflightReport): voi
   out.line(JSON.stringify(config, null, 2));
   out.line();
   out.line(`Custo estimado: ${fmtUsd(rep.estimate.low)} – ${fmtUsd(rep.estimate.high)}`);
+  // extra#2: timeout EFETIVO por papel (juiz/gabarito/datagen/reescritor têm piso).
+  const t = effectiveRoleTimeouts(config);
+  out.line(
+    `Timeouts:       competidor ${t.competitor / 1000}s · juiz ${t.judge / 1000}s · duelo ${t.duel / 1000}s · ` +
+      `gabarito ${t.gabarito / 1000}s · datagen ${t.datagen / 1000}s · reescritor ${t.rewriter / 1000}s`,
+  );
   const c = rep.checks;
   out.line(
     'Pré-voo:        ' +
@@ -463,7 +702,7 @@ export function exitFor(
   return EXIT.OK;
 }
 
-function relatorioFinal(out: Output, record: RunRecord): void {
+export function relatorioFinal(out: Output, record: RunRecord): void {
   if (!out.isText) return;
   out.line();
   for (const l of renderSpend(record.costByRole, record.totalCostUsd, record.budgetUsd, record.costAccuracy, record.costLedger)) {
@@ -518,10 +757,27 @@ function relatorioFinal(out: Output, record: RunRecord): void {
   if (record.standings?.length) {
     out.line();
     out.line('Classificação (duelos das finais, por taxa de vitória):');
-    for (const s of record.standings) {
+    // cli#1: judge-score ao lado de cada finalista e o empate dito em TEXTO —
+    // antes só a tabela empatada aparecia e o 0 × 100 do judge-score sumia.
+    const js = record.judgeScoreByContestant ?? {};
+    const w = winnerFromStandings(record);
+    const ordem = sortStandings(record.standings, record.judgeScoreByContestant, seedFromId(record.id));
+    for (const s of ordem) {
       // IMPL-007: taxa de vitória = (V + ½E) / disputados — rótulo honesto do placar.
       const taxa = `${Math.round(s.winRate * 100)}%`.padStart(4);
-      out.line(`  ${s.label.padEnd(24)} taxa de vitória ${taxa}  (${s.wins}V ${s.ties}E ${s.losses}D)`);
+      const nota = typeof js[s.id] === 'number' ? js[s.id].toFixed(1) : '—';
+      out.line(
+        `  ${s.label.padEnd(24)} taxa de vitória ${taxa}  (${s.wins}V ${s.ties}E ${s.losses}D) · judge ${nota}`,
+      );
+    }
+    if (w.tie) {
+      const labelDe = (id: string): string => record.standings!.find((s) => s.id === id)?.label ?? id;
+      out.line(
+        `  empate na taxa de vitória: ${w.tiedIds.map(labelDe).join(', ')} — ` +
+          (w.unresolved
+            ? 'empate também no desempate (vencedor pelo sorteio cego, não pelos dados)'
+            : `desempate por ${w.tieBreak === 'wins' ? 'nº de vitórias' : 'judge-score'}`),
+      );
     }
   } else if (record.judgeScoreByContestant) {
     out.line();
@@ -555,13 +811,49 @@ interface OutcomeExtras {
   idempotency?: IdempotencyInfo;
   /** A run parou (ou foi barrada) pelo teto DIARIO da maquina, nao pelo `--budget`. */
   dailyCapReached?: boolean;
+  /** IMPL-090: k de n itens de biblioteca curados (só com `scenarios.from: 'library'`). */
+  curation?: LibraryCuration;
 }
 
 function extrasData(x: OutcomeExtras): Record<string, unknown> {
   return {
     ...(x.idempotency ? { idempotency: x.idempotency } : {}),
     ...(x.dailyCapReached ? { dailyCapReached: true } : {}),
+    ...(x.curation ? { curatedKofN: x.curation.curatedKofN, curation: curationPayload(x.curation) } : {}),
   };
+}
+
+/** A curadoria no resultado: a lista de não aprovados vai com teto (o stream é de agente). */
+function curationPayload(c: LibraryCuration): Record<string, unknown> {
+  return {
+    profile: c.profile,
+    curated: c.curated,
+    total: c.total,
+    unapproved: c.unapproved.slice(0, 50),
+    ...(c.unapproved.length > 50 ? { unapprovedTruncated: c.unapproved.length - 50 } : {}),
+    warnings: c.warnings,
+  };
+}
+
+/**
+ * cli#3 — run/sessao derrubada por key RECUSADA ou SEM CREDITO sai pelo MESMO
+ * classificador do gateway (exit 4 `auth.failed` / 5 `credit.insufficient`),
+ * com o resumo da run em `details`. Antes todo `status: 'error'` virava exit 1
+ * `run.failed` (kind internal) — o agente trocava a key boa ou repetia a run
+ * sem credito. `undefined` = outra falha (segue o `run.failed` de sempre).
+ */
+export function fatalGatewayOutcome(
+  rec: { error?: string; errorKind?: string; errorHttpStatus?: number },
+  details: Record<string, unknown>,
+): CliError | undefined {
+  const gw = fatalGatewayErrorFromRecord(rec);
+  if (!gw) return undefined;
+  const base = toCliError(gw);
+  const baseDetails = base.details && typeof base.details === 'object' ? (base.details as Record<string, unknown>) : {};
+  return new CliError(base.message, base.code, { ...baseDetails, ...details }, {
+    code: base.errorCode,
+    ...(base.hint ? { hint: base.hint } : {}),
+  });
 }
 
 /**
@@ -569,7 +861,7 @@ function extrasData(x: OutcomeExtras): Record<string, unknown> {
  * reaproveitada por --idempotency-key (o agente nao distingue pelo formato, so
  * por `idempotency.reused`).
  */
-function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
+export function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
   // IMPL-014: o alerta de truncamento (> 2% das chamadas) vai SEMPRE para o
   // stderr (narração), em qualquer formato; no payload ele sai em `truncationAlert`.
   const camposTrunc = truncationFields(record);
@@ -579,17 +871,19 @@ function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
   // Falha vira o envelope de erro (com o resumo em `details`), nunca um
   // `result` ok:false seguido de um segundo objeto — dois JSONs no stdout.
   if (record.status === 'error') {
-    throw new CliError(
-      record.error ?? 'run falhou',
-      EXIT.ERROR,
-      {
-        runId: record.id,
-        status: record.status,
-        totalCostUsd: record.totalCostUsd,
-        stoppedAtPhase: record.stoppedAtPhase ?? null,
-        ...extrasData(x),
-      },
-      { code: 'run.failed', hint: `Veja o record em \`prompt-builder runs show ${record.id} --json\`.` },
+    const detalhes = {
+      runId: record.id,
+      status: record.status,
+      totalCostUsd: record.totalCostUsd,
+      stoppedAtPhase: record.stoppedAtPhase ?? null,
+      ...extrasData(x),
+    };
+    throw (
+      fatalGatewayOutcome(record, detalhes) ??
+      new CliError(record.error ?? 'run falhou', EXIT.ERROR, detalhes, {
+        code: 'run.failed',
+        hint: `Veja o record em \`prompt-builder runs show ${record.id} --json\`.`,
+      })
     );
   }
   // ok:true com exit != 0 so para PARCIAL (7/130): `stoppedReason` diz qual.
@@ -611,6 +905,8 @@ function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
     // IMPL-004: falhas por papel e, se inconclusiva, o porquê.
     failureCountByRole: record.failureCountByRole,
     inconclusiveReasons: record.verdictIntegrity?.reasons,
+    // IMPL-081: run RETOMADA — replays do journal (US$ 0) e o gasto anterior.
+    ...(record.resume ? { resume: record.resume } : {}),
     ...extrasData(x),
   };
   const exit = exitFor(record.stoppedReason, record.budgetExhausted, record.status);
@@ -659,33 +955,44 @@ function sessionOutcome(out: Output, record: SessionRecord, sessionId: string, x
       out.line();
       // Sem o holdout o campeao esta NAO validado contra sobreajuste — omitir
       // isso transformaria a feature de orcamento numa regressao de qualidade.
+      // cli#9: o MOTIVO real (piso de cenários ≠ orçamento ≠ cancelamento).
+      const motivo = holdoutSkipReasonOf(record);
       out.warn(
-        'campeão NÃO validado em holdout (pulado por orçamento/interrupção) — ' +
+        `campeão NÃO validado em holdout (${motivo ? holdoutSkipReasonText(motivo) : 'pulado'}) — ` +
           'pode estar sobreajustado aos cenários de treino.',
       );
     }
+    // IMPL-065: sem âncora humana suficiente a sessão NÃO declara campeão — a
+    // recusa sai citando os itens curados e o piso (stderr), e o prompt é
+    // rotulado como o melhor do bootstrap.
+    const naoDeclarado = record.championDeclaration?.declared === false;
+    if (naoDeclarado) {
+      out.line();
+      out.warn(record.championDeclaration!.message);
+    }
     if (campeao) {
       out.line();
-      out.line('--- prompt campeão ---');
+      out.line(naoDeclarado ? '--- melhor prompt do bootstrap (campeão NÃO declarado) ---' : '--- prompt campeão ---');
       out.line(campeao.systemPrompt);
     }
   }
 
   if (record.status === 'error') {
-    throw new CliError(
-      record.error ?? 'treino falhou',
-      EXIT.ERROR,
-      {
-        sessionId,
-        status: record.status,
-        totalCostUsd: record.totalCostUsd,
-        iterationsDone: record.bestPromptByIteration.length,
-        ...extrasData(x),
-      },
-      {
+    const detalhes = {
+      sessionId,
+      status: record.status,
+      totalCostUsd: record.totalCostUsd,
+      iterationsDone: record.bestPromptByIteration.length,
+      ...extrasData(x),
+    };
+    // Sessão: só a MENSAGEM sobrevive (o treino repassa a da run) — o
+    // reconhecimento cai no início canônico da mensagem do gateway.
+    throw (
+      fatalGatewayOutcome(record, detalhes) ??
+      new CliError(record.error ?? 'treino falhou', EXIT.ERROR, detalhes, {
         code: 'session.failed',
         hint: `Veja a sessão em \`prompt-builder sessions show ${sessionId} --json\`.`,
-      },
+      })
     );
   }
   out.result(true, 'train', {
@@ -697,7 +1004,12 @@ function sessionOutcome(out: Output, record: SessionRecord, sessionId: string, x
     budgetExhausted: Boolean(record.budgetExhausted),
     stoppedReason: record.stoppedReason ?? null,
     holdoutSkipped: Boolean(record.holdoutSkipped),
+    // cli#9: por que não houve holdout (null = houve).
+    holdoutSkipReason: holdoutSkipReasonOf(record) ?? null,
     championPrompt: campeao?.systemPrompt,
+    // IMPL-065: campeão só DECLARADO sob âncora humana (itens curados ≥ piso);
+    // `declared:false` = o prompt acima é o melhor do bootstrap, não campeão.
+    championDeclaration: record.championDeclaration ?? null,
     holdout: record.holdout,
     significance: record.significance,
     ...extrasData(x),
@@ -870,13 +1182,32 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
   const allowConcurrent = values['allow-concurrent'] === true;
   const idemKey = values['idempotency-key'] !== undefined ? validateIdempotencyKey(values['idempotency-key']) : null;
 
+  // IMPL-090: curadoria dos itens de biblioteca (k de n) — relatada, e
+  // `--require-approved` recusa antes de qualquer gasto (dry-run idem).
+  let curation: LibraryCuration | undefined;
+  const requireApproved = values['require-approved'] === true;
   const config =
     typeof values.config === 'string'
-      ? await readConfigFile(values.config, {
-          allowPii: values['allow-pii'] === true,
-          piiMode: piiModeFlag(values['pii-mode']),
-        })
+      ? await readConfigFile(
+          values.config,
+          {
+            allowPii: values['allow-pii'] === true,
+            piiMode: piiModeFlag(values['pii-mode']),
+          },
+          { library: { requireApproved, onCuration: (c) => (curation = c) } },
+        )
       : await buildFromFlags(mode, values);
+  if (requireApproved && !curation) {
+    throw new CliError('--require-approved: esta config não usa a biblioteca — não há curadoria para exigir.', EXIT.USAGE, undefined, {
+      code: 'usage.require_approved_without_library',
+      hint: 'Use `scenarios: { from: "library", profile: "<id>" }` no arena-config@1, ou tire a flag.',
+    });
+  }
+  if (curation) {
+    // Aviso AGREGADO (um só): stderr + uma linha `run.warning` no NDJSON.
+    for (const w of curation.warnings) out.warn(w);
+    emitCurationWarning(out, curation);
+  }
 
   // LGPD (IMPL-042): o que sai pseudonimizado no envio é dito, nunca silencioso
   // (stderr: narração; o record guarda o mesmo relatório em `piiReport`).
@@ -896,7 +1227,12 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
 
   const budget = resolveBudget(values, (m) => out.warn(m));
   const budgetUsd = budgetUsdOf(budget);
-  const configComOrcamento: RunConfig = { ...config, ...(budgetUsd !== undefined ? { budgetUsd } : {}) };
+  const configComOrcamento: RunConfig = {
+    ...config,
+    ...(budgetUsd !== undefined ? { budgetUsd } : {}),
+    // IMPL-075: `--auditable` liga o modo (nunca desliga o do arquivo).
+    ...(values.auditable === true ? { auditable: true } : {}),
+  };
   const hash = configHash(configComOrcamento);
 
   // IMPL-031 — IDEMPOTENCIA ANTES DE TUDO: a key ja usada com a MESMA config
@@ -966,11 +1302,15 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
     const resumo = {
       dryRun: true,
       estimate: rep.estimate,
+      // extra#2: timeouts efetivos por papel (ms) — o piso do papel sobre `timeoutMs`.
+      roleTimeoutsMs: effectiveRoleTimeouts(configComOrcamento),
       wouldRefuse: rep.wouldRefuse,
       requires: rep.requires,
       warnings: rep.warnings,
       checks: rep.checks,
       ...(idemKey ? { idempotency: { key: idemKey, wouldReuse: false } } : {}),
+      // IMPL-090: o dry-run já diz quantos itens da biblioteca são curados.
+      ...(curation ? { curatedKofN: curation.curatedKofN, curation: curationPayload(curation) } : {}),
     };
     const primeira = rep.wouldRefuse[0];
     if (primeira) {
@@ -1081,6 +1421,10 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
   // continua na raiz, com a mesma semantica de antes. Antes, o GC do estado
   // no disco (dias velhos do ledger, keys vencidas) — revisao do IMPL-031.
   pruneSpendState(dataDir);
+  // IMPL-100: TTL de retenção (90 dias por default, `PB_RETENTION_DAYS`; 0
+  // desliga) no pré-voo de cada run real — no máximo 1 varredura/hora/processo,
+  // nunca lança (falha de um item vira aviso no stderr).
+  await retentionSweep(out);
   const { root, machine } = openMachineLedger({
     dataDir,
     label: `${commandEfetivo}${runId ? ` run ${runId}` : ''}`,
@@ -1094,8 +1438,8 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
 
   try {
     // `runId` nulo <=> mode efetivo 'training' (sessao: o id nasce no onSession).
-    if (runId === null) return await runTraining(ctx, configComOrcamento, ac.signal, guards, detached);
-    return await runSingle(ctx, configComOrcamento, ac.signal, runId, guards, detached);
+    if (runId === null) return await runTraining(ctx, configComOrcamento, ac.signal, guards, curation, detached);
+    return await runSingle(ctx, configComOrcamento, ac.signal, runId, guards, curation, detached);
   } finally {
     process.off('SIGINT', onSigint);
     stopGraceful();
@@ -1111,6 +1455,7 @@ async function runSingle(
   signal: AbortSignal,
   runId: string,
   guards: SpendGuards,
+  curation: LibraryCuration | undefined,
   detached?: DetachedBodyHooks,
 ): Promise<number> {
   const { out } = ctx;
@@ -1136,9 +1481,11 @@ async function runSingle(
   }
 
   relatorioFinal(out, record);
+  await recordRunCompletedTelemetry({ runId: record.id, status: record.status }, ctx.dataDir); // IMPL-120 (no-op sem opt-in)
   return runOutcome(out, record, {
     ...(guards.claim ? { idempotency: { key: guards.claim.key, reused: false } } : {}),
     dailyCapReached: guards.machine.capHit,
+    ...(curation ? { curation } : {}),
   });
 }
 
@@ -1147,6 +1494,7 @@ async function runTraining(
   config: RunConfig,
   signal: AbortSignal,
   guards: SpendGuards,
+  curation: LibraryCuration | undefined,
   detached?: DetachedBodyHooks,
 ): Promise<number> {
   const { out } = ctx;
@@ -1183,7 +1531,12 @@ async function runTraining(
         if (e.type === 'iteration.started') {
           unsubRuns.push(
             subscribe(e.runId, (re) =>
-              emitRunEvent(out, re, { verbose: ctx.verbose, sessionId: id }),
+              emitRunEvent(out, re, {
+                verbose: ctx.verbose,
+                sessionId: id,
+                // cli#7: `budget` da iteração leva o acumulado da SESSÃO.
+                totalSpentUsd: () => guards.root.spentUsd,
+              }),
             ),
           );
         }
@@ -1207,8 +1560,10 @@ async function runTraining(
   unsubSession();
   for (const u of unsubRuns) u();
 
+  await recordRunCompletedTelemetry({ sessionId: sessionId || record.id, status: record.status }, ctx.dataDir); // IMPL-120
   return sessionOutcome(out, record, sessionId || record.id, {
     ...(guards.claim ? { idempotency: { key: guards.claim.key, reused: false } } : {}),
     dailyCapReached: guards.machine.capHit,
+    ...(curation ? { curation } : {}),
   });
 }

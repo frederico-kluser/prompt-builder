@@ -8,8 +8,19 @@
 import { pkgVersion } from '../paths.js';
 import { configureGatewayFromEnv } from '../gatewayEnv.js';
 import { CliError, EXIT, Output, failAndExit } from './output.js';
-import { closestMatch, commandLabel, sniffOutputFormat, sniffPretty } from './context.js';
+import {
+  closestMatch,
+  commandLabel,
+  installPipeGuards,
+  isBareHelpRequest,
+  stdoutClosedAction,
+  locateCommand,
+  missingCommandError,
+  sniffOutputFormat,
+  sniffPretty,
+} from './context.js';
 import { COMMANDS, HELP_TAIL, renderCommandHelp } from './help.js';
+import { activeStopHandlers, requestStop } from './runControl.js';
 import { cmdModels } from './commands/models.js';
 import { cmdRun } from './commands/run.js';
 import { cmdDocs, cmdInit, cmdSkill } from './commands/knowledge.js';
@@ -29,6 +40,12 @@ import {
 import { cmdLibrary } from './commands/library.js';
 import { cmdBaseline } from './commands/baseline.js';
 import { cmdLimits } from './commands/limits.js';
+import { cmdTelemetry, recordExitTelemetry } from './commands/telemetry.js';
+import { installCostSamplesPersistence } from '../costSamplesStore.js';
+import { getDataDir } from '../storage.js';
+import { cmdCalib } from './commands/calib.js';
+import { cmdPrompts } from './commands/prompts.js';
+import { cmdJev } from './commands/jev.js';
 
 const VERSION = pkgVersion();
 
@@ -77,7 +94,10 @@ RESULTADOS
   runs wait <id> [--timeout <s>]
                            espera o fim (padrão 600 s; exit 9 se esgotar)
   runs cancel <id>         parada graciosa: record 'aborted' com o parcial
+  runs resume <id>         retoma sem pagar de novo (journal: chamadas pagas a US$ 0)
   runs reproduce <id>      config reconstruído + comando p/ re-rodar a run
+  runs reproduce <id> --replay
+                           re-pontua as respostas gravadas a US$ 0 (exit 3 se divergir)
   runs export <id> [-o <arq>]
                            artefato auto-contido (config, gabaritos, prompts, juiz)
   sessions list | show <id> | winner <id>
@@ -85,6 +105,9 @@ RESULTADOS
                            handoff com backup + diff; holdout regredido
                            BLOQUEIA (exit 10) salvo --override com motivo
                            (gravado em <data-dir>/handoffs.jsonl + trailer)
+  sessions report <id> [--html <arq>] [--calls-per-month N] [--annotate]
+                           relatório de CICLOS: quanto melhorou (original ×
+                           campeão) e quanto a mudança muda o custo por chamada
 
 BIBLIOTECA (dataset estável de cenários+gabaritos)
   library list | init | show | add | seed | verify | coverage | export | rm | drop
@@ -95,6 +118,8 @@ OUTROS
   doctor                   key (exit 4 se ausente/recusada), limite da key,
                            teto diário e runs ativas
   registry validate [--file <arq>]   guarda de drift dos prompts de produção
+  prompts regression --model <id> --judge <id> [--dry-run] [--budget <usd>]
+                           regressão dos meta-prompts internos (exit 10 abaixo dos limiares)
   registry init [-o <arq>]           grava um registro-exemplo comentado
   baseline pin <runId> [-o <arq>]    pina juiz/gabarito/contrato de uma run (judge-baseline@1)
   baseline check [--file <arq>] [--config <arq>] [--catalog <models.json>]
@@ -102,14 +127,32 @@ OUTROS
                            sem re-baseline declarada (ver: docs lifecycle)
   baseline declare --reason "…" [--judge a,b] [--reference x]
   mcp                      servidor MCP por stdio (mesmo binário)
+  telemetry [status|schema|counters]
+                           telemetria opt-in (desligada por padrão) e atribuição
+
+CALIBRAÇÃO DO JUIZ (juiz × humano; só disco, sem key)
+  calib report --file <arq.jsonl> [--pilot]
+                           α ordinal de Krippendorff + AC2 de Gwet + IC95%;
+                           humano × humano primeiro (--pilot), juiz só com
+                           α humano ≥ 0,667; exit 10 se reprovar (ver: docs calibration)
+  calib template [-o <arq.jsonl>]
+                           exemplo comentado do formato (itens SINTÉTICOS)
+
+DECISÕES TIPADAS (modo JEV — noul/choice/score em casos rotulados)
+  jev validate|example|models|import|run|eval|compare|train|list|show|report|export|techniques
+                           mede e evolui definições de decisão do Jev (ver: docs jev)
 
 AGENTES (modo agente — mesmo motor, executor pi)
   agents doctor [--deep] [--container] [--config <arq>]
                            pré-voo do executor (canário real com --deep; valida Docker/sandbox em
                            --container; --config mede a imagem/runtime daquela run)
   agents run --config <arq> --budget <usd|none> [--dry-run] [--allow-concurrent]
+          [--allow-exec-config]
                            roda a arena de agentes até o fim (mesmo teto
-                           diário e lock por config dos comandos de run)
+                           diário e lock por config dos comandos de run; config
+                           executável exige o pin SHA-256 — exit 3 sem ele)
+  agents task validate <arq> [--allow-exec-config]
+                           as 6 checagens da tarefa (mesmo portão de execução)
   agents show <runId>      record + execuções de agente
   agents list              varre <data-dir>/agent-runs
   agents logs <runId> --stage N --contestant <id>
@@ -127,6 +170,11 @@ OPÇÕES GLOBAIS
   --data-dir <caminho>     onde gravar runs (padrão ~/.prompt-builder)
   --refresh-models         ignora o cache de catálogo (24h)
   --quiet · --verbose · --no-color · --pretty · --help · --version
+
+AMBIENTE (dado enviado a terceiros)
+  PROMPT_BUILDER_NO_ATTRIBUTION=on  não envia HTTP-Referer/X-Title ao OpenRouter
+  PROMPT_BUILDER_TELEMETRY=on       telemetria opt-in (padrão: desligada)
+  OPENROUTER_STREAM_TRANSPORT=0     papéis de avaliação sem streaming (JSON)
 
   \`<comando> --help\` mostra o help daquele comando — todos terminam com a
   tabela de códigos de saída (IMPL-092).
@@ -184,6 +232,10 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdRegistry(argv);
     case 'baseline':
       return cmdBaseline(argv);
+    case 'calib':
+      return cmdCalib(argv);
+    case 'prompts':
+      return cmdPrompts(argv);
     case 'doctor':
       return cmdDoctor(argv);
     case 'limits':
@@ -192,6 +244,11 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdMcp(argv);
     case 'agents':
       return cmdAgents(argv);
+    case 'telemetry':
+      return cmdTelemetry(argv);
+    case 'jev':
+    case 'decisions':
+      return cmdJev(argv);
     default: {
       const sugestao = cmd ? closestMatch(cmd, COMMANDS) : undefined;
       throw new CliError(
@@ -211,8 +268,9 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
-  const cmd = argv[0] && !argv[0].startsWith('-') ? argv[0] : undefined;
-  const rest = cmd ? argv.slice(1) : argv;
+  // IMPL-028: o comando é o 1º token que não é flag (nem valor de flag global) —
+  // `--json compare --bogus` também sai pelo envelope, não pelo help em texto.
+  const { cmd, rest } = locateCommand(argv);
 
   // IMPL-028: o formato de saida e fixado AQUI, por varredura do argv, ANTES de
   // qualquer outra coisa. Antes ele so era descoberto depois do parse — e um
@@ -220,6 +278,27 @@ async function main(): Promise<void> {
   // com 0 bytes e o consumidor-maquina nao via nada (Furo 1, R-12).
   const out = new Output({ format: sniffOutputFormat(argv), pretty: sniffPretty(argv) });
   const label = commandLabel(argv);
+  // cli#19: pipe fechado pelo consumidor (`| head`) sai 0 em silêncio, não "rede"
+  // — MAS só em comando de leitura. Revisão w2: run paga em andamento (ou no
+  // pré-voo) segue a rota do SIGTERM (record 'aborted', exit 130) e o `mcp`
+  // encerra pelo próprio caminho; ver `stdoutClosedAction`.
+  let pipeFechadoEmRun = false;
+  installPipeGuards({
+    onClosed: () => {
+      if (pipeFechadoEmRun) return; // a parada graciosa já está em curso
+      const acao = stdoutClosedAction(cmd, activeStopHandlers());
+      if (acao === 'ignore') return;
+      if (acao === 'stop-run') {
+        pipeFechadoEmRun = true;
+        // Sem run registrada ainda (pré-voo), o pedido fica pendente e a run
+        // para assim que se registrar — antes da 1ª chamada paga.
+        requestStop('stdout fechado pelo consumidor (EPIPE)');
+        return;
+      }
+      process.exit(EXIT.OK);
+    },
+    onOtherError: (err) => failAndExit(out, label, err),
+  });
   // Excecao sem dono (callback, rejeicao solta) tambem termina no envelope —
   // o NDJSON nunca fica sem a linha `result`.
   process.on('uncaughtException', (err) => failAndExit(out, label, err));
@@ -230,6 +309,9 @@ async function main(): Promise<void> {
     // comando tocar a rede — o gateway em si nao le o processo (IMPL-021).
     // Dentro do try: nem a configuracao escapa do envelope.
     configureGatewayFromEnv();
+    // IMPL-113: calibração da estimativa persistida entre processos (amostras
+    // estimado × real no diretório de dados, resolvido quando o comando o fixa).
+    installCostSamplesPersistence(() => getDataDir());
 
     // `--version` ANTES do help: sem comando, `!cmd` e verdadeiro e um
     // `prompt-builder --version` cairia no help.
@@ -237,6 +319,9 @@ async function main(): Promise<void> {
       process.stdout.write(`${VERSION}\n`);
       process.exit(EXIT.OK);
     }
+    // IMPL-028: flags sem comando (`--json` sozinho, `--output-format ndjson`)
+    // é uso inválido no formato pedido — só o help puro sai com exit 0.
+    if (!cmd && !isBareHelpRequest(argv)) throw missingCommandError(COMMANDS);
     if (!cmd || argv.includes('--help') || argv.includes('-h')) {
       // IMPL-092: `--help` COM comando = help DO comando (todo help termina com
       // a tabela de códigos de saída); sem comando (ou comando desconhecido) =
@@ -256,6 +341,8 @@ async function main(): Promise<void> {
     if (cliErr.code === EXIT.USAGE) emitClaudeHint();
     process.exitCode = cliErr.code;
   }
+  // IMPL-120: funil "parou por orçamento" (saída 7) — no-op sem opt-in.
+  recordExitTelemetry(cmd, process.exitCode, getDataDir());
 }
 
 void main();

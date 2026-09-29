@@ -87,8 +87,10 @@ export function papelDe(body: { model?: string; stream?: boolean; messages?: { r
   if (body.model === 'fake/gen') return 'datagen';
   if (body.model === 'fake/ref') return 'gabarito';
   if (body.model === 'fake/opt') return 'rewriter';
-  if (body.stream === true) return 'competitor';
   const system = body.messages?.find((m) => m.role === 'system')?.content ?? '';
+  // IMPL-072: o processo real manda TODO papel em streaming — o juiz sai pelo MODELO.
+  if (body.model === 'fake/judge') return system.includes('DUELO') ? 'duel' : 'judge';
+  if (body.stream === true) return 'competitor';
   return system.includes('DUELO') ? 'duel' : 'judge';
 }
 
@@ -129,7 +131,8 @@ export function fakeDoPipeline(stages: typeof CENARIOS = CENARIOS): FakeOpenRout
         };
       }
       if (req.model === 'fake/ref') return { text: `Gabarito: ${req.user.slice(0, 40)}`, usage };
-      if (req.stream) return { text: `Resposta de ${req.model}`, usage };
+      // IMPL-072: juiz roteado pelo MODELO (no processo real todo papel faz stream).
+      if (req.model !== 'fake/judge' && req.stream) return { text: `Resposta de ${req.model}`, usage };
       // Contrato do IMPL-006: todo veredito devolve o canário do pedido.
       if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), usage };
       return { text: pointwiseReply(req, 'resolve', 'confere'), usage };

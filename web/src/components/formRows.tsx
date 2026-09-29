@@ -68,6 +68,30 @@ export function TxtNumRow(p: {
   );
 }
 
+/** Linha de texto CURTO (uma linha; ex.: lista de idiomas). */
+export function TextRow(p: {
+  label: string;
+  sub?: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <SettingRow label={p.label} sub={p.sub}>
+      <Input
+        type="text"
+        className="w-40"
+        aria-label={p.label}
+        spellCheck={false}
+        autoComplete="off"
+        placeholder={p.placeholder}
+        value={p.value}
+        onChange={(e) => p.onChange(e.target.value)}
+      />
+    </SettingRow>
+  );
+}
+
 /** Linha booleana. O rótulo visível é o da linha, daí o aria-label no switch. */
 export function SwitchRow(p: { label: string; sub: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (

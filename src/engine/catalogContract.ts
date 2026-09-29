@@ -168,7 +168,11 @@ export function runModelIds(config: RunConfig): string[] {
     config.datagenModelId,
     config.optimizerModelId,
     config.referenceModelId,
+    config.secondReferenceModelId,
     ...(config.judgeModelIds ?? []),
+    // IMPL-115: no modo econômico quem julga são os baratos + o forte.
+    ...(config.judgeCascade?.cheap ?? []),
+    config.judgeCascade?.strong,
   ];
   if (config.mode === 'compare') {
     ids.push(...(config.competitorModelIds ?? []), ...(config.competitorConfigs ?? []).map((c) => c.modelId));

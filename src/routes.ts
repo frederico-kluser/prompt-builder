@@ -1,17 +1,29 @@
 import { Router } from 'express';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { listModels, validateKey } from './openrouter.js';
-import { startRun } from './orchestrator.js';
-import { startTraining } from './trainer.js';
+import { getLiveRun } from './orchestrator.js';
+// `startRun`/`startTraining` daqui são os do motor COM AbortController
+// registrado (mesma assinatura): toda run/sessão iniciada por esta API é
+// cancelável por POST /runs/:id/cancel e /sessions/:id/cancel (http-api#2).
+import {
+  cancelControlled,
+  startControlledRun as startRun,
+  startControlledTraining as startTraining,
+} from './httpRunControl.js';
 import { listTechniques } from './techniques.js';
 import { getLgpdData } from './lgpd.js';
 import { listRuns, loadRun, listSessions, loadSession } from './storage.js';
 import { subscribe, subscribeSession } from './events.js';
-import { runConfigSchema } from './runConfigSchema.js';
+import { agentExecFields, agentExecRefusalMessage, runConfigSchema } from './runConfigSchema.js';
 import { prepareOptsFor } from './prepareRun.js';
 import { isTerminalRunStatus } from './types.js';
 import { isValidRecordId, publicErrorMessage } from './pathSafety.js';
+import { csvCell } from './engine/csv.js';
 import type { CompareConfig, CompetitorResponse, RunRecord } from './types.js';
+import { buildSessionReport, renderSessionReportMarkdown } from './engine/sessionReport.js';
+import { renderSessionReportHtml } from './engine/sessionReportHtml.js';
+import { unknownKeyIssues, unknownKeysMessage } from './configKeys.js';
+import { autoPrune } from './lgpd.js';
 
 const router = Router();
 
@@ -70,7 +82,10 @@ function requireKey(req: Request, res: Response, next: NextFunction) {
 }
 
 router.post('/validate-key', ah(async (req, res) => {
-  const key = extractKey(req) ?? (req.body?.apiKey as string | undefined);
+  // `body.apiKey` vem do cliente: o cast não checa nada em runtime. Número,
+  // array ou objeto chegavam ao `.trim()` do gateway e viravam 500.
+  const bodyKey: unknown = req.body?.apiKey;
+  const key = extractKey(req) ?? ((typeof bodyKey === 'string' && bodyKey.trim()) || undefined);
   if (!key) {
     res.status(400).json({ ok: false, error: 'Key ausente.' });
     return;
@@ -88,12 +103,52 @@ router.get('/models', requireKey, ah(async (req, res) => {
   }
 }));
 
+/**
+ * Modo agente (setup[]/verify[] executam no host) NÃO entra por /v1/benchmark:
+ * aqui não há token, portão de isolamento (§21.5) nem PROMPT_BUILDER_AGENTS —
+ * só por /v1/agents/runs. Responde 400 (e nada é iniciado) quando a config
+ * crua traz `agent` ou `agentTask`. `true` = já respondeu.
+ */
+function refuseAgentExec(body: unknown, res: Response): boolean {
+  const campos = agentExecFields(body);
+  if (campos.length === 0) return false;
+  res.status(400).json({
+    error: agentExecRefusalMessage(campos),
+    code: 'config.agent_requires_agents_run',
+    fields: campos,
+  });
+  return true;
+}
+
+/**
+ * IMPL-093 — fail-closed na API HTTP, com a MESMA regra do CLI e do MCP: chave
+ * que o `runConfigSchema` (strip) descartaria em silêncio é 400, citando o
+ * caminho JSON e o "você quis dizer". Antes um typo como `judgePases` sumia do
+ * body e a run PAGA rodava com o default. O SPA servido junto do backend só LÊ
+ * runs/sessões (web/src/backend.ts) — nenhum POST dele passa por aqui.
+ * `true` = já respondeu.
+ */
+function refuseUnknownKeys(body: unknown, parsed: unknown, res: Response): boolean {
+  const issues = unknownKeyIssues(body, parsed);
+  if (issues.length === 0) return false;
+  res.status(400).json({
+    error: unknownKeysMessage(issues),
+    code: 'config.unknown_key',
+    unknownKeys: issues,
+  });
+  return true;
+}
+
 router.post('/runs', requireKey, ah(async (req, res) => {
+  // Antes do parse: a recusa não pode depender de a config agente ser válida.
+  if (refuseAgentExec(req.body, res)) return;
   const parsed = runConfigSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Config invalida', details: parsed.error.flatten() });
     return;
   }
+  if (refuseAgentExec(parsed.data, res)) return;
+  if (refuseUnknownKeys(req.body, parsed.data, res)) return;
   const apiKey = (req as Request & { apiKey: string }).apiKey;
 
   // Pre-flight: valida a key ANTES de iniciar a run, pra falhar rapido com
@@ -115,7 +170,9 @@ router.post('/runs', requireKey, ah(async (req, res) => {
     if (cfg.mode === 'variation') {
       // A geracao das variantes mora em prepareRun.ts — servidor e CLI passam
       // pelo mesmo lugar. Sem ela, a run sai com ZERO contestants e sem erro.
-      const { runId } = startRun(cfg, apiKey, prepareOptsFor(cfg, apiKey));
+      const { runId, persisted } = startRun(cfg, apiKey, prepareOptsFor(cfg, apiKey));
+      // http-api#0: o 202 so sai com a run JA no disco (GET/SSE logo em seguida nao dao 404).
+      await persisted;
       res.status(202).json({ runId });
       return;
     }
@@ -123,7 +180,8 @@ router.post('/runs', requireKey, ah(async (req, res) => {
     // compare — o superRefine garantiu competitorModelIds OU competitorConfigs
     // (>= 2 competidores efetivos); esse XOR nao e expressavel no tipo estatico
     // (CompareConfig exige competitorModelIds), dai o cast pontual.
-    const { runId } = startRun(cfg as CompareConfig, apiKey);
+    const { runId, persisted } = startRun(cfg as CompareConfig, apiKey);
+    await persisted; // http-api#0
     res.status(202).json({ runId });
   } catch (err) {
     fail500(res, err);
@@ -141,8 +199,14 @@ router.get('/lgpd', (_req, res) => {
   res.json({ data: getLgpdData() });
 });
 
+/**
+ * IMPL-100 — TTL de retenção LIGADO por default (90 dias, `PB_RETENTION_DAYS`;
+ * 0 desliga): as listagens rodam o prune antes de ler — no máximo uma varredura
+ * por hora por processo (`autoPrune`), que nunca lança. Runs E sessões.
+ */
 router.get('/runs', ah(async (_req, res) => {
   try {
+    await autoPrune();
     const data = await listRuns();
     res.json({ data });
   } catch (err) {
@@ -152,7 +216,8 @@ router.get('/runs', ah(async (_req, res) => {
 
 router.get('/runs/:id', ah(async (req, res) => {
   try {
-    const record = await loadRun(req.params.id);
+    // http-api#1: run viva deste processo = o record em memória (o disco é throttled).
+    const record = getLiveRun(req.params.id) ?? (await loadRun(req.params.id));
     if (!record) {
       res.status(404).json({ error: 'Run nao encontrada' });
       return;
@@ -166,8 +231,11 @@ router.get('/runs/:id', ah(async (req, res) => {
 // SSE: nao exige key (a key so e necessaria para INICIAR a run, nao para acompanhar)
 router.get('/runs/:id/events', ah(async (req, res) => {
   const runId = req.params.id;
+  // http-api#1: run VIVA deste processo — snapshot do record em memória e
+  // subscribe no MESMO tick (nada de `await` entre os dois): o disco é uma
+  // cópia throttled e o que era emitido durante o `loadRun` sumia do stream.
   // Lança (EISDIR…) ANTES dos headers de SSE: o `ah` responde 500 em JSON.
-  const record = await loadRun(runId);
+  const record = getLiveRun(runId) ?? (await loadRun(runId));
   if (!record) {
     res.status(404).json({ error: 'Run nao encontrada' });
     return;
@@ -220,11 +288,9 @@ router.get('/runs/:id/events', ah(async (req, res) => {
   });
 }));
 
-function csvEscape(value: unknown): string {
-  const s = value === undefined || value === null ? '' : String(value);
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
-}
+// Célula CSV: fonte única com o SPA (aspas + neutralização de fórmula — a
+// `question` e o `text` são saída de LLM). http-api#9.
+const csvEscape = csvCell;
 
 router.get('/runs/:id/export.csv', ah(async (req, res) => {
   const record = await loadRun(req.params.id);
@@ -304,17 +370,36 @@ router.get('/runs/:id/export.csv', ah(async (req, res) => {
 }));
 
 // ---------------------------------------------------------------------------
+// Cancelamento (http-api#2) — só o que ESTE processo iniciou; o resto é 409
+// com o caminho certo (CLI/MCP). Não exige key: parar não gasta nada, e o
+// hostGuard já barra Origin de fora (CSRF).
+// ---------------------------------------------------------------------------
+
+router.post('/runs/:id/cancel', ah(async (req, res) => {
+  const out = await cancelControlled('run', req.params.id);
+  res.status(out.status).json(out.body);
+}));
+
+router.post('/sessions/:id/cancel', ah(async (req, res) => {
+  const out = await cancelControlled('session', req.params.id);
+  res.status(out.status).json(out.body);
+}));
+
+// ---------------------------------------------------------------------------
 // Sessoes de treino (modo training = N iteracoes encadeadas)
 // ---------------------------------------------------------------------------
 
 router.post('/sessions', requireKey, ah(async (req, res) => {
+  if (refuseAgentExec(req.body, res)) return;
   const parsed = runConfigSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Config invalida', details: parsed.error.flatten() });
     return;
   }
+  if (refuseAgentExec(parsed.data, res)) return;
+  if (refuseUnknownKeys(req.body, parsed.data, res)) return;
   if (parsed.data.mode !== 'training') {
-    res.status(400).json({ error: 'POST /sessions exige mode "training".' });
+    res.status(400).json({ error: 'POST /v1/benchmark/sessions exige mode "training".' });
     return;
   }
   const apiKey = (req as Request & { apiKey: string }).apiKey;
@@ -335,6 +420,7 @@ router.post('/sessions', requireKey, ah(async (req, res) => {
 
 router.get('/sessions', ah(async (_req, res) => {
   try {
+    await autoPrune(); // IMPL-100 (ver GET /runs)
     res.json({ data: await listSessions() });
   } catch (err) {
     fail500(res, err);
@@ -349,6 +435,62 @@ router.get('/sessions/:id', ah(async (req, res) => {
       return;
     }
     res.json(record);
+  } catch (err) {
+    fail500(res, err);
+  }
+}));
+
+/**
+ * Relatório de CICLOS da sessão (src/engine/sessionReport.ts): `format=json`
+ * (padrão), `html` (página autocontida no tema do Plannotator) ou `markdown`.
+ * `callsPerMonth` muda o volume da projeção de custo.
+ */
+router.get('/sessions/:id/report', ah(async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!isValidRecordId(id)) {
+      res.status(400).json({ error: 'Id de sessão inválido.' });
+      return;
+    }
+    const format = typeof req.query.format === 'string' ? req.query.format : 'json';
+    if (!['json', 'html', 'markdown'].includes(format)) {
+      res.status(400).json({ error: 'format deve ser json, html ou markdown.' });
+      return;
+    }
+    const cpmRaw = typeof req.query.callsPerMonth === 'string' ? Number(req.query.callsPerMonth) : undefined;
+    if (cpmRaw !== undefined && (!Number.isInteger(cpmRaw) || cpmRaw <= 0)) {
+      res.status(400).json({ error: 'callsPerMonth deve ser um inteiro positivo.' });
+      return;
+    }
+    const session = await loadSession(id);
+    if (!session) {
+      res.status(404).json({ error: 'Sessao nao encontrada' });
+      return;
+    }
+    const ids = new Set<string>(session.runIds);
+    for (const it of session.bestPromptByIteration) {
+      const rid = it.gate?.reeval?.runId;
+      if (rid) ids.add(rid);
+    }
+    const runs: RunRecord[] = [];
+    for (const rid of ids) {
+      if (!isValidRecordId(rid)) continue;
+      const r = await loadRun(rid);
+      if (r) runs.push(r);
+    }
+    const report = buildSessionReport(session, runs, {
+      generatedAt: new Date().toISOString(),
+      ...(cpmRaw ? { callsPerMonth: cpmRaw } : {}),
+    });
+    if (format === 'html') {
+      res.type('html').send(renderSessionReportHtml(report));
+      return;
+    }
+    if (format === 'markdown') {
+      res.type('text/markdown; charset=utf-8').send(renderSessionReportMarkdown(report));
+      return;
+    }
+    res.json(report);
   } catch (err) {
     fail500(res, err);
   }

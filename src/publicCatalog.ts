@@ -7,6 +7,8 @@
 //   • `prompt-builder baseline check` (gate de re-baseline do juiz/gabarito);
 //   • `scripts/check-model-ids.ts` (job semanal que confere ids citados nas docs).
 // `/models` é público e gratuito (AGENTS.md), então o gate não custa crédito.
+// O escopo `query: '?output_modalities=all'` traz o universo COMPLETO (chat +
+// modelos de decisão do modo JEV) — o que o job de ids das docs precisa.
 //
 // `--catalog <arquivo>` (um snapshot salvo de /models) substitui a rede: deixa
 // o gate reprodutível/offline e é o que os testes usam.
@@ -25,6 +27,8 @@ interface CacheFile {
   v: number;
   fetchedAt: number;
   base: string;
+  /** Escopo da consulta (query string de `/models`) — o cache é POR escopo. */
+  q?: string;
   data: OpenRouterModel[];
 }
 
@@ -35,6 +39,14 @@ export interface PublicCatalogOptions {
   /** Ignora o cache fresco e busca de novo. */
   force?: boolean;
   baseUrl?: string;
+  /**
+   * Query string do `GET /models`. Default: `/models` puro (só modelos de
+   * chat). `?output_modalities=all` devolve o universo COMPLETO — inclui os
+   * modelos de DECISÃO do modo JEV (`typesafe/jev-1.13` e afins), que não
+   * aparecem no `/models` puro: quem confere ids citados nas docs precisa
+   * deste escopo, senão reprova id real como "não está no catálogo".
+   */
+  query?: string;
   fetch?: FetchLike;
   now?: () => number;
   onWarn?: (msg: string) => void;
@@ -76,10 +88,13 @@ export async function loadCatalogFile(file: string): Promise<OpenRouterModel[]> 
   return sanitize(models);
 }
 
-async function readCache(file: string, base: string): Promise<CacheFile | null> {
+async function readCache(file: string, base: string, q: string): Promise<CacheFile | null> {
   try {
     const parsed = JSON.parse(await fs.readFile(file, 'utf-8')) as CacheFile;
     if (parsed.v !== CACHE_VERSION || parsed.base !== base) return null;
+    // Cache é POR ESCOPO: o cache do `/models` puro não serve para
+    // `?output_modalities=all` (e vice-versa) — os ids citados mudam de sorte.
+    if ((parsed.q ?? '') !== q) return null;
     if (!Array.isArray(parsed.data) || !parsed.data.length) return null;
     return parsed;
   } catch {
@@ -105,25 +120,26 @@ async function writeCache(target: string, content: CacheFile): Promise<void> {
  */
 export async function loadPublicCatalog(opts: PublicCatalogOptions = {}): Promise<PublicCatalogResult> {
   const base = (opts.baseUrl ?? DEFAULT_OPENROUTER_BASE_URL).replace(/\/+$/, '');
+  const q = opts.query ?? '';
   const now = opts.now ?? Date.now;
   const ttl = opts.ttlMs ?? PUBLIC_CATALOG_TTL_MS;
-  const cache = opts.cachePath ? await readCache(opts.cachePath, base) : null;
+  const cache = opts.cachePath ? await readCache(opts.cachePath, base, q) : null;
   if (!opts.force && cache && now() - cache.fetchedAt < ttl) {
     return { models: cache.data, fetchedAt: cache.fetchedAt, source: 'disk' };
   }
   try {
     // Copiado para variável local: nunca chamar `opts.fetch(...)` como método.
     const doFetch: FetchLike = opts.fetch ?? ((input, init) => globalThis.fetch(input, init));
-    const res = await doFetch(`${base}/models`, {
+    const res = await doFetch(`${base}/models${q}`, {
       method: 'GET',
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) throw new Error(`GET /models respondeu ${res.status}`);
+    if (!res.ok) throw new Error(`GET /models${q} respondeu ${res.status}`);
     const models = sanitize(parseModelsPayload(await res.json()));
-    if (!models.length) throw new Error('GET /models veio vazio');
+    if (!models.length) throw new Error(`GET /models${q} veio vazio`);
     const fetchedAt = now();
-    if (opts.cachePath) await writeCache(opts.cachePath, { v: CACHE_VERSION, fetchedAt, base, data: models });
+    if (opts.cachePath) await writeCache(opts.cachePath, { v: CACHE_VERSION, fetchedAt, base, q, data: models });
     return { models, fetchedAt, source: 'network' };
   } catch (err) {
     if (cache) {

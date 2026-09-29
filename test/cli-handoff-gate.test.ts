@@ -151,6 +151,11 @@ describe('evaluateHandoffGuards — matriz regredido × pulado × IC95% × drift
   it('o motivo vira UMA linha (trailer de commit e JSONL não quebram)', () => {
     expect(normalizeOverrideReason('  decisão do PO\n  aceita a regressão\t ')).toBe('decisão do PO aceita a regressão');
     expect(normalizeOverrideReason('   ')).toBeNull();
+    // Revisão w2: controle que não é espaço (NUL/ESC/DEL) também sai — o motivo
+    // vira trailer de commit e linha JSONL.
+    expect(normalizeOverrideReason('ok\u0000motivo\u001b[31m\u007ffim\r\nOverride-Reason: x')).toBe(
+      'ok motivo [31m fim Override-Reason: x',
+    );
   });
 
   it('exit GATE_BLOCKED = 10, kind gate', () => {

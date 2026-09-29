@@ -42,6 +42,27 @@ describe('stats:sim reduzido — viés do ganho exibido sob H1 (+10 p.p.)', () =
     expect(Math.abs(r.biasCorrectedPp)).toBeLessThanOrEqual(MAX_ABS_BIAS_PP);
   });
 
+  // IMPL-002 — regressão das BORDAS da grade (n = 5, K alto, ruído alto): sem a
+  // calibração (WINNERS_CURSE_CALIBRATION) a troca de sinais dos resíduos
+  // sobre-corrigia e `npm run stats:sim` saía com n=5 K=8 flip 0,30 em −1,02
+  // p.p. (20.000 ensaios). As duas células do achado + as duas do lado oposto
+  // (onde a calibração empurra o viés para CIMA), 10.000 ensaios por célula.
+  for (const c of [
+    { n: 5, K: 8, flip: 0.3 },
+    { n: 5, K: 7, flip: 0.3 },
+    { n: 5, K: 2, flip: 0.3 },
+    { n: 5, K: 8, flip: 0.15 },
+  ]) {
+    it(`n=${c.n} K=${c.K} flip=${c.flip} (borda): |viés corrigido| ≤ 1 p.p.`, () => {
+      const r = simulateCell({ ...c, mode: 'h1', trials: 10_000 });
+      expect(Math.abs(r.biasCorrectedPp), `viés ${r.biasCorrectedPp}±${r.biasCorrectedSe}`).toBeLessThanOrEqual(
+        MAX_ABS_BIAS_PP,
+      );
+      // Margem de 2 erros-padrão: a célula não pode estar raspando o limite.
+      expect(Math.abs(r.biasCorrectedPp) + 2 * r.biasCorrectedSe).toBeLessThanOrEqual(MAX_ABS_BIAS_PP + 0.1);
+    });
+  }
+
   it('K=1: nada a corrigir (corrigido = bruto)', () => {
     const r = simulateCell({ n: 8, K: 1, flip: 0.15, mode: 'h1', trials: 800 });
     expect(r.biasCorrectedPp).toBe(r.biasRawPp);

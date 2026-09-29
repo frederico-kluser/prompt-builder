@@ -1,10 +1,13 @@
 # Prompt Builder
 
-Arena de benchmark **paralelo** de LLMs sobre a [OpenRouter](https://openrouter.ai). Em três
-modos: **comparar** vários modelos no mesmo desafio, **testar** vários prompts em um modelo, ou
-**treinar** um prompt que evolui sozinho. Você dá um **tema**, o sistema **gera cenários** com um
-modelo, faz os **participantes** responderem ao mesmo tempo, um **modelo juiz** ranqueia às cegas e
-a interface mostra **placar, heatmap, custo e o texto sendo gerado token a token** — tudo ao vivo (SSE).
+Arena de benchmark **paralelo** de LLMs sobre a [OpenRouter](https://openrouter.ai), com três
+superfícies para o mesmo motor: **interface web**, **CLI** e **servidor MCP**. Em três modos:
+**comparar** vários modelos no mesmo desafio, **testar** vários prompts em um modelo, ou **treinar**
+um prompt que evolui sozinho. Você dá um **tema**; um modelo **gera cenários**, os **participantes**
+respondem ao mesmo tempo, um **juiz** compara cada resposta com um **gabarito** (resolve / parcial /
+não) e os melhores **duelam** no fim. Durante a run a tela mostra, ao vivo (SSE), as fases, o
+**heatmap de vereditos** e o **gasto face ao teto**; as respostas completas aparecem quando cada
+etapa termina.
 
 > **Em uma frase:** "dado um tema, descubra qual modelo (ou qual prompt) responde melhor — e quais
 > respostas são boas o bastante para usar no trabalho de verdade — com evidência, ranking e custo."
@@ -12,10 +15,22 @@ a interface mostra **placar, heatmap, custo e o texto sendo gerado token a token
 > **Novo por aqui?** O **[GUIA](./GUIA.md)** leva do primeiro acesso (a chave do OpenRouter) à
 > leitura do resultado — em linguagem de quem usa a interface, sem jargão do motor.
 
-## CLI para agentes de programação (`prompt-builder`)
+---
 
-Publicado no npm. Feito para ser dirigido por **Claude Code, Codex, opencode, Cursor, Gemini CLI** —
-sem prompt interativo, `--json` em tudo, e auto-documentação versionada dentro do próprio pacote.
+## Começo rápido
+
+### Pela interface (humanos)
+
+```bash
+npm install && npm run setup   # raiz + web/ (o MOTION_TOKEN é opcional, ver "Como rodar")
+npm run dev                    # API :3001 (tsx watch) + Vite :5173 (proxy de /v1 e /health)
+```
+
+Abra `http://localhost:5173`, cole a key do OpenRouter e siga a **Nova run guiada** (5 passos, com o
+custo estimado antes de gastar). A mesma SPA roda **sem backend** — o motor roda na aba e guarda no
+IndexedDB —, que é como ela é publicada estática (Vercel). As telas, passo a passo: [GUIA](./GUIA.md).
+
+### Pelo terminal (CLI publicado no npm)
 
 ```bash
 # a ferramenta ensina o agente a usá-la (docs embarcadas, casadas com a versão)
@@ -24,114 +39,141 @@ npx prompt-builder-cli docs quickstart
 # descobre o modelo do ambiente e QUAIS níveis de raciocínio ele aceita
 npx prompt-builder-cli models show anthropic/claude-opus-5 --json
 
-# pré-voo inteiro SEM gastar nada (e sem key): recusa com o MESMO código da run real
-npx prompt-builder-cli train --config arena.json --budget 3 --dry-run --json
+# um arena-config@1 de exemplo, e o pré-voo inteiro SEM gastar (e sem key)
+npx prompt-builder-cli config example --mode train -o arena.json
+npx prompt-builder-cli train --config arena.json --budget 10 --dry-run --json
 
 # treina com teto de gasto, emitindo um evento JSON por linha
-npx prompt-builder-cli train --config arena.json --budget 3 --output-format ndjson
+npx prompt-builder-cli train --config arena.json --budget 10 --output-format ndjson
 
-# instala a skill no repositório (.claude/skills, .agents/skills)
-npx prompt-builder-cli init --agent all
+# quanto o prompt melhorou e quanto a mudança muda o custo por chamada
+npx prompt-builder-cli sessions report <sessionId> --html relatorio.html
 ```
 
-Também expõe um **servidor MCP** no mesmo binário:
+Sem TTY, `--budget` é obrigatório (exit `2`, nada gasto). Se o pré-voo recusar por orçamento
+(`usage.budget_below_estimate`), `error.details.estimate.high` diz o teto que passa. A key vai por
+`OPENROUTER_API_KEY` ou `prompt-builder key set --stdin` — nunca como argumento.
+
+### Para agentes de código (Claude Code, Codex, Cursor, …)
+
+No checkout do repositório, **um comando** deixa esta cópia pronta para os agentes da máquina:
+
+```bash
+npm install && npm run agent-setup   # idempotente; nunca usa sudo nem `npm -g`
+npm run agent-setup:doctor           # confere tudo (exit 1 se falta algo)
+npm run agent-setup:uninstall        # remove só o que ele criou
+```
+
+O `agent-setup` (`scripts/agent-setup.sh`) faz quatro coisas, sem sobrescrever o que não escreveu:
+
+1. **build** — compila `dist/` quando falta ou está mais velho que `src/`;
+2. **bins** — escreve os lançadores `prompt-builder`, `pbuilder` e `prompt-builder-cli` em
+   `.local/bin` do seu home (ou em `PB_BIN_DIR`), que executam **este** `dist/`. Sem eles o agente
+   cai no `npx prompt-builder-cli`, que baixa a versão **publicada** — outra versão, outros comandos;
+3. **skill** — liga `skills/prompt-builder` por **symlink** em todo diretório de skills de agente que
+   existir: Claude Code (`.claude/skills`, os perfis `.claude-<nome>/skills` e
+   `$CLAUDE_CONFIG_DIR/skills`), Codex, Copilot CLI, Cursor, Kiro, DSH, jcode, pi, Gemini CLI,
+   OpenCode e `.agents/skills` (genérico);
+4. **relatório** — garante o binário do **Plannotator** (instalador oficial em modo `--minimal`: só o
+   binário) e as skills **`plannotator-visual-explainer`** (quem compõe o relatório de ciclos) e
+   **`visual-explainer`** (de quem ela depende), ligadas nos mesmos diretórios. Uma cópia que já
+   exista na máquina é reusada.
+
+Opções: `--no-build`, `--no-bin`, `--no-plannotator`, `--target <dir>` (repetível); o resto em
+`bash scripts/agent-setup.sh help`. Outros caminhos:
+
+- **só a skill**, global por symlink: `bash scripts/install-agent-skill.sh install|doctor|uninstall`
+  (a fonte única da descoberta de diretórios; também roda do pacote instalado, em
+  `node_modules/prompt-builder-cli/scripts/`);
+- **por projeto** (cópia versionada com o repo): `npx prompt-builder-cli init --agent all`;
+- **sem instalar nada**: `npx prompt-builder-cli docs --list`, `docs <tópico>` e `skill`.
+
+A skill ([`skills/prompt-builder/SKILL.md`](./skills/prompt-builder/SKILL.md)) ensina o agente a
+operar o benchmark **sem interface web** — orçamento, `--dry-run`, NDJSON, MCP, modo agente, JEV,
+`sessions report`, exit codes — apontando para as docs embarcadas em vez de as duplicar.
+
+**Servidor MCP** no mesmo binário:
 
 ```bash
 claude mcp add --transport stdio arena -- npx -y prompt-builder-cli mcp
 ```
 
-Runs levam minutos e os clientes MCP cortam uma chamada em ~60 s, então o caminho é por
-**job**: `start_run` devolve o `jobId` na hora (a run roda em segundo plano, uma por processo,
-as demais em fila), `run_status` acompanha e `cancel_run` interrompe. `idempotencyKey` é
-obrigatória no `start_run`: um retry com a MESMA chave — até de outro processo — devolve o mesmo
-job em vez de pagar uma segunda run. `run_benchmark`/`train_prompt`/`run_agent_benchmark`
-continuam, mas esperam no máximo ~25 s e então devolvem o `jobId`. Cliente que declara a
-extensão `io.modelcontextprotocol/tasks` recebe uma task (`tasks/get`, `tasks/cancel`).
-
-Cancelar (`cancel_run`, `tasks/cancel` ou `notifications/cancelled` da chamada) interrompe a run
-na hora: nenhuma chamada paga nova sai, o parcial fica gravado como `aborted`
-(`stoppedReason: "cancelled"`) e é lido por `get_result`. Fechar o stdin ou mandar `SIGTERM` faz
-o mesmo com até ~10 s de graça; um job que passa do prazo (`ttlSeconds`, padrão 2 h) também.
-
-Três coisas que o CLI garante e a UI não garantia:
-
-- **Custo real.** O gasto sai de `usage.cost` (o valor cobrado), quebrado por papel — juiz,
-  gabarito, duelos e reescritor incluídos. Antes só as respostas dos competidores eram contadas,
-  subcontando o total por um múltiplo.
-- **Orçamento que não corrompe o resultado.** Ao estourar o teto, a run para numa fronteira de
-  fase e entrega o parcial honesto (exit `7`), em vez de virar uma run "concluída" com vereditos
-  inventados por falta de dinheiro.
-- **Think levels do catálogo.** `models show` diz exatamente quais degraus aquele modelo aceita e o
-  que vai no fio para cada nível pedido — é o que permite a um agente treinar contra o próprio
-  modelo sem tomar HTTP 400.
-
-Evolução de prompts com **dataset estável e cinto de segurança** (paridade com o
-prompt-arena):
-
-- **Biblioteca de cenários** (`prompt-builder library`) — banco persistente de cenários+
-  gabaritos por perfil, com `tier`/`dimensionTags`/`expected` (rótulo = veredito determinístico
-  sem juiz). `scenarios: {"from":"library","profile":…}` no config faz o evolve rodar sempre
-  sobre o MESMO dataset — e recusa item sem gabarito.
-- **Contratos never-break** (`prompt.contracts`) e **multi-prompt** (`prompt.group`/`promptId`,
-  coordinate ascent com irmãos congelados) — a evolução não quebra o prompt de produção.
-- **Pool Pareto** (`training.paretoPool`), **reflexão GEPA por LLM** (`training.reflection`),
-  **`repeats`** para medir instabilidade — seleção de população, não campeão único.
-- **Reprodutibilidade**: `runs reproduce` (config + comando exato), `runs export` (artefato
-  auto-contido), `sessions winner --apply` (handoff com backup+diff+commit) e `registry validate`
-  (guarda de drift do prompt em código).
-- **Ciclo de vida dos modelos**: toda run grava `canonicalSlug`/`expirationDate`/`aliasTarget`
-  do catálogo e alerta 30/14/7 dias antes da expiração; `baseline check` é o gate de CI que
-  reprova quando juiz/gabarito mudam ou somem sem re-baseline declarada (`docs lifecycle`).
-
-Documentação completa: `npx prompt-builder-cli docs --list`.
-
-### Skill para agentes — instalar globalmente (symlink)
-
-A **skill de agente** do pacote ([`skills/prompt-builder/SKILL.md`](./skills/prompt-builder/SKILL.md))
-ensina o agente a operar o benchmark **sem interface web** — MCP, modo agente, orçamento, `--dry-run`,
-NDJSON, `sessions winner`, `runs reproduce`, exit codes — apontando para as docs embarcadas em vez de
-as duplicar. Dois caminhos para a instalar (não copie à mão: [`skills/`](./skills/) é fonte única):
-
-- **Global por symlink (recomendado)** — vale a partir de qualquer diretório e acompanha o repo/pacote
-  (atualizou? todos os agentes veem a skill nova):
-
-  ```bash
-  bash scripts/install-agent-skill.sh install    # todos os agentes conhecidos que existirem
-  bash scripts/install-agent-skill.sh doctor     # onde está · link íntegro · SKILL.md visível
-  bash scripts/install-agent-skill.sh uninstall  # remove só os symlinks desta skill
-  ```
-
-  Cria `<dir-de-skills>/prompt-builder` apontando para `skills/prompt-builder` (caminho absoluto) nos
-  diretórios de skills dos agentes instalados — relativos ao home: `.claude/skills` (Claude Code),
-  `.codex/skills` (Codex CLI), `.dsh/skills` (DSH), `.gemini/skills` (Gemini CLI),
-  `.config/opencode/skills` (OpenCode), `.agents/skills` (genérico) — criando o diretório quando o
-  agente está instalado; outros alvos com `--target <dir>`. O script resolve a skill a partir da
-  própria localização, por isso roda tanto deste checkout como do pacote instalado
-  (`node_modules/prompt-builder-cli/scripts/install-agent-skill.sh`). Exit codes: `0` ok · `2` uso
-  inválido · `1` operacional.
-
-- **Por projeto (cópia)** — `npx prompt-builder-cli init --agent <nome|all>` copia a skill para
-  `.claude/skills`, `.agents/skills`, … do repositório corrente e acrescenta um bloco ao `AGENTS.md`:
-  versiona com o projeto, mas não acompanha as atualizações do pacote.
-
-**Caminho alternativo via npm (sem instalar nada):** o conteúdo viaja no pacote —
-`npx prompt-builder-cli docs --list` (tópicos, com custo aprox. em tokens), `docs <tópico>` (uma doc) e
-`npx prompt-builder-cli skill` (imprime a SKILL.md); o servidor MCP é `prompt-builder mcp`.
+Runs levam minutos e os clientes MCP cortam uma chamada em ~60 s, então o caminho é por **job**:
+`start_run` devolve o `jobId` na hora (a run roda em segundo plano, uma por processo, as demais em
+fila), `run_status` acompanha, `cancel_run` interrompe e `get_result` lê o desfecho;
+`get_session_report` traz o relatório de ciclos, `estimate_cost`/`list_models` funcionam sem key e
+`read_docs` lê as docs embarcadas. `idempotencyKey` é obrigatória no `start_run`: um retry com a
+MESMA chave — até de outro processo — devolve o mesmo job em vez de pagar uma segunda run.
+`run_benchmark`/`train_prompt`/`run_agent_benchmark` continuam, mas esperam no máximo ~25 s e então
+devolvem o `jobId`. Cliente que declara a extensão `io.modelcontextprotocol/tasks` recebe uma task
+(`tasks/get`, `tasks/cancel`). Cancelar (`cancel_run`, `tasks/cancel` ou `notifications/cancelled`)
+interrompe na hora: nenhuma chamada paga nova sai e o parcial fica gravado como `aborted`
+(`stoppedReason: "cancelled"`). Fechar o stdin ou mandar `SIGTERM` faz o mesmo com até ~10 s de
+graça; um job que passa do prazo (`ttlSeconds`, padrão 2 h) também.
 
 ---
 
-Convenções para **agentes de código** (Claude Code, Codex, Cursor…) estão em [`AGENTS.md`](./AGENTS.md),
-na biblioteca de skills em [`.agents/skills/`](./.agents/skills/) e na **memória CoALA** do projeto —
-veja [Skills e memória CoALA](#skills-e-memória-coala). (A antiga documentação em `docs/`/`TELAS.md`
-foi consolidada na memória em 2026-09-26.)
+## O que ele faz
+
+- **Três modos** — `compare` (qual modelo), `vary` (qual versão do prompt, num modelo) e `train` (o
+  prompt evolui por iterações). No treino a promoção exige margem `minGain` **e** o teste da melhor
+  de K **e** uma re-avaliação limpa; um **holdout** reservado (30% por padrão, piso de 10 cenários)
+  e um teste pareado exato fecham a sessão.
+- **Julgamento por referência** — gabarito temp-0 por cenário, juiz pointwise (resolve / parcial /
+  não), painel por maioria simples e finais com duelos nas duas ordens. O juiz listwise é o fallback
+  do compare clássico. **Modo econômico** (`--judge-cascade barato1,barato2:forte`): dois juízes
+  baratos votam e o forte só julga os vereditos em dúvida.
+- **Relatório de ciclos do treino** — quanto o prompt melhorou (original × campeão, por ciclo e no
+  holdout) e quanto a mudança muda o custo **por chamada**. Está no CLI (`sessions report`), no MCP
+  (`get_session_report`), na API (`GET /v1/benchmark/sessions/:id/report`) e na tela
+  `/training/:id/report`; a versão rica sai pela skill `plannotator-visual-explainer`, entregue com
+  `plannotator annotate`.
+- **Modo JEV (decisões tipadas)** — mede e evolui definições de decisão `noul` / `choice` / `score`
+  do Jev e de outros modelos de decisão em casos rotulados: calibração, bandas de confiança, custo
+  por decisão e cascata com LLM. `prompt-builder jev …` no terminal; seletor **LLM | JEV** na Nova
+  run.
+- **Modo agente** — agentes de código (executor `pi`, sala limpa, container opcional) resolvendo
+  tarefas verificadas por oráculo: `agents doctor` / `agents run` (`docs agents`).
+- **Custo medido e orçamento honesto** — o gasto sai de `usage.cost` (o valor cobrado), por papel.
+  As portas de orçamento param a run numa fronteira de fase e entregam o parcial honesto (exit `7`),
+  nunca uma run "concluída" com vereditos inventados. O `--dry-run` recusa com o MESMO código da run
+  real; há teto diário por máquina. BYOK só conta com `usage.is_byok` — sem ele o
+  `upstream_inference_cost` já está dentro do `usage.cost` e somá-lo dobraria o gasto.
+- **Dataset estável** — `library` (cenários + gabaritos por perfil, rótulos `expected` sem juiz,
+  seeds adversariais, curadoria, troca `exchange@1`), contratos never-break, multi-prompt, pool
+  Pareto e reflexão GEPA.
+- **Confiança no juiz** — `calib report` (juiz × humano: α ordinal de Krippendorff, AC2 de Gwet,
+  IC95% e portão exit `10`), `baseline pin|check` (juiz e gabarito só mudam com re-baseline
+  declarada), `prompts regression` (suíte fixa dos meta-prompts internos) e `runs reproduce --replay`
+  (re-pontua uma run gravada a US$ 0).
+- **LGPD e dado pessoal** — allowlist por endpoint (fail-closed em área sensível, roteamento ZDR
+  forçado) e pseudonimização PT-BR no gateway, ou o modo "só sintético".
+- **Handoff do campeão** — `sessions winner --apply` (backup + diff; holdout regredido bloqueia com
+  exit `10`), registro `prompt-approval@1` e trailers no commit; `registry validate` vigia o drift do
+  prompt em código.
+- **Ciclo de vida** — `models show` com os think levels que o modelo aceita, alertas de expiração
+  30/14/7 dias, `runs export|import|delete|prune` e `sessions export|import|delete` (retenção:
+  TTL de 90 dias, `PB_RETENTION_DAYS`).
+
+Documentação completa para agentes: `npx prompt-builder-cli docs --list`.
+
+---
+
+Convenções para **agentes de código** que trabalham NESTE repositório estão em
+[`AGENTS.md`](./AGENTS.md), nas skills de tarefa em [`.agents/skills/`](./.agents/skills/) e na
+**memória CoALA** do projeto — veja [Skills e memória CoALA](#skills-e-memória-coala). (A antiga
+documentação em `docs/`/`TELAS.md` foi consolidada na memória em 2026-09-26.)
 
 ---
 
 ## Sumário
 
 - [Guia do utilizador (GUIA.md)](./GUIA.md)
+- [Começo rápido](#começo-rápido) · [O que ele faz](#o-que-ele-faz)
 - [Como funciona (visão geral)](#como-funciona-visão-geral)
 - [Os três modos](#os-três-modos)
+- [Relatório de ciclos do treino](#relatório-de-ciclos-do-treino)
+- [Modo JEV (decisões tipadas)](#modo-jev-decisões-tipadas)
 - [Os papéis dos modelos](#os-papéis-dos-modelos)
 - [Conformidade LGPD (allowlist por endpoint)](#conformidade-lgpd-allowlist-por-endpoint)
 - [Anatomia de uma etapa](#anatomia-de-uma-etapa)
@@ -153,17 +195,19 @@ foi consolidada na memória em 2026-09-26.)
 
 ## Como funciona (visão geral)
 
-O backend orquestra um **pipeline em etapas**. Você define `N` etapas; cada etapa é um
-mini-benchmark independente e auto-contido:
+O motor (o mesmo no CLI/servidor e, espelhado, no navegador) orquestra um **pipeline em etapas**.
+Você define `N` etapas (cenários); cada etapa é um mini-benchmark independente e auto-contido, e as
+**finais** acontecem depois que todas foram julgadas:
 
 ```mermaid
 flowchart LR
-  T([Tema + config]) --> DG[1 · Datagen<br/>gera o cenário]
-  DG --> C{2 · Participantes<br/>respondem em paralelo}
-  C --> J[3 · Juiz<br/>veredito vs gabarito<br/>+ duelos por taxa de vitória]
-  J --> S[(Placar + Heatmap)]
-  S -->|próxima etapa| DG
-  S --> R([Run finalizada])
+  T([Tema + config]) --> DG[1 · Datagen<br/>gera os cenários]
+  DG --> G[Gabarito temp-0<br/>por cenário]
+  G --> C{2 · Participantes<br/>respondem em paralelo}
+  C --> J[3 · Juiz<br/>veredito vs gabarito]
+  J --> S[(Judge-score + Heatmap)]
+  S --> F[4 · Finais<br/>N melhores duelam<br/>em todos os cenários]
+  F --> R([Run finalizada])
 ```
 
 1. **Datagen** — um modelo recebe o tema (e um `scenarioBrief` opcional) e produz os **cenários**
@@ -172,19 +216,25 @@ flowchart LR
    dado delimitado antes da pergunta; a variante sob teste é o único *system prompt*) e um teto de
    tokens sugerido (`maxTokens`). Cada etapa varia o tipo de tarefa (extração, raciocínio,
    comparação, recusa…). Um **pacote de cenários** importado vira seed e mescla com os gerados.
-2. **Participantes** — respondem **ao mesmo cenário em paralelo** (com limite de concorrência),
-   em *streaming*. A UI mostra o texto crescendo, a velocidade (chars/s), latência, tokens e custo.
+2. **Participantes** — respondem **ao mesmo cenário em paralelo** (a vazão é do limitador global
+   do gateway). A resposta vai por *streaming* no fio, mas a UI não mostra o texto crescendo: cada
+   resposta aparece inteira, com latência, tokens e custo, quando a etapa termina.
 3. **Julgamento** — por default (fora do compare clássico) é **por referência**: um **gabarito**
    temp-0 é gerado por cenário, o juiz classifica cada resposta isoladamente contra ele
    (**resolve / parcial / não**, com explicação de 1 frase; com 2+ juízes vale a **maioria
-   simples**, e painel dividido é **empate técnico**, nunca arredondado para cima) e os melhores
-   disputam **duelos** classificados por **taxa de vitória** (cada par nas duas ordens; empate em
-   desacordo). Sem gabarito (ou no compare
-   clássico), cai no **juiz listwise** clássico: ordena as respostas às cegas e dá o veredito de
-   aceitabilidade ("dá para usar em produção sem causar erro/dano?").
-4. **Todas as etapas rodam em paralelo** (cenários pré-gerados juntos; execução concorrente
-   limitada por um semáforo global adaptativo). O placar é aditivo, então a ordem de término não
-   importa; ao final a run é `finished` e fica no histórico (com export JSON/CSV).
+   simples**, e painel dividido é **empate técnico**, nunca arredondado para cima). Sem gabarito
+   (ou no compare clássico), cai no **juiz listwise** clássico: ordena as respostas às cegas e dá o
+   veredito de aceitabilidade ("dá para usar em produção sem causar erro/dano?"). Com
+   `--judge-cascade` (modo econômico), dois juízes baratos votam e o forte só julga os vereditos em
+   dúvida (divergência, voto `parcial` ou resposta de comprimento extremo).
+4. **Finais** — depois de todas as etapas julgadas, os **N melhores por judge-score médio**
+   (`finalists`, padrão 3) duelam entre si em **todos** os cenários, cada par nas duas ordens
+   (desacordo entre as ordens = empate); a classificação final é a **taxa de vitória**.
+
+**Todas as etapas rodam em paralelo** (cenários pré-gerados juntos; execução concorrente limitada
+por um semáforo global adaptativo). O placar é aditivo, então a ordem de término não importa; ao
+final a run é `finished` (ou `inconclusive`, quando vereditos demais se perderam) e fica no
+histórico, com export JSON/CSV.
 
 Tudo é transmitido ao navegador em tempo real via **Server-Sent Events (SSE)**: durante a run a tela
 da run mostra um **Resumo em linguagem natural** (fases do pipeline com contagem, placar simples e
@@ -212,17 +262,65 @@ Qualquer uma delas atende três objetivos. O que muda é **quem é o "participan
   curada em `src/techniques.ts`); **desligada** → você escreve as variações manualmente
   (`manualVariants`). Um `basePrompt` opcional roda como **controle**.
 - **Treino** repete a variação por `N` iterações (`src/trainer.ts`): a melhor versão de cada rodada
-  é a semente da próxima — mas **só é promovida se superar o campeão por `minGain`** (default 1
-  p.p.); sem margem, a sessão **converge** e para. Os cenários são **congelados** após a iteração 0
-  (`pinnedStages`, com split de **holdout**) para comparação justa; o feedback vem de **lições
-  determinísticas** das falhas do campeão (sem LLM extra). Ao final, uma run de **holdout** e um
-  **teste pareado exato** (troca de sinais + IC por inversão) validam o campeão. Acompanhe em
-  `TrainingView`.
+  é a semente da próxima — mas **só é promovida** se superar a régua por `minGain` (padrão
+  `max(1; 50/n)` p.p.) **e** passar no teste da melhor de K (max-T por permutação, p ajustado ≤
+  0,05) **e** na re-avaliação limpa; com paciência 2 (duas iterações seguidas sem promoção) ou
+  platô, a sessão **converge** e para. Os cenários são **congelados** após a iteração 0
+  (`pinnedStages`); uma fatia de **holdout** (`holdoutRatio`, padrão **0,3**, piso absoluto de **10
+  cenários** — com menos de 20 cenários não há holdout, é "confirmação fraca") fica fora da
+  seleção. O feedback vem de **lições determinísticas** das falhas do campeão (sem LLM extra; a
+  reflexão por LLM é opt-in). Ao final, o campeão enfrenta a base no holdout com um **teste pareado
+  exato** (troca de sinais + IC por inversão). O treino default tem **10 cenários** (com menos, o
+  gate quase não consegue promover). Acompanhe em `TrainingView` e leia o
+  [relatório de ciclos](#relatório-de-ciclos-do-treino).
 - Nos modos de um modelo, o **juiz nunca é o modelo sob teste** (anti-viés de auto-preferência), e
   há a opção **"juiz em 2 ordens"** (`judgePasses: 2`) contra viés de posição.
 
-`RunConfig` é uma **união discriminada por `mode`** (`src/types.ts`), validada por Zod em
-`src/routes.ts`.
+`RunConfig` é uma **união discriminada por `mode`** (`src/types.ts`), validada pelo Zod de
+`src/runConfigSchema.ts` (o mesmo no servidor, no CLI e no MCP). O arquivo de configuração
+portátil é o `arena-config@1` — contrato campo a campo em `prompt-builder docs config`.
+
+---
+
+## Relatório de ciclos do treino
+
+Responde, com números **medidos**, às duas perguntas de quem decide: *quanto o prompt melhorou*
+(judge-score original × campeão, por ciclo e no holdout, com Δ, IC95 e p) e *quanto a mudança muda
+o custo de usar o prompt* (custo, tokens e latência **por chamada**, pareados pela mesma pergunta;
+projeção mensal com `--calls-per-month`). Também traz o custo da otimização por papel, o diff do
+prompt e as ressalvas (holdout pulado, regressão, drift de juiz, custo desconhecido).
+
+| Onde | Como |
+|---|---|
+| CLI | `prompt-builder sessions report <id>` (Markdown) · `--json` · `--html <arq>` · `--markdown <arq>` · `--annotate` |
+| MCP | `get_session_report` (`format`: `markdown` \| `json` \| `html`) |
+| API | `GET /v1/benchmark/sessions/:id/report?format=json\|html\|markdown&callsPerMonth=N` |
+| Web | botão **Relatório de ciclos** na tela do treino (`/training/:id/report`), com "Baixar HTML" |
+
+O `--html` já sai no tema do Plannotator. Para uma versão explicada a quem vai decidir, o agente usa
+o Markdown como *brief* da skill **`plannotator-visual-explainer`** e entrega com
+`plannotator annotate <arquivo.html>` — o `npm run agent-setup` instala os dois. Detalhes e como ler
+sem se enganar: `prompt-builder docs report`.
+
+---
+
+## Modo JEV (decisões tipadas)
+
+Para classificação, roteamento, triagem, guardrail e scoring em alto volume, o modo **JEV** mede e
+evolui **definições de decisão** (`noul` = sim/não, `choice` = 1 de N, `score` = régua ordenada) do
+Jev (TypeSafe) e de outros modelos de decisão, em casos **rotulados**: acurácia, Brier, ECE,
+bandas de confiança, custo e latência por decisão, comparação com um LLM e cascata (o Jev decide o
+que cai na banda de confiança e escala o resto). Formato próprio `jev-config@1`.
+
+- **Web:** o seletor **LLM | JEV** no topo da Nova run (`/new?tipo=jev` abre direto); o motor roda
+  na aba e os records ficam no IndexedDB. Se a rede bloquear o endpoint, o mesmo JSON roda no
+  terminal e volta por «Histórico → JEV → Importar do terminal».
+- **CLI:** `prompt-builder jev validate|example|models|import|run|eval|compare|train|list|show|report|export|techniques`
+  (alias `decisions`); `jev validate` e `--dry-run` não gastam.
+- **MCP:** as tools existentes aceitam `jev-config@1` (`start_run`, `estimate_cost`, `get_result`, `list_models`).
+
+O Jev não é ZDR: em área LGPD sensível o modo fica indisponível. Contrato completo:
+`prompt-builder docs jev`.
 
 ---
 
@@ -234,13 +332,14 @@ Toda run tem **modelos de apoio** (gerador + juiz) além dos participantes:
 |---|---|---|---|
 | **Participante** | compare: **≥2** (ou 2–12 configs); variation/training: **1** (+ variações) | Respondem ao cenário e disputam o ranking | `competitorModelIds[]` / `competitorConfigs[]` / `contestantModelId` |
 | **Gerador (datagen)** | exatamente **1** | Inventa os cenários (pergunta + contexto + maxTokens) | `datagenModelId` |
-| **Juiz** | **1 ou mais** | Vereditos vs gabarito + duelos (ou ranking listwise, no fallback) | `judgeModelIds[]` |
+| **Juiz** | **1 ou mais** (ou a cascata: 2 baratos + 1 forte) | Vereditos vs gabarito + duelos das finais (ou ranking listwise, no fallback) | `judgeModelIds[]` · `judgeCascade` (`--judge-cascade`) |
 | **Referência (gabarito)** | 1 (**obrigatório** em variation/training; em compare o default = 1º juiz) | Gera a resposta de referência temp-0 por cenário | `referenceModelId` |
 | **Optimizer** | 1 (variation/training) | Reescreve prompts aplicando técnicas | `optimizerModelId` (default = `datagenModelId`) |
 
-**Regras validadas no backend** (Zod) — config inválida é recusada com `400`:
+**Regras validadas pelo schema** (Zod) — config inválida é recusada com `400` na API e exit `3` no CLI:
 
-- compare: ≥ **2 competidores distintos**; gerador ≠ juiz; nem gerador nem juiz são competidores.
+- compare: ≥ **2 competidores distintos**; nem gerador nem juiz são competidores (o gerador pode
+  ser também um juiz — é o default do compare).
 - variation/training: ≥ 2 variações (técnicas ou manuais, contando o `basePrompt` como controle);
   **juiz ≠ modelo sob teste**.
 - **papéis separados (IMPL-048):** a referência **não pode ser juiz nem competidor** (erro de
@@ -263,8 +362,8 @@ Toda run tem **modelos de apoio** (gerador + juiz) além dos participantes:
 
 ## Conformidade LGPD (allowlist por endpoint)
 
-No passo **Tema** do assistente há um bloco **"Conformidade LGPD"** que **filtra o catálogo de
-modelos** conforme a área de uso — útil porque este repositório é do **Grupo Fleury** (dados de
+Na configuração **completa** da Nova run, em «Avançado», há o bloco **"Conformidade LGPD"** (no
+guiado, o último passo leva até lá) que **filtra o catálogo de modelos** conforme a área de uso — útil porque este repositório é do **Grupo Fleury** (dados de
 saúde = sensíveis). Você escolhe uma **área** (Geral, Jurídico, Saúde, Financeiro, Crianças e
 adolescentes, Setor público — ou **"Livre"**, que mostra tudo) e um **rigor** (incluir ou não
 modelos "permitido com ressalvas").
@@ -366,24 +465,24 @@ sequenceDiagram
   participant UI as Navegador SSE
 
   O->>UI: stage.generating
-  O->>D: gera cenário (lotes paralelos)
+  O->>D: gera cenários (lotes paralelos + reposição por diversidade)
   D-->>O: {question, productContext, maxTokens}
-  O->>UI: stage.generated (cenário completo)
+  O->>UI: datagen.report (uma vez) · stage.generated
   O->>J: gabarito temp 0 (referência)
   O->>UI: stage.gabarito (progresso agregado)
-  par participantes em paralelo (cap = concurrency)
-    O->>K: responder (streaming)
-    K-->>O: deltas de texto
-    O->>UI: competitor.progress (chars, ch/s, preview)
+  par participantes em paralelo (limitador global)
+    O->>K: responder
     K-->>O: resposta final (latência, tokens, custo)
     O->>UI: competitor.finished
   end
   O->>UI: stage.judging
   O->>J: vereditos vs gabarito (pointwise, cego)
-  O->>J: duelos (2 ordens por par)
-  O->>UI: stage.dueled / duel.progress
-  J-->>O: vereditos + ordem por taxa de vitória (JudgeResult sintetizado)
+  J-->>O: vereditos (JudgeResult sintetizado)
   O->>UI: stage.judged (placar + custo atualizados)
+  Note over O,J: depois de TODAS as etapas: finais
+  O->>UI: finals.started (N melhores por judge-score)
+  O->>J: duelos em todos os cenários (2 ordens por par)
+  O->>UI: stage.dueled / duel.progress
 ```
 
 Pontos-chave (`src/orchestrator.ts`):
@@ -399,59 +498,71 @@ Pontos-chave (`src/orchestrator.ts`):
 
 ## Sistema de pontuação
 
-Há **duas leituras complementares** de cada run:
+Há **duas réguas, não intercambiáveis** (o CLI e a tela sempre dizem qual usaram), sobre uma
+unidade comum — o **veredito**:
 
-### 1. Ranking competitivo (juiz) → placar e heatmap
+### 1. Veredito por cenário → judge-score e heatmap
 
-A cada etapa, o juiz ordena as respostas. Pontuação estilo "corrida":
-
-> Com **N** respostas válidas: 1º lugar = **N−1** pontos, 2º = **N−2**, … último = **0**.
-> Os pontos são **somados em todas as etapas** (`src/orchestrator.ts` → `applyScoreboard`).
-
-O **heatmap** mostra a posição de cada participante em cada etapa, do **verde** (melhor) ao
-**vermelho** (pior); `·` = "não ranqueado". A classificação final ordena por: **pontos** →
-**posição média** → **nº de 1ºs lugares** → id.
-
-### 2. Vereditos de aceitabilidade → "dá pra usar no trabalho?"
-
-Independente do ranking, cada resposta recebe um **veredito**:
+Cada resposta recebe um **veredito** contra o gabarito (no listwise, do próprio juiz):
 
 - ✅ **resolve** — resolve a necessidade de forma correta e segura, **mesmo não sendo a melhor**;
 - ◐ **parcial** — serve em parte (falta algo ou desvia do contexto);
 - ❌ **não** — erro factual, viola contexto/política, ou incompleta a ponto de não servir.
 
-"**Aceitável**" = veredito ≠ `não`. Respostas com **erro/vazias** são automaticamente **não
-aceitáveis** (sem gastar chamada de LLM). No julgamento por referência o veredito é **pointwise
-contra o gabarito**; no listwise, vem do próprio juiz.
+O **judge-score** é `(resolve + 0,5 × parcial) / julgados × 100`. Falha do juiz **não é
+veredito**: fica ausente, fora da média (nunca vira `não`), e com perdas demais (> 10% num papel ou
+< 5 cenários julgados) a run sai `inconclusive`. Respostas com **erro/vazias** são automaticamente
+**não aceitáveis** (sem gastar chamada de LLM). O **heatmap** mostra o veredito de cada participante
+em cada cenário.
 
-> É a diferença entre "**quem ganhou**" (ranking) e "**quem serve**" (aceitabilidade): um modelo
+### 2. Finais → taxa de vitória (`standings`)
+
+Os **N melhores por judge-score médio** duelam em todos os cenários, cada par nas duas ordens; a
+classificação é `(vitórias + 0,5 × empates) / duelos disputados`, com V–E–D ao lado. Empate nos
+duelos desempata pelo judge-score, nunca pela ordem de cadastro. Sem finais (`--no-duels`,
+`finalists: 0`, orçamento), a régua é o judge-score.
+
+### Fallback listwise (compare clássico)
+
+Sem gabarito, o juiz **ordena** as respostas às cegas (rótulos `A, B, C…`) e dá o veredito. O placar
+é estilo "corrida": com **N** respostas válidas, 1º = **N−1** pontos, … último = **0**, somados em
+todas as etapas (`applyScoreboard`); o heatmap mostra a posição.
+
+> É a diferença entre "**quem ganhou**" (finais) e "**quem serve**" (aceitabilidade): um modelo
 > pode quase nunca vencer e ainda assim ser aceitável em 100% das etapas.
 
 ---
 
 ## Stack tecnológica
 
-**Backend**
+**Motor, CLI e backend** (`src/`)
 
-- **Node.js** (ESM, `"type": "module"`, `NodeNext` — imports relativos com extensão `.js`) + **Express 4**.
-- **TypeScript 5** (strict) — compilado para `dist/`.
-- **Zod 4** — validação do corpo das requisições e dos JSONs devolvidos pelas LLMs.
-- **`fetch` nativo** — chamadas à OpenRouter (sem SDK), inclusive **streaming SSE**.
+- **Node.js ≥ 20.11** (ESM, `"type": "module"`, `NodeNext` — imports relativos com extensão `.js`)
+  + **Express 4** (só o servidor self-host).
+- **TypeScript 5** (strict) — compilado para `dist/` (o CLI mora em `src/cli/` e compila junto).
+- **Zod 4** — schema único da config de run (`src/runConfigSchema.ts`) e dos JSONs devolvidos pelas LLMs.
+- **`fetch` nativo** — chamadas à OpenRouter (sem SDK), com streaming SSE; tudo passa por UM
+  gateway (`src/openrouter.ts`) com limitador global adaptativo e contabilidade de custo por papel.
 - **`EventEmitter` nativo** — barramento de eventos por run/sessão (`src/events.ts`).
-- Sem banco de dados: **persistência em arquivos JSON** (`data/runs/*.json`, `data/sessions/*.json`).
+- Sem banco de dados: **persistência em arquivos JSON** (`data/` no servidor, `~/.prompt-builder` no CLI).
+- CLI e servidor MCP escritos à mão (`node:util` `parseArgs`, JSON-RPC), zero dependência extra.
 
 **Frontend** (`web/`)
 
-- **React 18** + **React Router 6** — SPA com 5 telas.
-- **Vite 5** — dev server (proxy de `/v1` e `/health`) e build.
-- **TypeScript 5**; **`EventSource`** (SSE) para acompanhar ao vivo.
-- **Cache em IndexedDB** (`web/src/idb.ts`, db `prompt-builder`) — fallback offline do histórico.
-- **CSS puro** (`web/src/styles.css`) com **design tokens** e tema **claro/escuro**, sem framework de UI.
+- **React 19** + **React Router 6** — SPA; **Vite 5** (dev server com proxy de `/v1` e `/health`) e build.
+- **Tailwind v4 + shadcn + Motion UI**, só com classes semânticas; tokens em `web/src/index.css`,
+  tema claro/escuro pela classe `dark`. Motion+ (`motion-plus`) é **opcional**: sem o
+  `MOTION_TOKEN` o build usa os substitutos abertos de `web/src/motion-plus-fallback/`.
+- **Motor no navegador** (`web/src/engine/`): o mesmo pipeline roda na aba; módulos puros são
+  fonte única em `src/` (re-exportados por shim) e os pares com seam divergente são mirrors
+  vigiados por `test/engine-sync.test.ts`.
+- **IndexedDB** (`web/src/idb.ts`, db `prompt-builder` **v3**: runs, sessões, biblioteca de prompts
+  e os records do modo JEV).
 
 **Integração externa**
 
-- **OpenRouter** — gateway único para todos os modelos. Catálogo + preços via `GET /models`;
-  geração via `POST /chat/completions` (streaming p/ participantes, JSON-mode p/ datagen/juiz);
+- **OpenRouter** — gateway único para todos os modelos. Catálogo + preços via `GET /models`
+  (público); geração via `POST /chat/completions`; decisões do modo JEV via o endpoint de decisões;
   validação de key via `GET /key`. `/models` e `/endpoints/zdr` são **públicos**.
 
 ---
@@ -460,46 +571,51 @@ contra o gabarito**; no listwise, vem do próprio juiz.
 
 ```
 prompt-builder/
-├─ src/                      # Backend (TypeScript → dist/)
-│  ├─ server.ts              # Express, /health, monta /v1/benchmark, serve web/dist, aborta órfãs
-│  ├─ routes.ts              # Endpoints /v1/benchmark/* + validação Zod + SSE + CSV
-│  ├─ orchestrator.ts        # Loop da run: datagen → participantes → juiz+avaliador → placar
-│  ├─ trainer.ts             # Modo training: encadeia N iterações (sessão)
-│  ├─ variator.ts            # Gera variações de prompt (técnicas / manuais)
-│  ├─ datagen.ts             # Gera o cenário (question/productContext/maxTokens)
-│  ├─ competitor.ts          # Roda 1 participante (streaming, retry, progresso, custo)
-│  ├─ judge.ts               # Juiz listwise (fallback — ranking cego + vereditos)
-│  ├─ gabarito.ts / refJudge.ts / duels.ts   # Julgamento por referência: gabarito, vereditos pointwise, duelos (taxa de vitória)
-│  ├─ rank.ts / holdout.ts / stats.ts        # Promoção (minGain), holdout, significância pareada exata
-│  ├─ llmVariants.ts / reasoning.ts / dedup.ts / scenarioPack.ts   # compare-llms, reasoning por papel, dedup, pacote de cenários
-│  ├─ openrouter.ts          # Cliente OpenRouter: models, chat, stream, custo, validateKey
-│  ├─ techniques.ts          # Biblioteca curada de técnicas de prompt
-│  ├─ lgpd.ts                # Base LGPD + allowlist do pacote e pré-voo da run (Node)
-│  ├─ engine/lgpdCore.ts     # Núcleo PURO da LGPD: classificação ÚNICA, allowlist por endpoint, pré-voo
-│  ├─ engine/pii.ts          # Núcleo PURO de dado pessoal PT-BR: detecção (DV mod-11), pseudonimização, bloqueio
-│  ├─ events.ts / normalize.ts / storage.ts / types.ts
+├─ src/                      # Motor + CLI + servidor (TypeScript → dist/)
+│  ├─ cli/                   # CLI `prompt-builder` (index.ts, commands/*, ndjson.ts, preflight.ts) + servidor MCP
+│  ├─ server.ts / routes.ts  # Express: /health, /v1/benchmark/* (Zod, SSE, CSV, relatório), serve web/dist
+│  ├─ agentRoutes.ts         # /v1/agents/* — só com PROMPT_BUILDER_AGENTS=1
+│  ├─ orchestrator.ts        # Loop da run: datagen → gabarito → participantes → juiz → finais
+│  ├─ trainer.ts             # Modo training: iterações, gate, holdout (sessão)
+│  ├─ variator.ts / techniques.ts   # Variações de prompt (técnicas curadas / manuais)
+│  ├─ datagen.ts / dedup.ts / embeddings.ts   # Cenários, dedup exato+semântico, relatório da geração
+│  ├─ competitor.ts          # Roda 1 participante (retry, truncamento, custo)
+│  ├─ gabarito.ts / refJudge.ts / judge.ts / duels.ts   # Gabarito, juiz pointwise (+ cascata), listwise, finais
+│  ├─ rank.ts / holdout.ts / stats.ts   # Promoção (minGain + melhor de K), holdout, significância exata
+│  ├─ openrouter.ts / budget.ts   # Gateway único (limitador, retries, BYOK) e ledger de custo por papel
+│  ├─ roleLimits.ts          # Tetos de tokens e pisos de timeout POR PAPEL
+│  ├─ metaPrompts.ts         # Fingerprint dos meta-prompts internos (`prompts regression`)
+│  ├─ lgpd.ts / library.ts / registry.ts / storage.ts / types.ts
+│  ├─ engine/                # Núcleos PUROS (fonte única p/ Node e navegador): lgpdCore, pii,
+│  │                         #   sensitiveRouting, sessionReport(+Html), trainingPolicy, bestOfK,
+│  │                         #   calibration, roleSeparation, verdictCache, jev/ (motor JEV), …
+│  ├─ jev/                   # Persistência Node + job/MCP do modo JEV
+│  ├─ agent/                 # Modo agente: executor pi, sala limpa, container, oráculo, dossiê
 │  └─ data/                  # JSON estático VERSIONADO (lgpd-compliance, lgpd-allowlist.generated)
 │
-├─ web/                      # Frontend (React + Vite)
+├─ web/                      # SPA (React + Vite)
 │  └─ src/
-│     ├─ main.tsx            # Router, layout, navegação
-│     ├─ api.ts              # Cliente HTTP/SSE + tipos + key no localStorage
-│     ├─ idb.ts              # Cache IndexedDB v2 (incl. store `prompts`); theme.ts / help.ts (contexts)
-│     ├─ lgpd.ts             # Shim do núcleo LGPD + loader do bundle (SPA)
-│     ├─ styles.css          # Design tokens (claro/escuro)
-│     ├─ components/         # ModelSelector, Toggle, TechniqueSelector, ManualVariantsEditor, KeySetup, HelpModal
-│     └─ pages/              # NewRun (assistente 5 passos), RunsList, RunView, TrainingView, PromptsPage, Settings
+│     ├─ main.tsx            # Rotas: /new, /runs, /runs/:id, /training/:id(/report), /jev/…, /prompts, /settings
+│     ├─ api.ts / backend.ts # Fachada do motor na aba + leitura do backend self-host (somente leitura)
+│     ├─ engine/             # Motor no navegador (shims + mirrors do src/)
+│     ├─ jev/                # Modo JEV na aba (store IndexedDB v3, import do terminal)
+│     ├─ idb.ts / index.css  # IndexedDB v3 · tokens de tema
+│     ├─ components/         # AppShell, GuidedSetup, ModelSelector, KeySetup, RunNarrative, … (+ ui/ e motion-ui/ do CLI)
+│     └─ pages/              # NewBenchmark (LLM | JEV) → NewRun, RunsList, RunView, TrainingView,
+│                            #   TrainingReport, PromptsPage, Settings, jev/*
 │
-├─ scripts/gen-lgpd-allowlist.mjs   # Regenera a allowlist LGPD por endpoint (npm run lgpd:allowlist)
-├─ scripts/install-agent-skill.sh  # Instala a skill globalmente por symlink (install/doctor/uninstall)
-├─ skills/prompt-builder/          # Skill de agente (SKILL.md) — fonte única, vai no tarball npm
-├─ .agents/skills/          # Biblioteca de Knowledge Skills (fonte única) — ver seção abaixo
-├─ .claude/skills           # symlink → ../.agents/skills (portabilidade Claude Code)
-├─ AGENTS.md                # Instruções mínimas para agentes de código (CLAUDE.md é symlink)
-├─ data/                    # runtime: runs/ e sessions/ (gitignored — regra /data/)
-├─ .env.example             # Variáveis OPCIONAIS (o app roda sem .env)
-├─ README.md  ·  GUIA.md    # Este arquivo · guia do utilizador (telas e fluxos)
-└─ package.json  ·  tsconfig.json
+├─ agent-docs/               # Docs embarcadas no pacote (`prompt-builder docs <tópico>`)
+├─ skills/prompt-builder/    # Skill de agente (SKILL.md + models.md) — fonte única, vai no tarball
+├─ scripts/                  # agent-setup.sh, install-agent-skill.sh, docs-lint.ts, check-model-ids.ts,
+│                            #   gen-lgpd-allowlist.mjs, tarball-gate/smoke, release-tag, stats-sim
+├─ test/                     # Testes de contrato (vitest) — `npm test`
+├─ .agents/skills/           # Skills de TAREFA do repo + memória CoALA (ver abaixo)
+├─ .claude/skills            # symlink → ../.agents/skills (portabilidade Claude Code)
+├─ AGENTS.md                 # Instruções para agentes de código (CLAUDE.md é symlink)
+├─ data/                     # runtime do servidor: runs/ e sessions/ (gitignored — regra /data/)
+├─ .env.example              # Variáveis OPCIONAIS (o app roda sem .env)
+├─ README.md  ·  GUIA.md     # Este arquivo · guia do utilizador (telas e fluxos)
+└─ package.json  ·  tsconfig.json  ·  vitest.config.ts  ·  vercel.json
 ```
 
 ---
@@ -510,69 +626,85 @@ O conhecimento do projeto vive na **memória CoALA local**
 ([`.agents/prompt-builder-coala-memory-agent-skill/`](./.agents/prompt-builder-coala-memory-agent-skill/)):
 uma base SQLite com busca híbrida (FTS5 + vetor, fusão RRF), memória **episódica, semântica e
 procedimental**, working memory orçamentada, proveniência (`owner`/`agent`/`untrusted`) e supersessão.
-As antigas *knowledge skills* (`knowledge-*`) e o `project-router` foram **destiladas para essa
-memória** (chaves `skill:<nome>:<tema>`) e apagadas em 2026-09-27; o conteúdo das 32 deep researches
-técnicas e dos documentos do projeto também está lá (chaves `R-xx:DEC-n`, `R-xx:REC-n`, `docs:Q-xx`,
-`docs:pivo-P-x`, …).
+As antigas *knowledge skills* (`knowledge-*`), o `project-router` e as meta-skills foram
+**destiladas para essa memória** (chaves `skill:<nome>:<tema>`) e apagadas em 2026-09-27; o
+conteúdo das 32 deep researches técnicas e dos documentos do projeto também está lá (chaves
+`R-xx:DEC-n`, `R-xx:REC-n`, `docs:Q-xx`, `docs:pivo-P-x`, …).
 
 **Como usar (agentes de código):** no início de cada tarefa,
 `python3 .agents/prompt-builder-coala-memory-agent-skill/scripts/coala.py recall "<tarefa>" --budget 1500`;
-para dúvidas pontuais, `coala.py search "<termos>"`; no fim, registar o durável com `coala.py add`.
+para dúvidas pontuais, `coala.py search "<termos>"`; no fim, registar o durável com `coala.py add`
+(a supersessão por `--key` faz o papel do antigo GC de skills).
 
 ```
 .agents/skills/                              (fonte única; .claude/skills é symlink)
 ├─ prompt-builder-coala-memory-agent-skill/  memória CoALA local (conhecimento do projeto)
-├─ task-*/                                   memória procedural (terminam com <evolution> + LEARNINGS.md):
+├─ task-*/                                   memória procedural (terminam com o registo de
+│                                            aprendizado + LEARNINGS.md):
 │                                            add-endpoint, edit-newrun-form, run-and-verify
-├─ meta-skill-evolution/                     decide o destino de aprendizados novos (via git diff)
-├─ meta-skill-consolidate/                   GC periódico: dedup, contradições, versionamento, poda
 └─ catalog.md                                índice · skill-template.md  modelo
 ```
 
-**Memória evolutiva com salvaguardas:** skills de tarefa terminam com um passo `<evolution>` que
-destila aprendizados em `LEARNINGS.md`. Inspirado em Voyager (persistir só após verificação) e
+**Memória evolutiva com salvaguardas:** skills de tarefa terminam com um passo que destila
+aprendizados em `LEARNINGS.md` e na memória. Inspirado em Voyager (persistir só após verificação) e
 Reflexion (feedback verbal). **Gate humano inegociável:** toda atualização de skill (ou registro
-durável na memória) é um *commit* separado para revisão por `git diff` — pesquisa da ETH Zurich
+durável na memória) é um *commit* separado para revisão pelo diff — pesquisa da ETH Zurich
 (arXiv:2602.11988) mostra que contexto auto-gerado *sem curadoria* piora o desempenho do agente.
 As skills aqui são **rascunhos curados**: trate-as como tal e revise antes de confiar.
 
 **Portabilidade:** fonte única em `.agents/skills/`, frontmatter mínimo (`name` + `description`),
 symlinks versionados. Começo: [`AGENTS.md`](./AGENTS.md) (comandos exatos + regras não-óbvias),
-[`catalog.md`](./.agents/skills/catalog.md) e a memória CoALA.
+[`catalog.md`](./.agents/skills/catalog.md) e a memória CoALA. (A skill **do produto**, para quem
+USA o benchmark, é outra: `skills/prompt-builder`, instalada pelo `npm run agent-setup`.)
 
 ---
 
 ## Configuração
 
 **Não é preciso nenhum `.env` para rodar** — todos os parâmetros têm default. A **chave do
-OpenRouter não vai em variável de ambiente**: a app **pede-a logo ao abrir** (first-run, com os
-pontos de risco/limite/revogação) e ela continua gerível em **Configurações** — fica no
-`localStorage` do navegador, indo ao backend só no header `x-openrouter-key`. Detalhes no
-[GUIA §2](./GUIA.md#2-primeiro-acesso-a-chave).
+OpenRouter não vai em variável de ambiente** na interface: a app **pede-a logo ao abrir** (first-run,
+com os pontos de risco/limite/revogação) e ela continua gerível em **Configurações** — fica na memória
+da aba (ou no `localStorage`, com «Lembrar neste dispositivo») e sai do navegador só para o
+OpenRouter. Detalhes no [GUIA §2](./GUIA.md#2-primeiro-acesso-a-chave). No CLI, a key vem de
+`--key`, `OPENROUTER_API_KEY` ou do arquivo gravado por `key set --stdin` (modo 0600).
 
-Variáveis **opcionais** (veja `.env.example`):
+Variáveis **opcionais** do servidor/gateway (veja `.env.example`):
 
 | Variável | Default | Para quê |
 |---|---|---|
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Apontar para um proxy/gateway compatível |
 | `OPENROUTER_APP_URL` | `http://localhost:3000` | Header `HTTP-Referer` de atribuição |
 | `OPENROUTER_APP_TITLE` | `Prompt Builder` | Header `X-Title` de atribuição |
+| `PROMPT_BUILDER_NO_ATTRIBUTION=on` | — | Não envia nenhum dos dois headers de atribuição (na SPA: Configurações › Privacidade) |
 | `BENCHMARK_PORT` | `3001` | Porta do backend |
 | `PB_HOST` (ou `--host`) | `127.0.0.1` | Interface de bind do backend. Fora de localhost é pedido explícito (aviso no log); com `PROMPT_BUILDER_AGENTS=1` o servidor **recusa** subir fora de localhost. `HOST` **não** vale para o bind (containers/CI exportam o hostname nele): se estiver definido fora de localhost, só gera um aviso — e, no modo agente, a recusa |
 | `PB_ALLOWED_HOSTS` | — | Nomes extras aceitos no header `Host`/`Origin`, separados por vírgula (ex.: túnel ou proxy). Sem isso, só `localhost`/`127.0.0.1`/`::1` — o resto leva 400/403 (proteção contra DNS rebinding) |
+| `PROMPT_BUILDER_AGENTS=1` | desligado | Monta `/v1/agents/*` (modo agente pela API); ausente, a rota não existe (404) |
 | `OPENROUTER_MAX_CONCURRENCY` | `32` | Teto do limitador global adaptativo de chamadas ao OpenRouter |
+| `OPENROUTER_STREAM_TRANSPORT=0` | streaming ligado | Papéis de avaliação em JSON em vez de streaming (proxy que não faz SSE) |
+| `OPENROUTER_ROLE_TIMEOUTS` | por papel | Encurta o teto do gateway por papel: `judge=60/120,competitor=90/600` (inatividade/total, em segundos) |
+| `OPENROUTER_AUDITABLE=on` | desligado | Juiz, duelo e gabarito com provedor travado (sem fallback) em toda run |
 
-Parâmetros da **run** (na tela de Nova Run, validados no backend):
+No CLI também valem `PROMPT_BUILDER_HOME` (data-dir; padrão `~/.prompt-builder`),
+`PB_RETENTION_DAYS` (TTL dos records, padrão 90; `0` desliga) e `PROMPT_BUILDER_TELEMETRY=on`
+(telemetria opt-in; desligada por padrão). O `npm run agent-setup` lê `PB_BIN_DIR` (destino dos
+lançadores) e `PB_EXTRA_AGENT_DIRS` (diretórios de skills extras, separados por `:`).
 
-| Campo | Faixa | Default (UI) |
+Parâmetros da **run** (na tela de Nova Run, validados pelo schema):
+
+| Campo | Faixa | Default |
 |---|---|---|
-| `stages` (etapas) | 1–50 | 5 |
+| `stages` (cenários) | 1–50 | 5 (treino: **10** — com menos o gate quase não consegue promover) |
 | `iterations` (treino) | 2–10 | 3 |
-| `concurrency` | 1–32 | 8 |
+| `holdoutRatio` (treino) | 0–0,5 | **0,3** (piso absoluto de 10 cenários reservados; `0` desliga) |
+| `concurrency` | 1–32 | 8 (só registrado — ver abaixo) |
 | `timeoutMs` | 1.000–300.000 | 60.000 |
 | `maxOutputTokens` | 50–16.000 | 500 |
 
 `maxOutputTokens` é um **teto absoluto**; o efetivo é `min(maxOutputTokens, maxTokens do datagen)`.
+`timeoutMs` vale para o competidor; os papéis de avaliação têm **piso próprio** (juiz 120 s, duelo
+90 s, gabarito/datagen/reescritor 180 s; menos com raciocínio desligado) — o efetivo é
+`max(timeoutMs, piso do papel)`, e o `--dry-run` mostra os valores em `roleTimeoutsMs`.
 
 > A concorrência efetiva das chamadas ao OpenRouter é governada por um **limitador global
 > adaptativo** (`OPENROUTER_MAX_CONCURRENCY`); o campo `concurrency` por run é legado (não limita
@@ -582,27 +714,47 @@ Parâmetros da **run** (na tela de Nova Run, validados no backend):
 
 ## Como rodar
 
-Um **único `npm install`** instala backend **e** front (`postinstall` cuida do `web/`).
+`npm install && npm run setup` instala a raiz **e** o `web/` (o `postinstall` saiu de propósito:
+publicado, ele quebraria o `npm i prompt-builder-cli` de quem instala o pacote — ver AGENTS.md).
+O **`MOTION_TOKEN`** (registry privado do Motion+) é **opcional**: `motion-plus` é
+`optionalDependency`, então sem o token o install pula o pacote privado e o Vite liga os
+substitutos abertos de `web/src/motion-plus-fallback/`; com o token (time, CI, Vercel) vem o pacote
+real. Token em <https://motion.dev/dashboard/tokens> (exige Motion+).
 
 ### Desenvolvimento
 
 ```bash
-npm install
+npm install && npm run setup
 npm run dev      # backend :3001 (tsx watch) + Vite :5173 (proxy de /v1 e /health)
+npm run cli -- models show openai/gpt-5-mini   # o CLI a partir do fonte (tsx)
 ```
 
 Abra **`http://localhost:5173`** e cole sua chave OpenRouter na tela de setup.
 
-### Produção
+### Produção (self-host)
 
 ```bash
-npm install
-npm run build    # compila backend (dist/) e front (web/dist/)
-npm run start    # serve API + frontend juntos em http://localhost:3001
+npm install && npm run setup
+npm run build:all   # backend (dist/) + front (web/dist/)
+npm run start       # serve API + frontend juntos em http://localhost:3001
 ```
 
-Em produção o Express serve `web/dist` e faz *fallback* de SPA para rotas que não comecem com
-`/v1` ou `/health`.
+(`npm run build` sozinho compila só o backend/CLI para `dist/` — é o que o pacote npm e o
+`npm test` usam.)
+
+Em produção o Express serve `web/dist` e faz *fallback* de SPA só para **navegação** (rotas que
+não comecem com `/v1` ou `/health`, sem extensão e fora de `/assets/`: asset ausente é 404, nunca
+o `index.html`). O SPA leva os **mesmos headers de segurança do deploy da Vercel** (CSP com
+`frame-ancestors 'none'`, `X-Frame-Options`, `nosniff`, `Referrer-Policy`, COOP), lidos do
+`vercel.json`; `/v1` e `/health` levam a mesma lista com a CSP reduzida a `frame-ancestors 'none'`
+(a do SPA bloquearia o estilo inline de um documento servido pela API).
+
+**O que a UI servida pelo backend enxerga:** o SPA detecta o backend (`GET /health` da mesma origem
+respondendo o JSON do serviço) e passa a **ler** as runs/sessões do servidor — as criadas pela API
+HTTP (`curl`, agentes) aparecem no histórico e abrem na tela de run/treino, acompanhadas pelo SSE
+de `/v1/benchmark/.../events`. É **somente leitura**: runs criadas **na UI** continuam rodando na
+aba (IndexedDB), e a key do OpenRouter não vai para o servidor. Na SPA estática (Vercel) `/health`
+é o `index.html` e esse modo fica desligado.
 
 ### Deploy estático (Vercel) — modo client-side
 
@@ -629,40 +781,68 @@ processo persistente: Railway/Render/Fly), mas **não é usado** pela SPA estát
 | Script | O que faz |
 |---|---|
 | `npm run dev` | Backend (watch) + Vite, em paralelo (`concurrently`) |
-| `npm run build` | `tsc` do backend + `tsc -b && vite build` do front |
-| `npm run start` | Roda o backend compilado (`dist/server.js`) |
+| `npm run build` | `tsc` do backend/CLI → `dist/` (o que o pacote npm publica) |
+| `npm run build:all` | `build` + `web:build` (backend e front) |
+| `npm run start` | Roda o backend compilado (`dist/server.js`), servindo `web/dist` |
+| `npm run cli -- <comando>` | O CLI a partir do fonte (tsx) |
+| `npm run setup` | Instala o `web/` (`npm --prefix web install`) |
+| `npm run agent-setup` · `:doctor` · `:uninstall` | Prepara a máquina para agentes (bins, skill, Plannotator) — ver [Começo rápido](#começo-rápido) |
 | `npm run web:dev` / `web:build` / `web:install` | Atalhos para `web/` |
-| `npm test` | **Testes de contrato** (vitest): núcleo de evolução, config, orçamento e guarda de sincronia do motor |
+| `npm test` | **Testes de contrato** (vitest; o `pretest` compila `dist/` antes) |
+| `npm run test:full` | A suíte inteira, incluindo docker/Monte Carlo (`PB_FULL=1`) |
+| `npm run lgpd:allowlist` | Regenera a allowlist LGPD por endpoint (endpoints públicos, sem key) |
+| `npm run gate:tarball` / `gate:smoke` / `gate:publint` / `gate:attw` | Portões do pacote antes de publicar (`prepublishOnly` roda todos) |
 
 > Verificação = `npm test` + type-check (`npx tsc -p tsconfig.json --noEmit` e `cd web && npx tsc -b`)
 > + execução manual. Os testes de contrato **travam o comportamento determinístico** (seeds,
-> desempates, pisos) e os whitelists silenciosos (`variationConfigFrom`, `normalizeRunRecord`) —
-> rode-os antes e depois de qualquer refactor do pipeline.
+> desempates, pisos), os whitelists silenciosos (`variationConfigFrom`, `normalizeRunRecord`), a
+> sincronia do motor (`src/` × `web/src/engine/`) e a própria documentação: `test/docs-lint.test.ts`
+> roda os exemplos de config e os comandos das docs embarcadas no validador real, e
+> `test/docs-run-examples.test.ts` passa cada exemplo de `compare`/`vary`/`train` das docs (e deste
+> README) pelo pré-voo com o orçamento escrito — rode-os antes e depois de qualquer refactor do
+> pipeline. (As cópias de worktree em `.claude/` ficam fora do vitest.)
 
 ---
 
 ## Fluxo de eventos (SSE)
 
 O backend mantém um **barramento de eventos por run** (`src/events.ts`). Ao abrir
-`GET /v1/benchmark/runs/:id/events`, o cliente recebe um `snapshot` e depois o *stream* incremental.
+`GET /v1/benchmark/runs/:id/events`, o cliente recebe um `snapshot` e depois o *stream* incremental
+(os tipos são a união `RunEvent` de `src/types.ts`; consumidor deve **ignorar** tipo desconhecido).
 
 | Evento | Quando | Carrega |
 |---|---|---|
 | `snapshot` | Ao conectar | Record completo |
 | `run.started` | Início | Record inicial |
-| `stage.generating` / `stage.generated` | Datagen | `stageIndex` / `spec` |
-| `stage.failed` | Datagen falhou (etapa pulada) | `error` |
-| `competitor.started` / `competitor.progress` / `competitor.finished` | Participante | `modelId` / `chars`,`charsPerSec`,`preview` / `response` |
-| `stage.judging` / `stage.judged` | Juiz | `stageIndex` / `judge`,`evaluation`,`scoreboard`,`totalCostUsd` |
-| `stage.gabarito` / `stage.dueled` / `duel.progress` | Julgamento por referência | progresso agregado / `duels` da etapa |
+| `variants.generating` / `variants.generated` | Geração das variantes do prompt (variation/training) | — / `contestants` |
+| `datagen.report` | Uma vez, logo após gerar os cenários (sem `stageIndex`) | `report` (pedidos/gerados/descartes/entregues, `warning` se faltou cenário) |
+| `stage.generating` / `stage.generated` | Datagen | `stageIndex` / `spec` (+ `warning` se o gabarito truncou e foi descartado) |
+| `stage.failed` | Datagen falhou (etapa pulada) | `stageIndex`, `error` |
+| `stage.gabarito` | Progresso agregado dos gabaritos (`stageIndex: -1`) | `done`, `total` |
+| `competitor.finished` | Participante terminou | `stageIndex`, `response` |
+| `stage.incomplete` | Etapa fora do placar e das médias (hoje: truncamento) | `stageIndex`, `reason`, `detail`, `contestantIds` |
+| `judge.truncated` | Veredito invalidado por saída do juiz cortada (fica ausente; duelo sem resultado) | `stageIndex`, `phase`, `contestantIds`, `kinds`, `detail` |
+| `judge.contract.changed` | O contrato do juiz mudou desde o último pin visto (recalibre antes de comparar) | `previousHash`, `currentHash`, `detail` |
+| `stage.judging` / `stage.judged` | Juiz | `stageIndex` / `judge`, `scoreboard`, `totalCostUsd` |
+| `finals.started` | Início das finais (`pickFinalists`) | `finalists` (id, label, score) |
+| `stage.dueled` | Duelos de um cenário nas finais | `stageIndex`, `duels` |
+| `duel.progress` | Progresso agregado dos duelos (sem `stageIndex`) | `done`, `total` |
+| `run.spend` | Gasto medido (`usage.cost`), acumulado e throttled | `spentUsd`, `budgetUsd`, `byRole` |
+| `run.budget` | Uma porta de orçamento decidiu numa fronteira de fase | `phase`, `projectedUsd`, `remainingUsd`, `decision` (`go`\|`stop`) |
+| `agent.started` / `agent.turn` / `agent.tool` / `agent.finished` / `agent.verified` | Modo agente (nunca a saída da ferramenta) | ids da execução + `turn`/`toolName`/`stopReason`/`results` |
 | `run.finished` / `run.error` | Fim / erro | Record final / `error` |
+
+Não existem mais `competitor.started`/`competitor.progress` (streaming ao vivo por competidor foi
+removido; `StageRecord.live` só sobrevive para ler records antigos) — a tela da run em andamento é o
+resumo + heatmap.
 
 Sessões de **treino** têm eventos análogos (`session.started`, `iteration.started/finished`,
 `iteration.promoted`, `session.converged`, `session.holdout`, `session.finished/error`) em
 `GET /sessions/:id/events`.
 
-Runs **terminais** (`finished`/`error`/`aborted`) não abrem stream "vivo": o servidor manda o
-evento terminal e fecha; o cliente fecha o `EventSource` (sem reconexão infinita). *Keepalive* a cada 15 s.
+Runs **terminais** (`finished`/`inconclusive`/`error`/`aborted`) não abrem stream "vivo": o servidor
+manda o evento terminal e fecha; o cliente fecha o `EventSource` (sem reconexão infinita).
+*Keepalive* a cada 15 s.
 
 ---
 
@@ -678,11 +858,19 @@ Base: `/v1/benchmark`. A key vai no header **`x-openrouter-key`** (quando exigid
 | `GET` | `/lgpd` | — | Base de conhecimento de conformidade LGPD |
 | `POST` | `/runs` | ✅ | Inicia run `compare`/`variation`; responde **`202 { runId }`** |
 | `POST` | `/sessions` | ✅ | Inicia sessão de **treino**; responde **`202 { sessionId }`** |
+| `POST` | `/runs/:id/cancel` · `/sessions/:id/cancel` | — | Cancela o que **este** servidor iniciou: **`202 { runId\|sessionId, aborted: true }`** (fecha `aborted`/`stoppedReason: "cancelled"` com o parcial); `404` inexistente; `409` já terminal ou de outro processo (CLI/MCP — a mensagem diz como cancelar lá) |
 | `GET` | `/runs` · `/runs/:id` | — | Histórico (resumos) · record completo |
 | `GET` | `/runs/:id/events` | — | **Stream SSE** em tempo real |
 | `GET` | `/runs/:id/export.csv` | — | Exporta os resultados em CSV |
 | `GET` | `/sessions` · `/sessions/:id` · `/sessions/:id/events` | — | Sessões de treino + stream |
+| `GET` | `/sessions/:id/report` | — | **Relatório de ciclos** do treino: `?format=json` (padrão, `prompt-builder-session-report@1`) \| `html` (página autocontida no tema do Plannotator) \| `markdown`; `&callsPerMonth=N` muda a projeção de custo |
 | `GET` | `/health` | — | Health check: `{ "status": "ok", "service": "prompt-builder" }` |
+
+Com `PROMPT_BUILDER_AGENTS=1` o servidor monta também **`/v1/agents/*`** (modo agente: `doctor`,
+`runs` + `events`/`cancel`/`export.csv` e os artefatos de cada execução); sem a variável a rota
+não existe. Rota ou método inexistente sob `/v1` responde **`404 { "error": "Rota não encontrada." }`** (JSON,
+nunca o HTML do Express). No **SIGTERM/SIGINT** o servidor aborta as runs/sessões dele, espera a
+escrita terminal (até 5 s) e sai — nada fica `running` em disco.
 
 **Exemplo — iniciar uma run (compare):**
 
@@ -700,6 +888,9 @@ curl -X POST http://localhost:3001/v1/benchmark/runs \
     "concurrency": 8, "timeoutMs": 60000, "maxOutputTokens": 500
   }'
 # -> 202 { "runId": "..." }   (acompanhe em /runs/:id/events)
+
+curl -X POST http://localhost:3001/v1/benchmark/runs/<runId>/cancel
+# -> 202 { "runId": "...", "aborted": true }
 ```
 
 > `POST /runs` faz um **pre-flight** da key (valida **antes** de começar) para falhar rápido com
@@ -717,11 +908,16 @@ Runs em `data/runs/<id>.json` e sessões de treino em `data/sessions/<id>.json` 
 - **Fila por run:** gravações de uma mesma run são **serializadas**.
 - **Órfãs viram `aborted`:** ao subir, o servidor marca como `aborted` runs presas em `running`
   (`markOrphansAsAborted`).
-- **Cache no cliente:** o frontend espelha resumos/records em **IndexedDB** (`web/src/idb.ts`) — o
-  servidor é a fonte de verdade; o cache é fallback offline.
+- **No navegador:** runs e sessões criadas **na UI** rodam na aba e vivem no **IndexedDB**
+  (`web/src/idb.ts`, db `prompt-builder` **v3**); servida pelo backend, a SPA também **lê** (só
+  leitura) as runs/sessões do servidor. A v3 acrescentou as stores do modo JEV (`jevRuns`,
+  `jevSessions`, `jevSummaries`).
 - **Biblioteca de prompts:** prompts salvos (campeões de treino/variação) vivem **só no cliente**,
-  na store `prompts` do IndexedDB v2 (`web/src/engine/promptStore.ts`), com versionamento por texto
+  na store `prompts` do IndexedDB (`web/src/engine/promptStore.ts`), com versionamento por texto
   — nada disso passa pelo backend.
+- **No CLI:** `~/.prompt-builder/` (ou `--data-dir`/`PROMPT_BUILDER_HOME`) guarda `runs/`,
+  `sessions/`, `jev-runs/`, `jev-sessions/`, `library/`, `agent-runs/` e o cache do catálogo;
+  retenção por TTL de 90 dias (`runs prune`, `PB_RETENTION_DAYS`).
 
 ---
 
@@ -743,11 +939,18 @@ status, latencyMs, tokensIn, tokensOut, costUsd, rankPosition, errorMsg, text
 Uma run longa não pode morrer por um soluço de rede ou de um modelo:
 
 - **Etapa isolada:** falha de datagen **pula a etapa**, não mata a run.
-- **Datagen com 2 tentativas** e timeout estendido (`max(timeout, 90s)`).
-- **Participante com retry** (`retries: 1`); se falhar, vira `status: error` (resposta vazia) e o
-  juiz ignora respostas inválidas.
+- **Datagen em lotes com reposição por diversidade** (laço limitado); faltou cenário = a run segue
+  com n menor e o `datagenReport` diz quanto faltou.
+- **Re-tentativa em UM ponto:** o gateway re-tenta transientes (429/5xx/rede antes do envio) até
+  4 vezes, com `Retry-After` como piso; o competidor não repete o que o gateway já re-tentou. Se
+  falhar, vira `status: error` (resposta vazia) e o juiz ignora respostas inválidas. 401/402 são
+  fatais em todo papel (a run para: key inválida ou sem crédito).
+- **Timeouts por papel:** o competidor usa o `timeoutMs` da run; juiz, duelo, gabarito, datagen e
+  reescritor têm piso próprio (ver [Configuração](#configuração)).
 - **Juiz e avaliador em `Promise.allSettled`:** um falhando não derruba o outro nem a run.
 - **Casos-limite do juiz:** 0 respostas válidas → inconclusiva; 1 resposta → auto-ranqueada.
+  Falha do juiz não é veredito: fica ausente (fora das médias); acima de 10% num papel ou com
+  menos de 5 cenários julgados a run sai `inconclusive` (CLI: exit `6`).
 - **Escrita atômica + fila por run**; **timeouts via `AbortController`** em toda chamada à OpenRouter.
 - **Mensagens de erro traduzidas** (401 = key inválida; 402 = sem crédito; 429 = rate limit).
 - **Bloqueio ≠ recusa ≠ erro:** HTTP 403 de moderação/guardrail e `finish_reason` de filtro de
@@ -766,8 +969,9 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
 
 ## Segurança da API key
 
-- A key **nunca** fica em `.env` nem no servidor: vive no **`localStorage`** do navegador e é
-  enviada **só** no header `x-openrouter-key` das chamadas que precisam dela.
+- A key **nunca** fica em `.env` nem no servidor: vive na **memória da aba** (ou no
+  **`localStorage`** do navegador, só com «Lembrar neste dispositivo») e é enviada **só** ao
+  OpenRouter nas chamadas que precisam dela (no modo servidor, no header `x-openrouter-key`).
 - O backend **não persiste** a key — usa na requisição e descarta.
 - A validação usa o endpoint **autenticado** `GET /key` (e não `/models`, que é público e
   responderia `200` até para uma key inválida), então uma key ruim é barrada **na hora**.
@@ -780,9 +984,12 @@ Uma run longa não pode morrer por um soluço de rede ou de um modelo:
 - **Custo total exibido = todos os papéis do pipeline.** O `totalCostUsd` vem do `BudgetLedger` e
   soma **datagen, gabarito, competidores, juiz, duelos e rewriter** — cada chamada conta pelo valor
   cobrado (`usage.cost`), com fallback no catálogo da OpenRouter (`costAccuracy` diz quantas saíram
-  exatas vs estimadas). `costByContestant` é a fatia **só dos competidores**: gasto de juiz/duelo
-  não é atribuível a um contestant. Os comandos `runs show`/`sessions show` trazem a quebra por
-  papel (`costByRole`).
+  exatas vs estimadas; preço desconhecido nunca vira "grátis"). `costByContestant` é a fatia
+  **só dos competidores**: gasto de juiz/duelo não é atribuível a um contestant. Os comandos
+  `runs show`/`sessions show` trazem a quebra por papel (`costByRole`). **BYOK:** o
+  `cost_details.upstream_inference_cost` vem em TODA resposta, mas só é gasto BYOK quando
+  `usage.is_byok === true` (fica em `costLedger.byok`); sem BYOK ele já está dentro do `usage.cost`
+  e somá-lo dobraria o total. O campo legado `upstreamCostUsd` não é mais escrito.
 - **LGPD:** áreas sensíveis bloqueiam o que está fora da allowlist de endpoints ZDR e forçam o
   roteamento por requisição (`provider.only` + `zdr` + `data_collection: deny` +
   `allow_fallbacks: false`); a área "geral" segue consultiva — ver

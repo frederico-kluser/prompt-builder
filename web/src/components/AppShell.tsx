@@ -336,9 +336,10 @@ export function AppShell({ children }: { children: ReactNode }) {
             />
           </ShrinkHeader>
 
-          <main style={{ paddingTop: HEADER_TALL + 16, paddingBottom: 24 }}>
-            <RouteTransition routeKey={location.pathname}>{children}</RouteTransition>
-          </main>
+          {/* A transição entre rotas NÃO mora aqui (web-live#9): ela precisa da
+              location CONGELADA por página, e isso só quem monta as <Routes>
+              tem — ver `AppRoutes` em main.tsx. */}
+          <main style={{ paddingTop: HEADER_TALL + 16, paddingBottom: 24 }}>{children}</main>
 
           {/* Barra inferior (IMPL-110): os 4 destinos ficam a1 toque abaixo de
               768px. Mora FORA do wrapper de transição, que não pode ter
@@ -360,8 +361,17 @@ export function AppShell({ children }: { children: ReactNode }) {
  * SEM transform: qualquer `transform` no wrapper vira containing block dos
  * `fixed` descendentes no iOS (IMPL-110) — a barra inferior e os toasts ficam
  * fora, mas a regra vale para o que entrar aqui.
+ *
+ * web-live#9: os filhos TÊM de ser renderizados com a location congelada
+ * (`<Routes location={…}>`). Com `mode="wait"` o AnimatePresence mantém o
+ * wrapper que sai montado até a animação terminar; se as <Routes> dele lessem
+ * a location do contexto, já resolveriam a rota NOVA — a página de destino
+ * montava duas vezes (a 1ª no wrapper que sai, descartada) e efeito de uma vez
+ * só (o rascunho "Usar como base" da biblioteca) era consumido pela cópia
+ * errada. O wrapper que sai guarda o elemento do render anterior, com a
+ * location ANTIGA: cada página monta uma vez, no seu wrapper.
  */
-function RouteTransition({ routeKey, children }: { routeKey: string; children: ReactNode }) {
+export function RouteTransition({ routeKey, children }: { routeKey: string; children: ReactNode }) {
   const ui = useMotionUITransition('ui');
   const { motionMode } = useMotionUITheme();
   const still = motionMode === 'off';

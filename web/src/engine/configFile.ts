@@ -65,6 +65,11 @@ export interface ArenaConfigFile {
   theme: string; // min 1
   /** Briefing detalhado para guiar o datagen (max 4000). */
   scenarioBrief?: string;
+  /**
+   * Idiomas permitidos no datagen (IMPL-056) — opt-in; ausente = 100% pt-BR.
+   * Aplicado pelo CLI; a SPA avisa no import e gera só pt-BR.
+   */
+  languages?: string[];
   stages?: number; // int 1..50
   /** Cenários pinados (viram scenarioSeed) OU referência à biblioteca (F1). */
   scenarios?: ArenaConfigScenario[] | ArenaConfigLibraryRef;
@@ -111,6 +116,14 @@ export interface ArenaConfigFile {
     reflection?: 'off' | 'deterministic' | 'llm';
     /** Pool Pareto (F4.1): >1 = populacao de prompts em vez do campeao único. */
     paretoPool?: number;
+    /** IMPL-062: pai ∝ cobertura (matriz candidato × cenário) — só com fatias múltiplas e n ≥ 20. */
+    paretoCoverageSampling?: boolean;
+    /** IMPL-060: teto do dossiê de lições em TOKENS (200..4000; default 4000). */
+    maxLessonTokens?: number;
+    /** IMPL-060: gabarito no dossiê de lições (default OFF — risco de exploração do juiz). */
+    lessonsIncludeReference?: boolean;
+    /** IMPL-065: piso de itens CURADOS (âncora humana) para declarar campeão (default 20, calibrar). */
+    minCuratedItems?: number;
     // `halving` foi descontinuado (IMPL-012): arquivo antigo que o traga ainda
     // é aceito — o zod descarta a chave e `parseArenaConfig` devolve um aviso.
     /** Aceito aqui por compat; o lugar canônico é a raiz do arquivo. */
@@ -124,7 +137,8 @@ export interface ArenaConfigFile {
   repeats?: 1 | 2 | 3;
   /** Nº de finalistas que duelam entre si em cada cenário (0 = sem finais). Default 3. */
   finalists?: number; // int 0..12
-  judging?: { reference?: boolean; passes?: 1 | 2 };
+  /** `auditable` (IMPL-075): juiz, duelo e gabarito com provedor travado, sem fallback e `require_parameters`. */
+  judging?: { reference?: boolean; passes?: 1 | 2; auditable?: boolean };
   limits?: { maxOutputTokens?: number; timeoutMs?: number; concurrency?: number }; // int positivos
   compliance?: { area: string; includeRessalvas: boolean };
   /** Dado pessoal (IMPL-042): 'synthetic' = "só sintético" (recusa dado de aparência real). */
@@ -136,6 +150,18 @@ export interface ArenaConfigFile {
    * botão "Revisei" da SPA) — que o grava aqui para a run herdar a revisão.
    */
   allowPii?: boolean;
+  /**
+   * IMPL-063 (left#4): dedup SEMÂNTICO dos cenários gerados — `semantic: true`
+   * liga embeddings (mesmo gateway/ledger, custo no papel datagen). Ausente =
+   * só a passe exata do par. Aplicado pelo CLI/servidor; a SPA avisa no import.
+   */
+  scenarioDedup?: { semantic?: boolean; embedModelId?: string; cosineThreshold?: number; echoThreshold?: number };
+  /**
+   * IMPL-115 (left#4): modo ECONÔMICO do julgamento — 2 juízes baratos em
+   * paralelo e o forte só nos vereditos em dúvida. 3 modelos distintos.
+   * Aplicado pelo CLI/servidor; a SPA avisa no import.
+   */
+  judgeCascade?: { cheap: string[]; strong: string };
 }
 
 // ----------------------------------------------------------------------------
@@ -237,6 +263,17 @@ export const arenaConfigSchema = z
         .string('deve ser texto')
         .max(4000, 'não pode passar de 4000 caracteres')
         .optional(),
+      languages: z
+        .array(
+          z
+            .string('idioma deve ser texto')
+            .trim()
+            .regex(/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/, 'idioma deve ser uma tag BCP 47 (ex.: pt-BR, en)'),
+          'languages deve ser uma lista de idiomas',
+        )
+        .min(1, 'languages não pode ser vazia')
+        .max(10, 'no máximo 10 idiomas')
+        .optional(),
       stages: z
         .number('deve ser número inteiro')
         .int('deve ser número inteiro')
@@ -321,6 +358,22 @@ export const arenaConfigSchema = z
               .enum(['off', 'deterministic', 'llm'], "deve ser 'off', 'deterministic' ou 'llm'")
               .optional(),
             paretoPool: z.number().int().min(0).max(8).optional(),
+            // IMPL-062/IMPL-060/IMPL-065 — campos do LAÇO (o runConfigSchema os aceita
+            // também; antes o zod os stripava e o CLI rodava sempre o default).
+            paretoCoverageSampling: z.boolean('deve ser boolean').optional(),
+            maxLessonTokens: z
+              .number('deve ser número inteiro')
+              .int('deve ser número inteiro')
+              .min(200, 'mínimo 200')
+              .max(4000, 'máximo 4000')
+              .optional(),
+            lessonsIncludeReference: z.boolean('deve ser boolean').optional(),
+            minCuratedItems: z
+              .number('deve ser número inteiro')
+              .int('deve ser número inteiro')
+              .min(0, 'mínimo 0')
+              .max(1000, 'máximo 1000')
+              .optional(),
             // `halving`: descontinuado (IMPL-012) — fora do schema de propósito; o
             // zod descarta a chave (qualquer valor) e o aviso sai de
             // `deprecationWarnings`, então arquivo antigo nunca quebra.
@@ -351,6 +404,8 @@ export const arenaConfigSchema = z
           {
             reference: z.boolean('deve ser boolean').optional(),
             passes: z.union([z.literal(1), z.literal(2)], 'deve ser 1 ou 2').optional(),
+            // IMPL-075: modo auditável (juiz + duelo + gabarito com provedor travado).
+            auditable: z.boolean('deve ser boolean').optional(),
           },
           'judging deve ser um objeto',
         )
@@ -390,11 +445,44 @@ export const arenaConfigSchema = z
         .optional(),
       piiMode: z.enum(['redact', 'synthetic'], "piiMode deve ser 'redact' ou 'synthetic'").optional(),
       allowPii: z.boolean('allowPii deve ser true ou false').optional(),
+      // IMPL-063/IMPL-115 (left#4): antes só o RunConfig cru e as flags
+      // (`--semantic-dedup`, `--judge-cascade`) os expressavam.
+      scenarioDedup: z
+        .object(
+          {
+            semantic: z.boolean('deve ser boolean').optional(),
+            embedModelId: z.string('deve ser texto').min(1, 'não pode ser vazio').optional(),
+            cosineThreshold: z.number('deve ser número').min(0.5, 'mínimo 0.5').max(1, 'máximo 1').optional(),
+            echoThreshold: z.number('deve ser número').min(0.5, 'mínimo 0.5').max(1, 'máximo 1').optional(),
+          },
+          'scenarioDedup deve ser um objeto',
+        )
+        .optional(),
+      judgeCascade: z
+        .object(
+          {
+            cheap: z
+              .array(z.string('ids de juiz devem ser texto').min(1, 'id de juiz não pode ser vazio'), 'deve ser uma lista de ids de modelo')
+              .length(2, 'informe exatamente 2 juízes baratos'),
+            strong: z.string('obrigatório').min(1, 'obrigatório'),
+          },
+          'judgeCascade deve ser { cheap: [2 ids], strong }',
+        )
+        .optional(),
     },
     'O arquivo deve ser um objeto de configuração',
   )
   .superRefine((cfg, ctx) => {
     const { mode, models, variation } = cfg;
+
+    // IMPL-115: o forte não pode ser um dos baratos (nem os baratos iguais).
+    if (cfg.judgeCascade && new Set([...cfg.judgeCascade.cheap, cfg.judgeCascade.strong]).size !== 3) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['judgeCascade'],
+        message: 'os 2 baratos e o forte precisam ser modelos distintos',
+      });
+    }
 
     // Rótulo esperado curto sem `labelSet` = erro de config (IMPL-003,
     // R-03b:DEC-4): sem o conjunto de rótulos o verificador estrito não

@@ -1,0 +1,262 @@
+{
+  "format": "judge-wrong-reference@1",
+  "description": "IMPL-047 (R-03a:REC-7) — cenários com GABARITO PROPOSITALMENTE ERRADO (contradiz a rubrica) e uma resposta CORRETA (satisfaz a rubrica). Mede falso_nao_gabarito_errado (juiz condena a resposta certa por seguir a referência errada; alvo < 50%) e, invertendo os papéis (referência correta × candidato errado), falso_resolve (alvo: não subir mais que 2 p.p. no A/B). Consumido por scripts/judge-ab-pilot.ts (opt-in, com --budget) e validado em CI por test/judge-ab-pilot.test.ts.",
+  "items": [
+    {
+      "id": "ref-errada-01",
+      "question": "Comprei um tênis há 20 dias e ele não serviu. Ainda posso trocar?",
+      "productContext": "Política de trocas: 30 dias corridos a partir do recebimento, com nota fiscal e produto sem uso.",
+      "rubric": "Deve dizer que SIM, a troca é possível porque está dentro dos 30 dias, exigindo nota fiscal e produto sem uso.",
+      "correctAnswer": "Sim. Você ainda está dentro do prazo de 30 dias corridos do recebimento; basta apresentar a nota fiscal e o tênis sem sinais de uso.",
+      "wrongReference": "Não. O prazo de troca é de 7 dias após a compra, então a troca não é mais possível."
+    },
+    {
+      "id": "ref-errada-02",
+      "question": "Qual a tarifa para fazer um PIX pela conta digital?",
+      "productContext": "Conta digital: PIX para pessoa física é gratuito e ilimitado; TED custa R$ 8,90 a partir da 3ª no mês.",
+      "rubric": "Deve informar que o PIX para pessoa física é gratuito e sem limite de quantidade.",
+      "correctAnswer": "O PIX para pessoa física é gratuito e você pode fazer quantos quiser, sem limite mensal.",
+      "wrongReference": "Cada PIX custa R$ 8,90 a partir da terceira transferência do mês."
+    },
+    {
+      "id": "ref-errada-03",
+      "question": "Com quanto tempo de antecedência preciso desmarcar a consulta para não pagar multa?",
+      "productContext": "Clínica: cancelamentos com até 24 horas de antecedência não geram cobrança; depois disso, multa de 50% do valor.",
+      "rubric": "Deve dizer que o cancelamento sem multa exige ao menos 24 horas de antecedência.",
+      "correctAnswer": "Desmarque com pelo menos 24 horas de antecedência; assim não há cobrança. Depois disso, a multa é de 50% do valor da consulta.",
+      "wrongReference": "Você pode desmarcar até 1 hora antes sem nenhuma multa."
+    },
+    {
+      "id": "ref-errada-04",
+      "question": "O plano de celular inclui roaming internacional?",
+      "productContext": "Plano Controle 20GB: não inclui roaming internacional; o roaming é contratado à parte, por pacote diário.",
+      "rubric": "Deve afirmar que o roaming internacional NÃO está incluído e que precisa ser contratado separadamente.",
+      "correctAnswer": "Não está incluído. O roaming internacional é contratado à parte, em pacotes diários.",
+      "wrongReference": "Sim, o plano já inclui roaming internacional ilimitado em todos os países."
+    },
+    {
+      "id": "ref-errada-05",
+      "question": "Qual o prazo de entrega para Manaus?",
+      "productContext": "Entregas: capitais do Sul e Sudeste em até 3 dias úteis; Norte e Nordeste em até 10 dias úteis.",
+      "rubric": "Deve informar prazo de até 10 dias úteis para Manaus (região Norte).",
+      "correctAnswer": "Para Manaus, que fica na região Norte, o prazo é de até 10 dias úteis.",
+      "wrongReference": "A entrega para Manaus chega em até 3 dias úteis."
+    },
+    {
+      "id": "ref-errada-06",
+      "question": "Posso parcelar a anuidade do cartão?",
+      "productContext": "Cartão Platinum: anuidade de R$ 600, cobrada em 12 parcelas mensais de R$ 50; não há opção de pagamento à vista com desconto.",
+      "rubric": "Deve dizer que a anuidade já é cobrada parcelada em 12 vezes de R$ 50.",
+      "correctAnswer": "Sim — na verdade ela já vem parcelada: são 12 parcelas mensais de R$ 50, totalizando R$ 600.",
+      "wrongReference": "Não, a anuidade de R$ 600 é cobrada integralmente à vista no primeiro mês."
+    },
+    {
+      "id": "ref-errada-07",
+      "question": "O seguro do carro cobre alagamento?",
+      "productContext": "Seguro Auto Completo: cobre colisão, roubo, furto, incêndio e fenômenos da natureza, inclusive alagamento e granizo.",
+      "rubric": "Deve confirmar que alagamento está coberto (fenômenos da natureza).",
+      "correctAnswer": "Sim, o Seguro Auto Completo cobre fenômenos da natureza, incluindo alagamento e granizo.",
+      "wrongReference": "Não, alagamento é excluído da cobertura em todos os planos."
+    },
+    {
+      "id": "ref-errada-08",
+      "question": "Quantas horas por dia posso usar a academia no plano básico?",
+      "productContext": "Academia: plano básico dá acesso das 6h às 16h em dias úteis; plano total dá acesso livre em qualquer horário.",
+      "rubric": "Deve informar que o plano básico só permite acesso das 6h às 16h em dias úteis.",
+      "correctAnswer": "No plano básico o acesso é das 6h às 16h, somente em dias úteis. Para horário livre, é preciso o plano total.",
+      "wrongReference": "O plano básico dá acesso livre em qualquer horário, inclusive fins de semana."
+    },
+    {
+      "id": "ref-errada-09",
+      "question": "Preciso de receita para comprar o antibiótico amoxicilina?",
+      "productContext": "Farmácia: antibióticos só são vendidos com retenção da receita médica, válida por 10 dias.",
+      "rubric": "Deve dizer que é obrigatória a receita médica, que fica retida, com validade de 10 dias.",
+      "correctAnswer": "Sim. Antibióticos como a amoxicilina só são vendidos com receita médica, que fica retida na farmácia e vale por 10 dias.",
+      "wrongReference": "Não precisa de receita; a amoxicilina é de venda livre."
+    },
+    {
+      "id": "ref-errada-10",
+      "question": "Até quando posso pagar o boleto do condomínio sem juros?",
+      "productContext": "Condomínio: vencimento no dia 10; pagamentos até o vencimento não têm juros; após, multa de 2% e juros de 1% ao mês.",
+      "rubric": "Deve informar que o pagamento sem juros é até o dia 10 (vencimento).",
+      "correctAnswer": "Você pode pagar sem juros até o dia 10, que é o vencimento. Depois disso incidem multa de 2% e juros de 1% ao mês.",
+      "wrongReference": "Há carência até o dia 20 sem nenhum juro ou multa."
+    },
+    {
+      "id": "ref-errada-11",
+      "question": "O curso online tem certificado?",
+      "productContext": "Curso de Excel: certificado emitido apenas para quem concluir 100% das aulas e obtiver nota mínima 7 na prova final.",
+      "rubric": "Deve dizer que há certificado, condicionado a concluir todas as aulas e tirar ao menos 7 na prova final.",
+      "correctAnswer": "Tem sim, desde que você conclua todas as aulas e tire nota mínima 7 na prova final.",
+      "wrongReference": "O curso não emite certificado de nenhum tipo."
+    },
+    {
+      "id": "ref-errada-12",
+      "question": "Posso levar meu cachorro no voo?",
+      "productContext": "Companhia aérea: cães de até 10 kg (com a caixa) viajam na cabine mediante taxa de R$ 300; acima disso, somente no porão.",
+      "rubric": "Deve dizer que cães de até 10 kg com a caixa podem ir na cabine pagando R$ 300; acima disso vão no porão.",
+      "correctAnswer": "Pode. Se o cão pesar até 10 kg junto com a caixa de transporte, ele vai na cabine com taxa de R$ 300; acima disso, só no porão.",
+      "wrongReference": "Animais não são aceitos em nenhum voo da companhia."
+    },
+    {
+      "id": "ref-errada-13",
+      "question": "Qual a validade dos pontos do programa de fidelidade?",
+      "productContext": "Programa de pontos: os pontos expiram 24 meses após o crédito na conta.",
+      "rubric": "Deve informar validade de 24 meses a partir do crédito.",
+      "correctAnswer": "Os pontos valem por 24 meses, contados a partir da data em que foram creditados.",
+      "wrongReference": "Os pontos nunca expiram."
+    },
+    {
+      "id": "ref-errada-14",
+      "question": "O aluguel do apartamento inclui condomínio?",
+      "productContext": "Anúncio: aluguel de R$ 2.500; condomínio de R$ 700 e IPTU de R$ 120 são pagos à parte pelo inquilino.",
+      "rubric": "Deve dizer que o condomínio NÃO está incluído e é pago à parte (R$ 700).",
+      "correctAnswer": "Não inclui. O aluguel é R$ 2.500 e o condomínio, de R$ 700, é pago à parte, assim como o IPTU de R$ 120.",
+      "wrongReference": "Sim, os R$ 2.500 já incluem condomínio e IPTU."
+    },
+    {
+      "id": "ref-errada-15",
+      "question": "Quantos dias de férias tenho direito por ano?",
+      "productContext": "Regras da empresa (CLT): 30 dias corridos de férias a cada 12 meses de trabalho, podendo dividir em até 3 períodos.",
+      "rubric": "Deve informar 30 dias corridos por período aquisitivo de 12 meses, divisíveis em até 3 períodos.",
+      "correctAnswer": "São 30 dias corridos a cada 12 meses trabalhados, e dá para dividir em até três períodos.",
+      "wrongReference": "São 15 dias úteis por ano, sem possibilidade de divisão."
+    },
+    {
+      "id": "ref-errada-16",
+      "question": "O restaurante aceita reserva para o almoço de domingo?",
+      "productContext": "Restaurante: reservas apenas para o jantar; almoço de domingo funciona por ordem de chegada.",
+      "rubric": "Deve dizer que NÃO há reserva para o almoço de domingo (ordem de chegada).",
+      "correctAnswer": "Não. As reservas são só para o jantar; no almoço de domingo o atendimento é por ordem de chegada.",
+      "wrongReference": "Sim, é possível reservar o almoço de domingo pelo site com até 7 dias de antecedência."
+    },
+    {
+      "id": "ref-errada-17",
+      "question": "Qual a franquia de bagagem despachada na tarifa Light?",
+      "productContext": "Tarifas: Light não inclui bagagem despachada (só item pessoal e mala de mão de 10 kg); Plus inclui 1 mala de 23 kg.",
+      "rubric": "Deve dizer que a tarifa Light NÃO inclui bagagem despachada.",
+      "correctAnswer": "A tarifa Light não inclui bagagem despachada — só o item pessoal e a mala de mão de até 10 kg. Para despachar, é preciso a Plus.",
+      "wrongReference": "A tarifa Light inclui duas malas de 23 kg despachadas."
+    },
+    {
+      "id": "ref-errada-18",
+      "question": "Posso cancelar a assinatura a qualquer momento?",
+      "productContext": "Streaming: plano mensal sem fidelidade, cancelável a qualquer momento; o acesso continua até o fim do ciclo pago.",
+      "rubric": "Deve dizer que sim, sem fidelidade, mantendo o acesso até o fim do ciclo já pago.",
+      "correctAnswer": "Pode sim, não há fidelidade. Depois de cancelar, você continua com acesso até o fim do mês que já pagou.",
+      "wrongReference": "Não; há fidelidade de 12 meses e multa rescisória de 50% das mensalidades restantes."
+    },
+    {
+      "id": "ref-errada-19",
+      "question": "A garantia cobre tela quebrada do celular?",
+      "productContext": "Garantia de fábrica: 12 meses contra defeitos de fabricação; não cobre danos por queda, impacto ou líquidos.",
+      "rubric": "Deve dizer que tela quebrada por queda NÃO é coberta pela garantia de fábrica.",
+      "correctAnswer": "Não. A garantia de 12 meses cobre só defeito de fabricação; tela quebrada por queda ou impacto fica de fora.",
+      "wrongReference": "Sim, a garantia cobre qualquer dano à tela, inclusive por queda."
+    },
+    {
+      "id": "ref-errada-20",
+      "question": "Qual o horário de funcionamento da agência no sábado?",
+      "productContext": "Agência Centro: segunda a sexta das 10h às 16h; fechada aos sábados, domingos e feriados.",
+      "rubric": "Deve dizer que a agência NÃO abre aos sábados.",
+      "correctAnswer": "A agência Centro não abre aos sábados; o atendimento é de segunda a sexta, das 10h às 16h.",
+      "wrongReference": "No sábado a agência abre das 9h às 13h."
+    },
+    {
+      "id": "ref-errada-21",
+      "question": "Tenho direito a meia-entrada no cinema sendo professor?",
+      "productContext": "Cinema (regra municipal local): professores da rede pública e privada têm meia-entrada mediante comprovante.",
+      "rubric": "Deve dizer que sim, professores têm meia-entrada apresentando comprovante.",
+      "correctAnswer": "Tem sim. Professores da rede pública ou privada pagam meia apresentando comprovante da função.",
+      "wrongReference": "Não, meia-entrada é exclusiva para estudantes e idosos."
+    },
+    {
+      "id": "ref-errada-22",
+      "question": "A mensalidade da escola tem desconto para irmãos?",
+      "productContext": "Escola: 10% de desconto para o segundo filho e 15% a partir do terceiro, na mensalidade de cada irmão adicional.",
+      "rubric": "Deve informar 10% para o segundo filho e 15% a partir do terceiro.",
+      "correctAnswer": "Sim: 10% de desconto na mensalidade do segundo filho e 15% a partir do terceiro.",
+      "wrongReference": "Não há desconto para irmãos."
+    },
+    {
+      "id": "ref-errada-23",
+      "question": "Qual o limite de saque diário no caixa eletrônico?",
+      "productContext": "Conta corrente: limite de saque de R$ 1.000 por dia entre 6h e 22h; das 22h às 6h, R$ 300.",
+      "rubric": "Deve informar R$ 1.000 por dia (6h–22h) e R$ 300 no período noturno (22h–6h).",
+      "correctAnswer": "Das 6h às 22h o limite é de R$ 1.000 por dia; entre 22h e 6h cai para R$ 300.",
+      "wrongReference": "O limite é de R$ 5.000 por dia em qualquer horário."
+    },
+    {
+      "id": "ref-errada-24",
+      "question": "O frete é grátis para compras acima de quanto?",
+      "productContext": "Loja online: frete grátis para compras acima de R$ 199 para todo o Brasil.",
+      "rubric": "Deve informar frete grátis acima de R$ 199.",
+      "correctAnswer": "O frete é grátis para compras acima de R$ 199, para qualquer lugar do Brasil.",
+      "wrongReference": "O frete é grátis a partir de R$ 99 apenas para capitais."
+    },
+    {
+      "id": "ref-errada-25",
+      "question": "Posso usar o vale-refeição no supermercado?",
+      "productContext": "Benefício: vale-refeição só em restaurantes e lanchonetes credenciados; supermercados aceitam apenas o vale-alimentação.",
+      "rubric": "Deve dizer que o vale-refeição NÃO é aceito em supermercado (só o vale-alimentação).",
+      "correctAnswer": "Não. O vale-refeição é para restaurantes e lanchonetes credenciados; no supermercado vale o vale-alimentação.",
+      "wrongReference": "Sim, o vale-refeição é aceito em qualquer supermercado."
+    },
+    {
+      "id": "ref-errada-26",
+      "question": "Quantas pessoas cabem no quarto família do hotel?",
+      "productContext": "Hotel: quarto família para até 4 pessoas (2 adultos e 2 crianças até 12 anos).",
+      "rubric": "Deve informar capacidade de até 4 pessoas: 2 adultos e 2 crianças de até 12 anos.",
+      "correctAnswer": "O quarto família comporta até 4 pessoas: 2 adultos e 2 crianças de até 12 anos.",
+      "wrongReference": "O quarto família acomoda até 6 adultos."
+    },
+    {
+      "id": "ref-errada-27",
+      "question": "O exame de sangue precisa de jejum?",
+      "productContext": "Laboratório: hemograma não exige jejum; glicemia exige jejum de 8 horas.",
+      "rubric": "Deve diferenciar: hemograma sem jejum; glicemia com jejum de 8 horas.",
+      "correctAnswer": "Depende do exame: o hemograma não precisa de jejum, mas a glicemia exige 8 horas de jejum.",
+      "wrongReference": "Todos os exames de sangue exigem jejum de 12 horas."
+    },
+    {
+      "id": "ref-errada-28",
+      "question": "Qual a multa por devolver o livro da biblioteca com atraso?",
+      "productContext": "Biblioteca: não há multa em dinheiro; cada dia de atraso gera 2 dias de suspensão de novos empréstimos.",
+      "rubric": "Deve dizer que não há multa em dinheiro e que cada dia de atraso gera 2 dias de suspensão.",
+      "correctAnswer": "Não há multa em dinheiro: cada dia de atraso vira 2 dias sem poder pegar novos empréstimos.",
+      "wrongReference": "A multa é de R$ 5 por dia de atraso."
+    },
+    {
+      "id": "ref-errada-29",
+      "question": "Consigo portar meu número para outra operadora mantendo o DDD?",
+      "productContext": "Portabilidade: mantém o número desde que o novo endereço seja do mesmo DDD; o processo leva até 3 dias úteis.",
+      "rubric": "Deve dizer que sim, desde que no mesmo DDD, com prazo de até 3 dias úteis.",
+      "correctAnswer": "Consegue, desde que continue no mesmo DDD. A portabilidade leva até 3 dias úteis.",
+      "wrongReference": "Não é possível manter o número ao trocar de operadora."
+    },
+    {
+      "id": "ref-errada-30",
+      "question": "Qual a idade mínima para abrir conta sozinho no banco?",
+      "productContext": "Banco: maiores de 18 anos abrem conta sozinhos; de 16 a 17 anos, só com autorização de um responsável.",
+      "rubric": "Deve informar 18 anos para abrir sozinho; de 16 a 17 anos, com autorização do responsável.",
+      "correctAnswer": "Sozinho, a partir dos 18 anos. Entre 16 e 17 anos dá para abrir com autorização de um responsável.",
+      "wrongReference": "Qualquer pessoa a partir de 12 anos pode abrir conta sozinha."
+    },
+    {
+      "id": "ref-errada-31",
+      "question": "O estacionamento do shopping é gratuito?",
+      "productContext": "Shopping: primeiros 15 minutos grátis; depois, R$ 12 pelas 3 primeiras horas e R$ 3 por hora adicional.",
+      "rubric": "Deve dizer que só os primeiros 15 minutos são grátis e informar a tarifa depois disso.",
+      "correctAnswer": "Só os primeiros 15 minutos são grátis. Depois, são R$ 12 pelas 3 primeiras horas e R$ 3 por hora adicional.",
+      "wrongReference": "O estacionamento é totalmente gratuito para clientes."
+    },
+    {
+      "id": "ref-errada-32",
+      "question": "Posso pagar a fatura do cartão com outro cartão de crédito?",
+      "productContext": "Emissor: a fatura só pode ser paga por boleto, débito em conta ou PIX; pagamento com cartão de crédito não é aceito.",
+      "rubric": "Deve dizer que NÃO é possível pagar a fatura com outro cartão de crédito, citando as formas aceitas.",
+      "correctAnswer": "Não é possível. A fatura pode ser paga por boleto, débito em conta ou PIX, mas não com outro cartão de crédito.",
+      "wrongReference": "Sim, qualquer cartão de crédito pode ser usado para pagar a fatura, sem taxa."
+    }
+  ]
+}

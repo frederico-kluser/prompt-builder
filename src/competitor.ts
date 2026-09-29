@@ -2,6 +2,8 @@ import {
   catalogDeniesReasoning,
   chatCompletionStream,
   guessPromptTokens,
+  isCallerRetryable,
+  isFatalGatewayError,
   isGatewayBlocked,
   peekModelsCache,
   type ChatMessage,
@@ -215,12 +217,19 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
         maxTokens,
         ...(res.truncationSignals?.length ? { truncationSignals: res.truncationSignals } : {}),
         ...retryFields(),
+        // IMPL-075: o provedor que serviu (payload/GET /generation) vai para o
+        // record — sem ele a variação de provedor se confundia com a de prompt.
+        ...(res.provider && (res.provider.name || res.provider.upstreamId || res.provider.serviceTier)
+          ? { provider: { ...res.provider } }
+          : {}),
       };
     } catch (err) {
       // Orcamento/cancelamento sao SINAIS DE CONTROLE: repetir a chamada so
       // gastaria mais, e devolver status 'error' faria a run parecer completa
-      // com um competidor "que falhou". Sai do laco propagando.
-      if (isControlSignal(err)) throw err;
+      // com um competidor "que falhou". Sai do laco propagando. Key recusada
+      // (401) / sem credito (402) idem (cli#3): nenhuma nova tentativa nem
+      // outro competidor conserta — a run tem de parar com exit 4/5.
+      if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
       spentOnFailed += attemptCost?.usd ?? 0;
       // Bloqueio de moderacao/guardrail (403) e DETERMINISTICO para a mesma
       // entrada: repetir so gastaria tempo, e nao e falha de infraestrutura
@@ -244,6 +253,11 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
       lastError = err;
       attempt += 1;
       console.error(`[competitor ${modelId}] tentativa ${attempt} falhou:`, err);
+      // IMPL-073 (R-07a:REC-3): UM nível de retry por resposta. HTTP
+      // classificado (429/5xx já re-tentados pelo gateway; 4xx não muda) e
+      // desfecho desconhecido depois do despacho (pode ter sido cobrado) NÃO
+      // repetem aqui — antes 429 em rajada virava 2 × 7 = 14 POSTs.
+      if (!isCallerRetryable(err)) break;
     }
   }
 

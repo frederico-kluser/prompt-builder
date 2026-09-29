@@ -9,6 +9,7 @@ import {
   createSession,
   estimateConfigCost,
   isCostConfirmationRequired,
+  isKeyMissing,
   fetchLgpd,
   fetchModels,
   fetchTechniques,
@@ -39,20 +40,34 @@ import {
   DEFAULT_DATAGEN,
   DEFAULT_DATAGEN_COMPARE,
   DEFAULT_MAX_OUTPUT_TOKENS,
+  TRAINING_DEFAULT_STAGES,
   applyArenaConfigToForm,
   defaultArenaFormState,
   exportArenaConfig,
   formatArenaWarning,
   jsonOnlyActiveValue,
   jsonOnlyRunPatch,
+  parseLanguages,
   promptGroupProblem,
+  stagesForModeChange,
+  trainingPowerNotice,
   type ArenaFieldWarning,
+  type AutoStages,
   type ArenaFormState,
   type ConfigRow,
 } from '../arenaForm';
 import { CostConfirmDialog } from '../components/CostConfirmDialog';
-import { AreaRow, LinkButton, NumRow, SwitchRow, TxtNumRow } from '../components/formRows';
+import { KeySetup } from '../components/KeySetup';
+import { AreaRow, LinkButton, NumRow, SwitchRow, TextRow, TxtNumRow } from '../components/formRows';
 import { GuidedSetup, SECTION_STEP, type GuidedStep } from '../components/GuidedSetup';
+import {
+  clampStages,
+  defaultReferenceFor,
+  effortOfTuning,
+  reasoningFromTuning,
+  referenceProblemTexts,
+  stagesProblem,
+} from '../newRunRules';
 import {
   AREA_LIVRE,
   allowlistNotice,
@@ -108,7 +123,9 @@ const MODES: { id: RunMode; label: string }[] = [
 const MODE_DESCRIPTIONS: Record<RunMode, string> = {
   compare: 'Vários modelos respondem aos mesmos cenários; os juízes decidem quem foi melhor.',
   variation: 'Um modelo, vários system prompts — descubra qual prompt funciona melhor.',
-  training: 'O prompt evolui a cada rodada até convergir no melhor.',
+  // web-live#5: "evolui a cada rodada" prometia promoção garantida — ela só
+  // acontece com ganho acima da margem E significativo (gate da melhor de K).
+  training: 'O prompt evolui rodada a rodada: uma variante só vira campeã quando supera a atual com margem e significância.',
 };
 
 /**
@@ -122,6 +139,17 @@ type SectionId = 'cenarios' | 'sujeitos' | 'juizes' | 'avancado';
 interface Problem {
   section: SectionId;
   text: string;
+  /**
+   * Passo do GUIADO que mostra o campo, quando não é o da seção (ex.: o
+   * gabarito mora no Avançado da completa mas em "Participantes" no guiado).
+   */
+  step?: GuidedStep;
+  /**
+   * O campo NÃO existe no guiado (técnicas/variantes manuais, eixo de configs,
+   * grupo multi-prompt): no guiado a pendência abre a configuração COMPLETA na
+   * seção — nunca um passo que não mostra o campo (IMPL-106 d).
+   */
+  onlyComplete?: boolean;
 }
 
 function fmtUsd(x: number): string {
@@ -210,7 +238,12 @@ export function NewRun() {
   const [avancadoOpen, setAvancadoOpen] = useState(false);
   const [theme, setTheme] = useState(INIT.theme);
   const [scenarioBrief, setScenarioBrief] = useState(INIT.scenarioBrief);
+  // IMPL-056: idiomas do datagen (texto "pt-BR, en"; '' = só pt-BR).
+  const [languages, setLanguages] = useState(INIT.languages);
   const [stages, setStages] = useState(INIT.stages);
+  // web-live#5: o nº de cenários que o modo treino SUBIU sozinho (de → para).
+  // Ao sair do treino, volta ao anterior se o usuário não mexeu no valor.
+  const autoStages = useRef<AutoStages | null>(null);
   const [concurrency, setConcurrency] = useState(INIT.concurrency);
   const [timeoutMs, setTimeoutMs] = useState(INIT.timeoutMs);
   // Máx. tokens por resposta: campo LIVRE (texto). ''/inválido cai no default
@@ -317,6 +350,12 @@ export function NewRun() {
   const [modelsLoading, setModelsLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Key sumida" no meio da configuração (IMPL-082 crit. iv): a key vive só na
+  // memória da aba por default e o navegador pode apagar a lembrada. O que
+  // gasta recusa com `KeyMissingError` ANTES de qualquer fetch — aqui isso vira
+  // RE-PROMPT (o KeySetup no topo, com tudo o que foi preenchido intacto),
+  // nunca um erro genérico no rodapé.
+  const [needKey, setNeedKey] = useState(false);
   // Só depois de o usuário TENTAR iniciar a pendência vira erro (vermelho) —
   // validação prematura em vermelho é anti-padrão.
   const [tried, setTried] = useState(false);
@@ -345,6 +384,32 @@ export function NewRun() {
   // escolha vinda de arquivo (refJudgingChoice !== null).
   const referenceJudging = refJudgingChoice ?? (mode !== 'compare' || compareAxis === 'configs');
 
+  // IMPL-048: nos modos de prompt o gabarito é OBRIGATÓRIO e distinto dos
+  // juízes e do modelo sob teste (o schema do Node e o portão da SPA recusam
+  // sem ele). Ao entrar num desses modos sem gabarito, ele ganha um default —
+  // o 1º juiz preferido LIVRE, como os demais papéis têm default —, visível no
+  // passo "Participantes" do guiado e no Avançado (citado em Juízes) da
+  // completa. Ao voltar ao compare, o default INTOCADO sai: lá o gabarito é
+  // opcional (vazio = 1º juiz) e o id poderia colidir com um competidor.
+  const autoReference = useRef<string | null>(null);
+  useEffect(() => {
+    if (isSingle) {
+      if (referenceModel.length === 0) {
+        const id = defaultReferenceFor(judge, contestantModel);
+        if (id) {
+          autoReference.current = id;
+          setReferenceModel([id]);
+        }
+      }
+    } else if (autoReference.current && referenceModel[0] === autoReference.current) {
+      autoReference.current = null;
+      setReferenceModel([]);
+    }
+    // Só na troca de modo (inclusive a que vem de um import): depois disso o
+    // gabarito é do usuário — até removê-lo (vira pendência, nunca re-default).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSingle]);
+
   useEffect(() => {
     let active = true;
     fetchModels()
@@ -368,6 +433,9 @@ export function NewRun() {
       const data = JSON.parse(raw) as { text?: unknown; name?: unknown };
       if (typeof data.text === 'string' && data.text.trim()) {
         setBasePrompt(data.text);
+        // web-live#9: prompt base só existe nos modos de PROMPT — em 'compare'
+        // o campo nem aparece e o rascunho sumiria no envio sem aviso.
+        if (mode === 'compare') setMode('variation');
         const name = typeof data.name === 'string' && data.name.trim() ? data.name : 'sem nome';
         setDraftNotice(`Prompt '${name}' carregado da biblioteca.`);
       }
@@ -466,10 +534,21 @@ export function NewRun() {
   const importedList: StageSpec[] = rawStages ?? pack?.scenarios ?? [];
   const importedCount = rawStages ? rawStages.length : seedCount;
   const importedRefs = importedList.filter((s) => s.reference?.trim()).length;
+  // Nº de cenários efetivo (inteiro 1–50): o input aceita qualquer coisa na
+  // digitação — o clamp mora AQUI, uma vez, e envio/estimativa/textos leem ele.
+  const stagesNum = clampStages(stages);
   // O orchestrator só gera o que falta p/ `stages`; garante etapas >= seed.
-  const plannedStages = rawStages ? rawStages.length : Math.max(stages, seedCount);
+  const plannedStages = rawStages ? rawStages.length : Math.max(stagesNum, seedCount);
   // Só chama o gerador quando ainda faltam cenários para completar `stages`.
   const precisaGerar = !rawStages && plannedStages > seedCount;
+  // Finais (duelos) só existem em etapa COM gabarito — gerado (julgamento por
+  // referência) ou importado no cenário. Sem nenhum, o duelo nunca roda
+  // (web-live#10): a tela não pode prometê-lo nem oferecer controle que não age.
+  const temGabarito = referenceJudging || importedRefs > 0;
+  // web-live#5: poder do gate de promoção do treino (null = suficiente).
+  const trainingPower = mode === 'training' ? trainingPowerNotice(plannedStages, holdoutRatio) : null;
+  // IMPL-056: idiomas da tela → `languages` da run (inválido = pendência).
+  const languagesParsed = parseLanguages(languages);
 
   // Guard-rail anti-viés de painel (consultivo): juiz da MESMA família dos
   // modelos avaliados, ou painel pouco diverso.
@@ -509,8 +588,7 @@ export function NewRun() {
 
   /** Esforço ajustado no modelo ('' / ausente = padrão do provedor, não envia). */
   function effortOf(modelId?: string): ReasoningLevel | undefined {
-    const level = modelId ? tuning[modelId]?.effort : undefined;
-    return level ? level : undefined;
+    return effortOfTuning(tuning, modelId);
   }
 
   /** Temperatura ajustada no modelo (texto → número, com clamp). */
@@ -522,7 +600,7 @@ export function NewRun() {
   /** Recorte do estado que o arena-config descreve (ver `../arenaForm`). */
   function snapshot(): ArenaFormState {
     return {
-      mode, theme, scenarioBrief, stages, pack, customStages, basePrompt, taskDescription, promptImported,
+      mode, theme, scenarioBrief, languages, stages, pack, customStages, basePrompt, taskDescription, promptImported,
       datagen, judge, referenceModel, contestantModel, competitors, compareAxis, competitorConfigs,
       rewriterModel, tuning, optimize, techniques, manualVariants, iterations, minGain, holdoutRatio,
       feedbackDriven, duelsOn, finalists, twoPassJudge, maxOutputTokens, timeoutMs, concurrency,
@@ -533,9 +611,11 @@ export function NewRun() {
 
   /** Escreve um estado do assistente de volta na tela (um setter por campo). */
   function applyFormState(f: ArenaFormState) {
-    setMode(f.mode);
+    // O arquivo manda no nº de cenários: nada de default de treino por cima.
+    setMode(f.mode, { keepStages: true });
     setTheme(f.theme);
     setScenarioBrief(f.scenarioBrief);
+    setLanguages(f.languages);
     setStages(f.stages);
     setPack(f.pack);
     setCustomStages(f.customStages);
@@ -662,7 +742,10 @@ export function NewRun() {
         ),
       );
     } catch (err) {
-      setGenBaseError((err as Error).message);
+      if (isKeyMissing(err)) {
+        setNeedKey(true);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else setGenBaseError((err as Error).message);
     } finally {
       setGenBaseLoading(false);
     }
@@ -678,12 +761,13 @@ export function NewRun() {
     // O gerador só é exigido quando ele vai ser chamado: com os cenários já
     // prontos no arquivo, o campo nem aparece — não pode travar o botão.
     if (precisaGerar && datagen.length !== 1)
-      out.push({ section: 'cenarios', text: 'Selecione 1 modelo gerador.' });
+      // No guiado o seletor do gerador mora em "Participantes" (não em "Teste").
+      out.push({ section: 'cenarios', step: 'participantes', text: 'Selecione 1 modelo gerador.' });
     if (judge.length < 1) out.push({ section: 'juizes', text: 'Selecione ao menos 1 juiz.' });
     if (mode === 'compare') {
       if (compareAxis === 'configs') {
         if (competitorConfigs.filter((r) => r.modelId).length < 2)
-          out.push({ section: 'sujeitos', text: 'Preencha o modelo em pelo menos 2 configs.' });
+          out.push({ section: 'sujeitos', text: 'Preencha o modelo em pelo menos 2 configs.', onlyComplete: true });
       } else if (competitors.length < 2) {
         out.push({ section: 'sujeitos', text: 'Selecione pelo menos 2 modelos competidores.' });
       }
@@ -693,13 +777,47 @@ export function NewRun() {
       if (variantCount < 2)
         out.push({
           section: 'sujeitos',
+          // Técnicas e variantes manuais só existem na completa.
+          onlyComplete: true,
           text: optimize
             ? 'Selecione ao menos 2 técnicas (ou 1 técnica + prompt base).'
             : 'Escreva ao menos 2 variantes manuais (ou 1 + prompt base).',
         });
     }
+    // Papéis separados (IMPL-048): a mesma regra do schema/portão da SPA. O
+    // gabarito mora no Avançado da completa (o irPara abre) e em
+    // "Participantes" no guiado.
+    for (const text of referenceProblemTexts({
+      mode,
+      reference: referenceModel[0],
+      judges: judge,
+      competitors: compareAxis === 'configs' ? competitorConfigs.map((r) => r.modelId).filter(Boolean) : competitors,
+      contestant: contestantModel[0],
+    })) {
+      out.push({ section: 'avancado', step: 'participantes', text });
+    }
+    // Cenários: só quando o campo aparece (com etapas cruas, `stages` nem vale).
+    const cenarios = rawStages ? null : stagesProblem(stages);
+    if (cenarios) out.push({ section: 'avancado', text: cenarios });
+    // web-live#5: treino que MATEMATICAMENTE não promove nada (menor p possível
+    // > α) não sai — é sessão paga sem resultado possível. O campo que resolve é
+    // o nº de cenários (Avançado na completa, "Limites" no guiado); com etapas
+    // cruas o arquivo fixa o total e quem resolve é a seção Cenários da completa.
+    else if (trainingPower?.blocking) {
+      out.push(
+        rawStages
+          ? {
+              section: 'cenarios',
+              onlyComplete: true,
+              text: `${trainingPower.text} Importe mais cenários ou remova os importados.`,
+            }
+          : { section: 'avancado', text: trainingPower.text },
+      );
+    }
+    // IMPL-056: o campo de idiomas só existe na completa (Avançado).
+    if (!languagesParsed.ok) out.push({ section: 'avancado', text: languagesParsed.error, onlyComplete: true });
     const grupo = promptGroupProblem({ mode, promptGroup, promptId });
-    if (grupo) out.push({ section: 'avancado', text: grupo });
+    if (grupo) out.push({ section: 'avancado', text: grupo, onlyComplete: true });
     if (budget.trim() !== '' && !(parseFloat(budget) > 0))
       out.push({
         section: 'avancado',
@@ -719,11 +837,13 @@ export function NewRun() {
    * no completo, abre o "Avançado" se preciso e rola/foca a âncora. Nunca troca
    * de aba (a página é única).
    */
-  function irPara(section: SectionId) {
-    if (formStyle === 'guided') {
-      setGuidedStep(SECTION_STEP[section]);
+  function irPara(section: SectionId, step?: GuidedStep, onlyComplete?: boolean) {
+    if (formStyle === 'guided' && !onlyComplete) {
+      setGuidedStep(step ?? SECTION_STEP[section]);
       return;
     }
+    // Campo que o guiado não tem: abre a completa (mesmo estado) na seção.
+    if (formStyle === 'guided') setFormStyle('complete');
     if (section === 'avancado') setAvancadoOpen(true);
     // Depois do render (o Avançado precisa abrir antes de existir no layout).
     requestAnimationFrame(() => {
@@ -738,8 +858,13 @@ export function NewRun() {
   /**
    * Troca o modo. Se o gerador de cenários ainda for um DEFAULT intocado, ele
    * segue o default do modo (compare ≠ modos de papel — ver `arenaForm.ts`).
+   *
+   * web-live#5: entrar no TREINO com menos de {@link TRAINING_DEFAULT_STAGES}
+   * cenários sobe o nº para ele (com 5 o gate da melhor de K só promove sem
+   * nenhum empate — na prática, nunca); sair do treino devolve o valor anterior
+   * se o usuário não mexeu. `keepStages` = o import, em que o arquivo manda.
    */
-  function setMode(m: RunMode) {
+  function setMode(m: RunMode, opts: { keepStages?: boolean } = {}) {
     setModeRaw(m);
     const alvo = m === 'compare' ? DEFAULT_DATAGEN_COMPARE : DEFAULT_DATAGEN;
     setDatagen((atual) =>
@@ -747,6 +872,13 @@ export function NewRun() {
         ? [alvo]
         : atual,
     );
+    if (opts.keepStages) {
+      autoStages.current = null;
+      return;
+    }
+    const prox = stagesForModeChange({ from: mode, to: m, stages, auto: autoStages.current });
+    autoStages.current = prox.auto;
+    if (prox.stages !== stages) setStages(prox.stages);
   }
 
   /** Troca a superfície do formulário e grava a preferência. */
@@ -767,18 +899,16 @@ export function NewRun() {
   function buildConfig(): RunConfig {
     // Reasoning por papel: sai do ajuste do modelo daquele papel (o esforço mora
     // no modelo). No compare por modelos ele é POR competidor — vai lá embaixo,
-    // em competitorConfigs.
-    const reasoning: ReasoningConfig = {};
-    const competitorEffort = isSingle ? effortOf(contestantModel[0]) : undefined;
-    if (competitorEffort) reasoning.competitor = competitorEffort;
-    // O engine usa um nível só para juiz e gabarito (`reasoning.judge`); com o
-    // juiz no padrão, o ajuste do modelo de gabarito é quem manda.
-    const judgeEffort = effortOf(judge[0]) ?? effortOf(referenceModel[0]);
-    if (judgeEffort) reasoning.judge = judgeEffort;
-    const datagenEffort = effortOf(datagen[0]);
-    if (datagenEffort) reasoning.datagen = datagenEffort;
-    const rewriterEffort = effortOf(rewriterModel[0]);
-    if (rewriterEffort) reasoning.rewriter = rewriterEffort;
+    // em competitorConfigs. Gabarito em `gab`, nunca vazando no juiz/duelo.
+    const reasoning: ReasoningConfig = reasoningFromTuning({
+      tuning,
+      isSingle,
+      contestant: contestantModel[0],
+      judge: judge[0],
+      reference: referenceModel[0],
+      datagen: datagen[0],
+      rewriter: rewriterModel[0],
+    });
     // Temperatura do modelo sob teste: vale para TODAS as variantes (o que se
     // compara são os prompts, não as configs).
     const contestantTemp = isSingle ? tempOf(contestantModel[0]) : undefined;
@@ -801,6 +931,9 @@ export function NewRun() {
       ...(isLivre ? {} : { compliance: { area: complianceArea, includeRessalvas } }),
       ...(piiMode === 'synthetic' ? { piiMode } : {}),
       ...(scenarioBrief.trim() ? { scenarioBrief: scenarioBrief.trim() } : {}),
+      // IMPL-056: opt-in de idiomas (ausente = 100% pt-BR). Inválido não sai:
+      // é pendência e o submit para antes.
+      ...(languagesParsed.ok && languagesParsed.languages ? { languages: languagesParsed.languages } : {}),
       // Seed do pacote: perde o `id` do arquivo (o engine re-rotula as etapas).
       ...(seedCount > 0 && pack ? { scenarioSeed: pack.scenarios.map(({ id, ...spec }) => spec) } : {}),
       // Explícito: o default muda por modo/eixo, então o valor efetivo vai sempre.
@@ -843,10 +976,13 @@ export function NewRun() {
         };
       } else if (competitors.some((id) => effortOf(id) || tempOf(id) !== undefined)) {
         // Ajuste por competidor: uma lista de ids não representa mais a run —
-        // promove para competitorConfigs, NA ORDEM dos chips.
+        // promove para competitorConfigs, NA ORDEM dos chips. Continua sendo
+        // uma lista de MODELOS: `competitorAnchor: false` impede o 1º de virar
+        // "base/controlo" (regra do eixo compare-llms — web-code#16).
         config = {
           mode,
           ...common,
+          competitorAnchor: false,
           competitorConfigs: competitors.map((id) => {
             const t = tempOf(id);
             const e = effortOf(id);
@@ -904,6 +1040,11 @@ export function NewRun() {
         setPendingLaunch({ config, estimate: err.estimate });
         return;
       }
+      if (isKeyMissing(err)) {
+        setNeedKey(true);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
       setError((err as Error).message);
     }
   }
@@ -914,8 +1055,13 @@ export function NewRun() {
     const faltas = problems();
     if (faltas.length) {
       setTried(true);
-      irPara(faltas[0].section);
-      return setError(faltas[0].text);
+      irPara(faltas[0].section, faltas[0].step, faltas[0].onlyComplete);
+      // A pendência NÃO vira `error`: com `tried` o rodapé já mostra a atual
+      // (em vermelho). Gravada aqui, ela sobrevivia à correção — trocar de
+      // modo depois de "Iniciar" com 4 cenários no treino deixava "Com 4
+      // cenários o treino…" no rodapé do compare (medido na verificação do
+      // web-live#5).
+      return;
     }
     let config = buildConfig();
 
@@ -989,8 +1135,12 @@ export function NewRun() {
                   não podem virar paradas novas antes do "Iniciar" (o orçamento
                   IMPL-106 (c) é contrato). Aqui entram o arquivo da configuração
                   e a SUPERFÍCIE do formulário (guiado/completo), que sem isto
-                  estourava o orçamento no modo variation. */}
-              <RovingToolbar label="Ações da configuração" count={4} className="flex items-center gap-2">
+                  estourava o orçamento no modo variation.
+                  web-live#13: a 390 px a fileira passava da tela (466 px de
+                  página) — o invólucro de ações do PageHeader não encolhe. Em
+                  tela estreita Importar/Exportar ficam só com o ícone (o nome
+                  acessível e o title seguem) e a fileira pode quebrar. */}
+              <RovingToolbar label="Ações da configuração" count={4} className="flex flex-wrap items-center gap-2">
                 <RovingItem index={0}>
                   {(roving) => (
                     <Button
@@ -998,18 +1148,28 @@ export function NewRun() {
                       variant="outline"
                       size="sm"
                       {...roving}
+                      aria-label="Importar JSON"
+                      title="Importar JSON"
                       onClick={() => importRef.current?.click()}
                     >
                       <Upload aria-hidden="true" />
-                      Importar JSON
+                      <span className="hidden sm:inline">Importar JSON</span>
                     </Button>
                   )}
                 </RovingItem>
                 <RovingItem index={1}>
                   {(roving) => (
-                    <Button type="button" variant="outline" size="sm" {...roving} onClick={handleExport}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      {...roving}
+                      aria-label="Exportar JSON"
+                      title="Exportar JSON"
+                      onClick={handleExport}
+                    >
                       <Download aria-hidden="true" />
-                      Exportar JSON
+                      <span className="hidden sm:inline">Exportar JSON</span>
                     </Button>
                   )}
                 </RovingItem>
@@ -1075,6 +1235,16 @@ export function NewRun() {
               </SegmentedToggleOption>
             ))}
           </SegmentedToggle>
+        )}
+
+        {needKey && (
+          <div className="mt-4 flex flex-col gap-3">
+            <Banner tone="warn">
+              A chave da OpenRouter não está mais nesta aba (recarregou sem «Lembrar neste dispositivo», ou o
+              navegador apagou os dados do site). Conecte-a de novo — o que você preencheu continua aqui.
+            </Banner>
+            <KeySetup onSaved={() => setNeedKey(false)} />
+          </div>
         )}
 
         {piiImport && (
@@ -1175,8 +1345,16 @@ export function NewRun() {
             basePrompt={basePrompt}
             setBasePrompt={setBasePrompt}
             stages={stages}
+            plannedStages={plannedStages}
             setStages={setStages}
+            importedCount={importedCount}
+            importedRefs={importedRefs}
+            importedFixed={!!rawStages}
+            precisaGerar={precisaGerar}
+            referenceJudging={referenceJudging}
+            trainingPower={trainingPower}
             budget={budget}
+            budgetNum={budgetNum}
             setBudget={setBudget}
             competitors={competitors}
             setCompetitors={setCompetitors}
@@ -1186,6 +1364,8 @@ export function NewRun() {
             setDatagen={setDatagen}
             judge={judge}
             setJudge={setJudge}
+            referenceModel={referenceModel}
+            setReferenceModel={setReferenceModel}
             duelsOn={duelsOn}
             setDuelsOn={setDuelsOn}
             finalists={finalists}
@@ -1197,6 +1377,7 @@ export function NewRun() {
             problems={pendencias}
             estimate={launchEstimate ? { low: launchEstimate.low, high: launchEstimate.high } : null}
             onOpenClassic={() => setFormStyle('complete')}
+            tried={tried}
           />
         ) : (
         <div className="mt-6 flex flex-col gap-5">
@@ -1314,7 +1495,7 @@ export function NewRun() {
                                 title={`Config ${i + 1}`}
                                 value={row.modelId ? [row.modelId] : []}
                                 onChange={(ids) => updateConfigRow(i, { modelId: ids[0] ?? '' })}
-                                excludeIds={[...datagen, ...judge]}
+                                excludeIds={[...datagen, ...judge, ...referenceModel]}
                                 models={participantModels}
                                 loading={modelsLoading}
                               />
@@ -1373,7 +1554,7 @@ export function NewRun() {
                         title="Competidores"
                         value={competitors}
                         onChange={setCompetitors}
-                        excludeIds={[...datagen, ...judge]}
+                        excludeIds={[...datagen, ...judge, ...referenceModel]}
                         models={participantModels}
                         loading={modelsLoading}
                         tuning={tuning}
@@ -1391,7 +1572,7 @@ export function NewRun() {
                       title="Modelo sob teste"
                       value={contestantModel}
                       onChange={setContestantModel}
-                      excludeIds={[...datagen, ...judge]}
+                      excludeIds={[...datagen, ...judge, ...referenceModel]}
                       models={participantModels}
                       loading={modelsLoading}
                       tuning={tuning}
@@ -1482,7 +1663,21 @@ export function NewRun() {
             title="Juízes"
             pending={pendenciaEm('juizes')}
             status={judge.length === 1 ? '1 juiz' : `${judge.length} juízes`}
-            footer="Gerador e juízes rodam com temperatura fixa para o resultado ser reproduzível."
+            footer={
+              <>
+                {isSingle && (
+                  // O gabarito é obrigatório aqui (IMPL-048) mas mora no Avançado
+                  // (orçamento de Tab do IMPL-106): fica CITADO à vista, sem
+                  // virar parada de Tab — trocá-lo é no Avançado.
+                  <span className="mb-1 block">
+                    Gabarito: <span className="font-mono text-[12px] text-foreground">{referenceModel[0] ?? '—'}</span>{' '}
+                    — escreve a resposta ideal de cada cenário e não pode ser juiz nem o modelo sob teste. Troque
+                    em Avançado.
+                  </span>
+                )}
+                Gerador e juízes rodam com temperatura fixa para o resultado ser reproduzível.
+              </>
+            }
           >
                 <SettingRow wide>
                   <ModelSelector
@@ -1490,7 +1685,7 @@ export function NewRun() {
                     title="Juízes"
                     value={judge}
                     onChange={setJudge}
-                    excludeIds={mode === 'compare' ? competitors : contestantModel}
+                    excludeIds={[...(mode === 'compare' ? competitors : contestantModel), ...referenceModel]}
                     models={models}
                     loading={modelsLoading}
                     tuning={tuning}
@@ -1531,9 +1726,18 @@ export function NewRun() {
                       ? precisaGerar
                         ? `Serão gerados mais ${plannedStages - seedCount} para completar ${plannedStages}.`
                         : `Os ${seedCount} cenários do arquivo já cobrem o total — nada a gerar.`
-                      : 'Quantos cenários o gerador cria para a run.'
+                      : mode === 'training'
+                        ? `Quantos cenários o gerador cria. No treino, poucos cenários impedem a promoção (teste de significância): o padrão é ${TRAINING_DEFAULT_STAGES}.`
+                        : 'Quantos cenários o gerador cria para a run.'
                   }
                 />
+              )}
+              {/* web-live#5: poder do gate de promoção — aviso ao lado do campo
+                  que o resolve (o bloqueante também vira pendência). */}
+              {trainingPower && (
+                <SettingRow wide>
+                  <Banner tone="warn">{trainingPower.text}</Banner>
+                </SettingRow>
               )}
               {importedCount === 0 && (
                 <AreaRow
@@ -1543,6 +1747,16 @@ export function NewRun() {
                   placeholder="Ex.: se respeitam as regras de jejum de cada exame e não inventam orientação médica."
                 />
               )}
+              {/* IMPL-056: idioma é opt-in — vazio = 100% pt-BR (o default do
+                  motor). Vale para o gerador E para o aviso de cenário
+                  importado fora da lista (RunRecord.languageWarnings). */}
+              <TextRow
+                label="Idiomas dos cenários"
+                sub="Vazio = só português (pt-BR). Com uma lista (ex.: pt-BR, en), o gerador distribui os cenários entre esses idiomas; cenário importado fora da lista vira aviso na run."
+                value={languages}
+                onChange={setLanguages}
+                placeholder="pt-BR"
+              />
               {isSingle && !promptImported && (
                 <AreaRow
                   label="Descreva a tarefa"
@@ -1568,14 +1782,24 @@ export function NewRun() {
             </SettingGroup>
 
             <SettingGroup title="Execução">
-                <NumRow
-                  label="Finalistas"
-                  sub="Quantas variantes disputam o duelo final. As melhores por score entram; 0 desliga a final."
-                  value={finalists}
-                  onChange={setFinalists}
-                  min={0}
-                  max={12}
-                />
+                {/* web-live#10: finais só existem em etapa com gabarito — sem
+                    nenhum (comparar modelos, sem referência importada) o campo
+                    não age, então não é oferecido: a linha diz o porquê. */}
+                {temGabarito ? (
+                  <NumRow
+                    label="Finalistas"
+                    sub="Quantas variantes disputam o duelo final. As melhores por score entram; 0 desliga a final."
+                    value={finalists}
+                    onChange={setFinalists}
+                    min={0}
+                    max={12}
+                  />
+                ) : (
+                  <SettingRow
+                    label="Finalistas"
+                    sub="Sem duelo final nesta run: os duelos só acontecem em cenários com gabarito, e nesta configuração nenhum tem — o juiz ranqueia as respostas lado a lado. Importe cenários com referência (ou compare configurações) para ter a final."
+                  />
+                )}
                 <TxtNumRow
                   label="Orçamento máx. (US$)"
                   sub={
@@ -1608,7 +1832,7 @@ export function NewRun() {
                 />
                 <NumRow
                   label="Concorrência"
-                  sub="Quantas chamadas seguem em paralelo. Mais é mais rápido e bate no limite do provedor mais cedo."
+                  sub="Só registrada na run (compatibilidade do arena-config): o paralelismo real é do limitador global adaptativo, que cresce no sucesso e recua quando o provedor devolve 429."
                   value={concurrency}
                   onChange={setConcurrency}
                   min={1}
@@ -1626,13 +1850,25 @@ export function NewRun() {
 
                 <SettingRow
                   wide
-                  sub="Escreve a resposta ideal de cada cenário; o juiz compara as respostas com ela. Vazio = o primeiro juiz."
+                  sub={
+                    isSingle
+                      ? 'Escreve a resposta ideal de cada cenário; o juiz compara as respostas com ela. Obrigatório em teste e treino — e diferente dos juízes e do modelo sob teste (quem escreve a régua não julga nem compete contra ela).'
+                      : 'Escreve a resposta ideal de cada cenário; o juiz compara as respostas com ela. Vazio = o primeiro juiz. Não pode ser juiz nem competidor.'
+                  }
                 >
                   <ModelSelector
                     multi={false}
                     title="Gabarito"
                     value={referenceModel}
                     onChange={setReferenceModel}
+                    excludeIds={[
+                      ...judge,
+                      ...(mode === 'compare'
+                        ? compareAxis === 'configs'
+                          ? competitorConfigs.map((r) => r.modelId).filter(Boolean)
+                          : competitors
+                        : contestantModel),
+                    ]}
                     models={models}
                     loading={modelsLoading}
                     tuning={tuning}
@@ -1677,7 +1913,7 @@ export function NewRun() {
                     />
                     <TxtNumRow
                       label="Margem p/ promover"
-                      sub={`Quanto a vencedora precisa superar a campeã atual (em pontos). Vazio = automática, max(1; 50/n): ${Number(defaultMinGain(stages).toFixed(2))} com ${stages} cenários. Além da margem, ela precisa passar no teste da melhor de K (p ajustado ≤ ${GATE_ALPHA}); sem isso, o treino para.`}
+                      sub={`Quanto a vencedora precisa superar a campeã atual (em pontos). Vazio = automática, max(1; 50/n): ${Number(defaultMinGain(plannedStages).toFixed(2))} com ${plannedStages} cenários. Além da margem, ela precisa passar no teste da melhor de K (p ajustado ≤ ${GATE_ALPHA}); sem isso, o treino para.`}
                       value={minGain}
                       onChange={setMinGain}
                       min={0}
@@ -1850,7 +2086,7 @@ export function NewRun() {
               <button
                 type="button"
                 className="text-left text-destructive underline-offset-4 hover:underline"
-                onClick={() => primeira && irPara(primeira.section)}
+                onClick={() => primeira && irPara(primeira.section, primeira.step, primeira.onlyComplete)}
               >
                 {tried && primeira ? primeira.text : error}
               </button>
@@ -1858,7 +2094,7 @@ export function NewRun() {
               <button
                 type="button"
                 className="text-left text-muted-foreground underline-offset-4 hover:underline"
-                onClick={() => irPara(primeira.section)}
+                onClick={() => irPara(primeira.section, primeira.step, primeira.onlyComplete)}
               >
                 {primeira.text}
               </button>
@@ -1879,8 +2115,10 @@ export function NewRun() {
             )}
           </div>
 
+          {/* web-live#13: `shrink-0` fazia a linha dos drivers (~410 px) passar
+              da tela a 390 px; em tela estreita o bloco encolhe e a linha quebra. */}
           <span
-            className="shrink-0 text-right text-[12px] text-muted-foreground tabular"
+            className="max-w-full min-w-0 text-right text-[12px] text-muted-foreground tabular sm:shrink-0"
             title={
               launchEstimate
                 ? `Estimativa pelo teto de tokens; inclui gabaritos, finais e o holdout do treino.\n${launchEstimate.drivers

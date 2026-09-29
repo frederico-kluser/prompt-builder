@@ -2,22 +2,28 @@
 
 ```bash
 prompt-builder train \
-  --model openai/gpt-5-mini \
-  --judge anthropic/claude-sonnet-5 \
-  --datagen openai/gpt-5-mini \
+  --model xiaomi/mimo-v2.6-pro \
+  --judge google/gemini-3.8-flash --judge meta/muse-spark-1.3 \
+  --reference z-ai/glm-5.3-flash \
+  --datagen xiaomi/mimo-v2.6-pro \
   --theme "Suporte técnico de um SaaS de faturamento" \
   --base-prompt-file prompt.md \
   --techniques persona,constraints,format \
   --stages 8 --iterations 3 \
-  --budget 3 --output-format ndjson
+  --budget 10 --output-format ndjson
 ```
+
+Os modelos acima são os defaults por papel (skill `prompt-builder`, `models.md`);
+o pré-voo desse exemplo estima ~US$ 6–8 (preços de 2026-09). Orçamento abaixo do
+teto estimado recusa com exit `2` antes de gastar — `error.details.estimate.high`
+diz o valor que passa.
 
 Ou, melhor para um agente, tudo declarado num arquivo:
 
 ```bash
 prompt-builder config example --mode train -o arena.json
-prompt-builder train --config arena.json --budget 3 --dry-run
-prompt-builder train --config arena.json --budget 3 --output-format ndjson
+prompt-builder train --config arena.json --budget 10 --dry-run
+prompt-builder train --config arena.json --budget 10 --output-format ndjson
 ```
 
 ## Flags que importam
@@ -26,15 +32,18 @@ prompt-builder train --config arena.json --budget 3 --output-format ndjson
 |---|---|
 | `--model <id>` | o modelo sob teste (todas as variantes rodam nele) |
 | `--judge <id>` | juiz; repita para um painel. **Não pode ser o `--model`.** |
+| `--reference <id>` | quem escreve o gabarito — **obrigatório** em `train`/`vary` (sem ele: exit `3`); não pode ser juiz nem o `--model` |
 | `--techniques a,b,c` | técnicas de reescrita (`prompt-builder techniques`) |
 | `--base-prompt-file` | o prompt de partida; entra como controle |
-| `--iterations N` | teto de iterações (2–10; recomendado 3–5). O laço para antes se convergir: paciência = 2 iterações seguidas sem promoção (configurável via `patience` 1–5 no JSON do config — default 2) ou parada por platão (IC95 do ganho abaixo de `minGain`; `convergenceReason` diz qual foi) |
+| `--iterations N` | teto de iterações (2–10; recomendado 3–5). O laço para antes se convergir: paciência = 2 iterações seguidas sem promoção (`patience` 1–5 num RunConfig cru em `--config` — o `arena-config@1` não tem a chave; default 2) ou parada por platão (IC95 do ganho abaixo de `minGain`; `convergenceReason` diz qual foi) |
 | `--min-gain N` | margem PRÁTICA mínima em pontos de judge-score para promover. Padrão: `max(1; 50/n)` — meia granularidade (com 8 cenários, 6,25 pontos). Além dela, o gate exige p ajustado ≤ 0,05 (ver abaixo) |
 | `--holdout-ratio N` | fatia reservada para o gate final (padrão 0,3; 0 desliga). **Piso absoluto de 10 cenários**: fatia menor não é holdout — é "confirmação fraca" (`holdoutSkipped`) e a palavra "validado" fica bloqueada no resultado |
-| `--stages N` | quantos cenários (1–50). Recomendado 6–12; veja a tabela de poder abaixo (`stages ≤ 5` = **modo econômico**, o `estimate` avisa) |
+| `--stages N` | quantos cenários (1–50; **padrão 10 no `train`**, 5 nos outros). Recomendado 6–12; veja a tabela de poder abaixo (`stages ≤ 5` = **modo econômico**, o `estimate` avisa) |
 | `--effort-judge high` | o juiz é a tarefa mais sensível — vale gastar aqui |
 | `--effort-datagen low` | gerar cenários é mecânico |
 | `--finalists N` / `--no-duels` | tamanho da final / desliga a final |
+| `--judge-cascade b1,b2:forte` | modo econômico do juiz: 2 juízes baratos votam e o forte só julga os vereditos em dúvida (`docs compare`) |
+| `--auditable` | juiz, duelo e gabarito com provedor travado (sem fallback) |
 | `--pii-mode synthetic` | recusa dado pessoal de aparência real, sem exceção (vale em `compare`/`vary` também) |
 | `--allow-pii` | revisei o dado pessoal apontado: segue pseudonimizado (nomes não cobertos) |
 
@@ -57,8 +66,12 @@ referência rápida é esta (α=0,05 unilateral, poder 80%, σd=0,5):
 | 30 | 22,7 | | | |
 | 50 | 17,6 | | | |
 
-- ⚠️ σd=0,5 é **estimativa não calibrada** (tabela): calibre com uma run-piloto —
-  o `estimate` aceita o IC do piloto e usa o **limite superior** do IC.
+- ⚠️ σd=0,5 é **estimativa não calibrada** (tabela): calibre com um piloto
+  GRAVADO — `estimate --config <arq> --pilot-run <runId>` (IC95% recomputado das
+  etapas da run: régua × vencedor; num compare, 1º × 2º) ou `--pilot-session
+  <id>` (a significância gravada da sessão). O σd sai do **limite superior** do
+  IC (conservador com n pequeno); piloto com menos de 5 pares efetivos é
+  recusado (exit 3, `estimate.pilot_unusable`).
 - `stages ≤ 5` = **modo econômico**: com 5 cenários só se decide Δ ≥ 45 p.p.
 - **Repetição ≠ observação independente** (ICC/design effect): com `repeats`/`repetitions`
   ≥ 2, `runs show` reporta ICC, DE=1+(m−1)·ICC e nEfetivo = n·m/DE (no texto **e**
@@ -81,6 +94,7 @@ referência rápida é esta (α=0,05 unilateral, poder 80%, σd=0,5):
 prompt-builder sessions winner <sessionId>              # legível
 prompt-builder sessions winner <sessionId> --json       # estruturado
 prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
+prompt-builder sessions report <sessionId>              # relatório de ciclos (docs report)
 ```
 
 - `holdout` — campeão vs. base nos cenários **reservados**. É a evidência de que
@@ -108,19 +122,34 @@ prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
   dos vereditos ausentes (> 10% dos pares); o gate não promove (conta para a
   paciência: 2 iterações seguidas sem promoção encerram o treino).
   Investigue as falhas do juiz antes de rodar de novo.
-- `holdoutSkipped: true` — **o campeão não passou pelo gate de holdout** (pulado,
-  ou fatia abaixo do piso de 10 cenários). O resultado vem como "confirmação
-  fraca" — sem confirmação contra sobreajuste; a palavra "validado" não aparece.
-  O `significance` nesse caso tem `pOrigin: "selecao"` (p medido na própria run de
-  seleção — anti-conservador); o p de confirmação só existe com holdout
-  (`pOrigin: "holdout"`, α=0,05 unilateral).
+- `holdoutSkipped: true` — **o campeão não passou pelo gate de holdout**. O
+  MOTIVO vem em `holdoutSkipReason`: `min-scenarios` (seleção com < 20 cenários —
+  a fatia reservada ficaria abaixo do piso de 10; **suba `--stages`**, não o
+  orçamento), `budget` (o teto não cobria o holdout ou a sessão parou por
+  orçamento), `cancelled` ou `run-failed` (a run de holdout terminou sem veredito).
+  Sem holdout por desenho, `holdoutSkipped` fica falso e o motivo é `disabled`
+  (`holdoutRatio: 0`), `no-change` (campeão = prompt base) ou `no-base`. O
+  resultado vem como "confirmação fraca" — sem confirmação contra sobreajuste; a
+  palavra "validado" não aparece. O `significance` nesse caso tem
+  `pOrigin: "selecao"` (p medido na própria run de seleção — anti-conservador); o
+  p de confirmação só existe com holdout (`pOrigin: "holdout"`, α=0,05 unilateral).
+- "validado em holdout" só aparece quando o holdout (≥ 10 cenários) RODOU, o
+  campeão não regrediu e o p unilateral do próprio holdout ficou ≤ 0,05. Holdout
+  que rodou sem confirmar sai "NÃO confirmado" com Δ e p (ou "REGREDIU").
+- A fatia de holdout **nunca** entra na seleção: a run da iteração 0 cobre todos
+  os cenários (é nela que eles nascem), mas o gate, a re-avaliação e as lições
+  leem só os cenários de treino (`gate.pairing.n` da iteração 0 = `pinnedStages`).
 - `holdout.regressed: true` — o campeão foi **pior** que a base nos cenários
   reservados. `sessions winner <id> --apply <arq>` **recusa** (exit `10`,
   destino intocado); só passa com `--override "<motivo>"`, que fica gravado
   (`docs results`).
 - `bestPromptByIteration[].gate.heldBy: ["reeval"]` — a melhor variante passou
   no gate, mas a re-avaliação limpa (`gate.reeval`: minibatch, Δ limpo) não
-  confirmou a melhora. Promoção por acaso barrada — não é falha.
+  confirmou a melhora. Promoção por acaso barrada — não é falha. Com
+  `gate.reeval.runStatus` a re-avaliação NÃO terminou (cancelada/sem orçamento/
+  erro): não há Δ a ler, e a sessão para ali (`stoppedReason`). As runs de
+  re-avaliação ficam em `reevalRunIds` (fora de `runIds`, que é uma run por
+  iteração + a do holdout).
 - `convergedAtIteration` — o treino parou por falta de ganho, não por falta de
   iterações. Isso é um bom sinal, não uma falha. `convergenceReason` diz o porquê:
   `"patience"` (2 iterações seguidas sem promoção — configurável via `patience`)
@@ -162,9 +191,49 @@ E no `arena-config@1`, aponte o banco em vez de pinar cenários:
 
 Itens sem gabarito (`reference` textual OU `expected` de rótulo) são **recusados**
 no evolve (paridade com o 409 do prompt-arena). Item enriquecido: `title`, `tier`
-(`mft|invariance|adversarial|edge`), `persona`, `context`, `successCriteria[]`,
-`rationale`, `dimensionTags[]` — `pb library seed --profile X --generate 10
---theme T --model <id>` gera com gabarito por item (seed idempotente por id).
+(`mft|invariance|adversarial|edge|benign-twin`), `persona`, `context`,
+`successCriteria[]`, `rationale`, `dimensionTags[]` — `pb library seed --profile X
+--generate 10 --theme T --model <id>` gera com gabarito por item (seed idempotente
+por id) e guarda os metadados do gerador (tier, dimensões, persona, dificuldade,
+grupo de invariância, idioma).
+
+Cenários **adversariais** (injeção, extração do system prompt, jailbreak, fuga de
+escopo, dado pessoal e o gêmeo benigno que mede recusa excessiva), condicionados
+ao prompt que você quer proteger — ≥ 4 por categoria, `single-turn` (ASR@1 é um
+limite inferior), com cobertura e custo por cenário no resultado:
+
+```bash
+prompt-builder library seed --profile meu-alvo --generate 30 --tier adversarial \
+  --base-prompt-file prompt.md --model <id> --budget 1
+```
+
+Para mover o banco entre máquinas sem perder campo, `library export -o <dir>`
+grava `prompt-builder-exchange@1` (manifest.json + library.jsonl) e
+`library add --profile outro --file <dir>` o reimporta idêntico; campo que um
+formato não carrega aparece em `lostFields` (nunca some calado).
+
+**Curadoria.** Item curado = `state: "aprovado"` com o `contentHash` do conteúdo
+atual (editou depois da revisão, a aprovação caduca). Toda run com
+`scenarios.from: "library"` relata `curatedKofN` ("k de n itens curados") no
+resultado e, havendo não aprovados, UM aviso agregado (`run.warning` no NDJSON,
+stderr no texto) — sem bloquear. `--require-approved` (compare/vary/train)
+recusa com exit 3 (`library.unapproved_items`). O **holdout** exige 100%
+aprovados quando o perfil usa curadoria (algum item selecionado tem `state`):
+senão exit 3 (`library.unapproved_holdout`, ids em `details.holdoutIds`); perfil
+sem curadoria nenhuma só avisa.
+
+A revisão é pelo CLI: `library review --profile X` lista a fila (o que não
+conta e por quê); `library review --profile X --approve a,b --reviewer "Nome
+<email>"` aprova (também `--reject <ids> --reason <tipo>`, `--adjust`,
+`--reopen`). Tudo ou nada: id ruim = exit 2, aprovar sem gabarito = exit 3.
+Sem TTY o `--reviewer` é obrigatório — aprovar afirma que uma PESSOA conferiu
+pergunta e gabarito. Item aprovado conta como âncora humana do
+`minCuratedItems` mesmo gerado por IA (o revisor fica no item, não na run).
+
+**Idioma.** O datagen gera 100% em pt-BR. Variar idioma é opt-in:
+`--languages pt-BR,en` (em `compare`/`vary`/`train` e no `library seed`) ou
+`"languages": ["pt-BR","en"]` no arena-config@1. Cenário de qualquer fonte com
+idioma fora da política sai em `languageWarnings` no record da run.
 
 ## Rótulo esperado = veredito sem juiz (`expected`)
 

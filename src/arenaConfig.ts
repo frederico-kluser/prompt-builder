@@ -11,7 +11,9 @@
 // abaixo, cada uma marcando o que se perde se ela for esquecida.
 
 import { parseRunConfig } from './runConfigSchema.js';
+import { HOLDOUT_RATIO_DEFAULT, HOLDOUT_RATIO_MAX } from './holdout.js';
 import type { ArenaAgentConfigFile, ArenaConfigFile } from './configFile.js';
+import { TRAINING_DEFAULT_STAGES } from './engine/trainingPolicy.js';
 import type { ReasoningConfig, RunConfig, StageSpec } from './types.js';
 
 /** Defaults da UI, aplicados quando o arquivo omite o campo. */
@@ -57,7 +59,14 @@ export function arenaConfigToRunConfig(
   file: ArenaConfigFile,
   overrides: ArenaConfigDefaults = {},
 ): ArenaConfigToRunConfigResult {
-  const d = { ...DEFAULTS, ...overrides };
+  // web-live#5: no TREINO o default de cenários é o que deixa o gate da melhor
+  // de K conseguir promover (com 5, um único empate já segura — ver
+  // `trainingPromotionPower`); override explícito do chamador vence.
+  const d = {
+    ...DEFAULTS,
+    ...(file.mode === 'training' ? { stages: TRAINING_DEFAULT_STAGES } : {}),
+    ...overrides,
+  };
   const maxOutputTokens = Math.max(50, file.limits?.maxOutputTokens ?? d.maxOutputTokens);
 
   // Cenarios pinados viram `scenarioSeed` — sem o `id` (o motor re-rotula) e
@@ -122,11 +131,21 @@ export function arenaConfigToRunConfig(
     ...(file.mode === 'compare' && file.repeats ? { repeats: file.repeats } : {}),
     ...(scenarioSeed.length ? { scenarioSeed } : {}),
     ...(file.scenarioBrief?.trim() ? { scenarioBrief: file.scenarioBrief.trim() } : {}),
+    // IMPL-056: idiomas do datagen (opt-in; ausente = só pt-BR).
+    ...(file.languages?.length ? { languages: [...file.languages] } : {}),
     ...(file.models.reference ? { referenceModelId: file.models.reference } : {}),
     ...(Object.keys(reasoning).length ? { reasoning } : {}),
     ...(file.compliance ? { compliance: file.compliance } : {}),
     ...(file.piiMode ? { piiMode: file.piiMode } : {}),
     ...(file.allowPii ? { allowPii: true } : {}),
+    // IMPL-075: modo auditável (juiz + duelo + gabarito com provedor travado).
+    ...(file.judging?.auditable ? { auditable: true } : {}),
+    // IMPL-063/IMPL-115 (left#4): dedup semântico e modo econômico do juiz —
+    // sem estas linhas o arquivo os validaria e a run rodaria sem eles.
+    ...(file.scenarioDedup ? { scenarioDedup: { ...file.scenarioDedup } } : {}),
+    ...(file.judgeCascade
+      ? { judgeCascade: { cheap: [...file.judgeCascade.cheap], strong: file.judgeCascade.strong } }
+      : {}),
     // Contratos never-break (F2/P0.3): vivem no perfil do prompt, valem para
     // toda reescrita do variator.
     ...(file.prompt?.contracts ? { contracts: file.prompt.contracts } : {}),
@@ -177,10 +196,21 @@ export function arenaConfigToRunConfig(
             // IMPL-002: sem minGain no arquivo o gate usa o default max(1; 50/n)
             // — cravar 1 aqui desligaria a margem ligada à granularidade.
             ...(file.training?.minGain !== undefined ? { minGain: clamp(file.training.minGain, 0, 100) } : {}),
-            holdoutRatio: clamp(file.training?.holdoutRatio ?? 0.2, 0, 0.5),
+            // web-code#17: default canônico do trainer (0,3 — IMPL-050), não 0,2.
+            holdoutRatio: clamp(file.training?.holdoutRatio ?? HOLDOUT_RATIO_DEFAULT, 0, HOLDOUT_RATIO_MAX),
             feedbackDriven: file.training?.feedbackDriven !== false,
             ...(file.training?.reflection ? { reflection: file.training.reflection } : {}),
             ...(file.training?.paretoPool !== undefined ? { paretoPool: file.training.paretoPool } : {}),
+            // IMPL-062/IMPL-060/IMPL-065: campos do laço — sem estas linhas o
+            // arquivo os validava e a sessão rodava com o default em silêncio.
+            ...(file.training?.paretoCoverageSampling !== undefined
+              ? { paretoCoverageSampling: file.training.paretoCoverageSampling }
+              : {}),
+            ...(file.training?.maxLessonTokens !== undefined ? { maxLessonTokens: file.training.maxLessonTokens } : {}),
+            ...(file.training?.lessonsIncludeReference !== undefined
+              ? { lessonsIncludeReference: file.training.lessonsIncludeReference }
+              : {}),
+            ...(file.training?.minCuratedItems !== undefined ? { minCuratedItems: file.training.minCuratedItems } : {}),
           }
         : {}),
     };
@@ -252,6 +282,13 @@ export function arenaAgentConfigToRunConfig(
         ...(s.agentTask.setup ? { setup: s.agentTask.setup } : {}),
         ...(s.agentTask.files ? { files: s.agentTask.files } : {}),
         ...(s.agentTask.verify ? { verify: s.agentTask.verify } : {}),
+        // IMPL-098 (arena-agent-config@2): aditivos. `testsDir` sai RELATIVO ao
+        // arquivo — quem sabe de onde o arquivo veio (o CLI) o resolve.
+        ...(s.agentTask.regression ? { regression: s.agentTask.regression } : {}),
+        ...(s.agentTask.solution ? { solution: s.agentTask.solution } : {}),
+        ...(s.agentTask.testsDir ? { testsDir: s.agentTask.testsDir } : {}),
+        ...(s.agentTask.env ? { env: s.agentTask.env } : {}),
+        ...(s.agentTask.metadata ? { metadata: s.agentTask.metadata } : {}),
         ...(s.agentTask.forbiddenPaths ? { forbiddenPaths: s.agentTask.forbiddenPaths } : {}),
         ...(s.agentTask.rebuild ? { rebuild: s.agentTask.rebuild } : {}),
         ...(s.agentTask.detectors ? { detectors: s.agentTask.detectors } : {}),
@@ -327,6 +364,8 @@ export function arenaAgentConfigToRunConfig(
         ...common,
         // TODOS os contestants rodam como agentes (runner preso em 'agent').
         competitorConfigs: file.models.competitors.map((id) => ({ modelId: id })),
+        // Lista de MODELOS (não configs do mesmo modelo): ninguém é controle (web-code#16).
+        competitorAnchor: false,
       }
     : {
         mode: file.mode,

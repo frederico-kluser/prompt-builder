@@ -1,5 +1,6 @@
 import { modelCaps } from './modelCaps.js';
-import type { ModelReasoningMeta, PromptTechnique, PublicTechnique, ReasoningLevel } from './types.js';
+import { stageHasHumanApproval } from './engine/libraryCore.js';
+import type { ModelReasoningMeta, PromptTechnique, PublicTechnique, ReasoningLevel, StageSpec } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Few-shot a partir de TRACES REAIS (IMPL-061 / R-02a:REC-3, padrao
@@ -99,29 +100,174 @@ export function selectFewShotDemos(
   return escolhidas;
 }
 
+/** Recuo das linhas de continuação de um campo multilinha da demo. */
+const DEMO_CONTINUATION = '      ';
+
+/**
+ * Demos no formato canônico `[i] Pergunta/Resposta/Rotulo` (payload e bloco
+ * anexado). Campo multilinha (gabarito formatado) continua nas linhas
+ * seguintes com recuo — o formato que a demo demonstra não se perde.
+ */
+function renderDemoLines(demos: readonly FewShotDemo[]): string {
+  const campo = (rotulo: string, valor: string): string => {
+    const [primeira, ...resto] = valor
+      .replace(/<\/?(?:exemplos_reais|demonstracoes_reais)>/g, '')
+      .replace(/\r\n?/g, '\n')
+      .split('\n');
+    return [`${rotulo}: ${primeira}`, ...resto.map((l) => `${DEMO_CONTINUATION}${l}`)].join('\n');
+  };
+  return demos
+    .map((d, i) =>
+      [
+        `[${i + 1}] ${campo('Pergunta', d.question)}`,
+        `    ${campo('Resposta', d.response)}`,
+        ...(d.label ? [`    ${campo('Rotulo', d.label)}`] : []),
+      ].join('\n'),
+    )
+    .join('\n');
+}
+
 /**
  * `metaInstruction` da técnica few-shot COM demos reais (o payload do reescritor
  * le o bloco `<demonstracoes_reais>` — pergunta/resposta/rótulo — e a regra
  * dura: usar EXATAMENTE estes exemplos, nenhum inventado). Sem demos (ou com
  * menos de `FEWSHOT_MIN_DEMOS`) decai para `FEWSHOT_NO_DEMOS_INSTRUCTION`.
+ *
+ * IMPL-061: as demos NÃO são reescritas pelo LLM — o variator as ANEXA
+ * verbatim ao prompt final ({@link applyFewShotDemos}, padrão
+ * BootstrapFewShot: o framework insere as demos, não o otimizador). O
+ * reescritor só ajusta o texto para o formato que elas demonstram.
  */
 export function fewshotMetaInstruction(demos?: FewShotDemo[]): string {
   const lista = (demos ?? []).filter((d) => d?.question && d?.response);
   if (lista.length < FEWSHOT_MIN_DEMOS) return FEWSHOT_NO_DEMOS_INSTRUCTION;
-  const bloco = lista
-    .map(
-      (d, i) =>
-        `[${i + 1}] Pergunta: ${d.question}\n    Resposta: ${d.response}${d.label ? `\n    Rotulo: ${d.label}` : ''}`,
-    )
-    .join('\n');
   return (
-    'Reescreva o system prompt incluindo os exemplos abaixo — demonstracoes REAIS do conjunto rotulado (traces verificados) — para demonstrar o formato e o padrao desejados. ' +
-    'REGRAS DURAS: use EXATAMENTE estes exemplos (pergunta/resposta/rotulo como estao); NAO invente, NAO crie e NAO "melhore" nenhum exemplo; se precisar de mais um caso, prefira omitir a inventar; ' +
-    'equilibre a ordem dos rotulos para evitar vies de classe e atente ao efeito de recencia na ordem. Preserve as instrucoes do base.\n\n' +
+    'Reescreva o system prompt para demonstrar o formato e o padrao desejados com base nos exemplos abaixo — demonstracoes REAIS do conjunto rotulado (traces verificados). ' +
+    `O sistema ANEXA estes exemplos verbatim ao FINAL do prompt, num bloco <${FEWSHOT_DEMOS_TAG}>: use EXATAMENTE estes exemplos (pergunta/resposta/rotulo como estao) — NAO os copie para o texto, NAO invente, NAO crie e NAO "melhore" nenhum exemplo; nenhum outro exemplo pode aparecer no prompt. ` +
+    'Descreva o formato de saida e, se util, remeta aos "exemplos abaixo"; atente ao vies de rotulo e ao efeito de recencia na ordem. Preserve as instrucoes do base.\n\n' +
     '<demonstracoes_reais>\n' +
-    bloco +
+    renderDemoLines(lista) +
     '\n</demonstracoes_reais>'
   );
+}
+
+/** Tag do bloco de demos REAIS que o variator anexa ao prompt final (IMPL-061). */
+export const FEWSHOT_DEMOS_TAG = 'exemplos_reais';
+
+/** Bloco canônico das demos reais anexado ao prompt (vazio sem demos suficientes). */
+export function renderFewShotDemosBlock(demos: readonly FewShotDemo[]): string {
+  const lista = demos.filter((d) => d?.question && d?.response);
+  if (lista.length < FEWSHOT_MIN_DEMOS) return '';
+  return `<${FEWSHOT_DEMOS_TAG}>\n${renderDemoLines(lista)}\n</${FEWSHOT_DEMOS_TAG}>`;
+}
+
+/**
+ * IMPL-061 — prompt final da variante few-shot: o texto do reescritor SEM
+ * qualquer bloco de demos que ele tenha escrito (o `<demonstracoes_reais>` do
+ * payload ecoado, ou um `<exemplos_reais>` próprio) + o bloco CANÔNICO das
+ * demos do conjunto rotulado. Assim todo exemplo do bloco é real por
+ * construção. Sem demos suficientes o texto volta intacto (a técnica decaiu).
+ */
+export function applyFewShotDemos(prompt: string, demos: readonly FewShotDemo[]): string {
+  const bloco = renderFewShotDemosBlock(demos);
+  if (!bloco) return prompt;
+  const semBlocos = prompt
+    .replace(new RegExp(`<${FEWSHOT_DEMOS_TAG}>[\\s\\S]*?</${FEWSHOT_DEMOS_TAG}>`, 'g'), '')
+    .replace(/<demonstracoes_reais>[\s\S]*?<\/demonstracoes_reais>/g, '')
+    .trimEnd();
+  return `${semBlocos}\n\n${bloco}`;
+}
+
+/** Demos do bloco `<exemplos_reais>` de um prompt (auditoria/testes: todo exemplo é real?). */
+export function fewShotDemosOf(prompt: string): FewShotDemo[] {
+  const re = new RegExp(`<${FEWSHOT_DEMOS_TAG}>([\\s\\S]*?)</${FEWSHOT_DEMOS_TAG}>`, 'g');
+  const out: FewShotDemo[] = [];
+  for (const bloco of prompt.matchAll(re)) {
+    let atual: { question: string; response?: string; label?: string } | undefined;
+    let campo: 'question' | 'response' | 'label' = 'question';
+    const fecha = (): void => {
+      if (atual && atual.response !== undefined) {
+        out.push({ question: atual.question, response: atual.response, ...(atual.label ? { label: atual.label } : {}) });
+      }
+    };
+    for (const linha of bloco[1].split('\n')) {
+      const inicio = /^\[\d+\] Pergunta: (.*)$/.exec(linha);
+      if (inicio) {
+        fecha();
+        atual = { question: inicio[1] };
+        campo = 'question';
+        continue;
+      }
+      if (!atual) continue;
+      const resp = /^ {4}Resposta: (.*)$/.exec(linha);
+      const rot = /^ {4}Rotulo: (.*)$/.exec(linha);
+      if (resp) {
+        atual.response = resp[1];
+        campo = 'response';
+      } else if (rot) {
+        atual.label = rot[1];
+        campo = 'label';
+      } else if (linha.startsWith(DEMO_CONTINUATION)) {
+        atual[campo] = `${atual[campo] ?? ''}\n${linha.slice(DEMO_CONTINUATION.length)}`;
+      }
+    }
+    fecha();
+  }
+  return out;
+}
+
+/** Rótulo curto de um `expected` (ground-truth) para a demo. */
+function labelOfExpected(expected: StageSpec['expected']): string | undefined {
+  if (expected === undefined || expected === null) return undefined;
+  if (typeof expected === 'string') return expected.trim() || undefined;
+  if (Array.isArray(expected)) return expected.find((e) => typeof e === 'string' && e.trim())?.trim();
+  const pares = Object.entries(expected as Record<string, unknown>).map(([k, v]) => `${k}=${String(v)}`);
+  return pares.length ? pares.join('; ') : undefined;
+}
+
+/**
+ * IMPL-061 — conjunto ROTULADO de uma lista de cenários: só itens com âncora
+ * HUMANA (proveniência não-IA; gabarito escrito por gente ou `expected`
+ * verificado). Fica FORA: item sintético (`origin: 'ai'`), gabarito gerado por
+ * IA (`aiReference(spec)` — o orquestrador preenche `reference` com o gabarito
+ * do modelo de referência, que NÃO é verificado) e cenário ADVERSARIAL/de
+ * guarda (`adversarialCategory`: nunca vira demo no prompt de produção —
+ * Goodhart, IMPL-069). Quem chama já tirou o holdout.
+ */
+export function labeledScenariosFrom(
+  specs: readonly (StageSpec | undefined)[],
+  opts: { aiReference?: (spec: StageSpec) => boolean } = {},
+): LabeledScenario[] {
+  const out: LabeledScenario[] = [];
+  for (const spec of specs) {
+    // IMPL-065: item de IA APROVADO por gente (biblioteca) é demo legítima.
+    if (!spec || (spec.origin === 'ai' && !stageHasHumanApproval(spec)) || spec.adversarialCategory) continue;
+    const refHumana = spec.reference?.trim() && !opts.aiReference?.(spec) ? spec.reference.trim() : undefined;
+    const label = labelOfExpected(spec.expected);
+    if (!refHumana && !label) continue;
+    out.push({
+      question: spec.question,
+      ...(refHumana ? { response: refHumana } : {}),
+      ...(label ? { label } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * IMPL-066 — capacidades do modelo-alvo direto do CATÁLOGO (supported_parameters
+ * + reasoning). `undefined` quando o modelo não está no catálogo em mãos.
+ */
+export function targetModelFor(
+  catalog: readonly { id: string; supportedParameters?: string[]; reasoning?: ModelReasoningMeta }[] | undefined,
+  modelId: string,
+): TargetModelInfo | undefined {
+  const m = (catalog ?? []).find((x) => x.id === modelId);
+  if (!m) return undefined;
+  return {
+    ...(m.supportedParameters ? { supportedParameters: m.supportedParameters } : {}),
+    ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+  };
 }
 
 /** Atalho do payload: seleciona as demos do conjunto rotulado e monta a instrução. */

@@ -6,9 +6,13 @@
 // e o que torna a métrica do R-22:REC-6 mensurável: handoffs `applied` com
 // `holdout.regressed` em `blocks` e `override: null` têm de ser 0.
 //
-// O registro rico e versionado no repo do usuário (`prompt-approval@1`, com
-// hashes de dataset/config e trailer `Approved-by:`) é o IMPL-088; este log é o
-// mínimo local e reaproveita o mesmo formato de `override` ({reason}).
+// O registro rico de aprovação (`prompt-approval@1`, IMPL-088 — implementado:
+// hashes do prompt/dataset/config, ids de sessão/runs, evidência, aprovador)
+// mora em `src/cli/approval.ts`: vai EMBUTIDO em toda linha `applied` deste log
+// (`approval` + `approvalFile`, com ou sem flag) e, com `--record`/`--commit`,
+// também versionado no repo do destino (`.prompt-approvals/<id>.json`, ou no
+// diretório de `--record-dir <dir>`; com os trailers `Approved-by:`/
+// `Prompt-Approval:` no commit). O `override` segue o mesmo formato ({reason}).
 
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';

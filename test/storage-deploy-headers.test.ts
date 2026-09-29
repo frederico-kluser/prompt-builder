@@ -12,9 +12,11 @@
 //  — nada de 'unsafe-inline'/'unsafe-eval' em script-src, style-src sem
 //    'unsafe-inline', e o access-control-allow-origin: * legado continua FORA.
 //
-// O que exige deploy e por isso fica como pendência declarada de IMPL-083:
-// curl -sI no deploy (i), 0 violações de CSP no console das telas e dos
-// AnimatePresence popLayout (ii) e a auditoria Mozilla Observatory ≥ B+ (iv).
+// O critério (ii) — 0 violações de CSP no console das telas e dos
+// AnimatePresence popLayout — é medido num browser real com ESTES headers em
+// test/web-views-e2e.test.ts. O que exige deploy e por isso fica como
+// pendência declarada de IMPL-083: curl -sI no deploy (i) e a auditoria
+// Mozilla Observatory ≥ B+ (iv).
 
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -78,9 +80,15 @@ describe('vercel.json — headers de segurança da SPA (IMPL-083)', () => {
     expect(cspDirective(c, 'default-src')).toBe("default-src 'self'");
     expect(cspDirective(c, 'object-src')).toBe("object-src 'none'");
     expect(cspDirective(c, 'base-uri')).toBe("base-uri 'self'");
-    // style-src 'self' SEM 'unsafe-inline' (se o CSS runtime do popLayout do
-    // Motion bloquear, a saída é nonce via MotionConfig — não abrir o style-src).
-    expect(cspDirective(c, 'style-src')).toBe("style-src 'self'");
+    // style-src 'self' SEM 'unsafe-inline'. A ÚNICA exceção é o hash da string
+    // VAZIA (medido aqui, nunca copiado à mão): o popLayout do Motion (PopChild)
+    // cria um <style> VAZIO e escreve a regra por CSSOM (`sheet.insertRule`,
+    // que a CSP não restringe). Sem o hash o elemento é bloqueado (violação
+    // `style-src-elem` + `sheet` nulo = a saída do popLayout sem posição). Um
+    // <style> vazio não carrega CSS nenhum; conteúdo injetado não bate o hash.
+    const vazio = `'sha256-${createHash('sha256').update('', 'utf-8').digest('base64')}'`;
+    expect(cspDirective(c, 'style-src')).toBe(`style-src 'self' ${vazio}`);
+    expect(cspDirective(c, 'style-src')).not.toContain('unsafe-inline');
     // A SPA fala direto com o OpenRouter (BYOK); nenhum outro host em connect.
     expect(cspDirective(c, 'connect-src')).toContain('https://openrouter.ai');
     const scriptSrc = cspDirective(c, 'script-src');

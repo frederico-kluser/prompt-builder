@@ -2,7 +2,10 @@ node_modules
 dist
 .env
 *.Identifier
-/data/
+/data/*
+# Conjunto de calibração juiz × humano (IMPL-058): trabalho HUMANO versionado,
+# ao contrário do resto de data/ (runs/sessões em runtime).
+!/data/calibration/
 web/node_modules
 web/dist
 web/tsconfig.tsbuildinfo

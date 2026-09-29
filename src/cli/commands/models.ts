@@ -27,6 +27,7 @@ import {
 } from '../../engine/pricing.js';
 import { CliError, EXIT } from '../output.js';
 import {
+  assertKnownSubcommand,
   buildCatalogContext,
   buildContext,
   limitList,
@@ -330,6 +331,11 @@ async function cmdAllowlist(parsed: ParsedArgs): Promise<number> {
 
 export async function cmdModels(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
+  // cli#13: `models shwo x` listava o catálogo com exit 0 — recusa antes da rede.
+  assertKnownSubcommand('models', sub, ['list', 'show', 'export', 'allowlist'], {
+    usage: 'models list [filtros] | models show <id> | models export -o <arq> | models allowlist --check',
+    hint: (x) => (x.includes('/') ? `Para ver o modelo, use \`prompt-builder models show ${x}\`.` : undefined),
+  });
   const rest = sub === argv[0] ? argv.slice(1) : argv;
   const parsed: ParsedArgs = parse(rest, OPTIONS);
   // `allowlist` lê o snapshot do pacote: sem key, sem rede.
@@ -363,9 +369,14 @@ export async function cmdModels(argv: string[]): Promise<number> {
       );
       out.line(`  think levels    ${row.thinkLevels.accepted.join(', ') || '—'}`);
       if (row.thinkLevels.default) out.line(`  padrão          ${row.thinkLevels.default}`);
-      out.line('  encaixe (o que vai no fio para cada nível pedido):');
-      for (const [pedido, real] of Object.entries(row.thinkLevels.fit)) {
-        out.line(`    ${pedido.padEnd(8)} -> ${real}`);
+      if (row.thinkLevels.accepted.length > 0) {
+        out.line('  encaixe (o que vai no fio para cada nível pedido):');
+        for (const [pedido, real] of Object.entries(row.thinkLevels.fit)) {
+          out.line(`    ${pedido.padEnd(8)} -> ${real}`);
+        }
+      } else {
+        // cli#2: o gateway não envia `reasoning` a este modelo — nenhum nível vale.
+        out.line('  encaixe         (nenhum: o modelo não aceita raciocínio — nada vai no fio)');
       }
       // IMPL-019: ciclo de vida — o snapshot por trás do id e quando ele sai.
       if (row.lifecycle.canonicalSlug) out.line(`  snapshot        ${row.lifecycle.canonicalSlug}`);
@@ -405,22 +416,36 @@ export async function cmdModels(argv: string[]): Promise<number> {
     const h = allowlistHealth(getLgpdData().allowlist);
     if (h.state !== 'ok') out.warn(h.message);
   }
+  const destino = typeof values.out === 'string' && values.out.trim() ? values.out.trim() : undefined;
   // IMPL-092: teto default de 50 itens — `models list --json` sem flags já
   // devolveu o catálogo inteiro (~594 KB ≈ 150 mil tokens, satura o contexto
   // do agente). --all é a decisão explícita de querer tudo; truncar avisa.
-  const cap = parseListLimit(values);
+  // cli#10: o teto protege o CONTEXTO do agente — `models export` (o catálogo
+  // é o produto pedido) e `-o <arquivo>` (nada vai para o stdout) não levam o
+  // default. Com ele, `export -o models.json` gravava 50 de ~460 modelos e o
+  // `baseline check --catalog` acusava juiz "removido". `--limit` explícito
+  // continua valendo em qualquer caso.
+  const limiteExplicito = values.limit !== undefined && values.limit !== '';
+  const cap = (sub === 'export' || destino !== undefined) && !limiteExplicito ? { limit: null } : parseListLimit(values);
   const rows = limitList(filtrados, cap, out, 'modelos').map(toExportRow);
+  const truncado = rows.length < filtrados.length;
 
+  // Formato do ARQUIVO (-o) não depende do modo do stdout: sem --format, um
+  // arquivo leva o export JSON (o que `baseline check --catalog` lê).
+  const formatoExplicito = typeof values.format === 'string' ? values.format : undefined;
   const format =
-    typeof values.format === 'string'
-      ? values.format
+    formatoExplicito ??
+    (destino !== undefined
+      ? sub === 'export' || !out.isText
+        ? 'json'
+        : 'table'
       : out.format === 'json'
         ? 'json'
         : out.format === 'ndjson'
           ? 'ndjson'
           : sub === 'export'
             ? 'json'
-            : 'table';
+            : 'table');
 
   // JSON compacto por padrão (--pretty formata) — IMPL-092.
   const json = (v: unknown): string => (values.pretty === true ? JSON.stringify(v, null, 2) : JSON.stringify(v));
@@ -435,7 +460,7 @@ export async function cmdModels(argv: string[]): Promise<number> {
         scope: ctx.catalogScope,
         count: rows.length,
         total: filtrados.length,
-        truncated: rows.length < filtrados.length,
+        truncated: truncado,
         data: rows,
       });
       break;
@@ -458,21 +483,40 @@ export async function cmdModels(argv: string[]): Promise<number> {
       );
   }
 
-  const destino = typeof values.out === 'string' ? values.out : undefined;
+  const resumo = { count: rows.length, total: filtrados.length, truncated: truncado };
   if (destino) {
     await fs.writeFile(destino, `${payload}\n`, 'utf-8');
-    out.info(`${rows.length} modelos gravados em ${destino}`);
-    out.result(true, `models.${sub}`, { count: rows.length, file: destino });
+    out.info(`${rows.length} de ${filtrados.length} modelos gravados em ${destino}`);
+    // cli#10: o envelope diz se o ARQUIVO é parcial (antes só o conteúdo dizia).
+    out.result(true, `models.${sub}`, { ...resumo, file: destino, format });
     return EXIT.OK;
   }
 
-  // Em json/ndjson o payload JA e a saida estruturada — nao duplicar no result.
-  if (format === 'json' || format === 'ndjson') {
-    process.stdout.write(`${payload}\n`);
-  } else {
-    out.line(payload);
-    out.info(`${rows.length} de ${ctx.models.length} modelos.`);
-    out.result(true, `models.${sub}`, { count: rows.length });
+  // cli#18: NDJSON do contrato (--output-format ndjson) = linhas TIPADAS
+  // terminadas em `result`. O `--format ndjson` em modo texto segue sendo o
+  // export cru (uma linha por modelo, sem envelope) — é formato de arquivo.
+  if (out.isNdjson) {
+    for (const r of rows) out.event('model', { ...r });
+    out.result(true, `models.${sub}`, resumo);
+    return EXIT.OK;
   }
+  // `--json` + formato default (json): o objeto de export documentado É a
+  // saída estruturada — não duplicar num envelope.
+  if (format === 'json') {
+    process.stdout.write(`${payload}\n`);
+    return EXIT.OK;
+  }
+  // cli#18: `--json` com --format csv|ids|table|ndjson: o texto vai DENTRO do
+  // envelope (antes o payload sumia e sobrava só {count}).
+  if (!out.isText) {
+    out.result(true, `models.${sub}`, { ...resumo, format, payload });
+    return EXIT.OK;
+  }
+  if (format === 'ndjson') {
+    process.stdout.write(`${payload}\n`);
+    return EXIT.OK;
+  }
+  out.line(payload);
+  out.info(`${rows.length} de ${ctx.models.length} modelos.`);
   return EXIT.OK;
 }

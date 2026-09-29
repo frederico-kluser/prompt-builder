@@ -197,7 +197,7 @@ describe('IMPL-070 c4 — snapshot das mensagens montadas por papel (R-05:REC-3)
     // Snapshots: hash canônico por papel. (Uma assert por LINHA — o snapshot
     // inline é localizado pela linha de origem; dois no mesmo laço colidem.)
     expect(hashMensagens(etapa), 'datagen-etapa').toMatchInlineSnapshot(`"b00016e7a81736b455077a0af73effef10d11b5841a416dfd92664b2c7a6d983"`);
-    expect(hashMensagens(lote), 'datagen-lote').toMatchInlineSnapshot(`"ba2b4c0f19bada7154970293afbb4b3fe3d2aed7c3622bf20eb801ec8bb635c9"`);
+    expect(hashMensagens(lote), 'datagen-lote').toMatchInlineSnapshot(`"6d74e3bf5a15a70ce06bb0443748662834155012974f75d624bbe0465fe38fdc"`);
     for (const [nome, msgs] of [
       ['datagen-etapa', etapa],
       ['datagen-lote', lote],
@@ -237,10 +237,10 @@ describe('IMPL-070 c4 — snapshot das mensagens montadas por papel (R-05:REC-3)
       }),
     );
     // Snapshots por papel (uma assert por LINHA — ver nota acima).
-    expect(hashMensagens(gabarito), 'gabarito').toMatchInlineSnapshot(`"da5f210d9658224dd02156e3ffb0460c654d14f27bb1d0edfa725f761451454b"`);
-    expect(hashMensagens(pointwise), 'juiz-pointwise').toMatchInlineSnapshot(`"3e12cc844f88bedb412abf9f16428255878779ed3cdb13b20c1b34871b92ed34"`);
-    expect(hashMensagens(listwise), 'juiz-listwise').toMatchInlineSnapshot(`"fc5e77841e3b1aa8a80d6e3973ccba47c18eba7fea28f411fe85d0525a31f491"`);
-    expect(hashMensagens(duelo), 'duelo').toMatchInlineSnapshot(`"f9d8bd4970065adf783dcd4d778eacbaa3fd3424e7b35012bca4709cf7bb6dd0"`);
+    expect(hashMensagens(gabarito), 'gabarito').toMatchInlineSnapshot(`"5bdd39db8a98bae7f0bbdcfd118c99441cedef13969e7efb16abfed12e89d75d"`);
+    expect(hashMensagens(pointwise), 'juiz-pointwise').toMatchInlineSnapshot(`"d49cc50ef3c5168653259b249eaef28e175c4f18db883348f18fff1eef8e0b58"`);
+    expect(hashMensagens(listwise), 'juiz-listwise').toMatchInlineSnapshot(`"cacd6b29807d68a8251c4b313df8787f2938c91308f2a44e6e600012267a0807"`);
+    expect(hashMensagens(duelo), 'duelo').toMatchInlineSnapshot(`"4a4a00ad14344e0cef1053b8e3c9fb23a7f67d56a9f82a36dbf7b0014d562066"`);
     for (const [nome, msgs] of [
       ['gabarito', gabarito],
       ['juiz-pointwise', pointwise],

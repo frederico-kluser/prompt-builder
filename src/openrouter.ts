@@ -1,6 +1,6 @@
 import { applyReasoning } from './reasoning.js';
 import { parseLifecycleMeta } from './engine/modelLifecycle.js';
-import { isControlSignal, toControlSignal } from './budget.js';
+import { isControlSignal, isGenerationId, toControlSignal, type SettleDetails } from './budget.js';
 import { classifyPrice, priceTokens, type PriceFieldKind } from './engine/pricing.js';
 import { effortLabelOf, finishSignalsOf, isTruncated, truncationSignals } from './engine/truncation.js';
 import { createPiiGuard, type PiiGuardStats } from './engine/pii.js';
@@ -11,13 +11,16 @@ import {
   verdictCacheKey,
   type VerdictCacheEntry,
 } from './engine/verdictCache.js';
+import type { JournaledResult, JournalRequest } from './engine/callJournal.js';
 import type {
   CallCost,
   CallFinishSignals,
   CallProviderInfo,
+  CostLedgerSummary,
   CostRole,
   CostSink,
   ModelReasoningMeta,
+  PendingCall,
   PendingReason,
   OpenRouterModel,
   PricingTier,
@@ -55,8 +58,14 @@ const DEFAULT_APP_TITLE = 'Prompt Builder';
 const DEFAULT_MAX_CONCURRENCY = 32;
 const INITIAL_CONCURRENCY = 8;
 const MIN_CONCURRENCY = 1;
-/** Re-tentativas de transientes (429/5xx/rede). 1 + 6 = no maximo 7 tentativas. */
-export const MAX_RETRIES = 6;
+/**
+ * Re-tentativas de transientes (429/5xx/rede ANTES do envio). IMPL-073
+ * (R-07a:REC-3): 1 + 4 = no maximo 5 tentativas HTTP por RESPOSTA — o teto
+ * de mercado (2-4 re-tentativas) somando os dois niveis: o laco do competidor
+ * NAO repete o que o gateway ja re-tentou (`isCallerRetryable`). Antes eram
+ * 7 por chamada e 14 por resposta do competidor. `Retry-After` e piso.
+ */
+export const MAX_RETRIES = 4;
 /**
  * Teto de saida quando o chamador nao passa `maxTokens` (IMPL-017): o corpo
  * SEMPRE leva `max_tokens` e a reserva usa o MESMO numero. Antes a reserva
@@ -73,7 +82,12 @@ export function effectiveMaxTokens(maxTokens: number | undefined): number {
   return typeof maxTokens === 'number' && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS;
 }
 
-/** Id da geracao (`gen-…`) no corpo/chunk — chave da conciliacao via GET /generation. */
+/**
+ * Id da geracao (`gen-…`) no corpo/chunk — chave da conciliacao via GET
+ * /generation. Devolve o id CRU (qualquer texto nao vazio): quem decide se ele
+ * e conciliavel e `isGenerationId` (formato do OpenRouter) — o registo guarda
+ * os dois (id + validade), a conciliacao so consulta os validos.
+ */
 function generationIdOf(payload: unknown): string | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
   const id = (payload as { id?: unknown }).id;
@@ -124,6 +138,14 @@ export interface GatewayConfig {
   appUrl: string;
   /** Header `X-Title` de atribuicao. */
   appTitle: string;
+  /**
+   * IMPL-120 (R-01b:REC-9) — headers de ATRIBUICAO (`HTTP-Referer`/`X-Title`)
+   * sao DADO enviado ao OpenRouter (terceiro): `false` = nenhum dos dois vai no
+   * fio. Ausente/true = enviados (comportamento historico). No Node quem liga a
+   * supressao e `PROMPT_BUILDER_NO_ATTRIBUTION` (src/gatewayEnv.ts); na SPA, a
+   * preferencia salva no navegador (shim web/src/engine/openrouter.ts).
+   */
+  attribution?: boolean;
   /** Teto do limitador adaptativo (>= 1). */
   maxConcurrency: number;
   /** TTL do cache de catalogo em memoria. */
@@ -142,11 +164,15 @@ export interface GatewayConfig {
    */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /**
-   * IMPL-072 — transporte STREAMING (`stream: true` + SSE) também para
-   * `chatCompletion` (juiz, duelo, gabarito, datagen, reescritor): em abort/
-   * timeout o provedor PARA de gerar (e cobra só o gerado) — no não-streaming
-   * ele continua e cobra a resposta inteira. Default false = caminho JSON
-   * histórico; os papéis migram passando `streamTransport` ou ligando aqui.
+   * IMPL-072 (R-07a:REC-1) — transporte STREAMING (`stream: true` + SSE)
+   * também para `chatCompletion` (juiz, duelo, gabarito, datagen, reescritor):
+   * em abort/timeout o provedor PARA de gerar (e cobra só o gerado) — no
+   * não-streaming ele continua e cobra a resposta inteira (~98,7% do gasto
+   * ficava exposto a abort cobrado). LIGADO em todo ponto de entrada de
+   * runtime (Node: `gatewayConfigFromEnv`, com a válvula de escape
+   * `OPENROUTER_STREAM_TRANSPORT=0`; SPA: `browserGatewayConfig`); a instância
+   * crua de `createGateway()` fica no caminho JSON histórico. O parser aceita
+   * um corpo JSON mesmo pedindo stream (proxy/mock que ignora `stream: true`).
    */
   streamTransport?: boolean;
   /**
@@ -174,7 +200,7 @@ export interface GatewayConfig {
   /**
    * IMPL-075 — modo auditável: papéis que recebem `provider { order,
    * quantizations, allow_fallbacks:false, require_parameters:true }`. Preset do
-   * item: `AUDITABLE_ROLES` (juiz + gabarito). Vazio = desligado.
+   * item: `AUDITABLE_ROLES` (juiz + duelo + gabarito). Vazio = desligado.
    */
   auditableRoles?: CostRole[];
   /** Ordem fixa de provedores do modo auditável (`provider.order`). Vazio = omitido. */
@@ -196,10 +222,22 @@ export interface GatewayConfig {
    * `false` = desligado (default) — quem liga é a sessão de treino.
    */
   verdictCache?: VerdictCache | false;
+  /**
+   * Modo JEV (D-6) — URL do endpoint de DECISÕES (modelos de decisão tipada,
+   * ex.: `typesafe/jev-1.13`). AUSENTE = derivada da `baseUrl` a cada chamada
+   * (`deriveDecisionsUrl`): `…/api/v1` → `…/api/alpha/decisions`. Explícita
+   * vence (proxy/mock). Node: `OPENROUTER_DECISIONS_URL` (src/gatewayEnv.ts).
+   */
+  decisionsUrl?: string;
 }
 
-/** Preset do modo auditável (IMPL-075): juiz e gabarito — os papéis de REFERÊNCIA. */
-export const AUDITABLE_ROLES: readonly CostRole[] = ['judge', 'gabarito'];
+/**
+ * Preset do modo auditável (IMPL-075): juiz, duelo e gabarito — os papéis de
+ * REFERÊNCIA. Revisão w2: o duelo entrou porque as finais DECIDEM o vencedor
+ * (`winnerFromStandings`: finais primeiro, depois judge-score) — a chamada que
+ * coroa o campeão não pode ficar com fallback de provedor livre.
+ */
+export const AUDITABLE_ROLES: readonly CostRole[] = ['judge', 'duel', 'gabarito'];
 /** Quantizações de precisão cheia do modo auditável (auditável = sem quantização lossy). */
 export const DEFAULT_AUDITABLE_QUANTIZATIONS: readonly string[] = ['bf16', 'fp16', 'fp32'];
 
@@ -209,6 +247,13 @@ const DEFAULT_CONFIG: GatewayConfig = {
   appTitle: DEFAULT_APP_TITLE,
   maxConcurrency: DEFAULT_MAX_CONCURRENCY,
   modelsCacheTtlMs: MODELS_CACHE_TTL_MS,
+  attribution: true,
+  // IMPL-072: a instância CRUA (`createGateway()` sem config — testes com
+  // transporte falso) fica no caminho JSON; TODO ponto de entrada de runtime
+  // liga o streaming: Node por `gatewayConfigFromEnv` (CLI, servidor, MCP,
+  // biblioteca — src/index.ts) e a SPA por `browserGatewayConfig`. Contrato
+  // em test/gateway-transport.test.ts ("default de RUNTIME").
+  streamTransport: false,
   metaTimeoutMs: DEFAULT_META_TIMEOUT_MS,
   resendGuardTtlMs: 120_000,
   // IMPL-075 (iii): 'missing' por omissao — toda chamada com id de geracao
@@ -237,6 +282,7 @@ function mergeConfig(base: GatewayConfig, patch: Partial<GatewayConfig>): Gatewa
   }
   if (typeof patch.appUrl === 'string') out.appUrl = patch.appUrl;
   if (typeof patch.appTitle === 'string') out.appTitle = patch.appTitle;
+  if (typeof patch.attribution === 'boolean') out.attribution = patch.attribution;
   if (typeof patch.maxConcurrency === 'number' && Number.isFinite(patch.maxConcurrency)) {
     out.maxConcurrency = Math.max(MIN_CONCURRENCY, Math.floor(patch.maxConcurrency));
   }
@@ -283,6 +329,10 @@ function mergeConfig(base: GatewayConfig, patch: Partial<GatewayConfig>): Gatewa
   }
   // IMPL-080: cache de vereditos — instancia explicita; `false` desliga.
   if (patch.verdictCache !== undefined) out.verdictCache = patch.verdictCache === false ? undefined : patch.verdictCache;
+  // Modo JEV: URL de decisões explícita (vazio/ausente = derivada da baseUrl).
+  if (typeof patch.decisionsUrl === 'string' && patch.decisionsUrl.trim()) {
+    out.decisionsUrl = normalizeBaseUrl(patch.decisionsUrl);
+  }
   if ('fetch' in patch) out.fetch = patch.fetch;
   if ('sleep' in patch) out.sleep = patch.sleep;
   return out;
@@ -842,6 +892,18 @@ export class GatewayError extends Error {
   readonly gatewayError: GatewayErrorKind;
   readonly httpStatus?: number;
   readonly block?: GatewayBlock;
+  /**
+   * Modo JEV — `x-generation-id` do erro HTTP, quando o provedor atribuiu uma
+   * geração ANTES de recusar (400 upstream do endpoint de decisões): a chamada
+   * pode ter sido cobrada e fica pendente conciliável, nunca "de graça".
+   */
+  generationId?: string;
+  /**
+   * Modo JEV — corpo CRU do erro HTTP (recortado a 16 KB). A `message` é
+   * resumida (300 chars) e cortaria a lista de problemas do 400 de validação;
+   * o engine lê daqui os caminhos do esquema recusado.
+   */
+  responseBody?: string;
   constructor(kind: GatewayErrorKind, message: string, opts: { httpStatus?: number; block?: GatewayBlock } = {}) {
     super(message);
     this.name = 'GatewayError';
@@ -855,6 +917,52 @@ export class GatewayError extends Error {
 export function gatewayErrorKind(err: unknown): GatewayErrorKind | undefined {
   if (typeof err !== 'object' || err === null || !(GATEWAY_ERROR in err)) return undefined;
   return (err as GatewayError).gatewayError;
+}
+
+/**
+ * cli#3 — campos ESTRUTURADOS de uma falha classificada, para o record da
+ * run: sem eles o record guardava so a mensagem e o CLI saia com exit 1
+ * (`internal`) em vez do 4/5 documentado.
+ */
+export function gatewayErrorFields(err: unknown): { errorKind?: GatewayErrorKind; errorHttpStatus?: number } {
+  const kind = gatewayErrorKind(err);
+  if (!kind) return {};
+  const status = (err as { httpStatus?: unknown }).httpStatus;
+  return { errorKind: kind, ...(typeof status === 'number' ? { errorHttpStatus: status } : {}) };
+}
+
+/**
+ * Classe FATAL (auth/sem credito) reconhecida numa MENSAGEM — para records
+ * que so guardaram o texto (sessao de treino, records antigos). Casa pelo
+ * inicio canonico das mensagens de `classifyHttpError`, em qualquer posicao
+ * (o treino pode prefixar a mensagem da run).
+ */
+export function gatewayErrorKindFromMessage(message: string | undefined): 'auth' | 'no_credit' | undefined {
+  if (!message) return undefined;
+  if (message.includes(FATAL_MESSAGE_PREFIX.auth)) return 'auth';
+  if (message.includes(FATAL_MESSAGE_PREFIX.noCredit402) || message.includes(FATAL_MESSAGE_PREFIX.noCredit403)) {
+    return 'no_credit';
+  }
+  return undefined;
+}
+
+/**
+ * Reconstrói a falha FATAL do gateway a partir de um record (`errorKind` ou a
+ * mensagem canonica) — o CLI a passa pelo MESMO classificador de exit
+ * (auth = 4, sem credito = 5). Outras classes/sem falha = `undefined`.
+ */
+export function fatalGatewayErrorFromRecord(rec: {
+  error?: string;
+  errorKind?: string;
+  errorHttpStatus?: number;
+}): GatewayError | undefined {
+  const kind =
+    rec.errorKind === 'auth' || rec.errorKind === 'no_credit' ? rec.errorKind : gatewayErrorKindFromMessage(rec.error);
+  if (!kind) return undefined;
+  const status = typeof rec.errorHttpStatus === 'number' ? rec.errorHttpStatus : kind === 'auth' ? 401 : 402;
+  return new GatewayError(kind, rec.error ?? (kind === 'auth' ? FATAL_MESSAGE_PREFIX.auth : FATAL_MESSAGE_PREFIX.noCredit402), {
+    httpStatus: status,
+  });
 }
 
 /** true = a chamada foi bloqueada por moderacao/guardrail (nao e erro de infra nem de key). */
@@ -943,6 +1051,17 @@ export function describeOpenRouterError(status: number, body: string): string {
   return classifyHttpError(status, body).message;
 }
 
+/**
+ * Inicio CANONICO das mensagens das falhas FATAIS (cli#3): o mesmo texto monta
+ * o erro e o reconhece num record que so guardou a mensagem (ver
+ * `gatewayErrorKindFromMessage`) — mudar um sem o outro quebra o contrato.
+ */
+const FATAL_MESSAGE_PREFIX = {
+  auth: 'OpenRouter recusou a key (HTTP 401)',
+  noCredit402: 'OpenRouter sem credito (HTTP 402)',
+  noCredit403: 'OpenRouter recusou por limite de gasto (HTTP 403)',
+} as const;
+
 /** Erro HTTP do OpenRouter => `GatewayError` classificado (puro; exportado p/ testes). */
 export function classifyHttpError(status: number, body: string): GatewayError {
   const parsed = parseErrorBody(body);
@@ -951,7 +1070,7 @@ export function classifyHttpError(status: number, body: string): GatewayError {
   if (status === 401) {
     return new GatewayError(
       'auth',
-      `OpenRouter recusou a key (HTTP 401): a key e invalida, expirou ou foi revogada. Reconfigure em Configuracoes.${detalhe}`,
+      `${FATAL_MESSAGE_PREFIX.auth}: a key e invalida, expirou ou foi revogada. Reconfigure em Configuracoes.${detalhe}`,
       { httpStatus: status },
     );
   }
@@ -960,12 +1079,12 @@ export function classifyHttpError(status: number, body: string): GatewayError {
     if (block) return new GatewayError('blocked', block.message, { httpStatus: status, block });
     return new GatewayError(
       'no_credit',
-      `OpenRouter recusou por limite de gasto (HTTP 403): o limite de credito da key/conta foi atingido.${detalhe}`,
+      `${FATAL_MESSAGE_PREFIX.noCredit403}: o limite de credito da key/conta foi atingido.${detalhe}`,
       { httpStatus: status },
     );
   }
   if (status === 402) {
-    return new GatewayError('no_credit', `OpenRouter sem credito (HTTP 402): adicione creditos na sua conta.${detalhe}`, {
+    return new GatewayError('no_credit', `${FATAL_MESSAGE_PREFIX.noCredit402}: adicione creditos na sua conta.${detalhe}`, {
       httpStatus: status,
     });
   }
@@ -1103,7 +1222,22 @@ export interface UsageInfo {
   tokensOut: number;
   /** Creditos EFETIVAMENTE cobrados. Fonte primaria de custo. */
   cost?: number;
-  upstreamCost?: number;
+  /**
+   * `usage.is_byok`, quando booleano. `true` = a chamada rodou numa key do
+   * PROVEDOR cadastrada na conta OpenRouter (BYOK): `cost` e so a taxa do
+   * OpenRouter e a inferencia e cobrada pelo provedor direto nessa key.
+   * Ausente = a resposta nao disse — nunca inferir BYOK.
+   */
+  isByok?: boolean;
+  /**
+   * `cost_details.upstream_inference_cost` SO de chamada BYOK (`is_byok === true`):
+   * o que o provedor cobrou direto na key BYOK, FORA dos creditos e FORA de
+   * `cost`. ⚠️ O OpenRouter devolve o MESMO campo em TODA chamada: na nao-BYOK
+   * (`is_byok: false`) ele e o custo do provedor JA CONTIDO em `cost` (medido
+   * numa run paga: upstream == cost) — soma-lo dobraria o gasto. Por isso ele
+   * so e lido com `is_byok === true`; sem isso fica de fora.
+   */
+  byokUpstreamCost?: number;
   cachedTokensIn?: number;
   reasoningTokens?: number;
 }
@@ -1123,11 +1257,16 @@ export function extractUsage(u: unknown): UsageInfo {
   const costDetails = (usage.cost_details ?? {}) as Record<string, unknown>;
   const num = (v: unknown): number | undefined =>
     typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+  const isByok = typeof usage.is_byok === 'boolean' ? usage.is_byok : undefined;
+  // `upstream_inference_cost` vem em TODA resposta; so e gasto FORA de `cost`
+  // quando o proprio OpenRouter diz que a chamada foi BYOK (ver `UsageInfo`).
+  const byokUpstreamCost = isByok === true ? num(costDetails.upstream_inference_cost) : undefined;
   return {
     tokensIn: num(usage.prompt_tokens) ?? 0,
     tokensOut: num(usage.completion_tokens) ?? 0,
     cost: num(usage.cost),
-    upstreamCost: num(costDetails.upstream_inference_cost),
+    ...(isByok !== undefined ? { isByok } : {}),
+    ...(byokUpstreamCost !== undefined ? { byokUpstreamCost } : {}),
     cachedTokensIn: num(promptDetails.cached_tokens),
     reasoningTokens: num(completionDetails.reasoning_tokens),
   };
@@ -1140,7 +1279,14 @@ export function extractUsage(u: unknown): UsageInfo {
  */
 export function priceUsage(u: UsageInfo, model: OpenRouterModel | undefined): CallCost {
   if (typeof u.cost === 'number' && Number.isFinite(u.cost)) {
-    return { usd: u.cost, source: 'usage', upstreamUsd: u.upstreamCost };
+    // BYOK so com `is_byok === true` na resposta: `usd` segue sendo o que saiu
+    // dos creditos (a taxa); o provedor cobrou `byokUpstreamUsd` a parte.
+    return {
+      usd: u.cost,
+      source: 'usage',
+      ...(u.isByok === true ? { byok: true } : {}),
+      ...(u.isByok === true && typeof u.byokUpstreamCost === 'number' ? { byokUpstreamUsd: u.byokUpstreamCost } : {}),
+    };
   }
   // Catalogo so vale com preco CONHECIDO: um roteador ("-1") sem usage.cost e
   // 'unknown', nunca um custo derivado (antes saia negativo). IMPL-018.
@@ -1149,6 +1295,19 @@ export function priceUsage(u: UsageInfo, model: OpenRouterModel | undefined): Ca
     return { usd: doCatalogo, source: 'catalog' };
   }
   return { usd: 0, source: 'unknown' };
+}
+
+/**
+ * Dinheiro REAL de uma chamada medida, comparável ao preço do catálogo — a
+ * matéria-prima da calibração estimado × real (IMPL-113). Não-BYOK: `usd`
+ * (o `upstream_inference_cost` da resposta já está dentro dele). BYOK: `usd` é
+ * só a taxa do OpenRouter, então o real é taxa + o que o provedor cobrou na key
+ * BYOK; sem esse valor na resposta o real NÃO foi medido (`null` — nunca a taxa
+ * sozinha, que ensinaria à calibração um preço ~20× menor que o do catálogo).
+ */
+export function measuredCallUsd(cost: CallCost): number | null {
+  if (!cost.byok) return cost.usd;
+  return typeof cost.byokUpstreamUsd === 'number' ? cost.usd + cost.byokUpstreamUsd : null;
 }
 
 /** A resposta trouxe bloco `usage`? Sem ele o custo NAO foi medido (IMPL-017). */
@@ -1274,11 +1433,31 @@ export function modelFamilyOf(modelId: string): string {
 const COST_SAMPLE_LIMIT = 5000;
 const costSamples: CostCalibrationSample[] = [];
 
+/**
+ * Ouvintes de amostra (IMPL-113): quem PERSISTE a calibração entre processos
+ * (CLI: arquivo no diretório de dados; SPA: armazenamento do navegador) —
+ * antes o anel só vivia em memória e cada CLI nascia sem nada para calibrar.
+ */
+const costSampleListeners = new Set<(sample: CostCalibrationSample) => void>();
+
+/** Assina as amostras novas; devolve a função que cancela a assinatura. */
+export function subscribeCostSamples(listener: (sample: CostCalibrationSample) => void): () => void {
+  costSampleListeners.add(listener);
+  return () => costSampleListeners.delete(listener);
+}
+
 /** Regista uma amostra estimado × real (IMPL-113). Só o chamador medido chega aqui. */
 export function recordCostSample(sample: CostCalibrationSample): void {
   costSamples.push(sample);
   if (costSamples.length > COST_SAMPLE_LIMIT) {
     costSamples.splice(0, costSamples.length - COST_SAMPLE_LIMIT);
+  }
+  for (const l of costSampleListeners) {
+    try {
+      l(sample);
+    } catch {
+      // persistência é best-effort: nunca derruba a chamada já cobrada
+    }
   }
 }
 
@@ -1327,7 +1506,33 @@ function applyCacheControl(body: Record<string, unknown>, afterIndex: number): v
   if (!Number.isInteger(afterIndex) || afterIndex < 0 || afterIndex >= msgs.length) return;
   const alvo = msgs[afterIndex];
   if (!alvo || typeof alvo !== 'object') return;
-  msgs[afterIndex] = { ...(alvo as Record<string, unknown>), cache_control: { type: 'ephemeral' } };
+  // Forma DOCUMENTADA pelo OpenRouter para Anthropic: o `cache_control` vai
+  // numa PARTE de conteúdo (`{ type: 'text', text, cache_control }`), não na
+  // mensagem — no nível da mensagem o provedor ignora a marca em silêncio.
+  const marca = { type: 'ephemeral' };
+  const content = (alvo as Record<string, unknown>).content;
+  let parts: unknown[] | undefined;
+  if (typeof content === 'string') {
+    parts = [{ type: 'text', text: content, cache_control: marca }];
+  } else if (Array.isArray(content) && content.length > 0) {
+    const ultima = content[content.length - 1];
+    if (ultima && typeof ultima === 'object') {
+      parts = [...content.slice(0, -1), { ...(ultima as Record<string, unknown>), cache_control: marca }];
+    }
+  }
+  if (!parts) return;
+  msgs[afterIndex] = { ...(alvo as Record<string, unknown>), content: parts };
+}
+
+/**
+ * IMPL-114 — o modelo aceita a quebra EXPLÍCITA de cache de prompt
+ * (`cache_control`)? Só a família Anthropic via OpenRouter: nos provedores de
+ * cache automático (OpenAI, DeepSeek…) a marca não muda nada, e marcar um
+ * prefixo que ninguém reusa custa a ESCRITA do cache (1,25× a entrada na
+ * Anthropic) — por isso o juiz só pede o `cache_control` quando isto é true.
+ */
+export function supportsPromptCacheControl(modelId: string): boolean {
+  return /^anthropic\//i.test(modelId.trim());
 }
 
 /**
@@ -1497,6 +1702,40 @@ export class GatewayTimeoutError extends Error {
 /** true = falha por timeout do gateway (ERRO, não controle). */
 export function isGatewayTimeout(err: unknown): err is GatewayTimeoutError {
   return typeof err === 'object' && err !== null && GATEWAY_TIMEOUT in err && (err as Record<string, unknown>)[GATEWAY_TIMEOUT] === true;
+}
+
+/**
+ * IMPL-073 (R-07a:REC-3) — um laço de retry do CHAMADOR (ex.: competidor) pode
+ * repetir esta falha? NÃO quando:
+ *   - é sinal de controle (orçamento/cancelamento);
+ *   - é HTTP classificado (`GatewayError`): 429/5xx o gateway JÁ re-tentou até
+ *     `MAX_RETRIES` — repetir por cima multiplicava as tentativas (2×7 = 14) —
+ *     e 400/401/402/403 não mudam repetindo;
+ *   - o desfecho é desconhecido depois do despacho (`isUpstreamSent`): pode
+ *     ter sido COBRADO; sem verificação no /generation, reenviar é cobrança dupla;
+ *   - é erro de rede ANTES do envio que o gateway já esgotou.
+ * Sobra o que o gateway não repete e é seguro repetir: timeout (em stream o
+ * provedor para de gerar no abort) e falha in-band (200 com corpo de erro, já
+ * contabilizada).
+ */
+export function isCallerRetryable(err: unknown): boolean {
+  if (isControlSignal(err)) return false;
+  if (gatewayErrorKind(err) !== undefined) return false;
+  if (isUpstreamSent(err)) return false;
+  if (preSendError(err)) return false;
+  return true;
+}
+
+/**
+ * cli#3 — falha que NENHUM retry nem outro modelo conserta: key recusada (401)
+ * ou sem crédito (402 / 403 de limite de gasto). Quem degrada exceção
+ * (datagen, juiz, competidor) deve PROPAGAR estas — degradar deixaria a run
+ * seguir e morrer depois com uma mensagem genérica, sem o código de saída
+ * documentado (4 = auth, 5 = sem crédito).
+ */
+export function isFatalGatewayError(err: unknown): boolean {
+  const k = gatewayErrorKind(err);
+  return k === 'auth' || k === 'no_credit';
 }
 
 /**
@@ -1797,6 +2036,17 @@ export interface ChatCompletionResult {
   provider?: CallProviderInfo;
   /** true = corpo enviado no modo auditável (IMPL-075) — visível no artefato de replay. */
   auditable?: boolean;
+  /**
+   * IMPL-081 — servido do JOURNAL de chamadas (run retomada): nenhuma chamada
+   * saiu nesta tentativa e `cost.usd` é 0 porque NADA foi cobrado agora — a
+   * resposta foi paga UMA vez, na tentativa que a gravou.
+   */
+  replayed?: boolean;
+  /**
+   * Sinais de fim desta chamada como o ledger os contou (IMPL-014) — é o que o
+   * journal grava para o replay contá-los de novo (a resposta está no record).
+   */
+  finishSignals?: CallFinishSignals;
 }
 
 export interface ChatCompletionParams {
@@ -1852,26 +2102,140 @@ export interface ChatCompletionParams {
    * a cada chamada (o candidato do julgamento) e fica fora do prefixo cacheado.
    *
    * LAYOUT DE MENSAGENS DO JULGAMENTO — v1 (versionado; mudar = novo layout e
-   * cache invalidado nas primeiras chamadas):
-   *   [0..k] REFERENCIA → PERGUNTA → RUBRICA  ← prefixo ESTÁVEL (cacheável)
-   *   [k]    RUBRICA leva o `cache_control` (fim do prefixo)
-   *   [k+1..] CANDIDATO (muda por chamada/par) ← fora do prefixo
+   * cache invalidado nas primeiras chamadas). É o que `refJudge.judgeOne` envia
+   * a juiz com cache explícito (`supportsPromptCacheControl` — Anthropic):
+   *   [0] system — contrato do juiz (fixo)
+   *   [1] user   — REFERENCIA → PERGUNTA → RUBRICA (CRITÉRIO)
+   *       ← prefixo ESTÁVEL (cacheável): leva o `cache_control` (`cacheControlAfter: 1`),
+   *       com o marcador de bloco COMPARTILHADO pela etapa (byte a byte igual
+   *       entre candidatos)
+   *   [2] user   — CANDIDATO + INSTRUÇÕES (canário novo por veredito) ← fora do prefixo
+   * O `cache_control` vai numa PARTE de conteúdo (`{type:'text', text,
+   * cache_control}`), a forma documentada pelo OpenRouter para Anthropic.
    * No DUELO o prefixo útil vai só até a RÚBRICA: o cache ajuda ENTRE PARES
    * (mesma rúbrica), não entre as duas ordens do mesmo par (o candidato entra
-   * antes da 2ª ordem). O aquecimento (1 chamada por cenário antes do
-   * `Promise.all`) e a rota estável por provedor são do chamador (refJudge).
+   * antes da 2ª ordem). AQUECIMENTO: o gateway segura as chamadas de um mesmo
+   * prefixo até a 1ª terminar (`withCacheWarmup`) — uma por cenário × juiz
+   * antes do resto do `Promise.all`, sem teto de concorrência.
    *
    * ⚠️ NENHUM ganho é prometido sem isto: só há efeito em provedor com cache de
-   * prompt (Anthropic via OpenRouter) E prefixo idêntico no mesmo provedor. A
-   * medição é `usage.prompt_tokens_details.cached_tokens` (já extraído como
-   * `cachedTokensIn`); índice fora do alcance = nada muda (sem cache, nunca
-   * cache errado).
+   * prompt (Anthropic via OpenRouter) E prefixo idêntico no mesmo provedor
+   * (e acima do mínimo cacheável do provedor). A medição é
+   * `usage.prompt_tokens_details.cached_tokens` (já extraído como
+   * `cachedTokensIn`, somado por papel no ledger); índice fora do alcance =
+   * nada muda (sem cache, nunca cache errado).
    */
   cacheControlAfter?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Modo JEV — decisões tipadas (D-6/D-8). O endpoint é outro (não é chat): o
+// corpo é `{model, state, questions, session_id?}` e a resposta
+// `{model, answers, usage:{input_tokens, output_tokens, cost}, id, provider}`.
+// O gateway NÃO conhece os tipos do engine (`src/engine/jev/types.ts`):
+// perguntas e respostas atravessam como `Record<string, unknown>`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Overhead fixo de uma decisão, em tokens de entrada (medido ao vivo: ~270
+ * com 1 `noul` curta, ~400 com 3–5 perguntas e estado vazio). Entra na
+ * reserva por cima dos tokens do JSON de estado+perguntas.
+ */
+export const DECISION_REQUEST_OVERHEAD_TOKENS = 300;
+/** Teto total de uma decisão (ms): encurta o do papel (competidor = 600 s). Latência típica 0,3 s. */
+export const DEFAULT_DECISION_TIMEOUT_MS = 30_000;
+
+/** `…/api/v1` → `…/api/alpha/decisions`; outra base (proxy/mock) → `<base>/alpha/decisions`. */
+export function deriveDecisionsUrl(baseUrl: string): string {
+  const b = normalizeBaseUrl(baseUrl);
+  return /\/v1$/.test(b) ? b.replace(/\/v1$/, '/alpha/decisions') : `${b}/alpha/decisions`;
+}
+
+/**
+ * `usage` da resposta de decisão: `input_tokens`/`output_tokens`/`cost` (NÃO
+ * `prompt_tokens`). `cost` é o valor cobrado — a única fonte exata.
+ * BYOK (onda 2): a MESMA regra de `extractUsage` — `is_byok` só quando
+ * booleano, e `cost_details.upstream_inference_cost` só vira gasto à parte com
+ * `is_byok === true` (na não-BYOK ele já está dentro de `cost`; somá-lo dobraria).
+ */
+export function extractDecisionUsage(u: unknown): UsageInfo {
+  if (!u || typeof u !== 'object') return { tokensIn: 0, tokensOut: 0 };
+  const o = u as Record<string, unknown>;
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const isByok = typeof o.is_byok === 'boolean' ? o.is_byok : undefined;
+  const details = (o.cost_details && typeof o.cost_details === 'object' ? o.cost_details : {}) as Record<string, unknown>;
+  const byokUpstreamCost = isByok === true ? num(details.upstream_inference_cost) : undefined;
+  return {
+    tokensIn: num(o.input_tokens) ?? 0,
+    tokensOut: num(o.output_tokens) ?? 0,
+    cost: num(o.cost),
+    ...(isByok !== undefined ? { isByok } : {}),
+    ...(byokUpstreamCost !== undefined ? { byokUpstreamCost } : {}),
+  };
+}
+
+export interface DecideParams {
+  apiKey: string;
+  /** `typesafe/jev-1.13` (fixado) | `~typesafe/jev-latest` | outro modelo de decisão do catálogo. */
+  modelId: string;
+  /** Estado JÁ projetado (`stateView`): string, objeto ou lista. */
+  state: unknown;
+  /** Perguntas no formato do fio (`JevWireQuestion` do engine). */
+  questions: Record<string, unknown>;
+  /** → `session_id` do corpo (≤ 256; o runner usa o id da run). */
+  sessionId?: string;
+  /** Default `competitor` (D-7: nenhum papel novo). */
+  role?: CostRole;
+  sink?: CostSink;
+  signal?: AbortSignal;
+  /** Teto total (ms). Default `DEFAULT_DECISION_TIMEOUT_MS`. */
+  timeoutMs?: number;
+  onCost?: (cost: CallCost) => void;
+}
+
+export interface DecideResult {
+  /** Respostas CRUAS por id de pergunta (o engine valida). */
+  answers: Record<string, unknown>;
+  /** Snapshot datado que serviu (`typesafe/jev-1.13-20260917`). */
+  resolvedModel: string;
+  provider?: string;
+  generationId?: string;
+  tokensIn: number;
+  tokensOut: number;
+  /** Do despacho ao corpo lido (não inclui a fila do limitador). */
+  latencyMs: number;
+  cost: CallCost;
+  raw: unknown;
+}
+
 export interface ChatStreamParams extends ChatCompletionParams {
   onDelta?: (delta: string, fullText: string) => void;
+}
+
+/**
+ * IMPL-063 — chamada paga NÃO-chat com lista de textos (`meteredInputCall`):
+ * o `path` é relativo à base (ex.: o ponto de representação usado pelo dedup
+ * do datagen, em `src/embeddings.ts`). Mesmo ledger/limitador do chat.
+ */
+export interface MeteredInputParams {
+  apiKey: string;
+  modelId: string;
+  /** Caminho relativo à base da API (sem barra inicial). */
+  path: string;
+  /** Textos do pedido — passam pela cascata de dado pessoal como mensagens. */
+  input: string[];
+  /** Papel no ledger (obrigatório: o default 'competitor' do chat seria errado aqui). */
+  role: CostRole;
+  sink?: CostSink;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+export interface MeteredInputResult {
+  /** JSON cru da resposta 200. */
+  raw: unknown;
+  cost: CallCost;
+  latencyMs: number;
 }
 
 export interface KeyInfo {
@@ -1924,6 +2288,144 @@ interface GuardedResponse {
  */
 interface DispatchTrack {
   abortedInFlight?: PendingReason;
+}
+
+/**
+ * O que uma resposta 200 trouxe — lido do corpo JSON ou acumulado do SSE (os
+ * MESMOS campos, fechados por `finalizeReply`). `text` e o texto CRU do fio
+ * (pseudonimizado): a reidratacao acontece so no resultado.
+ */
+interface CollectedReply {
+  text: string;
+  usageRaw: unknown;
+  finishReason?: string;
+  nativeFinishReason?: string;
+  refusal: string;
+  error: OpenRouterErrorBody | null;
+  generationId?: string;
+  provider?: CallProviderInfo;
+  /** Payload do fio: o corpo JSON inteiro ou o ultimo chunk SSE. */
+  raw: unknown;
+}
+
+/** Campos de uma resposta JSON (`chat.completion`) no formato comum. */
+function collectJsonReply(json: unknown): CollectedReply {
+  const j = (json && typeof json === 'object' ? json : {}) as {
+    choices?: {
+      message?: { content?: unknown; refusal?: unknown };
+      finish_reason?: unknown;
+      native_finish_reason?: unknown;
+    }[];
+    usage?: unknown;
+    error?: unknown;
+  };
+  const choice = Array.isArray(j.choices) ? j.choices[0] : undefined;
+  const content = choice?.message?.content;
+  const err = j.error;
+  return {
+    text: typeof content === 'string' ? content : '',
+    usageRaw: j.usage,
+    finishReason: finishText(choice?.finish_reason),
+    nativeFinishReason: finishText(choice?.native_finish_reason),
+    refusal: typeof choice?.message?.refusal === 'string' ? choice.message.refusal : '',
+    error: err ? (typeof err === 'object' ? (err as OpenRouterErrorBody) : { message: String(err) }) : null,
+    generationId: generationIdOf(json),
+    provider: extractProviderInfo(json),
+    raw: json,
+  };
+}
+
+/** JSON tolerante: corpo ilegível vira `{}` (os leitores tratam campo ausente). */
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return {};
+  }
+}
+
+/** Ficha de UMA geração no GET /api/v1/generation (IMPL-074/IMPL-075). */
+export interface GenerationInfo {
+  generationId: string;
+  provider?: CallProviderInfo;
+  /** `total_cost` — o valor da FATURA desta geração. */
+  totalCostUsd?: number;
+  /**
+   * `is_byok === true` na ficha: `total_cost` é só a taxa do OpenRouter e o
+   * provedor cobrou `byokUpstreamUsd` direto na key BYOK. Ausente = não-BYOK
+   * ou não informado (nunca inferir).
+   */
+  byok?: boolean;
+  /** `upstream_inference_cost` SÓ de geração BYOK (na não-BYOK ele já está em `total_cost`). */
+  byokUpstreamUsd?: number;
+  cancelled?: boolean;
+  /** `generation_time` (ms) no provedor. */
+  generationTimeMs?: number;
+  /** `latency` (ms) medida pelo OpenRouter. */
+  latencyMs?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+}
+
+/** `{ data: {...} }` do GET /generation => ficha (puro; exportado p/ testes). */
+export function parseGenerationInfo(id: string, json: unknown): GenerationInfo | undefined {
+  const d = (json as { data?: unknown } | null)?.data;
+  if (!d || typeof d !== 'object') return undefined;
+  const r = d as Record<string, unknown>;
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const provider = extractProviderInfo(r);
+  const totalCostUsd = num(r.total_cost) ?? num(r.cost);
+  const tokensIn = num(r.tokens_prompt) ?? num(r.native_tokens_prompt);
+  const tokensOut = num(r.tokens_completion) ?? num(r.native_tokens_completion);
+  // Mesma regra do `extractUsage`: o upstream só é gasto à parte com `is_byok`.
+  const byok = r.is_byok === true;
+  const byokUpstreamUsd = byok ? num(r.upstream_inference_cost) : undefined;
+  return {
+    generationId: id,
+    ...(provider ? { provider } : {}),
+    ...(typeof totalCostUsd === 'number' ? { totalCostUsd } : {}),
+    ...(byok ? { byok: true } : {}),
+    ...(byokUpstreamUsd !== undefined ? { byokUpstreamUsd } : {}),
+    ...(typeof r.cancelled === 'boolean' ? { cancelled: r.cancelled } : {}),
+    ...(num(r.generation_time) !== undefined ? { generationTimeMs: num(r.generation_time) } : {}),
+    ...(num(r.latency) !== undefined ? { latencyMs: num(r.latency) } : {}),
+    ...(tokensIn !== undefined ? { tokensIn } : {}),
+    ...(tokensOut !== undefined ? { tokensOut } : {}),
+  };
+}
+
+/**
+ * O que a conciliação precisa do ledger (IMPL-074) — `BudgetLedger` cumpre.
+ * Declarado aqui para o gateway não importar a classe (só o contrato).
+ */
+export interface ReconcilableLedger {
+  pendingEntries(): PendingCall[];
+  settlePending(
+    generationId: string,
+    cost: CallCost | null,
+    tokens?: { tokensIn?: number; tokensOut?: number },
+    details?: SettleDetails,
+  ): boolean;
+  noteReconciliation?(r: NonNullable<CostLedgerSummary['reconciliation']>): void;
+}
+
+/** Espera `p` OU o abort de `signal` (que sai como sinal de controle — IMPL-020). */
+async function waitOrAbort(p: Promise<unknown>, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    await p;
+    return;
+  }
+  if (signal.aborted) throw toControlSignal(signal.reason);
+  let onAbort: () => void = () => undefined;
+  const abortou = new Promise<never>((_, reject) => {
+    onAbort = () => reject(toControlSignal(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    await Promise.race([p, abortou]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 /**
@@ -1992,6 +2494,36 @@ function withEffort(fim: CallFinishSignals, body: Record<string, unknown>): Call
   return effort ? { ...fim, effort } : fim;
 }
 
+/**
+ * O recorte CONTÁBIL de uma chamada (modo JEV, D-6): o que `reserveFor`,
+ * `account` e `accountUnmeasured` precisam — e só isso. Chat e decisão passam
+ * pelo MESMO ponto de contabilidade; a diferença fica nos números JÁ
+ * resolvidos aqui (`promptTokensGuess`/`capTokens`), nunca num segundo
+ * "account" paralelo. Decisão NÃO passa por `effectiveMaxTokens` (a saída é
+ * grátis: teto 0 — com `DEFAULT_MAX_TOKENS` a reserva sairia inflada).
+ */
+interface AccountingCall {
+  /** 'decision' não vira amostra de calibração de custo (ver `account`). */
+  kind: 'chat' | 'decision';
+  apiKey: string;
+  modelId: string;
+  role: CostRole;
+  sink?: CostSink;
+  signal?: AbortSignal;
+  onCost?: (cost: CallCost) => void;
+  /** Tokens de entrada estimados SEM margem (a margem é só da reserva dura). */
+  promptTokensGuess: number;
+  /** Teto de saída que entra na reserva e na estimativa (chat = `max_tokens`; decisão = 0). */
+  capTokens: number;
+  /**
+   * IMPL-075 — o CORPO foi no modo auditável (registo `auditable: true` no
+   * ledger). Resolvido UMA vez: chat pelo MESMO `auditableFor(params)` que
+   * monta o corpo; decisão = sempre `false` (o corpo de decisão não leva o pin
+   * de provedor — ver `decide`).
+   */
+  auditable: boolean;
+}
+
 export class OpenRouterGateway {
   private cfg: GatewayConfig;
   /**
@@ -2006,6 +2538,13 @@ export class OpenRouterGateway {
   private readonly modelsCache = new Map<string, { fetchedAt: number; data: OpenRouterModel[] }>();
   /** Alertas da ultima validacao de /models, por key (ver `validateModelsPayload`). */
   private readonly modelsIssues = new Map<string, CatalogIssue[]>();
+  /**
+   * Modo JEV (D-8) — catálogo de MODELOS DE DECISÃO (`GET /models?output_modalities=decisions`,
+   * público), por key, com a MESMA TTL do catálogo de chat. O `/models`
+   * padrão não lista o Jev; sem este cache a reserva das decisões ficaria sem
+   * preço e o ledger serializaria uma chamada em voo por papel.
+   */
+  private readonly decisionModelsCache = new Map<string, { fetchedAt: number; data: OpenRouterModel[] }>();
   // LGPD (IMPL-042): cascata de dado pessoal — uma por instância (contadores
   // próprios; cofre de pseudônimos com chave HMAC própria POR RUN/SESSÃO),
   // aplicada em `buildBody`, o ponto único dos 6 papéis.
@@ -2031,7 +2570,10 @@ export class OpenRouterGateway {
    * `idleMs: 0` = sem watchdog de inatividade (caminho JSON, onde o provedor
    * fica em silêncio enquanto gera e o teto total é que vale).
    */
-  private timeoutsFor(params: ChatCompletionParams, streaming: boolean): { totalMs: number; idleMs: number } {
+  private timeoutsFor(
+    params: Pick<ChatCompletionParams, 'role' | 'timeoutMs' | 'idleTimeoutMs'>,
+    streaming: boolean,
+  ): { totalMs: number; idleMs: number } {
     const role = params.role ?? 'competitor';
     const dflt = DEFAULT_ROLE_TIMEOUTS[role] ?? DEFAULT_ROLE_TIMEOUTS.competitor;
     const cfgT = this.cfg.roleTimeouts?.[role] ?? {};
@@ -2107,13 +2649,21 @@ export class OpenRouterGateway {
     return this;
   }
 
+  /**
+   * Headers do fio. Os de ATRIBUIÇÃO (`HTTP-Referer`/`X-Title`) são dado
+   * partilhado com o OpenRouter e saem com `attribution: false` (IMPL-120 —
+   * `PROMPT_BUILDER_NO_ATTRIBUTION`); valor vazio também não vai no fio.
+   */
   private headers(apiKey: string): Record<string, string> {
-    return {
+    const out: Record<string, string> = {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': this.cfg.appUrl,
-      'X-Title': this.cfg.appTitle,
     };
+    if (this.cfg.attribution !== false) {
+      if (this.cfg.appUrl) out['HTTP-Referer'] = this.cfg.appUrl;
+      if (this.cfg.appTitle) out['X-Title'] = this.cfg.appTitle;
+    }
+    return out;
   }
 
   /** Chama o transporte SEM `this` do objeto de config (ver GatewayConfig.fetch). */
@@ -2126,8 +2676,16 @@ export class OpenRouterGateway {
    * IMPL-077 — transporte de METADADOS (/models, /key, /generation) com teto
    * (default 20 s, dentro dos 15-30 s pedidos): um servidor mudo não pode mais
    * pendurar o processo para sempre. Timeout sai como `GatewayTimeoutError`.
+   *
+   * O teto cobre a requisição INTEIRA — headers E corpo: o corpo é lido aqui
+   * dentro, sob o mesmo relógio. Antes o timer caía assim que os headers
+   * chegavam e um servidor que mandava `200` e travava o corpo pendurava o
+   * `listModels` para sempre.
    */
-  private async metaFetch(url: string, init: RequestInit): Promise<Response> {
+  private async metaRequest(
+    url: string,
+    init: RequestInit,
+  ): Promise<{ ok: boolean; status: number; statusText: string; text: string }> {
     const controller = new AbortController();
     const ms = this.cfg.metaTimeoutMs ?? DEFAULT_META_TIMEOUT_MS;
     let timedOut = false;
@@ -2136,7 +2694,24 @@ export class OpenRouterGateway {
       controller.abort(new GatewayTimeoutError('total', ms));
     }, ms);
     try {
-      return await this.transport(url, { ...init, signal: controller.signal });
+      const res = await this.transport(url, { ...init, signal: controller.signal });
+      // O corpo sob o MESMO teto; um leitor que ignore o abort ainda perde a
+      // corrida para o timer (nada fica pendurado).
+      let onAbort: () => void = () => undefined;
+      const abortou = new Promise<never>((_, reject) => {
+        onAbort = () => reject(new GatewayTimeoutError('total', ms));
+        if (controller.signal.aborted) onAbort();
+        else controller.signal.addEventListener('abort', onAbort, { once: true });
+      });
+      const corpo = res.text();
+      corpo.catch(() => undefined); // perdeu a corrida: a rejeição tardia não vaza
+      try {
+        const text = await Promise.race([corpo, abortou]);
+        return { ok: res.ok, status: res.status, statusText: res.statusText, text };
+      } finally {
+        controller.signal.removeEventListener('abort', onAbort);
+        abortou.catch(() => undefined);
+      }
     } catch (err) {
       if (timedOut) throw new GatewayTimeoutError('total', ms);
       throw err;
@@ -2192,9 +2767,52 @@ export class OpenRouterGateway {
     return this.modelsCache.get(cacheKey(apiKey));
   }
 
-  /** Modelo do catalogo EM CACHE (sem rede). */
+  /** Modelo do catalogo EM CACHE (sem rede): chat primeiro, depois o de decisões (modo JEV). */
   cachedModel(apiKey: string, modelId: string): OpenRouterModel | undefined {
-    return this.modelsCache.get(cacheKey(apiKey))?.data.find((m) => m.id === modelId);
+    const ck = cacheKey(apiKey);
+    return (
+      this.modelsCache.get(ck)?.data.find((m) => m.id === modelId) ??
+      this.decisionModelsCache.get(ck)?.data.find((m) => m.id === modelId)
+    );
+  }
+
+  /** Modo JEV — semeia o catálogo de decisões sem rede (CLI/testes). */
+  primeDecisionModelsCache(apiKey: string, data: OpenRouterModel[], fetchedAt: number = Date.now()): void {
+    this.decisionModelsCache.set(cacheKey(apiKey), { fetchedAt, data });
+  }
+
+  /** Modo JEV — espia o catálogo de decisões em memória. `undefined` = frio. */
+  peekDecisionModelsCache(apiKey: string): { fetchedAt: number; data: OpenRouterModel[] } | undefined {
+    return this.decisionModelsCache.get(cacheKey(apiKey));
+  }
+
+  /**
+   * Modo JEV (D-8) — catálogo de modelos de DECISÃO. Público (sem key), com
+   * cache próprio. O preço dele (jev-1.13: 4,2e-8/token de entrada, saída 0)
+   * serve SÓ à reserva/estimativa: dinheiro continua vindo de `usage.cost`.
+   * Defensivo: se o endpoint ignorar o filtro e devolver o catálogo de chat,
+   * só entram itens que declaram saída `decisions` (ou sem `architecture`).
+   * Mesmo transporte de metadados do `/models` (IMPL-077: teto em headers E corpo).
+   */
+  async listDecisionModels(apiKey: string, force = false): Promise<OpenRouterModel[]> {
+    const ck = cacheKey(apiKey);
+    const cached = this.decisionModelsCache.get(ck);
+    if (!force && cached && Date.now() - cached.fetchedAt < this.cfg.modelsCacheTtlMs) return cached.data;
+    const res = await this.metaRequest(`${this.cfg.baseUrl}/models?output_modalities=decisions`, {
+      method: 'GET',
+      headers: this.headers(apiKey),
+    });
+    if (!res.ok) {
+      throw new Error(`OpenRouter /models (decisões) falhou: ${res.status} ${res.statusText} ${res.text.slice(0, 200)}`);
+    }
+    const { models } = validateModelsPayload(JSON.parse(res.text) as unknown);
+    const data = models.filter((m) => {
+      const arch = (m.raw as { architecture?: { output_modalities?: unknown } } | undefined)?.architecture;
+      const outs = arch?.output_modalities;
+      return !Array.isArray(outs) || outs.includes('decisions');
+    });
+    this.decisionModelsCache.set(ck, { fetchedAt: Date.now(), data });
+    return data;
   }
 
   async listModels(apiKey: string, force = false): Promise<OpenRouterModel[]> {
@@ -2204,17 +2822,16 @@ export class OpenRouterGateway {
       return cached.data;
     }
 
-    const res = await this.metaFetch(`${this.cfg.baseUrl}/models`, {
+    const res = await this.metaRequest(`${this.cfg.baseUrl}/models`, {
       method: 'GET',
       headers: this.headers(apiKey),
     });
 
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`OpenRouter /models falhou: ${res.status} ${res.statusText} ${text.slice(0, 200)}`);
+      throw new Error(`OpenRouter /models falhou: ${res.status} ${res.statusText} ${res.text.slice(0, 200)}`);
     }
 
-    const { models: data, issues } = validateModelsPayload(await res.json());
+    const { models: data, issues } = validateModelsPayload(JSON.parse(res.text) as unknown);
     this.modelsCache.set(ck, { fetchedAt: Date.now(), data });
     this.modelsIssues.set(ck, issues);
     return data;
@@ -2366,7 +2983,13 @@ export class OpenRouterGateway {
         slot.release();
         if (externalSignal?.aborted) throw toControlSignal(externalSignal.reason);
         // Classificado: 403 de moderacao sai como 'blocked' (nao "key invalida").
-        throw classifyHttpError(status, errText);
+        const httpErr = classifyHttpError(status, errText);
+        // Modo JEV: geração atribuída antes da recusa (400 upstream) — o
+        // chamador decide se a reserva fica pendente (ver `decide`).
+        const genId = res.headers?.get?.('x-generation-id');
+        if (typeof genId === 'string' && genId.trim()) httpErr.generationId = genId.trim();
+        if (errText) httpErr.responseBody = errText.slice(0, 16_384);
+        throw httpErr;
       }
 
       // OK: segura o slot ate o chamador terminar de ler o corpo.
@@ -2431,11 +3054,19 @@ export class OpenRouterGateway {
     return body;
   }
 
-  /** IMPL-075 — esta chamada vai no modo auditável? (preset do papel ou flag da chamada). */
+  /**
+   * IMPL-075 — esta chamada vai no modo auditável? Flag da chamada, preset do
+   * gateway (`auditableRoles`, env `OPENROUTER_AUDITABLE`) ou a política no
+   * ledger (`sink.auditableRoles`). O ledger é alimentado por `config.auditable`
+   * (schema, arena-config `judging.auditable`, CLI `--auditable`): os dois
+   * orquestradores e os dois trainers chamam `ledger.setAuditableRoles(
+   * AUDITABLE_ROLES)` e a cadeia de forks herda — por run/sessão, sem env.
+   */
   private auditableFor(params: ChatCompletionParams): boolean {
     if (params.auditable === true) return true;
     const role = params.role ?? 'competitor';
-    return (this.cfg.auditableRoles ?? []).includes(role);
+    if ((this.cfg.auditableRoles ?? []).includes(role)) return true;
+    return (params.sink?.auditableRoles?.() ?? []).includes(role);
   }
 
   /**
@@ -2485,33 +3116,37 @@ export class OpenRouterGateway {
    * reasoning tokens, latência, estimado x real e o provedor que serviu.
    */
   private account(
-    params: ChatCompletionParams,
+    call: AccountingCall,
     reservation: ReturnType<CostSink['reserve']> | undefined,
     usage: UsageInfo,
     finish?: CallFinishSignals,
-    extra?: { latencyMs?: number; provider?: CallProviderInfo },
+    extra?: { latencyMs?: number; provider?: CallProviderInfo; generationId?: string },
   ): CallCost {
-    const role = params.role ?? 'competitor';
-    const cost = priceUsage(usage, this.cachedModel(params.apiKey, params.modelId));
+    const role = call.role;
+    const cost = priceUsage(usage, this.cachedModel(call.apiKey, call.modelId));
     // Estimado x real por chamada (IMPL-113): só o custo MEDIDO vira amostra —
     // `catalog`/`unknown` não têm "real" e jamais entram (nem como zero).
-    const estimado = this.estimatedUsdFor(params);
-    if (cost.source === 'usage' && estimado !== null && estimado > 0 && cost.usd >= 0) {
+    const estimado = this.estimatedUsdFor(call);
+    const real = measuredCallUsd(cost);
+    // Modo JEV: chamada de DECISÃO (saída grátis, estimado ≈ real) nunca vira
+    // amostra — milhares delas no papel `competitor` distorceriam a faixa
+    // conformal do competidor LLM (`CostCalibration.live`).
+    if (call.kind === 'chat' && cost.source === 'usage' && estimado !== null && estimado > 0 && real !== null && real >= 0) {
       recordCostSample({
         role,
-        modelId: params.modelId,
-        family: modelFamilyOf(params.modelId),
+        modelId: call.modelId,
+        family: modelFamilyOf(call.modelId),
         estimatedUsd: estimado,
-        actualUsd: cost.usd,
+        actualUsd: real,
         ...(typeof finish?.effort === 'string' ? { effort: finish.effort } : {}),
         ...(typeof usage.reasoningTokens === 'number' ? { reasoningTokens: usage.reasoningTokens } : {}),
-        capTokens: effectiveMaxTokens(params.maxTokens),
+        capTokens: call.capTokens,
       });
     }
     if (reservation) {
-      params.sink?.note(reservation, {
+      call.sink?.note(reservation, {
         role,
-        modelId: params.modelId,
+        modelId: call.modelId,
         cost,
         tokensIn: usage.tokensIn,
         tokensOut: usage.tokensOut,
@@ -2519,22 +3154,22 @@ export class OpenRouterGateway {
         ...(typeof usage.reasoningTokens === 'number' ? { reasoningTokens: usage.reasoningTokens } : {}),
         ...(typeof extra?.latencyMs === 'number' ? { latencyMs: extra.latencyMs } : {}),
         ...(extra?.provider ? { provider: extra.provider } : {}),
+        // IMPL-074: o id de geração de TODA chamada 200 vai ao registo (a ponte
+        // com a fatura — conferência de cobrança dupla por id).
+        ...(extra?.generationId ? { generationId: extra.generationId } : {}),
+        ...(call.auditable ? { auditable: true } : {}),
         // Estimado x real (IMPL-078): a MESMA conta da reserva (catálogo), contra `cost.usd`.
         ...(estimado !== null ? { estimatedUsd: estimado } : {}),
         ...(finish ? { finish } : {}),
       });
     }
-    params.onCost?.(cost);
+    call.onCost?.(cost);
     return cost;
   }
 
   /** Estimativa de catálogo desta chamada (a mesma que vai na reserva). `null` = não precificável. */
-  private estimatedUsdFor(params: ChatCompletionParams): number | null {
-    return computeCost(
-      guessPromptTokens(params.messages),
-      effectiveMaxTokens(params.maxTokens),
-      this.cachedModel(params.apiKey, params.modelId),
-    );
+  private estimatedUsdFor(call: AccountingCall): number | null {
+    return computeCost(call.promptTokensGuess, call.capTokens, this.cachedModel(call.apiKey, call.modelId));
   }
 
   /**
@@ -2549,19 +3184,38 @@ export class OpenRouterGateway {
    * ao registo estimado × real (`estimatedUsdFor`) fica SEM margem, para a
    * calibração comparar estimativa honesta com o real.
    */
-  private async reserveFor(
-    params: ChatCompletionParams,
-    role: CostRole,
-  ): Promise<ReturnType<CostSink['reserve']> | undefined> {
-    const sink = params.sink;
+  private async reserveFor(call: AccountingCall): Promise<ReturnType<CostSink['reserve']> | undefined> {
+    const sink = call.sink;
     if (!sink) return undefined;
-    const cap = effectiveMaxTokens(params.maxTokens);
-    const promptGuess = Math.ceil(guessPromptTokens(params.messages) * RESERVE_TOKEN_MARGIN);
-    const fallback = computeCost(promptGuess, cap, this.cachedModel(params.apiKey, params.modelId));
+    const cap = call.capTokens;
+    const promptGuess = Math.ceil(call.promptTokensGuess * RESERVE_TOKEN_MARGIN);
+    const fallback = computeCost(promptGuess, cap, this.cachedModel(call.apiKey, call.modelId));
     const fb = fallback === null ? undefined : fallback;
     return sink.admit
-      ? sink.admit(role, params.modelId, promptGuess, cap, fb, params.signal)
-      : sink.reserve(role, params.modelId, promptGuess, cap, fb);
+      ? sink.admit(call.role, call.modelId, promptGuess, cap, fb, call.signal)
+      : sink.reserve(call.role, call.modelId, promptGuess, cap, fb);
+  }
+
+  /**
+   * O recorte CONTÁBIL de uma chamada de chat (modo JEV: o mesmo `account`
+   * serve a `decide`). Calculado UMA vez por chamada — a estimativa de tokens e
+   * o teto de saída são exatamente os de antes (`guessPromptTokens` das
+   * mensagens originais + `effectiveMaxTokens`), e o modo auditável sai do
+   * MESMO `auditableFor(params)` que monta o corpo.
+   */
+  private accountingOf(params: ChatCompletionParams): AccountingCall {
+    return {
+      kind: 'chat',
+      apiKey: params.apiKey,
+      modelId: params.modelId,
+      role: params.role ?? 'competitor',
+      sink: params.sink,
+      signal: params.signal,
+      onCost: params.onCost,
+      promptTokensGuess: guessPromptTokens(params.messages),
+      capTokens: effectiveMaxTokens(params.maxTokens),
+      auditable: this.auditableFor(params),
+    };
   }
 
   /**
@@ -2575,7 +3229,7 @@ export class OpenRouterGateway {
    * `soma(costByContestant)` passava de `totalCostUsd`.
    */
   private accountUnmeasured(
-    params: ChatCompletionParams,
+    call: AccountingCall,
     reservation: ReturnType<CostSink['reserve']> | undefined,
     reason: PendingReason,
     generationId: string | undefined,
@@ -2583,20 +3237,21 @@ export class OpenRouterGateway {
     extra?: { provider?: CallProviderInfo; latencyMs?: number },
   ): CallCost {
     if (reservation) {
-      params.sink?.pending(reservation, {
-        role: params.role ?? 'competitor',
-        modelId: params.modelId,
+      call.sink?.pending(reservation, {
+        role: call.role,
+        modelId: call.modelId,
         reason,
         ...(generationId ? { generationId } : {}),
         ...(extra?.provider ? { provider: extra.provider } : {}),
         ...(typeof extra?.latencyMs === 'number' ? { latencyMs: extra.latencyMs } : {}),
+        ...(call.auditable ? { auditable: true } : {}),
         ...(finish ? { finish } : {}),
       });
     }
     const usd = reservation?.usd ?? 0;
     const cost: CallCost =
       reservation?.status === 'pending' ? { usd: 0, source: 'unknown', pendingUsd: usd } : { usd, source: 'unknown' };
-    params.onCost?.(cost);
+    call.onCost?.(cost);
     return cost;
   }
 
@@ -2630,12 +3285,318 @@ export class OpenRouterGateway {
   }
 
   async chatCompletion(params: ChatCompletionParams): Promise<ChatCompletionResult> {
+    // IMPL-081: journal da run PRIMEIRO — o que já foi pago numa tentativa
+    // anterior volta daqui, antes de cache, reserva e fetch.
     // IMPL-080: cache EXATO de vereditos ANTES de qualquer reserva/fetch.
-    return this.withVerdictCache(params, () => this.chatCompletionDirect(params));
+    // IMPL-114: aquecimento do prefixo cacheável DEPOIS dele (hit não aquece).
+    return this.withCallJournal(params, () =>
+      this.withVerdictCache(params, () => this.withCacheWarmup(params, () => this.chatCompletionDirect(params))),
+    );
   }
 
   async chatCompletionStream(params: ChatStreamParams): Promise<ChatCompletionResult> {
-    return this.withVerdictCache(params, () => this.chatCompletionStreamDirect(params));
+    return this.withCallJournal(params, () =>
+      this.withVerdictCache(params, () => this.withCacheWarmup(params, () => this.chatCompletionStreamDirect(params))),
+    );
+  }
+
+  /** O pedido CANÔNICO desta chamada para o journal (IMPL-081) — o que muda a resposta. */
+  private journalRequestOf(params: ChatCompletionParams): JournalRequest {
+    return {
+      role: params.role ?? 'competitor',
+      modelId: params.modelId,
+      // As mensagens ORIGINAIS (antes da cascata de dado pessoal): o cofre de
+      // pseudônimos tem chave nova por run/processo — o corpo do fio mudaria
+      // a cada tentativa e nada seria replayável.
+      messages: params.messages,
+      temperature: params.temperature ?? 0,
+      maxTokens: effectiveMaxTokens(params.maxTokens),
+      reasoningLevel: params.reasoningLevel ?? null,
+      responseFormatJson: params.responseFormatJson ?? null,
+      responseSchema: params.responseSchema ?? null,
+      maxPricePerMTok: params.maxPricePerMTok ?? null,
+      cacheControlAfter: params.cacheControlAfter ?? null,
+      auditable: this.auditableFor(params),
+    };
+  }
+
+  /**
+   * IMPL-081 (R-10:REC-2) — journal de chamadas PAGAS da run (`sink.callJournal`).
+   * ANTES da chamada: numa run RETOMADA, a resposta gravada desta ocorrência do
+   * MESMO pedido canônico volta sem reserva, sem fetch e sem gasto (US$ 0 nesta
+   * tentativa; o ledger a registra como `replayed`, fora do gasto). DEPOIS: a
+   * resposta nova é gravada (durável) antes de voltar ao papel. Abort pendente
+   * NUNCA é replayado: segue o caminho normal, que o devolve como sinal de
+   * CONTROLE (RunCancelled). Falha ao gravar não derruba a chamada paga.
+   */
+  private async withCallJournal(
+    params: ChatStreamParams,
+    run: () => Promise<ChatCompletionResult>,
+  ): Promise<ChatCompletionResult> {
+    const journal = params.sink?.callJournal?.();
+    if (!journal) return run();
+    if (params.signal?.aborted) return run();
+    const req = this.journalRequestOf(params);
+    const got = journal.take(req);
+    if (got.kind === 'replay') {
+      const r = got.result;
+      params.sink?.noteReplayed?.({
+        role: req.role,
+        modelId: params.modelId,
+        originalCost: r.cost,
+        ...(r.finishSignals ? { finish: r.finishSignals } : {}),
+      });
+      params.onDelta?.(r.text, r.text);
+      return {
+        text: r.text,
+        tokensIn: r.tokensIn,
+        tokensOut: r.tokensOut,
+        latencyMs: r.latencyMs,
+        raw: { replayed: true },
+        cost: { usd: 0, source: 'usage', replayed: true },
+        ...(typeof r.cachedTokensIn === 'number' ? { cachedTokensIn: r.cachedTokensIn } : {}),
+        ...(typeof r.reasoningTokens === 'number' ? { reasoningTokens: r.reasoningTokens } : {}),
+        ...(r.finishReason ? { finishReason: r.finishReason } : {}),
+        ...(r.nativeFinishReason ? { nativeFinishReason: r.nativeFinishReason } : {}),
+        ...(r.refusal ? { refusal: r.refusal } : {}),
+        ...(r.blocked ? { blocked: r.blocked as GatewayBlock } : {}),
+        ...(typeof r.truncated === 'boolean' ? { truncated: r.truncated } : {}),
+        ...(r.truncationSignals?.length ? { truncationSignals: r.truncationSignals as TruncationSignal[] } : {}),
+        ...(r.provider ? { provider: r.provider } : {}),
+        ...(r.auditable ? { auditable: true } : {}),
+        ...(r.finishSignals ? { finishSignals: r.finishSignals } : {}),
+        replayed: true,
+      };
+    }
+    const result = await run();
+    // Replay de OUTRA camada (não existe hoje) nunca é regravado.
+    if (!result.replayed) await journal.record(got.ticket, result as JournaledResult);
+    return result;
+  }
+
+  // --- decisões (modo JEV) -----------------------------------------------------
+
+  /** URL efetiva do endpoint de decisões (explícita > derivada da baseUrl). */
+  private decisionsUrlOf(): string {
+    return this.cfg.decisionsUrl ?? deriveDecisionsUrl(this.cfg.baseUrl);
+  }
+
+  /**
+   * Corpo da decisão — o PONTO ÚNICO do modo JEV (espelha `buildBody`):
+   * estado e perguntas passam pela cascata de dado pessoal (`protectDeep`: toda
+   * string, sem teto de profundidade — os VALORES; chaves de opção e ids ficam
+   * intactos) e o roteamento sensível LGPD é aplicado POR ÚLTIMO (fail-closed:
+   * modelo fora da allowlist ZDR lança aqui, antes da reserva e do fetch).
+   * Nunca vão `temperature`, `max_tokens`, `reasoning` nem `user` (o endpoint
+   * ignora temperatura e recusa `user` longo; toda temperatura é pós-hoc).
+   */
+  private buildDecisionBody(p: DecideParams): Record<string, unknown> {
+    const safe = this.piiGuard.protectDeep({ state: p.state, questions: p.questions }, piiScopeOf(p.sink));
+    const body: Record<string, unknown> = { model: p.modelId, state: safe.state, questions: safe.questions };
+    if (typeof p.sessionId === 'string' && p.sessionId.trim()) body.session_id = p.sessionId.trim().slice(0, 256);
+    applySensitiveRouting(body, p.sink?.sensitiveRouting?.(), p.modelId, p.role ?? 'competitor');
+    return body;
+  }
+
+  /**
+   * Modo JEV (D-6) — UMA decisão tipada (`noul`/`choice`/`score`) num modelo de
+   * decisão. Mesmo esqueleto de `chatCompletion`: guarda anti-reenvio, reserva
+   * ANTES do slot, limitador AIMD por (key, modelo), backoff com
+   * `Retry-After` (quando o header é legível — no navegador o CORS do endpoint
+   * não o expõe e só o AIMD protege), timeout tipado, abort externo como sinal
+   * de controle e a contabilidade no MESMO `account` (role + sink), com o id de
+   * geração no registo (IMPL-074: a ponte com a fatura). Diferenças de dinheiro:
+   *   - reserva = tokens(JSON do estado+perguntas) + overhead medido, saída 0;
+   *   - 400 com `x-generation-id` (recusa do upstream) pode ter sido cobrado:
+   *     fica PENDENTE conciliável; só o 400 do edge (sem id) devolve a reserva;
+   *   - decisão nunca vira amostra da calibração de custo do LLM.
+   * `answers` volta CRU (validado no engine: `validateDecisionsResponse`).
+   */
+  async decide(p: DecideParams): Promise<DecideResult> {
+    const role = p.role ?? 'competitor';
+    const timeouts = this.timeoutsFor({ role, timeoutMs: p.timeoutMs ?? DEFAULT_DECISION_TIMEOUT_MS }, false);
+    const body = this.buildDecisionBody(p);
+    const bodyJson = JSON.stringify(body);
+    const guardKey = this.guardKey(bodyJson);
+    const bloqueado = this.resendBlocked(guardKey);
+    if (bloqueado !== undefined) throw bloqueado;
+
+    const acct: AccountingCall = {
+      kind: 'decision',
+      apiKey: p.apiKey,
+      modelId: p.modelId,
+      role,
+      sink: p.sink,
+      signal: p.signal,
+      onCost: p.onCost,
+      promptTokensGuess:
+        countTextTokens(JSON.stringify({ state: body.state, questions: body.questions })) + DECISION_REQUEST_OVERHEAD_TOKENS,
+      capTokens: 0,
+      // IMPL-075: o registo `auditable` afirma que o CORPO foi com o pin de
+      // provedor (`applyAuditable`). O corpo de decisão não leva `provider`
+      // (o endpoint é de um provedor só e não se sabe se aceita o campo) —
+      // marcar `true` aqui, mesmo com o papel na política, seria mentira.
+      auditable: false,
+    };
+    const reservation = await this.reserveFor(acct);
+
+    const track: DispatchTrack = {};
+    let guarded: GuardedResponse;
+    try {
+      guarded = await this.guardedFetch(
+        this.decisionsUrlOf(),
+        { method: 'POST', headers: this.headers(p.apiKey), body: JSON.stringify(body) },
+        timeouts,
+        role,
+        limiterScopeOf(p.apiKey, p.modelId, body),
+        p.signal,
+        track,
+      );
+    } catch (err) {
+      const genId = (err as { generationId?: unknown })?.generationId;
+      if (track.abortedInFlight) this.accountUnmeasured(acct, reservation, track.abortedInFlight, undefined);
+      else if (typeof genId === 'string' && genId) this.accountUnmeasured(acct, reservation, 'no_usage', genId);
+      else reservation?.release();
+      throw err;
+    }
+    const { res, startedAt, finish } = guarded;
+
+    let ok = false;
+    let accounted = false;
+    let generationId: string | undefined;
+    let provider: CallProviderInfo | undefined;
+    try {
+      const json = (await res.json()) as Record<string, unknown>;
+      const latencyMs = Date.now() - startedAt;
+      const header = (name: string): string | undefined => {
+        const v = res.headers?.get?.(name);
+        return typeof v === 'string' && v.trim() ? v.trim() : undefined;
+      };
+      generationId = header('x-generation-id') ?? generationIdOf(json);
+      const providerName = header('x-provider-name') ?? (typeof json.provider === 'string' ? json.provider : undefined);
+      provider = providerName ? { name: providerName } : undefined;
+      const usage = extractDecisionUsage(json.usage);
+      const semId = { latencyMs, ...(provider ? { provider } : {}) };
+      // IMPL-074: o id de geração vai ao registo da chamada medida (a ponte com
+      // a fatura), como em todo 200 de chat (`finalizeReply`).
+      const cost = hasUsage(json.usage)
+        ? this.account(acct, reservation, usage, undefined, { ...semId, ...(generationId ? { generationId } : {}) })
+        : this.accountUnmeasured(acct, reservation, 'no_usage', generationId, undefined, semId);
+      accounted = true;
+      const answers = json.answers;
+      // Cobrada (já contabilizada acima) mas fora do contrato: falha alto.
+      if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+        throw new Error('decisões: resposta sem `answers` (objeto) — contabilizada, fora do contrato.');
+      }
+      ok = true;
+      return {
+        answers: answers as Record<string, unknown>,
+        resolvedModel: typeof json.model === 'string' && json.model.trim() ? json.model.trim() : p.modelId,
+        ...(providerName ? { provider: providerName } : {}),
+        ...(generationId ? { generationId } : {}),
+        tokensIn: usage.tokensIn,
+        tokensOut: usage.tokensOut,
+        latencyMs,
+        cost,
+        raw: json,
+      };
+    } catch (err) {
+      if (!accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
+      throw controlIfAborted(err, p.signal);
+    } finally {
+      // Corpo ilegível/abortado depois do 200: despachada, sem custo medido —
+      // pendente pelo id (conservador sem ele), nunca devolvida.
+      if (!accounted) {
+        this.accountUnmeasured(acct, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
+          ...(provider ? { provider } : {}),
+          latencyMs: Date.now() - startedAt,
+        });
+      }
+      finish(ok);
+    }
+  }
+
+  /**
+   * IMPL-063 — chamada PAGA não-chat com lista de textos (`input`), pelo MESMO
+   * caminho do chat: cascata de dado pessoal nos textos (IMPL-042), roteamento
+   * sensível fail-closed, reserva no ledger ANTES do slot (role + sink), o
+   * limitador AIMD/retry/watchdog de `guardedFetch` e o custo MEDIDO por
+   * `usage.cost` (`account`) — sem `usage`, pendente/conservador
+   * (`accountUnmeasured`), nunca zero. Quem usa: `src/embeddings.ts` (dedup de
+   * cenários do datagen). Devolve o JSON cru da resposta 200.
+   */
+  async meteredInputCall(params: MeteredInputParams): Promise<MeteredInputResult> {
+    const { apiKey, modelId, sink, signal: externalSignal } = params;
+    const role = params.role;
+    // A MESMA forma de pedido que a reserva/cascata conhecem: cada texto é uma
+    // mensagem `user`; teto de saída 1 token (estes pontos não geram texto).
+    const comoChat: ChatCompletionParams = {
+      apiKey,
+      modelId,
+      messages: params.input.map((content) => ({ role: 'user' as const, content })),
+      maxTokens: 1,
+      role,
+      ...(typeof params.timeoutMs === 'number' ? { timeoutMs: params.timeoutMs } : {}),
+      ...(sink ? { sink } : {}),
+      ...(externalSignal ? { signal: externalSignal } : {}),
+    };
+    const protegidas = this.protectMessages(comoChat.messages, sink).map((m) => m.content);
+    const corpo: Record<string, unknown> = { model: modelId, input: protegidas };
+    applySensitiveRouting(corpo, sink?.sensitiveRouting?.(), modelId, role);
+    const timeouts = this.timeoutsFor(comoChat, false);
+    // Modo JEV: o recorte contábil é o MESMO do chat (`accountingOf`) — um só
+    // `account` para chat, decisão e esta chamada não-chat.
+    const acct = this.accountingOf(comoChat);
+    const reservation = await this.reserveFor(acct);
+    const track: DispatchTrack = {};
+    let guarded: GuardedResponse;
+    try {
+      guarded = await this.guardedFetch(
+        `${this.cfg.baseUrl}/${params.path.replace(/^\/+/, '')}`,
+        { method: 'POST', headers: this.headers(apiKey), body: JSON.stringify(corpo) },
+        timeouts,
+        role,
+        limiterScopeOf(apiKey, modelId, corpo),
+        externalSignal,
+        track,
+      );
+    } catch (err) {
+      if (track.abortedInFlight) this.accountUnmeasured(acct, reservation, track.abortedInFlight, undefined);
+      else reservation?.release();
+      throw err;
+    }
+    const { res, startedAt, finish } = guarded;
+    let contabilizado = false;
+    let ok = false;
+    let generationId: string | undefined;
+    try {
+      const json = (await res.json()) as { id?: unknown; usage?: unknown; error?: unknown };
+      generationId = typeof json?.id === 'string' && json.id ? json.id : undefined;
+      const latencyMs = Date.now() - startedAt;
+      const cost = hasUsage(json?.usage)
+        ? this.account(acct, reservation, extractUsage(json.usage), undefined, {
+            latencyMs,
+            ...(generationId ? { generationId } : {}),
+          })
+        : this.accountUnmeasured(acct, reservation, 'no_usage', generationId, undefined, { latencyMs });
+      contabilizado = true;
+      // 200 com corpo de erro (provedor recusou): falha, já contabilizada.
+      if (json?.error) {
+        const e = json.error as { message?: unknown };
+        throw new Error(`OpenRouter: ${typeof e?.message === 'string' ? e.message : JSON.stringify(json.error)}`);
+      }
+      ok = true;
+      return { raw: json, cost, latencyMs };
+    } catch (err) {
+      throw controlIfAborted(err, externalSignal);
+    } finally {
+      if (!contabilizado) {
+        this.accountUnmeasured(acct, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
+          latencyMs: Date.now() - startedAt,
+        });
+      }
+      finish(ok);
+    }
   }
 
   /**
@@ -2647,7 +3608,9 @@ export class OpenRouterGateway {
    * e o caminho normal o classifica).
    */
   private verdictCacheFor(params: ChatCompletionParams): VerdictCache | undefined {
-    const cache = this.cfg.verdictCache;
+    // IMPL-080: o cache da SESSÃO de treino viaja no ledger (`sink.verdictCache`,
+    // escopo da cadeia de forks) — o do gateway é o interruptor global legado.
+    const cache = this.cfg.verdictCache || params.sink?.verdictCache?.();
     if (!cache) return undefined;
     const role = params.role;
     if (role !== 'judge' && role !== 'duel' && role !== 'gabarito') return undefined;
@@ -2671,6 +3634,7 @@ export class OpenRouterGateway {
   ): Promise<ChatCompletionResult> {
     const cache = this.verdictCacheFor(params);
     if (!cache) return run();
+    const promptText = params.messages.map((m) => `${m.role}\u0000${m.content}`).join('\u0000');
     const key = verdictCacheKey({
       modelId: params.modelId,
       effort: params.reasoningLevel ?? null,
@@ -2682,10 +3646,12 @@ export class OpenRouterGateway {
         responseSchema: params.responseSchema?.schema ?? null,
         responseFormatJson: params.responseFormatJson ?? null,
       }),
-      promptText: params.messages.map((m) => `${m.role}\u0000${m.content}`).join('\u0000'),
+      promptText,
     });
     const role = params.role ?? 'competitor';
-    const hit = cache.lookup(key);
+    // IMPL-080: o texto servido do cache é re-amarrado ao marcador/canário
+    // DESTA chamada (a blindagem do juiz sorteia os dois por veredito).
+    const hit = cache.lookup(key, promptText);
     if (hit) {
       params.sink?.noteVerdictCache?.({ role, hit: true });
       if (!hit.retest) return this.cachedVerdictResult(params, hit.entry);
@@ -2693,14 +3659,14 @@ export class OpenRouterGateway {
       // veredito (discordância acima do limiar invalida o cache) e devolve o
       // resultado REAL — quem serve é a nova medição, não o replay.
       const fresh = await run();
-      cache.noteRetest(key, this.storableOf(fresh));
+      cache.noteRetest(key, this.storableOf(fresh), promptText);
       return fresh;
     }
     params.sink?.noteVerdictCache?.({ role, hit: false });
     const result = await run();
     // Só guarda o que completou SEM bloqueio do guardrail (corte de moderação
     // não é veredito — re-julgar é sempre o caminho).
-    if (!result.blocked) cache.store(key, this.storableOf(result));
+    if (!result.blocked) cache.store(key, this.storableOf(result), promptText);
     return result;
   }
 
@@ -2733,14 +3699,144 @@ export class OpenRouterGateway {
     };
   }
 
+  /**
+   * IMPL-114 (R-08:REC-4) — AQUECIMENTO do prefixo cacheável: a PRIMEIRA
+   * chamada com um dado prefixo (modelo + mensagens até `cacheControlAfter`)
+   * vai sozinha; as outras com o MESMO prefixo esperam ela terminar e só então
+   * saem — em paralelo, já achando o cache escrito. Sem isto o `Promise.all`
+   * do julgamento dispara N chamadas idênticas no mesmo instante e todas
+   * ESCREVEM o cache (nenhuma lê). Só vale quando o chamador pediu a quebra
+   * (`cacheControlAfter`); não é teto de concorrência — cada prefixo espera
+   * UMA chamada, uma vez, e prefixos diferentes nunca se esperam.
+   */
+  private readonly warmups = new Map<string, Promise<void> | true>();
+
+  private async withCacheWarmup<T>(params: ChatCompletionParams, run: () => Promise<T>): Promise<T> {
+    const k = params.cacheControlAfter;
+    if (typeof k !== 'number' || !Number.isInteger(k) || k < 0 || k >= params.messages.length) return run();
+    const key = this.guardKey(
+      [cacheKey(params.apiKey), params.modelId, ...params.messages.slice(0, k + 1).map((m) => `${m.role}\u0000${m.content}`)].join('\u0000'),
+    );
+    const estado = this.warmups.get(key);
+    if (estado === true) return run();
+    if (estado) {
+      await waitOrAbort(estado, params.signal);
+      return run();
+    }
+    let aquecido: () => void = () => undefined;
+    this.warmups.set(key, new Promise<void>((resolve) => (aquecido = resolve)));
+    try {
+      return await run();
+    } finally {
+      // Falhou ou não, quem espera segue: o aquecimento é otimização, nunca porta.
+      this.warmups.set(key, true);
+      aquecido();
+      if (this.warmups.size > 1024) {
+        for (const [chave, v] of this.warmups) {
+          if (this.warmups.size <= 768) break;
+          if (v === true) this.warmups.delete(chave);
+        }
+      }
+    }
+  }
+
+  /**
+   * Fecha uma resposta 200 (JSON ou SSE, os MESMOS campos): bloqueio/recusa,
+   * truncamento, sinais de fim, proveniência, CONTABILIDADE e o resultado.
+   * Contabiliza ANTES de lançar a falha in-band — uma resposta 200 com corpo
+   * de erro JÁ foi cobrada (sem isto ela saía de graça nos livros e cara na
+   * fatura). `st.accounted` avisa o chamador de que o custo já foi lançado.
+   */
+  private async finalizeReply(
+    params: ChatCompletionParams,
+    acct: AccountingCall,
+    reservation: ReturnType<CostSink['reserve']> | undefined,
+    body: Record<string, unknown>,
+    maxTokens: number,
+    startedAt: number,
+    reply: CollectedReply,
+    st: { accounted: boolean },
+  ): Promise<ChatCompletionResult> {
+    const usage = extractUsage(reply.usageRaw);
+    // Erro no MEIO do stream chega como chunk `{ error, finish_reason: 'error' }`
+    // (o HTTP ja foi 200); no JSON, como `{ error }` no corpo 200. Moderacao
+    // aqui e bloqueio, nao "resposta vazia".
+    const inBandBlock = reply.error ? blockFromErrorBody(reply.error, undefined, 'in_band') : undefined;
+    // OpenRouter as vezes devolve 200 com um corpo de erro (ex.: provider
+    // rejeitou um parametro). Sem isto a falha viraria "resposta vazia" muda.
+    const inBandFailure = !reply.text && Boolean(reply.error);
+    const blocked = inBandBlock ?? blockFromFinishReason(reply.finishReason, reply.nativeFinishReason);
+    const refusal = refusalText(reply.refusal);
+    // O finish_reason (penultimo chunk no SSE) e o usage (com reasoning_tokens,
+    // ultimo chunk) so estao completos aqui: e aqui que se decide o truncamento.
+    const trunc = this.truncationOf(
+      maxTokens,
+      usage,
+      reply.text,
+      reply.finishReason,
+      reply.nativeFinishReason,
+      Boolean(blocked || refusal),
+    );
+    // Sinais de fim so quando a chamada completou (a falha in-band nao tem fim a medir).
+    const fim = inBandFailure
+      ? undefined
+      : withEffort(
+          finishSignalsOf(
+            {
+              text: reply.text,
+              tokensOut: usage.tokensOut,
+              reasoningTokens: usage.reasoningTokens,
+              finishReason: reply.finishReason,
+              nativeFinishReason: reply.nativeFinishReason,
+              ...trunc,
+            },
+            maxTokens,
+          ),
+          body,
+        );
+    // IMPL-075: completa provider_name/upstream_id/service_tier via
+    // GET /generation quando o modo pedir (best-effort, nunca derruba a chamada).
+    const provider = mergeProviderInfo(reply.provider, await this.lookupProvider(params, reply.generationId, reply.provider));
+    const latencyMs = Date.now() - startedAt;
+    // Sem bloco `usage` nao ha custo medido: pendente pelo id (IMPL-017).
+    const cost = hasUsage(reply.usageRaw)
+      ? this.account(acct, reservation, usage, fim, { latencyMs, provider, generationId: reply.generationId })
+      : this.accountUnmeasured(acct, reservation, 'no_usage', reply.generationId, fim, { latencyMs, provider });
+    st.accounted = true;
+    if (inBandFailure && reply.error) {
+      if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
+      throw new Error(`OpenRouter: ${reply.error.message ?? JSON.stringify(reply.error)}`);
+    }
+    return {
+      // Reidratado: o papel recebe o valor original, nunca o token (LGPD, IMPL-042).
+      text: this.restoreText(reply.text, params.sink),
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      latencyMs,
+      raw: reply.raw,
+      cost,
+      cachedTokensIn: usage.cachedTokensIn,
+      reasoningTokens: usage.reasoningTokens,
+      ...(reply.finishReason ? { finishReason: reply.finishReason } : {}),
+      ...(reply.nativeFinishReason ? { nativeFinishReason: reply.nativeFinishReason } : {}),
+      ...(refusal ? { refusal } : {}),
+      ...(blocked ? { blocked } : {}),
+      ...(provider ? { provider } : {}),
+      ...(acct.auditable ? { auditable: true } : {}),
+      ...trunc,
+      ...(fim ? { finishSignals: fim } : {}),
+    };
+  }
+
   private async chatCompletionDirect(params: ChatCompletionParams): Promise<ChatCompletionResult> {
-    // IMPL-072: transporte STREAMING quando o papel/chamada pedir — o parser SSE
-    // é ÚNICO (o de `chatCompletionStream`), e em abort/timeout o provedor PARA
-    // de gerar em vez de concluir e cobrar a resposta inteira.
+    // IMPL-072: transporte STREAMING (default de runtime — ver `streamTransport`)
+    // — o parser é ÚNICO (o de `chatCompletionStream`) e em abort/timeout o
+    // provedor PARA de gerar em vez de concluir e cobrar a resposta inteira.
     if (params.streamTransport ?? this.cfg.streamTransport) return this.chatCompletionStreamDirect(params);
-    const { signal: externalSignal, sink } = params;
+    const { signal: externalSignal } = params;
     const maxTokens = effectiveMaxTokens(params.maxTokens);
     const role = params.role ?? 'competitor';
+    const acct = this.accountingOf(params);
     const timeouts = this.timeoutsFor(params, false);
     const body = this.buildBody(params, false);
     const bodyJson = JSON.stringify(body);
@@ -2750,7 +3846,7 @@ export class OpenRouterGateway {
     const bloqueado = this.resendBlocked(guardKey);
     if (bloqueado !== undefined) throw bloqueado;
 
-    const reservation = await this.reserveFor(params, role);
+    const reservation = await this.reserveFor(acct);
 
     const track: DispatchTrack = {};
     let guarded: GuardedResponse;
@@ -2770,111 +3866,34 @@ export class OpenRouterGateway {
     } catch (err) {
       // Abortada depois de despachada => pendente/conservador; HTTP de erro e
       // falha de rede sem resposta => nada gerado, a reserva volta (IMPL-017).
-      if (track.abortedInFlight) this.accountUnmeasured(params, reservation, track.abortedInFlight, undefined);
+      if (track.abortedInFlight) this.accountUnmeasured(acct, reservation, track.abortedInFlight, undefined);
       else reservation?.release();
       throw err;
     }
     const { res, startedAt, finish } = guarded;
 
-    let ok = false;
     // A partir daqui o provedor ja respondeu 200: qualquer saida sem custo
     // lancado e "despachada sem usage" — nunca devolucao da reserva.
-    let accounted = false;
-    let generationId: string | undefined;
-    let provider: CallProviderInfo | undefined;
+    const st = { accounted: false };
+    let ok = false;
+    let lido: CollectedReply | undefined;
     try {
-      const latencyMs = Date.now() - startedAt;
-      const json = (await res.json()) as {
-        id?: unknown;
-        choices?: {
-          message?: { content?: string | null; refusal?: string | null };
-          finish_reason?: string | null;
-          native_finish_reason?: string | null;
-        }[];
-        usage?: unknown;
-        error?: OpenRouterErrorBody;
-      };
-      generationId = generationIdOf(json);
-      // IMPL-075: provedor que serviu esta chamada (payload; /generation sob demanda).
-      provider = extractProviderInfo(json);
-
-      const usage = extractUsage(json.usage);
-      const choice = json.choices?.[0];
-      // Reidratada: o papel recebe o valor original, nunca o token (LGPD, IMPL-042).
-      const text = this.restoreText(choice?.message?.content ?? '', sink);
-      const finishReason = finishText(choice?.finish_reason);
-      const nativeFinishReason = finishText(choice?.native_finish_reason);
-      const inBandBlock = json.error ? blockFromErrorBody(json.error, undefined, 'in_band') : undefined;
-      // OpenRouter as vezes devolve 200 com um corpo de erro (ex.: provider
-      // rejeitou um parametro). Sem isto a falha viraria "resposta vazia" muda.
-      const inBandFailure = !text && Boolean(json.error);
-      const blocked = inBandBlock ?? blockFromFinishReason(finishReason, nativeFinishReason);
-      const refusal = refusalText(choice?.message?.refusal);
-      const trunc = this.truncationOf(
-        maxTokens,
-        usage,
-        text,
-        finishReason,
-        nativeFinishReason,
-        Boolean(blocked || refusal),
-      );
-      // IMPL-075: completa provider_name/upstream_id/service_tier via
-      // GET /generation quando o modo pedir (best-effort, nunca derruba a chamada).
-      provider = mergeProviderInfo(provider, await this.lookupProvider(params, generationId, provider));
-      const extra = { latencyMs, provider };
-      // Contabiliza ANTES do throw in-band: uma resposta 200 com corpo de erro
-      // (provider rejeitou um parametro) JA foi cobrada. Sem isto ela sai de
-      // graca nos livros e cara na fatura. Os sinais de fim so vao junto
-      // quando a chamada completou (a falha in-band nao tem fim a medir).
-      const fim = inBandFailure
-        ? undefined
-        : withEffort(
-            finishSignalsOf(
-              { text, tokensOut: usage.tokensOut, reasoningTokens: usage.reasoningTokens, finishReason, nativeFinishReason, ...trunc },
-              maxTokens,
-            ),
-            body,
-          );
-      // Sem bloco `usage` nao ha custo medido: pendente pelo id (IMPL-017).
-      const cost = hasUsage(json.usage)
-        ? this.account(params, reservation, usage, fim, extra)
-        : this.accountUnmeasured(params, reservation, 'no_usage', generationId, fim, extra);
-      accounted = true;
-      if (inBandFailure && json.error) {
-        if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
-        throw new Error(`OpenRouter: ${json.error.message ?? JSON.stringify(json.error)}`);
-      }
-
+      lido = collectJsonReply(await res.json());
+      const result = await this.finalizeReply(params, acct, reservation, body, maxTokens, startedAt, lido, st);
       ok = true;
-      return {
-        text,
-        tokensIn: usage.tokensIn,
-        tokensOut: usage.tokensOut,
-        latencyMs,
-        raw: json,
-        cost,
-        cachedTokensIn: usage.cachedTokensIn,
-        reasoningTokens: usage.reasoningTokens,
-        ...(finishReason ? { finishReason } : {}),
-        ...(nativeFinishReason ? { nativeFinishReason } : {}),
-        ...(refusal ? { refusal } : {}),
-        ...(blocked ? { blocked } : {}),
-        ...(provider ? { provider } : {}),
-        ...(this.auditableFor(params) ? { auditable: true } : {}),
-        ...trunc,
-      };
+      return result;
     } catch (err) {
       // IMPL-073: falha DEPOIS do 200 (corpo ilegível/cortado) tem desfecho
       // desconhecido e PODE ter sido cobrada: marca o erro e guarda o corpo
       // contra reenvio sem verificação.
-      if (!accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
+      if (!st.accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
       throw controlIfAborted(err, externalSignal);
     } finally {
       // Corpo abortado/ilegivel depois do 200: o provedor gerou (e cobra) —
       // no nao-streaming ele segue gerando apos o abort (IMPL-017).
-      if (!accounted) {
-        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
-          provider,
+      if (!st.accounted) {
+        this.accountUnmeasured(acct, reservation, guarded.abortReason() ?? 'no_usage', lido?.generationId, undefined, {
+          provider: lido?.provider,
           latencyMs: Date.now() - startedAt,
         });
       }
@@ -2886,6 +3905,7 @@ export class OpenRouterGateway {
     const { signal: externalSignal, sink, onDelta } = params;
     const maxTokens = effectiveMaxTokens(params.maxTokens);
     const role = params.role ?? 'competitor';
+    const acct = this.accountingOf(params);
     // IMPL-077: inatividade + teto total por papel (o watchdog de inatividade é
     // o que faz sentido em stream — cada chunk zera o relógio via `touch`).
     const timeouts = this.timeoutsFor(params, true);
@@ -2896,7 +3916,7 @@ export class OpenRouterGateway {
     const bloqueado = this.resendBlocked(guardKey);
     if (bloqueado !== undefined) throw bloqueado;
 
-    const reservation = await this.reserveFor(params, role);
+    const reservation = await this.reserveFor(acct);
 
     const track: DispatchTrack = {};
     let guarded: GuardedResponse;
@@ -2912,36 +3932,30 @@ export class OpenRouterGateway {
         track,
       );
     } catch (err) {
-      if (track.abortedInFlight) this.accountUnmeasured(params, reservation, track.abortedInFlight, undefined);
+      if (track.abortedInFlight) this.accountUnmeasured(acct, reservation, track.abortedInFlight, undefined);
       else reservation?.release();
       throw err;
     }
     const { res, startedAt, finish, touch } = guarded;
 
+    const st = { accounted: false };
     let ok = false;
-    let accounted = false;
-    // Id da geracao: vem em TODO chunk — e o que permite conciliar um stream
-    // cortado no meio pelo GET /generation (IMPL-017).
-    let generationId: string | undefined;
-    let provider: CallProviderInfo | undefined;
-    let fullText = '';
-    let lastRaw: unknown = null;
-    // Guardado SEPARADO de `lastRaw`: hoje o ultimo chunk *por acaso* e o de
-    // usage (porque `[DONE]` e ignorado), mas basta um provedor emitir um
-    // keep-alive depois do frame de usage para o custo sumir em silencio.
-    let usageRaw: unknown = null;
-    let streamError: OpenRouterErrorBody | null = null;
-    // Sinais de fim: chegam num chunk proprio perto do fim (antes do frame de
-    // usage). Guarda o ULTIMO nao-nulo — chunks intermediarios trazem null.
-    let finishReason: string | undefined;
-    let nativeFinishReason: string | undefined;
-    let refusal = '';
+    // Acumulado do stream. O id da geracao vem em TODO chunk — e o que permite
+    // conciliar um stream cortado no meio pelo GET /generation (IMPL-017).
+    // `usageRaw` e guardado SEPARADO do `raw`: hoje o ultimo chunk *por acaso*
+    // e o de usage (porque `[DONE]` e ignorado), mas basta um provedor emitir
+    // um keep-alive depois do frame de usage para o custo sumir em silencio.
+    const acc: CollectedReply = { text: '', usageRaw: null, refusal: '', error: null, raw: null };
 
     try {
       if (!res.body) throw new Error('OpenRouter retornou stream sem corpo de resposta.');
       const reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
+      // IMPL-072: pedir `stream: true` nao garante SSE — proxy/mock/provedor
+      // pode devolver o JSON inteiro. O 1o caractere util decide: `{` = corpo
+      // JSON (lido inteiro, mesmos campos); qualquer outro = SSE.
+      let modo: 'sse' | 'json' | undefined;
 
       while (true) {
         const { value, done } = await reader.read();
@@ -2949,6 +3963,12 @@ export class OpenRouterGateway {
         // IMPL-077: qualquer byte recebido zera o watchdog de inatividade.
         touch();
         buffer += decoder.decode(value, { stream: true });
+        if (!modo) {
+          const inicio = buffer.trimStart();
+          if (!inicio) continue;
+          modo = inicio.startsWith('{') ? 'json' : 'sse';
+        }
+        if (modo === 'json') continue; // acumula o corpo inteiro
 
         // SSE lines separadas por \n. OpenRouter usa data: <json>\n\n
         let idx;
@@ -2970,116 +3990,54 @@ export class OpenRouterGateway {
               error?: OpenRouterErrorBody;
               id?: unknown;
             };
-            lastRaw = chunk;
-            generationId ??= generationIdOf(chunk);
+            acc.raw = chunk;
+            acc.generationId ??= generationIdOf(chunk);
             // IMPL-075: o provedor vem em todo chunk (campo `provider`).
-            provider ??= extractProviderInfo(chunk);
-            if (chunk.error && !streamError) {
-              streamError =
-                typeof chunk.error === 'object' ? chunk.error : { message: String(chunk.error) };
+            acc.provider ??= extractProviderInfo(chunk);
+            if (chunk.error && !acc.error) {
+              acc.error = typeof chunk.error === 'object' ? chunk.error : { message: String(chunk.error) };
             }
             const choice = chunk.choices?.[0];
             const delta = choice?.delta?.content;
             if (typeof delta === 'string' && delta.length > 0) {
-              fullText += delta;
+              acc.text += delta;
               // Previa ja reidratada (sem contar: e a mesma resposta a cada pedaco).
               // `delta` e o pedaco cru do provedor — pode trazer token parcial.
-              onDelta?.(delta, this.restoreText(fullText, sink, false));
+              onDelta?.(delta, this.restoreText(acc.text, sink, false));
             }
-            if (typeof choice?.delta?.refusal === 'string') refusal += choice.delta.refusal;
-            finishReason = finishText(choice?.finish_reason) ?? finishReason;
-            nativeFinishReason = finishText(choice?.native_finish_reason) ?? nativeFinishReason;
-            if (chunk.usage) usageRaw = chunk.usage;
+            if (typeof choice?.delta?.refusal === 'string') acc.refusal += choice.delta.refusal;
+            // Sinais de fim: chegam num chunk proprio perto do fim (antes do
+            // frame de usage). Guarda o ULTIMO nao-nulo.
+            acc.finishReason = finishText(choice?.finish_reason) ?? acc.finishReason;
+            acc.nativeFinishReason = finishText(choice?.native_finish_reason) ?? acc.nativeFinishReason;
+            if (chunk.usage) acc.usageRaw = chunk.usage;
           } catch {
             // chunk JSON invalido, ignora
           }
         }
       }
 
-      const usage = extractUsage(usageRaw);
-
-      // Erro no MEIO do stream chega como chunk `{ error, finish_reason: 'error' }`
-      // (o HTTP ja foi 200): moderacao aqui e bloqueio, nao "resposta vazia".
-      const inBandBlock = streamError ? blockFromErrorBody(streamError, undefined, 'in_band') : undefined;
-      const inBandFailure = !fullText && Boolean(streamError);
-      const blocked = inBandBlock ?? blockFromFinishReason(finishReason, nativeFinishReason);
-      const refusalFinal = refusalText(refusal);
-      // No stream o finish_reason chega no penultimo chunk e o usage (com
-      // reasoning_tokens) no ultimo: so aqui, com o fluxo inteiro lido, da
-      // para decidir o truncamento.
-      const trunc = this.truncationOf(
-        maxTokens,
-        usage,
-        fullText,
-        finishReason,
-        nativeFinishReason,
-        Boolean(blocked || refusalFinal),
-      );
-      // Contabiliza antes do throw in-band — a chamada ja foi cobrada. Sinais
-      // de fim so quando a chamada completou.
-      const fim = inBandFailure
-        ? undefined
-        : withEffort(
-            finishSignalsOf(
-              {
-                text: fullText,
-                tokensOut: usage.tokensOut,
-                reasoningTokens: usage.reasoningTokens,
-                finishReason,
-                nativeFinishReason,
-                ...trunc,
-              },
-              maxTokens,
-            ),
-            body,
-          );
-      // IMPL-075: completa provider_name/upstream_id/service_tier via
-      // GET /generation quando o modo pedir (best-effort, nunca derruba o stream).
-      provider = mergeProviderInfo(provider, await this.lookupProvider(params, generationId, provider));
-      const extra = { latencyMs: Date.now() - startedAt, provider };
-      // Stream sem frame de usage: pendente pelo id dos chunks (IMPL-017).
-      const cost = hasUsage(usageRaw)
-        ? this.account(params, reservation, usage, fim, extra)
-        : this.accountUnmeasured(params, reservation, 'no_usage', generationId, fim, extra);
-      accounted = true;
-      // Resposta vazia + erro in-band (provider rejeitou parametro etc.): falha alto.
-      if (inBandFailure && streamError) {
-        if (inBandBlock) throw new GatewayError('blocked', inBandBlock.message, { block: inBandBlock });
-        throw new Error(`OpenRouter: ${streamError.message ?? JSON.stringify(streamError)}`);
+      if (modo === 'json') {
+        buffer += decoder.decode();
+        Object.assign(acc, collectJsonReply(JSON.parse(buffer)));
+        if (acc.text) onDelta?.(acc.text, this.restoreText(acc.text, sink, false));
       }
 
-      const latencyMs = Date.now() - startedAt;
+      const result = await this.finalizeReply(params, acct, reservation, body, maxTokens, startedAt, acc, st);
       ok = true;
-      return {
-        // Texto final acumulado, reidratado (LGPD, IMPL-042).
-        text: this.restoreText(fullText, sink),
-        tokensIn: usage.tokensIn,
-        tokensOut: usage.tokensOut,
-        latencyMs,
-        raw: lastRaw,
-        cost,
-        cachedTokensIn: usage.cachedTokensIn,
-        reasoningTokens: usage.reasoningTokens,
-        ...(finishReason ? { finishReason } : {}),
-        ...(nativeFinishReason ? { nativeFinishReason } : {}),
-        ...(refusalFinal ? { refusal: refusalFinal } : {}),
-        ...(blocked ? { blocked } : {}),
-        ...(provider ? { provider } : {}),
-        ...(this.auditableFor(params) ? { auditable: true } : {}),
-        ...trunc,
-      };
+      return result;
     } catch (err) {
       // IMPL-073: stream cortado/abortado DEPOIS do 200 = desfecho desconhecido
       // (o provedor pode ter concluído e cobrado): marca o erro e guarda o corpo
       // contra reenvio sem verificação.
-      if (!accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
+      if (!st.accounted && !isControlSignal(err)) this.armResendGuard(guardKey, markUpstreamSent(err));
       throw controlIfAborted(err, externalSignal);
     } finally {
       // Stream cortado no meio (abort/timeout/rede): tokens ja gerados foram
       // cobrados — pendente pelo id dos chunks, conservador sem ele (IMPL-017).
-      if (!accounted) {
-        this.accountUnmeasured(params, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
-          provider,
+      if (!st.accounted) {
+        this.accountUnmeasured(acct, reservation, guarded.abortReason() ?? 'no_usage', acc.generationId, undefined, {
+          provider: acc.provider,
           latencyMs: Date.now() - startedAt,
         });
       }
@@ -3103,9 +4061,9 @@ export class OpenRouterGateway {
       return { ok: false, error: 'Key vazia ou muito curta. Cole a key completa do OpenRouter.' };
     }
 
-    let res: Response;
+    let res: Awaited<ReturnType<OpenRouterGateway['metaRequest']>>;
     try {
-      res = await this.metaFetch(`${this.cfg.baseUrl}/key`, {
+      res = await this.metaRequest(`${this.cfg.baseUrl}/key`, {
         method: 'GET',
         headers: this.headers(key),
       });
@@ -3124,11 +4082,10 @@ export class OpenRouterGateway {
       };
     }
     if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      return { ok: false, error: describeOpenRouterError(res.status, body) };
+      return { ok: false, error: describeOpenRouterError(res.status, res.text) };
     }
 
-    const json = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown> };
+    const json = safeJson(res.text) as { data?: Record<string, unknown> };
     const d = json.data ?? {};
     return {
       ok: true,
@@ -3149,44 +4106,143 @@ export class OpenRouterGateway {
    * provedor que efetivamente serviu a chamada (`provider_name`, `upstream_id`,
    * `service_tier`), o custo cobrado (`total_cost`) e se a geração foi
    * cancelada. É o MESMO endpoint da conciliação de pendentes
-   * (`BudgetLedger.settlePending`); aqui fica acessível a qualquer papel.
-   * Best-effort: id vazio, 404 ou falha de rede => `undefined`.
+   * (`reconcilePending` → `BudgetLedger.settlePending`); aqui fica acessível a
+   * qualquer papel. Best-effort, UMA tentativa: id vazio, 404 ou falha de rede
+   * => `undefined` (quem precisa de retry usa `fetchGenerationDetail`).
    */
-  async fetchGenerationInfo(
+  async fetchGenerationInfo(apiKey: string, generationId: string): Promise<GenerationInfo | undefined> {
+    const r = await this.fetchGenerationDetail(apiKey, generationId, { attempts: 1 });
+    return r.status === 'ok' ? r.info : undefined;
+  }
+
+  /**
+   * IMPL-074 — GET /generation com RETRY: o 404 logo depois da chamada é
+   * TRANSITÓRIO (a fatura ainda não propagou — R-07a DEC-4), assim como
+   * 429/5xx; backoff exponencial (1 s, 2 s, 4 s… — `sleep` injetável) até
+   * `attempts`. 404 persistente => `not_found` (o id não existe na conta).
+   */
+  async fetchGenerationDetail(
     apiKey: string,
     generationId: string,
-  ): Promise<
-    { generationId: string; provider?: CallProviderInfo; totalCostUsd?: number; cancelled?: boolean } | undefined
-  > {
+    opts: { attempts?: number; baseDelayMs?: number; signal?: AbortSignal } = {},
+  ): Promise<{ status: 'ok' | 'not_found' | 'error'; info?: GenerationInfo; error?: string }> {
     const id = (generationId ?? '').trim();
-    if (!id) return undefined;
-    let res: Response;
-    try {
-      res = await this.metaFetch(`${this.cfg.baseUrl}/generation?id=${encodeURIComponent(id)}`, {
-        method: 'GET',
-        headers: this.headers(apiKey),
-      });
-    } catch {
-      return undefined;
+    if (!id) return { status: 'error', error: 'id vazio' };
+    const attempts = Math.max(1, Math.floor(opts.attempts ?? 4));
+    const base = Math.max(0, opts.baseDelayMs ?? 1000);
+    let last: { status: 'not_found' | 'error'; error: string } = { status: 'error', error: 'sem tentativa' };
+    for (let i = 0; i < attempts; i++) {
+      if (i > 0) {
+        if (opts.signal?.aborted) break;
+        await this.sleep(base * 2 ** (i - 1), opts.signal);
+        if (opts.signal?.aborted) break;
+      }
+      let res: Awaited<ReturnType<OpenRouterGateway['metaRequest']>>;
+      try {
+        res = await this.metaRequest(`${this.cfg.baseUrl}/generation?id=${encodeURIComponent(id)}`, {
+          method: 'GET',
+          headers: this.headers(apiKey),
+        });
+      } catch (err) {
+        last = { status: 'error', error: (err as Error).message };
+        continue;
+      }
+      if (res.ok) {
+        const info = parseGenerationInfo(id, safeJson(res.text));
+        if (info) return { status: 'ok', info };
+        last = { status: 'error', error: 'resposta sem data' };
+        continue;
+      }
+      last = res.status === 404 ? { status: 'not_found', error: 'HTTP 404' } : { status: 'error', error: `HTTP ${res.status}` };
+      // 401/403/400: repetir não muda nada.
+      if (res.status !== 404 && res.status !== 429 && res.status < 500) break;
     }
-    if (!res.ok) return undefined;
-    const json = (await res.json().catch(() => ({}))) as { data?: Record<string, unknown> };
-    const d = json.data;
-    if (!d || typeof d !== 'object') return undefined;
-    const provider = extractProviderInfo(d);
-    const totalCostUsd =
-      typeof d.total_cost === 'number' && Number.isFinite(d.total_cost)
-        ? d.total_cost
-        : typeof d.cost === 'number' && Number.isFinite(d.cost)
-          ? d.cost
-          : undefined;
-    const cancelled = typeof d.cancelled === 'boolean' ? d.cancelled : undefined;
-    return {
-      generationId: id,
-      ...(provider ? { provider } : {}),
-      ...(typeof totalCostUsd === 'number' ? { totalCostUsd } : {}),
-      ...(typeof cancelled === 'boolean' ? { cancelled } : {}),
+    return last;
+  }
+
+  /**
+   * IMPL-074 / IMPL-017 (iv) — CONCILIA as pendentes do ledger pela fatura:
+   * para cada chamada despachada sem custo medido (abort/timeout/sem usage)
+   * com id de geração, busca o `total_cost` no GET /generation e troca a
+   * reserva mantida pelo valor COBRADO (`settlePending`, source `usage`),
+   * gravando provedor/cancelled/generation_time/latency no registo da
+   * chamada. 404 persistente (ou id fora do formato `gen-…`, que o
+   * /generation nunca acharia) => a reserva vira gasto CONSERVADOR — não
+   * medido não é "custou zero". Falha de rede => segue pendente (a conciliação
+   * pode rodar de novo depois). Concorrência pequena de propósito: o endpoint
+   * tem rate limit próprio. Não é chamada de LLM: não passa pelo ledger.
+   *
+   * `notFoundAsPending` (o FIM DE RUN usa): o 404 de um id `gen-…` NÃO é
+   * definitivo — as últimas chamadas da run (finais, juiz) têm segundos de
+   * idade e o /generation costuma dar 404 até indexar a geração. Converter em
+   * conservador ali trocaria a fatura real pela reserva PARA SEMPRE (sai do
+   * conjunto de pendentes); com a opção a chamada segue pendente no record
+   * (`costLedger.pendingEntries`), conciliável depois, e conta em `failed`.
+   */
+  async reconcilePending(
+    ledger: ReconcilableLedger,
+    apiKey: string,
+    opts: {
+      attempts?: number;
+      baseDelayMs?: number;
+      concurrency?: number;
+      signal?: AbortSignal;
+      notFoundAsPending?: boolean;
+    } = {},
+  ): Promise<NonNullable<CostLedgerSummary['reconciliation']>> {
+    const pendentes = ledger.pendingEntries();
+    const out = { attempted: pendentes.length, settled: 0, notFound: 0, failed: 0 };
+    if (pendentes.length === 0) return out;
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < pendentes.length) {
+        const p = pendentes[next++];
+        if (opts.signal?.aborted) {
+          out.failed += 1;
+          continue;
+        }
+        if (!isGenerationId(p.generationId)) {
+          // Id sintetizado/malformado: o /generation devolveria 404 para sempre.
+          ledger.settlePending(p.generationId, null);
+          out.notFound += 1;
+          continue;
+        }
+        const r = await this.fetchGenerationDetail(apiKey, p.generationId, opts).catch(
+          (err: unknown) => ({ status: 'error' as const, error: (err as Error).message, info: undefined }),
+        );
+        if (r.status === 'ok' && r.info && typeof r.info.totalCostUsd === 'number') {
+          const details: SettleDetails = {
+            ...(r.info.provider ? { provider: r.info.provider } : {}),
+            ...(typeof r.info.cancelled === 'boolean' ? { cancelled: r.info.cancelled } : {}),
+            ...(typeof r.info.generationTimeMs === 'number' ? { generationTimeMs: r.info.generationTimeMs } : {}),
+            ...(typeof r.info.latencyMs === 'number' ? { latencyMs: r.info.latencyMs } : {}),
+          };
+          const cost: CallCost = {
+            usd: r.info.totalCostUsd,
+            source: 'usage',
+            ...(r.info.byok ? { byok: true } : {}),
+            ...(r.info.byok && typeof r.info.byokUpstreamUsd === 'number' ? { byokUpstreamUsd: r.info.byokUpstreamUsd } : {}),
+          };
+          ledger.settlePending(
+            p.generationId,
+            cost,
+            { tokensIn: r.info.tokensIn, tokensOut: r.info.tokensOut },
+            details,
+          );
+          out.settled += 1;
+        } else if (r.status === 'not_found' && !opts.notFoundAsPending) {
+          ledger.settlePending(p.generationId, null);
+          out.notFound += 1;
+        } else {
+          // Rede/erro — ou 404 recente no fim da run: segue PENDENTE.
+          out.failed += 1;
+        }
+      }
     };
+    const width = Math.max(1, Math.min(opts.concurrency ?? 4, pendentes.length));
+    await Promise.all(Array.from({ length: width }, worker));
+    ledger.noteReconciliation?.(out);
+    return out;
   }
 
   /**
@@ -3277,6 +4333,21 @@ export function chatCompletionStream(params: ChatStreamParams): Promise<ChatComp
   return defaultGateway.chatCompletionStream(params);
 }
 
+/** IMPL-063 — chamada paga não-chat pelo gateway padrão (ver `OpenRouterGateway.meteredInputCall`). */
+export function meteredInputCall(params: MeteredInputParams): Promise<MeteredInputResult> {
+  return defaultGateway.meteredInputCall(params);
+}
+
+/** Modo JEV — uma decisão tipada pela instância padrão (ver `OpenRouterGateway.decide`). */
+export function decide(params: DecideParams): Promise<DecideResult> {
+  return defaultGateway.decide(params);
+}
+
+/** Modo JEV — catálogo de modelos de decisão da instância padrão (público; cache próprio). */
+export function listDecisionModels(apiKey: string, force = false): Promise<OpenRouterModel[]> {
+  return defaultGateway.listDecisionModels(apiKey, force);
+}
+
 /** Pseudonimiza `value` com o cofre do escopo de `sink` na instancia padrao (ver o metodo). */
 export function pseudonymize<T>(value: T, sink?: CostSink): T {
   return defaultGateway.pseudonymize(value, sink);
@@ -3284,4 +4355,32 @@ export function pseudonymize<T>(value: T, sink?: CostSink): T {
 
 export function validateKey(apiKey: string): Promise<ValidateKeyResult> {
   return defaultGateway.validateKey(apiKey);
+}
+
+/**
+ * IMPL-074 / IMPL-017 (iv) — concilia as pendentes do ledger pela fatura (GET
+ * /generation) na instância padrão. Os orquestradores chamam isto no fim da
+ * run, antes da escrita terminal (ver `OpenRouterGateway.reconcilePending`).
+ */
+export function reconcilePendingGenerations(
+  ledger: ReconcilableLedger,
+  apiKey: string,
+  opts?: Parameters<OpenRouterGateway['reconcilePending']>[2],
+): Promise<NonNullable<CostLedgerSummary['reconciliation']>> {
+  return defaultGateway.reconcilePending(ledger, apiKey, opts);
+}
+
+/**
+ * Conciliação do FIM DE RUN (os dois orquestradores): poucas tentativas
+ * curtas; o que seguir sem resposta — falha de rede OU 404 (a geração pode
+ * ainda não estar indexada: as últimas chamadas têm segundos de idade) — fica
+ * PENDENTE no record (`costLedger.pendingEntries`, conciliável depois), nunca
+ * vira a reserva conservadora em definitivo. Nunca lança: falha aqui não pode
+ * transformar uma run concluída em erro.
+ */
+export const RUN_END_RECONCILE = { attempts: 3, baseDelayMs: 500, concurrency: 4, notFoundAsPending: true } as const;
+
+export async function reconcileAtRunEnd(ledger: ReconcilableLedger, apiKey: string): Promise<void> {
+  if (ledger.pendingEntries().length === 0) return;
+  await reconcilePendingGenerations(ledger, apiKey, RUN_END_RECONCILE).catch(() => undefined);
 }

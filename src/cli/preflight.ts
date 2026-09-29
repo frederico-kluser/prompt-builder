@@ -22,6 +22,8 @@
 
 import { estimateInputFromConfig, estimateRunCost, toPerMTok, type CostEstimate } from '../estimate.js';
 import { isKnownPrice } from '../engine/pricing.js';
+import { ignoredReasoningLevels } from '../modelCaps.js';
+import { plannedTrainingStages, trainingPromotionPower } from '../engine/trainingPolicy.js';
 import type { KeyInfo } from '../openrouter.js';
 import type { OpenRouterModel, RunConfig } from '../types.js';
 import { CliError, EXIT, fmtUsd, isCliError, kindForExit, type ErrorKind } from './output.js';
@@ -231,6 +233,19 @@ export async function runPreflight(
   //    rede (nada foi gasto, nem uma leitura).
   if (budget.kind === 'missing') refuse(budgetRequiredError());
 
+  // 1b. Poder do gate de promoção (web-live#5): o gate da melhor de K é exato
+  //     — com poucos cenários de SELEÇÃO o treino não consegue promover nada
+  //     (ou só sem nenhum empate). Aviso, não recusa: a config é válida, mas
+  //     ninguém deve pagar a sessão achando que ela pode evoluir o prompt.
+  if (config.mode === 'training') {
+    const poder = trainingPromotionPower({
+      stages: plannedTrainingStages(config),
+      holdoutRatio: config.holdoutRatio,
+      techniques: config.techniqueIds?.length,
+    });
+    if (poder.message) warn(`poder do gate: ${poder.message}`);
+  }
+
   // 2. Catálogo (público sem key). Sem ele não há o que conferir nem estimar.
   let catalog: LoadedCatalog | null = null;
   try {
@@ -254,6 +269,12 @@ export async function runPreflight(
     //    tomaria 400 — vira veredito degradado, não resultado.
     const desconhecidos = chamados.filter((id) => !isKnownModel(id, byId));
     if (desconhecidos.length) refuse(unknownModelError(desconhecidos, catalog));
+
+    // cli#2: nível de raciocínio pedido a modelo SEM raciocínio — o gateway
+    // não envia nada; avisa em vez de o esforço sumir em silêncio.
+    for (const i of ignoredReasoningLevels(config as Parameters<typeof ignoredReasoningLevels>[0], models)) {
+      warn(`"${i.modelId}" não aceita raciocínio: o nível "${i.level}" (${i.role}) será ignorado — nada vai no fio.`);
+    }
 
     // 4. Sem preço exato. Duas naturezas:
     //    (a) sem entrada no catálogo (variante de roteamento `:nitro`…): com
@@ -331,10 +352,13 @@ export async function runPreflight(
 
     // 6. Orçamento × faixa estimada (a do ORÇAMENTO: pior caso p/ preço variável).
     if (budgetUsd !== undefined && estOrcamento.high > budgetUsd) {
-      if (estOrcamento.low > budgetUsd && !input.force) {
-        refuse(budgetBelowEstimateError(budgetUsd, estOrcamento));
+      const abaixoDoPiso = estOrcamento.low > budgetUsd;
+      if (abaixoDoPiso && !input.force) {
+        refuse(budgetBelowEstimateError(budgetUsd, estOrcamento, input.agentContext === true && !input.yes));
       } else if (!input.yes && input.agentContext) {
-        refuse(confirmationRequiredError(budgetUsd, estOrcamento));
+        // cli#17: com --force abaixo do piso, fora de um terminal ainda falta o
+        // --yes — a mensagem diz ABAIXO do piso (não "dentro da faixa").
+        refuse(confirmationRequiredError(budgetUsd, estOrcamento, abaixoDoPiso));
       } else {
         warn(
           `orçamento ${fmtUsd(budgetUsd)} pode não cobrir o teto (${fmtUsd(estOrcamento.high)}) — a run pode parar cedo.`,
@@ -558,29 +582,38 @@ function priceCapError(
   return null;
 }
 
-function budgetBelowEstimateError(budgetUsd: number, est: CostEstimate): CliError {
+function budgetBelowEstimateError(budgetUsd: number, est: CostEstimate, agentContext = false): CliError {
+  // cli#17: fora de um terminal o --force sozinho não basta (a confirmação
+  // também é exigida) — a dica já nomeia as DUAS flags, sem um 2º tropeço.
+  const forcar = agentContext ? '--force --yes' : '--force';
   return new CliError(
     `Orçamento ${fmtUsd(budgetUsd)} abaixo do piso estimado ${fmtUsd(est.low)}.\n` +
       'Reduza --stages, desligue as finais (--no-duels), use menos juízes, ' +
-      'ou passe --force para rodar mesmo assim (as portas de orçamento seguem armadas).',
+      `ou passe ${forcar} para rodar mesmo assim (as portas de orçamento seguem armadas).`,
     EXIT.USAGE,
-    { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high },
+    { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high, requiredFlags: forcar.split(' ') },
     {
       code: 'usage.budget_below_estimate',
-      hint: 'Suba --budget, reduza --stages/--no-duels/juízes, ou passe --force para rodar mesmo assim.',
+      hint: `Suba --budget, reduza --stages/--no-duels/juízes, ou passe ${forcar} para rodar mesmo assim.`,
     },
   );
 }
 
-function confirmationRequiredError(budgetUsd: number, est: CostEstimate): CliError {
+function confirmationRequiredError(budgetUsd: number, est: CostEstimate, belowFloor = false): CliError {
+  const faixa = `${fmtUsd(est.low)} – ${fmtUsd(est.high)}`;
   return new CliError(
-    `Orçamento ${fmtUsd(budgetUsd)} está dentro da faixa estimada (${fmtUsd(est.low)} – ${fmtUsd(est.high)}), ` +
-      'então a run pode parar no meio. Confirme com --yes.',
+    belowFloor
+      ? `Orçamento ${fmtUsd(budgetUsd)} está ABAIXO do piso estimado ${fmtUsd(est.low)} (faixa ${faixa}): ` +
+          '--force aceito, mas fora de um terminal a run também exige --yes.'
+      : `Orçamento ${fmtUsd(budgetUsd)} está dentro da faixa estimada (${faixa}), ` +
+          'então a run pode parar no meio. Confirme com --yes.',
     EXIT.USAGE,
-    { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high },
+    { budgetUsd, estimateLowUsd: est.low, estimateHighUsd: est.high, belowFloor },
     {
       code: 'usage.confirmation_required',
-      hint: 'Repita o mesmo comando com `--yes` (ou suba --budget acima do teto estimado).',
+      hint: belowFloor
+        ? 'Repita o mesmo comando com `--force --yes` (ou suba --budget).'
+        : 'Repita o mesmo comando com `--yes` (ou suba --budget acima do teto estimado).',
     },
   );
 }

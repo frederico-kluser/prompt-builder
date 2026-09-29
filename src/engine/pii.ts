@@ -1374,6 +1374,13 @@ export class PiiVault {
   }
 }
 
+/**
+ * Teto de aninhamento de `PiiGuard.protectDeep` (modo JEV). Bem acima do que um
+ * estado real usa (o lint `state.too_deep` recusa antes, em 32): existe só para
+ * a recursão nunca estourar a pilha — acima dele a chamada LANÇA (fail-closed).
+ */
+export const PII_PROTECT_MAX_DEPTH = 256;
+
 export interface PiiGuardStats {
   /** Requisições que passaram pela cascata (== requisições de chat enviadas). */
   scannedCalls: number;
@@ -1445,6 +1452,57 @@ export class PiiGuard {
       }
       return { ...msg, content: r.text };
     });
+    if (redigiu) this.counters.redactedCalls += 1;
+    return out;
+  }
+
+  /**
+   * Modo JEV (decisões tipadas): a cascata para um valor ESTRUTURADO inteiro
+   * (estado + perguntas), no mesmo papel de `protect` para mensagens de chat —
+   * conta UMA requisição varrida. Diferente de `PiiVault.redactDeep` (que para
+   * na profundidade 8 e não conta), aqui NENHUMA string escapa por estar
+   * funda: o pré-voo varre até 12 níveis e um estado de 9+ níveis sairia cru
+   * depois de liberado. Acima de `PII_PROTECT_MAX_DEPTH` níveis (ou ciclo)
+   * LANÇA — fail-closed, nunca envia sem varrer. Só VALORES são redigidos:
+   * chaves (ids de pergunta, opções de `choice`, campos do estado) ficam.
+   */
+  protectDeep<T>(value: T, scope?: object): T {
+    this.counters.scannedCalls += 1;
+    this.counters.scannedMessages += 1;
+    const vault = this.vaultFor(scope);
+    let redigiu = false;
+    const emCurso = new Set<object>();
+    const visit = (v: unknown, depth: number): unknown => {
+      if (typeof v === 'string') {
+        if (!v) return v;
+        const r = vault.redact(v);
+        this.counters.contextualSeen += r.contextualSeen;
+        if (!r.redactions.length) return v;
+        redigiu = true;
+        for (const x of r.redactions) {
+          this.counters.redactionsByKind[x.kind] = (this.counters.redactionsByKind[x.kind] ?? 0) + 1;
+        }
+        return r.text;
+      }
+      if (v === null || typeof v !== 'object') return v;
+      if (depth > PII_PROTECT_MAX_DEPTH) {
+        throw new Error(
+          `valor com mais de ${PII_PROTECT_MAX_DEPTH} níveis de aninhamento: a cascata de dado pessoal não o ` +
+            'envia sem varrer (fail-closed). Achate o estado.',
+        );
+      }
+      if (emCurso.has(v)) throw new Error('valor circular não pode ir ao modelo (a cascata não o varre).');
+      emCurso.add(v);
+      try {
+        if (Array.isArray(v)) return v.map((x) => visit(x, depth + 1));
+        const out: Record<string, unknown> = {};
+        for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[k] = visit(x, depth + 1);
+        return out;
+      } finally {
+        emCurso.delete(v);
+      }
+    };
+    const out = visit(value, 0) as T;
     if (redigiu) this.counters.redactedCalls += 1;
     return out;
   }

@@ -283,7 +283,7 @@ function sinalizar(owner: { pid: number; host: string; startToken?: string | nul
  * graciosa e espera o record terminal (e o processo sair, quando é um processo
  * do CLI). Job do `--detach`: marcador em disco (durável) + SIGTERM direto
  * (imediato). Run em foreground de outro shell: SIGTERM ao dono. Run de um
- * servidor/MCP: recusa (use `cancel_run`/DELETE). Idempotente em terminal.
+ * servidor/MCP: recusa (use `cancel_run` ou POST …/cancel). Idempotente em terminal.
  */
 export async function runsCancel(ctx: CliContext): Promise<number> {
   const id = idArg(ctx, 'cancel');
@@ -315,7 +315,7 @@ export async function runsCancel(ctx: CliContext): Promise<number> {
       if (!owner.signalStop) {
         throw new CliError(
           'Essa run pertence a um servidor/MCP, não a um comando do CLI — cancele por lá ' +
-            '(`cancel_run` no MCP ou DELETE /v1/benchmark/runs/<id>).',
+            `(\`cancel_run\` no MCP ou POST /v1/benchmark/${r.owner.kind === 'session' ? 'sessions' : 'runs'}/${r.owner.id}/cancel).`,
           EXIT.ERROR,
         );
       }

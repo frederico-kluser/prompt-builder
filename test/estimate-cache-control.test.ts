@@ -44,6 +44,18 @@ const MENSAGENS = [
 
 type Corpo = { messages?: Array<Record<string, unknown>> };
 
+/**
+ * `cache_control` de uma mensagem: vai numa PARTE de conteúdo (`{ type:
+ * 'text', text, cache_control }`) — a forma que o OpenRouter documenta para
+ * Anthropic; na mensagem em si, nunca.
+ */
+function marcaDe(m: Record<string, unknown>): unknown {
+  expect(m.cache_control).toBeUndefined();
+  const c = m.content;
+  if (!Array.isArray(c)) return undefined;
+  return (c.at(-1) as Record<string, unknown> | undefined)?.cache_control;
+}
+
 async function comGateway<T>(fake: ReturnType<typeof fakeOpenRouter>, fn: (gw: ReturnType<typeof createGateway>) => Promise<T>): Promise<T> {
   const gw = createGateway({ fetch: fake.fetch, sleep: noSleep });
   const anterior = setDefaultGateway(gw);
@@ -73,12 +85,17 @@ describe('IMPL-114 (i/ii) — `cache_control` no fim do prefixo estável, e só 
     );
     const msgs = (fake.chatRequests()[0].body as Corpo).messages!;
     expect(msgs).toHaveLength(4);
-    // Só a mensagem k leva a marca de cache…
-    expect(msgs[2].cache_control).toEqual({ type: 'ephemeral' });
+    // Só a mensagem k leva a marca de cache — numa PARTE de conteúdo, com o
+    // texto intacto…
+    expect(marcaDe(msgs[2])).toEqual({ type: 'ephemeral' });
+    expect(msgs[2].content).toEqual([
+      { type: 'text', text: MENSAGENS[2].content, cache_control: { type: 'ephemeral' } },
+    ]);
     // …e as outras ficam limpas (o candidato NÃO entra no prefixo cacheado).
-    expect(msgs[0].cache_control).toBeUndefined();
-    expect(msgs[1].cache_control).toBeUndefined();
-    expect(msgs[3].cache_control).toBeUndefined();
+    expect(marcaDe(msgs[0])).toBeUndefined();
+    expect(marcaDe(msgs[1])).toBeUndefined();
+    expect(marcaDe(msgs[3])).toBeUndefined();
+    expect(msgs[3].content).toBe(MENSAGENS[3].content);
   });
 
   it('sem `cacheControlAfter` o corpo não muda; índice fora do alcance é fail-closed', async () => {
@@ -102,7 +119,7 @@ describe('IMPL-114 (i/ii) — `cache_control` no fim do prefixo estável, e só 
     });
     for (const req of fake.chatRequests()) {
       const msgs = (req.body as Corpo).messages!;
-      for (const m of msgs) expect(m.cache_control).toBeUndefined();
+      for (const m of msgs) expect(marcaDe(m)).toBeUndefined();
     }
   });
 
@@ -122,8 +139,8 @@ describe('IMPL-114 (i/ii) — `cache_control` no fim do prefixo estável, e só 
     const req = fake.chatRequests()[0];
     expect(req.stream).toBe(true);
     const msgs = (req.body as Corpo).messages!;
-    expect(msgs[2].cache_control).toEqual({ type: 'ephemeral' });
-    expect(msgs.filter((m) => m.cache_control !== undefined)).toHaveLength(1);
+    expect(marcaDe(msgs[2])).toEqual({ type: 'ephemeral' });
+    expect(msgs.filter((m) => marcaDe(m) !== undefined)).toHaveLength(1);
   });
 });
 

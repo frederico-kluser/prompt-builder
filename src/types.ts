@@ -19,10 +19,15 @@ import type {
   AgentTaskSpec,
   ExecutionRef,
 } from './agent/types.js';
+// Módulo PURO (sem node:*): seguro no grafo do web (IMPL-094).
+import type { AgentInfraCounts } from './agent/infraError.js';
 import type { ExpectedSpec, ReferenceValidation } from './engine/groundTruth.js';
-import type { PromptContracts } from './engine/contracts.js';
+import type { PromptContracts, ResponseSecurity, SecuritySummary } from './engine/contracts.js';
 import type { PromptGroup } from './engine/promptGroup.js';
 import type { ModelLifecycleSnapshot } from './engine/modelLifecycle.js';
+import type { DatagenReport, ItemSaturationReport } from './datagen.js';
+import type { CascadeReport, JudgeCascadeConfig, JudgeCascadeSummary } from './judge.js';
+import type { ScenarioDedupConfig } from './dedup.js';
 
 // Ciclo de vida de modelos (IMPL-019): fonte única em src/engine/modelLifecycle.ts.
 export type {
@@ -45,6 +50,8 @@ export type {
 export type TokenPrice = number | null;
 import type { PiiRunReport } from './engine/pii.js';
 import type { SensitiveRouting } from './engine/sensitiveRouting.js';
+import type { VerdictCache } from './engine/verdictCache.js';
+import type { CallJournal } from './engine/callJournal.js';
 
 export interface OpenRouterModelPricing {
   prompt: TokenPrice; // USD per token (null = desconhecido)
@@ -101,16 +108,35 @@ export const COST_ROLES: readonly CostRole[] = [
 export type CostSource = 'usage' | 'catalog' | 'agent-derived' | 'unknown';
 
 export interface CallCost {
+  /** O que saiu dos creditos do OpenRouter (`usage.cost`). Numa chamada BYOK e so a taxa. */
   usd: number;
   source: CostSource;
-  /** BYOK: cobrado direto pelo provedor upstream, fora dos creditos. */
-  upstreamUsd?: number;
+  /**
+   * true = o OpenRouter disse `usage.is_byok: true`: a chamada rodou numa key
+   * do PROVEDOR cadastrada na conta (BYOK) e `usd` e so a taxa do OpenRouter.
+   * Ausente = nao-BYOK (ou nao informado) — nunca inferir BYOK.
+   */
+  byok?: boolean;
+  /**
+   * So com `byok`: `cost_details.upstream_inference_cost`, cobrado pelo
+   * provedor direto na key BYOK — FORA dos creditos e FORA de `usd`.
+   * ⚠️ O OpenRouter devolve esse campo em TODA chamada; na nao-BYOK ele ja
+   * esta dentro de `usd` e e descartado na extracao (somar dobraria o gasto).
+   */
+  byokUpstreamUsd?: number;
   /**
    * Chamada despachada sem custo medido e com id de geracao (IMPL-017): a
    * reserva ficou PENDENTE no ledger — fora de `usd`/`totalCostUsd` ate a
    * conciliacao. `usd: 0` com este campo NAO e "custou zero".
    */
   pendingUsd?: number;
+  /**
+   * IMPL-081 — resposta servida do JOURNAL de chamadas numa run RETOMADA:
+   * nenhuma chamada saiu para o provedor nesta tentativa (`usd: 0` é medido,
+   * não inferido). O custo original foi pago UMA vez, na tentativa que gravou
+   * a resposta, e aparece à parte em `CostEntry.replayedUsd`.
+   */
+  replayed?: boolean;
 }
 
 export interface CostEntry {
@@ -146,6 +172,68 @@ export interface CostEntry {
    */
   cacheHits?: number;
   cacheTotal?: number;
+  /**
+   * IMPL-075 (R-07b:REC-4) — chamadas por PROVEDOR que as serviu
+   * (`provider_name` do payload ou do GET /generation), somadas pelo ledger no
+   * ponto único. Cobertura de registro do papel = Σ providers / calls.
+   */
+  providers?: Record<string, number>;
+  /** IMPL-075 — chamadas deste papel enviadas no modo AUDITÁVEL (provider travado). */
+  auditableCalls?: number;
+  /**
+   * IMPL-081 — respostas deste papel servidas do JOURNAL numa run retomada:
+   * NÃO contam em `calls`/`usd` (não houve chamada nem gasto nesta tentativa).
+   * `replayedUsd` = custo MEDIDO original delas (já pago antes — informativo,
+   * fora do gasto e do orçamento desta tentativa; nunca somar a `usd`).
+   */
+  replayedCalls?: number;
+  replayedUsd?: number;
+}
+
+/**
+ * IMPL-074 (R-07a:REC-4) — UMA chamada contabilizada, com o id de geração
+ * (`gen-…`) que a liga à fatura (GET /api/v1/generation). Vai no RunRecord
+ * (`callLog`), FORA do `costLedger`: o ledger enxuto viaja em NDJSON/MCP e o
+ * registo por chamada só interessa a auditoria/conciliação.
+ */
+export interface CallLogEntry {
+  role: CostRole;
+  modelId: string;
+  /** Id de geração do OpenRouter; ausente = a resposta não trouxe id. */
+  generationId?: string;
+  /** false = o id não tem o formato `gen-…` documentado (não é conciliável). */
+  generationIdValid?: boolean;
+  /** Valor lançado (medido, reserva pendente/conservadora ou conciliado). */
+  usd: number;
+  source: CostSource;
+  /**
+   * `measured` = `usage.cost` da resposta; `pending` = reserva mantida à
+   * espera do /generation; `conservative` = reserva inteira (sem id ou 404
+   * persistente); `reconciled` = trocada pelo `total_cost` do /generation;
+   * `replayed` (IMPL-081) = resposta servida do journal numa run retomada —
+   * `usd` 0 nesta tentativa, o valor pago antes em `replayedFromUsd`.
+   */
+  status: 'measured' | 'pending' | 'conservative' | 'reconciled' | 'replayed';
+  /** IMPL-081 — só em `replayed`: custo medido da chamada ORIGINAL (paga uma vez, antes). */
+  replayedFromUsd?: number;
+  /** Provedor que serviu (IMPL-075). */
+  provider?: string;
+  /** Latência observada pelo cliente (ms). */
+  latencyMs?: number;
+  /** true = corpo enviado no modo auditável (IMPL-075). */
+  auditable?: boolean;
+  /** Do GET /generation (IMPL-074): a geração foi cancelada no provedor. */
+  cancelled?: boolean;
+  /** Do GET /generation: tempo de geração no provedor (ms). */
+  generationTimeMs?: number;
+  /** Do GET /generation: `upstream_id` no provedor. */
+  upstreamId?: string;
+  /**
+   * Chamada BYOK (`is_byok: true`): `usd` é só a taxa do OpenRouter e
+   * `byokUpstreamUsd` (quando informado) foi cobrado pelo provedor na key BYOK.
+   */
+  byok?: boolean;
+  byokUpstreamUsd?: number;
 }
 
 /**
@@ -193,6 +281,12 @@ export type PendingReason = 'timeout' | 'aborted' | 'no_usage';
  * (IMPL-074 concilia via GET /api/v1/generation?id=…).
  */
 export interface PendingCall {
+  /**
+   * Id de geração para conciliar. `''` (left#14) = chamada interrompida pelo
+   * CANCELAR sem id recuperável (nenhuma resposta chegou): não é conciliável
+   * pelo /generation — segue pendente (limite superior, fora do gasto) e uma
+   * conciliação posterior a lança como conservadora.
+   */
   generationId: string;
   role: CostRole;
   modelId: string;
@@ -231,6 +325,28 @@ export interface CostLedgerSummary {
    * contagens deixavam o `pendingUsd` preso no record para sempre.
    */
   pendingEntries?: PendingCall[];
+  /**
+   * IMPL-074 — última conciliação pelo GET /generation (contagens). Ausente =
+   * nunca conciliado (sem pendentes, ou record anterior).
+   */
+  reconciliation?: {
+    /** Pendentes consultados. */
+    attempted: number;
+    /** Trocados pelo `total_cost` da fatura. */
+    settled: number;
+    /** 404 persistente / id fora do formato: viraram gasto conservador. */
+    notFound: number;
+    /** Falha de rede/HTTP: seguem pendentes (conciliáveis depois). */
+    failed: number;
+  };
+  /**
+   * Chamadas BYOK (`usage.is_byok: true`) — presente só quando houve alguma.
+   * `upstreamUsd` foi cobrado pelo PROVEDOR direto nas keys BYOK: fica FORA
+   * de `spentUsd`/`totalCostUsd` (que são créditos do OpenRouter — nelas, só a
+   * taxa) e fora do orçamento. `upstreamUnknownCalls` = BYOK cujo custo do
+   * provedor não veio na resposta: não medido, NÃO é "custou zero".
+   */
+  byok?: { calls: number; upstreamUsd: number; upstreamUnknownCalls: number };
 }
 
 /**
@@ -280,6 +396,8 @@ export interface CostSink {
       provider?: CallProviderInfo;
       /** IMPL-078: latência observada até o corte/abort, em ms. */
       latencyMs?: number;
+      /** IMPL-075: corpo enviado no modo auditável. */
+      auditable?: boolean;
     },
   ): void;
   /** Chamado DEPOIS do fetch, sempre: troca a reserva pelo custo real. */
@@ -306,6 +424,10 @@ export interface CostSink {
       estimatedUsd?: number;
       /** IMPL-075: provedor que efetivamente serviu a chamada. */
       provider?: CallProviderInfo;
+      /** IMPL-074: id de geração (`gen-…`) da resposta — a ponte com a fatura. */
+      generationId?: string;
+      /** IMPL-075: corpo enviado no modo auditável. */
+      auditable?: boolean;
       /**
        * Sinais de fim da chamada (IMPL-014) — presentes quando a chamada
        * COMPLETOU (ausentes no 200 com corpo de erro, que lanca). E por aqui
@@ -337,6 +459,40 @@ export interface CostSink {
    * faltou campo, lanca antes do fetch. Opcional: sink sem ele = modo desligado.
    */
   sensitiveRouting?(): SensitiveRouting | undefined;
+  /**
+   * IMPL-075 (R-07b:REC-4): papéis que ESTA run/sessão manda no modo
+   * AUDITÁVEL (provider travado, sem fallback, `require_parameters`), somados
+   * ao preset do gateway. Opcional: sink sem ele = só o preset do gateway.
+   */
+  auditableRoles?(): readonly CostRole[] | undefined;
+  /**
+   * IMPL-080 (R-08:REC-3): cache EXATO de vereditos desta run/sessão (a
+   * sessão de treino liga um por sessão; a cadeia de forks o herda). O gateway
+   * o consulta nos papéis de juízo (judge/duel/gabarito). Opcional: sink sem
+   * ele = só o cache global do gateway (desligado por default).
+   */
+  verdictCache?(): VerdictCache | undefined;
+  /**
+   * IMPL-081 (R-10:REC-2): journal de chamadas pagas desta run (a retomada o
+   * carrega com as respostas das tentativas anteriores). O gateway o consulta
+   * ANTES de reservar/enviar e grava DEPOIS de cada resposta. Opcional: sink
+   * sem ele = nada é gravado nem replayado.
+   */
+  callJournal?(): CallJournal | undefined;
+  /**
+   * IMPL-081: resposta servida do journal — NÃO é chamada nem gasto desta
+   * tentativa (não toca `calls`/`usd`/`spentUsd`/`committedUsd`): sobe como
+   * `replayedCalls`/`replayedUsd` por papel e entra no registo por chamada
+   * como `replayed`. Os sinais de fim (IMPL-014) contam: a resposta está no
+   * record. Opcional: sinks antigos simplesmente não registram.
+   */
+  noteReplayed?(entry: {
+    role: CostRole;
+    modelId: string;
+    /** Custo da chamada ORIGINAL (paga uma vez, na tentativa que a gravou). */
+    originalCost?: CallCost;
+    finish?: CallFinishSignals;
+  }): void;
 }
 
 /**
@@ -564,8 +720,48 @@ export interface RunConfigBase {
   referenceModelId?: string;
   /** Julgamento por referencia (pointwise vs gabarito + duelos). Default: true em variation/training, false em compare. */
   referenceJudging?: boolean;
+  /**
+   * IMPL-053 (R-03b:REC-1) — sondas CONTRAFACTUAIS do diagnóstico de
+   * verbosidade: re-julga ~20% das respostas com o texto truncado/preenchido
+   * em 20% e publica a taxa de INVERSÃO (`verbosityDiag.taxaInversaoSondas`,
+   * bom < 10%). OPT-IN: custa chamadas extras de juiz (papel `judge`, no
+   * ledger). Ausente/false = sem sondas (taxa `null`).
+   */
+  verbosityProbes?: boolean;
+  /**
+   * IMPL-055 (R-03a:REC-1) — valida os gabaritos GERADOS antes do julgamento:
+   * verificação dirigida pela rubrica (1º juiz) + amostra humana de 5–10% →
+   * `RunRecord.needsHumanReview`. OPT-IN (chamadas extras). Implícito quando
+   * `secondReferenceModelId` está presente.
+   */
+  validateReferences?: boolean;
+  /**
+   * IMPL-055 — modelo do 2º GABARITO (família DISTINTA do `referenceModelId`),
+   * disparado só quando a verificação acusa 'parcial'/divergência. Liga a
+   * validação dos gabaritos.
+   */
+  secondReferenceModelId?: string;
   /** Descricao detalhada do que testar — guia o datagen na geracao de cenarios. */
   scenarioBrief?: string;
+  /**
+   * Idiomas permitidos no datagen (IMPL-056, R-03a:REC-6) — opt-in,
+   * OFF-BY-DEFAULT. Ausente = produto monolíngue: 100% dos cenários em pt-BR e
+   * nenhuma variação de idioma pedida. Cenário (de QUALQUER fonte) com idioma
+   * fora desta lista vira aviso em `RunRecord.languageWarnings`.
+   */
+  languages?: string[];
+  /**
+   * IMPL-063 — dedup SEMÂNTICO dos cenários gerados: `semantic: true` liga
+   * os embeddings do OpenRouter (mesmo gateway/ledger do chat, custo no papel
+   * datagen) com limiares calibráveis. Ausente = só a passe exata do par.
+   */
+  scenarioDedup?: ScenarioDedupConfig;
+  /**
+   * IMPL-115 — modo ECONÔMICO do julgamento: 2 juízes baratos em paralelo e o
+   * forte só nos vereditos em dúvida (discordância, 'parcial', anomalia de
+   * comprimento). Ausente = julgamento normal por `judgeModelIds`.
+   */
+  judgeCascade?: JudgeCascadeConfig;
   /** Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`. */
   scenarioSeed?: StageSpec[];
   /**
@@ -605,6 +801,14 @@ export interface RunConfigBase {
    * que quebrar — evolução com cinto de segurança, validação local sem LLM.
    */
   contracts?: PromptContracts;
+  /**
+   * IMPL-075 (R-07b:REC-4) — modo AUDITÁVEL da run/sessão: juiz, duelo e gabarito
+   * (`AUDITABLE_ROLES`) saem com provedor travado (`provider.order`,
+   * `allow_fallbacks:false`, `require_parameters:true`, quantizações de
+   * precisão cheia). Visível no artefato: `costByRole[*].auditableCalls` e
+   * `callLog[].auditable`. Ausente/false = só o preset do gateway (env).
+   */
+  auditable?: boolean;
 }
 
 /** Campos comuns aos modos de 1 LLM (variation/training). */
@@ -642,6 +846,15 @@ export interface CompareConfig extends RunConfigBase {
   competitorModelIds: string[];
   /** compare-llms: variantes de config {modelo, temperatura, reasoning} no eixo de contestants (identidade = tripla). */
   competitorConfigs?: { modelId: string; temperature?: number; reasoningLevel?: ReasoningLevel }[];
+  /**
+   * Ancora (web-code#16): com `competitorConfigs`, o 1º concorrente vira o
+   * controle (`isOriginal` — "base" no heatmap, "controlo" na narrativa). Vale
+   * para o eixo compare-llms (configs do MESMO modelo). `false` = ninguém é
+   * controle: a lista é de MODELOS diferentes promovida a configs só para
+   * carregar o ajuste por competidor (Nova Run) ou os agentes do compare.
+   * Ausente = ancorado (comportamento de sempre).
+   */
+  competitorAnchor?: boolean;
 }
 export interface VariationConfig extends RunConfigBase, SingleModelFields {
   mode: 'variation';
@@ -760,6 +973,16 @@ export interface StageSpec {
   labelSet?: string[];
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
+  /**
+   * Aprovacao HUMANA vigente do item de origem (biblioteca — IMPL-065/087):
+   * presente so quando o item estava `aprovado` E o `contentHash` gravado ainda
+   * era o do conteudo (a aprovacao cobre pergunta + gabarito). E o que faz um
+   * item gerado por IA (`origin: 'ai'`) e revisado por gente contar como
+   * ANCORA humana (`trainingPolicy.isCuratedItem`). Ausente = sem aprovacao.
+   * QUEM aprovou fica na biblioteca (o `contentHash` liga os dois): o nome/
+   * e-mail do revisor nao viaja para config/record da run (LGPD).
+   */
+  humanApproval?: { reviewedAt?: string; contentHash: string };
   /**
    * Metadados de CURRICULO (F1/F4.1): tier curatorial e dimensoes medidas.
    * Sobrevivem da biblioteca (`toStageSpec`) e alimentam a selecao Pareto por
@@ -953,6 +1176,13 @@ export interface CompetitorResponse {
   /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
   firstAttempt?: CallFinishSignals;
   /**
+   * IMPL-075 (R-07b:REC-4) — provedor que SERVIU a resposta final (payload do
+   * OpenRouter; o GET /generation completa quando o gateway pede). Sem isto a
+   * variação entre provedores do mesmo id de pesos abertos ficava inseparável
+   * da variação de prompt. Ausente = nada recuperável (nunca inventado).
+   */
+  provider?: CallProviderInfo;
+  /**
    * Ponteiro para os artefatos da execução de agente em disco. NUNCA o
    * conteúdo: o RunRecord é resserializado inteiro a cada saveRun (throttled
    * em 800ms) e embutir trajetórias tornaria cada escrita O(tudo que já rodou).
@@ -996,6 +1226,11 @@ export interface JudgeContractComponents {
   judgeReasoningLevel?: string;
   /** Política de provedor das chamadas de juiz (ex.: roteamento ZDR forçado). */
   providerPolicy?: string;
+  /**
+   * Temperatura de amostragem das chamadas de juízo (IMPL-117, R-07b:REC-5) —
+   * `JUDGE_TEMPERATURE` (0) no pipeline. Ausente em pins anteriores ao IMPL-117.
+   */
+  judgeTemperature?: number | string;
 }
 
 /**
@@ -1080,13 +1315,35 @@ export interface VerdictError {
 }
 
 /**
+ * Sinais de fim + artefato de UMA chamada de juízo (IMPL-014 / IMPL-117), POR
+ * voto/ordem/passagem — antes só o histograma por papel
+ * (`finishSignalsByRole.judge`) sobrevivia e não dava para saber qual veredito
+ * terminou com qual `finish_reason`. É a ÚLTIMA chamada que respondeu (o
+ * lembrete de formato é uma 2ª chamada). Ausente = nenhuma resposta (exceção de
+ * transporte), veredito determinístico (oráculo/ground-truth) ou record antigo.
+ */
+export interface JudgeCallFinish {
+  /** `finish_reason` normalizado pelo OpenRouter (ex.: stop, length). */
+  finishReason?: string;
+  /** `native_finish_reason` cru do provedor. */
+  nativeFinishReason?: string;
+  /** true = saída cortada no teto (o voto foi DESCARTADO — `truncated`). */
+  truncated?: boolean;
+  /** Id da geração no OpenRouter (`gen-…`) — auditoria/conciliação da chamada. */
+  generationId?: string;
+  /** SHA-256 (hex) do texto devolvido pelo juiz — prova da resposta que virou veredito. */
+  responseSha256?: string;
+}
+
+/**
  * Voto de UM juiz para UMA resposta (IMPL-057, R-11a:REC-8): veredito +
  * explicação + confiança + canário persistidos POR JUIZ — antes o resultado
  * agregado descartava os singles e era impossível mostrar "2 de 3 juízes:
  * resolve", destacar o divergente ou calcular κ painel×humano. Juiz que FALHOU
- * entra com `error` e sem `verdict` (falha ≠ veredito).
+ * entra com `error` e sem `verdict` (falha ≠ veredito). Os sinais de fim da
+ * chamada (IMPL-014) vão nos campos de `JudgeCallFinish`.
  */
-export interface JudgeVote {
+export interface JudgeVote extends JudgeCallFinish {
   judgeModelId: string;
   /** Veredito deste juiz; ausente = este juiz falhou (motivo em `error`). */
   verdict?: Verdict;
@@ -1162,6 +1419,12 @@ export interface SingleJudgeResult {
   /** letra -> contestantId desta avaliacao (cosmetico p/ a UI "(era X)"). */
   blindMap: Record<string, string>;
   inconclusive?: boolean;
+  /**
+   * Sinais de fim de CADA passagem deste juiz (IMPL-014), na ordem das
+   * passagens — inclusive a que falhou com resposta (ex.: cortada). Ausente em
+   * records antigos.
+   */
+  passFinish?: JudgeCallFinish[];
 }
 
 /**
@@ -1171,6 +1434,8 @@ export interface SingleJudgeResult {
  * tambem o resultado individual de cada juiz (placar aditivo + justificativas).
  */
 export interface JudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /** Consenso entre juizes (posicao media): melhor -> pior. Placar/heatmap/CSV usam isto. */
   rankedContestantIds: string[];
   /**
@@ -1207,6 +1472,8 @@ export interface JudgeResult {
  * sem comparar contestants entre si. Base do judge-score.
  */
 export interface ReferenceJudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /**
    * Veredito ternario por contestant (consenso entre juizes, quando ha mais de
    * um). SO vereditos legitimos: falha do juiz/competidor deixa a chave AUSENTE
@@ -1290,8 +1557,12 @@ export interface ReferenceJudgeResult {
   unscoredRepsByContestant?: Record<string, number>;
 }
 
-/** Uma ordem de apresentação de um duelo, nos termos REAIS do par ('a' = 1º do par). */
-export interface DuelOrderResult {
+/**
+ * Uma ordem de apresentação de um duelo, nos termos REAIS do par ('a' = 1º do
+ * par). Os sinais de fim da chamada dessa ordem (IMPL-014) vão nos campos de
+ * `JudgeCallFinish` (ausentes no oráculo e em records antigos).
+ */
+export interface DuelOrderResult extends JudgeCallFinish {
   winner: 'a' | 'b' | 'tie';
   explanation: string;
   /** Canário que o juiz devolveu nesta ordem (IMPL-006). Ausente no oráculo e em records antigos. */
@@ -1335,6 +1606,11 @@ export interface DuelFailure {
   order1?: DuelOrderResult;
   order2?: DuelOrderResult;
   error: VerdictError;
+  /**
+   * Sinais de fim das ordens que FALHARAM com resposta (ex.: cortada no teto —
+   * IMPL-014). As ordens com vencedor já os levam em `order1`/`order2`.
+   */
+  failedOrderFinish?: { order1?: JudgeCallFinish; order2?: JudgeCallFinish };
 }
 
 /**
@@ -1403,6 +1679,12 @@ export interface CompetitorLiveState {
 }
 
 export interface StageRecord {
+  /**
+   * IMPL-069 — estado de SEGURANÇA de cada resposta (contestantId → estado)
+   * nos cenários do conjunto de guarda (tier adversarial/benign-twin), separado
+   * do judge-score. Ausente nos demais cenários e em records antigos.
+   */
+  security?: Record<string, ResponseSecurity>;
   index: number;
   spec?: StageSpec;
   responses: CompetitorResponse[];
@@ -1547,6 +1829,20 @@ export interface RunRecord {
    */
   agentUnscoredRepsByContestant?: Record<string, number>;
   /**
+   * IMPL-094 (R-14a REC-2) — falhas que NAO sao do agente, por run: execucoes
+   * que valem, `infraErrors` (sem veredito por infra depois das retentativas
+   * cegas), tentativas/retentativas (transitoria: 429/5xx/rede/sandbox morto,
+   * ate 2x) e etapas invalidadas para TODOS por defeito da tarefa. Presente
+   * (zerado) em toda run com agente, desde o inicio.
+   */
+  agentInfra?: AgentInfraCounts;
+  /**
+   * IMPL-094 — `agentInfra.infraErrors / agentInfra.executions` (0..1). Acima
+   * de 5% = alerta; acima de 10% a run e INVALIDA (status `inconclusive` com o
+   * motivo em `verdictIntegrity.reasons`; `agents run` sai 6 `run.infra_invalid`).
+   */
+  infraErrorRate?: number;
+  /**
    * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
    * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).
    */
@@ -1572,6 +1868,24 @@ export interface RunRecord {
   /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
   fairnessWarnings?: string[];
   /**
+   * Cenários com idioma DECLARADO fora da política da run (IMPL-056): todas as
+   * fontes (datagen, seed/pacote, customStages, biblioteca). Idioma diferente
+   * é confundidor no veredito. Ausente = record antigo; [] = tudo na política.
+   */
+  languageWarnings?: string[];
+  /**
+   * Cobertura ADVERSARIAL das specs da run (IMPL-068): cenários por categoria
+   * (6 mínimas), lacunas abaixo do mínimo e o rótulo de turno (ASR@1
+   * single-turn = limite inferior). Ausente = run sem item adversarial.
+   */
+  adversarialCoverage?: {
+    byCategory: Record<string, number>;
+    gaps: string[];
+    minPerCategory: number;
+    total: number;
+    turnLabel: string;
+  };
+  /**
    * Fila `needs-human-review` (IMPL-055, R-03a:REC-1): itens cujo gabarito
    * divergiu da rubrica, cujo 2º gabarito (família distinta) discordou, ou a
    * amostra humana de auditoria (5–10%, acionada por discordância). A
@@ -1582,6 +1896,33 @@ export interface RunRecord {
    * preserva o campo (`normalizeRunRecord` espalha `...raw`).
    */
   needsHumanReview?: HumanReviewItem[];
+  /**
+   * IMPL-112 (R-05:REC-8) — taxa de acerto POR ITEM × contestants da run e a
+   * fila de REVISÃO HUMANA do gabarito (100% 'resolve' ou 100% 'nao' em k
+   * execuções — nunca descarte automático). Sai de `itemSaturationReport`
+   * (src/datagen.ts) no fim do julgamento. Ausente em records antigos.
+   */
+  itemSaturation?: ItemSaturationReport;
+  /**
+   * web-live#7 (+ IMPL-063/IMPL-059) — relatório da GERAÇÃO de cenários:
+   * pedido/gerado/descartes por camada (exata, semântica, contra o seed)/
+   * rodadas de reposição/entregues/limiares + aviso de falta e rubricas que
+   * exigem fato ausente do caso. Ausente = run sem datagen (pinada/seed cobre)
+   * ou record antigo. Sai de `generateStages` (`onReport`).
+   */
+  datagenReport?: DatagenReport;
+  /**
+   * IMPL-115 — resumo do modo econômico: vereditos julgados/escalonados ao
+   * juiz forte, fração escalonada e histograma dos gatilhos. O custo por
+   * veredito sai MEDIDO do ledger (`costByRole.judge`). Ausente = sem cascata.
+   */
+  judgeCascade?: JudgeCascadeSummary;
+  /**
+   * IMPL-069 — resumo de segurança por contestant (ataques, violações,
+   * recusas; gêmeos benignos e recusa excessiva). `classifier: 'none'`: só o
+   * detector determinístico (canário/span do system prompt) está ligado.
+   */
+  securitySummary?: SecuritySummary;
   /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
@@ -1603,6 +1944,19 @@ export interface RunRecord {
       modelIds: string[];
       pinnedAt: string;
       components?: JudgeContractComponents;
+    };
+    /**
+     * Auditoria do contrato ENTRE runs (IMPL-049/IMPL-057): o pin da última
+     * run gravada antes desta (a âncora sobrevive a processos/abas) e a linha
+     * curta "juiz: <modelo> (mesmo contrato desde a última run)" — `detail`
+     * (12 chars do hash) é o que vai no detalhe/export.
+     */
+    contractAudit?: {
+      changed: boolean;
+      previousHash?: string;
+      previousRunId?: string;
+      line: string;
+      detail: string;
     };
     /**
      * Viés de verbosidade (IMPL-052): a regressão deixa de misturar papéis —
@@ -1651,7 +2005,21 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** Ledger: spent/committed/pending (IMPL-017). Ausente em records antigos. */
   costLedger?: CostLedgerSummary;
-  /** BYOK: cobrado pelo provedor upstream, fora dos creditos do OpenRouter. */
+  /**
+   * IMPL-074 — registo POR CHAMADA (id de geração, provedor, custo, estado da
+   * conciliação), com teto `CALL_LOG_LIMIT`. Fora do `costLedger` de propósito:
+   * não viaja em NDJSON/MCP. Ausente em records antigos.
+   */
+  callLog?: CallLogEntry[];
+  /** Entradas que passaram do teto do `callLog` (não registadas). */
+  callLogDropped?: number;
+  /**
+   * @deprecated LEGADO — não é mais escrito. Records antigos somavam aqui o
+   * `upstream_inference_cost` de TODA chamada, e o OpenRouter o devolve também
+   * nas não-BYOK (onde já está dentro de `totalCostUsd`): semântica
+   * desconhecida. Nunca somar ao gasto nem rotular de BYOK. O gasto BYOK
+   * medido vive em `costLedger.byok`.
+   */
   upstreamCostUsd?: number;
   /**
    * Desfechos nao-ok dos competidores, SEPARADOS (IMPL-010): `blocked` =
@@ -1700,10 +2068,49 @@ export interface RunRecord {
   startedAt: string;
   finishedAt?: string;
   error?: string;
+  /**
+   * cli#3 — classe da falha do gateway que derrubou a run (`auth` = key
+   * recusada, `no_credit` = sem crédito…) e o status HTTP. Com isto o CLI sai
+   * com o código documentado (4/5) em vez de 1; ausente = falha não
+   * classificada ou record antigo.
+   */
+  errorKind?: 'auth' | 'blocked' | 'no_credit' | 'rate_limit' | 'http';
+  errorHttpStatus?: number;
   // Lineage de treino (ausente em compare/variation):
   sessionId?: string;
   iteration?: number; // 0-based
   parentRunId?: string;
+  /**
+   * IMPL-081 — presente quando ESTA execução é uma RETOMADA (crash, aba
+   * recarregada, cancelamento, orçamento ou erro): o pipeline rodou de novo e
+   * as chamadas já pagas vieram do journal a US$ 0. `totalCostUsd` é só o
+   * gasto DESTA tentativa; o das anteriores está em `priorSpentUsd`.
+   */
+  resume?: RunResumeInfo;
+}
+
+/** IMPL-081 — carimbo de uma run retomada (ver `RunRecord.resume`). */
+export interface RunResumeInfo {
+  /** Tentativa atual (2 = primeira retomada). */
+  attempt: number;
+  resumedAt: string;
+  /**
+   * Gasto GRAVADO das tentativas anteriores (FORA de `totalCostUsd`). Limite
+   * inferior: é o último snapshot de cada uma — chamadas em voo num crash
+   * podem ter sido cobradas sem aparecer aqui.
+   */
+  priorSpentUsd: number;
+  /** Pendente (sem custo medido) das tentativas anteriores — pode ter sido cobrado. */
+  priorPendingUsd: number;
+  /** Respostas do journal disponíveis para replay no início desta tentativa. */
+  journalCalls: number;
+  /** Chamadas desta tentativa servidas do journal (US$ 0 nesta tentativa). */
+  replayedCalls: number;
+  /** Custo MEDIDO original das respostas replayadas (já dentro de `priorSpentUsd`). */
+  replayedUsd: number;
+  /** Como a tentativa anterior terminou (`aborted`/`error`) e por quê. */
+  previousStatus: string;
+  previousStoppedReason?: string;
 }
 
 // ----------------------------------------------------------------------------
@@ -1881,7 +2288,7 @@ export interface BestOfKTest {
  * `reeval` (IMPL-013): passou no gate da melhor de K, mas a re-avaliação LIMPA no
  * minibatch não confirmou a melhora (ou não chegou a rodar até o fim).
  */
-export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance' | 'reeval';
+export type GateHoldReason = 'no-pairs' | 'min-gain' | 'significance' | 'reeval' | 'contamination' | 'safety';
 
 /**
  * Re-avaliação LIMPA do candidato antes de confirmar a promoção (IMPL-013,
@@ -1944,6 +2351,20 @@ export interface IterationGate {
    * `heldBy: ['reeval']`.
    */
   reeval?: PromotionReeval;
+  /**
+   * IMPL-067 (R-20:REC-9): contaminação dados→prompt do `bestId` contra o
+   * corpus da run de seleção (cenários ∪ gabaritos ∪ explicações do juiz),
+   * sem contar o que o prompt de base já trazia. `blocked` (span exato ≥ 8
+   * tokens) segura a promoção (`heldBy: ['contamination']`); `containment` é
+   * reportado para toda campeã.
+   */
+  contamination?: { containment: number; alert: boolean; blocked: boolean; detail?: string };
+  /**
+   * IMPL-069 (R-21:REC-2): restrição DURA de segurança — variantes com NOVA
+   * violação em âncora crítica (cenário adversarial que a régua não violava)
+   * ficam FORA da disputa antes da utilidade (ordem lexicográfica).
+   */
+  safety?: { excludedIds: string[] };
 }
 
 /** Pareamento final da sessão (holdout, ou a última run de treino sem holdout). */
@@ -2096,8 +2517,9 @@ export interface SessionRecord {
   /** Soma do `failureCountByRole` de todas as runs da sessao (IMPL-004). */
   failureCountByRole?: Partial<Record<CostRole, number>>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
-  /** Ledger da sessao: spent/committed/pending (IMPL-017). */
+  /** Ledger da sessao: spent/committed/pending (IMPL-017). Gasto BYOK em `costLedger.byok`. */
   costLedger?: CostLedgerSummary;
+  /** @deprecated LEGADO, semântica desconhecida — ver `RunRecord.upstreamCostUsd`. Não é mais escrito. */
   upstreamCostUsd?: number;
   budgetUsd?: number;
   budgetExhausted?: boolean;
@@ -2106,12 +2528,50 @@ export interface SessionRecord {
   /** Iteracao em que o orcamento/cancelamento interrompeu a sessao. */
   stoppedAtIteration?: number;
   /**
-   * true = o campeao NAO passou pelo gate de holdout (pulado por orcamento).
-   * Sem holdout o campeao esta nao-validado contra sobreajuste — quem le o
-   * resultado precisa saber disso.
+   * true = o campeao NAO passou pelo gate de holdout: seleção pequena demais
+   * para reservar o piso de 10 cenários, orçamento, cancelamento ou run de
+   * holdout sem veredito. Sem holdout o campeao esta nao-validado contra
+   * sobreajuste — quem le o resultado precisa saber disso. O PORQUÊ vem em
+   * `holdoutSkipReason` (o texto de CLI/UI/handoff sai dele, nunca adivinhado).
    */
   holdoutSkipped?: boolean;
+  /**
+   * Por que a sessão terminou SEM resultado de holdout (ver
+   * {@link HoldoutSkipReason}). Presente sempre que `holdout` falta numa sessão
+   * terminada; `holdoutSkipped` é true só para os motivos que deixam o campeão
+   * não validado (`min-scenarios`/`budget`/`cancelled`/`run-failed`). Ausente em
+   * sessões antigas — derive com `holdoutSkipReasonOf` (engine/sessionDecision).
+   */
+  holdoutSkipReason?: HoldoutSkipReason;
+  /**
+   * Runs de RE-AVALIAÇÃO LIMPA (IMPL-013) da sessão, na ordem em que rodaram.
+   * Ficam FORA de `runIds` de propósito: consumidores tratam `runIds` como
+   * "uma run por iteração (+ holdout)"; a re-avaliação é paga e persistida, e
+   * esta lista a deixa alcançável (UI, relatório, aviso de gravação).
+   */
+  reevalRunIds?: string[];
 }
+
+/**
+ * Motivo de a sessão não ter resultado de holdout:
+ * - `min-scenarios`: a seleção tem < 20 cenários — a fatia reservada ficaria
+ *   abaixo do piso de 10 (IMPL-050) e tudo treina ("confirmação fraca");
+ * - `disabled`: `holdoutRatio: 0`;
+ * - `budget` / `cancelled`: a sessão parou (ou o teto não cobria a run de
+ *   holdout) antes do gate final;
+ * - `no-change`: o campeão final é o próprio prompt base — nada a validar;
+ * - `no-base`: sem prompt base não há controle para o holdout;
+ * - `run-failed`: a run de holdout terminou sem veredito válido
+ *   (erro/inconclusiva).
+ */
+export type HoldoutSkipReason =
+  | 'min-scenarios'
+  | 'disabled'
+  | 'budget'
+  | 'cancelled'
+  | 'no-change'
+  | 'no-base'
+  | 'run-failed';
 
 // ----------------------------------------------------------------------------
 // Biblioteca de prompts (IndexedDB, client-only) e pacote JSON de cenarios
@@ -2131,7 +2591,10 @@ export interface SavedPrompt {
     sessionId?: string;
     runId?: string;
     techniqueId?: string;
+    /** Iteração 0-based da rodada (a UI mostra "rodada N+1"). */
     iteration?: number;
+    /** Salvo da run de HOLDOUT (não é rodada de treino — web-code#14). */
+    holdout?: boolean;
   };
   createdAt: string;
   updatedAt: string;
@@ -2233,6 +2696,13 @@ export type RunEvent =
     }
   | { type: 'stage.dueled'; runId: string; stageIndex: number; duels: StageDuels }
   | { type: 'duel.progress'; runId: string; done: number; total: number }
+  /**
+   * web-live#7 — relatório da geração de cenários, emitido UMA vez, logo
+   * depois do datagen e ANTES de gastar com gabarito/competidores/juízes.
+   * `report.warning` presente = faltou cenário (a run segue com n menor).
+   * Agregado: NÃO entra no reducer de etapas (sem `stageIndex`).
+   */
+  | { type: 'datagen.report'; runId: string; report: DatagenReport }
   /** Gasto acumulado (throttled). Hook do CLI para a linha de orcamento. */
   | {
       type: 'run.spend';

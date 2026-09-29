@@ -1,8 +1,11 @@
 import { requestPersistentStorage, type StorageSubject } from './storageHealth';
 // Shape do rotulo esperado e da validacao do gabarito: fonte unica no motor.
 import type { ExpectedSpec, ReferenceValidation } from '../../src/engine/groundTruth.js';
-import type { PromptContracts } from '../../src/engine/contracts.js';
+import type { PromptContracts, ResponseSecurity, SecuritySummary } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
+import type { DatagenReport, ItemSaturationReport } from '../../src/datagen.js';
+import type { CascadeReport, JudgeCascadeConfig, JudgeCascadeSummary } from '../../src/judge.js';
+import type { ScenarioDedupConfig } from '../../src/dedup.js';
 import type {
   CallFinishSignals,
   CostEntry,
@@ -26,14 +29,24 @@ export type {
   LaunchCostEstimate,
 } from '../../src/engine/costConfirmation.js';
 export { COST_CONFIRM_THRESHOLD_USD, costConfirmationReason } from '../../src/engine/costConfirmation.js';
+// Papéis separados (IMPL-048): a MESMA regra do runConfigSchema do Node — o
+// formulário mostra a pendência e o createRun/createSession recusa (fail-closed).
+import { assertRoleSeparation } from '../../src/engine/roleSeparation.js';
+export {
+  competingModelIds,
+  roleConflictMessage,
+  roleSeparationIssues,
+  type RoleConflict,
+} from '../../src/engine/roleSeparation.js';
 // Significância pareada: fonte única em src/types.ts (IMPL-001), como os tipos de custo.
 export type { PairedSignificance, SignificanceMethod, StoredSignificance } from '../../src/types.js';
 // Pareamento honesto (IMPL-005): fonte única em src/types.ts, como a significância.
-import type { IterationGate, RunCompleteness, SessionPairing } from '../../src/types.js';
+import type { HoldoutSkipReason, IterationGate, RunCompleteness, SessionPairing } from '../../src/types.js';
 export type {
   BestOfKEntry,
   BestOfKTest,
   GateHoldReason,
+  HoldoutSkipReason,
   IterationGate,
   MultiplicityMethod,
   ObservationCoverage,
@@ -63,10 +76,11 @@ export type {
 export { isTerminalRunStatus } from '../../src/types.js';
 // Fila `needs-human-review` + voto de cada juiz + diagnóstico de verbosidade
 // (IMPL-055/057/053): fonte única em src/types.ts, como acima.
-import type { HumanReviewItem, JudgeVote } from '../../src/types.js';
+import type { HumanReviewItem, JudgeCallFinish, JudgeVote } from '../../src/types.js';
 export type {
   HumanReviewItem,
   HumanReviewReason,
+  JudgeCallFinish,
   JudgeVote,
   VerbosityDiag,
 } from '../../src/types.js';
@@ -81,6 +95,8 @@ import type { ModelReasoningMeta } from './modelCaps';
 import { reasoningLevelForRole } from './modelCaps';
 import {
   checkImportPii,
+  KEY_REMEMBER,
+  KEY_STORAGE,
   loadLgpdData,
   sensitiveRoutingFor,
   type LgpdData,
@@ -88,9 +104,15 @@ import {
   type PiiRunReport,
 } from './lgpd';
 import { BudgetLedger } from '../../src/budget.js';
-import { cancelRun as engineCancelRun, isRunCancellable, startRun } from './engine/orchestrator';
-import { cancelTraining, isTrainingCancellable, startTraining } from './engine/trainer';
-import { generateContestants, generateBasePrompt as engineGenerateBasePrompt } from './engine/variator';
+// left#15: orchestrator/trainer/variator (o PIPELINE: competidores, juízes,
+// gabarito, datagen, duelos…) só carregam quando uma run/treino COMEÇA nesta
+// aba — ver `loadOrchestrator`/`loadTrainer`. Abrir o app, o histórico ou uma
+// run salva não paga por eles.
+import type * as OrchestratorModule from './engine/orchestrator';
+import type * as TrainerModule from './engine/trainer';
+// IMPL-081: o núcleo do journal é puro e leve (shim) — a recusa de retomada é
+// síncrona e não justifica chunk próprio.
+import { resumeRefusal } from './engine/callJournal';
 import { listModels, validateKey as engineValidateKey, currentConcurrency } from './engine/openrouter';
 import { listTechniques } from './engine/techniques';
 import {
@@ -119,6 +141,18 @@ import {
 import { parseScenarioPack, SCENARIO_PACK_FORMAT, SCENARIO_PACK_FORMAT_LEGACY } from './engine/scenarioPack';
 import { parseArenaConfig, ARENA_CONFIG_FORMAT, type ArenaConfigFile } from './engine/configFile';
 import { isHeldHere } from './engine/runLocks';
+// http-api#3: servido junto do backend (self-host), o histórico e as telas de
+// run/treino também leem as runs criadas pela API HTTP — somente leitura.
+import {
+  fetchBackendRun,
+  fetchBackendRuns,
+  fetchBackendSession,
+  fetchBackendSessions,
+  followBackendRun,
+  followBackendRunLive,
+  followBackendSession,
+  mergeById,
+} from './backend';
 import {
   markRunInterrupted as engineMarkRunInterrupted,
   markSessionInterrupted as engineMarkSessionInterrupted,
@@ -262,6 +296,27 @@ export interface RunConfig {
   /** Julgamento por referencia (pointwise vs gabarito + duelos). */
   referenceJudging?: boolean;
   /**
+   * IMPL-053 (R-03b:REC-1) — sondas CONTRAFACTUAIS do diagnóstico de
+   * verbosidade: re-julga ~20% das respostas com o texto truncado/preenchido
+   * em 20% e publica a taxa de INVERSÃO (`verbosityDiag.taxaInversaoSondas`,
+   * bom < 10%). OPT-IN: custa chamadas extras de juiz (papel `judge`, no
+   * ledger). Ausente/false = sem sondas (taxa `null`).
+   */
+  verbosityProbes?: boolean;
+  /**
+   * IMPL-055 (R-03a:REC-1) — valida os gabaritos GERADOS antes do julgamento:
+   * verificação dirigida pela rubrica (1º juiz) + amostra humana de 5–10% →
+   * `RunRecord.needsHumanReview`. OPT-IN (chamadas extras). Implícito quando
+   * `secondReferenceModelId` está presente.
+   */
+  validateReferences?: boolean;
+  /**
+   * IMPL-055 — modelo do 2º GABARITO (família DISTINTA do `referenceModelId`),
+   * disparado só quando a verificação acusa 'parcial'/divergência. Liga a
+   * validação dos gabaritos.
+   */
+  secondReferenceModelId?: string;
+  /**
    * No de FINALISTAS que disputam os duelos depois do julgamento pointwise.
    * Os melhores por judge-score medio (todos os cenarios) duelam entre si em
    * cada cenario. 0 = sem duelos. Default 3.
@@ -271,8 +326,24 @@ export interface RunConfig {
   duels?: boolean;
   /** Descricao detalhada do que testar — guia o datagen. */
   scenarioBrief?: string;
+  /** Idiomas permitidos no datagen (IMPL-056) — opt-in; ausente = só pt-BR. */
+  languages?: string[];
+  /**
+   * IMPL-063 — dedup SEMÂNTICO dos cenários gerados: `semantic: true` liga
+   * os embeddings do OpenRouter (mesmo gateway/ledger do chat, custo no papel
+   * datagen) com limiares calibráveis. Ausente = só a passe exata do par.
+   */
+  scenarioDedup?: ScenarioDedupConfig;
+  /**
+   * IMPL-115 — modo ECONÔMICO do julgamento: 2 juízes baratos em paralelo e o
+   * forte só nos vereditos em dúvida (discordância, 'parcial', anomalia de
+   * comprimento). Ausente = julgamento normal por `judgeModelIds`.
+   */
+  judgeCascade?: JudgeCascadeConfig;
   /** Contratos never-break do prompt base (pos-rewriter rejeita o que quebrar). */
   contracts?: PromptContracts;
+  /** IMPL-075: modo auditável (juiz + duelo + gabarito com provedor travado) — ver src/types.ts. */
+  auditable?: boolean;
   /** Multi-prompt (F2/P0.4): grupo de fragmentos; evolui-se `promptId` por sessao. */
   promptGroup?: PromptGroup;
   promptId?: string;
@@ -280,6 +351,8 @@ export interface RunConfig {
   scenarioSeed?: StageSpec[];
   /** compare-llms: variantes de config {modelo, temp, reasoning}. */
   competitorConfigs?: { modelId: string; temperature?: number; reasoningLevel?: ReasoningLevel }[];
+  /** web-code#16: `false` = nenhum concorrente é controle (ver src/types.ts). */
+  competitorAnchor?: boolean;
   /**
    * training: margem PRATICA minima de ganho (pp) p/ promover; sem ganho =
    * convergiu. Ausente = max(1; 50/n) (meia granularidade — IMPL-002); o gate
@@ -343,6 +416,8 @@ export interface CompetitorResponse {
   truncationRetried?: boolean;
   /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
   firstAttempt?: CallFinishSignals;
+  /** IMPL-075: provedor que serviu a resposta final (espelho de src/types.ts). */
+  provider?: { name?: string; upstreamId?: string; serviceTier?: string };
 }
 
 export interface StageSpec {
@@ -365,6 +440,16 @@ export interface StageSpec {
   labelSet?: string[];
   /** Proveniencia da etapa: gerada pela IA ou importada de pacote JSON. */
   origin?: 'ai' | 'import';
+  /**
+   * Aprovacao HUMANA vigente do item de origem (biblioteca — IMPL-065/087):
+   * presente so quando o item estava `aprovado` E o `contentHash` gravado ainda
+   * era o do conteudo (a aprovacao cobre pergunta + gabarito). E o que faz um
+   * item gerado por IA (`origin: 'ai'`) e revisado por gente contar como
+   * ANCORA humana (`trainingPolicy.isCuratedItem`). Ausente = sem aprovacao.
+   * QUEM aprovou fica na biblioteca (o `contentHash` liga os dois): o nome/
+   * e-mail do revisor nao viaja para config/record da run (LGPD).
+   */
+  humanApproval?: { reviewedAt?: string; contentHash: string };
   /**
    * Metadados de curriculo (IMPL-064): tier curatorial e dimensoes medidas —
    * alimentam a selecao Pareto por fatia. Espelho de src/types.ts.
@@ -416,9 +501,13 @@ export interface SingleJudgeResult {
   verdicts: JudgeVerdict[];
   blindMap: Record<string, string>;
   inconclusive?: boolean;
+  /** Sinais de fim de CADA passagem deste juiz (IMPL-014). */
+  passFinish?: JudgeCallFinish[];
 }
 
 export interface JudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /** Consenso entre juizes (posicao media): melhor -> pior. */
   rankedContestantIds: string[];
   /** Aceitavel por contestant = maioria dos juizes (derivado do ternario). */
@@ -444,6 +533,8 @@ export interface JudgeResult {
 
 /** Julgamento pointwise contra o gabarito (`StageSpec.reference`). Base do judge-score. */
 export interface ReferenceJudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /** Veredito ternario por contestant (consenso entre juizes, quando ha mais de um). */
   verdictByContestant: Record<string, Verdict>;
   /** Explicacao curta (1 frase) por contestant. */
@@ -481,8 +572,9 @@ export interface ReferenceJudgeResult {
 export interface DuelOutcome {
   a: string;
   b: string;
-  order1: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence };
-  order2: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence };
+  // + sinais de fim da chamada de cada ordem (IMPL-014) — espelho de src/types.ts.
+  order1: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence } & JudgeCallFinish;
+  order2: { winner: 'a' | 'b' | 'tie'; explanation: string; canary?: string; confidence?: JudgeConfidence } & JudgeCallFinish;
   /** Resultado combinado das 2 ordens. */
   outcome: 'a' | 'b' | 'tie';
   /** Quem decidiu (IMPL-004): juiz LLM ou oráculo. */
@@ -531,6 +623,12 @@ export interface StageEvaluation {
 }
 
 export interface StageRecord {
+  /**
+   * IMPL-069 — estado de SEGURANÇA de cada resposta (contestantId → estado)
+   * nos cenários do conjunto de guarda (tier adversarial/benign-twin), separado
+   * do judge-score. Ausente nos demais cenários e em records antigos.
+   */
+  security?: Record<string, ResponseSecurity>;
   index: number;
   spec?: StageSpec;
   responses: CompetitorResponse[];
@@ -565,6 +663,12 @@ export interface CompetitorLiveState {
   done: boolean;
 }
 
+/**
+ * ATENÇÃO (sincronia com `src/types.ts`): os campos do modo agente
+ * (`agent*`/`infraErrorRate`) são SÓ do Node de propósito — o modo agente não
+ * roda no navegador. O dado de records importados sobrevive em runtime
+ * (`normalizeRunRecord` espalha `...raw`).
+ */
 export interface RunRecord {
   id: string;
   status: 'running' | 'finished' | 'inconclusive' | 'error' | 'aborted';
@@ -591,6 +695,37 @@ export interface RunRecord {
    * gabarito discordante ou amostra humana de auditoria (5–10%).
    */
   needsHumanReview?: HumanReviewItem[];
+  /** Cenários com idioma fora da política da run (IMPL-056) — todas as fontes. */
+  languageWarnings?: string[];
+  /** Cobertura adversarial por categoria (IMPL-068); ausente = sem item adversarial. */
+  adversarialCoverage?: {
+    byCategory: Record<string, number>;
+    gaps: string[];
+    minPerCategory: number;
+    total: number;
+    turnLabel: string;
+  };
+  /**
+   * IMPL-112 (R-05:REC-8) — taxa de acerto POR ITEM × contestants da run e a
+   * fila de REVISÃO HUMANA do gabarito (100% 'resolve' ou 100% 'nao' em k
+   * execuções — nunca descarte automático). Sai de `itemSaturationReport`
+   * (src/datagen.ts) no fim do julgamento. Ausente em records antigos.
+   */
+  itemSaturation?: ItemSaturationReport;
+  /** web-live#7 — relatório da geração de cenários (espelho de src/types.ts). */
+  datagenReport?: DatagenReport;
+  /**
+   * IMPL-115 — resumo do modo econômico: vereditos julgados/escalonados ao
+   * juiz forte, fração escalonada e histograma dos gatilhos. O custo por
+   * veredito sai MEDIDO do ledger (`costByRole.judge`). Ausente = sem cascata.
+   */
+  judgeCascade?: JudgeCascadeSummary;
+  /**
+   * IMPL-069 — resumo de segurança por contestant (ataques, violações,
+   * recusas; gêmeos benignos e recusa excessiva). `classifier: 'none'`: só o
+   * detector determinístico (canário/span do system prompt) está ligado.
+   */
+  securitySummary?: SecuritySummary;
   /**
    * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
    * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).
@@ -614,7 +749,16 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** Ledger: spent/committed/pending (IMPL-017). Ausente em records antigos. */
   costLedger?: CostLedgerSummary;
-  /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
+  /** IMPL-074: registo por chamada (id de geração/provedor/conciliação), fora do ledger enxuto. */
+  callLog?: import('../../src/types.js').CallLogEntry[];
+  callLogDropped?: number;
+  /**
+   * @deprecated LEGADO — não é mais escrito. Records antigos somavam aqui o
+   * `upstream_inference_cost` de TODA chamada, e o OpenRouter o devolve também
+   * nas não-BYOK (onde já está dentro de `totalCostUsd`): semântica
+   * desconhecida. Nunca somar ao gasto nem rotular de BYOK. O gasto BYOK
+   * medido vive em `costLedger.byok`.
+   */
   upstreamCostUsd?: number;
   /** Ciclo de vida de todo modelo da run + alertas 30/14/7 dias (IMPL-019). */
   modelLifecycle?: ModelLifecycleSnapshot;
@@ -649,9 +793,22 @@ export interface RunRecord {
   startedAt: string;
   finishedAt?: string;
   error?: string;
+  /**
+   * cli#3 — classe da falha do gateway que derrubou a run (`auth` = key
+   * recusada, `no_credit` = sem crédito…) e o status HTTP. Com isto o CLI sai
+   * com o código documentado (4/5) em vez de 1; ausente = falha não
+   * classificada ou record antigo.
+   */
+  errorKind?: 'auth' | 'blocked' | 'no_credit' | 'rate_limit' | 'http';
+  errorHttpStatus?: number;
   sessionId?: string;
   iteration?: number;
   parentRunId?: string;
+  /**
+   * IMPL-081 — execução RETOMADA: as chamadas já pagas vieram do journal a
+   * US$ 0; `totalCostUsd` é só o desta tentativa (o anterior em `priorSpentUsd`).
+   */
+  resume?: import('../../src/types.js').RunResumeInfo;
 }
 
 export interface RunSummary {
@@ -697,8 +854,8 @@ export function normalizeContestants(record: RunRecord): Contestant[] {
 //  • migração: key gravada por versões antigas (sem flag) é tratada como
 //    "lembrada" — o usuário a salvou explicitamente; apagá-la em silêncio no
 //    upgrade seria perda surpresa. A UI a declara como persistida.
-const KEY_STORAGE = 'openrouter_api_key';
-const KEY_REMEMBER = 'openrouter_api_key:remember';
+// `KEY_STORAGE`/`KEY_REMEMBER` vêm de `./lgpd` (fonte única: o "apagar todos os
+// dados locais" os remove junto com o banco).
 
 let memoryKey: string | null = null; // null = ainda não resolvido (reload)
 
@@ -801,11 +958,6 @@ export function requireKey(): string {
   return key;
 }
 
-function authHeaders(): Record<string, string> {
-  const key = getStoredKey();
-  return key ? { 'x-openrouter-key': key } : {};
-}
-
 // -------------- Calls --------------
 
 export interface ValidateKeyResponse {
@@ -891,6 +1043,25 @@ async function assertCostConfirmed(config: RunConfig, opts: LaunchOpts): Promise
   if (est.requiresConfirmation) throw new CostConfirmationRequiredError(est);
 }
 
+// -------------- Motor sob demanda (left#15) --------------
+
+// Os módulos ficam guardados depois do primeiro import: cancelar/perguntar se
+// dá para cancelar é SÍNCRONO, e só existe run cancelável nesta aba se ela foi
+// iniciada aqui — o que já carregou o módulo. Módulo não carregado ⇒ nada
+// roda nesta aba ⇒ `false` é a resposta certa, não uma aproximação.
+let orchestratorMod: typeof OrchestratorModule | null = null;
+let trainerMod: typeof TrainerModule | null = null;
+
+function loadOrchestrator(): Promise<typeof OrchestratorModule> {
+  return import('./engine/orchestrator').then((m) => (orchestratorMod = m));
+}
+
+function loadTrainer(): Promise<typeof TrainerModule> {
+  // O trainer inicia as runs das iterações pelo orchestrator: guarda os dois
+  // (cancelar a run de uma iteração passa por `orchestratorMod`).
+  return Promise.all([import('./engine/trainer'), loadOrchestrator()]).then(([m]) => (trainerMod = m));
+}
+
 // -------------- Cancelamento (IMPL-020) --------------
 
 /**
@@ -899,22 +1070,22 @@ async function assertCostConfirmed(config: RunConfig, opts: LaunchOpts): Promise
  * `aborted` + `stoppedReason: 'cancelled'`, com o parcial honesto.
  */
 export function cancelRun(id: string): boolean {
-  return engineCancelRun(id);
+  return orchestratorMod?.cancelRun(id) ?? false;
 }
 
 /** Cancela o treino NESTA aba (a run da iteração em voo cai junto). */
 export function cancelSession(id: string): boolean {
-  return cancelTraining(id);
+  return trainerMod?.cancelTraining(id) ?? false;
 }
 
 /** true = a run roda nesta aba e ainda pode ser cancelada. */
 export function canCancelRun(id: string): boolean {
-  return isRunCancellable(id);
+  return orchestratorMod?.isRunCancellable(id) ?? false;
 }
 
 /** true = o treino roda nesta aba e ainda pode ser cancelado. */
 export function canCancelSession(id: string): boolean {
-  return isTrainingCancellable(id);
+  return trainerMod?.isTrainingCancellable(id) ?? false;
 }
 
 export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Promise<string> {
@@ -925,12 +1096,30 @@ export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Pro
   // IMPL-082: "key sumida" (Safari ITP/limpeza) recusa ANTES de qualquer fetch:
   // vira re-prompt (`isKeyMissing`), nunca erro de rede opaco.
   const apiKey = requireKey();
+  // IMPL-048: a SPA não passa pelo zod do servidor — sem isto a referência
+  // ausente caía no 1º juiz (gabarito e veredito do mesmo modelo). Recusa antes
+  // de qualquer chamada paga, com a mesma mensagem do schema.
+  assertRoleSeparation(config);
   await assertCostConfirmed(config, launch);
-  // Client-side: o run roda na própria aba (engine). Para variação, as variantes
-  // são geradas via "optimizer" antes do loop (igual ao prepare do backend).
+  // left#15: o pipeline chega agora (chunk próprio), só quando a run começa.
+  const { startRun } = await loadOrchestrator();
+  const { runId, record } = startRun(config as never, apiKey, (await engineOptsFor(config, apiKey)) as never);
+  cacheRunRecord(record);
+  return runId;
+}
+
+/**
+ * Opções do motor por modo — as MESMAS na run nova e na retomada (IMPL-081).
+ * Client-side: o run roda na própria aba (engine). Para variação, as variantes
+ * são geradas via "optimizer" antes do loop (igual ao prepare do backend) — na
+ * retomada o reescritor volta do journal a US$ 0, com as mesmas variantes.
+ * left#15: o variator carrega sob demanda (chunk próprio) — daí `async`.
+ */
+async function engineOptsFor(config: RunConfig, apiKey: string): Promise<Record<string, unknown>> {
   const cfg = config as Record<string, any>;
   const opts: Record<string, unknown> = {};
   if (cfg.mode === 'variation') {
+    const { generateContestants } = await import('./engine/variator');
     const optimizerModelId = cfg.optimizerModelId ?? cfg.datagenModelId;
     const promptOptimization = cfg.promptOptimization !== false;
     // `runCtx` = ledger da run: o custo do reescritor entra na conta da run.
@@ -961,7 +1150,43 @@ export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Pro
         ctx: runCtx,
       });
   }
-  const { runId, record } = startRun(config as never, apiKey, opts as never);
+  return opts;
+}
+
+/**
+ * IMPL-081 — por que esta run NÃO pode ser retomada (`null` = pode): a regra
+ * única de `src/engine/callJournal.ts` (órfã/cancelada/orçamento/erro sim;
+ * concluída, em execução, rodada de treino ou modo agente não).
+ */
+export function runResumeRefusal(record: RunRecord): string | null {
+  return resumeRefusal(record as never);
+}
+
+/**
+ * IMPL-081 (R-10:REC-2) — RETOMA a run nesta aba sem pagar de novo o que já
+ * foi pago: o pipeline roda outra vez com o MESMO id e a MESMA config, e as
+ * chamadas concluídas voltam do journal (IndexedDB) a US$ 0. O teto é o que
+ * sobrou do original. Run 'running' passa antes pela checagem de órfã (lock):
+ * se outra aba a executa, nada é retomado aqui.
+ */
+export async function resumeRun(id: string): Promise<string> {
+  void requestPersistentStorage();
+  const apiKey = requireKey();
+  // O DISCO decide (é dele que o motor recarrega a config e o journal); a
+  // memória só cobre o record que nunca chegou a ser gravado.
+  let rec = ((await loadRun(id)) as unknown as RunRecord | null) ?? (getRunRecord(id) as unknown as RunRecord | undefined);
+  if (!rec) throw new Error('Run nao encontrada');
+  if (rec.status === 'running' && !isHeldHere('run', id)) {
+    const chk = await reconcileRun(id);
+    if (chk.state !== 'missing') rec = chk.record as unknown as RunRecord;
+  }
+  const motivo = runResumeRefusal(rec);
+  if (motivo) throw new Error(`Esta run não pode ser retomada: ${motivo}`);
+  // IMPL-048: o record veio do disco — a mesma recusa de papéis do createRun.
+  assertRoleSeparation(rec.config);
+  // left#15: o pipeline (e o resumeRun do engine) chega no próprio chunk.
+  const { resumeRun: engineResumeRun } = await loadOrchestrator();
+  const { runId, record } = await engineResumeRun(id, apiKey, (await engineOptsFor(rec.config, apiKey)) as never);
   cacheRunRecord(record);
   return runId;
 }
@@ -992,6 +1217,7 @@ export async function generateBasePrompt(
     ctx = { sink };
   }
   const apiKey = requireKey(); // IMPL-082: re-prompt em vez de fetch sem key
+  const { generateBasePrompt: engineGenerateBasePrompt } = await import('./engine/variator'); // left#15
   return engineGenerateBasePrompt({ apiKey, modelId, taskDescription, theme, ctx });
 }
 
@@ -1013,7 +1239,18 @@ export function getLiveRun(id: string): RunRecord | undefined {
  * de ele emitir (diferente de openRunStream, que exige o record ja em memoria).
  */
 export function subscribeRunLive(id: string, onEvent: (e: any) => void): () => void {
-  return subscribeRun(id, onEvent as any);
+  const off = subscribeRun(id, onEvent as any);
+  if (getRunRecord(id) || isHeldHere('run', id)) return off;
+  // Iteração de uma sessão do SERVIDOR (http-api#3): o motor da aba nunca a
+  // emite — os eventos vêm do SSE do backend (se o record existir lá).
+  const ctrl = new AbortController();
+  void fetchBackendRun(id).then((rec) => {
+    if (rec && !ctrl.signal.aborted && !getRunRecord(id)) void followBackendRunLive(id, onEvent, ctrl.signal);
+  });
+  return () => {
+    ctrl.abort();
+    off();
+  };
 }
 
 export async function fetchLgpd(): Promise<LgpdData> {
@@ -1053,8 +1290,9 @@ export interface SessionRecord {
   /** Soma do `failureCountByRole` de todas as runs da sessão (IMPL-004). */
   failureCountByRole?: Partial<Record<CostRole, number>>;
   costAccuracy?: { exact: number; estimated: number; unknown: number };
-  /** Ledger da sessão: spent/committed/pending (IMPL-017). */
+  /** Ledger da sessão: spent/committed/pending (IMPL-017). Gasto BYOK em `costLedger.byok`. */
   costLedger?: CostLedgerSummary;
+  /** @deprecated LEGADO, semântica desconhecida — ver `RunRecord.upstreamCostUsd`. Não é mais escrito. */
   upstreamCostUsd?: number;
   budgetUsd?: number;
   budgetExhausted?: boolean;
@@ -1064,6 +1302,10 @@ export interface SessionRecord {
   stoppedAtIteration?: number;
   /** true = o campeão NÃO passou pelo holdout (pulado): não validado contra sobreajuste. */
   holdoutSkipped?: boolean;
+  /** Por que a sessão terminou sem resultado de holdout (fonte: src/types.ts). */
+  holdoutSkipReason?: HoldoutSkipReason;
+  /** Runs de re-avaliação limpa (IMPL-013) — fora de `runIds` de propósito. */
+  reevalRunIds?: string[];
   startedAt: string;
   finishedAt?: string;
   error?: string;
@@ -1143,7 +1385,10 @@ export interface SavedPrompt {
     sessionId?: string;
     runId?: string;
     techniqueId?: string;
+    /** Iteração 0-based da rodada (a UI mostra "rodada N+1"). */
     iteration?: number;
+    /** Salvo da run de HOLDOUT (não é rodada de treino — web-code#14). */
+    holdout?: boolean;
   };
   createdAt: string;
   updatedAt: string;
@@ -1163,8 +1408,11 @@ export interface ScenarioPack {
 export async function createSession(config: RunConfig, launch: LaunchOpts = {}): Promise<string> {
   void requestPersistentStorage(); // IMPL-022: ver createRun
   const apiKey = requireKey(); // IMPL-082: "key sumida" => re-prompt, não fetch
+  assertRoleSeparation(config); // IMPL-048: ver createRun
   await assertCostConfirmed(config, launch);
-  // Client-side: a sessão de treino roda na própria aba (engine trainer).
+  // Client-side: a sessão de treino roda na própria aba (engine trainer),
+  // carregado sob demanda (left#15).
+  const { startTraining } = await loadTrainer();
   const { sessionId, record } = await startTraining(config as never, apiKey);
   cacheSessionRecord(record);
   return sessionId;
@@ -1177,7 +1425,11 @@ export async function fetchSession(id: string): Promise<SessionRecord> {
     return live as unknown as SessionRecord;
   }
   const rec = await loadSession(id);
-  if (!rec) throw new Error('Sessão não encontrada');
+  if (!rec) {
+    const remote = await fetchBackendSession(id); // http-api#3 (self-host)
+    if (remote) return remote;
+    throw new Error('Sessão não encontrada');
+  }
   // IMPL-023: 'running' que NÃO roda nesta aba — o lock decide se é órfã.
   if (rec.status !== 'running' || isHeldHere('session', id)) return rec as unknown as SessionRecord;
   const chk = await reconcileSession(id);
@@ -1197,7 +1449,8 @@ export interface SessionSummary {
 
 export async function fetchSessions(): Promise<SessionSummary[]> {
   await sweepOrphansShared(); // IMPL-023: o histórico não lista treino zumbi
-  return await engineListSessions<SessionSummary>();
+  const [local, remote] = await Promise.all([engineListSessions<SessionSummary>(), fetchBackendSessions()]);
+  return mergeById(local, remote); // http-api#3: + as do servidor (self-host)
 }
 
 export function openSessionStream(
@@ -1223,6 +1476,8 @@ export function openSessionStream(
     (rec) => onEvent({ type: 'snapshot', record: rec }),
     (state) => onEvent({ type: 'ownership', state } satisfies OwnershipEvent),
     ctrl.signal,
+    // http-api#3: fora do IndexedDB, pode ser uma sessão do servidor (self-host).
+    () => void followBackendSession(id, onEvent, ctrl.signal),
   );
   return () => ctrl.abort();
 }
@@ -1507,7 +1762,8 @@ export {
 
 export async function fetchRuns(): Promise<RunSummary[]> {
   await sweepOrphansShared(); // IMPL-023: o histórico não lista run zumbi
-  return await engineListRuns<RunSummary>();
+  const [local, remote] = await Promise.all([engineListRuns<RunSummary>(), fetchBackendRuns()]);
+  return mergeById(local, remote); // http-api#3: + as do servidor (self-host)
 }
 
 export async function fetchRun(id: string): Promise<RunRecord> {
@@ -1517,7 +1773,11 @@ export async function fetchRun(id: string): Promise<RunRecord> {
     return live as unknown as RunRecord;
   }
   const rec = await loadRun(id);
-  if (!rec) throw new Error('Run nao encontrada');
+  if (!rec) {
+    const remote = await fetchBackendRun(id); // http-api#3 (self-host)
+    if (remote) return remote;
+    throw new Error('Run nao encontrada');
+  }
   // IMPL-023: 'running' que NÃO roda nesta aba — o lock decide se é órfã
   // (recarregar no meio da run reabre aborted/orphan, sem intervenção).
   if (rec.status !== 'running' || isHeldHere('run', id)) return rec as unknown as RunRecord;
@@ -1558,6 +1818,8 @@ export function openRunStream(
     emitRecord,
     (state) => onEvent({ type: 'ownership', state } satisfies OwnershipEvent),
     ctrl.signal,
+    // http-api#3: fora do IndexedDB, pode ser uma run do servidor (self-host).
+    () => void followBackendRun(id, onEvent, ctrl.signal),
   );
   return () => ctrl.abort();
 }
@@ -1589,10 +1851,16 @@ async function followStoredRecord<R extends { status: string }>(
   emit: (rec: R) => void,
   ownership: (state: OwnershipEvent['state']) => void,
   signal: AbortSignal,
+  /** Sem record local: quem mais pode tê-lo (o backend, no self-host). */
+  onMissing?: () => void,
 ): Promise<void> {
   try {
     const rec = await load();
-    if (signal.aborted || !rec) return;
+    if (signal.aborted) return;
+    if (!rec) {
+      onMissing?.();
+      return;
+    }
     if (rec.status !== 'running') {
       emit(rec);
       return;

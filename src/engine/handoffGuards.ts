@@ -15,10 +15,29 @@
 // Puro (sem node:*, sem I/O): serve ao CLI hoje e ao SPA quando ele passar a
 // promover campeões. A entrada é ESTRUTURAL (subconjunto do SessionRecord) de
 // propósito: campos novos em `significance` (cluster stats) não quebram nada.
+//
+// cli#9: o aviso de holdout diz o MOTIVO real (`holdoutSkipReason`, derivado
+// dos campos antigos em record legado) — antes toda sessão com < 20 cenários
+// lia "pulado por orçamento/cancelamento" e o agente ia subir o --budget quando
+// o remédio era ter mais cenários.
+//
+// IMPL-067 (R-20:REC-9): BARREIRA FINAL de contaminação dados→prompt. O campeão
+// que carrega um span exato de ≥ 8 tokens dos cenários pinados (pergunta,
+// contexto, gabarito, rubrica) — ou que o treino já marcou como contaminado no
+// gate da iteração — BLOQUEIA o handoff (mesmo override justificado do
+// holdout). Containment ≥ 30% sem span exato só AVISA. O que o prompt de base
+// já continha fica fora da conta (política do usuário ≠ dado colado).
+
+import { holdoutSkipReasonText } from '../holdout.js';
+import { holdoutSkipReasonOf } from './sessionDecision.js';
+import { contaminationCheck, contaminationCorpus, type ContaminationStage } from './contracts.js';
+import { demoQuestionsOf, questionKey } from './trainingPolicy.js';
+import type { HoldoutSkipReason } from '../types.js';
 
 /** Identificador estável de cada sinal (vai no JSON, no log de auditoria e no trailer). */
 export type HandoffIssueCode =
   | 'holdout.regressed'
+  | 'champion.undeclared'
   | 'holdout.skipped'
   | 'holdout.missing'
   | 'significance.ci_contains_zero'
@@ -26,6 +45,8 @@ export type HandoffIssueCode =
   | 'significance.missing'
   | 'judge.drift'
   | 'session.unfinished'
+  | 'contamination.blocked'
+  | 'contamination.alert'
   | 'override.applied'
   | 'override.unused';
 
@@ -53,8 +74,49 @@ export interface HandoffGuardInput {
     regressed: boolean;
   };
   holdoutSkipped?: boolean;
+  /** Por que não houve holdout (ausente em record antigo — derivado dos campos abaixo). */
+  holdoutSkipReason?: HoldoutSkipReason;
+  /** Parada da sessão: distingue orçamento/cancelamento do piso de cenários em record antigo. */
+  stoppedReason?: string | null;
+  budgetExhausted?: boolean;
   significance?: { ci95Pp: [number, number]; n?: number; meanDiffPp?: number; pValue?: number } | null;
   judgeDrift?: boolean;
+  /** IMPL-065: declaração sob âncora humana (ausente em record antigo = sem bloqueio). */
+  championDeclaration?: { declared: boolean; message?: string; curatedItems?: number; minCuratedItems?: number };
+  /**
+   * IMPL-067: o campeão é o `systemPrompt` da última iteração; o gate da
+   * iteração pode trazer o veredito de contaminação do treino (com o corpus
+   * da run de seleção, explicações do juiz inclusas).
+   */
+  bestPromptByIteration?: {
+    systemPrompt?: string;
+    /** Campeão PÓS-gate da iteração (o dono de `systemPrompt`). */
+    winnerContestantId?: string;
+    /**
+     * Gate da iteração — ⚠️ é o veredito do CANDIDATO (`bestId`), não do
+     * campeão: quando segurou, o `systemPrompt` da linha é outro (carry/régua).
+     */
+    gate?: {
+      bestId?: string;
+      decision?: string;
+      contamination?: { blocked?: boolean; containment?: number; detail?: string };
+    };
+  }[];
+  /** Cenários congelados do treino — o corpus protegido da barreira. */
+  pinnedStages?: ContaminationStage[];
+  /** Prompt de base (o que ele já continha não é contaminação). */
+  config?: { basePrompt?: string };
+}
+
+/** Veredito de contaminação do campeão no handoff (IMPL-067). */
+export interface HandoffContamination {
+  containment: number;
+  alert: boolean;
+  blocked: boolean;
+  exactSpans: string[];
+  detail: string;
+  /** `recomputed` = sobre os cenários pinados; `training` = o gate da iteração já marcou. */
+  source: 'recomputed' | 'training';
 }
 
 export interface HandoffGuardReport {
@@ -64,6 +126,77 @@ export interface HandoffGuardReport {
   warnings: HandoffIssue[];
   /** Presente quando um motivo de override válido foi dado (com ou sem bloqueio a sobrepor). */
   override: HandoffOverride | null;
+  /**
+   * IMPL-067: containment de 8-gramas do campeão contra os cenários pinados
+   * (reportado SEMPRE que há campeão e corpus); `null` = sem como medir.
+   */
+  contamination?: HandoffContamination | null;
+}
+
+/**
+ * O gate da linha descreve o CAMPEÃO dela? Só quando promoveu — o `bestId` do
+ * gate virou o `winnerContestantId`. Um gate que segurou (inclusive por
+ * contaminação: `withContamination` força `isWinner: false`) fala de um
+ * candidato que NUNCA chegou a campeão; a linha guarda o carry/régua.
+ */
+function gateDescreveCampeao(row: NonNullable<HandoffGuardInput['bestPromptByIteration']>[number]): boolean {
+  const g = row.gate;
+  if (!g) return false;
+  if (g.decision === 'promoted') return true;
+  return typeof g.bestId === 'string' && g.bestId === row.winnerContestantId;
+}
+
+/**
+ * Contaminação do campeão (IMPL-067): o veredito do TREINO (gate da última
+ * iteração) prevalece quando bloqueou E descreve o campeão — ele viu também as
+ * explicações do juiz; senão, recomputa sobre os cenários pinados. Sem campeão
+ * ou sem corpus = null.
+ *
+ * Revisão w2: o gate é do CANDIDATO da iteração. Se o candidato foi barrado por
+ * contaminação, o campeão da linha é outro (carry limpo) — usar aquele veredito
+ * bloqueava o handoff de um campeão limpo. Só vale quando o gate promoveu.
+ *
+ * IMPL-061 × IMPL-067 — leave-demos-out: o cenário cuja pergunta o campeão
+ * carrega como demo REAL (bloco canônico `<exemplos_reais>`, anexado pelo
+ * variator a partir do conjunto rotulado) sai do corpus, pela MESMA regra do
+ * treino — lá ele já saiu da seleção (gate, re-avaliação) e do holdout para
+ * todos, então o ganho medido nunca passou por ele. Sem isso, toda campeã
+ * few-shot com demos seria barrada no handoff por "colar" o próprio exemplo que
+ * o framework inseriu. Os demais cenários continuam protegidos.
+ */
+export function handoffContamination(input: HandoffGuardInput): HandoffContamination | null {
+  const ultima = input.bestPromptByIteration?.at(-1);
+  const campeao = ultima?.systemPrompt;
+  const doTreino = ultima && gateDescreveCampeao(ultima) ? ultima.gate?.contamination : undefined;
+  const demos = typeof campeao === 'string' ? demoQuestionsOf([campeao]) : new Set<string>();
+  const protegidos = (input.pinnedStages ?? []).filter(
+    (s) => !(demos.size > 0 && s && typeof s.question === 'string' && demos.has(questionKey(s.question))),
+  );
+  const corpus = contaminationCorpus(protegidos);
+  if (typeof campeao !== 'string' || !campeao.trim()) return null;
+  const base = input.config?.basePrompt;
+  const r = corpus.length
+    ? contaminationCheck(campeao, corpus, { allowedTexts: typeof base === 'string' ? [base] : [] })
+    : null;
+  if (doTreino?.blocked) {
+    return {
+      containment: typeof doTreino.containment === 'number' ? doTreino.containment : (r?.containment ?? 0),
+      alert: Boolean(r?.alert),
+      blocked: true,
+      exactSpans: r?.exactSpans ?? [],
+      detail: doTreino.detail || r?.detail || 'o treino marcou o campeão como contaminado',
+      source: 'training',
+    };
+  }
+  if (!r) return null;
+  return {
+    containment: r.containment,
+    alert: r.alert,
+    blocked: r.blocked,
+    exactSpans: r.exactSpans,
+    detail: r.detail,
+    source: 'recomputed',
+  };
 }
 
 /**
@@ -73,7 +206,9 @@ export interface HandoffGuardReport {
  */
 export function normalizeOverrideReason(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') return null;
-  const reason = raw.replace(/\s+/g, ' ').trim();
+  // Revisão w2: controle que não é espaço (NUL, ESC, DEL…) também sai — o
+  // motivo vai para trailer de commit e trilha JSONL; só texto de uma linha.
+  const reason = raw.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/g, ' ').trim();
   return reason.length > 0 ? reason : null;
 }
 
@@ -114,19 +249,37 @@ export function evaluateHandoffGuards(
     });
   }
 
+  // IMPL-065 (R-05:REC-4): a sessão RECUSOU declarar campeão (itens curados
+  // abaixo do piso) — o prompt é o melhor do bootstrap sintético, não
+  // evidência. Levar para produção exige override justificado.
+  if (input.championDeclaration?.declared === false) {
+    blocks.push({
+      code: 'champion.undeclared',
+      severity: 'block',
+      message:
+        input.championDeclaration.message ??
+        `campeão NÃO declarado: ${input.championDeclaration.curatedItems ?? 0} itens curados < piso ${input.championDeclaration.minCuratedItems ?? '?'}.`,
+    });
+  }
+
+  // O motivo só vale sem resultado de holdout (com `holdout` não há o que explicar).
+  const motivo = h ? undefined : holdoutSkipReasonOf({ ...input, significance: undefined });
   if (input.holdoutSkipped) {
     warnings.push({
       code: 'holdout.skipped',
       severity: 'warn',
-      message: 'campeão NÃO validado em holdout (pulado por orçamento/cancelamento) — pode estar sobreajustado.',
+      message: `campeão NÃO validado em holdout (${
+        motivo ? holdoutSkipReasonText(motivo) : 'pulado'
+      }) — pode estar sobreajustado.`,
     });
   } else if (!h) {
     warnings.push({
       code: 'holdout.missing',
       severity: 'warn',
-      message:
-        'sessão sem resultado de holdout (fatia < 5 cenários, holdoutRatio 0, campeão = base ou run de ' +
-        'holdout falhou) — campeão não validado contra sobreajuste.',
+      message: motivo
+        ? `sessão sem resultado de holdout (${holdoutSkipReasonText(motivo)}) — campeão não validado contra sobreajuste.`
+        : 'sessão sem resultado de holdout (seleção < 20 cenários, holdoutRatio 0, campeão = base ou run de ' +
+          'holdout falhou) — campeão não validado contra sobreajuste.',
     });
   }
 
@@ -176,6 +329,24 @@ export function evaluateHandoffGuards(
     });
   }
 
+  // IMPL-067: barreira final de contaminação dados→prompt.
+  const contamination = handoffContamination(input);
+  if (contamination?.blocked) {
+    blocks.push({
+      code: 'contamination.blocked',
+      severity: 'block',
+      message:
+        `campeão CONTAMINADO por dado do benchmark (${contamination.detail}) — o ganho medido é inseparável ` +
+        'da memorização de cenários; reveja o diff antes de promover.',
+    });
+  } else if (contamination?.alert) {
+    warnings.push({
+      code: 'contamination.alert',
+      severity: 'warn',
+      message: `containment de 8-gramas do campeão com os cenários em ${(contamination.containment * 100).toFixed(0)}% (≥ 30%): revise se o prompt não está decorando cenários.`,
+    });
+  }
+
   const reason = normalizeOverrideReason(opts.overrideReason);
   let override: HandoffOverride | null = null;
   if (reason) {
@@ -195,5 +366,5 @@ export function evaluateHandoffGuards(
     );
   }
 
-  return { blocked: blocks.length > 0 && override === null, blocks, warnings, override };
+  return { blocked: blocks.length > 0 && override === null, blocks, warnings, override, contamination };
 }

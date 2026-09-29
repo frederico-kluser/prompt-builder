@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ArrowRight, Pencil, Search } from 'lucide-react';
+import { ArrowRight, FilePenLine, Pencil, Search } from 'lucide-react';
 import type { SavedPrompt } from '../api';
 import { deletePrompt, listPrompts, updatePrompt } from '../api';
 import { diffLines } from '../diff';
@@ -15,13 +15,17 @@ import { HoldToConfirmButton } from '@/components/motion-ui/hold-to-confirm';
 import { SkeletonResolveList, SkeletonResolveRow, Skeleton } from '@/components/motion-ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { DiffView, EmptyState, MiniLabel, PageHeader, Pre, Screen, Tag } from '../components/primitives';
 import { useToasts } from '../components/AppShell';
 
 // Biblioteca de prompts salvos (store 'prompts' do IndexedDB): lista, busca,
-// renomeia, exclui e compara as versões dos prompts promovidos nos treinos e
-// variações. "Usar como base" semeia o rascunho da Nova Run no localStorage
-// (chave 'arena:prompt-draft' — o NewRun lê e remove a chave ao abrir).
+// renomeia, exclui, EDITA o texto (cada edição vira uma versão nova — o
+// histórico e o diff entre versões ficam alcançáveis, web-live#15) e compara
+// as versões. Hoje quem salva é a tela de Treino ("Melhor prompt"), que também
+// pode gravar como nova versão de um prompt já salvo da mesma sessão.
+// "Usar como base" semeia o rascunho da Nova Run no localStorage (chave
+// 'arena:prompt-draft' — o NewRun lê e remove a chave ao abrir).
 
 const DRAFT_KEY = 'arena:prompt-draft';
 
@@ -42,12 +46,17 @@ function originLabel(origin: Origin): string {
   return 'manual';
 }
 
-/** Técnica/iteração de proveniência, quando registradas no save. */
+/**
+ * Técnica/rodada de proveniência, quando registradas no save. A rodada é
+ * 1-based como na tela de Treino ("Rodada 1" é a iteração 0 — web-code#14);
+ * a run de holdout não é rodada nenhuma.
+ */
 function originDetail(origin: Origin): string {
   if (!origin) return '';
   const parts: string[] = [];
   if (origin.techniqueId) parts.push(origin.techniqueId);
-  if (origin.iteration !== undefined) parts.push(`iteração ${origin.iteration}`);
+  if (origin.holdout) parts.push('holdout');
+  else if (origin.iteration !== undefined) parts.push(`rodada ${origin.iteration + 1}`);
   return parts.join(' · ');
 }
 
@@ -72,6 +81,17 @@ function PromptItem({ prompt: p, onUpdated, onDeleted }: PromptItemProps) {
   const [draftName, setDraftName] = useState(p.name);
   const [saving, setSaving] = useState(false);
   const [selVersion, setSelVersion] = useState(p.version);
+  // Edição do TEXTO (web-live#15): é o que cria versão nova no promptStore.
+  const [editingText, setEditingText] = useState(false);
+  const [draftText, setDraftText] = useState(p.text);
+  const [draftNote, setDraftNote] = useState('');
+  const editId = useId();
+
+  // Versão nova (edição aqui ou "nova versão" salva do treino) passa a ser a
+  // selecionada — senão o seletor ficava parado na anterior.
+  useEffect(() => {
+    setSelVersion(p.version);
+  }, [p.version]);
 
   // Versões ordenadas; por construção do promptStore a corrente é a última.
   const versions = useMemo(() => [...p.history].sort((a, b) => a.version - b.version), [p.history]);
@@ -102,6 +122,36 @@ function PromptItem({ prompt: p, onUpdated, onDeleted }: PromptItemProps) {
   function cancelRename() {
     setDraftName(p.name);
     setEditing(false);
+  }
+
+  function startEditText() {
+    setDraftText(p.text);
+    setDraftNote('');
+    setEditingText(true);
+  }
+
+  async function saveText() {
+    if (saving || !draftText.trim()) return;
+    if (draftText === p.text) {
+      notify('O texto não mudou — nenhuma versão nova.');
+      setEditingText(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      const note = draftNote.trim();
+      const updated = await updatePrompt(p.id, { text: draftText, ...(note ? { note } : {}) });
+      if (updated) {
+        onUpdated(updated);
+        notify(`“${updated.name}” salvo como v${updated.version}.`);
+      }
+      setEditingText(false);
+    } catch (err) {
+      // IMPL-022: falha do IndexedDB chega aqui com a causa (ex.: sem espaço).
+      notify(`Não foi possível salvar a versão: ${err instanceof Error ? err.message : String(err)}`, 'error');
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function confirmDelete() {
@@ -166,6 +216,10 @@ function PromptItem({ prompt: p, onUpdated, onDeleted }: PromptItemProps) {
             Usar como base
             <ArrowRight aria-hidden="true" />
           </Button>
+          <Button variant="ghost" size="sm" onClick={startEditText} disabled={editingText}>
+            <FilePenLine aria-hidden="true" />
+            Editar texto
+          </Button>
           <Button
             variant="ghost"
             size="sm"
@@ -212,10 +266,39 @@ function PromptItem({ prompt: p, onUpdated, onDeleted }: PromptItemProps) {
           </p>
         )}
 
-        <div className="mb-4">
-          <MiniLabel>Prompt atual (v{p.version})</MiniLabel>
-          <Pre>{p.text}</Pre>
-        </div>
+        {editingText ? (
+          <div className="mb-4 flex flex-col gap-2">
+            <label htmlFor={`${editId}-texto`}>
+              <MiniLabel>Novo texto (vira a v{p.version + 1})</MiniLabel>
+            </label>
+            <Textarea
+              id={`${editId}-texto`}
+              className="max-h-96 min-h-40 font-mono text-[12.5px]"
+              value={draftText}
+              onChange={(e) => setDraftText(e.target.value)}
+            />
+            <Input
+              className="h-8"
+              aria-label="Nota da versão (opcional)"
+              placeholder="Nota da versão (opcional) — o que mudou e por quê"
+              value={draftNote}
+              onChange={(e) => setDraftNote(e.target.value)}
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" disabled={saving || !draftText.trim()} onClick={() => void saveText()}>
+                {saving ? 'Salvando…' : 'Salvar nova versão'}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setEditingText(false)}>
+                Cancelar
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mb-4">
+            <MiniLabel>Prompt atual (v{p.version})</MiniLabel>
+            <Pre>{p.text}</Pre>
+          </div>
+        )}
 
         <div>
           <div className="mb-1.5 flex flex-wrap items-center gap-2">
@@ -238,11 +321,16 @@ function PromptItem({ prompt: p, onUpdated, onDeleted }: PromptItemProps) {
               </span>
             )}
           </div>
+          {sel?.note && (
+            <p className="mb-1.5 text-[12.5px] text-muted-foreground">
+              Nota da v{sel.version}: {sel.note}
+            </p>
+          )}
           {prev && sel ? (
             <DiffView diff={diff} />
           ) : (
             <p className="text-[13px] text-muted-foreground">
-              Primeira versão — não há versão anterior para comparar.
+              Primeira versão — não há versão anterior para comparar. “Editar texto” cria a próxima.
             </p>
           )}
         </div>
@@ -289,7 +377,7 @@ export function PromptsPage() {
     <Screen>
       <PageHeader
         title="Prompts"
-        subtitle="Biblioteca de prompts salvos dos treinos e variações, com histórico de versões."
+        subtitle="Biblioteca dos prompts salvos dos treinos, com histórico de versões — editar o texto cria uma versão nova."
       />
 
       <div className="relative mb-4">
@@ -321,7 +409,10 @@ export function PromptsPage() {
           </SkeletonResolveList>
         </div>
       ) : prompts.length === 0 ? (
-        <EmptyState>Nenhum prompt salvo ainda — salve o campeão de um treino ou variação.</EmptyState>
+        <EmptyState>
+          Nenhum prompt salvo ainda — salve o campeão de um treino (tela do treino → “Melhor prompt” → “Salvar na
+          biblioteca”).
+        </EmptyState>
       ) : visible.length === 0 ? (
         <EmptyState>Nenhum prompt corresponde à busca.</EmptyState>
       ) : (

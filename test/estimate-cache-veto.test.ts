@@ -39,7 +39,23 @@ const CAMINHO_AVALIACAO = [
   'web/src/engine/judge.ts',
   'web/src/engine/duels.ts',
   'web/src/engine/gabarito.ts',
+  // IMPL-116 (revisão): o resto do caminho por onde um veredito passa — a
+  // blindagem/re-tentativa do juiz, o best-of-k e os orquestradores que
+  // consomem vereditos.
+  'src/engine/judgeGuard.ts',
+  'src/engine/judgeRetry.ts',
+  'src/engine/bestOfK.ts',
+  'src/orchestrator.ts',
+  'web/src/engine/orchestrator.ts',
 ];
+
+/**
+ * Módulos do reuso EXATO de vereditos (R-08:REC-3): é AQUI que um reuso por
+ * parecença seria acrescentado de verdade — o gateway (`withVerdictCache`) e o
+ * próprio cache. O NOME do cache exato é legítimo (fora do veto), então nestes
+ * só vale a parte do detector que acha a máquina de PARECENÇA.
+ */
+const CACHE_EXATO = ['src/engine/verdictCache.ts', 'src/openrouter.ts', 'web/src/engine/openrouter.ts'];
 
 /** Código sem comentários: a prosa cita o veto; o detector olha o CÓDIGO. */
 function semComentarios(texto: string): string {
@@ -51,7 +67,7 @@ function semComentarios(texto: string): string {
  * embeddings/similaridade, funções de cosseno/vetores, reuso de veredito por
  * cache de similaridade. Dedup EXATO (por id/hash) não é parecença: fica fora.
  */
-function violacoesVeto(codigo: string): string[] {
+function violacoesVeto(codigo: string, opts: { cacheExatoLegitimo?: boolean } = {}): string[] {
   const padroes: Array<[string, RegExp]> = [
     ['import de módulo de embeddings/similaridade/dedup-semântico', /from\s+['"][^'"]*(embed|similar|vector|dedup)[^'"]*['"]/i],
     ['função de similaridade (cosine/cosseno)', /cosine|cosseno/i],
@@ -59,7 +75,10 @@ function violacoesVeto(codigo: string): string[] {
     ['medida de similaridade', /similarity|similaridade/i],
     ['reuso de veredito por cache', /verdict\w*Cache|cache\w*Verdict|reuse\w*Verdict|verdict\w*Reuse/i],
   ];
-  return padroes.filter(([, re]) => re.test(codigo)).map(([nome]) => nome);
+  return padroes
+    .filter(([nome]) => !(opts.cacheExatoLegitimo && nome === 'reuso de veredito por cache'))
+    .filter(([, re]) => re.test(codigo))
+    .map(([nome]) => nome);
 }
 
 describe('IMPL-116 (i) — a decisão negativa está documentada no repositório', () => {
@@ -82,6 +101,23 @@ describe('IMPL-116 (ii/iii) — nenhum módulo de avaliação reusa veredito por
       for (const v of violacoesVeto(codigo)) apanhados.push(`${rel}: ${v}`);
     }
     expect(apanhados, 'similaridade semântica em caminho de avaliação (veto R-08:REC-6)').toEqual([]);
+  });
+
+  it('o caminho do cache EXATO (gateway + verdictCache, Node e SPA) não tem máquina de parecença', () => {
+    const apanhados: string[] = [];
+    for (const rel of CACHE_EXATO) {
+      const codigo = semComentarios(readFileSync(join(raiz, rel), 'utf-8'));
+      for (const v of violacoesVeto(codigo, { cacheExatoLegitimo: true })) apanhados.push(`${rel}: ${v}`);
+    }
+    expect(apanhados, 'reuso por parecença no caminho do cache de vereditos (veto R-08:REC-6)').toEqual([]);
+  });
+
+  it('controle: no caminho do cache exato uma busca por similaridade AINDA reprova', () => {
+    const violador = `
+      const hit = verdictCache.lookup(key) ?? verdictCache.nearest(embedding(prompt), 0.94);
+    `;
+    expect(violacoesVeto(violador, { cacheExatoLegitimo: true })).toContain('representação vetorial (embedding)');
+    expect(violacoesVeto(violador, { cacheExatoLegitimo: true })).not.toContain('reuso de veredito por cache');
   });
 
   it('controle positivo: o detector REPROVA um trecho violador (não é guarda vazia)', () => {

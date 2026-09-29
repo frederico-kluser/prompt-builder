@@ -17,6 +17,8 @@
 import type {
   CallCost,
   CallFinishSignals,
+  CallLogEntry,
+  CallProviderInfo,
   CostEntry,
   CostLedgerSummary,
   CostRole,
@@ -31,6 +33,8 @@ import type {
 import { COST_ROLES } from './types.js';
 import { cloneFinishCounts, emptyFinishCounts, tallyFinish } from './engine/truncation.js';
 import type { SensitiveRouting } from './engine/sensitiveRouting.js';
+import type { VerdictCache } from './engine/verdictCache.js';
+import type { CallJournal } from './engine/callJournal.js';
 
 // ---------------------------------------------------------------------------
 // Sinais de controle
@@ -110,11 +114,42 @@ function emptyByRole(): Record<CostRole, CostEntry> {
 /** Pendente conciliavel (IMPL-017) — o tipo mora em types.ts (vai no record). */
 export type { PendingCall };
 
+/**
+ * IMPL-074 — teto do registo POR CHAMADA (`callLog`) em cada nivel do ledger:
+ * uma sessao longa nao cresce sem limite (o excedente so e contado em
+ * `callLogDropped`). O ledger enxuto (`summary`) nunca leva o registo.
+ */
+export const CALL_LOG_LIMIT = 2000;
+
+/**
+ * IMPL-074 (R-07a:REC-4) — formato do id de geracao do OpenRouter: `gen-` +
+ * >= 20 caracteres alfanumericos/hifen. Cobre as duas formas vistas
+ * (`gen-<24 chars>` da documentacao e `gen-<unix>-<20 chars>` das respostas
+ * atuais). Fora disso o id NAO e conciliavel (o GET /generation devolveria 404
+ * para sempre — o caso do executor `pi`, que sintetiza ids proprios).
+ */
+export const GENERATION_ID_RE = /^gen-[A-Za-z0-9-]{20,}$/;
+
+/** true = id de geracao no formato do OpenRouter (conciliavel pelo GET /generation). */
+export function isGenerationId(id: unknown): id is string {
+  return typeof id === 'string' && GENERATION_ID_RE.test(id.trim());
+}
+
+/** Detalhes que a conciliacao (GET /generation) grava no registo da chamada. */
+export interface SettleDetails {
+  provider?: CallProviderInfo;
+  cancelled?: boolean;
+  generationTimeMs?: number;
+  latencyMs?: number;
+}
+
 /** Estado interno de uma reserva; a `Reservation` publica e so a alca. */
 interface ReservationState {
   status: ReservationStatus;
   usd: number;
   role: CostRole;
+  /** IMPL-074: registo desta chamada (compartilhado pela cadeia), quando ja lancado. */
+  log?: CallLogEntry;
   /** Ledger onde a reserva nasceu (a cadeia sobe dele ate a raiz). */
   owner: BudgetLedger;
   /** Custo impossivel de estimar com teto definido — conta no limite por papel. */
@@ -140,7 +175,16 @@ export interface BudgetSnapshot {
   conservativeUsd: number;
   conservativeCalls: number;
   remainingUsd?: number;
-  upstreamUsd: number;
+  /**
+   * Chamadas BYOK (`usage.is_byok: true`) e o que o PROVEDOR cobrou nelas
+   * direto na key BYOK — FORA de `spentUsd` (créditos do OpenRouter; na BYOK,
+   * só a taxa). `byokUpstreamUnknownCalls` = BYOK sem o custo do provedor na
+   * resposta (não medido, não é zero). Chamada não-BYOK nunca entra aqui: o
+   * `upstream_inference_cost` dela já está dentro de `usd`.
+   */
+  byokCalls: number;
+  byokUpstreamUsd: number;
+  byokUpstreamUnknownCalls: number;
   byRole: Record<CostRole, CostEntry>;
   accuracy: { exact: number; estimated: number; unknown: number };
   /**
@@ -182,7 +226,10 @@ export class BudgetLedger implements CostSink {
   /** Parte de `spentUsd` lancada como reserva inteira (sem id para conciliar). */
   conservativeUsd = 0;
   conservativeCalls = 0;
-  upstreamUsd = 0;
+  /** BYOK (ver `BudgetSnapshot`): só chamadas com `is_byok: true`; fora de `spentUsd`. */
+  byokCalls = 0;
+  byokUpstreamUsd = 0;
+  byokUpstreamUnknownCalls = 0;
   byRole: Record<CostRole, CostEntry> = emptyByRole();
   accuracy = { exact: 0, estimated: 0, unknown: 0 };
   /**
@@ -193,7 +240,18 @@ export class BudgetLedger implements CostSink {
    */
   finishByRole: Partial<Record<CostRole, FinishSignalCounts>> = {};
   /** Pendentes visiveis NESTE nivel (o mesmo objeto sobe a cadeia inteira). */
-  private readonly pendingSet = new Set<PendingCall & { state: ReservationState }>();
+  private readonly pendingSet = new Set<
+    PendingCall & { state: ReservationState; provider?: CallProviderInfo; latencyMs?: number; auditable?: boolean }
+  >();
+  /**
+   * IMPL-074 — registo por chamada deste nivel (os MESMOS objetos sobem a
+   * cadeia: a conciliacao atualiza em todos os niveis de uma vez).
+   */
+  private readonly callLogItems: CallLogEntry[] = [];
+  /** Chamadas que passaram de `CALL_LOG_LIMIT` neste nivel. */
+  callLogDropped = 0;
+  /** IMPL-074 — contagens acumuladas da conciliacao (ver `noteReconciliation`). */
+  private reconciliation?: NonNullable<CostLedgerSummary['reconciliation']>;
   /** So na raiz: chamadas sem estimativa em voo por papel + quem espera vaga. */
   private readonly unboundedInFlight: Partial<Record<CostRole, number>> = {};
   private readonly unboundedWaiters: Partial<Record<CostRole, Array<() => void>>> = {};
@@ -242,6 +300,65 @@ export class BudgetLedger implements CostSink {
   sensitiveRouting(): SensitiveRouting | undefined {
     for (let n: BudgetLedger | undefined = this; n; n = n.parent) {
       if (n.sensitive) return n.sensitive;
+    }
+    return undefined;
+  }
+
+  // IMPL-075: modo AUDITAVEL por run/sessao (mesmo padrao do modo sensivel:
+  // so liga, nunca desliga; vale para a cadeia abaixo). Quem liga:
+  // `RunConfig.auditable` (schema, arena-config `judging.auditable`, CLI
+  // `--auditable`) nos orquestradores e no trainer; alem do env
+  // OPENROUTER_AUDITABLE (preset do gateway).
+  private auditable?: CostRole[];
+
+  /** Liga o modo auditavel para `roles` (vazio/`undefined` = no-op). */
+  setAuditableRoles(roles: readonly CostRole[] | undefined): void {
+    if (roles && roles.length > 0) this.auditable = [...new Set([...(this.auditable ?? []), ...roles])];
+  }
+
+  /** Papeis auditaveis mais proximos subindo a cadeia (este ledger → raiz). */
+  auditableRoles(): readonly CostRole[] | undefined {
+    for (let n: BudgetLedger | undefined = this; n; n = n.parent) {
+      if (n.auditable) return n.auditable;
+    }
+    return undefined;
+  }
+
+  // IMPL-080 (R-08:REC-3): cache EXATO de vereditos com escopo de SESSAO. O
+  // trainer liga um por sessao na raiz dela; as runs das iteracoes (forks)
+  // herdam. `null` num nivel DESLIGA dali para baixo (a re-avaliacao limpa e o
+  // holdout medem de novo — reusar veredito ali reintroduziria a correlacao
+  // com a selecao que eles existem para quebrar).
+  private verdictCacheSlot?: VerdictCache | null;
+
+  /** Liga o cache de vereditos neste nivel (`null` = desliga daqui para baixo). */
+  setVerdictCache(cache: VerdictCache | null): void {
+    this.verdictCacheSlot = cache;
+  }
+
+  /** O cache mais proximo subindo a cadeia; `null` num nivel corta a heranca. */
+  verdictCache(): VerdictCache | undefined {
+    for (let n: BudgetLedger | undefined = this; n; n = n.parent) {
+      if (n.verdictCacheSlot === null) return undefined;
+      if (n.verdictCacheSlot) return n.verdictCacheSlot;
+    }
+    return undefined;
+  }
+
+  // IMPL-081 (R-10:REC-2): journal de chamadas pagas da RUN (a retomada o
+  // carrega com as respostas das tentativas anteriores). Mora no ledger da run
+  // e vale para os níveis abaixo dele; o gateway o acha pelo `sink`.
+  private callJournalSlot?: CallJournal;
+
+  /** Liga o journal de chamadas neste nível (e abaixo). */
+  setCallJournal(journal: CallJournal | undefined): void {
+    this.callJournalSlot = journal;
+  }
+
+  /** O journal mais próximo subindo a cadeia (este ledger → raiz). */
+  callJournal(): CallJournal | undefined {
+    for (let n: BudgetLedger | undefined = this; n; n = n.parent) {
+      if (n.callJournalSlot) return n.callJournalSlot;
     }
     return undefined;
   }
@@ -443,17 +560,51 @@ export class BudgetLedger implements CostSink {
       tokensIn: number;
       tokensOut: number;
       finish?: CallFinishSignals;
+      /** IMPL-078: telemetria de uso por chamada (somada por papel). */
+      cachedTokensIn?: number;
+      reasoningTokens?: number;
+      latencyMs?: number;
+      estimatedUsd?: number;
+      /** IMPL-075: provedor que serviu e modo auditavel. */
+      provider?: CallProviderInfo;
+      auditable?: boolean;
     },
   ): void {
+    const add = (v: number | undefined, prev: number | undefined): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) ? (prev ?? 0) + v : prev;
+    const providerName = entry.provider?.name?.trim();
     for (const n of BudgetLedger.chain(from)) {
       const slot = n.byRole[entry.role];
       slot.calls += 1;
       slot.usd += entry.cost.usd;
       slot.tokensIn += entry.tokensIn;
       slot.tokensOut += entry.tokensOut;
+      // IMPL-078 (R-08:REC-5): antes o ledger real descartava estes campos —
+      // so um sink de teste os via. Somados aqui, no ponto unico.
+      const cached = add(entry.cachedTokensIn, slot.cachedTokensIn);
+      if (cached !== undefined) slot.cachedTokensIn = cached;
+      const reasoning = add(entry.reasoningTokens, slot.reasoningTokens);
+      if (reasoning !== undefined) slot.reasoningTokens = reasoning;
+      const latency = add(entry.latencyMs, slot.latencyTotalMs);
+      if (latency !== undefined) slot.latencyTotalMs = latency;
+      const estimated = add(entry.estimatedUsd, slot.estimatedUsd);
+      if (estimated !== undefined) slot.estimatedUsd = estimated;
+      if (providerName) {
+        slot.providers = { ...(slot.providers ?? {}) };
+        slot.providers[providerName] = (slot.providers[providerName] ?? 0) + 1;
+      }
+      if (entry.auditable) slot.auditableCalls = (slot.auditableCalls ?? 0) + 1;
       n.spentUsd += entry.cost.usd;
       n.committedUsd += entry.cost.usd;
-      n.upstreamUsd += entry.cost.upstreamUsd ?? 0;
+      // BYOK só quando o OpenRouter disse `is_byok: true` (`cost.byok`): o
+      // `upstream_inference_cost` de uma chamada NÃO-BYOK já está em `usd` e
+      // somá-lo aqui dobraria o gasto (medido numa run paga: upstream == total).
+      if (entry.cost.byok === true) {
+        n.byokCalls += 1;
+        const up = entry.cost.byokUpstreamUsd;
+        if (typeof up === 'number' && Number.isFinite(up)) n.byokUpstreamUsd += up;
+        else n.byokUpstreamUnknownCalls += 1;
+      }
       // `usage` continua a ÚNICA fonte exata (IMPL-096). `agent-derived` (o que
       // o executor calculou) e `catalog` (tabela do /models) são PRECIFICADOS
       // mas não medidos no gateway: contam como estimados.
@@ -475,6 +626,13 @@ export class BudgetLedger implements CostSink {
       tokensIn: number;
       tokensOut: number;
       finish?: CallFinishSignals;
+      cachedTokensIn?: number;
+      reasoningTokens?: number;
+      latencyMs?: number;
+      estimatedUsd?: number;
+      provider?: CallProviderInfo;
+      generationId?: string;
+      auditable?: boolean;
     },
   ): void {
     const state = RESERVATIONS.get(reservation);
@@ -485,6 +643,65 @@ export class BudgetLedger implements CostSink {
       reservation.release();
     }
     BudgetLedger.book(this, entry);
+    BudgetLedger.log(this, {
+      role: entry.role,
+      modelId: entry.modelId,
+      ...generationIdFields(entry.generationId),
+      usd: entry.cost.usd,
+      source: entry.cost.source,
+      status: 'measured',
+      ...byokLogFields(entry.cost),
+      ...(entry.provider?.name ? { provider: entry.provider.name } : {}),
+      ...(typeof entry.latencyMs === 'number' ? { latencyMs: entry.latencyMs } : {}),
+      ...(entry.auditable ? { auditable: true } : {}),
+    });
+  }
+
+  /**
+   * IMPL-081 — resposta servida do JOURNAL numa run retomada. NÃO é chamada nem
+   * gasto desta tentativa: nada de reserva, `calls`, `usd`, `spentUsd` ou
+   * `committedUsd` (o dinheiro foi pago UMA vez, na tentativa que gravou a
+   * resposta — somá-lo de novo seria contar em dobro). Sobe à parte em
+   * `replayedCalls`/`replayedUsd` (custo MEDIDO original) e entra no registo
+   * como `replayed`. Os sinais de fim contam (a resposta está no record: a
+   * taxa de truncamento da run a inclui).
+   */
+  noteReplayed(entry: {
+    role: CostRole;
+    modelId: string;
+    originalCost?: CallCost;
+    finish?: CallFinishSignals;
+  }): void {
+    const orig = entry.originalCost;
+    const pago = orig && orig.source === 'usage' && Number.isFinite(orig.usd) ? orig.usd : undefined;
+    for (const n of BudgetLedger.chain(this)) {
+      const slot = n.byRole[entry.role];
+      slot.replayedCalls = (slot.replayedCalls ?? 0) + 1;
+      if (pago !== undefined) slot.replayedUsd = (slot.replayedUsd ?? 0) + pago;
+      if (entry.finish) tallyFinish((n.finishByRole[entry.role] ??= emptyFinishCounts()), entry.finish);
+    }
+    BudgetLedger.log(this, {
+      role: entry.role,
+      modelId: entry.modelId,
+      usd: 0,
+      source: orig?.source ?? 'unknown',
+      status: 'replayed',
+      ...(orig && Number.isFinite(orig.usd) ? { replayedFromUsd: orig.usd } : {}),
+    });
+  }
+
+  /** IMPL-074 — anexa uma chamada ao registo de cada nivel da cadeia (com teto). */
+  private static log(from: BudgetLedger, entry: CallLogEntry): CallLogEntry {
+    for (const n of BudgetLedger.chain(from)) {
+      if (n.callLogItems.length < CALL_LOG_LIMIT) n.callLogItems.push(entry);
+      else n.callLogDropped += 1;
+    }
+    return entry;
+  }
+
+  /** IMPL-074 — registo por chamada deste nivel (copia; vai no `RunRecord.callLog`). */
+  callLog(): CallLogEntry[] {
+    return this.callLogItems.map((e) => ({ ...e }));
   }
 
   /**
@@ -508,8 +725,18 @@ export class BudgetLedger implements CostSink {
    * nao-streaming ele segue gerando depois do abort).
    * - com `generationId`: fica PENDENTE (committed estavel; nem gasto nem
    *   devolvida) ate `settlePending` conciliar pelo GET /generation;
-   * - sem id: vira gasto CONSERVADOR — a reserva inteira, `source: 'unknown'`
-   *   (nao medido nao e "custou zero").
+   * - sem id e `reason: 'aborted'` (o CANCELAR — Ctrl-C, botão, `runs
+   *   cancel`, cancel do MCP): tambem PENDENTE, com id `''` (left#14). Antes a
+   *   reserva inteira (o PIOR caso, max_tokens x preco) virava gasto: cancelar
+   *   no datagen mostrava US$ 0,0622 "gastos" numa chamada que nem respondeu.
+   *   O desfecho e desconhecido — limite superior FORA do gasto, como o do
+   *   cancelado que ja tinha id (o Cancelar nao concilia; ninguem vira
+   *   "custou zero": fica em `pendingUsd`/`committedUsd`, na porta e no teto
+   *   diario). Uma conciliacao posterior o lanca como conservador (id `''`
+   *   nao e conciliavel pelo /generation);
+   * - sem id nos demais casos (timeout, 200 sem usage): vira gasto
+   *   CONSERVADOR — a reserva inteira, `source: 'unknown'` (nao medido nao e
+   *   "custou zero"; a run segue e o gasto tem de pesar ja).
    */
   pending(
     reservation: Reservation,
@@ -519,6 +746,9 @@ export class BudgetLedger implements CostSink {
       reason: PendingReason;
       generationId?: string;
       finish?: CallFinishSignals;
+      provider?: CallProviderInfo;
+      latencyMs?: number;
+      auditable?: boolean;
     },
   ): void {
     const state = RESERVATIONS.get(reservation);
@@ -530,10 +760,33 @@ export class BudgetLedger implements CostSink {
         tallyFinish((n.finishByRole[entry.role] ??= emptyFinishCounts()), entry.finish);
       }
     }
-    const generationId = entry.generationId?.trim();
-    if (state && generationId) {
+    const idLido = entry.generationId?.trim();
+    // left#14: cancelado sem id = pendente NAO conciliavel (id '').
+    const generationId = idLido || (entry.reason === 'aborted' ? '' : undefined);
+    const logBase = {
+      role: entry.role,
+      modelId: entry.modelId,
+      ...generationIdFields(idLido),
+      usd,
+      source: 'unknown' as const,
+      ...(entry.provider?.name ? { provider: entry.provider.name } : {}),
+      ...(typeof entry.latencyMs === 'number' ? { latencyMs: entry.latencyMs } : {}),
+      ...(entry.auditable ? { auditable: true } : {}),
+    };
+    if (state && generationId !== undefined) {
       this.close(state, 'pending');
-      const item = { generationId, role: entry.role, modelId: entry.modelId, usd, reason: entry.reason, state };
+      state.log = BudgetLedger.log(owner, { ...logBase, status: 'pending' });
+      const item = {
+        generationId,
+        role: entry.role,
+        modelId: entry.modelId,
+        usd,
+        reason: entry.reason,
+        state,
+        ...(entry.provider ? { provider: entry.provider } : {}),
+        ...(typeof entry.latencyMs === 'number' ? { latencyMs: entry.latencyMs } : {}),
+        ...(entry.auditable ? { auditable: true } : {}),
+      };
       for (const n of BudgetLedger.chain(owner)) {
         n.pendingUsd += usd;
         n.pendingSet.add(item);
@@ -547,7 +800,16 @@ export class BudgetLedger implements CostSink {
     } else {
       reservation.release();
     }
-    BudgetLedger.book(owner, { role: entry.role, cost: { usd, source: 'unknown' }, tokensIn: 0, tokensOut: 0 });
+    BudgetLedger.book(owner, {
+      role: entry.role,
+      cost: { usd, source: 'unknown' },
+      tokensIn: 0,
+      tokensOut: 0,
+      latencyMs: entry.latencyMs,
+      provider: entry.provider,
+      auditable: entry.auditable,
+    });
+    BudgetLedger.log(owner, { ...logBase, status: 'conservative' });
     for (const n of BudgetLedger.chain(owner)) {
       n.conservativeUsd += usd;
       n.conservativeCalls += 1;
@@ -556,7 +818,13 @@ export class BudgetLedger implements CostSink {
 
   /** Pendentes ainda nao conciliados (o que o IMPL-074 consulta no /generation). */
   pendingEntries(): PendingCall[] {
-    return [...this.pendingSet].map(({ state: _s, ...p }) => ({ ...p }));
+    return [...this.pendingSet].map((p) => ({
+      generationId: p.generationId,
+      role: p.role,
+      modelId: p.modelId,
+      usd: p.usd,
+      reason: p.reason,
+    }));
   }
 
   /**
@@ -569,6 +837,7 @@ export class BudgetLedger implements CostSink {
     generationId: string,
     cost: CallCost | null,
     tokens: { tokensIn?: number; tokensOut?: number } = {},
+    details: SettleDetails = {},
   ): boolean {
     const item = [...this.pendingSet].find((p) => p.generationId === generationId);
     if (!item) return false;
@@ -578,6 +847,10 @@ export class BudgetLedger implements CostSink {
       n.pendingUsd = Math.max(0, n.pendingUsd - item.usd);
       n.committedUsd = Math.max(0, n.committedUsd - item.usd);
     }
+    // O /generation completa a proveniencia (IMPL-075): o provedor que a fatura
+    // diz ter servido vence o do payload.
+    const provider = details.provider?.name ? details.provider : item.provider;
+    const latencyMs = typeof details.latencyMs === 'number' ? details.latencyMs : item.latencyMs;
     if (cost) {
       item.state.status = 'reconciled';
       // Custo agora conhecido: a vaga sem preco do papel volta a valer.
@@ -590,16 +863,56 @@ export class BudgetLedger implements CostSink {
         cost,
         tokensIn: tokens.tokensIn ?? 0,
         tokensOut: tokens.tokensOut ?? 0,
+        latencyMs,
+        provider,
+        auditable: item.auditable,
       });
     } else {
       item.state.status = 'conservative';
-      BudgetLedger.book(owner, { role: item.role, cost: { usd: item.usd, source: 'unknown' }, tokensIn: 0, tokensOut: 0 });
+      BudgetLedger.book(owner, {
+        role: item.role,
+        cost: { usd: item.usd, source: 'unknown' },
+        tokensIn: 0,
+        tokensOut: 0,
+        latencyMs,
+        provider,
+        auditable: item.auditable,
+      });
       for (const n of BudgetLedger.chain(owner)) {
         n.conservativeUsd += item.usd;
         n.conservativeCalls += 1;
       }
     }
+    // Registo da chamada (mesmo objeto em toda a cadeia): estado final + fatura.
+    const log = item.state.log;
+    if (log) {
+      log.status = cost ? 'reconciled' : 'conservative';
+      log.usd = cost ? cost.usd : item.usd;
+      log.source = cost ? cost.source : 'unknown';
+      if (cost) Object.assign(log, byokLogFields(cost));
+      if (provider?.name) log.provider = provider.name;
+      if (details.provider?.upstreamId) log.upstreamId = details.provider.upstreamId;
+      if (typeof details.cancelled === 'boolean') log.cancelled = details.cancelled;
+      if (typeof details.generationTimeMs === 'number') log.generationTimeMs = details.generationTimeMs;
+      if (typeof latencyMs === 'number') log.latencyMs = latencyMs;
+    }
     return true;
+  }
+
+  /**
+   * IMPL-074 — grava as contagens de uma rodada de conciliacao (GET
+   * /generation) neste nivel e acima: vai no `summary().reconciliation`.
+   */
+  noteReconciliation(r: NonNullable<CostLedgerSummary['reconciliation']>): void {
+    for (const n of BudgetLedger.chain(this)) {
+      const prev = n.reconciliation ?? { attempted: 0, settled: 0, notFound: 0, failed: 0 };
+      n.reconciliation = {
+        attempted: prev.attempted + r.attempted,
+        settled: prev.settled + r.settled,
+        notFound: prev.notFound + r.notFound,
+        failed: prev.failed + r.failed,
+      };
+    }
   }
 
   // --- Leitura --------------------------------------------------------------
@@ -619,6 +932,16 @@ export class BudgetLedger implements CostSink {
       conservativeUsd: this.conservativeUsd,
       conservativeCalls: this.conservativeCalls,
       ...(pendentes.length > 0 ? { pendingEntries: pendentes } : {}),
+      ...(this.byokCalls > 0
+        ? {
+            byok: {
+              calls: this.byokCalls,
+              upstreamUsd: this.byokUpstreamUsd,
+              upstreamUnknownCalls: this.byokUpstreamUnknownCalls,
+            },
+          }
+        : {}),
+      ...(this.reconciliation ? { reconciliation: { ...this.reconciliation } } : {}),
     };
   }
 
@@ -632,7 +955,9 @@ export class BudgetLedger implements CostSink {
       conservativeUsd: this.conservativeUsd,
       conservativeCalls: this.conservativeCalls,
       remainingUsd: this.remainingUsd(),
-      upstreamUsd: this.upstreamUsd,
+      byokCalls: this.byokCalls,
+      byokUpstreamUsd: this.byokUpstreamUsd,
+      byokUpstreamUnknownCalls: this.byokUpstreamUnknownCalls,
       byRole: this.byRole,
       accuracy: { ...this.accuracy },
       finishByRole: Object.fromEntries(
@@ -640,6 +965,19 @@ export class BudgetLedger implements CostSink {
       ) as Partial<Record<CostRole, FinishSignalCounts>>,
     };
   }
+}
+
+/** Campos do id de geracao no registo: o id e se ele tem o formato conciliavel. */
+function generationIdFields(id: string | undefined): Pick<CallLogEntry, 'generationId' | 'generationIdValid'> {
+  const g = id?.trim();
+  if (!g) return {};
+  return { generationId: g, generationIdValid: isGenerationId(g) };
+}
+
+/** BYOK no registo por chamada: só com `cost.byok` (o OpenRouter disse `is_byok: true`). */
+function byokLogFields(cost: CallCost): Pick<CallLogEntry, 'byok' | 'byokUpstreamUsd'> {
+  if (cost.byok !== true) return {};
+  return { byok: true, ...(typeof cost.byokUpstreamUsd === 'number' ? { byokUpstreamUsd: cost.byokUpstreamUsd } : {}) };
 }
 
 /** Rotulo PT-BR de cada papel, para o relatorio final. */
