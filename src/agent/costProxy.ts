@@ -724,7 +724,9 @@ export function createRunCostMeter(opts: RunCostMeterOptions = {}): RunCostMeter
       cost: {
         usd: round6(cost.usd),
         source: cost.source satisfies CostSource,
-        ...(cost.upstreamUsd !== undefined ? { upstreamUsd: cost.upstreamUsd } : {}),
+        // BYOK só com `is_byok: true` (o upstream de chamada não-BYOK já está em `usd`).
+        ...(cost.byok ? { byok: true } : {}),
+        ...(cost.byokUpstreamUsd !== undefined ? { byokUpstreamUsd: cost.byokUpstreamUsd } : {}),
         model: responseModel ?? state.modelId,
         ...(tapped?.generationId ? { generationId: tapped.generationId } : {}),
         tokensIn,

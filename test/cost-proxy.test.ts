@@ -189,9 +189,20 @@ describe('proxy de custo — regras puras', () => {
   });
 
   it('usage: formato OpenRouter (cost/upstream/detalhes) e Anthropic/Responses (input/output_tokens)', () => {
+    // Não-BYOK (forma real: upstream == cost, JÁ dentro dele): nada de upstream à parte.
+    const naoByok = usageFromRaw({
+      prompt_tokens: 10,
+      completion_tokens: 2,
+      cost: 0.0123,
+      is_byok: false,
+      cost_details: { upstream_inference_cost: 0.0123 },
+    });
+    expect(naoByok).toMatchObject({ tokensIn: 10, tokensOut: 2, cost: 0.0123, isByok: false });
+    expect(naoByok?.byokUpstreamCost).toBeUndefined();
+    // BYOK: `cost` é a taxa; o upstream foi cobrado na key do provedor.
     expect(
-      usageFromRaw({ prompt_tokens: 10, completion_tokens: 2, cost: 0.0123, cost_details: { upstream_inference_cost: 0.01 } }),
-    ).toMatchObject({ tokensIn: 10, tokensOut: 2, cost: 0.0123, upstreamCost: 0.01 });
+      usageFromRaw({ prompt_tokens: 10, completion_tokens: 2, cost: 0.0005, is_byok: true, cost_details: { upstream_inference_cost: 0.01 } }),
+    ).toMatchObject({ tokensIn: 10, tokensOut: 2, cost: 0.0005, isByok: true, byokUpstreamCost: 0.01 });
     expect(usageFromRaw({ input_tokens: 7, output_tokens: 3 })).toMatchObject({ tokensIn: 7, tokensOut: 3, cost: undefined });
     expect(usageFromRaw(null)).toBeUndefined();
   });

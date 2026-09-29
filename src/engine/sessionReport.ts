@@ -621,6 +621,14 @@ export function buildSessionReport(
       `US$ ${(session.costLedger?.pendingUsd ?? 0).toFixed(4)} em chamadas pendentes (sem custo apurado): o gasto real da otimização pode chegar a total + pendente.`,
     );
   }
+  // BYOK só com `is_byok: true` (`costLedger.byok`). O `upstreamCostUsd` LEGADO
+  // de records antigos NÃO entra: somava também chamadas não-BYOK (já no total).
+  const byok = session.costLedger?.byok;
+  if (byok && byok.calls > 0) {
+    warnings.push(
+      `${byok.calls} chamada(s) BYOK: o total tem só a taxa do OpenRouter delas; o provedor cobrou US$ ${byok.upstreamUsd.toFixed(4)} direto na sua key${byok.upstreamUnknownCalls > 0 ? ` (+ ${byok.upstreamUnknownCalls} chamada(s) sem custo informado)` : ''}, fora do total e do orçamento — o custo por chamada da comparação também só vê a taxa nelas.`,
+    );
+  }
   if (runs.some((r) => r.contestants?.some((c) => c.runner === 'agent'))) {
     warnings.push(
       'Modo agente: o custo por "chamada" é o custo de uma execução inteira do agente (derivado), não de uma chamada de LLM — compare com cautela.',

@@ -163,10 +163,11 @@ describe('IMPL-021 (b) — usage.cost medido prevalece sobre o catálogo', () =>
   it('JSON: usage.cost vence o catálogo (source "usage")', async () => {
     const { gw } = await gatewayCom(() => ({
       text: 'r',
-      usage: { prompt_tokens: 1000, completion_tokens: 500, cost: 0.0421, cost_details: { upstream_inference_cost: 0.01 } },
+      // Forma real não-BYOK: o upstream repete o custo JÁ contido em `cost`.
+      usage: { prompt_tokens: 1000, completion_tokens: 500, cost: 0.0421, is_byok: false, cost_details: { upstream_inference_cost: 0.0421 } },
     }));
     const r = await gw.chatCompletion({ apiKey: KEY, modelId: 'm/pago', messages: msgs });
-    expect(r.cost).toEqual({ usd: 0.0421, source: 'usage', upstreamUsd: 0.01 });
+    expect(r.cost).toEqual({ usd: 0.0421, source: 'usage' });
     // O catálogo diria 1000*1e-6 + 500*2e-6 = 0.002 — o valor medido manda.
     expect(r.cost.usd).not.toBeCloseTo(0.002, 6);
   });
@@ -202,7 +203,7 @@ describe('IMPL-021 (b) — usage.cost medido prevalece sobre o catálogo', () =>
     });
     expect(r.text).toBe('resposta em stream');
     expect(deltas.join('')).toBe('resposta em stream');
-    expect(r.cost).toEqual({ usd: 0.0077, source: 'usage', upstreamUsd: undefined });
+    expect(r.cost).toEqual({ usd: 0.0077, source: 'usage' });
     const body = fake.chatRequests()[0].body!;
     expect(body.stream).toBe(true);
     expect(body).not.toHaveProperty('usage');
@@ -210,7 +211,7 @@ describe('IMPL-021 (b) — usage.cost medido prevalece sobre o catálogo', () =>
 
   it('priceUsage/extractUsage são puros: mesma ordem usage > catálogo > unknown', () => {
     const u = extractUsage({ prompt_tokens: 7, completion_tokens: 3, cost: 0.5 });
-    expect(priceUsage(u, undefined)).toEqual({ usd: 0.5, source: 'usage', upstreamUsd: undefined });
+    expect(priceUsage(u, undefined)).toEqual({ usd: 0.5, source: 'usage' });
     expect(priceUsage({ tokensIn: 7, tokensOut: 3 }, undefined)).toEqual({ usd: 0, source: 'unknown' });
     expect(extractUsage(null)).toEqual({ tokensIn: 0, tokensOut: 0 });
   });

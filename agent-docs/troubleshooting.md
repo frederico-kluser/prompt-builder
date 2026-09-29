@@ -72,6 +72,17 @@ com 404 persistente, lança a reserva inteira como gasto conservador
 provedor e o estado. Cancelar (Ctrl-C/`runs cancel`) NÃO espera a conciliação:
 as pendentes ficam em `costLedger.pendingEntries`.
 
+## BYOK / `upstream_inference_cost` / `upstreamCostUsd`
+
+O OpenRouter devolve `cost_details.upstream_inference_cost` em TODA chamada. Sem
+BYOK (`is_byok: false`) ele é o custo do provedor **já contido** em `usage.cost`:
+somá-lo dobra o gasto. Só com `is_byok: true` (key do provedor cadastrada na
+conta OpenRouter) ele é cobrado à parte, na key do provedor — aí `usage.cost` é
+só a taxa do OpenRouter. O gasto BYOK medido fica em `costLedger.byok`
+(`calls`, `upstreamUsd`, `upstreamUnknownCalls`), FORA de `totalCostUsd` e do
+orçamento. `upstreamCostUsd` em records antigos é LEGADO de semântica
+desconhecida (somava também chamadas não-BYOK): nunca some ao gasto.
+
 ## Proxy que não entende streaming
 
 Todo papel (juiz, duelo, gabarito, datagen, reescritor) vai em streaming: em

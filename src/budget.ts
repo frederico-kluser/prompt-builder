@@ -174,7 +174,16 @@ export interface BudgetSnapshot {
   conservativeUsd: number;
   conservativeCalls: number;
   remainingUsd?: number;
-  upstreamUsd: number;
+  /**
+   * Chamadas BYOK (`usage.is_byok: true`) e o que o PROVEDOR cobrou nelas
+   * direto na key BYOK — FORA de `spentUsd` (créditos do OpenRouter; na BYOK,
+   * só a taxa). `byokUpstreamUnknownCalls` = BYOK sem o custo do provedor na
+   * resposta (não medido, não é zero). Chamada não-BYOK nunca entra aqui: o
+   * `upstream_inference_cost` dela já está dentro de `usd`.
+   */
+  byokCalls: number;
+  byokUpstreamUsd: number;
+  byokUpstreamUnknownCalls: number;
   byRole: Record<CostRole, CostEntry>;
   accuracy: { exact: number; estimated: number; unknown: number };
   /**
@@ -216,7 +225,10 @@ export class BudgetLedger implements CostSink {
   /** Parte de `spentUsd` lancada como reserva inteira (sem id para conciliar). */
   conservativeUsd = 0;
   conservativeCalls = 0;
-  upstreamUsd = 0;
+  /** BYOK (ver `BudgetSnapshot`): só chamadas com `is_byok: true`; fora de `spentUsd`. */
+  byokCalls = 0;
+  byokUpstreamUsd = 0;
+  byokUpstreamUnknownCalls = 0;
   byRole: Record<CostRole, CostEntry> = emptyByRole();
   accuracy = { exact: 0, estimated: 0, unknown: 0 };
   /**
@@ -565,7 +577,15 @@ export class BudgetLedger implements CostSink {
       if (entry.auditable) slot.auditableCalls = (slot.auditableCalls ?? 0) + 1;
       n.spentUsd += entry.cost.usd;
       n.committedUsd += entry.cost.usd;
-      n.upstreamUsd += entry.cost.upstreamUsd ?? 0;
+      // BYOK só quando o OpenRouter disse `is_byok: true` (`cost.byok`): o
+      // `upstream_inference_cost` de uma chamada NÃO-BYOK já está em `usd` e
+      // somá-lo aqui dobraria o gasto (medido numa run paga: upstream == total).
+      if (entry.cost.byok === true) {
+        n.byokCalls += 1;
+        const up = entry.cost.byokUpstreamUsd;
+        if (typeof up === 'number' && Number.isFinite(up)) n.byokUpstreamUsd += up;
+        else n.byokUpstreamUnknownCalls += 1;
+      }
       // `usage` continua a ÚNICA fonte exata (IMPL-096). `agent-derived` (o que
       // o executor calculou) e `catalog` (tabela do /models) são PRECIFICADOS
       // mas não medidos no gateway: contam como estimados.
@@ -611,6 +631,7 @@ export class BudgetLedger implements CostSink {
       usd: entry.cost.usd,
       source: entry.cost.source,
       status: 'measured',
+      ...byokLogFields(entry.cost),
       ...(entry.provider?.name ? { provider: entry.provider.name } : {}),
       ...(typeof entry.latencyMs === 'number' ? { latencyMs: entry.latencyMs } : {}),
       ...(entry.auditable ? { auditable: true } : {}),
@@ -804,6 +825,7 @@ export class BudgetLedger implements CostSink {
       log.status = cost ? 'reconciled' : 'conservative';
       log.usd = cost ? cost.usd : item.usd;
       log.source = cost ? cost.source : 'unknown';
+      if (cost) Object.assign(log, byokLogFields(cost));
       if (provider?.name) log.provider = provider.name;
       if (details.provider?.upstreamId) log.upstreamId = details.provider.upstreamId;
       if (typeof details.cancelled === 'boolean') log.cancelled = details.cancelled;
@@ -846,6 +868,15 @@ export class BudgetLedger implements CostSink {
       conservativeUsd: this.conservativeUsd,
       conservativeCalls: this.conservativeCalls,
       ...(pendentes.length > 0 ? { pendingEntries: pendentes } : {}),
+      ...(this.byokCalls > 0
+        ? {
+            byok: {
+              calls: this.byokCalls,
+              upstreamUsd: this.byokUpstreamUsd,
+              upstreamUnknownCalls: this.byokUpstreamUnknownCalls,
+            },
+          }
+        : {}),
       ...(this.reconciliation ? { reconciliation: { ...this.reconciliation } } : {}),
     };
   }
@@ -860,7 +891,9 @@ export class BudgetLedger implements CostSink {
       conservativeUsd: this.conservativeUsd,
       conservativeCalls: this.conservativeCalls,
       remainingUsd: this.remainingUsd(),
-      upstreamUsd: this.upstreamUsd,
+      byokCalls: this.byokCalls,
+      byokUpstreamUsd: this.byokUpstreamUsd,
+      byokUpstreamUnknownCalls: this.byokUpstreamUnknownCalls,
       byRole: this.byRole,
       accuracy: { ...this.accuracy },
       finishByRole: Object.fromEntries(
@@ -875,6 +908,12 @@ function generationIdFields(id: string | undefined): Pick<CallLogEntry, 'generat
   const g = id?.trim();
   if (!g) return {};
   return { generationId: g, generationIdValid: isGenerationId(g) };
+}
+
+/** BYOK no registo por chamada: só com `cost.byok` (o OpenRouter disse `is_byok: true`). */
+function byokLogFields(cost: CallCost): Pick<CallLogEntry, 'byok' | 'byokUpstreamUsd'> {
+  if (cost.byok !== true) return {};
+  return { byok: true, ...(typeof cost.byokUpstreamUsd === 'number' ? { byokUpstreamUsd: cost.byokUpstreamUsd } : {}) };
 }
 
 /** Rotulo PT-BR de cada papel, para o relatorio final. */
