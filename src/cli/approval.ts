@@ -26,6 +26,7 @@ import path from 'node:path';
 import { contentHash } from '../engine/hash.js';
 import { configHash } from './runLock.js';
 import type { HandoffOverride } from '../engine/handoffGuards.js';
+import { CliError, EXIT } from './output.js';
 import type { RunRecord, SessionRecord, StageSpec } from '../types.js';
 
 export const PROMPT_APPROVAL_FORMAT = 'prompt-approval@1';
@@ -152,12 +153,31 @@ export function gitTopLevel(dir: string): string | null {
   return gitOut(dir, ['rev-parse', '--show-toplevel']);
 }
 
+/** Caractere de controle (inclui `\n`/`\r`/`\t`, NUL e DEL). */
+const CONTROLE = /[\u0000-\u001f\u007f]/u;
+
+/**
+ * Revisão w2: `--approver` vai VERBATIM para o trailer `Approved-by:` do commit,
+ * para o `.prompt-approvals/<id>.json` e para o `handoffs.jsonl` — trilha de
+ * auditoria. Um `\n` embutido (`--approver $'Ana\nOverride-Reason: x'`, ou uma
+ * variável de script) forjava linhas que `git interpret-trailers --parse` lê
+ * como trailers reais. Recusa (exit 2) em vez de "consertar" em silêncio.
+ */
+export function assertCleanApprover(raw: string | undefined): void {
+  if (raw === undefined || !CONTROLE.test(raw)) return;
+  throw new CliError('--approver não pode conter quebra de linha nem outro caractere de controle.', EXIT.USAGE, { flag: '--approver' }, {
+    code: 'usage.invalid_flag_value',
+    hint: 'Use uma linha só, no formato `--approver "Nome <email>"` (o valor vira o trailer `Approved-by:` do commit).',
+  });
+}
+
 /**
  * Quem aprova: `--approver` explícito, senão a identidade que o `git commit`
  * usaria AQUI (`git var GIT_AUTHOR_IDENT` respeita config e env), no formato
  * `Nome <email>`. `null` = ninguém identificável.
  */
 export function resolveApprover(explicit: string | undefined, dir: string): string | null {
+  assertCleanApprover(explicit);
   const e = explicit?.trim();
   if (e) return e;
   const ident = gitOut(dir, ['var', 'GIT_AUTHOR_IDENT']);

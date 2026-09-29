@@ -104,6 +104,7 @@ import {
   approvalTrailers,
   buildPromptApproval,
   PROMPT_APPROVAL_FORMAT,
+  assertCleanApprover,
   resolveApprover,
   writePromptApproval,
   type PromptApproval,
@@ -960,6 +961,8 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     }
     const wantRecord = parsed.values.record === true;
     const approverRaw = typeof parsed.values.approver === 'string' ? parsed.values.approver : undefined;
+    // Revisão w2: recusa ANTES de qualquer efeito (trilha, destino, commit).
+    assertCleanApprover(approverRaw);
     if ((wantRecord || approverRaw !== undefined) && !applyTo) {
       throw new CliError('--record/--approver só fazem sentido junto de --apply <arquivo>.', EXIT.USAGE, undefined, {
         code: 'usage.record_without_apply',

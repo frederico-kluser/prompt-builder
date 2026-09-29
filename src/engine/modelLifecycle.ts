@@ -453,6 +453,8 @@ export interface RunModelsLike {
   referenceModelId?: string;
   optimizerModelId?: string;
   promptOptimization?: boolean;
+  /** IMPL-115: juízes do modo econômico (baratos + forte). */
+  judgeCascade?: { cheap?: readonly string[]; strong?: string };
 }
 
 /**
@@ -472,6 +474,8 @@ export function modelRolesForRun(
   };
   for (const c of contestants) add(c.modelId, 'competitor');
   for (const j of config.judgeModelIds ?? []) add(j, 'judge');
+  for (const j of config.judgeCascade?.cheap ?? []) add(j, 'judge');
+  add(config.judgeCascade?.strong, 'judge');
   add(config.referenceModelId ?? config.judgeModelIds?.[0], 'reference');
   add(config.datagenModelId, 'datagen');
   const otimiza = config.mode === 'variation' || config.mode === 'training';

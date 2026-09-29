@@ -138,7 +138,7 @@ export function arenaConfigToRunConfig(
     ...(file.compliance ? { compliance: file.compliance } : {}),
     ...(file.piiMode ? { piiMode: file.piiMode } : {}),
     ...(file.allowPii ? { allowPii: true } : {}),
-    // IMPL-075: modo auditável (juiz + gabarito com provedor travado).
+    // IMPL-075: modo auditável (juiz + duelo + gabarito com provedor travado).
     ...(file.judging?.auditable ? { auditable: true } : {}),
     // Contratos never-break (F2/P0.3): vivem no perfil do prompt, valem para
     // toda reescrita do variator.

@@ -697,7 +697,7 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     // o bug mais caro e mais silencioso do plano. O runner='agent' dos
     // contestants e marcado pelo variator/trainer quando `agent` presente.
     agent: cfg.agent,
-    // IMPL-075: o modo AUDITÁVEL (juiz + gabarito com provedor travado) vale
+    // IMPL-075: o modo AUDITÁVEL (juiz + duelo + gabarito com provedor travado) vale
     // para toda iteração, a re-avaliação e o holdout — sem esta linha a flag da
     // sessão sumia na run e o artefato dizia "auditável" sem ter sido.
     auditable: cfg.auditable,
@@ -802,7 +802,7 @@ async function trainingLoop(
     });
   const ctx: RunCtx = { signal: opts.signal, sink: ledger };
   record.budgetUsd = cfg.budgetUsd;
-  // IMPL-075: modo AUDITÁVEL da sessão — juiz e gabarito com provedor travado
+  // IMPL-075: modo AUDITÁVEL da sessão — juiz, duelo e gabarito com provedor travado
   // (só liga; as runs das iterações são forks e herdam, além de lerem
   // `config.auditable` repassado por variationConfigFrom).
   if (cfg.auditable) ledger.setAuditableRoles(AUDITABLE_ROLES);

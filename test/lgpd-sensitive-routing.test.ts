@@ -650,3 +650,98 @@ describe('IMPL-040 (3) — modo agente em área sensível é recusado no pré-vo
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// (4) Revisão w2 — IMPL-115: os juízes da CASCATA entram no pré-voo
+// ---------------------------------------------------------------------------
+// Com `judgeCascade`, quem emite os vereditos são os 2 baratos + o forte (o
+// painel `judgeModelIds` não julga etapa). O pré-voo só olhava
+// `judgeModelIds`: checava quem nem julga e deixava passar quem julga. Em
+// runtime a recusa do roteamento sensível virava `judge_failed` e a cascata
+// seguia com o consenso barato marcado 'degraded' — run sensível "concluída"
+// com painel reduzido, em vez de recusada antes de gastar.
+
+describe('revisão w2 — juízes da cascata (IMPL-115) no pré-voo LGPD', () => {
+  const FORA = 'openai/forte-fora-da-allowlist';
+  const CASCATA = { cheap: [M.judge, M.b], strong: FORA };
+  const restaurar: Array<() => void> = [];
+  let silencio: Array<{ mockRestore(): void }> = [];
+  let tmp: string;
+  let dirAnterior: string;
+
+  beforeAll(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'pb-w2-cascata-lgpd-'));
+    dirAnterior = getDataDir();
+    setDataDir(tmp);
+    silencio = (['log', 'warn', 'error'] as const).map((k) => vi.spyOn(console, k).mockImplementation(() => undefined));
+  });
+  afterEach(() => {
+    while (restaurar.length) restaurar.pop()!();
+  });
+  afterAll(() => {
+    silencio.forEach((s) => s.mockRestore());
+    setDataDir(dirAnterior);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('núcleo: runModelRoles inclui baratos + forte (juiz), 2º gabarito (gabarito) e o embedder do dedup (gerador)', () => {
+    const papeis = core.runModelRoles({
+      judgeModelIds: [M.judge],
+      judgeCascade: CASCATA,
+      secondReferenceModelId: 'mistralai/ref2',
+      scenarioDedup: { semantic: true },
+    });
+    expect(papeis).toEqual(
+      expect.arrayContaining([
+        { role: 'judge', modelId: M.b },
+        { role: 'judge', modelId: FORA },
+        { role: 'reference', modelId: 'mistralai/ref2' },
+        { role: 'datagen', modelId: core.DEFAULT_SCENARIO_EMBED_MODEL },
+      ]),
+    );
+    // Dedup só exato: nenhum embedder no pré-voo.
+    expect(core.runModelRoles({ scenarioDedup: { semantic: false, embedModelId: 'x/emb' } })).toEqual([]);
+    const check = core.checkRunCompliance(
+      { ...COMPARE, judgeCascade: CASCATA } as unknown as core.ComplianceConfigLike,
+      dadosLiberando(),
+    );
+    expect(check.violations).toEqual([expect.objectContaining({ role: 'judge', modelId: FORA })]);
+  });
+
+  it('run compare (Node e SPA) com juiz FORTE da cascata fora da allowlist ⇒ recusa no pré-voo, 0 POST', async () => {
+    for (const run of [runNode, runWeb] as const) {
+      const data = dadosLiberando();
+      restaurar.push(nodeLgpd.overrideLgpdData(data), webLgpd.overrideLgpdData(data));
+      const fake = fakePipeline();
+      const anterior = nodeGw.setDefaultGateway(nodeGw.createGateway({ fetch: fake.fetch, sleep: noSleep }));
+      restaurar.push(() => nodeGw.setDefaultGateway(anterior));
+      const rec = await run({ ...COMPARE, judgeCascade: CASCATA } as never, KEY, {});
+      expect(rec.status).toBe('error');
+      expect(rec.error).toMatch(/LGPD/);
+      expect(rec.error).toContain(FORA);
+      expect(fake.chatRequests(), 'nenhuma chamada paga').toEqual([]);
+      while (restaurar.length) restaurar.pop()!();
+    }
+  });
+
+  it('juiz recusado em runtime (LgpdPolicyError) NÃO vira judge_failed: callJudgeWithRetry propaga', async () => {
+    const { callJudgeWithRetry } = await import('../src/engine/judgeRetry.js');
+    const recusa = new core.LgpdPolicyError('Modo sensível LGPD: recusado', [
+      { role: 'judge', modelId: FORA, motivo: 'modelo_desconhecido', message: 'fora' },
+    ]);
+    let chamadas = 0;
+    const err = await callJudgeWithRetry({
+      call: async () => {
+        chamadas += 1;
+        throw recusa;
+      },
+      parse: () => null,
+      formatReminder: 'JSON',
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(core.isLgpdPolicyError(err)).toBe(true);
+    expect(chamadas).toBe(1);
+  });
+});

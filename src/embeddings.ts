@@ -20,9 +20,13 @@
 import { meteredInputCall } from './openrouter.js';
 import type { EmbedFn } from './dedup.js';
 import type { CostRole, RunCtx } from './types.js';
+import { DEFAULT_SCENARIO_EMBED_MODEL } from './engine/lgpdCore.js';
 
-/** Modelo default de representação (barato; 1536 dims). Troque por config. */
-export const DEFAULT_DEDUP_EMBED_MODEL = 'openai/text-embedding-3-small';
+/**
+ * Modelo default de representação (barato; 1536 dims). Troque por config.
+ * Fonte única em `lgpdCore` — o pré-voo LGPD checa este MESMO modelo.
+ */
+export const DEFAULT_DEDUP_EMBED_MODEL = DEFAULT_SCENARIO_EMBED_MODEL;
 
 /** Textos por pedido: lotes grandes estouram o limite de entrada do provedor. */
 export const EMBED_BATCH_SIZE = 64;

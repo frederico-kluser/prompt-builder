@@ -323,7 +323,7 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
   finalists: { kind: 'ui', control: 'Avançado › Finalistas' },
   'judging.reference': { kind: 'json-only', status: 'aplicado', note: 'força ligar/desligar o julgamento por gabarito (sem ele: default do modo)' },
   'judging.passes': { kind: 'ui', control: 'Avançado › Juiz em 2 ordens' },
-  'judging.auditable': { kind: 'json-only', status: 'ignorado', note: 'modo auditável (juiz + gabarito com provedor travado) — aplicado pelo CLI; a tela não repassa' },
+  'judging.auditable': { kind: 'json-only', status: 'ignorado', note: 'modo auditável (juiz + duelo + gabarito com provedor travado) — aplicado pelo CLI; a tela não repassa' },
   'limits.maxOutputTokens': { kind: 'ui', control: 'Avançado › Máx. tokens por resposta' },
   'limits.timeoutMs': { kind: 'ui', control: 'Avançado › Timeout' },
   // web-code#13: só REGISTRADO na run — nenhum motor limita chamadas por ele (o
@@ -1076,11 +1076,13 @@ export const trainingGateScenarios: (stages: number, holdoutRatio: number) => nu
 export const minAchievablePAdjusted: (n: number) => number = minAchievableGateP;
 
 /**
- * Menor nº de cenários de treino com que ALGUMA promoção é possível (1/2ⁿ ≤ α).
- * ⚠️ É o `minPairsForPromotion` do motor — o `minScenariosForPromotion` de lá é
- * outra régua (cenários CONFIGURADOS com folga de empates, depois do holdout).
+ * Menor nº de PARES de seleção com que ALGUMA promoção é possível (1/2ⁿ ≤ α) —
+ * reexport da régua do motor com o MESMO nome. Revisão w2: aqui ela se chamava
+ * `minScenariosForPromotion`, homônimo de outra função do motor (cenários
+ * CONFIGURADOS com folga de empates, depois do holdout) — fácil pegar o piso
+ * errado. Um nome, um significado.
  */
-export const minScenariosForPromotion: (alpha?: number) => number = minPairsForPromotion;
+export { minPairsForPromotion };
 
 /** Nº de cenários que o modo treino subiu sozinho (de → para). */
 export interface AutoStages {
@@ -1138,7 +1140,7 @@ export function trainingPowerNotice(stages: number, holdoutRatio: number): Train
       gateScenarios: n,
       text:
         `Com ${n} cenário${n === 1 ? '' : 's'}${deTreino} o treino não consegue promover nenhuma variante: ` +
-        `o menor p ajustado possível é ${fmtP(pMin)} (> ${alfa}). Use ao menos ${minScenariosForPromotion()} — ` +
+        `o menor p ajustado possível é ${fmtP(pMin)} (> ${alfa}). Use ao menos ${minPairsForPromotion()} — ` +
         `o recomendado é ${TRAINING_DEFAULT_STAGES}.`,
     };
   }
@@ -1147,7 +1149,7 @@ export function trainingPowerNotice(stages: number, holdoutRatio: number): Train
       blocking: false,
       gateScenarios: n,
       text:
-        n <= minScenariosForPromotion()
+        n <= minPairsForPromotion()
           ? `Com ${n} cenários${deTreino} a variante só é promovida se vencer em TODOS: um único empate ou derrota ` +
             `já segura a promoção (p ajustado mínimo ${fmtP(pMin)}, precisa ≤ ${alfa}). Use ${TRAINING_DEFAULT_STAGES} ou mais.`
           : `Com ${n} cenários${deTreino} uma única derrota da variante costuma bastar para segurar a promoção ` +

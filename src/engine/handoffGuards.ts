@@ -90,7 +90,17 @@ export interface HandoffGuardInput {
    */
   bestPromptByIteration?: {
     systemPrompt?: string;
-    gate?: { contamination?: { blocked?: boolean; containment?: number; detail?: string } };
+    /** Campeão PÓS-gate da iteração (o dono de `systemPrompt`). */
+    winnerContestantId?: string;
+    /**
+     * Gate da iteração — ⚠️ é o veredito do CANDIDATO (`bestId`), não do
+     * campeão: quando segurou, o `systemPrompt` da linha é outro (carry/régua).
+     */
+    gate?: {
+      bestId?: string;
+      decision?: string;
+      contamination?: { blocked?: boolean; containment?: number; detail?: string };
+    };
   }[];
   /** Cenários congelados do treino — o corpus protegido da barreira. */
   pinnedStages?: ContaminationStage[];
@@ -124,9 +134,27 @@ export interface HandoffGuardReport {
 }
 
 /**
+ * O gate da linha descreve o CAMPEÃO dela? Só quando promoveu — o `bestId` do
+ * gate virou o `winnerContestantId`. Um gate que segurou (inclusive por
+ * contaminação: `withContamination` força `isWinner: false`) fala de um
+ * candidato que NUNCA chegou a campeão; a linha guarda o carry/régua.
+ */
+function gateDescreveCampeao(row: NonNullable<HandoffGuardInput['bestPromptByIteration']>[number]): boolean {
+  const g = row.gate;
+  if (!g) return false;
+  if (g.decision === 'promoted') return true;
+  return typeof g.bestId === 'string' && g.bestId === row.winnerContestantId;
+}
+
+/**
  * Contaminação do campeão (IMPL-067): o veredito do TREINO (gate da última
- * iteração) prevalece quando bloqueou — ele viu também as explicações do juiz;
- * senão, recomputa sobre os cenários pinados. Sem campeão ou sem corpus = null.
+ * iteração) prevalece quando bloqueou E descreve o campeão — ele viu também as
+ * explicações do juiz; senão, recomputa sobre os cenários pinados. Sem campeão
+ * ou sem corpus = null.
+ *
+ * Revisão w2: o gate é do CANDIDATO da iteração. Se o candidato foi barrado por
+ * contaminação, o campeão da linha é outro (carry limpo) — usar aquele veredito
+ * bloqueava o handoff de um campeão limpo. Só vale quando o gate promoveu.
  *
  * IMPL-061 × IMPL-067 — leave-demos-out: o cenário cuja pergunta o campeão
  * carrega como demo REAL (bloco canônico `<exemplos_reais>`, anexado pelo
@@ -139,7 +167,7 @@ export interface HandoffGuardReport {
 export function handoffContamination(input: HandoffGuardInput): HandoffContamination | null {
   const ultima = input.bestPromptByIteration?.at(-1);
   const campeao = ultima?.systemPrompt;
-  const doTreino = ultima?.gate?.contamination;
+  const doTreino = ultima && gateDescreveCampeao(ultima) ? ultima.gate?.contamination : undefined;
   const demos = typeof campeao === 'string' ? demoQuestionsOf([campeao]) : new Set<string>();
   const protegidos = (input.pinnedStages ?? []).filter(
     (s) => !(demos.size > 0 && s && typeof s.question === 'string' && demos.has(questionKey(s.question))),
@@ -178,7 +206,9 @@ export function handoffContamination(input: HandoffGuardInput): HandoffContamina
  */
 export function normalizeOverrideReason(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') return null;
-  const reason = raw.replace(/\s+/g, ' ').trim();
+  // Revisão w2: controle que não é espaço (NUL, ESC, DEL…) também sai — o
+  // motivo vai para trailer de commit e trilha JSONL; só texto de uma linha.
+  const reason = raw.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/g, ' ').trim();
   return reason.length > 0 ? reason : null;
 }
 

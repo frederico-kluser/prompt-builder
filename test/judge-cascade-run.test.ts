@@ -250,6 +250,12 @@ describe('IMPL-115 (2)/(3) — a run com judgeCascade grava a fração escalonad
       });
       expect(rec.judgeCascade!.reasons.disagreement).toBe(1);
       expect(chamadasDe(fake, 'fake/forte')).toBe(1);
+      // Revisão w2: o aviso de imparcialidade olha o painel EFETIVO (baratos +
+      // forte), não só `judgeModelIds` — o forte "fake/forte" é da família dos
+      // competidores "fake/*".
+      for (const juiz of [...CASCATA.cheap, CASCATA.strong]) {
+        expect(rec.fairnessWarnings?.some((w) => w.includes(`O juiz "${juiz}"`)), juiz).toBe(true);
+      }
       // O juiz do painel normal NÃO julgou nenhuma etapa (só a cascata).
       expect(fake.chatRequests().filter((r) => r.model === 'fake/judge' && r.user.includes('CANDIDATO'))).toHaveLength(0);
       // Etapa escalonada: o veredito do forte decide.
@@ -297,6 +303,14 @@ describe('IMPL-115 (4) — --judge-cascade e o schema', () => {
     expect(parseRunConfig({ ...base, judgeCascade: CASCATA }).ok).toBe(true);
     expect(parseRunConfig({ ...base, judgeCascade: { cheap: ['x/1'], strong: 'x/2' } }).ok).toBe(false);
     expect(parseRunConfig({ ...base, judgeCascade: { cheap: ['x/1', 'x/2'], strong: 'x/1' } }).ok).toBe(false);
+    // Revisão w2 (IMPL-048 × IMPL-115): referência = juiz da cascata e juiz da
+    // cascata = competidor são recusados (antes passavam em silêncio).
+    const refBarato = parseRunConfig({ ...base, referenceModelId: CASCATA.cheap[0], judgeCascade: CASCATA });
+    expect(refBarato.ok).toBe(false);
+    if (!refBarato.ok) expect(refBarato.error).toMatch(/não pode ser também juiz/);
+    const forteCompete = parseRunConfig({ ...base, judgeCascade: { ...CASCATA, strong: 'a/x' } });
+    expect(forteCompete.ok).toBe(false);
+    if (!forteCompete.ok) expect(forteCompete.error).toMatch(/juiz da cascata "a\/x"/);
   });
 
   async function dryRun(extra: string[]): Promise<{ exit: number; payload?: Record<string, unknown>; errorCode?: string }> {

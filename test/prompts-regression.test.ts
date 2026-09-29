@@ -29,8 +29,18 @@ import {
 } from '../src/cli/commands/prompts.js';
 import { COMMANDS } from '../src/cli/help.js';
 import { EXIT, resetOutputState, toCliError } from '../src/cli/output.js';
-import { REWRITER_SYSTEM_PROMPT, REFLECT_SYSTEM_PROMPT } from '../src/variator.js';
-import { GABARITO_ROLE_PROMPT } from '../src/gabarito.js';
+import { BASE_GENERATION_SYSTEM_PROMPT, REWRITER_SYSTEM_PROMPT, REFLECT_SYSTEM_PROMPT } from '../src/variator.js';
+import { GABARITO_ROLE_PROMPT, GABARITO_VERIFIER_SYSTEM_PROMPT } from '../src/gabarito.js';
+import {
+  ADVERSARIAL_CATEGORIES,
+  ADVERSARIAL_SYSTEM_PROMPT,
+  buildAdversarialMessages,
+  DATAGEN_STAGE_SYSTEM_PROMPT,
+  diversityInstruction,
+} from '../src/datagen.js';
+import { DIFF_JUDGE_SYSTEM } from '../src/engine/contractLayers.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { readMarkedBlock } from '../src/engine/judgeGuard.js';
 import { pinJudgeContract } from '../src/engine/judgeCalibration.js';
 import { pipelineMetaPromptTexts, pipelineMetaPromptsFingerprint } from '../src/metaPrompts.js';
@@ -209,6 +219,53 @@ describe('IMPL-070 (3)/(5) — prompts regression ponta a ponta', { timeout: 60_
     expect(rel.gate.failures.map((x) => x.metric)).toEqual(expect.arrayContaining(['rewriter.diversity', 'gabarito.kappa']));
   });
 
+  // Revisão w2: resposta sem `usage` com id de geração fica PENDENTE no ledger
+  // — fora de spentUsd/byRole/accuracy.unknown. Sem conciliar, o relatório
+  // mostrava US$ 0 para chamada paga com `unknownCostCalls: 0`.
+  it('juiz sem `usage`: concilia pelo /generation no fim; o que não concilia sai como pendente, nunca US$ 0 calado', async () => {
+    const gid = (n: number): string => `gen-1759150000-${String(n).padStart(20, 'y')}`;
+    const semUsage = (conciliavel: boolean) => {
+      let n = 0;
+      const ids: string[] = [];
+      // `--roles judge`: só o juiz é chamado (casos fixos da suíte).
+      const chat = fakeOpenRouter({
+        catalog: CATALOGO,
+        chat: (req): FakeChatReply => {
+          const cand = readMarkedBlock(req.user, 'CANDIDATO') ?? '';
+          const id = gid(++n);
+          ids.push(id);
+          return { text: pointwiseReply(req, CERTOS.has(cand.trim()) ? 'resolve' : 'nao'), id, usage: null };
+        },
+      });
+      const fetch = async (url: string, init?: RequestInit): Promise<Response> => {
+        const u = new URL(url);
+        if (u.pathname.endsWith('/generation')) {
+          if (!conciliavel) return new Response('{"error":"not found"}', { status: 404 });
+          return new Response(JSON.stringify({ data: { id: u.searchParams.get('id'), total_cost: 0.002, is_byok: false } }), { status: 200 });
+        }
+        return chat.fetch(url, init as never);
+      };
+      return { fetch, chatRequests: () => chat.chatRequests(), ids };
+    };
+    type Rel = { costUsd: number; costByRole: Record<string, number>; unknownCostCalls: number; pendingUsd: number; pendingCalls: number };
+    const relDe = (r: Awaited<ReturnType<typeof invocar>>): Rel => (r.payload as { data: Rel }).data;
+
+    // (a) fatura disponível: o custo do juiz entra MEDIDO pela conciliação.
+    const ok = semUsage(true);
+    const a = await invocar(['regression', '--model', 'fake/m', '--judge', 'fake/j', '--budget', '2', '--key', KEY, '--roles', 'judge'], ok as never);
+    expect(a.exit, JSON.stringify(a).slice(0, 600)).toBe(EXIT.OK);
+    expect(ok.ids.length).toBeGreaterThan(0);
+    expect(relDe(a).pendingCalls).toBe(0);
+    expect(relDe(a).costByRole.judge).toBeCloseTo(0.002 * ok.ids.length, 9);
+
+    // (b) sem fatura (404): pendente no relatório, com o valor reservado.
+    const pend = semUsage(false);
+    const b = await invocar(['regression', '--model', 'fake/m', '--judge', 'fake/j', '--budget', '2', '--key', KEY, '--roles', 'judge'], pend as never);
+    expect(b.exit, JSON.stringify(b).slice(0, 600)).toBe(EXIT.OK);
+    expect(relDe(b).pendingCalls).toBe(pend.ids.length);
+    expect(relDe(b).pendingUsd).toBeGreaterThan(0);
+  });
+
   it('subcomando desconhecido / modelo ausente / --roles inválido: exit 2', async () => {
     expect((await invocar(['nada'], fake())).exit).toBe(EXIT.USAGE);
     expect((await invocar(['regression', '--judge', 'fake/j', '--budget', '1', '--key', KEY], fake())).errorCode).toBe('usage.missing_flag');
@@ -242,21 +299,81 @@ describe('IMPL-070 (4) — --dry-run estima o teto sem key e sem gastar', () => 
 // ---------------------------------------------------------------------------
 
 describe('IMPL-070 (c2) — runContractHash cobre reescritor, reflexão e datagen', () => {
-  it('trocar o texto de QUALQUER meta-prompt muda o hash da run; o do juiz não muda', () => {
-    const textos = pipelineMetaPromptTexts();
-    for (const chave of ['rewriter/system', 'reflection/system', 'datagen/batch-system', 'gabarito/role']) {
-      expect(textos[chave], chave).toBeTruthy();
+  // Revisão w2: o teste anterior editava uma CÓPIA do mapa e re-hasheava —
+  // qualquer mapa passaria. Agora: (a) cada constante/builder LLM-facing do
+  // pipeline tem o texto DENTRO do mapa real; (b) a varredura dos
+  // `role: 'system'` dos módulos do pipeline falha quando aparece mensagem de
+  // sistema nova sem registro em src/metaPrompts.ts.
+  it('cobertura: o texto de cada meta-prompt do pipeline está no mapa do fingerprint', () => {
+    const valores = Object.values(pipelineMetaPromptTexts());
+    const presente = (t: string) => valores.some((v) => v.includes(t));
+    const obrigatorios: Record<string, string> = {
+      REWRITER_SYSTEM_PROMPT,
+      REFLECT_SYSTEM_PROMPT,
+      BASE_GENERATION_SYSTEM_PROMPT,
+      GABARITO_ROLE_PROMPT,
+      GABARITO_VERIFIER_SYSTEM_PROMPT,
+      DATAGEN_STAGE_SYSTEM_PROMPT,
+      ADVERSARIAL_SYSTEM_PROMPT,
+      DIFF_JUDGE_SYSTEM,
+      // Builders: o molde fixo (sem o que vem da config/rodada).
+      'datagen/backfill-diversity': diversityInstruction(2, 3, 4).split('rodada')[0],
+      'datagen/batch-user': 'Gere os 1 cenarios em JSON conforme as regras.',
+      'rewriter/user-template': 'Reescreva o prompt agora, aplicando a tecnica.',
+      'gabarito/user-template': 'Responda APENAS com a resposta de referência ideal',
+    };
+    for (const [nome, texto] of Object.entries(obrigatorios)) {
+      expect(texto.trim().length, nome).toBeGreaterThan(10);
+      expect(presente(texto), `${nome} fora de pipelineMetaPromptTexts()`).toBe(true);
     }
+    for (const c of ADVERSARIAL_CATEGORIES) {
+      const [, user] = buildAdversarialMessages({ category: c, count: 1, baseSystemPrompt: '' });
+      expect(presente(user.content as string), `adversarial/${c}`).toBe(true);
+    }
+  });
+
+  it('varredura: toda mensagem de SISTEMA dos módulos do pipeline está classificada (registrada)', () => {
+    // Expressão do `content` de cada `role: 'system'` → coberta por qual chave.
+    // Mensagem de sistema NOVA: registre o texto em src/metaPrompts.ts e
+    // classifique aqui (senão o runContractHash não muda quando ela muda).
+    const CLASSIFICADAS: Record<string, string[]> = {
+      'src/variator.ts': ['REWRITER_SYSTEM_PROMPT', 'BASE_GENERATION_SYSTEM_PROMPT', 'REFLECT_SYSTEM_PROMPT'],
+      'src/datagen.ts': [
+        '`${DATAGEN_STAGE_SYSTEM_PROMPT}\\n${languageLine(languages)}`',
+        // `rendered.system` = regras do USUÁRIO (config); o resto é o batch-system.
+        '`${rendered.system}\\n\\n---\\n\\n${systemComContrato}`',
+        'systemComContrato',
+        'ADVERSARIAL_SYSTEM_PROMPT',
+      ],
+      'src/gabarito.ts': ['GABARITO_ROLE_PROMPT', 'GABARITO_VERIFIER_SYSTEM_PROMPT'],
+      'src/engine/contractLayers.ts': ['DIFF_JUDGE_SYSTEM'],
+    };
+    const ROOT = fileURLToPath(new URL('..', import.meta.url));
+    for (const [rel, ok] of Object.entries(CLASSIFICADAS)) {
+      const fonte = readFileSync(join(ROOT, rel), 'utf8');
+      const achadas = [...fonte.matchAll(/role:\s*'system',\s*content:\s*([^\n]+?)\s*\},?\s*$/gm)].map((m) => m[1]);
+      expect(achadas.length, rel).toBeGreaterThan(0);
+      // Mensagem de sistema escrita noutro formato (multilinha, `as const`…)
+      // também conta: o total de `role: 'system',` tem de bater com o varrido.
+      const total = (fonte.match(/role:\s*'system'\s*(?:as const\s*)?,/g) ?? []).length;
+      expect(achadas.length, `${rel}: mensagem de sistema fora do formato varrido`).toBe(total);
+      for (const expr of achadas) {
+        expect(ok, `${rel}: mensagem de sistema NÃO registrada no fingerprint: ${expr}`).toContain(expr);
+      }
+    }
+  });
+
+  it('editar o texto de uma constante REAL muda o fingerprint do pipeline; o hash do juiz não muda', () => {
     const base = pinJudgeContract(['j/x'], 'PROMPT DO JUIZ', undefined, undefined, {
       metaPromptsFingerprint: pipelineMetaPromptsFingerprint(),
     });
     expect(base.metaPromptsFingerprint).toBe(pipelineMetaPromptsFingerprint());
     expect(base.runContractHash).toMatch(/^[0-9a-f]{32}$/);
-    for (const chave of ['rewriter/system', 'reflection/system', 'datagen/batch-system']) {
+    const textos = pipelineMetaPromptTexts();
+    for (const chave of Object.keys(textos)) {
       const editado = metaPromptsFingerprint({ ...textos, [chave]: `${textos[chave]} ` });
       const pin = pinJudgeContract(['j/x'], 'PROMPT DO JUIZ', undefined, undefined, { metaPromptsFingerprint: editado });
       expect(pin.runContractHash, chave).not.toBe(base.runContractHash);
-      // O hash do JUIZ (o do `baseline check`) fica intacto.
       expect(pin.hash, chave).toBe(base.hash);
     }
   });

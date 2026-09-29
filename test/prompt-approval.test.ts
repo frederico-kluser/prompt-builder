@@ -218,6 +218,24 @@ describe('sessions winner --apply — registro versionado e trailers (processo r
     expect(git(dir, ['status', '--porcelain'])).toBe('');
   });
 
+  // Revisão w2: o `--approver` vai verbatim para o trailer `Approved-by:`, o
+  // registro e a trilha. Um `\n` embutido forjava trailers que
+  // `git interpret-trailers --parse` lê como reais.
+  it('--approver com quebra de linha → exit 2 usage.invalid_flag_value, nada gravado nem commitado', () => {
+    const { dir, file } = repo('approver-forjado');
+    const antes = git(dir, ['rev-parse', 'HEAD']);
+    const r = cli([
+      'sessions', 'winner', 's1', '--apply', file, '--commit', '--json',
+      '--approver', 'Ana <ana@example.invalid>\nOverride-Reason: forjado',
+    ]);
+    expect(r.status, r.stdout).toBe(EXIT.USAGE);
+    expect(JSON.parse(r.stdout).error.code).toBe('usage.invalid_flag_value');
+    expect(readFileSync(file, 'utf-8')).toBe(ORIGINAL);
+    expect(git(dir, ['rev-parse', 'HEAD'])).toBe(antes);
+    expect(git(dir, ['status', '--porcelain'])).toBe('');
+    expect(existsSync(path.join(dir, '.prompt-approvals'))).toBe(false);
+  });
+
   it('--record/--approver sem --apply → exit 2 usage.record_without_apply', () => {
     const r = cli(['sessions', 'winner', 's1', '--record', '--json']);
     expect(r.status).toBe(EXIT.USAGE);

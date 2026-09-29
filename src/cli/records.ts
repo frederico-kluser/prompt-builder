@@ -235,7 +235,9 @@ export async function runsExportExchange(out: Output, id: string, destino: strin
   const cru = await lerCru('run', id);
   if (!cru) throw new CliError(`Run "${id}" não encontrada no diretório de dados.`, EXIT.USAGE);
   if (cru.status === 'running') out.warn(`a run ${id} ainda está rodando: o pacote leva o parcial gravado até agora.`);
-  const bundle = buildExchangeBundle({ producer: produtor(), runs: [cru] });
+  // `importedAt` é metadado local (TTL deste data-dir): o pacote leva o record
+  // como a ORIGEM o gravou — ida e volta segue identidade entre data-dirs.
+  const bundle = buildExchangeBundle({ producer: produtor(), runs: [semImportedAt(cru)] });
   await entregarPacote(out, 'runs.export', bundle, destino, { runId: id, runs: 1 });
   return EXIT.OK;
 }
@@ -252,13 +254,13 @@ export async function sessionsExportExchange(out: Output, id: string, destino: s
   const faltando: string[] = [];
   for (const rid of runIdsOfSession(cru as unknown as SessionRecord)) {
     const r = await lerCru('run', rid);
-    if (r) runs.push(r);
+    if (r) runs.push(semImportedAt(r));
     else faltando.push(rid);
   }
   if (faltando.length > 0) {
     out.warn(`${faltando.length} run(s) da sessão não estão no disco (apagadas/nunca gravadas): ${faltando.join(', ')}.`);
   }
-  const bundle = buildExchangeBundle({ producer: produtor(), sessions: [cru], runs });
+  const bundle = buildExchangeBundle({ producer: produtor(), sessions: [semImportedAt(cru)], runs });
   await entregarPacote(out, 'sessions.export', bundle, destino, {
     sessionId: id,
     sessions: 1,
@@ -296,6 +298,13 @@ function invalido(file: string, motivo: string): CliError {
     code: 'records.exchange_invalid',
     hint: 'Aponte o diretório gerado por `runs export --format exchange -o <dir>` / `sessions export -o <dir>` (ou o .json único).',
   });
+}
+
+/** O record sem o carimbo local de importação (comparação de conteúdo). */
+function semImportedAt(r: Record<string, unknown>): Record<string, unknown> {
+  if (!('importedAt' in r)) return r;
+  const { importedAt: _local, ...resto } = r;
+  return resto;
 }
 
 /** Forma mínima de um record importável (o resto vai verbatim). `null` = ok. */
@@ -352,7 +361,9 @@ export async function importRecords(
   for (const e of entradas) {
     const id = String(e.record.id);
     const atual = await lerCru(e.kind, id);
-    const acao = !atual ? 'novo' : contentHash(atual) === contentHash(e.record) ? 'identico' : 'conflito';
+    // `importedAt` é metadado DESTE data-dir (carimbado abaixo): fica fora da
+    // comparação — reimportar o mesmo pacote segue idempotente.
+    const acao = !atual ? 'novo' : contentHash(semImportedAt(atual)) === contentHash(semImportedAt(e.record)) ? 'identico' : 'conflito';
     plano.push({ ...e, acao });
   }
   const conflitos = plano.filter((p) => p.acao === 'conflito');
@@ -374,15 +385,20 @@ export async function importRecords(
   const imported: Record<'runs' | 'sessions', string[]> = { runs: [], sessions: [] };
   const skipped: string[] = [];
   const overwritten: string[] = [];
+  const agora = new Date().toISOString();
   for (const p of plano) {
     const id = String(p.record.id);
     if (p.acao === 'identico') {
       skipped.push(id);
       continue;
     }
-    // Verbatim: o save grava o objeto como veio (campo desconhecido incluso).
-    if (p.kind === 'run') await saveRun(p.record as never);
-    else await saveSession(p.record as never);
+    // Verbatim: o save grava o objeto como veio (campo desconhecido incluso),
+    // mais `importedAt` — revisão w2: o TTL (IMPL-100) conta da IMPORTAÇÃO.
+    // Sem o carimbo, o `startedAt` original de um arquivo com > retentionDays
+    // fazia o próximo `runs list` apagar o que acabou de ser importado.
+    const gravado = { ...p.record, importedAt: agora };
+    if (p.kind === 'run') await saveRun(gravado as never);
+    else await saveSession(gravado as never);
     imported[DIR_DO_TIPO[p.kind]].push(id);
     if (p.acao === 'conflito') overwritten.push(id);
   }

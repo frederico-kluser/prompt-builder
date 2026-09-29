@@ -252,6 +252,32 @@ describe('web-live#7 (5) — limiar semântico adaptativo em tema estreito', () 
     expect(out.length).toBeGreaterThan(1);
   });
 
+  // Revisão w2: com limiar configurado ≥ o último degrau nenhum relaxamento se
+  // aplica — o stderr dizia "relaxado de 0.99 para 0.99" mesmo assim.
+  it('limiar já no teto (0.99): nenhum degrau se aplica e NADA é narrado como relaxado', async () => {
+    const semEntidade = (i: number) => ({
+      question: `como faço o pedido de reembolso numero ${'abcdefgh'[i]} do produto`,
+      productContext: `politica ${'abcdefgh'[i]}`,
+      maxTokens: 200,
+    });
+    const fake = fakeGerador(() => [0, 1, 2, 3, 4].map(semEntidade));
+    instalar(fake);
+    let rel: DatagenReport | undefined;
+    await generateStages({
+      apiKey: KEY,
+      theme: 'reembolso',
+      count: 5,
+      modelId: 'fake/gen',
+      dedup: { embed: async (texts) => texts.map(() => [1, 0, 0]), cosineThreshold: 0.99 },
+      maxBackfillRounds: 0,
+      onReport: (r) => (rel = r),
+    });
+    expect(rel!.dedupedSemantic).toBeGreaterThan(0);
+    expect(rel!.effectiveCosineThreshold).toBe(0.99);
+    const narrado = warn.mock.calls.map((c) => String(c[0]));
+    expect(narrado.some((m) => m.includes('tema estreito'))).toBe(false);
+  });
+
   it('âncoras no dedup semântico: item colado no seed sai; seed nunca conta', async () => {
     const vetor = async (texts: string[]) => texts.map(() => [1, 0, 0]);
     const res = await dedupeSemantic([{ question: 'pergunta nova sobre prazo' }], {

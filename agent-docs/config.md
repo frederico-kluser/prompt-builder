@@ -168,8 +168,9 @@ Ids: `persona`, `cot`, `fewshot`, `format`, `constraints`, `decompose`,
 finais). Default ligado em variation/training e no compare com
 `competitorConfigs`; desligado no compare clássico, que usa o juiz **listwise**
 (sem finais). `passes` (1 \| 2, default 1): passes do listwise (2 = as duas
-ordens, anti-viés de posição). `auditable` (bool, default `false`): juiz e
-gabarito com provedor travado (sem fallback, `require_parameters`).
+ordens, anti-viés de posição). `auditable` (bool, default `false`): juiz,
+duelo das finais e gabarito com provedor travado (sem fallback,
+`require_parameters`) — o duelo entra porque as finais decidem o vencedor.
 
 ### 3.10 `limits`
 

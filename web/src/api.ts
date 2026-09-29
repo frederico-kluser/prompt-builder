@@ -334,7 +334,7 @@ export interface RunConfig {
   judgeCascade?: JudgeCascadeConfig;
   /** Contratos never-break do prompt base (pos-rewriter rejeita o que quebrar). */
   contracts?: PromptContracts;
-  /** IMPL-075: modo auditável (juiz + gabarito com provedor travado) — ver src/types.ts. */
+  /** IMPL-075: modo auditável (juiz + duelo + gabarito com provedor travado) — ver src/types.ts. */
   auditable?: boolean;
   /** Multi-prompt (F2/P0.4): grupo de fragmentos; evolui-se `promptId` por sessao. */
   promptGroup?: PromptGroup;

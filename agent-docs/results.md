@@ -168,7 +168,11 @@ dono, `.tmp`, journal de chamadas, job (inclusive o do `--detach`), chave de
 idempotência e `agent-runs/<id>/`; record `running` com dono vivo é recusado
 (pare antes com `runs cancel`). O TTL de retenção é de **90 dias por default**
 (`PB_RETENTION_DAYS`; `0` desliga) e roda sozinho no `runs list`/`sessions
-list` e antes de cada run real — o que venceu some das listas e do disco.
+list` e antes de cada run real — o que venceu some das listas e do disco. A
+idade conta do **mais recente** entre `startedAt` e `importedAt`: o import
+carimba `importedAt` no record gravado (metadado local — o `export` não o
+leva), então importar o arquivo de uma run antiga não a condena ao próximo
+`runs list`.
 
 ### Registro de aprovação (`prompt-approval@1`)
 

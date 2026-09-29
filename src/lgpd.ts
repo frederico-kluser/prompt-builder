@@ -199,6 +199,21 @@ export function isOlderThan(ref: Date | number | string, now: number, retentionD
   return t < cutoff;
 }
 
+/**
+ * Referência de idade de um record para o TTL (revisão w2): o MAIS RECENTE
+ * entre `startedAt` e `importedAt`. A retenção conta de quando o record ENTROU
+ * neste data-dir — `runs|sessions import` grava o `startedAt` original e, sem
+ * isto, importar um pacote de arquivo com > 90 dias "dava certo" e o próximo
+ * `runs list` apagava tudo em silêncio. `null` = nenhuma data legível (quem
+ * chama cai para o mtime do arquivo).
+ */
+export function retentionReferenceMs(rec: { startedAt?: unknown; importedAt?: unknown }): number | null {
+  const datas = [rec.startedAt, rec.importedAt]
+    .map((v) => (typeof v === 'string' ? Date.parse(v) : Number.NaN))
+    .filter((t) => Number.isFinite(t));
+  return datas.length ? Math.max(...datas) : null;
+}
+
 /** Tipo de registro apagável (run avulsa ou sessão de treino). */
 export type ErasableKind = 'run' | 'session';
 
@@ -454,8 +469,15 @@ async function pruneExpired(kind: ErasableKind, opts: PruneOptions): Promise<Pru
       try {
         let ref: number | string = (await fs.stat(path.join(dir, nome))).mtimeMs;
         try {
-          const rec = JSON.parse(await fs.readFile(path.join(dir, nome), 'utf-8')) as { startedAt?: string };
-          if (rec.startedAt) ref = rec.startedAt;
+          const rec = JSON.parse(await fs.readFile(path.join(dir, nome), 'utf-8')) as {
+            startedAt?: string;
+            importedAt?: string;
+          };
+          // Revisão w2: importado conta da IMPORTAÇÃO (`importedAt`), não do
+          // início original — ver `retentionReferenceMs`.
+          const refMs = retentionReferenceMs(rec);
+          if (refMs !== null) ref = refMs;
+          else if (rec.startedAt) ref = rec.startedAt; // ilegível ⇒ vencido (isOlderThan)
         } catch {
           // record corrompido ⇒ idade pelo mtime (nunca trava o prune)
         }

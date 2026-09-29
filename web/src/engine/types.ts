@@ -400,7 +400,7 @@ export interface RunConfigBase {
    */
   budgetUsd?: number;
   /**
-   * IMPL-075 — modo AUDITÁVEL (juiz + gabarito com provedor travado, sem
+   * IMPL-075 — modo AUDITÁVEL (juiz + duelo + gabarito com provedor travado, sem
    * fallback, `require_parameters`). Espelho de src/types.ts.
    */
   auditable?: boolean;

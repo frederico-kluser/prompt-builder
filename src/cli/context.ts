@@ -378,6 +378,30 @@ export function installPipeGuards(handlers: { onClosed: () => void; onOtherError
   process.stderr.on('error', () => undefined);
 }
 
+/**
+ * Revisão w2 (cli#19) — o que fazer quando o consumidor fecha o stdout (EPIPE):
+ *   • `ignore`: o `mcp` é dono do próprio stdout (encerra com graça pelo
+ *     `pedirFim('EPIPE')` dele, gravando o parcial das runs em voo) — sair 0
+ *     daqui passava por cima disso;
+ *   • `stop-run`: há run PAGA neste processo (`activeRuns` > 0 — quem registrou
+ *     `installGracefulStop`) ou é um comando de run ainda no pré-voo: mesma rota
+ *     do SIGTERM (aborta, grava 'aborted', sai 130 — ou 7 se já parava por
+ *     orçamento). Sair 0 aqui dizia "sucesso" a um `set -o pipefail` sobre uma
+ *     run morta que já tinha gastado, com o record preso em 'running';
+ *   • `exit-ok`: comando de leitura (`docs --all | head -1`): o que o
+ *     consumidor queria já saiu — exit 0 em silêncio (cli#19).
+ */
+export type StdoutClosedAction = 'ignore' | 'stop-run' | 'exit-ok';
+
+/** Comandos que abrem run paga (o pré-voo deles já conta como run). */
+const RUN_COMMANDS = new Set(['compare', 'vary', 'train', 'agents']);
+
+export function stdoutClosedAction(cmd: string | undefined, activeRuns: number): StdoutClosedAction {
+  if (cmd === 'mcp') return 'ignore';
+  if (activeRuns > 0 || (cmd !== undefined && RUN_COMMANDS.has(cmd))) return 'stop-run';
+  return 'exit-ok';
+}
+
 /** true quando quem chama e um agente/script, nao um humano num terminal. */
 export function isAgentContext(): boolean {
   return (

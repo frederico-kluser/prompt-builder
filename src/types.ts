@@ -755,7 +755,7 @@ export interface RunConfigBase {
    */
   contracts?: PromptContracts;
   /**
-   * IMPL-075 (R-07b:REC-4) — modo AUDITÁVEL da run/sessão: juiz e gabarito
+   * IMPL-075 (R-07b:REC-4) — modo AUDITÁVEL da run/sessão: juiz, duelo e gabarito
    * (`AUDITABLE_ROLES`) saem com provedor travado (`provider.order`,
    * `allow_fallbacks:false`, `require_parameters:true`, quantizações de
    * precisão cheia). Visível no artefato: `costByRole[*].auditableCalls` e

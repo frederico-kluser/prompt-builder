@@ -65,6 +65,7 @@ import { reasoningLevelForRole } from './modelCaps.js';
 import { roleTimeoutMs } from './roleLimits.js';
 import { pipelineMetaPromptsFingerprint } from './metaPrompts.js';
 import { stageSecurity, summarizeSecurity } from './engine/contracts.js';
+import { judgingModelIds } from './engine/roleSeparation.js';
 import { AUDITABLE_ROLES, gatewayErrorFields, isFatalGatewayError, listModels, reconcileAtRunEnd } from './openrouter.js';
 import {
   cutDuels,
@@ -643,7 +644,7 @@ async function runLoop(
   // IMPL-040: área sensível ⇒ o gateway força o roteamento ZDR em TODA chamada
   // desta run (a política viaja no ledger, que todo papel recebe via ctx.sink).
   ledger.setSensitiveRouting(preflight.sensitiveRouting);
-  // IMPL-075: modo AUDITÁVEL por run (`config.auditable`) — juiz e gabarito com
+  // IMPL-075: modo AUDITÁVEL por run (`config.auditable`) — juiz, duelo e gabarito com
   // provedor travado; como o modo sensível, só liga e vale para a cadeia abaixo.
   if (record.config.auditable) ledger.setAuditableRoles(AUDITABLE_ROLES);
 
@@ -1860,9 +1861,11 @@ async function runLoop(
     // ele acusava um papel que ninguém exerceu. (O pin do contrato do juiz
     // segue com `referenceModelId`: mudar o hash seria drift falso.)
     const autorDoGabarito = record.stages.some((s) => s.spec?.reference?.trim()) ? referenceModelId : undefined;
+    // IMPL-115 (revisão w2): com cascata quem julga são os baratos + o forte —
+    // o aviso de auto-preferência olha o painel EFETIVO, não só judgeModelIds.
     record.fairnessWarnings = fairnessWarningsForModels(
       record.contestants.map((c) => c.modelId),
-      record.config.judgeModelIds,
+      judgingModelIds(record.config),
       autorDoGabarito,
     );
     // IMPL-052 (R-03b:REC-2): higiene das amostras do diagnóstico de verbosidade.

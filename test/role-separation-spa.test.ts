@@ -68,6 +68,7 @@ const VARIATION = {
   techniqueIds: ['tecnica-a', 'tecnica-b'],
 };
 const TRAINING = { ...VARIATION, mode: 'training', iterations: 2 };
+const CASCATA = { cheap: ['fake/c1', 'fake/c2'], strong: 'fake/forte' };
 const COMPARE = {
   mode: 'compare',
   theme: 'suporte',
@@ -104,6 +105,21 @@ describe('IMPL-048 (i) — regra única: o schema do Node diz o que a função p
       '2º gabarito = modelo sob teste',
       { ...VARIATION, referenceModelId: 'fake/ref', validateReferences: true, secondReferenceModelId: 'fake/a' },
     ],
+    // Revisão w2 (IMPL-115): com cascata quem julga são os baratos + o forte.
+    ['compare ref = juiz barato da cascata', { ...COMPARE, referenceModelId: 'fake/c1', judgeCascade: CASCATA }],
+    ['training ref = juiz forte da cascata', { ...TRAINING, referenceModelId: 'fake/forte', judgeCascade: CASCATA }],
+    [
+      '2º gabarito = juiz da cascata',
+      { ...COMPARE, referenceModelId: 'fake/ref', validateReferences: true, secondReferenceModelId: 'fake/c2', judgeCascade: CASCATA },
+    ],
+    [
+      'variation: juiz forte da cascata = modelo sob teste',
+      { ...VARIATION, referenceModelId: 'fake/ref', judgeCascade: { ...CASCATA, strong: 'fake/a' } },
+    ],
+    [
+      'compare: juiz barato da cascata = competidor',
+      { ...COMPARE, judgeCascade: { ...CASCATA, cheap: ['fake/b', 'fake/c2'] } },
+    ],
   ];
   for (const [nome, cfg] of casos) {
     it(`${nome}: cada conflito da função pura sai no schema com a MESMA mensagem`, () => {
@@ -122,6 +138,7 @@ describe('IMPL-048 (i) — regra única: o schema do Node diz o que a função p
       COMPARE, // compare sem referência = default documentado (1º juiz)
       { ...COMPARE, referenceModelId: 'fake/ref' },
       { ...COMPARE, referenceModelId: 'fake/ref', validateReferences: true, secondReferenceModelId: 'fake/ref2' },
+      { ...TRAINING, referenceModelId: 'fake/ref', judgeCascade: CASCATA },
     ]) {
       expect(roleSeparationIssues(cfg)).toEqual([]);
       expect(parseRunConfig(cfg).ok).toBe(true);
@@ -149,6 +166,9 @@ describe('IMPL-048 (ii)+(iii) — portão da SPA: recusa antes do motor e de qua
       [{ ...COMPARE, referenceModelId: 'fake/b' }, /n[ãa]o pode ser tamb[ée]m competidor/],
       [{ ...COMPARE, referenceModelId: 'fake/ref', secondReferenceModelId: 'fake/ref' }, /2º gabarito .* a própria referência/],
       [{ ...COMPARE, referenceModelId: 'fake/ref', secondReferenceModelId: 'fake/judge' }, /2º gabarito .* tamb[ée]m juiz/],
+      // Revisão w2 (IMPL-115): a cascata entra na régua de "é juiz" e não compete.
+      [{ ...VARIATION, referenceModelId: 'fake/c1', judgeCascade: CASCATA }, /n[ãa]o pode ser tamb[ée]m juiz/],
+      [{ ...COMPARE, judgeCascade: { ...CASCATA, strong: 'fake/a' } }, /juiz da cascata "fake\/a"/],
     ] as const) {
       const err = await api.createRun(cfg as never, { costConfirmed: true }).catch((e: unknown) => e);
       expect(err, JSON.stringify(cfg)).toBeInstanceOf(Error);

@@ -180,7 +180,7 @@ export interface ArenaConfigFile {
   repeats?: 1 | 2 | 3;
   /** Nº de finalistas que duelam entre si em cada cenário (0 = sem finais). Default 3. */
   finalists?: number; // int 0..12
-  /** `auditable` (IMPL-075): juiz e gabarito com provedor travado, sem fallback e `require_parameters`. */
+  /** `auditable` (IMPL-075): juiz, duelo e gabarito com provedor travado, sem fallback e `require_parameters`. */
   judging?: { reference?: boolean; passes?: 1 | 2; auditable?: boolean };
   limits?: { maxOutputTokens?: number; timeoutMs?: number; concurrency?: number }; // int positivos
   compliance?: { area: string; includeRessalvas: boolean };
@@ -533,7 +533,7 @@ export const arenaConfigSchema = z
           {
             reference: z.boolean('deve ser boolean').optional(),
             passes: z.union([z.literal(1), z.literal(2)], 'deve ser 1 ou 2').optional(),
-            // IMPL-075: modo auditável (juiz + gabarito com provedor travado).
+            // IMPL-075: modo auditável (juiz + duelo + gabarito com provedor travado).
             auditable: z.boolean('deve ser boolean').optional(),
           },
           'judging deve ser um objeto',

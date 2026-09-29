@@ -27,6 +27,7 @@
 
 import { isControlSignal, RunCancelled } from '../budget.js';
 import { isFatalGatewayError } from '../openrouter.js';
+import { isLgpdPolicyError } from './lgpdCore.js';
 import { judgeReplyCut, type JudgeReplyFinish } from './truncation.js';
 import { sha256Hex } from './hash.js';
 import type { JudgeCallFinish, VerdictError } from '../types.js';
@@ -127,7 +128,10 @@ export async function callJudgeWithRetry<T>(opts: JudgeRetryOptions<T>): Promise
       const raw = await opts.call(reminder);
       reply = typeof raw === 'string' ? { text: raw } : raw;
     } catch (err) {
-      if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
+      // Recusa LGPD (roteamento sensível fail-closed) também NÃO degrada: virar
+      // `judge_failed` deixava a cascata seguir com o consenso barato marcado
+      // 'degraded' — uma run sensível "concluída" com painel reduzido.
+      if (isControlSignal(err) || isFatalGatewayError(err) || isLgpdPolicyError(err)) throw err;
       if (opts.signal?.aborted) throw new RunCancelled(opts.signal.reason);
       const error = describeJudgeError(err);
       if (error.kind === 'timeout' && !timeoutRetried) {

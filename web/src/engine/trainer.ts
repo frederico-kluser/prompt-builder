@@ -795,7 +795,7 @@ async function trainingLoop(
   });
   const ctx: RunCtx = { signal, sink: ledger };
   record.budgetUsd = cfg.budgetUsd;
-  // IMPL-075: modo AUDITÁVEL da sessão — juiz e gabarito com provedor travado
+  // IMPL-075: modo AUDITÁVEL da sessão — juiz, duelo e gabarito com provedor travado
   // (só liga; as runs das iterações são forks e herdam, além de lerem
   // `config.auditable` repassado por variationConfigFrom).
   if (cfg.auditable) ledger.setAuditableRoles(AUDITABLE_ROLES);

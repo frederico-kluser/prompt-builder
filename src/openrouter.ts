@@ -199,7 +199,7 @@ export interface GatewayConfig {
   /**
    * IMPL-075 — modo auditável: papéis que recebem `provider { order,
    * quantizations, allow_fallbacks:false, require_parameters:true }`. Preset do
-   * item: `AUDITABLE_ROLES` (juiz + gabarito). Vazio = desligado.
+   * item: `AUDITABLE_ROLES` (juiz + duelo + gabarito). Vazio = desligado.
    */
   auditableRoles?: CostRole[];
   /** Ordem fixa de provedores do modo auditável (`provider.order`). Vazio = omitido. */
@@ -223,8 +223,13 @@ export interface GatewayConfig {
   verdictCache?: VerdictCache | false;
 }
 
-/** Preset do modo auditável (IMPL-075): juiz e gabarito — os papéis de REFERÊNCIA. */
-export const AUDITABLE_ROLES: readonly CostRole[] = ['judge', 'gabarito'];
+/**
+ * Preset do modo auditável (IMPL-075): juiz, duelo e gabarito — os papéis de
+ * REFERÊNCIA. Revisão w2: o duelo entrou porque as finais DECIDEM o vencedor
+ * (`winnerFromStandings`: finais primeiro, depois judge-score) — a chamada que
+ * coroa o campeão não pode ficar com fallback de provedor livre.
+ */
+export const AUDITABLE_ROLES: readonly CostRole[] = ['judge', 'duel', 'gabarito'];
 /** Quantizações de precisão cheia do modo auditável (auditável = sem quantização lossy). */
 export const DEFAULT_AUDITABLE_QUANTIZATIONS: readonly string[] = ['bf16', 'fp16', 'fp32'];
 
@@ -2848,9 +2853,10 @@ export class OpenRouterGateway {
   /**
    * IMPL-075 — esta chamada vai no modo auditável? Flag da chamada, preset do
    * gateway (`auditableRoles`, env `OPENROUTER_AUDITABLE`) ou a política no
-   * ledger (`sink.auditableRoles`). ⚠️ Hoje só o ENV liga o modo em produção:
-   * o gancho do ledger (`BudgetLedger.setAuditableRoles`) existe e é testado,
-   * mas nenhum campo de RunConfig/sessão o alimenta ainda (IMPL-075 pendente).
+   * ledger (`sink.auditableRoles`). O ledger é alimentado por `config.auditable`
+   * (schema, arena-config `judging.auditable`, CLI `--auditable`): os dois
+   * orquestradores e os dois trainers chamam `ledger.setAuditableRoles(
+   * AUDITABLE_ROLES)` e a cadeia de forks herda — por run/sessão, sem env.
    */
   private auditableFor(params: ChatCompletionParams): boolean {
     if (params.auditable === true) return true;

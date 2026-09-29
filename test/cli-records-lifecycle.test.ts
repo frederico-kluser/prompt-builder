@@ -61,6 +61,12 @@ function cli(dataDir: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}) 
   return { status: r.status, json, stderr: r.stderr };
 }
 
+/** O record sem o carimbo local `importedAt` (revisão w2). */
+function semCarimbo(r: Record<string, unknown>): Record<string, unknown> {
+  const { importedAt: _local, ...resto } = r;
+  return resto;
+}
+
 function runRecord(id: string, startedAt: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id,
@@ -242,12 +248,43 @@ describe('IMPL-089 — runs/sessões em prompt-builder-exchange@1 (ida e volta =
     expect(im.status, im.stderr).toBe(EXIT.OK);
     expect(im.json.data).toMatchObject({ imported: { runs: [RUN], sessions: [] } });
     const volta = JSON.parse(readFileSync(path.join(destino, 'runs', `${RUN}.json`), 'utf-8'));
-    expect(volta).toEqual(original);
+    // Revisão w2: o disco guarda o record verbatim + o carimbo LOCAL de
+    // importação (o TTL conta dele); o pacote re-exportado não o leva.
+    expect(semCarimbo(volta)).toEqual(original);
+    expect(Date.parse(volta.importedAt as string)).toBeGreaterThan(0);
+    const reexport = path.join(tempDir('pb-rec-exr-'), 'de-volta.json');
+    expect(cli(destino, ['runs', 'export', RUN, '--format', 'exchange', '-o', reexport]).status).toBe(EXIT.OK);
+    expect(readFileSync(reexport, 'utf-8')).not.toContain('importedAt');
+    const terceiro = tempDir('pb-rec-exc-');
+    expect(cli(terceiro, ['runs', 'import', reexport]).status).toBe(EXIT.OK);
+    expect(semCarimbo(JSON.parse(readFileSync(path.join(terceiro, 'runs', `${RUN}.json`), 'utf-8')))).toEqual(original);
 
     // Reimportar o idêntico é idempotente (pulado, nada muda).
     const de_novo = cli(destino, ['runs', 'import', pacote]);
     expect(de_novo.status).toBe(EXIT.OK);
     expect(de_novo.json.data).toMatchObject({ skipped: [RUN] });
+  });
+
+  // Revisão w2 (IMPL-100 × IMPL-089): o TTL media a idade pelo `startedAt`
+  // ORIGINAL — importar o arquivo de uma run de > 90 dias "dava certo" e o
+  // próximo `runs list` a apagava em silêncio. Agora conta da importação.
+  it('importar run com startedAt além da retenção: o `runs list` seguinte NÃO a apaga', () => {
+    const origem = tempDir('pb-rec-tta-');
+    const destino = tempDir('pb-rec-ttb-');
+    const pacote = path.join(tempDir('pb-rec-ttp-'), 'arquivo.json');
+    const antiga = runRecord(VELHA, new Date(Date.now() - 200 * 86_400_000).toISOString());
+    write(origem, `runs/${VELHA}.json`, antiga);
+    // A origem exporta com o TTL desligado (senão ela mesma já teria apagado).
+    expect(cli(origem, ['runs', 'export', VELHA, '--format', 'exchange', '-o', pacote], { PB_RETENTION_DAYS: '0' }).status).toBe(EXIT.OK);
+    expect(cli(destino, ['runs', 'import', pacote]).status).toBe(EXIT.OK);
+    const lista = cli(destino, ['runs', 'list']);
+    expect(lista.status, lista.stderr).toBe(EXIT.OK);
+    expect(existsSync(path.join(destino, 'runs', `${VELHA}.json`))).toBe(true);
+    // Controle: sem o carimbo (record gravado à mão), o mesmo TTL apaga.
+    const manual = tempDir('pb-rec-ttc-');
+    write(manual, `runs/${VELHA}.json`, antiga);
+    expect(cli(manual, ['runs', 'list']).status).toBe(EXIT.OK);
+    expect(existsSync(path.join(manual, 'runs', `${VELHA}.json`))).toBe(false);
   });
 
   it('conflito (mesmo id, conteúdo diferente) recusa com exit 3; `--overwrite` substitui', () => {
@@ -284,9 +321,9 @@ describe('IMPL-089 — runs/sessões em prompt-builder-exchange@1 (ida e volta =
 
     const im = cli(destino, ['sessions', 'import', pacote]);
     expect(im.status, im.stderr).toBe(EXIT.OK);
-    expect(JSON.parse(readFileSync(path.join(destino, 'sessions', `${SESS}.json`), 'utf-8'))).toEqual(sessao);
+    expect(semCarimbo(JSON.parse(readFileSync(path.join(destino, 'sessions', `${SESS}.json`), 'utf-8')))).toEqual(sessao);
     for (const r of runs) {
-      expect(JSON.parse(readFileSync(path.join(destino, 'runs', `${r.id as string}.json`), 'utf-8'))).toEqual(r);
+      expect(semCarimbo(JSON.parse(readFileSync(path.join(destino, 'runs', `${r.id as string}.json`), 'utf-8')))).toEqual(r);
     }
   });
 

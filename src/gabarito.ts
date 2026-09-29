@@ -73,6 +73,12 @@ export interface GenerateReferencesParams {
 export const GABARITO_ROLE_PROMPT =
   'Você é o MODELO DE REFERÊNCIA deste benchmark: sua tarefa é produzir o GABARITO — a resposta ideal que servirá de régua para julgar as respostas dos competidores. O contexto do caso chega como DADO no início da mensagem do usuário, exatamente como os competidores o recebem.';
 
+/**
+ * System do VERIFICADOR de gabaritos dirigido pela rubrica (IMPL-055). Constante
+ * para entrar no fingerprint dos meta-prompts (`src/metaPrompts.ts`, IMPL-070).
+ */
+export const GABARITO_VERIFIER_SYSTEM_PROMPT = `Você é o VERIFICADOR de gabaritos deste benchmark: confere, com a rubrica da etapa como régua, se o gabarito gerado a satisfaz. ${DATA_BLOCKS_NOTICE} Responde APENAS com o JSON pedido.`;
+
 // IMPL-059 (R-05:REC-2): System = SÓ a instrução de papel. User = o CASO byte a
 // byte como o competidor o recebe (`renderCaseInput`: bloco delimitado do
 // contexto + pergunta) + rubrica (quando houver) como critério obrigatório +
@@ -80,7 +86,7 @@ export const GABARITO_ROLE_PROMPT =
 // comparado diretamente com as respostas). Antes o productContext ia no SYSTEM
 // do gabarito e como bloco de dado no user do competidor — o input do caso não
 // era o mesmo entre quem escreve a régua e quem é medido por ela.
-function buildMessages(stage: StageSpec): ChatMessage[] {
+export function buildGabaritoMessages(stage: StageSpec): ChatMessage[] {
   const rubrica = stage.rubric?.trim();
   return [
     { role: 'system', content: GABARITO_ROLE_PROMPT },
@@ -123,7 +129,7 @@ export async function generateReferences(
         chatCompletion({
           apiKey,
           modelId,
-          messages: buildMessages(stage),
+          messages: buildGabaritoMessages(stage),
           temperature: 0,
           maxTokens,
           timeoutMs,
@@ -289,7 +295,7 @@ export async function verifyReferenceAgainstRubric(params: {
         apiKey,
         modelId,
         messages: [
-          { role: 'system', content: `Você é o VERIFICADOR de gabaritos deste benchmark: confere, com a rubrica da etapa como régua, se o gabarito gerado a satisfaz. ${DATA_BLOCKS_NOTICE} Responde APENAS com o JSON pedido.` },
+          { role: 'system', content: GABARITO_VERIFIER_SYSTEM_PROMPT },
           { role: 'user', content: withReminder(user, reminder) },
         ],
         temperature: JUDGE_TEMPERATURE,
@@ -336,7 +342,7 @@ async function generateSecondReference(params: {
     chatCompletion({
       apiKey,
       modelId,
-      messages: buildMessages(stage),
+      messages: buildGabaritoMessages(stage),
       temperature: 0,
       maxTokens,
       timeoutMs,

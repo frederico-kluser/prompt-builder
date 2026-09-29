@@ -153,7 +153,7 @@ const OPTIONS = {
   'require-approved': { type: 'boolean' },
   // IMPL-030: roda num processo destacado; acompanhe por `runs status/wait/cancel`.
   detach: { type: 'boolean' },
-  // IMPL-075: modo AUDITÁVEL — juiz e gabarito com provedor travado
+  // IMPL-075: modo AUDITÁVEL — juiz, duelo e gabarito com provedor travado
   // (`allow_fallbacks:false`, `require_parameters:true`); vale sobre o --config.
   auditable: { type: 'boolean' },
 } as const;

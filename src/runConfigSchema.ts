@@ -346,7 +346,7 @@ const baseFields = {
   // IMPL-011: schema fonte única (inclui judgeDiff e canaries — sem ele o zod
   // STRIPAVA os campos novos em silêncio e a camada 3 nunca rodava pela API).
   contracts: promptContractsSchema.optional(),
-  // IMPL-075 (R-07b:REC-4): modo AUDITÁVEL por run/sessão — juiz e gabarito
+  // IMPL-075 (R-07b:REC-4): modo AUDITÁVEL por run/sessão — juiz, duelo e gabarito
   // saem com provedor travado (`provider.order`, `allow_fallbacks:false`,
   // `require_parameters:true`, quantizações de precisão cheia). A contagem por
   // papel (`costByRole[*].auditableCalls`) e o registo por chamada (`callLog`)

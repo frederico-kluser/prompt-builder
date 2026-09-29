@@ -25,7 +25,9 @@ import {
   isOlderThan as nodeIsOlderThan,
   loadRetentionPolicy,
   pruneExpiredRuns,
+  resetAutoPruneThrottle,
   retentionCutoffMs as nodeRetentionCutoffMs,
+  retentionReferenceMs,
   DEFAULT_RETENTION_DAYS,
   RETENTION_DAYS_ENV,
 } from '../src/lgpd.js';
@@ -47,6 +49,9 @@ let base: string;
 let prevDataDir: string;
 
 beforeEach(() => {
+  // Revisão w2: o `autoPrune` guarda um throttle POR PROCESSO — sem zerar, um
+  // teste que já varreu faria o próximo pular o prune em silêncio.
+  resetAutoPruneThrottle();
   base = mkdtempSync(join(tmpdir(), 'pb-lgpd-ret-'));
   prevDataDir = getDataDir();
   setDataDir(base);
@@ -206,6 +211,27 @@ describe('IMPL-100 (2) TTL + prune automático', () => {
     expect(primeira.deleted).toEqual(['run-velha-2']);
     const segunda = await autoPrune({ dataDir: base, now: agora + 1_000, retentionDays: 90, intervalMs: 60_000 });
     expect(segunda.scanned).toBe(0); // throttled: não varreu de novo
+    // Isolamento de teste: zerar o throttle faz a varredura seguinte rodar.
+    resetAutoPruneThrottle();
+    await saveRun(runRecord('run-velha-3', new Date(agora - 200 * DAY).toISOString(), 'done'));
+    const terceira = await autoPrune({ dataDir: base, now: agora + 2_000, retentionDays: 90, intervalMs: 60_000 });
+    expect(terceira.deleted).toEqual(['run-velha-3']);
+  });
+
+  // Revisão w2: record IMPORTADO conta da importação (`importedAt`), não do
+  // `startedAt` original — senão o próximo `runs list` apagava o que acabou de
+  // entrar pelo `runs import`.
+  it('TTL: `importedAt` recente segura um record com `startedAt` antigo', async () => {
+    const agora = Date.now();
+    const velho = new Date(agora - 200 * DAY).toISOString();
+    expect(retentionReferenceMs({ startedAt: velho, importedAt: new Date(agora).toISOString() })).toBe(agora);
+    expect(retentionReferenceMs({ startedAt: velho })).toBe(Date.parse(velho));
+    expect(retentionReferenceMs({ startedAt: 'lixo' })).toBeNull();
+    await saveRun({ ...runRecord('run-importada', velho, 'done'), importedAt: new Date(agora - DAY).toISOString() } as never);
+    await saveRun(runRecord('run-velha-4', velho, 'done'));
+    const r = await pruneExpiredRuns({ dataDir: base, now: agora, retentionDays: 90 });
+    expect(r.deleted).toEqual(['run-velha-4']);
+    expect(r.kept).toContain('run-importada');
   });
 
   it('corte/idade: a MESMA semântica nos dois lados (Node × navegador)', () => {

@@ -7,10 +7,10 @@
 //     registro sobrevive a normalizeRunRecord (JSON de ida e volta);
 //   IMPL-075 (i/iii): provedor que serviu contado por papel no ledger real —
 //     cobertura (Σ providers / calls) = 1,0 em TODOS os papéis; modo auditável
-//     ligável por ambiente (OPENROUTER_AUDITABLE — o único interruptor de
-//     produção hoje) e pelo gancho do ledger (`setAuditableRoles`, ainda sem
-//     campo de RunConfig que o chame), visível no registro (`auditableCalls`,
-//     `callLog[].auditable`);
+//     ligável por ambiente (OPENROUTER_AUDITABLE) e pelo gancho do ledger
+//     (`setAuditableRoles`, alimentado por `config.auditable` nos dois motores
+//     — ver test/trainer-auditable-reconcile.test.ts), visível no registro
+//     (`auditableCalls`, `callLog[].auditable`);
 //   IMPL-074 (i): TODA chamada 200 deixa o id de geração no registro por
 //     chamada, com a validade do formato `gen-…`;
 //   IMPL-074 (ii): GET /generation 404 → retry com backoff → sucesso;
@@ -150,7 +150,7 @@ describe('IMPL-075 — provedor por papel no ledger real; modo auditável ligáv
     expect(fake.requests.filter((r) => r.path.endsWith('/generation'))).toHaveLength(0);
   });
 
-  it('OPENROUTER_AUDITABLE=on liga o preset (juiz + gabarito): corpo travado e visível no registro', async () => {
+  it('OPENROUTER_AUDITABLE=on liga o preset (juiz + duelo + gabarito): corpo travado e visível no registro', async () => {
     expect(gatewayConfigFromEnv({ OPENROUTER_AUDITABLE: 'on' }).auditableRoles).toEqual([...AUDITABLE_ROLES]);
     expect(gatewayConfigFromEnv({ OPENROUTER_AUDITABLE: 'judge,duel,nada' }).auditableRoles).toEqual(['judge', 'duel']);
     expect(gatewayConfigFromEnv({ OPENROUTER_AUDITABLE: '0' }).auditableRoles).toBeUndefined();

@@ -26,7 +26,7 @@
 import { buildCatalogContext, buildNetworkContext, isAgentContext, parse } from '../context.js';
 import { CliError, EXIT, fmtUsd, type Output } from '../output.js';
 import { BudgetLedger, isControlSignal } from '../../budget.js';
-import { computeCost, isFatalGatewayError } from '../../openrouter.js';
+import { computeCost, isFatalGatewayError, reconcileAtRunEnd } from '../../openrouter.js';
 import { generateContestants, llmReflectLessons } from '../../variator.js';
 import { pipelineMetaPromptsFingerprint } from '../../metaPrompts.js';
 import { generateStages, type DatagenReport } from '../../datagen.js';
@@ -363,6 +363,13 @@ export interface RegressionReport {
   costByRole: Partial<Record<CostRole, number>>;
   /** Chamadas sem custo medido (o total é um PISO quando > 0). */
   unknownCostCalls: number;
+  /**
+   * Revisão w2: chamadas que voltaram SEM `usage` mas com id de geração e que
+   * a conciliação do fim (GET /generation) ainda não fechou — fora de
+   * `costUsd`, mas provavelmente cobradas (desconhecido ≠ zero).
+   */
+  pendingUsd: number;
+  pendingCalls: number;
 }
 
 export interface RunRegressionOptions {
@@ -661,7 +668,15 @@ function linhasRelatorio(out: Output, r: RegressionReport): void {
   if (m.judge) out.line(`  juiz         acerto ${f(m.judge.accuracy)} · κ ${f(m.judge.kappa)} (${m.judge.cases} casos)`);
   if (m.gabarito) out.line(`  gabarito     κ ${f(m.gabarito.kappa)} (${m.gabarito.generated} gerados)`);
   out.line('  ganho/técnica não medido aqui (exige competidor + juiz): use `vary`.');
-  out.line(`  custo ${fmtUsd(r.costUsd)}${r.unknownCostCalls ? ` (PISO: ${r.unknownCostCalls} chamada(s) sem custo medido)` : ''}`);
+  // Revisão w2: pendente (sem usage, id conhecido, não conciliado) também é
+  // "sem custo medido" — o total é PISO e o teto do que pode ter saído aparece.
+  const semCusto = r.unknownCostCalls + r.pendingCalls;
+  out.line(
+    `  custo ${fmtUsd(r.costUsd)}${semCusto ? ` (PISO: ${semCusto} chamada(s) sem custo medido)` : ''}` +
+      (r.pendingCalls
+        ? ` · pendente ${fmtUsd(r.pendingUsd)} em ${r.pendingCalls} chamada(s) — o gasto real pode chegar a ${fmtUsd(r.costUsd + r.pendingUsd)}`
+        : ''),
+  );
   out.line(r.gate.pass ? 'Limiares OK.' : `REPROVADO: ${r.gate.failures.map((x) => x.message).join('; ')}`);
 }
 
@@ -718,6 +733,11 @@ async function cmdRegression(argv: string[]): Promise<number> {
     ctx: { sink: ledger },
     onProgress: (msg) => net.out.info(msg),
   });
+  // Revisão w2: resposta sem `usage` com id de geração fica PENDENTE no ledger
+  // (fora de spentUsd/byRole/accuracy.unknown) — sem conciliar, o relatório
+  // mostrava US$ 0 para chamada paga com `unknownCostCalls: 0`. Mesma
+  // conciliação do fim de run dos orquestradores (nunca lança).
+  await reconcileAtRunEnd(ledger, net.apiKey);
   const snap = ledger.snapshot();
   const costByRole: Partial<Record<CostRole, number>> = {};
   for (const [role, e] of Object.entries(snap.byRole)) if (e.calls > 0) costByRole[role as CostRole] = e.usd;
@@ -733,6 +753,8 @@ async function cmdRegression(argv: string[]): Promise<number> {
     costUsd: snap.spentUsd,
     costByRole,
     unknownCostCalls: snap.accuracy.unknown,
+    pendingUsd: snap.pendingUsd,
+    pendingCalls: snap.pendingCalls,
   };
   linhasRelatorio(net.out, report);
   if (!report.gate.pass) {

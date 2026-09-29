@@ -612,8 +612,29 @@ export interface ComplianceConfigLike {
   competitorModelIds?: string[];
   competitorConfigs?: { modelId: string }[];
   contestantModelId?: string;
+  /** IMPL-055: o 2º gabarito também lê cenário + rubrica. */
+  secondReferenceModelId?: string;
+  /** IMPL-115: no modo econômico quem julga são os baratos + o forte. */
+  judgeCascade?: { cheap?: readonly string[]; strong?: string };
+  /** IMPL-063: o modelo de embeddings do dedup semântico recebe o texto dos cenários. */
+  scenarioDedup?: { semantic?: boolean; embedModelId?: string };
   /** Presente = modo agente: o executor (`pi`) fala com o provedor FORA do gateway. */
   agent?: unknown;
+}
+
+/**
+ * Modelo de embeddings do dedup semântico quando o config liga o dedup sem
+ * escolher um. Fonte ÚNICA (`src/embeddings.ts` reexporta como
+ * `DEFAULT_DEDUP_EMBED_MODEL`): o pré-voo checa o modelo que DE FATO recebe
+ * os cenários.
+ */
+export const DEFAULT_SCENARIO_EMBED_MODEL = 'openai/text-embedding-3-small';
+
+/** Modelo de embeddings que a run chama (dedup semântico ligado), ou undefined. */
+export function scenarioEmbedModelId(cfg: Pick<ComplianceConfigLike, 'scenarioDedup'>): string | undefined {
+  const d = cfg.scenarioDedup;
+  if (!d?.semantic) return undefined;
+  return d.embedModelId?.trim() || DEFAULT_SCENARIO_EMBED_MODEL;
 }
 
 /** O config liga o modo sensível? (compliance numa área sensível; área fora da base conta). */
@@ -641,8 +662,16 @@ export function runModelRoles(cfg: ComplianceConfigLike): { role: LgpdRole; mode
   for (const c of cfg.competitorConfigs ?? []) add('competitor', c.modelId);
   add('competitor', cfg.contestantModelId);
   for (const id of cfg.judgeModelIds ?? []) add('judge', id);
+  // IMPL-115 (revisão w2): com cascata os juízes que EMITEM veredito são os
+  // baratos + o forte — sem eles o pré-voo checava quem nem julga e deixava
+  // passar quem julga (a recusa virava `judge_failed` → consenso 'degraded').
+  for (const id of cfg.judgeCascade?.cheap ?? []) add('judge', id);
+  add('judge', cfg.judgeCascade?.strong);
   add('datagen', cfg.datagenModelId);
+  // IMPL-063: embeddings do dedup semântico (papel datagen no ledger).
+  add('datagen', scenarioEmbedModelId(cfg));
   add('reference', cfg.referenceModelId);
+  add('reference', cfg.secondReferenceModelId);
   add('rewriter', cfg.optimizerModelId);
   return out;
 }

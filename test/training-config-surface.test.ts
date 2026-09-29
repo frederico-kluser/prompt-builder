@@ -216,4 +216,25 @@ describe('IMPL-048 — o próprio motor de treino recusa papéis misturados (def
       await expect(startWebTraining(c as never, 'sk-x')).rejects.toThrow(msg);
     }
   });
+
+  // Revisão w2 (IMPL-115 × IMPL-048): com `judgeCascade` quem julga são os
+  // baratos + o forte. `--reference R --judge-cascade R,C:X` (referência que
+  // julga contra o próprio gabarito; modelo sob teste como juiz forte das
+  // próprias respostas) passava no schema, no CLI e no assert dos trainers.
+  it('Node e SPA: referência = juiz barato da cascata / modelo sob teste = juiz forte ⇒ rejeita (schema e trainers)', async () => {
+    const CASCATA = { cheap: ['acme/ref', 'acme/barato'], strong: 'acme/alpha' };
+    const ruim = { ...CFG, judgeCascade: CASCATA } as unknown as TrainingConfig;
+    const r = parseRunConfig(ruim);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toMatch(/A referência "acme\/ref" não pode ser também juiz/);
+      expect(r.error).toMatch(/juiz da cascata "acme\/alpha"/);
+    }
+    const msg = /referência "acme\/ref" não pode ser também juiz|juiz da cascata/;
+    await expect(trainToCompletion(ruim, 'sk-x')).rejects.toThrow(msg);
+    await expect(startTraining(ruim, 'sk-x')).rejects.toThrow(msg);
+    await expect(startWebTraining(ruim as never, 'sk-x')).rejects.toThrow(msg);
+    // Cascata de modelos livres: o schema aceita.
+    expect(parseRunConfig({ ...TRAINING, judgeCascade: { cheap: ['acme/b1', 'acme/b2'], strong: 'acme/forte' } }).ok).toBe(true);
+  });
 });

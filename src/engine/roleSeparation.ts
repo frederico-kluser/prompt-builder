@@ -12,6 +12,9 @@
 // de Nova Run (`problems()`) mostra a mesma pendência antes do clique. Uma
 // segunda cópia da regra divergiria no primeiro ajuste — foi o furo do IMPL-048
 // na SPA, que não validava nada e caía no `judgeModelIds[0]`.
+//
+// IMPL-115 (revisão w2): com `judgeCascade` quem julga são os 2 baratos + o
+// forte — eles entram na régua de "é juiz" (`judgingModelIds`) e não competem.
 
 export type RoleConflictKind =
   | 'reference-missing'
@@ -20,7 +23,9 @@ export type RoleConflictKind =
   // IMPL-055: o 2º gabarito (validação por família distinta) sob a MESMA regra.
   | 'second-reference-is-reference'
   | 'second-reference-is-judge'
-  | 'second-reference-is-competitor';
+  | 'second-reference-is-competitor'
+  // IMPL-115 (revisão w2): juiz da cascata (barato ou forte) que compete.
+  | 'cascade-judge-is-competitor';
 
 export interface RoleConflict {
   kind: RoleConflictKind;
@@ -43,6 +48,23 @@ export interface RoleSeparationInput {
    * correlacionado que o IMPL-048 existe para evitar.
    */
   secondReferenceModelId?: string | null;
+  /**
+   * IMPL-115: modo econômico — com a cascata quem EMITE os vereditos são os
+   * 2 baratos + o forte (não `judgeModelIds`). Eles entram na mesma régua de
+   * "é juiz" (referência/2º gabarito) e não podem competir.
+   */
+  judgeCascade?: { cheap?: readonly string[] | null; strong?: string | null } | null;
+}
+
+/**
+ * Todos os modelos que JULGAM no config: o painel `judgeModelIds` ∪ os juízes
+ * da cascata (IMPL-115), sem repetir, na ordem do contrato pinado. É a régua de
+ * "é juiz" desta regra e dos avisos de imparcialidade dos orquestradores.
+ */
+export function judgingModelIds(cfg: Pick<RoleSeparationInput, 'judgeModelIds' | 'judgeCascade'>): string[] {
+  const c = cfg.judgeCascade;
+  const ids = [...(cfg.judgeModelIds ?? []), ...(c?.cheap ?? []), ...(c?.strong ? [c.strong] : [])];
+  return [...new Set(ids.filter((id) => typeof id === 'string' && id.trim() !== ''))];
 }
 
 /** Quem COMPETE no config: ids do compare (dois eixos) ou o modelo sob teste. */
@@ -59,10 +81,14 @@ export function competingModelIds(cfg: RoleSeparationInput): string[] {
  */
 export function roleSeparationIssues(cfg: RoleSeparationInput): RoleConflict[] {
   const out: RoleConflict[] = [];
+  // IMPL-115: com cascata, os baratos e o forte também julgam — a referência
+  // que for um deles julgaria contra o próprio gabarito (o furo da revisão w2).
+  const juizes = judgingModelIds(cfg);
+  const competidores = competingModelIds(cfg);
   const ref = cfg.referenceModelId ?? '';
   if (ref) {
-    if ((cfg.judgeModelIds ?? []).includes(ref)) out.push({ kind: 'reference-is-judge', ref });
-    if (competingModelIds(cfg).includes(ref)) out.push({ kind: 'reference-is-competitor', ref });
+    if (juizes.includes(ref)) out.push({ kind: 'reference-is-judge', ref });
+    if (competidores.includes(ref)) out.push({ kind: 'reference-is-competitor', ref });
   }
   if (cfg.mode !== 'compare' && !ref.trim()) out.push({ kind: 'reference-missing' });
   const segunda = cfg.secondReferenceModelId ?? '';
@@ -70,8 +96,16 @@ export function roleSeparationIssues(cfg: RoleSeparationInput): RoleConflict[] {
     // Sem referência explícita (compare) quem escreve o gabarito é o 1º juiz —
     // e esse caso já cai em "é juiz".
     if (ref && segunda === ref) out.push({ kind: 'second-reference-is-reference', ref: segunda });
-    if ((cfg.judgeModelIds ?? []).includes(segunda)) out.push({ kind: 'second-reference-is-judge', ref: segunda });
-    if (competingModelIds(cfg).includes(segunda)) out.push({ kind: 'second-reference-is-competitor', ref: segunda });
+    if (juizes.includes(segunda)) out.push({ kind: 'second-reference-is-judge', ref: segunda });
+    if (competidores.includes(segunda)) out.push({ kind: 'second-reference-is-competitor', ref: segunda });
+  }
+  // O painel `judgeModelIds` × competidores já é checado pelo schema (compare:
+  // "juiz não compete"; train/vary: "juiz ≠ modelo sob teste"). A cascata
+  // entra AQUI para valer também no portão da SPA e no assert dos trainers.
+  const c = cfg.judgeCascade;
+  const daCascata = [...new Set([...(c?.cheap ?? []), ...(c?.strong ? [c.strong] : [])])];
+  for (const id of daCascata) {
+    if (id && competidores.includes(id)) out.push({ kind: 'cascade-judge-is-competitor', ref: id });
   }
   return out;
 }
@@ -91,11 +125,14 @@ export function roleConflictMessage(c: RoleConflict): string {
       return `O 2º gabarito "${c.ref}" não pode ser também juiz (o 1º juiz é ainda o verificador): o mesmo modelo escreveria a régua e julgaria contra ela. Escolha modelos distintos.`;
     case 'second-reference-is-competitor':
       return `O 2º gabarito "${c.ref}" não pode ser também competidor: quem escreve a régua não compete contra ela. Escolha modelos distintos.`;
+    case 'cascade-judge-is-competitor':
+      return `O juiz da cascata "${c.ref}" (judgeCascade) não pode ser também competidor nem o modelo sob teste: julgaria as próprias respostas (viés de auto-preferência). Escolha modelos distintos.`;
   }
 }
 
 /** Campo do config que o conflito aponta (o schema reporta o issue nele). */
-export function roleConflictField(c: RoleConflict): 'referenceModelId' | 'secondReferenceModelId' {
+export function roleConflictField(c: RoleConflict): 'referenceModelId' | 'secondReferenceModelId' | 'judgeCascade' {
+  if (c.kind === 'cascade-judge-is-competitor') return 'judgeCascade';
   return c.kind.startsWith('second-reference') ? 'secondReferenceModelId' : 'referenceModelId';
 }
 

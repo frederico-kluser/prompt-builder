@@ -13,12 +13,14 @@ import {
   commandLabel,
   installPipeGuards,
   isBareHelpRequest,
+  stdoutClosedAction,
   locateCommand,
   missingCommandError,
   sniffOutputFormat,
   sniffPretty,
 } from './context.js';
 import { COMMANDS, HELP_TAIL, renderCommandHelp } from './help.js';
+import { activeStopHandlers, requestStop } from './runControl.js';
 import { cmdModels } from './commands/models.js';
 import { cmdRun } from './commands/run.js';
 import { cmdDocs, cmdInit, cmdSkill } from './commands/knowledge.js';
@@ -267,8 +269,27 @@ async function main(): Promise<void> {
   // com 0 bytes e o consumidor-maquina nao via nada (Furo 1, R-12).
   const out = new Output({ format: sniffOutputFormat(argv), pretty: sniffPretty(argv) });
   const label = commandLabel(argv);
-  // cli#19: pipe fechado pelo consumidor (`| head`) sai 0 em silêncio, não "rede".
-  installPipeGuards({ onClosed: () => process.exit(EXIT.OK), onOtherError: (err) => failAndExit(out, label, err) });
+  // cli#19: pipe fechado pelo consumidor (`| head`) sai 0 em silêncio, não "rede"
+  // — MAS só em comando de leitura. Revisão w2: run paga em andamento (ou no
+  // pré-voo) segue a rota do SIGTERM (record 'aborted', exit 130) e o `mcp`
+  // encerra pelo próprio caminho; ver `stdoutClosedAction`.
+  let pipeFechadoEmRun = false;
+  installPipeGuards({
+    onClosed: () => {
+      if (pipeFechadoEmRun) return; // a parada graciosa já está em curso
+      const acao = stdoutClosedAction(cmd, activeStopHandlers());
+      if (acao === 'ignore') return;
+      if (acao === 'stop-run') {
+        pipeFechadoEmRun = true;
+        // Sem run registrada ainda (pré-voo), o pedido fica pendente e a run
+        // para assim que se registrar — antes da 1ª chamada paga.
+        requestStop('stdout fechado pelo consumidor (EPIPE)');
+        return;
+      }
+      process.exit(EXIT.OK);
+    },
+    onOtherError: (err) => failAndExit(out, label, err),
+  });
   // Excecao sem dono (callback, rejeicao solta) tambem termina no envelope —
   // o NDJSON nunca fica sem a linha `result`.
   process.on('uncaughtException', (err) => failAndExit(out, label, err));

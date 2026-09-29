@@ -63,8 +63,8 @@ export function parseRoleTimeouts(raw: string | undefined): Partial<Record<CostR
 }
 
 /**
- * `OPENROUTER_AUDITABLE` (IMPL-075): `on` = preset (juiz + gabarito, os papeis
- * de REFERENCIA); ou a lista de papeis (`judge,gabarito,duel`).
+ * `OPENROUTER_AUDITABLE` (IMPL-075): `on` = preset (juiz + duelo + gabarito,
+ * os papeis de REFERENCIA); ou a lista de papeis (`judge,gabarito,duel`).
  */
 function parseAuditableRoles(raw: string | undefined): CostRole[] | undefined {
   const txt = (raw ?? '').trim();
@@ -87,7 +87,7 @@ function parseAuditableRoles(raw: string | undefined): CostRole[] | undefined {
  *   omissao TODO papel vai em streaming — em abort o provedor para de gerar)
  * OPENROUTER_ROLE_TIMEOUTS → roleTimeouts (IMPL-077; ver `parseRoleTimeouts`)
  * OPENROUTER_META_TIMEOUT_MS → metaTimeoutMs (/models, /key, /generation)
- * OPENROUTER_AUDITABLE → auditableRoles (IMPL-075; `on` = juiz + gabarito)
+ * OPENROUTER_AUDITABLE → auditableRoles (IMPL-075; `on` = juiz + duelo + gabarito)
  * OPENROUTER_AUDITABLE_PROVIDERS → auditableProviderOrder (lista por virgula)
  */
 export function gatewayConfigFromEnv(env: Env): Partial<GatewayConfig> {

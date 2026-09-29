@@ -143,7 +143,7 @@ const USO: Record<string, string> = {
   --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR)
   --stages N               default 10 no treino: com poucos cenários o gate não
                            consegue promover (o pré-voo avisa)
-  --auditable              juiz e gabarito com provedor travado (sem fallback)
+  --auditable              juiz, duelo e gabarito com provedor travado (sem fallback)
   Campeão só é DECLARADO com ≥ N itens curados (âncora humana: gabarito/rótulo
   escrito por gente — gabarito gerado por IA não conta). N = training.minCuratedItems,
   default 20 — proposta SEM fonte (calibrar). Abaixo disso o resultado traz

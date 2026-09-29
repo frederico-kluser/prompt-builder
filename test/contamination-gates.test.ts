@@ -163,7 +163,14 @@ describe('IMPL-067 (3) — barreira do handoff', () => {
   it('o veredito do TREINO (gate da iteração) também bloqueia; override justificado sobrepõe', () => {
     const r = evaluateHandoffGuards(
       sessaoInput(PARAFRASE, {
-        bestPromptByIteration: [{ systemPrompt: PARAFRASE, gate: { contamination: { blocked: true, containment: 0.4, detail: 'explicação do juiz colada' } } }],
+        // Linha em que o gate PROMOVEU o próprio candidato (o gate fala do campeão).
+        bestPromptByIteration: [
+          {
+            systemPrompt: PARAFRASE,
+            winnerContestantId: 'v1',
+            gate: { bestId: 'v1', decision: 'promoted', contamination: { blocked: true, containment: 0.4, detail: 'explicação do juiz colada' } },
+          },
+        ],
       }),
     );
     expect(r.blocked).toBe(true);
@@ -171,6 +178,48 @@ describe('IMPL-067 (3) — barreira do handoff', () => {
     const com = evaluateHandoffGuards(sessaoInput(CONTAMINADO), { overrideReason: 'revisado pelo time' });
     expect(com.blocked).toBe(false);
     expect(com.override?.bypassed).toEqual(['contamination.blocked']);
+  });
+
+  // Revisão w2: o gate da iteração é o veredito do CANDIDATO. Quando o candidato
+  // da última iteração foi barrado por contaminação, `withContamination` já
+  // forçou `isWinner: false` e o campeão da linha é o carry (limpo) — o handoff
+  // não pode barrá-lo pelo candidato que nunca foi promovido.
+  it('candidato da última iteração barrado + carry limpo: o handoff NÃO acusa contaminação', () => {
+    const r = evaluateHandoffGuards(
+      sessaoInput(PARAFRASE, {
+        bestPromptByIteration: [
+          { systemPrompt: PARAFRASE, winnerContestantId: 'v1', gate: { bestId: 'v1', decision: 'promoted' } },
+          {
+            systemPrompt: PARAFRASE,
+            winnerContestantId: 'carry',
+            gate: {
+              bestId: 'v7',
+              decision: 'held',
+              contamination: { blocked: true, containment: 0.5, detail: 'o candidato v7 colou um cenário' },
+            },
+          },
+        ],
+      }),
+    );
+    expect(r.blocked).toBe(false);
+    expect(r.blocks.map((b) => b.code)).not.toContain('contamination.blocked');
+    expect(r.contamination).toMatchObject({ blocked: false, source: 'recomputed' });
+  });
+
+  it('carry que é ELE MESMO contaminado continua barrado pela recomputação', () => {
+    const r = evaluateHandoffGuards(
+      sessaoInput(CONTAMINADO, {
+        bestPromptByIteration: [
+          {
+            systemPrompt: CONTAMINADO,
+            winnerContestantId: 'carry',
+            gate: { bestId: 'v7', decision: 'held', contamination: { blocked: true, containment: 0.5 } },
+          },
+        ],
+      }),
+    );
+    expect(r.blocked).toBe(true);
+    expect(r.contamination).toMatchObject({ blocked: true, source: 'recomputed' });
   });
 
   // Integração w2 (IMPL-061 × IMPL-067): a campeã few-shot carrega demos REAIS

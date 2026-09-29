@@ -35,7 +35,7 @@ import { trainToCompletion } from '../src/trainer.js';
 import { startTraining as startWebTraining } from '../web/src/engine/trainer.js';
 import { getRunRecord, subscribeSession } from '../web/src/engine/events.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter, type FakeRequest } from './fakeOpenRouter.js';
-import { pointwiseReply } from './judgeReplies.js';
+import { duelReply, pointwiseReply } from './judgeReplies.js';
 import type { RunRecord, SessionRecord, StageSpec, TrainingConfig } from '../src/types.js';
 
 const KEY = 'sk-or-v1-fake-key-para-teste-0000000000';
@@ -96,7 +96,10 @@ function transporte(): FetchLike {
         };
       }
       if (req.model === 'fake/a') return { text: `Resposta para ${req.user.slice(0, 30)}`, provider: 'AcmeCloud' };
-      if (req.model === 'fake/judge') return { text: pointwiseReply(req, 'parcial'), provider: 'JudgeCloud' };
+      if (req.model === 'fake/judge') {
+        if (req.system.includes('DUELO')) return { text: duelReply(req, 'A', 'A melhor'), provider: 'JudgeCloud' };
+        return { text: pointwiseReply(req, 'parcial'), provider: 'JudgeCloud' };
+      }
       return { text: 'ok' };
     },
   });
@@ -182,6 +185,20 @@ describe('IMPL-075 — modo auditável da sessão chega à run e trava o provedo
       expect(run.costByRole!.judge.auditableCalls).toBe(juiz.length);
       expect(run.callLog!.filter((c) => c.role === 'judge').every((c) => c.auditable === true)).toBe(true);
       expect(rec.costByRole!.judge.auditableCalls).toBe(juiz.length);
+    });
+
+    // Revisão w2: as finais DECIDEM o vencedor (finais primeiro, depois
+    // judge-score) — o duelo que coroa o campeão também trava o provedor.
+    it(`${nome}: auditable:true com FINAIS ⇒ todo pedido de duelo sai travado e conta em costByRole.duel`, async () => {
+      const { rec, run } = await treinar(config({ auditable: true, duels: true, finalists: 2 }));
+      expect(rec.status, rec.error).toBe('finished');
+      const duelos = doModelo('fake/judge').filter((r) => r.system.includes('DUELO'));
+      expect(duelos.length, 'a run não chegou às finais').toBeGreaterThan(0);
+      for (const r of duelos) {
+        expect(r.body?.provider).toMatchObject({ allow_fallbacks: false, require_parameters: true });
+      }
+      expect(run.costByRole!.duel.auditableCalls).toBe(duelos.length);
+      expect(run.callLog!.filter((c) => c.role === 'duel').every((c) => c.auditable === true)).toBe(true);
     });
 
     it(`${nome}: sem auditable, nada travado (o default não muda)`, async () => {
