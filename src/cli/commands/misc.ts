@@ -690,7 +690,7 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     // IMPL-115 (left#4): o modo econômico — quanto foi ao juiz forte e por quê.
     const cc = record.judgeCascade;
     if (cc) {
-      const motivos = Object.entries(cc.reasons)
+      const motivos = Object.entries(cc.reasons ?? {})
         .filter(([, n]) => n > 0)
         .map(([k, n]) => `${k}=${n}`)
         .join(' ');
