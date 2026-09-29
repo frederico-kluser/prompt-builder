@@ -121,7 +121,12 @@ como `credit.insufficient` não verificado). Como a key é a última checagem,
 toda recusa de configuração sai igual com ou sem key.
 
 `agents run --dry-run` estima com o catálogo e espelha as recusas da execução
-de agentes (só `usage.budget_required`; a key vai em `requires`).
+de agentes, na ordem dela: `usage.budget_required` (2), o portão de config
+executável — `config.exec_not_approved`/`config.exec_hash_changed` (3), sem o
+pin SHA-256 do conteúdo — e `run.locked`/`control.daily_cap_reached`; a key vai
+em `requires`. `data.checks.execConfig` diz `approved` (pinado), `would_approve`
+(com `--allow-exec-config` a real pinaria) ou `not_approved`. O dry-run **nunca**
+grava o pin, nem com a flag.
 
 ## Defesa anti-gasto N× (vários processos, retentativas)
 

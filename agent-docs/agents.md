@@ -38,7 +38,10 @@ O contrato completo da configuração está na próxima doc: `docs agent-task`.
 prompt-builder agents doctor          # --deep roda o auto-teste de sala limpa
 
 # 2. Rode. --config declara a arena; --budget é o teto da run inteira.
-prompt-builder agents run --config x.json --budget 5
+#    Na PRIMEIRA vez, revise setup[]/verify[]/testsDir (eles EXECUTAM nesta máquina) e aprove
+#    com --allow-exec-config: o SHA-256 do conteúdo fica pinado e o MESMO arquivo passa sem a
+#    flag depois. Sem pin → exit 3 `config.exec_not_approved` (o --dry-run recusa igual).
+prompt-builder agents run --config x.json --budget 5 --allow-exec-config
 
 # 3. Veja as runs existentes.
 prompt-builder agents list --json
@@ -69,10 +72,11 @@ cobrada. Configurar `maxCostUsd: 0.05` e ver `0.061` **é o teto funcionando**.
 **Erro de infraestrutura não é `error` do agente.** Quando a execução termina porque o
 **provedor/rede** falhou na última chamada ao modelo (retentativas esgotadas — ex.:
 proxy de inferência sem alcançar o provedor, 502/`Connection error.`), o `stopReason` é `error`,
-mas a execução leva `infraError` e a repetição fica **sem veredito — fora do placar e das
-médias, nunca `nao`**. Exceção: oráculo conclusivo (passou 100% ou violou
-`forbiddenPaths`) decide como numa execução concluída. O `error` → `nao` da tabela é o
-processo que **morreu** sem erro do provedor.
+mas a execução leva `infraError`, é **refeita às cegas até 2×** e, persistindo, a repetição
+fica **sem veredito — fora do placar e das médias, nunca `nao`** (ver **Falhas de
+infraestrutura**). Exceção: oráculo conclusivo (passou 100% ou violou `forbiddenPaths`)
+decide como numa execução concluída. O `error` → `nao` da tabela é o processo que
+**morreu** sem erro do provedor.
 
 | `stopReason` | O que acontece | Efeito na nota |
 |---|---|---|
@@ -100,6 +104,35 @@ inteira do placar, para todos.
 `forbiddenPaths`**, o corte por teto ainda pode valer `resolve` — o mundo mudou
 de forma verificável, e o critério de sucesso é o teste, não a educação do
 agente ao se despedir. Oráculo parcial, zerado ou violado + corte = `nao`.
+
+## Falhas de infraestrutura (transient × defect)
+
+O que **não é do agente** nunca vira nota. A classe sai do **tipo** da falha, nunca do resultado:
+
+| Classe | Exemplos | O que acontece |
+|---|---|---|
+| `transient` | 429/5xx do provedor, rede (`ECONNRESET`…), sandbox morto (daemon/container caiu, `docker run` exit 125) | a execução é refeita **às cegas até 2×**; persistindo, **sem veredito** (`infra_error`, fora de todos os denominadores) |
+| `defect` | `setup[]`/clone/fixture que falha, executor que não prepara, `testsDir` inválido | **sem retentativa**; a etapa fica **inválida para TODOS** os contestants (`stage.error`) |
+| `infra` | 401/402/403 do provedor, erro do harness, `rebuild` que falha | sem veredito e sem retentativa |
+
+Tentativa que produziu veredito (inclusive `nao` e corte por limite) **nunca** é refeita.
+Tentativas contam: `verdict.json` (`attempts`, `discardedAttempts`; a descartada fica em
+`<rep>.attempt-<n>/`), `agentInfra` no record e `agentSummary` (`attempts`, `retries`,
+`infraErrors`, `infraErrorRate`, `defectStages`). `infraErrorRate` > 5% = alerta; > **10%** =
+run **inválida**: status `inconclusive` e `agents run` sai **exit `6` `run.infra_invalid`**.
+
+## Tarefa @2 (`arena-agent-config@2`)
+
+Campos **aditivos** do `agentTask` (o @1 continua legível; a mesma tarefa passa em
+`agents task validate` e em `agents run`):
+
+- `regression[]` — checks (forma do `verify`) que rodam como `pass_to_pass`: quebrar um zera a nota.
+- `testsDir` — diretório **relativo ao arquivo** (sem `/` inicial nem `../`), copiado para o
+  verificador **depois** do agente: durante a execução ele não existe no workspace, e um
+  teste plantado pelo agente é sobrescrito. Entra no hash do portão (`--allow-exec-config`).
+- `solution` — `{kind:"script",script}` ou `{kind:"diff",diff}`; obrigatória só no `task validate`.
+- `env` — `{digest:"sha256:…"|"<ref>@sha256:…", path?}` (`path` relativo recusado); `metadata` —
+  `{origin, commit, difficulty, tags, canary}`; `verify[].critical` — barreira na validação.
 
 ## Oráculo × juiz — o juiz só age DENTRO da faixa do oráculo
 

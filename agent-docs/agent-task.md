@@ -1,10 +1,9 @@
-# O contrato `arena-agent-config@1` (a configuração do modo agente)
+# O contrato `arena-agent-config@1|@2` (a configuração do modo agente)
 
-Este é o arquivo de configuração inteiro do modo agente, campo a campo. Seu
-formato é **`arena-agent-config@1`** — um formato novo, não um campo a mais no
-`arena-config@1`. O parser despacha por `format`, e o `arena-config@1` também é
-lido pelo motor do navegador; aceitar campos de agente lá faria a UI validar com
-sucesso uma configuração que ela nunca poderia executar.
+O arquivo de configuração do modo agente, campo a campo. Formato
+**`arena-agent-config@1`** (ou `@2`) — não um campo a mais no `arena-config@1`:
+este também é lido pelo motor do navegador, e aceitar campos de agente lá faria
+a UI validar uma configuração que ela nunca poderia executar.
 
 ```jsonc
 {
@@ -65,7 +64,7 @@ sucesso uma configuração que ela nunca poderia executar.
 
 | Campo | Tipo | Obr. | Descrição |
 |---|---|---|---|
-| `format` | string | **sim** | Sempre o literal `"arena-agent-config@1"`. Qualquer outro valor é rejeitado. |
+| `format` | string | **sim** | `"arena-agent-config@1"` ou `"…@2"` (campos aditivos no `agentTask`). Outro valor é rejeitado. |
 | `mode` | string | **sim** | `compare` \| `variation` \| `training`. A pergunta da run (qual modelo? qual prompt? evoluir o prompt?). |
 | `theme` | string | sim | Tema/título da run. |
 | `scenarioBrief` | string | não | Instruções do autor para os cenários (não é usado em datagen de agente na v1 — ver nota). |
@@ -113,9 +112,8 @@ endurecido fixo (`--network none`, `--read-only`, `--cap-drop ALL`, usuário do 
 imagem por digest) e a key do OpenRouter **fora** do sandbox (proxy de inferência
 local, token fictício por execução). `setup[]`/`verify[]` em sandboxes próprios. Detalhes —
 imagem, binds, proxy, rede, `agents doctor --container` e a válvula do operador:
-`prompt-builder docs agents` → **Modo container**. Modelo inalcançável numa execução
-= **erro de infraestrutura** (`execution.infraError`): sem veredito, fora do placar;
-nunca `nao`.
+`prompt-builder docs agents` → **Modo container**. Falha de infraestrutura nunca vira
+`nao`: `docs agents` → **Falhas de infraestrutura**.
 
 ### `agent.limits`
 
@@ -189,6 +187,7 @@ tarefa com agentes diferentes.
 | `detectors` | não | Detectores estáticos sobre o diff (`skip`/`only`/`todo`, `xfail`, `exit(0)`/`\|\| true` **só em arquivo de teste/config de runner**, teste apagado, config de runner editada — inclusive `preinstall`/`install`/`postinstall`/`prepare` no `package.json`). `warn` (default) só registra em `oracle.json`; `fail` transforma em violação (a explicação do `nao` distingue detector de caminho protegido); `off` desliga. |
 | `contextFiles` | não | Autoriza o agente a ler `AGENTS.md`/`CLAUDE.md` do repo-semente. Default desligado (segurança contra prompt injection); quando ligado, o dossiê **destaca** que o repo instruiu o agente. |
 | `limits` | não | Limites **por execução**; herda de `agent.limits`. Default: obrigatório (ver `maxCostUsd`). |
+| `regression` `testsDir` `solution` `env` `metadata` | não | (@2) Ver `docs agents` → **Tarefa @2**. |
 
 #### `agentTask.repo`
 
