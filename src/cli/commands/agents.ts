@@ -1652,7 +1652,7 @@ async function cmdTaskCompile(argv: string[]): Promise<number> {
       EXIT.USAGE,
     );
   }
-  const { entries } = await loadTaskNodes(file);
+  const { baseDir, entries } = await loadTaskNodes(file);
   let entry = entries[0];
   if (entries.length > 1) {
     const idx = n(values.scenario, '--scenario');
@@ -1686,13 +1686,29 @@ async function cmdTaskCompile(argv: string[]): Promise<number> {
   }
 
   const name = typeof values.name === 'string' && values.name.trim() ? values.name : undefined;
-  const result = compileAgentTaskToHarbor(t.task, { outDir, instruction, ...(name ? { name } : {}) });
-  out.info(`árvore Harbor ${HARBOR_VERSION} escrita em ${result.outDir} (${result.files.length} arquivo(s)).`);
+  // left#12: o `testsDir` é relativo ao arquivo — o material dele vai para
+  // tests/files/ e o test.sh o materializa depois do agente.
+  let result: ReturnType<typeof compileAgentTaskToHarbor>;
+  try {
+    result = compileAgentTaskToHarbor(t.task, { outDir, instruction, baseDir, ...(name ? { name } : {}) });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/testsDir/.test(msg)) throw err;
+    throw new CliError(`Tarefa inválida em ${entry.label}: ${msg}.`, EXIT.CONFIG, { testsDir: t.task.testsDir ?? null, baseDir }, {
+      code: 'config.tests_dir_invalid',
+      hint: 'O `testsDir` é relativo ao diretório do arquivo de configuração e não pode sair dele (nem por symlink).',
+    });
+  }
+  out.info(
+    `árvore Harbor ${HARBOR_VERSION} escrita em ${result.outDir} (${result.files.length} arquivo(s)` +
+      `${result.testsMaterial ? `; ${result.testsMaterial.length} do testsDir em tests/files/` : ''}).`,
+  );
   out.result(true, 'agents.task.compile', {
     outDir: result.outDir,
     harborVersion: HARBOR_VERSION,
     files: result.files,
     rewardSpec: result.rewardSpec,
+    testsMaterial: result.testsMaterial,
   });
   return EXIT.OK;
 }

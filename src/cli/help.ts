@@ -307,6 +307,9 @@ const USO: Record<string, string> = {
   agents task validate <arq> [--repetitions N] [--allow-exec-config]
            as 6 checagens da tarefa — EXECUTA setup[]/solution/checks no
            host: passa pelo MESMO portão (pin SHA-256 inclui o testsDir)
+  agents task compile <arq> --out-dir <dir> [--instruction <txt>] [--scenario N]
+           layout Harbor (task.toml, solution/, tests/test.sh → reward.json);
+           o material do testsDir vai em tests/files/ e entra depois do agente
   agents show <runId> | list (teto 50; --all/--limit N) | logs | replay | gc`,
   telemetry: `  telemetry [status]       estado do opt-in e da atribuição (padrão)
   telemetry schema         schema PÚBLICO do payload + allowlist de eventos
