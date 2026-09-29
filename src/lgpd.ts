@@ -135,26 +135,24 @@ export async function enforceRunCompliance(
 // `<data-dir>` e não havia comando para removê-las. Agora:
 //
 //  • TTL por default (90 dias, `src/data/lgpd-retention.json`; `PB_RETENTION_DAYS`
-//    sobrescreve) com prune (`pruneExpiredRuns`) e a versão limitada a uma
-//    varredura por hora (`autoPrune`) — 0 exceções: um item preso não derruba
-//    a varredura;
-//  • apagamento TOTAL de uma run (`eraseRuns`/`eraseRunFiles`): record, sobras
-//    `.tmp` da escrita atômica, dono, job (registro, log, NDJSON, cancel,
-//    chave de idempotência) e o diretório de artefatos/cache do agente
-//    (`agent-runs/<id>/`, que inclui o `repo-cache`). Zero resíduo.
+//    sobrescreve; 0 desliga) com prune de runs E sessões (`pruneExpiredRuns`/
+//    `pruneExpiredSessions`) e a versão limitada a uma varredura por hora
+//    (`autoPrune`) — 0 exceções: um item preso não derruba a varredura;
+//  • apagamento TOTAL de uma run/sessão (`eraseRuns`/`eraseRunFiles`/
+//    `eraseSessionFiles`): record, sobras `.tmp` da escrita atômica, dono,
+//    journal de chamadas, job (registro, log, NDJSON, cancel, chave — inclusive
+//    o job de `--detach`, cujo id não é o da run), registro de
+//    `--idempotency-key`, relatório HTML da sessão e o diretório de
+//    artefatos/cache do agente (`agent-runs/<id>/`, com o `repo-cache`).
 //
-// ⚠️ PENDENTE (fora deste ficheiro, IMPL-100 por fechar): nada chama
-// `autoPrune`/`eraseRuns` ainda — falta o comando `runs delete` do CLI
-// (`src/cli/commands/`), o botão "apagar banco" da tela de Configurações
-// (`web/src/pages/Settings.tsx` → `wipeLocalData`) e a ligação do `autoPrune`
-// no boot do CLI/servidor e no pré-voo de cada run. Também ficam POR FORA:
-// sessões de treino (o critério fala em runs) e cifragem em repouso (keyring).
-// Os critérios (1)–(3) estão cobertos por `test/lgpd-retention.test.ts` e
-// `test/lgpd-wipe-e2e.test.ts` (este é o Playwright `launch_persistent_context`
-// com deleteDatabase + estimate ≈ 0).
-//
-// A SPA tem o par em `web/src/lgpd.ts` (apagamento do IndexedDB inteiro +
-// `navigator.storage.estimate` + instrução de "limpar dados do site").
+// Quem chama (IMPL-100): `runs delete`/`runs prune`/`sessions delete` do CLI,
+// o prune automático das listagens (`runs list`/`sessions list` e GET
+// /v1/benchmark/runs|sessions) e o pré-voo de cada run real do CLI.
+// Fica de fora DE PROPÓSITO: o ledger diário de gasto (`ledger/`, contabilidade
+// do teto da máquina — o rótulo cita o id, mas apagá-lo desarmaria o teto) e a
+// trilha de handoff (`handoffs.jsonl`, auditoria). A SPA tem o par em
+// `web/src/lgpd.ts` (apagamento do IndexedDB inteiro + `navigator.storage.
+// estimate` + instrução de "limpar dados do site"); a tela que o chama é da SPA.
 
 /** TTL de retenção das runs gravadas. `retentionDays: 0` = sem TTL (só apagamento explícito). */
 export interface RetentionPolicy {
@@ -201,7 +199,10 @@ export function isOlderThan(ref: Date | number | string, now: number, retentionD
   return t < cutoff;
 }
 
-/** Resíduos por run espalhados pelo data-dir (relativos à raiz). */
+/** Tipo de registro apagável (run avulsa ou sessão de treino). */
+export type ErasableKind = 'run' | 'session';
+
+/** Resíduos por run/sessão espalhados pelo data-dir (relativos à raiz). */
 export interface RunEraseResult {
   id: string;
   /** Caminhos relativos ao data-dir que existiam e foram removidos. */
@@ -212,59 +213,126 @@ function dataSub(dataDir: string, ...seg: string[]): string {
   return resolveInside(dataDir, ...seg);
 }
 
-/** Sobra da escrita atômica (`<alvo>.<uuid>.tmp`) de um alvo, e dono/job do id. */
-async function residueOf(dataDir: string, runId: string): Promise<Array<{ abs: string; rel: string }>> {
+const DIR_DO_TIPO: Record<ErasableKind, 'runs' | 'sessions'> = { run: 'runs', session: 'sessions' };
+
+async function lerJson(abs: string): Promise<unknown> {
+  try {
+    return JSON.parse(await fs.readFile(abs, 'utf-8'));
+  } catch {
+    return undefined; // ausente/corrompido não é resíduo LÓGICO deste id
+  }
+}
+
+/** O objeto JSON cita este id em algum dos `campos`? */
+function citaId(json: unknown, id: string, campos: readonly string[]): boolean {
+  if (!json || typeof json !== 'object') return false;
+  const o = json as Record<string, unknown>;
+  return campos.some((c) => o[c] === id);
+}
+
+/**
+ * Tudo o que pertence a `id` no data-dir: record, dono, `.tmp` da escrita
+ * atômica, journal de chamadas (run), relatório HTML (sessão), job(s) — o de
+ * mesmo id E o de `--detach`, que tem id próprio e aponta a run/sessão —,
+ * chaves de job, registro de `--idempotency-key` e `agent-runs/<id>/`.
+ */
+async function residueOf(
+  dataDir: string,
+  kind: ErasableKind,
+  id: string,
+): Promise<Array<{ abs: string; rel: string }>> {
   const alvos: Array<{ abs: string; rel: string }> = [];
+  const vistos = new Set<string>();
   const add = (rel: string, abs: string): void => {
+    if (vistos.has(rel)) return;
+    vistos.add(rel);
     alvos.push({ rel, abs });
   };
+  const dir = DIR_DO_TIPO[kind];
 
-  add(path.posix.join('runs', `${runId}.json`), dataSub(dataDir, 'runs', `${runId}.json`));
-  add(path.posix.join('runs', `${runId}.owner`), dataSub(dataDir, 'runs', `${runId}.owner`));
-  add(path.posix.join('jobs', `${runId}.json`), dataSub(dataDir, 'jobs', `${runId}.json`));
-  add(path.posix.join('jobs', `${runId}.cancel`), dataSub(dataDir, 'jobs', `${runId}.cancel`));
-  add(path.posix.join('jobs', `${runId}.ndjson`), dataSub(dataDir, 'jobs', `${runId}.ndjson`));
-  add(path.posix.join('jobs', `${runId}.log`), dataSub(dataDir, 'jobs', `${runId}.log`));
-  // Diretório inteiro: artefatos + `repo-cache` (o "cache" da run).
-  add(path.posix.join('agent-runs', runId), dataSub(dataDir, 'agent-runs', runId));
+  add(path.posix.join(dir, `${id}.json`), dataSub(dataDir, dir, `${id}.json`));
+  add(path.posix.join(dir, `${id}.owner`), dataSub(dataDir, dir, `${id}.owner`));
+  if (kind === 'run') {
+    // Journal de chamadas (IMPL-081): guarda as RESPOSTAS pagas para replay.
+    add(path.posix.join('runs', `${id}.journal`), dataSub(dataDir, 'runs', `${id}.journal`));
+    // Diretório inteiro: artefatos + `repo-cache` (o "cache" da run).
+    add(path.posix.join('agent-runs', id), dataSub(dataDir, 'agent-runs', id));
+  } else {
+    // `sessions report --annotate` sem --html grava aqui (0700).
+    add(path.posix.join('reports', `${id}.html`), dataSub(dataDir, 'reports', `${id}.html`));
+  }
 
-  // Sobras `.tmp` de escrita atômica interrompida em runs/ e jobs/.
-  for (const dir of ['runs', 'jobs']) {
+  // Jobs: o de mesmo id e os que APONTAM este id (o `--detach` tem jobId próprio).
+  const jobIds = new Set<string>([id]);
+  let nomesJobs: string[] = [];
+  try {
+    nomesJobs = await fs.readdir(dataSub(dataDir, 'jobs'));
+  } catch {
+    // sem jobs/ ⇒ nada a apagar
+  }
+  for (const nome of nomesJobs) {
+    if (!nome.endsWith('.json')) continue;
+    const jobId = nome.slice(0, -'.json'.length);
+    try {
+      assertValidRecordId(jobId, 'id de job');
+    } catch {
+      continue;
+    }
+    if (citaId(await lerJson(dataSub(dataDir, 'jobs', nome)), id, ['runId', 'sessionId'])) jobIds.add(jobId);
+  }
+  for (const jobId of jobIds) {
+    for (const ext of ['json', 'cancel', 'ndjson', 'log']) {
+      add(path.posix.join('jobs', `${jobId}.${ext}`), dataSub(dataDir, 'jobs', `${jobId}.${ext}`));
+    }
+  }
+
+  // Sobras `.tmp` de escrita atômica interrompida no diretório do tipo e em jobs/.
+  for (const sub of [dir, 'jobs']) {
     let nomes: string[] = [];
     try {
-      nomes = await fs.readdir(dataSub(dataDir, dir));
+      nomes = await fs.readdir(dataSub(dataDir, sub));
     } catch {
       continue; // diretório inexistente ⇒ sem sobras
     }
     for (const nome of nomes) {
-      if (!nome.startsWith(`${runId}.`) || !nome.endsWith('.tmp')) continue;
-      add(path.posix.join(dir, nome), dataSub(dataDir, dir, nome));
+      if (!nome.endsWith('.tmp')) continue;
+      if (![...jobIds].some((j) => nome.startsWith(`${j}.`))) continue;
+      add(path.posix.join(sub, nome), dataSub(dataDir, sub, nome));
     }
   }
 
-  // Chave de idempotência (`jobs/keys/<sha256>.json`) que aponte para esta run.
+  // Chave de idempotência de job (`jobs/keys/<sha256>.json`) que aponte um dos jobs.
   try {
     const chaves = await fs.readdir(dataSub(dataDir, 'jobs', 'keys'));
     for (const nome of chaves) {
       if (!nome.endsWith('.json')) continue;
       const abs = dataSub(dataDir, 'jobs', 'keys', nome);
-      try {
-        const txt = await fs.readFile(abs, 'utf-8');
-        if (JSON.parse(txt)?.jobId === runId) add(path.posix.join('jobs', 'keys', nome), abs);
-      } catch {
-        // chave corrompida não é resíduo LOGÍCICO desta run — não tocar
-      }
+      const jobId = ((await lerJson(abs)) as { jobId?: unknown } | undefined)?.jobId;
+      if (typeof jobId === 'string' && jobIds.has(jobId)) add(path.posix.join('jobs', 'keys', nome), abs);
     }
   } catch {
     // sem diretório de chaves ⇒ nada a apagar
   }
 
+  // Registro de `--idempotency-key` do CLI (`idempotency/<h>.json`) que aponte o id.
+  try {
+    const regs = await fs.readdir(dataSub(dataDir, 'idempotency'));
+    for (const nome of regs) {
+      if (!nome.endsWith('.json')) continue;
+      const abs = dataSub(dataDir, 'idempotency', nome);
+      if (citaId(await lerJson(abs), id, ['runId', 'sessionId'])) add(path.posix.join('idempotency', nome), abs);
+    }
+  } catch {
+    // sem registros ⇒ nada a apagar
+  }
+
   return alvos;
 }
 
-/** Remove a linha da run no índice de resumos (`runs/_index.jsonl`, cache do listRuns). */
-async function dropFromRunsIndex(dataDir: string, runId: string): Promise<string | null> {
-  const idx = dataSub(dataDir, 'runs', '_index.jsonl');
+/** Remove a linha do id no índice de resumos (`<dir>/_index.jsonl`, cache das listagens). */
+async function dropFromIndex(dataDir: string, kind: ErasableKind, id: string): Promise<string | null> {
+  const dir = DIR_DO_TIPO[kind];
+  const idx = dataSub(dataDir, dir, '_index.jsonl');
   let texto: string;
   try {
     texto = await fs.readFile(idx, 'utf-8');
@@ -274,12 +342,12 @@ async function dropFromRunsIndex(dataDir: string, runId: string): Promise<string
   const linhas = texto.split('\n').filter((linha) => {
     if (!linha.trim()) return false;
     try {
-      return (JSON.parse(linha) as { summary?: { id?: string } })?.summary?.id !== runId;
+      return (JSON.parse(linha) as { summary?: { id?: string } })?.summary?.id !== id;
     } catch {
-      return true; // linha alheia corrompida não é resíduo desta run
+      return true; // linha alheia corrompida não é resíduo deste id
     }
   });
-  const novo = `${linhas.join('\n')}\n`;
+  const novo = linhas.length ? `${linhas.join('\n')}\n` : '';
   if (novo === texto) return null;
   const tmp = `${idx}.${Date.now().toString(36)}.tmp`;
   try {
@@ -288,19 +356,13 @@ async function dropFromRunsIndex(dataDir: string, runId: string): Promise<string
   } catch {
     await fs.rm(tmp, { force: true }).catch(() => undefined);
   }
-  return path.posix.join('runs', '_index.jsonl');
+  return path.posix.join(dir, '_index.jsonl');
 }
 
-/**
- * Apaga UMA run com TODOS os resíduos: record, `.tmp` da escrita atômica,
- * dono, job (registro/log/NDJSON/cancel/chave), `agent-runs/<id>/` (artefatos
- * + cache) e a linha do índice de resumos. Idempotente: o que não existe não é
- * erro. Valida o id ANTES de resolver caminhos (nunca sai de `<data-dir>`).
- */
-export async function eraseRunFiles(dataDir: string, runId: string): Promise<RunEraseResult> {
-  assertValidRecordId(runId, 'id de run');
+async function eraseFiles(dataDir: string, kind: ErasableKind, id: string): Promise<RunEraseResult> {
+  assertValidRecordId(id, kind === 'run' ? 'id de run' : 'id de sessão');
   const removed: string[] = [];
-  for (const { abs, rel } of await residueOf(dataDir, runId)) {
+  for (const { abs, rel } of await residueOf(dataDir, kind, id)) {
     try {
       await fs.lstat(abs); // idempotente: o que não existia não entra em `removed`
     } catch {
@@ -313,9 +375,23 @@ export async function eraseRunFiles(dataDir: string, runId: string): Promise<Run
       // 0 exceções: um arquivo preso não impede o resto do apagamento
     }
   }
-  const idx = await dropFromRunsIndex(dataDir, runId);
+  const idx = await dropFromIndex(dataDir, kind, id);
   if (idx) removed.push(idx);
-  return { id: runId, removed };
+  return { id, removed };
+}
+
+/**
+ * Apaga UMA run com TODOS os resíduos (ver `residueOf`) e a linha do índice de
+ * resumos. Idempotente: o que não existe não é erro. Valida o id ANTES de
+ * resolver caminhos (nunca sai de `<data-dir>`).
+ */
+export async function eraseRunFiles(dataDir: string, runId: string): Promise<RunEraseResult> {
+  return eraseFiles(dataDir, 'run', runId);
+}
+
+/** Como `eraseRunFiles`, para uma SESSÃO (as runs dela saem por `eraseRuns`). */
+export async function eraseSessionFiles(dataDir: string, sessionId: string): Promise<RunEraseResult> {
+  return eraseFiles(dataDir, 'session', sessionId);
 }
 
 /** `runs delete` de uma lista de ids (o comando do CLI chama isto). */
@@ -326,30 +402,31 @@ export async function eraseRuns(dataDir: string, runIds: readonly string[]): Pro
 }
 
 export interface PruneReport {
-  /** Registos de run varridos. */
+  /** Registros varridos. */
   scanned: number;
-  /** Runs vencidas apagadas (ids). */
+  /** Vencidos apagados (ids) — ou que SERIAM apagados, com `dryRun`. */
   deleted: string[];
-  /** Runs dentro do TTL mantidas (ids). */
+  /** Dentro do TTL mantidos (ids). */
   kept: string[];
   /** Falhas por item — o prune NUNCA lança (critério: 0 exceções). */
   errors: Array<{ id: string; error: string }>;
+  /** Só do `autoPrune`: o prune das SESSÕES, feito junto do das runs. */
+  sessions?: PruneReport;
 }
 
 export interface PruneOptions {
   dataDir?: string;
   now?: number;
-  /** Sobrepõe a política carregada (testes). */
+  /** Sobrepõe a política carregada (testes e `runs prune --older-than`). */
   retentionDays?: number;
+  /** Só relata o que venceria — nada é apagado (`runs prune --dry-run`). */
+  dryRun?: boolean;
 }
 
-/**
- * Prune do TTL: remove as runs cujo início (ou, sem data legível, a idade do
- * arquivo) passou de `retentionDays`. Nunca lança — cada item é isolado e as
- * falhas entram em `errors` (critério (2) de IMPL-100: "0 exceções").
- */
-export async function pruneExpiredRuns(opts: PruneOptions = {}): Promise<PruneReport> {
-  const report: PruneReport = { scanned: 0, deleted: [], kept: [], errors: [] };
+const relatorioVazio = (): PruneReport => ({ scanned: 0, deleted: [], kept: [], errors: [] });
+
+async function pruneExpired(kind: ErasableKind, opts: PruneOptions): Promise<PruneReport> {
+  const report = relatorioVazio();
   try {
     // Raiz de persistência = `getDataDir()` (storage.ts), NUNCA process.cwd().
     const dataDir = opts.dataDir ?? getDataDir();
@@ -358,20 +435,20 @@ export async function pruneExpiredRuns(opts: PruneOptions = {}): Promise<PruneRe
     const cutoff = retentionCutoffMs(now, retentionDays);
     if (cutoff === null) return report; // TTL desligado: nada vence
 
-    const dir = dataSub(dataDir, 'runs');
+    const dir = dataSub(dataDir, DIR_DO_TIPO[kind]);
     let nomes: string[] = [];
     try {
       nomes = await fs.readdir(dir);
     } catch {
-      return report; // data-dir ainda sem runs/
+      return report; // data-dir ainda sem o diretório
     }
     for (const nome of nomes) {
       if (!nome.endsWith('.json')) continue;
       const id = nome.slice(0, -'.json'.length);
       try {
-        assertValidRecordId(id, 'id de run');
+        assertValidRecordId(id, kind === 'run' ? 'id de run' : 'id de sessão');
       } catch {
-        continue; // nome estranho em runs/ não é run nossa
+        continue; // nome estranho no diretório não é registro nosso
       }
       report.scanned += 1;
       try {
@@ -386,7 +463,7 @@ export async function pruneExpiredRuns(opts: PruneOptions = {}): Promise<PruneRe
           report.kept.push(id);
           continue;
         }
-        await eraseRunFiles(dataDir, id);
+        if (!opts.dryRun) await eraseFiles(dataDir, kind, id);
         report.deleted.push(id);
       } catch (err) {
         report.errors.push({ id, error: err instanceof Error ? err.message : String(err) });
@@ -398,19 +475,43 @@ export async function pruneExpiredRuns(opts: PruneOptions = {}): Promise<PruneRe
   return report;
 }
 
+/**
+ * Prune do TTL: remove as runs cujo início (ou, sem data legível, a idade do
+ * arquivo) passou de `retentionDays`. Nunca lança — cada item é isolado e as
+ * falhas entram em `errors` (critério (2) de IMPL-100: "0 exceções").
+ */
+export async function pruneExpiredRuns(opts: PruneOptions = {}): Promise<PruneReport> {
+  return pruneExpired('run', opts);
+}
+
+/**
+ * O mesmo TTL para as SESSÕES de treino. Uma sessão começa antes das runs
+ * dela: quando a sessão vence, as runs dela também já venceram — o prune das
+ * duas mantém o conjunto coerente.
+ */
+export async function pruneExpiredSessions(opts: PruneOptions = {}): Promise<PruneReport> {
+  return pruneExpired('session', opts);
+}
+
 let autoPruneAt = 0;
 
 /**
- * Prune automático (fire-and-forget): o chamador (boot do CLI/servidor, pré-voo
- * de run) dispara e segue; no máximo uma varredura por `intervalMs` por
- * processo. Devolve o relatório (quem quiser aguarda) e NUNCA rejeita.
+ * Prune automático (runs + sessões): o chamador (listagens do CLI/servidor,
+ * pré-voo de run do CLI) aguarda; no máximo uma varredura por `intervalMs` por
+ * processo. Devolve o relatório das runs com o das sessões em `sessions` e
+ * NUNCA rejeita.
  */
-export function autoPrune(opts: PruneOptions & { intervalMs?: number; now?: number } = {}): Promise<PruneReport> {
+export async function autoPrune(opts: PruneOptions & { intervalMs?: number } = {}): Promise<PruneReport> {
   const now = opts.now ?? Date.now();
   const intervalMs = opts.intervalMs ?? 3_600_000;
-  if (now - autoPruneAt < intervalMs) {
-    return Promise.resolve({ scanned: 0, deleted: [], kept: [], errors: [] });
-  }
+  if (now - autoPruneAt < intervalMs) return relatorioVazio();
   autoPruneAt = now;
-  return pruneExpiredRuns(opts);
+  const runs = await pruneExpiredRuns({ ...opts, now });
+  const sessions = await pruneExpiredSessions({ ...opts, now });
+  return { ...runs, sessions };
+}
+
+/** Só para testes: esquece a última varredura do `autoPrune`. */
+export function resetAutoPruneThrottle(): void {
+  autoPruneAt = 0;
 }

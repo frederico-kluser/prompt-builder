@@ -199,8 +199,14 @@ router.get('/lgpd', (_req, res) => {
   res.json({ data: getLgpdData() });
 });
 
+/**
+ * IMPL-100 — TTL de retenção LIGADO por default (90 dias, `PB_RETENTION_DAYS`;
+ * 0 desliga): as listagens rodam o prune antes de ler — no máximo uma varredura
+ * por hora por processo (`autoPrune`), que nunca lança. Runs E sessões.
+ */
 router.get('/runs', ah(async (_req, res) => {
   try {
+    await autoPrune();
     const data = await listRuns();
     res.json({ data });
   } catch (err) {
@@ -414,6 +420,7 @@ router.post('/sessions', requireKey, ah(async (req, res) => {
 
 router.get('/sessions', ah(async (_req, res) => {
   try {
+    await autoPrune(); // IMPL-100 (ver GET /runs)
     res.json({ data: await listSessions() });
   } catch (err) {
     fail500(res, err);

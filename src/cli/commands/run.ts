@@ -71,6 +71,7 @@ import { emitRunEvent, emitSessionEventNdjson, truncationFields } from '../ndjso
 import { ROLE_LABEL } from '../../budget.js';
 import { forceExitNow, installGracefulStop } from '../runControl.js';
 import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
+import { retentionSweep } from '../records.js';
 import type {
   CostRole,
   RunConfig,
@@ -1181,6 +1182,10 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
   // continua na raiz, com a mesma semantica de antes. Antes, o GC do estado
   // no disco (dias velhos do ledger, keys vencidas) — revisao do IMPL-031.
   pruneSpendState(dataDir);
+  // IMPL-100: TTL de retenção (90 dias por default, `PB_RETENTION_DAYS`; 0
+  // desliga) no pré-voo de cada run real — no máximo 1 varredura/hora/processo,
+  // nunca lança (falha de um item vira aviso no stderr).
+  await retentionSweep(out);
   const { root, machine } = openMachineLedger({
     dataDir,
     label: `${commandEfetivo}${runId ? ` run ${runId}` : ''}`,

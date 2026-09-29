@@ -86,6 +86,15 @@ import type { RunRecord, SessionRecord } from '../../types.js';
 import { buildSessionReport, renderSessionReportMarkdown } from '../../engine/sessionReport.js';
 import { renderSessionReportHtml } from '../../engine/sessionReportHtml.js';
 import { readConfigFile, resolveArenaLibrary } from './run.js';
+import {
+  importRecords,
+  retentionSweep,
+  runsDelete,
+  runsExportExchange,
+  runsPrune,
+  sessionsDelete,
+  sessionsExportExchange,
+} from '../records.js';
 
 /**
  * Veredito + confirmação da sessão (IMPL-046/IMPL-050): o objeto ESTÁVEL de
@@ -321,6 +330,13 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     reason: { type: 'string' },
     // IMPL-117: `runs reproduce <id> --replay` re-pontua a run gravada a US$ 0.
     replay: { type: 'boolean' },
+    // IMPL-089: `runs export --format exchange` (prompt-builder-exchange@1).
+    format: { type: 'string' },
+    // IMPL-089: `runs import --overwrite` substitui registro conflitante.
+    overwrite: { type: 'boolean' },
+    // IMPL-100: `runs prune [--older-than 30d] [--dry-run]`.
+    'older-than': { type: 'string' },
+    'dry-run': { type: 'boolean' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -330,7 +346,17 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   if (sub === 'wait') return runsWait(ctx);
   if (sub === 'cancel') return runsCancel(ctx);
 
+  // IMPL-100: apagamento de verdade (record + resíduos) e o TTL sob demanda.
+  if (sub === 'delete') return runsDelete(out, parsed.positionals);
+  if (sub === 'prune') return runsPrune(out, parsed.values);
+  // IMPL-089: pacote prompt-builder-exchange@1 (runs e sessões, verbatim).
+  if (sub === 'import') {
+    return importRecords(out, 'runs.import', parsed.positionals[0], { overwrite: parsed.values.overwrite === true });
+  }
+
   if (sub === 'list') {
+    // IMPL-100: TTL ligado por default — a lista nunca mostra o que já venceu.
+    await retentionSweep(out);
     // IMPL-030: run 'running' cujo processo dono morreu (SIGKILL do host) sai
     // como 'aborted' — a lista nunca mostra 'running' para sempre.
     await sweepOrphanRecords({ locklessAfterMs: LOCKLESS_ORPHAN_AFTER_MS });
@@ -431,6 +457,25 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   }
 
   if (sub === 'export') {
+    const formato = typeof parsed.values.format === 'string' ? parsed.values.format.trim() : 'artifact';
+    if (formato !== 'artifact' && formato !== 'exchange') {
+      throw new CliError(
+        `--format deve ser "artifact" ou "exchange" (recebi "${formato}").`,
+        EXIT.USAGE,
+        { flag: '--format', value: formato, accepted: ['artifact', 'exchange'] },
+        {
+          code: 'usage.invalid_flag_value',
+          hint: 'artifact (default) é o artefato auditável; exchange é o pacote reimportável sem perda (`runs import`).',
+        },
+      );
+    }
+    if (formato === 'exchange') {
+      // IMPL-089: o record VERBATIM (campo desconhecido incluso) — `runs import`
+      // num data-dir novo devolve exatamente o mesmo record.
+      const alvoEx =
+        typeof parsed.values.out === 'string' && parsed.values.out.trim() ? parsed.values.out.trim() : undefined;
+      return runsExportExchange(out, record.id, alvoEx);
+    }
     // Artefato auto-contido: record + etapas com gabaritos + system prompts +
     // vereditos do juiz — auditável/reproduzível sem o disco original.
     const artifact = buildRunArtifact(record);
@@ -771,11 +816,24 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     markdown: { type: 'string' },
     'calls-per-month': { type: 'string' },
     annotate: { type: 'boolean' },
+    // IMPL-089: `sessions export -o <dir|arq.json>` / `sessions import --overwrite`.
+    out: { type: 'string', short: 'o' },
+    overwrite: { type: 'boolean' },
+    // IMPL-100: `sessions delete <id> --keep-runs` preserva as runs da sessão.
+    'keep-runs': { type: 'boolean' },
   });
   const ctx = buildContext(parsed);
   const { out } = ctx;
 
+  if (sub === 'delete') {
+    return sessionsDelete(out, parsed.positionals, { keepRuns: parsed.values['keep-runs'] === true });
+  }
+  if (sub === 'import') {
+    return importRecords(out, 'sessions.import', parsed.positionals[0], { overwrite: parsed.values.overwrite === true });
+  }
+
   if (sub === 'list') {
+    await retentionSweep(out); // IMPL-100: TTL ligado por default
     await sweepOrphanRecords({ locklessAfterMs: LOCKLESS_ORPHAN_AFTER_MS }); // IMPL-030
     const todas = await listSessions();
     // IMPL-092: teto default de 50 (--limit N / --all; truncar avisa no stderr).
@@ -800,6 +858,10 @@ export async function cmdSessions(argv: string[]): Promise<number> {
   const campeao = record.bestPromptByIteration.at(-1);
 
   if (sub === 'report') return sessionsReport(record, parsed.values, out);
+  if (sub === 'export') {
+    const alvo = typeof parsed.values.out === 'string' && parsed.values.out.trim() ? parsed.values.out.trim() : undefined;
+    return sessionsExportExchange(out, record.id, alvo);
+  }
 
   if (sub === 'winner') {
     // Handoff versionado: --apply leva o campeão para um arquivo de produção,
