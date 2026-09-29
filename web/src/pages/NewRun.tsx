@@ -1608,7 +1608,7 @@ export function NewRun() {
                 />
                 <NumRow
                   label="Concorrência"
-                  sub="Quantas chamadas seguem em paralelo. Mais é mais rápido e bate no limite do provedor mais cedo."
+                  sub="Só registrada na run (compatibilidade do arena-config): o paralelismo real é do limitador global adaptativo, que cresce no sucesso e recua quando o provedor devolve 429."
                   value={concurrency}
                   onChange={setConcurrency}
                   min={1}
