@@ -18,14 +18,30 @@ function formatDate(iso: string): string {
   return `${p(d.getDate())} ${MONTHS[d.getMonth()]} ${d.getFullYear()}, ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-type Group = 'running' | 'finished' | 'error';
+export type Group = 'running' | 'finished' | 'aborted' | 'error';
 
-function groupOf(status: RunSummary['status']): Group {
+export function groupOf(status: RunSummary['status']): Group {
   if (status === 'running') return 'running';
   // `inconclusive` (IMPL-004) terminou o pipeline: fica em "Concluídas" e a
   // pílula de status diz que o resultado não sustenta conclusão.
   if (status === 'finished' || status === 'inconclusive') return 'finished';
-  return 'error'; // error + aborted
+  // web-live#16: cancelada/orçamento/reinício NÃO é "erro" — tem grupo próprio.
+  if (status === 'aborted') return 'aborted';
+  return 'error';
+}
+
+/**
+ * Linha de metadados com UNIDADE (web-live#16): antes a coluna mostrava
+ * `5/3` (cenários/participantes) para run — lido como progresso — e `2/5`
+ * (rodadas) para treino, sem nada que os distinguisse.
+ */
+export function runMeta(r: Pick<RunSummary, 'stages' | 'contestants' | 'competitors'>): string {
+  const n = r.contestants ?? r.competitors;
+  return `${r.stages} cenário${r.stages === 1 ? '' : 's'} · ${n} participante${n === 1 ? '' : 's'}`;
+}
+
+export function sessionMeta(s: Pick<SessionSummary, 'iterationsDone' | 'iterationsPlanned'>): string {
+  return `rodada ${s.iterationsDone} de ${s.iterationsPlanned}`;
 }
 
 function modeLabel(mode?: RunMode): string {
@@ -38,6 +54,7 @@ const FILTERS: { key: 'all' | Group; label: string }[] = [
   { key: 'all', label: 'Todas' },
   { key: 'running', label: 'Em andamento' },
   { key: 'finished', label: 'Concluídas' },
+  { key: 'aborted', label: 'Interrompidas' },
   { key: 'error', label: 'Com erro' },
 ];
 
@@ -52,8 +69,7 @@ function Row({
   status,
   mode,
   theme,
-  left,
-  right,
+  meta,
   cost,
   at,
 }: {
@@ -62,15 +78,15 @@ function Row({
   status: RunSummary['status'];
   mode: string;
   theme: string;
-  left: string;
-  right: string;
+  /** Metadados JÁ com unidade ("5 cenários · 3 participantes", "rodada 2 de 5"). */
+  meta: string;
   cost: number;
   at: string;
 }) {
   return (
     <Link
       to={to}
-      className="grid grid-cols-[auto_1fr_auto] items-center gap-x-4 gap-y-2 border-b border-border px-4 py-3 last:border-b-0 hover:bg-muted/60 focus-visible:bg-muted focus-visible:outline-none sm:grid-cols-[5.5rem_7rem_1fr_auto_auto_10rem]"
+      className="grid grid-cols-[auto_1fr_auto] items-center gap-x-4 gap-y-2 border-b border-border px-4 py-3 last:border-b-0 hover:bg-muted/60 focus-visible:bg-muted focus-visible:outline-none sm:grid-cols-[5.5rem_8rem_1fr_auto_auto_10rem]"
     >
       <code className="font-mono text-[12px] text-muted-foreground">{id.slice(0, 8)}</code>
       <span className="flex items-center gap-1.5">
@@ -83,7 +99,7 @@ function Row({
         <Tag>{mode}</Tag>
       </span>
       <span className="hidden shrink-0 text-right text-[12px] text-muted-foreground tabular sm:block">
-        {left}/{right}
+        {meta}
       </span>
       <span className="hidden shrink-0 text-right text-[12px] text-muted-foreground tabular md:block">
         ${cost.toFixed(4)} · {formatDate(at)}
@@ -122,7 +138,7 @@ export function RunsList() {
   }, [runs, sessions]);
 
   const counts = useMemo(() => {
-    const c = { all: items.length, running: 0, finished: 0, error: 0 };
+    const c = { all: items.length, running: 0, finished: 0, aborted: 0, error: 0 };
     for (const it of items) c[groupOf(it.status)]++;
     return c;
   }, [items]);
@@ -150,13 +166,20 @@ export function RunsList() {
       <StorageNotice className="mb-4" targets="all" />
 
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        {/* 5 filtros não cabem em 390 px: o controle rola DENTRO de si (a página
+            não ganha rolagem lateral) e cada rótulo fica numa linha só. */}
         <SegmentedToggle
           value={filter}
           onChange={(v) => setFilter(v as 'all' | Group)}
           ariaLabel="Filtrar por status"
+          className="scroll-slim max-w-full overflow-x-auto"
         >
           {FILTERS.map((f) => (
-            <SegmentedToggleOption key={f.key} value={f.key} className="px-3 py-1.5 text-[13px]">
+            <SegmentedToggleOption
+              key={f.key}
+              value={f.key}
+              className="shrink-0 px-3 py-1.5 text-[13px] whitespace-nowrap"
+            >
               {f.label}
               <span className="text-[11px] opacity-70 tabular">{counts[f.key]}</span>
             </SegmentedToggleOption>
@@ -205,8 +228,7 @@ export function RunsList() {
                 status={it.r.status}
                 mode={modeLabel(it.r.mode)}
                 theme={it.r.theme}
-                left={String(it.r.stages)}
-                right={String(it.r.contestants ?? it.r.competitors)}
+                meta={runMeta(it.r)}
                 cost={it.r.totalCostUsd}
                 at={it.r.startedAt}
               />
@@ -218,8 +240,7 @@ export function RunsList() {
                 status={it.s.status}
                 mode="treino"
                 theme={it.s.theme}
-                left={String(it.s.iterationsDone)}
-                right={String(it.s.iterationsPlanned)}
+                meta={sessionMeta(it.s)}
                 cost={it.s.totalCostUsd}
                 at={it.s.startedAt}
               />

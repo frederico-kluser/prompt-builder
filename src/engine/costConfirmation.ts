@@ -80,17 +80,25 @@ export function requiresCostConfirmation(
  * preço desconhecido a faixa pode caber no limiar, e dizer "pode custar mais de
  * US$ 1" seria falso: o que falta é poder LIMITAR o custo, não um custo alto.
  * `null` = não precisa confirmar.
+ *
+ * web-code#7: `unknown` = modelo NO catálogo com preço VARIÁVEL (roteador,
+ * "-1"): fica fora da soma, então a faixa é parcial. O portão já o contava
+ * (`requiresConfirmation`), mas o motivo não — o diálogo abria dizendo "pode
+ * custar mais de US$ 1" ao lado de uma faixa de centavos.
  */
-export type CostConfirmationReason = 'threshold' | 'unpriced' | 'both';
+export type CostConfirmationReason = 'threshold' | 'unpriced' | 'unknown' | 'both';
 
 export function costConfirmationReason(
-  e: Pick<LaunchCostEstimate, 'high' | 'thresholdUsd' | 'unpricedModelIds'>,
+  e: Pick<LaunchCostEstimate, 'high' | 'thresholdUsd' | 'unpricedModelIds'> &
+    Partial<Pick<LaunchCostEstimate, 'unknownPriceModelIds'>>,
 ): CostConfirmationReason | null {
   const acima = e.high > e.thresholdUsd;
   const semPreco = e.unpricedModelIds.length > 0;
-  if (acima && semPreco) return 'both';
+  const variavel = (e.unknownPriceModelIds?.length ?? 0) > 0;
+  if (acima && (semPreco || variavel)) return 'both';
   if (acima) return 'threshold';
   if (semPreco) return 'unpriced';
+  if (variavel) return 'unknown';
   return null;
 }
 
