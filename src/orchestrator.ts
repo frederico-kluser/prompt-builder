@@ -45,7 +45,7 @@ import { contestantsFromConfig } from './normalize.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { reasoningLevelForRole } from './modelCaps.js';
-import { gatewayErrorFields, listModels, reconcileAtRunEnd } from './openrouter.js';
+import { AUDITABLE_ROLES, gatewayErrorFields, listModels, reconcileAtRunEnd } from './openrouter.js';
 import {
   cutDuels,
   cutVerdicts,
@@ -609,6 +609,9 @@ async function runLoop(
   // IMPL-040: área sensível ⇒ o gateway força o roteamento ZDR em TODA chamada
   // desta run (a política viaja no ledger, que todo papel recebe via ctx.sink).
   ledger.setSensitiveRouting(preflight.sensitiveRouting);
+  // IMPL-075: modo AUDITÁVEL por run (`config.auditable`) — juiz e gabarito com
+  // provedor travado; como o modo sensível, só liga e vale para a cadeia abaixo.
+  if (record.config.auditable) ledger.setAuditableRoles(AUDITABLE_ROLES);
 
   // Resolve contestants on-demand (variacao: gera as variantes via optimizer).
   if (opts.prepare) {

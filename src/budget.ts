@@ -33,6 +33,7 @@ import type {
 import { COST_ROLES } from './types.js';
 import { cloneFinishCounts, emptyFinishCounts, tallyFinish } from './engine/truncation.js';
 import type { SensitiveRouting } from './engine/sensitiveRouting.js';
+import type { VerdictCache } from './engine/verdictCache.js';
 
 // ---------------------------------------------------------------------------
 // Sinais de controle
@@ -291,12 +292,10 @@ export class BudgetLedger implements CostSink {
   }
 
   // IMPL-075: modo AUDITAVEL por run/sessao (mesmo padrao do modo sensivel:
-  // so liga, nunca desliga; vale para a cadeia abaixo). ⚠️ GANCHO SEM
-  // CHAMADOR DE PRODUCAO: nenhum campo de RunConfig/sessao chama
-  // `setAuditableRoles` ainda — o unico interruptor real hoje e o env
-  // OPENROUTER_AUDITABLE (config do gateway). Ligar por run exige o campo no
-  // schema + whitelists (normalize/variationConfigFrom) e a chamada nos
-  // orquestradores/trainers.
+  // so liga, nunca desliga; vale para a cadeia abaixo). Quem liga:
+  // `RunConfig.auditable` (schema, arena-config `judging.auditable`, CLI
+  // `--auditable`) nos orquestradores e no trainer; alem do env
+  // OPENROUTER_AUDITABLE (preset do gateway).
   private auditable?: CostRole[];
 
   /** Liga o modo auditavel para `roles` (vazio/`undefined` = no-op). */
@@ -308,6 +307,27 @@ export class BudgetLedger implements CostSink {
   auditableRoles(): readonly CostRole[] | undefined {
     for (let n: BudgetLedger | undefined = this; n; n = n.parent) {
       if (n.auditable) return n.auditable;
+    }
+    return undefined;
+  }
+
+  // IMPL-080 (R-08:REC-3): cache EXATO de vereditos com escopo de SESSAO. O
+  // trainer liga um por sessao na raiz dela; as runs das iteracoes (forks)
+  // herdam. `null` num nivel DESLIGA dali para baixo (a re-avaliacao limpa e o
+  // holdout medem de novo — reusar veredito ali reintroduziria a correlacao
+  // com a selecao que eles existem para quebrar).
+  private verdictCacheSlot?: VerdictCache | null;
+
+  /** Liga o cache de vereditos neste nivel (`null` = desliga daqui para baixo). */
+  setVerdictCache(cache: VerdictCache | null): void {
+    this.verdictCacheSlot = cache;
+  }
+
+  /** O cache mais proximo subindo a cadeia; `null` num nivel corta a heranca. */
+  verdictCache(): VerdictCache | undefined {
+    for (let n: BudgetLedger | undefined = this; n; n = n.parent) {
+      if (n.verdictCacheSlot === null) return undefined;
+      if (n.verdictCacheSlot) return n.verdictCacheSlot;
     }
     return undefined;
   }

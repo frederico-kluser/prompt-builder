@@ -320,6 +320,8 @@ export interface RunConfig {
   languages?: string[];
   /** Contratos never-break do prompt base (pos-rewriter rejeita o que quebrar). */
   contracts?: PromptContracts;
+  /** IMPL-075: modo auditável (juiz + gabarito com provedor travado) — ver src/types.ts. */
+  auditable?: boolean;
   /** Multi-prompt (F2/P0.4): grupo de fragmentos; evolui-se `promptId` por sessao. */
   promptGroup?: PromptGroup;
   promptId?: string;
@@ -392,6 +394,8 @@ export interface CompetitorResponse {
   truncationRetried?: boolean;
   /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
   firstAttempt?: CallFinishSignals;
+  /** IMPL-075: provedor que serviu a resposta final (espelho de src/types.ts). */
+  provider?: { name?: string; upstreamId?: string; serviceTier?: string };
 }
 
 export interface StageSpec {
