@@ -11,7 +11,9 @@ import {
   deriveDecisionsUrl,
   extractDecisionUsage,
   gatewayErrorKind,
+  measuredCallUsd,
   peekCostSamples,
+  priceUsage,
   resetCostSamples,
   DECISION_REQUEST_OVERHEAD_TOKENS,
 } from '../src/openrouter.js';
@@ -68,6 +70,20 @@ describe('decide() — fio', () => {
     expect(extractDecisionUsage({ input_tokens: 415, output_tokens: 70, cost: 0.00001743 })).toEqual({ tokensIn: 415, tokensOut: 70, cost: 0.00001743 });
     expect(extractDecisionUsage({ prompt_tokens: 9 })).toEqual({ tokensIn: 0, tokensOut: 0, cost: undefined });
     expect(extractDecisionUsage(null)).toEqual({ tokensIn: 0, tokensOut: 0 });
+  });
+
+  it('extractDecisionUsage segue a regra BYOK da onda 2 (upstream só com is_byok === true)', () => {
+    // Não-BYOK: o upstream já está dentro de `cost` — nunca vira gasto à parte.
+    const naoByok = extractDecisionUsage({ input_tokens: 1, output_tokens: 0, cost: 0.001, is_byok: false, cost_details: { upstream_inference_cost: 0.001 } });
+    expect(naoByok.isByok).toBe(false);
+    expect(naoByok.byokUpstreamCost).toBeUndefined();
+    expect(priceUsage(naoByok, undefined)).toEqual({ usd: 0.001, source: 'usage' });
+    // BYOK: `cost` é só a taxa; o provedor cobrou o upstream direto na key.
+    const byok = extractDecisionUsage({ input_tokens: 1, output_tokens: 0, cost: 0.00005, is_byok: true, cost_details: { upstream_inference_cost: 0.001 } });
+    expect(byok).toMatchObject({ isByok: true, byokUpstreamCost: 0.001 });
+    const custo = priceUsage(byok, undefined);
+    expect(custo).toEqual({ usd: 0.00005, source: 'usage', byok: true, byokUpstreamUsd: 0.001 });
+    expect(measuredCallUsd(custo)).toBeCloseTo(0.00105, 10);
   });
 });
 

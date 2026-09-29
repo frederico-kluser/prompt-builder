@@ -2142,12 +2142,24 @@ export function deriveDecisionsUrl(baseUrl: string): string {
 /**
  * `usage` da resposta de decisão: `input_tokens`/`output_tokens`/`cost` (NÃO
  * `prompt_tokens`). `cost` é o valor cobrado — a única fonte exata.
+ * BYOK (onda 2): a MESMA regra de `extractUsage` — `is_byok` só quando
+ * booleano, e `cost_details.upstream_inference_cost` só vira gasto à parte com
+ * `is_byok === true` (na não-BYOK ele já está dentro de `cost`; somá-lo dobraria).
  */
 export function extractDecisionUsage(u: unknown): UsageInfo {
   if (!u || typeof u !== 'object') return { tokensIn: 0, tokensOut: 0 };
   const o = u as Record<string, unknown>;
   const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
-  return { tokensIn: num(o.input_tokens) ?? 0, tokensOut: num(o.output_tokens) ?? 0, cost: num(o.cost) };
+  const isByok = typeof o.is_byok === 'boolean' ? o.is_byok : undefined;
+  const details = (o.cost_details && typeof o.cost_details === 'object' ? o.cost_details : {}) as Record<string, unknown>;
+  const byokUpstreamCost = isByok === true ? num(details.upstream_inference_cost) : undefined;
+  return {
+    tokensIn: num(o.input_tokens) ?? 0,
+    tokensOut: num(o.output_tokens) ?? 0,
+    cost: num(o.cost),
+    ...(isByok !== undefined ? { isByok } : {}),
+    ...(byokUpstreamCost !== undefined ? { byokUpstreamCost } : {}),
+  };
 }
 
 export interface DecideParams {
