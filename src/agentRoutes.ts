@@ -29,6 +29,7 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { ensurePrivateDataDir, getDataDir, listRuns, loadRun } from './storage.js';
 import { isValidRecordId } from './pathSafety.js';
+import { csvCell } from './engine/csv.js';
 import { normalizeRunRecord } from './normalize.js';
 import { subscribe } from './events.js';
 import { startRun } from './orchestrator.js';
@@ -430,11 +431,9 @@ router.post('/runs/:id/cancel', async (req, res) => {
 // Export CSV (§21.6) — uma linha por (etapa × contestant × repetição)
 // ---------------------------------------------------------------------------
 
-function csvEscape(value: unknown): string {
-  const s = value === undefined || value === null ? '' : String(value);
-  if (/[",\n]/u.test(s)) return `"${s.replace(/"/gu, '""')}"`;
-  return s;
-}
+// Célula CSV: fonte única (src/engine/csv.ts) — `stopReason` vem do executor e
+// um `\r` solto quebrava a linha nos parsers CR-aware. http-api#9.
+const csvEscape = csvCell;
 
 /** Veredito do referenceJudge para um contestant, quando houver. */
 function verdictFor(record: RunRecord, stageIndex: number, contestantId: string): string {

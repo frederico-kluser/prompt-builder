@@ -17,6 +17,7 @@ import {
 import { CancelHoldButton, OwnershipBanner, StopBanner } from '../components/RunControls';
 import { RunNarrative } from '../components/RunNarrative';
 import { StorageNotice } from '../components/StorageNotice';
+import { csvCell } from '../engine/csv';
 import {
   Accordion,
   AccordionItem,
@@ -80,10 +81,9 @@ function download(filename: string, text: string, type: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function csvEscape(value: unknown): string {
-  const s = value === undefined || value === null ? '' : String(value);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
+// Célula CSV: fonte única com as rotas /v1 (src/engine/csv.ts) — aspas RFC
+// 4180 e neutralização de fórmula: `question`/`text` são saída de LLM.
+const csvEscape = csvCell;
 
 // CSV plano: uma linha por resposta (cenario × competidor), com o veredito.
 function runToCsv(record: RunRecord, byId: Map<string, Contestant>): string {

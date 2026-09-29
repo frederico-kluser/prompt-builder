@@ -11,6 +11,7 @@ import { runConfigSchema } from './runConfigSchema.js';
 import { prepareOptsFor } from './prepareRun.js';
 import { isTerminalRunStatus } from './types.js';
 import { isValidRecordId, publicErrorMessage } from './pathSafety.js';
+import { csvCell } from './engine/csv.js';
 import type { CompareConfig, CompetitorResponse, RunRecord } from './types.js';
 
 const router = Router();
@@ -223,11 +224,9 @@ router.get('/runs/:id/events', ah(async (req, res) => {
   });
 }));
 
-function csvEscape(value: unknown): string {
-  const s = value === undefined || value === null ? '' : String(value);
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
-}
+// Célula CSV: fonte única com o SPA (aspas + neutralização de fórmula — a
+// `question` e o `text` são saída de LLM). http-api#9.
+const csvEscape = csvCell;
 
 router.get('/runs/:id/export.csv', ah(async (req, res) => {
   const record = await loadRun(req.params.id);
