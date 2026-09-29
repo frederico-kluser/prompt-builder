@@ -246,11 +246,136 @@ const FAMILIAS_COM_SUB = new Set(['models', 'key', 'runs', 'sessions', 'library'
  * `set`) — um id de run no lugar do subcomando nao vira rotulo.
  */
 export function commandLabel(argv: readonly string[]): string {
-  const cmd = argv[0] && !argv[0].startsWith('-') ? argv[0] : undefined;
+  const { cmd, rest } = locateCommand(argv);
   if (!cmd) return '?';
-  const sub = argv[1];
+  const sub = rest[0];
   if (FAMILIAS_COM_SUB.has(cmd) && sub && /^[a-z]+(?:-[a-z]+)*$/.test(sub)) return `${cmd}.${sub}`;
   return cmd;
+}
+
+/**
+ * Flags globais que CONSOMEM o token seguinte (o valor). `--budget` não é
+ * global no parse, mas o help o lista como tal — sem ele aqui, em
+ * `--budget 5 compare …` o "5" viraria o comando.
+ */
+const FLAGS_GLOBAIS_COM_VALOR = new Set(['--output-format', '--data-dir', '--key', '--budget']);
+
+/**
+ * O comando é o PRIMEIRO token que não é flag nem valor de flag global
+ * (IMPL-028): antes só `argv[0]` contava, e `prompt-builder --json compare
+ * --bogus` caía no help em TEXTO com exit 0 — o consumidor-máquina via stdout
+ * não-JSON e "sucesso". `rest` = os argumentos do comando com as flags de
+ * ANTES dele no fim (antes de um `--`), para o subcomando continuar em
+ * `rest[0]` (`--json runs show <id>` → `show <id> --json`).
+ */
+export function locateCommand(argv: readonly string[]): { cmd: string | undefined; rest: string[] } {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--') break;
+    if (a.startsWith('-')) {
+      if (!a.includes('=') && FLAGS_GLOBAIS_COM_VALOR.has(a)) i += 1;
+      continue;
+    }
+    const antes = argv.slice(0, i);
+    const depois = argv.slice(i + 1);
+    const sep = depois.indexOf('--');
+    const rest = sep === -1 ? [...depois, ...antes] : [...depois.slice(0, sep), ...antes, ...depois.slice(sep)];
+    return { cmd: a, rest };
+  }
+  return { cmd: undefined, rest: [...argv] };
+}
+
+/**
+ * Sem comando, só `prompt-builder`, `--help`/`-h` (e enfeites de saída em
+ * texto) mostram o help com exit 0. Qualquer outra coisa — `--json` sozinho,
+ * `--output-format ndjson`, uma flag solta — é uso inválido (IMPL-028): exit 2
+ * e o envelope no formato pedido, nunca o help em texto com "sucesso".
+ */
+export function isBareHelpRequest(argv: readonly string[]): boolean {
+  if (sniffOutputFormat(argv) !== 'text') return false;
+  const inofensivas = new Set(['--help', '-h', '--no-color', '--quiet', '--verbose', '--pretty']);
+  return argv.every((a) => inofensivas.has(a));
+}
+
+/** Erro de comando ausente (flags sem comando) — `usage.missing_command`. */
+export function missingCommandError(commands: readonly string[]): CliError {
+  return new CliError(
+    'Comando ausente: as flags vieram sem um comando.',
+    EXIT.USAGE,
+    { commands: [...commands] },
+    {
+      code: 'usage.missing_command',
+      hint: 'Use `prompt-builder <comando> [opções]` (ex.: `prompt-builder runs list --json`); a lista está em `prompt-builder --help`.',
+    },
+  );
+}
+
+/**
+ * Recusa subcomando desconhecido (cli#13) ANTES de parse, disco ou rede — exit
+ * 2 com `usage.unknown_subcommand`, os aceitos em `details` e "você quis dizer".
+ * Antes `runs delete <id>` caía no `runs show` (exit 0, nada apagado),
+ * `models shwo x` listava o catálogo e `key remove` validava a key na rede.
+ * `aliases` mapeia palavras naturais para o subcomando real (`remove` → `rm`);
+ * `hint` dá a dica específica quando o "subcomando" é outra coisa (um id, um
+ * arquivo).
+ */
+export function assertKnownSubcommand(
+  family: string,
+  sub: string,
+  subs: readonly string[],
+  opts: { usage: string; aliases?: Readonly<Record<string, string>>; hint?: (sub: string) => string | undefined } = {
+    usage: '',
+  },
+): void {
+  if (subs.includes(sub)) return;
+  const sugestao = opts.aliases?.[sub.toLowerCase()] ?? closestMatch(sub, subs);
+  const especifica = opts.hint?.(sub);
+  throw new CliError(
+    `Subcomando desconhecido: "${family} ${sub}".`,
+    EXIT.USAGE,
+    { subcommand: sub, accepted: [...subs], suggestion: sugestao ?? null },
+    {
+      code: 'usage.unknown_subcommand',
+      hint:
+        especifica ??
+        ((sugestao ? `Quis dizer \`prompt-builder ${family} ${sugestao}\`? ` : '') +
+          `Use: ${opts.usage || subs.map((s) => `${family} ${s}`).join(' | ')}.`),
+    },
+  );
+}
+
+/**
+ * Comando SEM subcomandos (`lgpd`, `techniques`, `doctor`, `estimate`) com um
+ * argumento solto (cli#13): antes `lgpd delete` mostrava as áreas com exit 0 e
+ * o agente achava que tinha apagado algo. Exit 2 `usage.unexpected_argument`.
+ */
+export function assertNoPositionals(command: string, positionals: readonly string[], usage: string): void {
+  if (positionals.length === 0) return;
+  throw new CliError(
+    `Argumento inesperado para "${command}": "${positionals[0]}" — este comando não tem subcomandos.`,
+    EXIT.USAGE,
+    { command, positionals: [...positionals] },
+    { code: 'usage.unexpected_argument', hint: `Use: ${usage}.` },
+  );
+}
+
+/**
+ * cli#19 — consumidor que fecha o pipe cedo (`docs --all | head -1`) NÃO é
+ * falha de rede: o que ele queria já saiu. Sem listener, o EPIPE assíncrono da
+ * escrita no stdout virava `uncaughtException` → `toCliError` → "Falha de
+ * rede: write EPIPE" com exit 8 (EPIPE também é errno de socket) — e o
+ * `failAndExit` ainda tentava escrever o envelope no stdout morto. Com o
+ * listener, EPIPE no stdout chama `onClosed` (o main sai 0 em silêncio: não há
+ * a quem entregar mais nada); erro no stderr é engolido (narração é opcional).
+ * Outro erro de escrita no stdout segue para `onOtherError` (o envelope).
+ */
+export function installPipeGuards(handlers: { onClosed: () => void; onOtherError: (err: Error) => void }): void {
+  process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') handlers.onClosed();
+    else handlers.onOtherError(err);
+  });
+  // stderr morto: nada a fazer — relatar o erro escreveria no MESMO stderr (laço).
+  process.stderr.on('error', () => undefined);
 }
 
 /** true quando quem chama e um agente/script, nao um humano num terminal. */

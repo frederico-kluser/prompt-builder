@@ -8,7 +8,16 @@
 import { pkgVersion } from '../paths.js';
 import { configureGatewayFromEnv } from '../gatewayEnv.js';
 import { CliError, EXIT, Output, failAndExit } from './output.js';
-import { closestMatch, commandLabel, sniffOutputFormat, sniffPretty } from './context.js';
+import {
+  closestMatch,
+  commandLabel,
+  installPipeGuards,
+  isBareHelpRequest,
+  locateCommand,
+  missingCommandError,
+  sniffOutputFormat,
+  sniffPretty,
+} from './context.js';
 import { COMMANDS, HELP_TAIL, renderCommandHelp } from './help.js';
 import { cmdModels } from './commands/models.js';
 import { cmdRun } from './commands/run.js';
@@ -243,8 +252,9 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
-  const cmd = argv[0] && !argv[0].startsWith('-') ? argv[0] : undefined;
-  const rest = cmd ? argv.slice(1) : argv;
+  // IMPL-028: o comando é o 1º token que não é flag (nem valor de flag global) —
+  // `--json compare --bogus` também sai pelo envelope, não pelo help em texto.
+  const { cmd, rest } = locateCommand(argv);
 
   // IMPL-028: o formato de saida e fixado AQUI, por varredura do argv, ANTES de
   // qualquer outra coisa. Antes ele so era descoberto depois do parse — e um
@@ -252,6 +262,8 @@ async function main(): Promise<void> {
   // com 0 bytes e o consumidor-maquina nao via nada (Furo 1, R-12).
   const out = new Output({ format: sniffOutputFormat(argv), pretty: sniffPretty(argv) });
   const label = commandLabel(argv);
+  // cli#19: pipe fechado pelo consumidor (`| head`) sai 0 em silêncio, não "rede".
+  installPipeGuards({ onClosed: () => process.exit(EXIT.OK), onOtherError: (err) => failAndExit(out, label, err) });
   // Excecao sem dono (callback, rejeicao solta) tambem termina no envelope —
   // o NDJSON nunca fica sem a linha `result`.
   process.on('uncaughtException', (err) => failAndExit(out, label, err));
@@ -272,6 +284,9 @@ async function main(): Promise<void> {
       process.stdout.write(`${VERSION}\n`);
       process.exit(EXIT.OK);
     }
+    // IMPL-028: flags sem comando (`--json` sozinho, `--output-format ndjson`)
+    // é uso inválido no formato pedido — só o help puro sai com exit 0.
+    if (!cmd && !isBareHelpRequest(argv)) throw missingCommandError(COMMANDS);
     if (!cmd || argv.includes('--help') || argv.includes('-h')) {
       // IMPL-092: `--help` COM comando = help DO comando (todo help termina com
       // a tabela de códigos de saída); sem comando (ou comando desconhecido) =

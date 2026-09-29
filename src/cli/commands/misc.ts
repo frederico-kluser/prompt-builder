@@ -48,6 +48,8 @@ import { groupVerdictFailures, verdictFailuresFromStages } from '../../refJudge.
 import { replayRun, replayUnsupportedReason } from '../replay.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import {
+  assertKnownSubcommand,
+  assertNoPositionals,
   assertNoUnknownConfigKeys,
   buildCatalogContext,
   buildContext,
@@ -150,8 +152,15 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf-8').trim();
 }
 
+const KEY_SUBS = ['check', 'path', 'rm', 'set'] as const;
+
 export async function cmdKey(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'check';
+  // cli#13: ANTES de parse/rede — `key remove` validava a key no OpenRouter.
+  assertKnownSubcommand('key', sub, KEY_SUBS, {
+    usage: 'key check | key path | key rm | key set --stdin',
+    aliases: { remove: 'rm', delete: 'rm', del: 'rm', unset: 'rm', show: 'path', validate: 'check', add: 'set' },
+  });
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, { stdin: { type: 'boolean' } });
   const ctx = buildContext(parsed);
   const { out } = ctx;
@@ -276,8 +285,31 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
 
 // --- runs / sessions ---------------------------------------------------------
 
+const RUNS_SUBS = [
+  'list',
+  'show',
+  'winner',
+  'status',
+  'wait',
+  'cancel',
+  'reproduce',
+  'export',
+  'import',
+  'delete',
+  'prune',
+] as const;
+
+/** Parece um id de record (e não um verbo)? — para a dica `runs show <id>`. */
+const pareceId = (x: string): boolean => isValidRecordId(x) && (/\d/.test(x) || x.length >= 16);
+
 export async function cmdRuns(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
+  // cli#13: antes `runs delete <id>` caía no `runs show` (exit 0, nada apagado).
+  assertKnownSubcommand('runs', sub, RUNS_SUBS, {
+    usage: `runs ${RUNS_SUBS.join('|')} (ver \`prompt-builder runs --help\`)`,
+    aliases: { rm: 'delete', remove: 'delete', del: 'delete', get: 'show', ls: 'list', gc: 'prune' },
+    hint: (x) => (pareceId(x) ? `Para ver a run, use \`prompt-builder runs show ${x}\`.` : undefined),
+  });
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     limit: { type: 'string' },
     // IMPL-092: --all devolve a lista inteira (o default tem teto de 50).
@@ -715,18 +747,17 @@ async function applyPromptFile(
   return { applied: true, file, backup, committed };
 }
 
-const SESSIONS_SUBS = new Set(['list', 'show', 'winner', 'report']);
+const SESSIONS_SUBS = ['list', 'show', 'winner', 'report', 'export', 'import', 'delete'] as const;
 
 export async function cmdSessions(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
-  if (!SESSIONS_SUBS.has(sub)) {
-    // Antes um subcomando desconhecido caía em silêncio no `show` (com o nome
-    // do subcomando lido como id): o agente achava que rodou outra coisa.
-    throw new CliError(
-      `Subcomando desconhecido: "sessions ${sub}". Use: sessions list | show <id> | winner <id> | report <id>.`,
-      EXIT.USAGE,
-    );
-  }
+  // Antes um subcomando desconhecido caía em silêncio no `show` (com o nome
+  // do subcomando lido como id): o agente achava que rodou outra coisa.
+  assertKnownSubcommand('sessions', sub, SESSIONS_SUBS, {
+    usage: 'sessions list | show <id> | winner <id> | report <id> | export <id> | import <arq> | delete <id>',
+    aliases: { rm: 'delete', remove: 'delete', del: 'delete', get: 'show', ls: 'list' },
+    hint: (x) => (pareceId(x) ? `Para ver a sessão, use \`prompt-builder sessions show ${x}\`.` : undefined),
+  });
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     'prompt-only': { type: 'boolean' },
     limit: { type: 'string' },
@@ -1068,6 +1099,7 @@ function openInPlannotator(file: string, out: Output): boolean {
 
 export async function cmdTechniques(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
+  assertNoPositionals('techniques', parsed.positionals, 'prompt-builder techniques [--json]');
   const ctx = buildContext(parsed);
   const techs = listTechniques();
   if (ctx.out.isText) {
@@ -1079,6 +1111,12 @@ export async function cmdTechniques(argv: string[]): Promise<number> {
 
 export async function cmdLgpd(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
+  // cli#13: `lgpd delete` mostrava as áreas (exit 0) — apagar é `runs delete`.
+  assertNoPositionals(
+    'lgpd',
+    parsed.positionals,
+    'prompt-builder lgpd [--json] (apagar dados: `runs delete <id>`, `sessions delete <id>`, `runs prune`)',
+  );
   const ctx = buildContext(parsed);
   const data = getLgpdData();
   // IMPL-041: área sensível é FAIL-CLOSED (allowlist de endpoints ZDR); a
@@ -1105,8 +1143,19 @@ export async function cmdLgpd(argv: string[]): Promise<number> {
   return EXIT.OK;
 }
 
+const CONFIG_SUBS = ['validate', 'schema', 'example'] as const;
+
 export async function cmdConfig(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'validate';
+  // cli#13: `config explain f.json` validava em silêncio (exit 0).
+  assertKnownSubcommand('config', sub, CONFIG_SUBS, {
+    usage: 'config validate <arq> | config schema [--dialect arena|run] | config example [--mode …]',
+    aliases: { check: 'validate', lint: 'validate', verify: 'validate', explain: 'validate', init: 'example', new: 'example' },
+    hint: (x) =>
+      /\.json$/i.test(x) || x.includes('/')
+        ? `Para validar o arquivo, use \`prompt-builder config validate ${x}\`.`
+        : undefined,
+  });
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     mode: { type: 'string' },
     dialect: { type: 'string' },
@@ -1265,8 +1314,13 @@ export async function cmdConfig(argv: string[]): Promise<number> {
 
 // --- registry (guarda de drift de prompts) -----------------------------------
 
+const REGISTRY_SUBS = ['validate', 'init'] as const;
+
 export async function cmdRegistry(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'validate';
+  assertKnownSubcommand('registry', sub, REGISTRY_SUBS, {
+    usage: 'registry validate [--file <arq>] | registry init [-o <arq>]',
+  });
   const parsed = parse(sub === argv[0] ? argv.slice(1) : argv, {
     file: { type: 'string' },
     out: { type: 'string', short: 'o' },
@@ -1297,13 +1351,6 @@ export async function cmdRegistry(argv: string[]): Promise<number> {
     out.info(`registro-exemplo gravado em ${alvo}`);
     out.result(true, 'registry.init', { file: alvo });
     return EXIT.OK;
-  }
-
-  if (sub !== 'validate') {
-    throw new CliError(
-      `Subcomando desconhecido: "${sub}". Uso: prompt-builder registry <validate|init>.`,
-      EXIT.USAGE,
-    );
   }
 
   const file =
@@ -1410,6 +1457,7 @@ export function keyLimitAdvice(info: KeyInfo | null, localDailyCapUsd: number | 
 
 export async function cmdDoctor(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
+  assertNoPositionals('doctor', parsed.positionals, 'prompt-builder doctor [--json]');
   const ctx = buildContext(parsed);
   const { out, dataDir } = ctx;
   const checks: Record<string, unknown> = {

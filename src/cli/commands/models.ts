@@ -27,6 +27,7 @@ import {
 } from '../../engine/pricing.js';
 import { CliError, EXIT } from '../output.js';
 import {
+  assertKnownSubcommand,
   buildCatalogContext,
   buildContext,
   limitList,
@@ -330,6 +331,11 @@ async function cmdAllowlist(parsed: ParsedArgs): Promise<number> {
 
 export async function cmdModels(argv: string[]): Promise<number> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv[0] : 'list';
+  // cli#13: `models shwo x` listava o catálogo com exit 0 — recusa antes da rede.
+  assertKnownSubcommand('models', sub, ['list', 'show', 'export', 'allowlist'], {
+    usage: 'models list [filtros] | models show <id> | models export -o <arq> | models allowlist --check',
+    hint: (x) => (x.includes('/') ? `Para ver o modelo, use \`prompt-builder models show ${x}\`.` : undefined),
+  });
   const rest = sub === argv[0] ? argv.slice(1) : argv;
   const parsed: ParsedArgs = parse(rest, OPTIONS);
   // `allowlist` lê o snapshot do pacote: sem key, sem rede.
