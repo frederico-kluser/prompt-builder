@@ -840,7 +840,7 @@ function curationPayload(c: LibraryCuration): Record<string, unknown> {
  * `run.failed` (kind internal) — o agente trocava a key boa ou repetia a run
  * sem credito. `undefined` = outra falha (segue o `run.failed` de sempre).
  */
-function fatalGatewayOutcome(
+export function fatalGatewayOutcome(
   rec: { error?: string; errorKind?: string; errorHttpStatus?: number },
   details: Record<string, unknown>,
 ): CliError | undefined {

@@ -68,6 +68,7 @@ import {
   type LoadedCatalog,
 } from '../context.js';
 import { budgetRequiredError, budgetUsdOf, keyRequirement, toRefusal, type BudgetChoice } from '../preflight.js';
+import { fatalGatewayOutcome } from './run.js';
 import { CliError, EXIT, failAndExit, fmtUsd, isCliError, renderSpend } from '../output.js';
 import { emitRunEvent } from '../ndjson.js';
 import { openSpendGuards, spendGuardRefusals, type SpendGuards } from '../spendGuards.js';
@@ -950,6 +951,12 @@ async function runAgents(argv: string[], detached?: DetachedBodyHooks): Promise<
   // Falha sai SÓ pelo envelope de erro (resumo em `details`) — antes saía um
   // `result` ok:false E depois o erro: dois objetos no stdout (IMPL-028).
   if (code === EXIT.ERROR) {
+    // cli#3 (left#5): key recusada / sem crédito derrubou a run → o MESMO
+    // classificador das runs de chat (exit 4 `auth.failed` / 5
+    // `credit.insufficient`), com o resumo em `details` — antes `run.failed`
+    // (exit 1): o agente trocava a key boa ou repetia a run sem crédito.
+    const fatal = record.status === 'error' ? fatalGatewayOutcome(record, resumo) : undefined;
+    if (fatal) throw fatal;
     const todasFalharam = summary && summary.executions > 0 && summary.failed === summary.executions;
     throw new CliError(
       todasFalharam
