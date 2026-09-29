@@ -24,6 +24,12 @@
     "approxTokens": 1300
   },
   {
+    "topic": "calibration",
+    "title": "Calibração juiz × humano",
+    "summary": "`calib report`: o juiz serve neste domínio? Formato calibration-jsonl@1, piloto anotador × anotador primeiro, α ordinal de Krippendorff + AC2 de Gwet + IC95%, sensibilidade/especificidade e o portão (exit 10)",
+    "approxTokens": 1700
+  },
+  {
     "topic": "budget",
     "title": "Orçamento e custo",
     "summary": "como o teto para a run sem corromper o resultado; pré-voo em ordem, códigos de recusa, o --dry-run com paridade e a defesa anti-gasto N× (lock da config, --idempotency-key, teto diário da máquina, limite da key)",
