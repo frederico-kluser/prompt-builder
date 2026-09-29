@@ -11,6 +11,7 @@
 
 import type { HoldoutSkipReason, Verdict } from './types.js';
 import { judgeScoreFromVerdicts } from './rank.js';
+import { stageCountsInJudgeScore } from './engine/verdictAggregate.js';
 
 /**
  * Mínimo de cenários em holdout para o gate final significar algo. Abaixo
@@ -127,7 +128,8 @@ export function trainOnlyView<
   const stages = run.stages.filter((s) => s.spec !== undefined && keep.has(s.spec));
   const view = { ...run, stages } as Record<string, unknown>;
   for (const k of RUN_WIDE_AGGREGATES) delete view[k];
-  const comRef = stages.filter((s) => s.referenceJudge && !s.incomplete);
+  // Regra ÚNICA de "a etapa vale no judge-score" (a mesma dos orquestradores).
+  const comRef = stages.filter(stageCountsInJudgeScore);
   if (comRef.length > 0) {
     view.judgeScoreByContestant = Object.fromEntries(
       run.contestants.map((c) => [
