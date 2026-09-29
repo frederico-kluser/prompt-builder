@@ -173,8 +173,9 @@ export function resolveTestsDir(testsDir: string, baseDir: string): string {
     return rel.startsWith('..') || path.isAbsolute(rel);
   };
   if (fora(base, abs)) throw new Error(`testsDir "${testsDir}" sai do diretório da configuração`);
-  // Contenção também por REALPATH: um `suites -> ~/.ssh` passaria na régua
-  // lexical e levaria arquivos de fora para o verificador (e para o dossiê).
+  // Contenção também por REALPATH: um symlink `suites` apontando para fora (a
+  // pasta de chaves do usuário, por exemplo) passaria na régua lexical e levaria
+  // arquivos de fora para o verificador (e para o dossiê).
   let real: string | undefined;
   try {
     real = realpathSync(abs);
