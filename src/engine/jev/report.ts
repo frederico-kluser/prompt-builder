@@ -240,17 +240,18 @@ export function runWarnings(run: JevRunRecord): string[] {
     if (ct.kind === 'llm') w.push(`${ct.label}: probabilidade VERBALIZADA (não calibrada) — compare acurácia e custo, e o Brier com cautela.`);
   }
   if (run.config.language && /^pt/i.test(run.config.language)) w.push('pt-BR: o Jev não tem avaliação oficial fora do inglês — estes números SÃO a avaliação.');
-  if (run.config.bands.noul.hitl !== 0.5) w.push(`noul com hitl ${run.config.bands.noul.hitl} (o simulador e a skill usam 0,5, onde uma noul nunca abstém).`);
+  if (run.config.bands.noul.hitl !== 0.5) w.push(`noul com hitl ${fmtNum(run.config.bands.noul.hitl, 2)} (o simulador e a skill usam 0,5, onde uma noul nunca abstém).`);
   return [...w, ...run.warnings];
 }
 
 export function buildJevRunReport(run: JevRunRecord, now: Date = new Date()): JevRunReport {
   const byQuestion: JevRunReport['byQuestion'] = [];
+  const rotulo = new Map(run.contestants.map((c) => [c.id, c.label]));
   for (const [ct, qs] of Object.entries(run.byQuestion)) {
     for (const [q, m] of Object.entries(qs)) {
       byQuestion.push({
         question: q,
-        contestant: ct,
+        contestant: rotulo.get(ct) ?? ct,
         accuracy: m.accuracy,
         brierScore: m.brierScore,
         ece: m.ece,
