@@ -5,75 +5,63 @@
 // stdout é payload, stderr é narração (contrato do CLI). `--json` devolve um
 // objeto por comando. `seed` com `--generate` gasta LLM e segue a regra de
 // `--budget` obrigatório fora de TTY (igual aos comandos de run).
+//
+// cli#16: o texto de ajuda mora SÓ em `../help.ts` (`renderCommandHelp`) — o
+// `main` intercepta `--help` antes do dispatch, então uma cópia local aqui
+// nunca era mostrada (e o help central apontava para ela mesma).
 
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import {
   coverageReport,
   hasGabarito,
   labelIssue,
+  libraryItemFromStage,
   mergeSeedItems,
   normalizeLibraryItem,
-  stableItemId,
   type CoverageTargets,
   type LibraryItem,
   type ScenarioRules,
 } from '../../engine/libraryCore.js';
 import { coverageInstruction, parseScenarioRules } from '../../engine/scenarioRules.js';
 import {
+  EXCHANGE_FORMAT,
+  isExchangeManifestOnly,
+  toSingleFileBundle,
+} from '../../engine/exchange.js';
+import {
   deleteItem,
   deleteProfile,
-  exportProfilePack,
+  exportProfileExchange,
+  exportProfilePackDeclared,
   getItem,
   getProfile,
   importItems,
+  isExchangeReadError,
   listItems,
   listProfiles,
   prepareImportItems,
-  saveItems,
+  readExchangeDir,
   saveProfile,
   seedItems,
+  writeExchangeDir,
 } from '../../library.js';
-import { generateStages } from '../../datagen.js';
+import {
+  ADVERSARIAL_MAX_COST_PER_SCENARIO_USD,
+  adversarialCoverageReport,
+  generateAdversarialStages,
+  generateStages,
+  languageWarnings,
+} from '../../datagen.js';
 import { generateReferences } from '../../gabarito.js';
 import { BudgetLedger, isControlSignal } from '../../budget.js';
+import { SCENARIO_PACK_FORMAT } from '../../scenarioPack.js';
+import { pkgVersion } from '../../paths.js';
+import type { StageSpec } from '../../types.js';
 import { buildContext, buildNetworkContext, isAgentContext, limitList, parse, parseListLimit, readJsonFile } from '../context.js';
 import { CliError, EXIT } from '../output.js';
+import { renderCommandHelp } from '../help.js';
 import { isUnsafePathError } from '../../pathSafety.js';
-
-const HELP = `prompt-builder library — banco persistente de cenários+gabaritos.
-
-USO
-  library list [--profile <id>]          perfis (ou itens de um perfil)
-  library init --profile <id> [--name <n>] [--description <d>]
-               [--rules <arq.json>] [--targets <arq.json>]
-                                         cria/atualiza o perfil (regras de geração
-                                         com grounding e matriz de cobertura)
-  library show <itemId> --profile <id>   item completo (JSON)
-  library add --profile <id> --file <arq> [--origin official|ai|manual|import] [--allow-pii]
-                                         importa itens (lista, {items:[…]} ou pacote)
-  library seed --profile <id> --file <arq> [--allow-pii]
-                                         seed IDEMPOTENTE por id (o que existe, não sobrescreve)
-  library seed --profile <id> --generate <N> --theme <t> --model <id> [--budget <usd>]
-                                         gera N itens via datagen + gabarito por item
-  library verify --profile <id>          itens SEM gabarito ou rótulo curto sem labelSet
-                                         (recusados no evolve; exit 3)
-  library coverage --profile <id>        cobertura tier × dimensão + lacunas
-  library export --profile <id> -o <arq> exporta como prompt-builder-pack@1
-  library rm --profile <id> <itemId>     remove um item
-  library drop --profile <id>            remove o perfil inteiro
-
-A biblioteca mora em <data-dir>/library/<profileId>/ (um JSON por item).
-Regras de geração (--rules): { templates: { system, user? }, grounding?: { context?,
-  fewShot?, setupKeys?[] } } — placeholders {{context}}, {{fewShot}}, {{setupKeys}},
-  {{theme}}, {{count}}. O system renderizado abre o prompt do gerador; grounding que
-  nenhum template usa NÃO chega ao gerador (o init e o seed avisam).
-Item da biblioteca aceita os campos enriquecidos do prompt-arena:
-  title, tier (mft|invariance|adversarial|edge), persona, context,
-  successCriteria[], rationale, dimensionTags[], question, productContext,
-  maxTokens, rubric, reference | expected (+ labelSet), origin.
-Rótulo curto em expected (≤5 palavras) exige labelSet = todos os rótulos
-válidos da etapa (ex.: "labelSet": ["positivo","negativo","neutro"]).
-`;
 
 function exigirProfile(values: Record<string, unknown>): string {
   const p = values.profile;
@@ -86,6 +74,37 @@ function exigirProfile(values: Record<string, unknown>): string {
 /** Mesmo leitor do resto do CLI: `usage.file_unreadable` (2) × `config.invalid_json` (3). */
 async function lerArquivoJson(file: string): Promise<unknown> {
   return readJsonFile(file);
+}
+
+/**
+ * Fonte de itens do `add`/`seed --file` (IMPL-089): arquivo JSON (lista,
+ * `{items}`, pacote `pack@1` ou `exchange@1` em arquivo único) OU o DIRETÓRIO
+ * de um pacote `prompt-builder-exchange@1` (manifest.json + library.jsonl) —
+ * apontar o próprio `manifest.json` também serve.
+ */
+async function lerFonteDeItens(file: string): Promise<unknown> {
+  const eDiretorio = await fs
+    .stat(file)
+    .then((st) => st.isDirectory())
+    .catch(() => false);
+  try {
+    if (eDiretorio) return await readExchangeDir(file);
+    const cru = await lerArquivoJson(file);
+    return isExchangeManifestOnly(cru) ? await readExchangeDir(path.dirname(file)) : cru;
+  } catch (err) {
+    if (isExchangeReadError(err)) {
+      throw new CliError(err.message, EXIT.CONFIG, { path: file }, {
+        code: 'library.exchange_invalid',
+        hint: `Aponte o diretório gerado por \`library export -o <dir>\` (ou o arquivo .json único).`,
+      });
+    }
+    throw err;
+  }
+}
+
+/** Texto de UM pacote de troca em arquivo único (stdout / `-o <arq>.json`). */
+function textoPacoteUnico(bundle: Parameters<typeof toSingleFileBundle>[0]): string {
+  return `${JSON.stringify(toSingleFileBundle(bundle), null, 2)}\n`;
 }
 
 export async function cmdLibrary(argv: string[]): Promise<number> {
@@ -117,13 +136,22 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
     out: { type: 'string', short: 'o' },
     rules: { type: 'string' },
     targets: { type: 'string' },
+    // IMPL-068: `seed --generate N --tier adversarial --base-prompt-file <arq>`.
+    tier: { type: 'string' },
+    'base-prompt-file': { type: 'string' },
+    // IMPL-056: idiomas do datagen (opt-in; sem a flag, 100% pt-BR).
+    languages: { type: 'string' },
+    // IMPL-089: `export --format exchange|pack` (default exchange).
+    format: { type: 'string' },
     // IMPL-092: teto default de 50 em `library list` (--limit N / --all).
     limit: { type: 'string' },
     all: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
   });
   if (parsed.values.help) {
-    process.stdout.write(HELP);
+    // Só alcançável por chamada direta (o `main` já responde ao --help): a
+    // MESMA fonte do help central, nunca uma cópia que diverge.
+    process.stdout.write(renderCommandHelp('library'));
     return EXIT.OK;
   }
   const ctx = buildContext(parsed);
@@ -211,13 +239,16 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
       const profileId = exigirProfile(parsed.values);
       const file = typeof parsed.values.file === 'string' ? parsed.values.file : undefined;
       if (!file) throw new CliError('Informe --file <arquivo.json>.', EXIT.USAGE);
-      const cru = await lerArquivoJson(file);
+      const cru = await lerFonteDeItens(file);
       const origin =
         parsed.values.origin === 'official' || parsed.values.origin === 'ai' || parsed.values.origin === 'manual'
           ? parsed.values.origin
           : 'import';
       const res = await importItems(profileId, cru, { origin, allowPii: parsed.values['allow-pii'] === true });
-      out.info(`+${res.added} itens · ${res.updated} atualizados · ${res.errors.length} recusados`);
+      out.info(`+${res.added} itens · ${res.updated} atualizados · ${res.errors.length} recusados (${res.format})`);
+      // IMPL-089: perda nunca é calada — o que o pacote declarou perdido (ou a
+      // normalização não representou) sai no stderr E no resultado.
+      if (res.lostFields.length) out.warn(`campos declarados perdidos: ${res.lostFields.join(', ')}`);
       for (const e of res.errors) out.warn(e);
       if (res.errors.length) {
         throw new CliError(`${res.errors.length} item(ns) recusado(s); os válidos já foram gravados.`, EXIT.CONFIG, res, {
@@ -234,14 +265,15 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
       // Caminho 1: seed IDEMPOTENTE de arquivo — o que já existe (mesmo id) é
       // pulado, nunca sobrescreve curadoria. Rodar 2× não muda nada.
       if (typeof parsed.values.file === 'string') {
-        const cru = await lerArquivoJson(parsed.values.file);
+        const cru = await lerFonteDeItens(parsed.values.file);
         // MESMO funil do `add` (formato + LGPD): item com dado pessoal de
         // aparência real é recusado nomeando o campo, salvo `--allow-pii`.
-        const { items: validos, errors } = prepareImportItems(cru, {
+        const { items: validos, errors, lostFields } = prepareImportItems(cru, {
           origin: 'import',
           allowPii: parsed.values['allow-pii'] === true,
         });
         const itens: LibraryItem[] = validos.map((it) => ({ ...it, seed: it.seed ?? 'prompt-builder:seed@1' }));
+        if (lostFields.length) out.warn(`campos declarados perdidos: ${lostFields.join(', ')}`);
         for (const e of errors) out.warn(e);
         const res = await seedItems(profileId, itens);
         out.info(`seed: +${res.added.length} novos · ${res.skipped.length} já existentes (pulados) · ${errors.length} recusados`);
@@ -256,18 +288,63 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
             },
           );
         }
-        out.result(true, 'library.seed', { added: res.added, skipped: res.skipped, errors });
+        out.result(true, 'library.seed', { added: res.added, skipped: res.skipped, errors, lostFields });
         return EXIT.OK;
       }
       // Caminho 2: geração IA (datagen com regras do perfil + gabarito por item).
       const count = Number(parsed.values.generate ?? 0);
       const theme = typeof parsed.values.theme === 'string' ? parsed.values.theme : '';
       const model = typeof parsed.values.model === 'string' ? parsed.values.model : '';
-      if (!Number.isInteger(count) || count <= 0 || !theme || !model) {
+      const tier = typeof parsed.values.tier === 'string' ? parsed.values.tier.trim() : undefined;
+      // IMPL-068: o único tier com gerador PRÓPRIO é o adversarial (6 categorias,
+      // condicionado ao prompt-base). Os demais saem do datagen normal, na
+      // proporção da matriz-alvo — pedir outro aqui seria prometer o que não há.
+      if (tier !== undefined && tier !== 'adversarial') {
         throw new CliError(
-          'Seed por geração exige --generate <N> --theme <tema> --model <id> (ou --file <arq>).',
+          `--tier só aceita "adversarial" (recebi "${tier}"). Os demais tiers saem do datagen normal, pela matriz-alvo.`,
+          EXIT.USAGE,
+          { flag: '--tier', value: tier },
+          { code: 'usage.invalid_flag_value', hint: 'Use `--tier adversarial --base-prompt-file <arq>` ou omita --tier.' },
+        );
+      }
+      const adversarial = tier === 'adversarial';
+      if (!Number.isInteger(count) || count <= 0 || !model || (!adversarial && !theme)) {
+        throw new CliError(
+          adversarial
+            ? 'Seed adversarial exige --generate <N> --tier adversarial --base-prompt-file <arq> --model <id>.'
+            : 'Seed por geração exige --generate <N> --theme <tema> --model <id> (ou --file <arq>).',
           EXIT.USAGE,
         );
+      }
+      let basePrompt = '';
+      if (adversarial) {
+        const arq = parsed.values['base-prompt-file'];
+        if (typeof arq !== 'string' || !arq.trim()) {
+          throw new CliError(
+            'Seed adversarial exige --base-prompt-file <arq>: o system prompt-base cuja política os ataques testam.',
+            EXIT.USAGE,
+            { flag: '--base-prompt-file' },
+            { code: 'usage.missing_flag', hint: 'Ex.: `--base-prompt-file prompts/atendimento.md`.' },
+          );
+        }
+        try {
+          basePrompt = await fs.readFile(arq, 'utf-8');
+        } catch {
+          throw new CliError(`Não consegui ler o arquivo "${arq}".`, EXIT.USAGE, { path: arq }, {
+            code: 'usage.file_unreadable',
+            hint: 'Confira o caminho (relativo ao diretório atual) e as permissões do arquivo.',
+          });
+        }
+        if (!basePrompt.trim()) {
+          throw new CliError(`"${arq}" está vazio: não há política para testar.`, EXIT.USAGE, { path: arq });
+        }
+      }
+      const languages =
+        typeof parsed.values.languages === 'string'
+          ? parsed.values.languages.split(',').map((l) => l.trim()).filter(Boolean)
+          : undefined;
+      if (adversarial && languages?.length) {
+        out.warn('--languages não se aplica a --tier adversarial: o gerador adversarial é pt-BR (flag ignorada).');
       }
       if (isAgentContext() && parsed.values.budget === undefined) {
         throw new CliError(
@@ -281,7 +358,7 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
       // derrubaria cada lote por dentro e o seed sairia com zero cenários.
       let rules: ScenarioRules | undefined;
       let warnings: string[] = [];
-      if (perfil?.scenarioRules !== undefined) {
+      if (!adversarial && perfil?.scenarioRules !== undefined) {
         const r = parseScenarioRules(perfil.scenarioRules);
         if (!r.ok) {
           throw new CliError(
@@ -301,17 +378,36 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
       try {
         const existentes = await listItems(profileId);
         const exclude = existentes.map((i) => i.question);
-        const gaps = coverageReport(existentes, perfil?.coverageTargets);
-        const stages = await generateStages({
-          apiKey: net.apiKey,
-          theme,
-          count,
-          modelId: model,
-          excludePrompts: exclude,
-          rules,
-          coverageInstructionText: coverageInstruction(gaps),
-          ctx: { sink: ledger },
-        });
+        let stages: StageSpec[];
+        if (adversarial) {
+          // IMPL-068: um lote por categoria (6), ≥ 4 cenários em cada; tier,
+          // rótulo single-turn e hash do prompt-base CARIMBADOS em código.
+          stages = await generateAdversarialStages({
+            apiKey: net.apiKey,
+            modelId: model,
+            baseSystemPrompt: basePrompt,
+            count,
+            excludePrompts: exclude.slice(0, 30),
+            ctx: { sink: ledger },
+          });
+        } else {
+          const gaps = coverageReport(existentes, perfil?.coverageTargets);
+          stages = await generateStages({
+            apiKey: net.apiKey,
+            theme,
+            count,
+            modelId: model,
+            excludePrompts: exclude,
+            rules,
+            coverageInstructionText: coverageInstruction(gaps),
+            ...(languages?.length ? { languages } : {}),
+            // O aviso sai UMA vez, sobre os itens gravados (logo abaixo).
+            onLanguageWarnings: () => undefined,
+            ctx: { sink: ledger },
+          });
+        }
+        // Custo de GERAÇÃO medido (usage.cost, papel datagen) ANTES dos gabaritos.
+        const custoDatagen = ledger.snapshot().byRole.datagen?.usd ?? 0;
         // 1 gabarito POR ITEM (regra P0.2): modelo de referência temp-0.
         const comGabarito = await generateReferences({
           stages,
@@ -321,41 +417,81 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
           onProgress: (done, total) => out.info(`gabaritos: ${done}/${total}`),
         });
         const now = new Date().toISOString();
-        const itens: LibraryItem[] = comGabarito.map((st) => {
-          const id = stableItemId(st.question);
-          return normalizeLibraryItem({
-            id,
-            title: st.question.slice(0, 80),
-            tier: 'mft',
-            question: st.question,
-            productContext: st.productContext,
-            maxTokens: st.maxTokens,
-            rubric: st.rubric,
-            reference: st.reference,
-            origin: 'ai',
-            createdAt: now,
-            seed: 'prompt-builder:seed@1',
-          }) as { ok: true; item: LibraryItem };
-        }).filter((r) => r.ok).map((r) => r.item);
+        // IMPL-064: TODO metadado do datagen v2 chega ao item (tier,
+        // dimensionTags, persona, difficultyEstimate, invarianceGroup, idioma
+        // e os carimbos adversariais) — antes o tier era fixo 'mft' e o resto
+        // se perdia. Item que o schema recusa vira AVISO, nunca some calado.
+        const itens: LibraryItem[] = [];
+        const recusados: string[] = [];
+        comGabarito.forEach((st, i) => {
+          const r = normalizeLibraryItem(libraryItemFromStage(st, { now, seed: 'prompt-builder:seed@1' }));
+          if (r.ok) itens.push(r.item);
+          else recusados.push(`item gerado ${i + 1}: ${r.error}`);
+        });
+        for (const e of recusados) out.warn(e);
+        // Idioma fora da política (IMPL-056): o gerador desobedeceu.
+        const avisosIdioma = languageWarnings(itens, { languages: adversarial ? undefined : languages });
+        for (const a of avisosIdioma) out.warn(a);
         const res = mergeSeedItems(existentes, itens);
         await seedItems(profileId, itens);
         const snap = ledger.snapshot();
         out.info(
           `seed: +${res.added.length} novos · ${res.skipped.length} já existentes (pulados) · custo $${snap.spentUsd.toFixed(4)}`,
         );
+        // IMPL-068: cobertura por categoria do PERFIL depois do seed (é o banco
+        // que a run vai usar; rodar de novo acumula) + custo de geração POR
+        // CENÁRIO (medido; `unknown` no ledger não vira "custou zero").
+        const cobertura = adversarial ? adversarialCoverageReport([...existentes, ...res.added]) : null;
+        const porCenario = stages.length > 0 ? custoDatagen / stages.length : 0;
+        if (adversarial) {
+          const linha = cobertura
+            ? Object.entries(cobertura.byCategory)
+                .map(([k, v]) => `${k}=${v}`)
+                .join('  ')
+            : '(nenhum item adversarial gerado)';
+          out.info(`cobertura adversarial (single-turn, ASR@1 = limite inferior): ${linha}`);
+          if (!cobertura || cobertura.gaps.length) {
+            out.warn(
+              `categorias abaixo de ${cobertura?.minPerCategory ?? 4} cenários: ${(cobertura?.gaps ?? []).join(', ') || 'todas'} — rode o seed de novo (é idempotente).`,
+            );
+          }
+          if (porCenario > ADVERSARIAL_MAX_COST_PER_SCENARIO_USD) {
+            out.warn(
+              `custo de geração $${porCenario.toFixed(4)}/cenário acima do teto de $${ADVERSARIAL_MAX_COST_PER_SCENARIO_USD} — use um gerador mais barato.`,
+            );
+          }
+          if (snap.accuracy.unknown > 0) {
+            out.warn(`${snap.accuracy.unknown} chamada(s) sem custo conhecido — o custo por cenário é um PISO, não o total.`);
+          }
+        }
         out.result(true, 'library.seed', {
           added: res.added,
           skipped: res.skipped,
+          rejected: recusados,
           totalCostUsd: snap.spentUsd,
           byRole: snap.byRole,
+          costAccuracy: snap.accuracy,
+          datagenCostPerScenarioUsd: porCenario,
           warnings,
+          languageWarnings: avisosIdioma,
+          ...(adversarial
+            ? {
+                tier: 'adversarial',
+                adversarialCoverage: cobertura,
+                // Só deste lote (o perfil pode já ter itens adversariais).
+                generatedCoverage: adversarialCoverageReport(itens),
+                maxCostPerScenarioUsd: ADVERSARIAL_MAX_COST_PER_SCENARIO_USD,
+              }
+            : {}),
         });
         return EXIT.OK;
       } catch (err) {
         // Sinal de controle sobe CRU: o envelope (toCliError) o mapeia para
         // kind 'control' com exit 7 (orçamento) ou 130 (cancelado).
         if (isControlSignal(err)) {
-          out.warn('interrompido por orçamento/cancelamento — o que foi gerado já está salvo');
+          // A gravação acontece só no FIM do lote (seed idempotente): parar no
+          // meio não deixa item pela metade — e também não grava nada.
+          out.warn('interrompido por orçamento/cancelamento — nada deste lote foi gravado');
         }
         throw err;
       }
@@ -446,16 +582,59 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
 
     case 'export': {
       const profileId = exigirProfile(parsed.values);
-      const pack = await exportProfilePack(profileId);
-      const texto = `${JSON.stringify(pack, null, 2)}\n`;
-      const destino = typeof parsed.values.out === 'string' ? parsed.values.out : undefined;
-      if (destino) {
-        await fs.writeFile(destino, texto, 'utf-8');
-        out.info(`pacote gravado em ${destino} (${pack.scenarios.length} cenários)`);
-      } else {
-        out.raw(texto);
+      const formato = parsed.values.format ?? 'exchange';
+      if (formato !== 'exchange' && formato !== 'pack') {
+        throw new CliError(`--format deve ser "exchange" ou "pack" (recebi "${String(formato)}").`, EXIT.USAGE, {
+          flag: '--format',
+          value: formato,
+        }, { code: 'usage.invalid_flag_value', hint: 'exchange (default) é reimportável sem perda; pack é o pacote de seed lossy.' });
       }
-      out.result(true, 'library.export', { scenarios: pack.scenarios.length, file: destino });
+      const destino = typeof parsed.values.out === 'string' ? parsed.values.out : undefined;
+
+      if (formato === 'pack') {
+        // Formato LOSSY de seed de run: o que ele descarta/reescreve é DECLARADO
+        // (IMPL-089) — antes o export perdia 8 campos em silêncio.
+        const { pack, lostFields } = await exportProfilePackDeclared(profileId);
+        if (lostFields.length) {
+          out.warn(`${SCENARIO_PACK_FORMAT} descarta/reescreve: ${lostFields.join(', ')} — para ida e volta sem perda use o default (--format exchange).`);
+        }
+        const texto = `${JSON.stringify(pack, null, 2)}\n`;
+        if (destino) {
+          await fs.writeFile(destino, texto, 'utf-8');
+          out.info(`pacote gravado em ${destino} (${pack.scenarios.length} cenários)`);
+        } else if (out.isText) {
+          out.raw(texto);
+        }
+        out.result(true, 'library.export', {
+          format: SCENARIO_PACK_FORMAT,
+          scenarios: pack.scenarios.length,
+          file: destino,
+          lostFields,
+          // Sem -o, o payload vai NO resultado (um único JSON no stdout).
+          ...(destino ? {} : { pack }),
+        });
+        return EXIT.OK;
+      }
+
+      // IMPL-089: prompt-builder-exchange@1 — itens VERBATIM (campo desconhecido
+      // incluso); `library add` do mesmo pacote num diretório novo é identidade.
+      const { bundle, count } = await exportProfileExchange(profileId, `prompt-builder-cli@${pkgVersion()}`);
+      if (destino && destino.toLowerCase().endsWith('.json')) {
+        await fs.writeFile(destino, textoPacoteUnico(bundle), 'utf-8');
+        out.info(`pacote ${EXCHANGE_FORMAT} gravado em ${destino} (${count} itens, arquivo único)`);
+      } else if (destino) {
+        await writeExchangeDir(destino, bundle);
+        out.info(`pacote ${EXCHANGE_FORMAT} gravado em ${destino}/ (${count} itens: ${Object.keys(bundle.files).join(', ')})`);
+      } else if (out.isText) {
+        out.raw(textoPacoteUnico(bundle));
+      }
+      out.result(true, 'library.export', {
+        format: EXCHANGE_FORMAT,
+        items: count,
+        ...(destino ? { [destino.toLowerCase().endsWith('.json') ? 'file' : 'dir']: destino } : {}),
+        lostFields: [],
+        ...(destino ? {} : { bundle: toSingleFileBundle(bundle) }),
+      });
       return EXIT.OK;
     }
 

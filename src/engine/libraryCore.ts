@@ -26,11 +26,18 @@ import { contentHash as jcsSha256 } from './hash.js';
  * - `mft`         happy path — o caso comum, maioria do banco;
  * - `invariance`  pares de invariância (variações que NÃO podem mudar a saída);
  * - `adversarial` tenta induzir o erro (prompt injection, premissa falsa);
- * - `edge`        fronteira do contrato (input vazio, idioma raro, limite).
+ * - `edge`        fronteira do contrato (input vazio, idioma raro, limite);
+ * - `benign-twin` gêmeo LEGÍTIMO de um ataque (IMPL-068): pedido lícito que o
+ *                 assistente DEVE atender — recusá-lo é recusa excessiva.
  */
-export type LibraryTier = 'mft' | 'invariance' | 'adversarial' | 'edge';
+export type LibraryTier = 'mft' | 'invariance' | 'adversarial' | 'edge' | 'benign-twin';
 
-export const LIBRARY_TIERS: readonly LibraryTier[] = ['mft', 'invariance', 'adversarial', 'edge'];
+export const LIBRARY_TIERS: readonly LibraryTier[] = ['mft', 'invariance', 'adversarial', 'edge', 'benign-twin'];
+
+/** Tier válido da biblioteca? (o datagen devolve `string` livre). */
+export function isLibraryTier(v: unknown): v is LibraryTier {
+  return typeof v === 'string' && (LIBRARY_TIERS as readonly string[]).includes(v);
+}
 
 /** Proveniência do item — curadoria humana, geração IA ou importação. */
 export type LibraryOrigin = 'official' | 'ai' | 'manual' | 'import';
@@ -125,6 +132,19 @@ export interface LibraryItem {
   rationale?: string;
   /** Dimensões medidas (ex.: "extracao", "recusa", "pt-BR") — base da cobertura. */
   dimensionTags?: string[];
+  // --- metadados do datagen v2 (IMPL-064/056/068) — antes o zod os stripava ---
+  /** Estimativa de dificuldade 1-5 do gerador: SINAL de curadoria, nunca rótulo. */
+  difficultyEstimate?: number;
+  /** Grupo de invariância (itens cuja saída esperada não pode mudar entre si). */
+  invarianceGroup?: string;
+  /** Idioma do cenário (IMPL-056): ausente = pt-BR (produto monolíngue). */
+  language?: string;
+  /** Categoria adversarial (uma das 6 mínimas do IMPL-068). */
+  adversarialCategory?: string;
+  /** Rótulo de turno ('single-turn' = ASR@1, limite inferior do ataque real). */
+  turnLabel?: string;
+  /** SHA-256 do system prompt-base que condicionou a geração adversarial. */
+  basePromptHash?: string;
   // --- contrato executável (StageSpec) ---
   question: string;
   productContext: string;
@@ -224,6 +244,14 @@ const itemSchema = z.object({
   successCriteria: z.array(z.string()).optional(),
   rationale: z.string().optional(),
   dimensionTags: z.array(z.string()).optional(),
+  // Sinal de curadoria (nunca rótulo): fora de 1..5 é CLAMPADO na normalização,
+  // não derruba o item — mesma política do datagen (`normalizeDatagenStage`).
+  difficultyEstimate: z.number('difficultyEstimate deve ser número').optional(),
+  invarianceGroup: z.string().optional(),
+  language: z.string().optional(),
+  adversarialCategory: z.string().optional(),
+  turnLabel: z.string().optional(),
+  basePromptHash: z.string().optional(),
   question: z.string('question obrigatória').min(1, 'question obrigatória'),
   productContext: z.string('productContext obrigatório').min(1, 'productContext obrigatório'),
   maxTokens: z
@@ -305,8 +333,15 @@ export function normalizeLibraryItem(
   item.question = item.question.trim();
   item.productContext = item.productContext.trim();
   if (item.reference !== undefined) item.reference = item.reference.trim();
-  item.dimensionTags = item.dimensionTags?.map((t) => t.trim()).filter(Boolean);
-  item.successCriteria = item.successCriteria?.map((s) => s.trim()).filter(Boolean);
+  // Só quando presentes: chave com valor `undefined` sujaria o round-trip
+  // (IMPL-089 compara o item relido com o original por igualdade estrita).
+  if (item.dimensionTags !== undefined) item.dimensionTags = item.dimensionTags.map((t) => t.trim()).filter(Boolean);
+  if (item.successCriteria !== undefined) {
+    item.successCriteria = item.successCriteria.map((s) => s.trim()).filter(Boolean);
+  }
+  if (item.difficultyEstimate !== undefined) {
+    item.difficultyEstimate = Math.min(5, Math.max(1, Math.round(item.difficultyEstimate)));
+  }
   return { ok: true, item };
 }
 
@@ -348,18 +383,72 @@ export function toStageSpec(item: LibraryItem): StageSpec & { id: string } {
     expected: item.expected,
     ...(item.labelSet !== undefined ? { labelSet: item.labelSet } : {}),
     origin: item.origin === 'ai' ? 'ai' : 'import',
+    // Metadados do datagen v2 (IMPL-064/056/068): chegam à run para o relatório
+    // de idioma (`languageWarnings`) e de cobertura adversarial do record.
+    ...(item.persona !== undefined ? { persona: item.persona } : {}),
+    ...(item.difficultyEstimate !== undefined ? { difficultyEstimate: item.difficultyEstimate } : {}),
+    ...(item.invarianceGroup !== undefined ? { invarianceGroup: item.invarianceGroup } : {}),
+    ...(item.language !== undefined ? { language: item.language } : {}),
+    ...(item.adversarialCategory !== undefined ? { adversarialCategory: item.adversarialCategory } : {}),
+    ...(item.turnLabel !== undefined ? { turnLabel: item.turnLabel } : {}),
+    ...(item.basePromptHash !== undefined ? { basePromptHash: item.basePromptHash } : {}),
+  };
+}
+
+/**
+ * Converte um cenário do datagen v2 (+ gabarito) no item CRU da biblioteca (IMPL-064):
+ * TODO metadado que `normalizeDatagenStage` preservou chega ao item — antes o
+ * `library seed --generate` carimbava `tier: 'mft'` e descartava dimensionTags/
+ * persona/difficultyEstimate/invarianceGroup, e o banco gerado não era
+ * representativo do fluxo da run. Tier fora de `LIBRARY_TIERS` cai em 'mft'
+ * (a matriz do banco é fechada); o resto passa verbatim.
+ *
+ * Devolve o objeto CRU: quem chama valida com `normalizeLibraryItem` (a
+ * validação única do item) — nenhum item sai daqui sem passar pelo schema.
+ */
+export function libraryItemFromStage(
+  st: StageSpec,
+  opts: { now: string; seed?: string; id?: string; titleMax?: number },
+): Record<string, unknown> {
+  return {
+    id: opts.id ?? stableItemId(st.question),
+    title: st.question.slice(0, opts.titleMax ?? 80),
+    tier: isLibraryTier(st.tier) ? st.tier : 'mft',
+    ...(st.dimensionTags?.length ? { dimensionTags: [...st.dimensionTags] } : {}),
+    ...(st.persona !== undefined ? { persona: st.persona } : {}),
+    ...(st.difficultyEstimate !== undefined ? { difficultyEstimate: st.difficultyEstimate } : {}),
+    ...(st.invarianceGroup !== undefined ? { invarianceGroup: st.invarianceGroup } : {}),
+    ...(st.language !== undefined ? { language: st.language } : {}),
+    ...(st.adversarialCategory !== undefined ? { adversarialCategory: st.adversarialCategory } : {}),
+    ...(st.turnLabel !== undefined ? { turnLabel: st.turnLabel } : {}),
+    ...(st.basePromptHash !== undefined ? { basePromptHash: st.basePromptHash } : {}),
+    question: st.question,
+    productContext: st.productContext,
+    maxTokens: st.maxTokens,
+    ...(st.rubric !== undefined ? { rubric: st.rubric } : {}),
+    ...(st.reference !== undefined ? { reference: st.reference } : {}),
+    origin: 'ai',
+    createdAt: opts.now,
+    ...(opts.seed !== undefined ? { seed: opts.seed } : {}),
   };
 }
 
 /**
  * Invariância de par (tier `invariance`): itens do MESMO grupo devem ter o
  * mesmo `reference`/`expected` — a saída não pode mudar quando só a superfície
- * da pergunta muda. Agrupamento por `dimensionTags[0]` prefixada de `inv:`.
+ * da pergunta muda. Agrupamento pelo `invarianceGroup` do item (datagen v2,
+ * IMPL-064 — normalizado para o prefixo `inv:`) ou, na falta dele, pela
+ * primeira `dimensionTags` prefixada de `inv:` (curadoria manual).
  */
 export function invariancePairs(items: LibraryItem[]): { key: string; itemIds: string[] }[] {
   const grupos = new Map<string, string[]>();
   for (const item of items) {
-    const key = (item.dimensionTags ?? []).find((t) => t.startsWith('inv:'));
+    const grupo = item.invarianceGroup?.trim();
+    const key = grupo
+      ? grupo.startsWith('inv:')
+        ? grupo
+        : `inv:${grupo}`
+      : (item.dimensionTags ?? []).find((t) => t.startsWith('inv:'));
     if (!key) continue;
     const lista = grupos.get(key) ?? [];
     lista.push(item.id);
@@ -375,7 +464,7 @@ export function coverageReport(
   items: LibraryItem[],
   targets?: CoverageTargets,
 ): CoverageReport {
-  const byTier: Record<LibraryTier, number> = { mft: 0, invariance: 0, adversarial: 0, edge: 0 };
+  const byTier: Record<LibraryTier, number> = { mft: 0, invariance: 0, adversarial: 0, edge: 0, 'benign-twin': 0 };
   const byDimension: Record<string, number> = {};
   const withoutGabarito: string[] = [];
   for (const item of items) {
@@ -424,6 +513,14 @@ export const ITEM_CONTENT_FIELDS = [
   'reference',
   'expected',
   'labelSet',
+  // Datagen v2 (IMPL-064/056/068): definem O QUE o item testa — mudar a
+  // categoria, o idioma ou o prompt-base condicionador é conteúdo novo.
+  // `difficultyEstimate` fica DE FORA: é sinal de curadoria, não conteúdo.
+  'invarianceGroup',
+  'language',
+  'adversarialCategory',
+  'turnLabel',
+  'basePromptHash',
 ] as const;
 
 /** O subconjunto de CONTEÚDO do item (o que o hash identifica). */
@@ -652,19 +749,37 @@ export function normalizeLibraryItemPreserving(
   | { ok: false; error: string } {
   const r = normalizeLibraryItem(raw);
   if (!r.ok) return r;
-  const item: LibraryItem & Record<string, unknown> = { ...r.item };
   const lostFields: string[] = [];
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    for (const [chave, valor] of Object.entries(raw as Record<string, unknown>)) {
-      if (chave in item) continue;
-      if (valor === undefined) {
-        lostFields.push(chave);
-        continue;
-      }
-      item[chave] = valor;
+  const item = restaurarDesconhecidos(raw, r.item, '', lostFields) as LibraryItem & Record<string, unknown>;
+  return { ok: true, item, lostFields };
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * Devolve ao objeto normalizado TODA chave que o zod stripou — inclusive em
+ * objetos aninhados (`rejectReason`, `generator`, cada entrada de
+ * `provenance`): o object() do zod descarta chave desconhecida em qualquer
+ * nível, e a régua do IMPL-089 vale para todos. Só `undefined` (que o JSON não
+ * representa) vira perda declarada, pelo caminho pontuado (`generator.x`).
+ */
+function restaurarDesconhecidos(raw: unknown, parsed: unknown, prefixo: string, perdidos: string[]): unknown {
+  if (!isPlainObject(raw) || !isPlainObject(parsed)) return parsed;
+  const out: Record<string, unknown> = { ...parsed };
+  for (const [chave, valor] of Object.entries(raw)) {
+    const caminho = prefixo ? `${prefixo}.${chave}` : chave;
+    if (!(chave in out)) {
+      if (valor === undefined) perdidos.push(caminho);
+      else out[chave] = valor;
+      continue;
+    }
+    if (isPlainObject(valor) && isPlainObject(out[chave])) {
+      out[chave] = restaurarDesconhecidos(valor, out[chave], caminho, perdidos);
     }
   }
-  return { ok: true, item, lostFields };
+  return out;
 }
 
 // ----------------------------------------------------------------------------
