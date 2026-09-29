@@ -162,9 +162,31 @@ E no `arena-config@1`, aponte o banco em vez de pinar cenários:
 
 Itens sem gabarito (`reference` textual OU `expected` de rótulo) são **recusados**
 no evolve (paridade com o 409 do prompt-arena). Item enriquecido: `title`, `tier`
-(`mft|invariance|adversarial|edge`), `persona`, `context`, `successCriteria[]`,
-`rationale`, `dimensionTags[]` — `pb library seed --profile X --generate 10
---theme T --model <id>` gera com gabarito por item (seed idempotente por id).
+(`mft|invariance|adversarial|edge|benign-twin`), `persona`, `context`,
+`successCriteria[]`, `rationale`, `dimensionTags[]` — `pb library seed --profile X
+--generate 10 --theme T --model <id>` gera com gabarito por item (seed idempotente
+por id) e guarda os metadados do gerador (tier, dimensões, persona, dificuldade,
+grupo de invariância, idioma).
+
+Cenários **adversariais** (injeção, extração do system prompt, jailbreak, fuga de
+escopo, dado pessoal e o gêmeo benigno que mede recusa excessiva), condicionados
+ao prompt que você quer proteger — ≥ 4 por categoria, `single-turn` (ASR@1 é um
+limite inferior), com cobertura e custo por cenário no resultado:
+
+```bash
+prompt-builder library seed --profile meu-alvo --generate 30 --tier adversarial \
+  --base-prompt-file prompt.md --model <id> --budget 1
+```
+
+Para mover o banco entre máquinas sem perder campo, `library export -o <dir>`
+grava `prompt-builder-exchange@1` (manifest.json + library.jsonl) e
+`library add --profile outro --file <dir>` o reimporta idêntico; campo que um
+formato não carrega aparece em `lostFields` (nunca some calado).
+
+**Idioma.** O datagen gera 100% em pt-BR. Variar idioma é opt-in:
+`--languages pt-BR,en` (em `compare`/`vary`/`train` e no `library seed`) ou
+`"languages": ["pt-BR","en"]` no arena-config@1. Cenário de qualquer fonte com
+idioma fora da política sai em `languageWarnings` no record da run.
 
 ## Rótulo esperado = veredito sem juiz (`expected`)
 
