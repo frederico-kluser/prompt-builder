@@ -1,13 +1,14 @@
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import type { Server } from 'node:http';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import benchmarkRouter from './routes.js';
 import agentRouter from './agentRoutes.js';
 import { markOrphansAsAborted, setDataDir } from './storage.js';
 import { configureGatewayFromEnv } from './gatewayEnv.js';
+import { shutdownControlled } from './httpRunControl.js';
 import { isUnsafePathError, publicErrorMessage, redactPaths } from './pathSafety.js';
 
 // Servidor HTTP de dev/self-host (NÃO viaja no pacote: `!dist/server.*`).
@@ -33,6 +34,91 @@ export interface AppOptions {
   extraAllowedHosts?: readonly string[];
   /** Pasta do SPA buildado; `null` desliga o static. Default: ../web/dist. */
   webDist?: string | null;
+  /**
+   * Headers de segurança do SPA. Default: os do vercel.json (`loadSecurityHeaders`).
+   * /v1 e /health recebem a mesma lista com a CSP trocada (`apiSecurityHeaders`).
+   */
+  securityHeaders?: readonly SecurityHeader[];
+}
+
+// ---------------------------------------------------------------------------
+// Headers de segurança (http-api#7)
+// ---------------------------------------------------------------------------
+
+export interface SecurityHeader {
+  key: string;
+  value: string;
+}
+
+/** Raiz do repo: `dist/server.js` e `src/server.ts` ficam UM nível abaixo dela. */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * Mínimo que vale mesmo sem o vercel.json ao lado (ex.: imagem só com `dist/`
+ * e `web/dist/`): anti-framing, nosniff, sem Referer e COOP. Sem `script-src`
+ * aqui — uma CSP sem o hash do script de tema bloquearia o próprio SPA.
+ */
+export const BASELINE_SECURITY_HEADERS: readonly SecurityHeader[] = [
+  { key: 'Content-Security-Policy', value: "frame-ancestors 'none'; object-src 'none'; base-uri 'self'" },
+  { key: 'X-Content-Type-Options', value: 'nosniff' },
+  { key: 'X-Frame-Options', value: 'DENY' },
+  { key: 'Referrer-Policy', value: 'no-referrer' },
+  { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+];
+
+/**
+ * Os MESMOS headers que o deploy da Vercel manda (grupo `/(.*)` do
+ * vercel.json): o SPA guarda a key do OpenRouter no localStorage, e servido
+ * por aqui ele saía sem CSP nem frame-ancestors — qualquer site podia
+ * emoldurar `http://localhost:3001` (o Host da moldura É localhost). Lidos do
+ * vercel.json, fonte única: o hash `sha256-…` do script de tema da CSP é
+ * medido contra o HTML em test/storage-deploy-headers.test.ts e nunca diverge
+ * entre os dois deploys. Arquivo ausente/ilegível => BASELINE_SECURITY_HEADERS.
+ */
+export function loadSecurityHeaders(vercelJsonPath = path.join(REPO_ROOT, 'vercel.json')): SecurityHeader[] {
+  try {
+    const cfg = JSON.parse(readFileSync(vercelJsonPath, 'utf-8')) as {
+      headers?: Array<{ source?: unknown; headers?: unknown }>;
+    };
+    const grupo = cfg.headers?.find((h) => h.source === '/(.*)');
+    const lista = Array.isArray(grupo?.headers)
+      ? (grupo.headers as unknown[]).filter(
+          (h): h is SecurityHeader =>
+            typeof (h as SecurityHeader | null)?.key === 'string' &&
+            typeof (h as SecurityHeader | null)?.value === 'string',
+        )
+      : [];
+    if (lista.length > 0) return lista.map(({ key, value }) => ({ key, value }));
+  } catch {
+    // cai no mínimo abaixo
+  }
+  return BASELINE_SECURITY_HEADERS.map((h) => ({ ...h }));
+}
+
+/** CSP das respostas da API: só anti-framing. */
+export const API_CSP = "frame-ancestors 'none'";
+
+/**
+ * /v1 e /health servem DADOS (JSON, SSE, CSV) e documentos autocontidos como
+ * o relatório `…/sessions/:id/report?format=html` (estilo inline). A CSP do SPA
+ * (`style-src 'self'`, `script-src` com o hash do tema) quebraria esse
+ * documento; ali vale o resto da lista com a CSP reduzida ao anti-framing.
+ */
+export function apiSecurityHeaders(list: readonly SecurityHeader[]): SecurityHeader[] {
+  return [
+    { key: 'Content-Security-Policy', value: API_CSP },
+    ...list.filter((h) => h.key.toLowerCase() !== 'content-security-policy'),
+  ];
+}
+
+const API_PATH = /^\/(?:v1|health)(?:\/|$)/u;
+
+function securityHeaders(spa: readonly SecurityHeader[]) {
+  const api = apiSecurityHeaders(spa);
+  return (req: Request, res: Response, next: NextFunction): void => {
+    for (const h of API_PATH.test(req.path) ? api : spa) res.setHeader(h.key, h.value);
+    next();
+  };
 }
 
 /** `PB_ALLOWED_HOSTS=a.com,b.local` → ['a.com','b.local'] (minúsculo, sem porta). */
@@ -133,6 +219,8 @@ export function createApp(opts: AppOptions = {}): express.Express {
   app.disable('x-powered-by');
 
   const allowed = new Set<string>([...LOCAL_HOSTS, ...(opts.extraAllowedHosts ?? [])]);
+  // Headers de segurança em TODA resposta — inclusive o 400/403 do hostGuard.
+  app.use(securityHeaders(opts.securityHeaders ?? loadSecurityHeaders()));
   // Host/Origin ANTES de tudo (inclusive /health e o static do SPA).
   app.use(hostGuard(allowed));
   app.use(redactErrorBodies);
@@ -151,14 +239,28 @@ export function createApp(opts: AppOptions = {}): express.Express {
     app.use('/v1/agents', agentRouter);
   }
 
+  // Qualquer /v1/* sem rota (inclusive /v1/agents com o modo agente desligado,
+  // e método errado numa rota que existe) responde no contrato JSON {error} —
+  // nunca o `<pre>Cannot GET …</pre>` do Express, que quebra o `res.json()` do
+  // cliente. Mensagem IDÊNTICA para todo caminho: o /v1/agents desligado não
+  // se distingue de uma rota inexistente (§21.5).
+  app.use('/v1', (_req, res) => {
+    res.status(404).json({ error: 'Rota não encontrada.' });
+  });
+
   // Servir frontend buildado (web/dist) na raiz, se existir.
-  const webDist =
-    opts.webDist === undefined
-      ? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'web', 'dist')
-      : opts.webDist;
+  const webDist = opts.webDist === undefined ? path.join(REPO_ROOT, 'web', 'dist') : opts.webDist;
   if (webDist) {
     app.use(express.static(webDist));
-    app.get(/^\/(?!v1|health).*/, (_req, res, next) => {
+    // Fallback de SPA só para NAVEGAÇÃO: `/assets/*` e qualquer caminho cujo
+    // último segmento tem extensão (`/favicon.ico`, chunk `x-abc123.js` de um
+    // build anterior) que o static não achou é 404 — com index.html + 200, o
+    // import dinâmico de uma aba aberta falhava com erro de MIME/módulo.
+    app.get(/^\/(?!v1(?:\/|$)|health(?:\/|$)).*/, (req, res, next) => {
+      if (req.path.startsWith('/assets/') || path.posix.extname(req.path) !== '' || !req.accepts('html')) {
+        next();
+        return;
+      }
       res.sendFile(path.join(webDist, 'index.html'), (err) => {
         if (err) next();
       });
@@ -297,6 +399,50 @@ async function main(): Promise<void> {
   void markOrphansAsAborted().catch((err) => {
     console.warn('[bench] markOrphansAsAborted failed:', publicErrorMessage(err));
   });
+  installGracefulShutdown(server);
+}
+
+/** Graça do encerramento: runs abortadas têm até isto para gravar o terminal. */
+const SERVER_SHUTDOWN_GRACE_MS = 5_000;
+
+/**
+ * SIGTERM/SIGINT (Ctrl-C, `docker stop`, `kill`): antes o processo morria na
+ * hora, a run ficava 'running' em disco até o próximo boot e o SSE caía sem
+ * evento terminal. Agora toda run/sessão deste servidor é abortada com
+ * `RunCancelled` (fecha 'aborted' com o parcial; o SSE recebe run.finished) e
+ * o processo sai quando as escritas terminais acabam — teto de
+ * SERVER_SHUTDOWN_GRACE_MS. Segundo sinal = saída imediata.
+ */
+function installGracefulShutdown(server: Server): void {
+  let stopping = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (stopping) {
+      console.error(`[bench] ${signal} de novo — saindo sem esperar.`);
+      process.exit(130);
+    }
+    stopping = true;
+    console.error(`[bench] ${signal}: abortando as runs deste servidor e encerrando…`);
+    // Para de aceitar conexões; o SSE de cada run fecha sozinho no terminal.
+    server.close();
+    server.closeIdleConnections?.();
+    void shutdownControlled(SERVER_SHUTDOWN_GRACE_MS)
+      .then(({ aborted, forced }) => {
+        const forcadas = forced.runs.length + forced.sessions.length;
+        if (aborted > 0 || forcadas > 0) {
+          console.error(
+            `[bench] ${aborted} run(s)/sessão(ões) abortada(s)` +
+              (forcadas > 0 ? `; ${forcadas} gravada(s) 'aborted' à força (graça esgotada)` : '') +
+              '.',
+          );
+        }
+      })
+      .catch((err: unknown) => {
+        console.error('[bench] falha no encerramento gracioso:', publicErrorMessage(err));
+      })
+      .finally(() => process.exit(0));
+  };
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
 }
 
 /** Entrypoint real (`node dist/server.js` / `tsx src/server.ts`), não import de teste. */

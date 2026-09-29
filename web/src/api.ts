@@ -122,6 +122,18 @@ import {
 import { parseScenarioPack, SCENARIO_PACK_FORMAT, SCENARIO_PACK_FORMAT_LEGACY } from './engine/scenarioPack';
 import { parseArenaConfig, ARENA_CONFIG_FORMAT, type ArenaConfigFile } from './engine/configFile';
 import { isHeldHere } from './engine/runLocks';
+// http-api#3: servido junto do backend (self-host), o histórico e as telas de
+// run/treino também leem as runs criadas pela API HTTP — somente leitura.
+import {
+  fetchBackendRun,
+  fetchBackendRuns,
+  fetchBackendSession,
+  fetchBackendSessions,
+  followBackendRun,
+  followBackendRunLive,
+  followBackendSession,
+  mergeById,
+} from './backend';
 import {
   markRunInterrupted as engineMarkRunInterrupted,
   markSessionInterrupted as engineMarkSessionInterrupted,
@@ -1058,7 +1070,18 @@ export function getLiveRun(id: string): RunRecord | undefined {
  * de ele emitir (diferente de openRunStream, que exige o record ja em memoria).
  */
 export function subscribeRunLive(id: string, onEvent: (e: any) => void): () => void {
-  return subscribeRun(id, onEvent as any);
+  const off = subscribeRun(id, onEvent as any);
+  if (getRunRecord(id) || isHeldHere('run', id)) return off;
+  // Iteração de uma sessão do SERVIDOR (http-api#3): o motor da aba nunca a
+  // emite — os eventos vêm do SSE do backend (se o record existir lá).
+  const ctrl = new AbortController();
+  void fetchBackendRun(id).then((rec) => {
+    if (rec && !ctrl.signal.aborted && !getRunRecord(id)) void followBackendRunLive(id, onEvent, ctrl.signal);
+  });
+  return () => {
+    ctrl.abort();
+    off();
+  };
 }
 
 export async function fetchLgpd(): Promise<LgpdData> {
@@ -1226,7 +1249,11 @@ export async function fetchSession(id: string): Promise<SessionRecord> {
     return live as unknown as SessionRecord;
   }
   const rec = await loadSession(id);
-  if (!rec) throw new Error('Sessão não encontrada');
+  if (!rec) {
+    const remote = await fetchBackendSession(id); // http-api#3 (self-host)
+    if (remote) return remote;
+    throw new Error('Sessão não encontrada');
+  }
   // IMPL-023: 'running' que NÃO roda nesta aba — o lock decide se é órfã.
   if (rec.status !== 'running' || isHeldHere('session', id)) return rec as unknown as SessionRecord;
   const chk = await reconcileSession(id);
@@ -1246,7 +1273,8 @@ export interface SessionSummary {
 
 export async function fetchSessions(): Promise<SessionSummary[]> {
   await sweepOrphansShared(); // IMPL-023: o histórico não lista treino zumbi
-  return await engineListSessions<SessionSummary>();
+  const [local, remote] = await Promise.all([engineListSessions<SessionSummary>(), fetchBackendSessions()]);
+  return mergeById(local, remote); // http-api#3: + as do servidor (self-host)
 }
 
 export function openSessionStream(
@@ -1272,6 +1300,8 @@ export function openSessionStream(
     (rec) => onEvent({ type: 'snapshot', record: rec }),
     (state) => onEvent({ type: 'ownership', state } satisfies OwnershipEvent),
     ctrl.signal,
+    // http-api#3: fora do IndexedDB, pode ser uma sessão do servidor (self-host).
+    () => void followBackendSession(id, onEvent, ctrl.signal),
   );
   return () => ctrl.abort();
 }
@@ -1556,7 +1586,8 @@ export {
 
 export async function fetchRuns(): Promise<RunSummary[]> {
   await sweepOrphansShared(); // IMPL-023: o histórico não lista run zumbi
-  return await engineListRuns<RunSummary>();
+  const [local, remote] = await Promise.all([engineListRuns<RunSummary>(), fetchBackendRuns()]);
+  return mergeById(local, remote); // http-api#3: + as do servidor (self-host)
 }
 
 export async function fetchRun(id: string): Promise<RunRecord> {
@@ -1566,7 +1597,11 @@ export async function fetchRun(id: string): Promise<RunRecord> {
     return live as unknown as RunRecord;
   }
   const rec = await loadRun(id);
-  if (!rec) throw new Error('Run nao encontrada');
+  if (!rec) {
+    const remote = await fetchBackendRun(id); // http-api#3 (self-host)
+    if (remote) return remote;
+    throw new Error('Run nao encontrada');
+  }
   // IMPL-023: 'running' que NÃO roda nesta aba — o lock decide se é órfã
   // (recarregar no meio da run reabre aborted/orphan, sem intervenção).
   if (rec.status !== 'running' || isHeldHere('run', id)) return rec as unknown as RunRecord;
@@ -1607,6 +1642,8 @@ export function openRunStream(
     emitRecord,
     (state) => onEvent({ type: 'ownership', state } satisfies OwnershipEvent),
     ctrl.signal,
+    // http-api#3: fora do IndexedDB, pode ser uma run do servidor (self-host).
+    () => void followBackendRun(id, onEvent, ctrl.signal),
   );
   return () => ctrl.abort();
 }
@@ -1638,10 +1675,16 @@ async function followStoredRecord<R extends { status: string }>(
   emit: (rec: R) => void,
   ownership: (state: OwnershipEvent['state']) => void,
   signal: AbortSignal,
+  /** Sem record local: quem mais pode tê-lo (o backend, no self-host). */
+  onMissing?: () => void,
 ): Promise<void> {
   try {
     const rec = await load();
-    if (signal.aborted || !rec) return;
+    if (signal.aborted) return;
+    if (!rec) {
+      onMissing?.();
+      return;
+    }
     if (rec.status !== 'running') {
       emit(rec);
       return;

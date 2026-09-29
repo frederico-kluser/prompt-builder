@@ -1,8 +1,15 @@
 import { Router } from 'express';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { listModels, validateKey } from './openrouter.js';
-import { getLiveRun, startRun } from './orchestrator.js';
-import { startTraining } from './trainer.js';
+import { getLiveRun } from './orchestrator.js';
+// `startRun`/`startTraining` daqui são os do motor COM AbortController
+// registrado (mesma assinatura): toda run/sessão iniciada por esta API é
+// cancelável por POST /runs/:id/cancel e /sessions/:id/cancel (http-api#2).
+import {
+  cancelControlled,
+  startControlledRun as startRun,
+  startControlledTraining as startTraining,
+} from './httpRunControl.js';
 import { listTechniques } from './techniques.js';
 import { getLgpdData } from './lgpd.js';
 import { listRuns, loadRun, listSessions, loadSession } from './storage.js';
@@ -11,6 +18,7 @@ import { runConfigSchema } from './runConfigSchema.js';
 import { prepareOptsFor } from './prepareRun.js';
 import { isTerminalRunStatus } from './types.js';
 import { isValidRecordId, publicErrorMessage } from './pathSafety.js';
+import { csvCell } from './engine/csv.js';
 import type { CompareConfig, CompetitorResponse, RunRecord } from './types.js';
 import { buildSessionReport, renderSessionReportMarkdown } from './engine/sessionReport.js';
 import { renderSessionReportHtml } from './engine/sessionReportHtml.js';
@@ -72,7 +80,10 @@ function requireKey(req: Request, res: Response, next: NextFunction) {
 }
 
 router.post('/validate-key', ah(async (req, res) => {
-  const key = extractKey(req) ?? (req.body?.apiKey as string | undefined);
+  // `body.apiKey` vem do cliente: o cast não checa nada em runtime. Número,
+  // array ou objeto chegavam ao `.trim()` do gateway e viravam 500.
+  const bodyKey: unknown = req.body?.apiKey;
+  const key = extractKey(req) ?? ((typeof bodyKey === 'string' && bodyKey.trim()) || undefined);
   if (!key) {
     res.status(400).json({ ok: false, error: 'Key ausente.' });
     return;
@@ -229,11 +240,9 @@ router.get('/runs/:id/events', ah(async (req, res) => {
   });
 }));
 
-function csvEscape(value: unknown): string {
-  const s = value === undefined || value === null ? '' : String(value);
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
-}
+// Célula CSV: fonte única com o SPA (aspas + neutralização de fórmula — a
+// `question` e o `text` são saída de LLM). http-api#9.
+const csvEscape = csvCell;
 
 router.get('/runs/:id/export.csv', ah(async (req, res) => {
   const record = await loadRun(req.params.id);
@@ -313,6 +322,22 @@ router.get('/runs/:id/export.csv', ah(async (req, res) => {
 }));
 
 // ---------------------------------------------------------------------------
+// Cancelamento (http-api#2) — só o que ESTE processo iniciou; o resto é 409
+// com o caminho certo (CLI/MCP). Não exige key: parar não gasta nada, e o
+// hostGuard já barra Origin de fora (CSRF).
+// ---------------------------------------------------------------------------
+
+router.post('/runs/:id/cancel', ah(async (req, res) => {
+  const out = await cancelControlled('run', req.params.id);
+  res.status(out.status).json(out.body);
+}));
+
+router.post('/sessions/:id/cancel', ah(async (req, res) => {
+  const out = await cancelControlled('session', req.params.id);
+  res.status(out.status).json(out.body);
+}));
+
+// ---------------------------------------------------------------------------
 // Sessoes de treino (modo training = N iteracoes encadeadas)
 // ---------------------------------------------------------------------------
 
@@ -323,7 +348,7 @@ router.post('/sessions', requireKey, ah(async (req, res) => {
     return;
   }
   if (parsed.data.mode !== 'training') {
-    res.status(400).json({ error: 'POST /sessions exige mode "training".' });
+    res.status(400).json({ error: 'POST /v1/benchmark/sessions exige mode "training".' });
     return;
   }
   const apiKey = (req as Request & { apiKey: string }).apiKey;

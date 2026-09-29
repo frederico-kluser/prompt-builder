@@ -29,9 +29,11 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { ensurePrivateDataDir, getDataDir, listRuns, loadRun } from './storage.js';
 import { isValidRecordId } from './pathSafety.js';
+import { csvCell } from './engine/csv.js';
 import { normalizeRunRecord } from './normalize.js';
 import { subscribe } from './events.js';
-import { getLiveRun, startRun } from './orchestrator.js';
+import { getLiveRun } from './orchestrator.js';
+import { cancelControlled, startControlledRun } from './httpRunControl.js';
 import { parseRunConfig } from './runConfigSchema.js';
 import { parseArenaAgentConfig } from './configFile.js';
 import { arenaAgentConfigToRunConfig } from './arenaConfig.js';
@@ -176,9 +178,17 @@ router.param('id', (_req, res, next, id: unknown) => {
  * `x-openrouter-key`); sem deep não chama LLM.
  */
 router.get('/doctor', async (req, res) => {
+  // A sala do pré-voo é DESCARTÁVEL: sem o `finally` cada GET deixava um
+  // tmp/doctor-<uuid> (no deep, com doctor-proj, doctor-home e doctor-sess).
+  // O cache durável do canário mora em <dataDir>/agent-doctor-cache/, fora
+  // daqui. A resposta só sai DEPOIS da limpeza: quem recebe o 200 não vê a
+  // sala ainda em disco.
+  let runDir = '';
+  let status = 200;
+  let body: unknown;
   try {
     const deep = req.query.deep === '1' || req.query.deep === 'true';
-    const runDir = path.join(getDataDir(), 'tmp', 'doctor-' + randomUUID());
+    runDir = path.join(getDataDir(), 'tmp', 'doctor-' + randomUUID());
     // IMPL-024: a sala envenenada do canário nasce dentro de tmp/ 0700.
     await ensurePrivateDataDir(runDir);
     const apiKeyHeader = req.headers['x-openrouter-key'];
@@ -198,18 +208,23 @@ router.get('/doctor', async (req, res) => {
       model,
       bin: undefined,
     });
-    res.json(result);
+    body = result;
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    status = 500;
+    body = { error: (err as Error).message };
+  } finally {
+    if (runDir) await fs.rm(runDir, { recursive: true, force: true }).catch(() => undefined);
   }
+  res.status(status).json(body);
 });
 
 // ---------------------------------------------------------------------------
 // Início e listagem de runs
 // ---------------------------------------------------------------------------
 
-// Controllers de abort por runId (§21.3 cancelamento).
-const abortControllers = new Map<string, AbortController>();
+// Controllers de abort por runId (§21.3 cancelamento): o registro é o MESMO
+// de /v1/benchmark (httpRunControl.ts) — o SIGTERM do servidor aborta as runs
+// de agente também, e o terminal solta a entrada sem listener órfão.
 
 /**
  * POST /runs — inicia uma run de agente. Aceita OU `arena-agent-config@1`
@@ -273,16 +288,9 @@ router.post('/runs', async (req, res) => {
   }
 
   try {
-    const controller = new AbortController();
-    const { runId, persisted } = startRun(config, apiKey, { signal: controller.signal });
-    abortControllers.set(runId, controller);
-    // Limpa o controller quando a run fecha em evento terminal (sem listener órfão).
-    const off = subscribe(runId, (event) => {
-      if (event.type === 'run.finished' || event.type === 'run.error') {
-        off();
-        abortControllers.delete(runId);
-      }
-    });
+    // http-api#2: registrada no httpRunControl (cancelável por POST …/cancel e
+    // abortada no SIGTERM do servidor).
+    const { runId, persisted } = startControlledRun(config, apiKey);
     // http-api#0: o 202 só sai com a run JÁ no disco (GET/SSE logo em seguida não dão 404).
     await persisted;
     res.status(202).json({ runId });
@@ -400,32 +408,16 @@ router.get('/runs/:id/events', async (req, res) => {
   });
 });
 
-/** POST /runs/:id/cancel — aborta a run via AbortController (sinal de controle). */
+/**
+ * POST /runs/:id/cancel — aborta a run com `RunCancelled` (sinal de controle).
+ * 202 {runId, aborted} · 404 inexistente · 409 já terminal (inclui
+ * 'inconclusive', IMPL-004) ou iniciada fora deste processo (CLI) — nunca
+ * finge que abortou. Idempotente até o terminal.
+ */
 router.post('/runs/:id/cancel', async (req, res) => {
-  const runId = req.params.id;
   try {
-    const record = await loadRun(runId);
-    if (!record) {
-      res.status(404).json({ error: 'Run não encontrada' });
-      return;
-    }
-    const terminal = isTerminalRunStatus(record.status); // inclui 'inconclusive' (IMPL-004)
-    if (terminal) {
-      res.status(409).json({ error: 'Run já terminou — nada a cancelar.' });
-      return;
-    }
-    const controller = abortControllers.get(runId);
-    if (!controller) {
-      // Sem controller, a run pode ter sido iniciada por outro processo (CLI):
-      // não conseguimos sinalizá-la aqui — não finge que abortou.
-      res.status(409).json({
-        error: 'Sem controle de abort para esta run (iniciada fora deste processo).',
-      });
-      return;
-    }
-    controller.abort();
-    abortControllers.delete(runId);
-    res.status(202).json({ runId, aborted: true });
+    const out = await cancelControlled('run', req.params.id);
+    res.status(out.status).json(out.body);
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -435,11 +427,9 @@ router.post('/runs/:id/cancel', async (req, res) => {
 // Export CSV (§21.6) — uma linha por (etapa × contestant × repetição)
 // ---------------------------------------------------------------------------
 
-function csvEscape(value: unknown): string {
-  const s = value === undefined || value === null ? '' : String(value);
-  if (/[",\n]/u.test(s)) return `"${s.replace(/"/gu, '""')}"`;
-  return s;
-}
+// Célula CSV: fonte única (src/engine/csv.ts) — `stopReason` vem do executor e
+// um `\r` solto quebrava a linha nos parsers CR-aware. http-api#9.
+const csvEscape = csvCell;
 
 /** Veredito do referenceJudge para um contestant, quando houver. */
 function verdictFor(record: RunRecord, stageIndex: number, contestantId: string): string {

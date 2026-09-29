@@ -73,6 +73,9 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   // única em src/engine/ — CLI (`sessions report`) e web (/training/:id/report).
   sessionReport: 'shim',
   sessionReportHtml: 'shim',
+  // http-api#9: célula CSV (aspas RFC 4180 + neutralização de fórmula) — as
+  // rotas /v1 e o botão "CSV" do SPA exportam texto de LLM pela MESMA função.
+  csv: 'shim',
   // Pares mantidos à mão (seams diferentes). Ao mudar UM lado, mude o outro.
   configFile: 'mirror',
   duels: 'mirror', // a MATEMÁTICA é compartilhada via src/engine/duelCore.ts (src lê dossiê de agente do disco)
@@ -102,6 +105,7 @@ const CANONICO_EM: Record<string, string> = {
   exchange: 'engine/exchange',
   sessionReport: 'engine/sessionReport',
   sessionReportHtml: 'engine/sessionReportHtml',
+  csv: 'engine/csv',
 };
 
 /**

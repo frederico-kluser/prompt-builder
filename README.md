@@ -582,12 +582,13 @@ Parâmetros da **run** (na tela de Nova Run, validados no backend):
 
 ## Como rodar
 
-Um **único `npm install`** instala backend **e** front (`postinstall` cuida do `web/`).
+`npm install && npm run setup` instala backend **e** front (o `setup` instala o `web/` e exige
+`MOTION_TOKEN` no ambiente — o `postinstall` saiu de propósito, ver AGENTS.md).
 
 ### Desenvolvimento
 
 ```bash
-npm install
+npm install && npm run setup
 npm run dev      # backend :3001 (tsx watch) + Vite :5173 (proxy de /v1 e /health)
 ```
 
@@ -596,13 +597,24 @@ Abra **`http://localhost:5173`** e cole sua chave OpenRouter na tela de setup.
 ### Produção
 
 ```bash
-npm install
+npm install && npm run setup
 npm run build    # compila backend (dist/) e front (web/dist/)
 npm run start    # serve API + frontend juntos em http://localhost:3001
 ```
 
-Em produção o Express serve `web/dist` e faz *fallback* de SPA para rotas que não comecem com
-`/v1` ou `/health`.
+Em produção o Express serve `web/dist` e faz *fallback* de SPA só para **navegação** (rotas que
+não comecem com `/v1` ou `/health`, sem extensão e fora de `/assets/`: asset ausente é 404, nunca
+o `index.html`). O SPA leva os **mesmos headers de segurança do deploy da Vercel** (CSP com
+`frame-ancestors 'none'`, `X-Frame-Options`, `nosniff`, `Referrer-Policy`, COOP), lidos do
+`vercel.json`; `/v1` e `/health` levam a mesma lista com a CSP reduzida a `frame-ancestors 'none'`
+(a do SPA bloquearia o estilo inline de um documento servido pela API).
+
+**O que a UI servida pelo backend enxerga:** o SPA detecta o backend (`GET /health` da mesma origem
+respondendo o JSON do serviço) e passa a **ler** as runs/sessões do servidor — as criadas pela API
+HTTP (`curl`, agentes) aparecem no histórico e abrem na tela de run/treino, acompanhadas pelo SSE
+de `/v1/benchmark/.../events`. É **somente leitura**: runs criadas **na UI** continuam rodando na
+aba (IndexedDB), e a key do OpenRouter não vai para o servidor. Na SPA estática (Vercel) `/health`
+é o `index.html` e esse modo fica desligado.
 
 ### Deploy estático (Vercel) — modo client-side
 
@@ -678,11 +690,16 @@ Base: `/v1/benchmark`. A key vai no header **`x-openrouter-key`** (quando exigid
 | `GET` | `/lgpd` | — | Base de conhecimento de conformidade LGPD |
 | `POST` | `/runs` | ✅ | Inicia run `compare`/`variation`; responde **`202 { runId }`** |
 | `POST` | `/sessions` | ✅ | Inicia sessão de **treino**; responde **`202 { sessionId }`** |
+| `POST` | `/runs/:id/cancel` · `/sessions/:id/cancel` | — | Cancela o que **este** servidor iniciou: **`202 { runId\|sessionId, aborted: true }`** (fecha `aborted`/`stoppedReason: "cancelled"` com o parcial); `404` inexistente; `409` já terminal ou de outro processo (CLI/MCP — a mensagem diz como cancelar lá) |
 | `GET` | `/runs` · `/runs/:id` | — | Histórico (resumos) · record completo |
 | `GET` | `/runs/:id/events` | — | **Stream SSE** em tempo real |
 | `GET` | `/runs/:id/export.csv` | — | Exporta os resultados em CSV |
 | `GET` | `/sessions` · `/sessions/:id` · `/sessions/:id/events` | — | Sessões de treino + stream |
 | `GET` | `/health` | — | Health check: `{ "status": "ok", "service": "prompt-builder" }` |
+
+Rota ou método inexistente sob `/v1` responde **`404 { "error": "Rota não encontrada." }`** (JSON,
+nunca o HTML do Express). No **SIGTERM/SIGINT** o servidor aborta as runs/sessões dele, espera a
+escrita terminal (até 5 s) e sai — nada fica `running` em disco.
 
 **Exemplo — iniciar uma run (compare):**
 
@@ -700,6 +717,9 @@ curl -X POST http://localhost:3001/v1/benchmark/runs \
     "concurrency": 8, "timeoutMs": 60000, "maxOutputTokens": 500
   }'
 # -> 202 { "runId": "..." }   (acompanhe em /runs/:id/events)
+
+curl -X POST http://localhost:3001/v1/benchmark/runs/<runId>/cancel
+# -> 202 { "runId": "...", "aborted": true }
 ```
 
 > `POST /runs` faz um **pre-flight** da key (valida **antes** de começar) para falhar rápido com
