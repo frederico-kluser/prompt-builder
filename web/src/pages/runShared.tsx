@@ -5,6 +5,19 @@ import { useMemo } from 'react';
 import type { RunRecord, StageRecord, Verdict } from '../api';
 import { normalizeContestants } from '../api';
 import {
+  judgeScoreTally,
+  stageCountsInJudgeScore,
+  type JudgeScoreStageLike,
+} from '../../../src/engine/verdictAggregate.js';
+import {
+  seedFromId,
+  sortStandings,
+  winnerFromStandings,
+  type StandingsWinner,
+} from '../../../src/engine/duelCore.js';
+import { panelAgreement, type PanelAgreement } from '../engine/refJudge';
+import type { VerdictErrorKind } from '../../../src/types.js';
+import {
   Accordion,
   AccordionItem,
   AccordionTrigger,
@@ -111,15 +124,22 @@ export function tieMarks(
  * para 72 em 5 rodadas'`. Sem isto o gráfico é um traço mudo para leitor de
  * tela (IMPL-108).
  */
-export function sparklineTrend(label: string, history: number[]): string {
+export function sparklineTrend(
+  label: string,
+  history: number[],
+  kind: 'evolution' | 'technique' = 'evolution',
+): string {
+  // web-code#4: a linha de uma TÉCNICA não é o mesmo prompt evoluindo — a cada
+  // rodada ela reescreve a partir do campeão novo. O texto diz isso.
+  const sujeito = kind === 'technique' ? `Nota da técnica ${label} por rodada` : `Evolução de ${label}`;
   const n = history.length;
-  if (!n) return `Evolução de ${label}: sem rodadas julgadas`;
+  if (!n) return `${sujeito}: sem rodadas julgadas`;
   const first = Math.round(history[0]);
   const last = Math.round(history[n - 1]);
   const rodadas = `${n} ${n === 1 ? 'rodada' : 'rodadas'}`;
-  if (last === first) return `Evolução de ${label}: estável em ${last} ao longo de ${rodadas}`;
+  if (last === first) return `${sujeito}: estável em ${last} ao longo de ${rodadas}`;
   const verbo = last > first ? 'subiu' : 'caiu';
-  return `Evolução de ${label}: ${verbo} de ${first} para ${last} em ${rodadas}`;
+  return `${sujeito}: ${verbo} de ${first} para ${last} em ${rodadas}`;
 }
 
 /** Medalha textual do pódio — o número é texto, a medalha também (IMPL-109). */
@@ -138,11 +158,21 @@ export interface HeatRow {
   isFinalist: boolean;
   /** Veredito por índice de cenário (denso, alinhado com `stages`). */
   verdicts: (Verdict | undefined)[];
+  /**
+   * Contagens que FORMAM o judge-score (web-code#12): numa run julgada por
+   * referência, só as etapas que `stageCountsInJudgeScore` aceita — o veredito
+   * listwise de etapa sem gabarito continua visível na célula, mas fica fora
+   * da conta, como no número oficial.
+   */
   resolve: number;
   parcial: number;
   nao: number;
   judged: number;
-  /** (resolve + 0,5·parcial) / judged × 100. `null` enquanto nada foi julgado. */
+  /**
+   * Judge-score 0–100: o OFICIAL (`record.judgeScoreByContestant`) quando o
+   * motor já o gravou; senão (resolve + 0,5·parcial) / judged × 100 pela
+   * mesma regra. `null` enquanto nada foi julgado.
+   */
   score: number | null;
 }
 
@@ -155,6 +185,58 @@ export function verdictErrorInStage(stage: StageRecord, contestantId: string): s
     stage.referenceJudge?.verdictErrorByContestant?.[contestantId] ??
     stage.judge?.verdictErrorByContestant?.[contestantId];
   return e ? e.message : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Painel do juiz por célula (IMPL-057): concordância "2 de 3: resolve" com o
+// divergente destacado, e o badge 'avaliador falhou' — que é do JUIZ, nunca
+// nota do candidato.
+// ---------------------------------------------------------------------------
+
+/** Causas técnicas em que quem falhou foi o AVALIADOR (juiz), não o candidato. */
+const AVALIADOR_FALHOU: ReadonlySet<VerdictErrorKind> = new Set<VerdictErrorKind>([
+  'judge_failed',
+  'invalid_output',
+  'truncated',
+  'timeout',
+]);
+
+/** O que o painel de juízes disse (ou deixou de dizer) sobre UM contestant numa etapa. */
+export interface PanelInfo {
+  /** Concordância do painel — só com 2+ juízes gravados (`judgeVotesByContestant`). */
+  agreement?: PanelAgreement;
+  /** Painel sem unanimidade: algum juiz votou diferente do veredito gravado. */
+  split: boolean;
+  /** Veredito PRESENTE com painel reduzido (algum juiz falhou) — `verdictSource=degraded`. */
+  degraded: boolean;
+  /** Veredito AUSENTE porque o avaliador falhou (motivo). */
+  judgeFailed?: string;
+}
+
+/** Lê o painel gravado de uma célula (etapa × contestant). */
+export function panelInfo(stage: StageRecord, contestantId: string): PanelInfo {
+  const ref = stage.referenceJudge;
+  const votos = ref?.judgeVotesByContestant?.[contestantId];
+  const veredito = ref?.verdictByContestant?.[contestantId];
+  const agreement = votos && votos.length >= 2 ? panelAgreement(votos, veredito) : undefined;
+  const fonte =
+    ref?.verdictSourceByContestant?.[contestantId] ?? stage.judge?.verdictSourceByContestant?.[contestantId];
+  const erro =
+    ref?.verdictErrorByContestant?.[contestantId] ?? stage.judge?.verdictErrorByContestant?.[contestantId];
+  return {
+    ...(agreement ? { agreement } : {}),
+    split: Boolean(agreement && agreement.divergentJudgeIds.length > 0),
+    degraded: fonte === 'degraded',
+    ...(erro && AVALIADOR_FALHOU.has(erro.kind) ? { judgeFailed: erro.message } : {}),
+  };
+}
+
+/** Frase curta da concordância: "painel 2 de 3 (divergente: x/juiz)". */
+export function panelPhrase(info: PanelInfo): string | undefined {
+  const a = info.agreement;
+  if (!a) return undefined;
+  const div = a.divergentJudgeIds.length ? ` (divergente: ${a.divergentJudgeIds.join(', ')})` : '';
+  return `painel ${a.agreeCount} de ${a.total}${div}`;
 }
 
 /** Veredito de um contestant numa etapa (gabarito > juiz > avaliador antigo). */
@@ -170,6 +252,46 @@ function verdictInStage(stage: StageRecord, contestantId: string): Verdict | und
   return verdictOf(stage.evaluation?.verdicts.find((v) => v.contestantId === contestantId));
 }
 
+/**
+ * Etapa julgada POR REFERÊNCIA cujo `referenceJudge` ainda não chegou à tela.
+ * Ao vivo o evento `stage.judged` só traz o `judge` SINTETIZADO (com os MESMOS
+ * vereditos); o `referenceJudge` só vem no snapshot/`run.finished`. O motor
+ * escolhe o caminho pelo gabarito da spec (`spec.reference` presente ⇒
+ * pointwise por referência), então a mesma condição identifica a etapa — sem
+ * isto, depois de recarregar a página no meio da run, as etapas julgadas ao
+ * vivo sumiam da contagem e a célula dizia "fora do score".
+ */
+function liveReferenceStage(stage: StageRecord): boolean {
+  return (
+    !stage.referenceJudge &&
+    !stage.incomplete &&
+    !stage.error &&
+    Boolean(stage.judge) &&
+    Boolean(stage.spec?.reference?.trim())
+  );
+}
+
+/**
+ * A etapa FORMA o judge-score? No record gravado, exatamente a regra do motor
+ * (`stageCountsInJudgeScore`). Com `live` (run em andamento), também a etapa
+ * por referência cujo `referenceJudge` ainda não chegou (ver acima).
+ */
+export function stageInJudgeScore(stage: StageRecord, live = false): boolean {
+  return stageCountsInJudgeScore(stage) || (live && liveReferenceStage(stage));
+}
+
+/**
+ * A run é julgada POR REFERÊNCIA (alguma etapa tem `referenceJudge` — ou, ao
+ * vivo, gabarito na spec)? Aí a nota segue `stageCountsInJudgeScore` — a regra
+ * única dos dois motores. Run só listwise (compare clássico, sem gabarito) não
+ * tem outra régua: conta tudo.
+ */
+export function isReferenceRun(stages: ReadonlyArray<StageRecord>, live = false): boolean {
+  return stages.some(
+    (s) => Boolean(s?.referenceJudge) || (live && Boolean(s?.spec?.reference?.trim())),
+  );
+}
+
 /** Deriva as linhas do heatmap. Ordem = ordem de `record.contestants` (ESTÁVEL). */
 export function heatRows(record: RunRecord): { rows: HeatRow[]; stages: StageRecord[] } {
   const stages = denseStages(record.stages);
@@ -178,17 +300,36 @@ export function heatRows(record: RunRecord): { rows: HeatRow[]; stages: StageRec
   // Controle = ancora da run: o prompt original ou o 'carry' do treino. Sem
   // fallback para o 1o contestant — em compare ninguem e "base".
   const controlId = contestants.find((c) => c.isOriginal || c.id === 'carry')?.id;
+  // web-code#12: contagem e nota pela MESMA regra do `judgeScoreByContestant`
+  // (src/engine/verdictAggregate.ts) — antes o veredito listwise de etapa cujo
+  // gabarito falhou/foi cortado entrava aqui e a ordem divergia da oficial.
+  const live = record.status === 'running';
+  const porReferencia = isReferenceRun(stages, live);
+  // Ao vivo, a etapa por referência ainda sem `referenceJudge` entra pelos
+  // vereditos do `judge` sintetizado (idênticos); no record gravado, só a
+  // regra do motor.
+  const etapasDaNota: JudgeScoreStageLike[] = live
+    ? stages.map((s) =>
+        liveReferenceStage(s) ? { referenceJudge: { verdictByContestant: s.judge?.verdictByContestant ?? {} } } : s,
+      )
+    : stages;
+  const oficial = record.judgeScoreByContestant ?? {};
   const rows = contestants.map((c) => {
     const verdicts = stages.map((s) => verdictInStage(s, c.id));
     let resolve = 0;
     let parcial = 0;
     let nao = 0;
-    for (const v of verdicts) {
-      if (v === 'resolve') resolve++;
-      else if (v === 'parcial') parcial++;
-      else if (v === 'nao') nao++;
+    if (porReferencia) {
+      ({ resolve, parcial, nao } = judgeScoreTally(etapasDaNota, c.id));
+    } else {
+      for (const v of verdicts) {
+        if (v === 'resolve') resolve++;
+        else if (v === 'parcial') parcial++;
+        else if (v === 'nao') nao++;
+      }
     }
     const judged = resolve + parcial + nao;
+    const nota = typeof oficial[c.id] === 'number' && Number.isFinite(oficial[c.id]) ? oficial[c.id] : undefined;
     return {
       contestantId: c.id,
       label: c.label,
@@ -199,10 +340,43 @@ export function heatRows(record: RunRecord): { rows: HeatRow[]; stages: StageRec
       parcial,
       nao,
       judged,
-      score: judged ? ((resolve + 0.5 * parcial) / judged) * 100 : null,
+      // Sem veredito legítimo não há nota: o motor grava 0 (`judgeScoreFromVerdicts`
+      // com n = 0), mas "sem evidência" não é zero — a tela mostra '—'.
+      score: judged ? (nota ?? ((resolve + 0.5 * parcial) / judged) * 100) : null,
     };
   });
   return { rows, stages };
+}
+
+// ---------------------------------------------------------------------------
+// Vencedor da run (web-code#10 / web-live#4): a MESMA régua de `runs winner`
+// e do MCP (`winnerFromStandings`, src/engine/duelCore.ts) — finais primeiro
+// (taxa de vitória → vitórias → judge-score → rank cego), senão judge-score.
+// O empate NUNCA some: `unresolved` = não há vencedor claro.
+// ---------------------------------------------------------------------------
+
+export interface RunWinnerView extends StandingsWinner {
+  /** Rodada de TREINO: quem promove é o gate da sessão (judge-score), não a final. */
+  training: boolean;
+}
+
+export function runWinner(record: RunRecord): RunWinnerView {
+  const training = Boolean(record.sessionId);
+  let js = record.judgeScoreByContestant;
+  if (!js || Object.keys(js).length === 0) {
+    // Run só listwise (sem gabarito): o placar de vereditos é a única régua.
+    const pelasLinhas: Record<string, number> = {};
+    for (const r of heatRows(record).rows) if (r.score !== null) pelasLinhas[r.contestantId] = r.score;
+    js = pelasLinhas;
+  }
+  const w = winnerFromStandings({
+    id: record.id,
+    // No treino a escolha da rodada é por judge-score (rank.ts) e a promoção é
+    // do gate — a final da rodada é só desempate/diagnóstico.
+    standings: training ? undefined : record.standings,
+    judgeScoreByContestant: js,
+  });
+  return { ...w, training };
 }
 
 /** Estado de UMA célula do heatmap: glifo decorativo + rótulo textual. */
@@ -220,12 +394,20 @@ export interface HeatCellState {
  * — pendente → resposta recebida → julgada, com erro à parte. É o que faz a run
  * longa não parecer travada. O rótulo é TEXTO: o glifo nunca é o nome acessível.
  */
-export function heatmapCellState(stage: StageRecord, row: HeatRow, cenario: number): HeatCellState {
+export function heatmapCellState(
+  stage: StageRecord,
+  row: HeatRow,
+  cenario: number,
+  /** `referenceRun`: a run é julgada por referência; `live`: a run ainda roda. */
+  opts: { referenceRun?: boolean; live?: boolean } = {},
+): HeatCellState {
   const v = row.verdicts[cenario];
   const resp = (stage.responses ?? []).find((r) => r.contestantId === row.contestantId);
   // IMPL-004: juiz que falhou NÃO vira nota — a célula diz "sem veredito" e o
   // motivo, e o score da linha ignora a etapa.
   const semVeredito = v ? undefined : verdictErrorInStage(stage, row.contestantId);
+  // IMPL-057: concordância do painel e 'avaliador falhou' (≠ veredito).
+  const painel = panelInfo(stage, row.contestantId);
   // Bloqueio (moderação/guardrail) vem ANTES do veredito: o cenário é
   // inconclusivo para o prompt, nunca um 'não' (IMPL-010).
   if (resp?.status === 'blocked') {
@@ -251,7 +433,18 @@ export function heatmapCellState(stage: StageRecord, row: HeatRow, cenario: numb
     };
   }
   if (v) {
-    return { glyph: VERDICT_GLYPH[v], cls: VERDICT_META[v].cell, label: VERDICT_META[v].label };
+    const extras = [
+      panelPhrase(painel),
+      painel.degraded ? 'avaliador falhou (painel reduzido — não é nota do candidato)' : undefined,
+      // web-code#12: veredito listwise de etapa sem gabarito fica FORA do score.
+      opts.referenceRun && !stageInJudgeScore(stage, opts.live) ? 'julgado sem gabarito, fora do score' : undefined,
+    ].filter(Boolean);
+    return {
+      // '*' = painel não unânime ou avaliador falhou (legenda no caption).
+      glyph: VERDICT_GLYPH[v] + (painel.split || painel.degraded ? '*' : ''),
+      cls: VERDICT_META[v].cell,
+      label: [VERDICT_META[v].label, ...extras].join(' — '),
+    };
   }
   if (stage.incomplete) {
     // Cortado por orçamento/cancelamento (IMPL-020): sem nota e fora do score —
@@ -267,7 +460,13 @@ export function heatmapCellState(stage: StageRecord, row: HeatRow, cenario: numb
     };
   }
   if (semVeredito && resp?.status !== 'error') {
-    return { glyph: '?', cls: 'bg-muted text-muted-foreground', label: `sem veredito — ${semVeredito}` };
+    return {
+      glyph: '?',
+      cls: 'bg-muted text-muted-foreground',
+      label: painel.judgeFailed
+        ? `sem veredito — avaliador falhou: ${painel.judgeFailed}`
+        : `sem veredito — ${semVeredito}`,
+    };
   }
   if (resp?.status === 'error') {
     // bg-nao/15 (não /20): medido em WCAG — /20 reprovava em dark (4,43:1).
@@ -306,10 +505,24 @@ interface ScoreHeatmapProps {
  */
 export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeatmapProps) {
   const { rows, stages } = useMemo(() => heatRows(record), [record]);
+  const live = record.status === 'running';
+  const referenceRun = useMemo(() => isReferenceRun(stages, live), [stages, live]);
   // Ordenacao so quando pedida (fim da run): sort e estavel, entao empate
-  // preserva a ordem de `contestants`.
+  // preserva a ordem de `contestants` — por isso o empate vira TEXTO (marcador
+  // + resumo) na coluna de score: a ordem sozinha não diz quem empatou.
   const linhas = useMemo(
     () => (ranked ? [...rows].sort((a, b) => (b.score ?? -1) - (a.score ?? -1)) : rows),
+    [rows, ranked],
+  );
+  const empates = useMemo(
+    () =>
+      ranked
+        ? tieMarks(
+            rows.map((r) => r.contestantId),
+            (id) => rows.find((r) => r.contestantId === id)?.score ?? undefined,
+            (id) => rows.find((r) => r.contestantId === id)?.label ?? id,
+          )
+        : new Map<string, TieMark>(),
     [rows, ranked],
   );
 
@@ -327,7 +540,7 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
 
   return (
     <div className="rounded-xl bg-card ring-1 ring-foreground/10">
-      <div className="scroll-slim overflow-x-auto p-3">
+      <div className="scroll-slim relative overflow-x-auto p-3">
         <table className="w-full min-w-fit border-separate border-spacing-x-1 border-spacing-y-0.5">
           <caption className="caption-top border-b border-border px-1 pb-2 text-left text-[12px] text-muted-foreground">
             Heatmap de vereditos — linhas: variantes; colunas: cenários.{' '}
@@ -336,7 +549,15 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
             veredito · <span aria-hidden="true">⏳</span> aguardando julgamento ·{' '}
             <span aria-hidden="true">⊘</span> bloqueado · <span aria-hidden="true">✂</span>{' '}
             truncada · <span aria-hidden="true">⏹</span> cortado ·{' '}
-            <span aria-hidden="true">!</span> erro · <span aria-hidden="true">·</span> pendente
+            <span aria-hidden="true">!</span> erro · <span aria-hidden="true">·</span> pendente ·{' '}
+            <span aria-hidden="true">*</span> painel de juízes não unânime ou avaliador falhou (detalhe
+            no cenário)
+            {ranked && (
+              <>
+                {' '}
+                · <span aria-hidden="true">{TIE_MARKER}</span> empatado na nota
+              </>
+            )}
           </caption>
           <thead>
             <tr>
@@ -394,7 +615,11 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
               <th
                 scope="col"
                 className="w-20 px-1 pb-1 text-right text-[11px] font-normal text-muted-foreground"
-                title="(resolve + ½·parcial) ÷ julgados × 100"
+                title={
+                  referenceRun
+                    ? 'judge-score: (resolve + ½·parcial) ÷ julgados × 100, só nos cenários julgados com gabarito'
+                    : '(resolve + ½·parcial) ÷ julgados × 100'
+                }
               >
                 score
               </th>
@@ -413,7 +638,7 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
                   </span>
                 </th>
                 {stages.map((s, i) => {
-                  const estado = heatmapCellState(s, row, i);
+                  const estado = heatmapCellState(s, row, i, { referenceRun, live });
                   return (
                     <td
                       key={s.index}
@@ -429,8 +654,15 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
                   );
                 })}
                 <td className="px-1 py-0.5 text-right leading-tight">
-                  <span className="text-[13px] font-medium tabular">
+                  <span
+                    className="text-[13px] font-medium tabular"
+                    title={empates.get(row.contestantId)?.summary}
+                  >
                     {row.score === null ? '—' : row.score.toFixed(0)}
+                    {empates.get(row.contestantId)?.marker}
+                    {empates.has(row.contestantId) && (
+                      <span className="sr-only"> — {empates.get(row.contestantId)!.summary}</span>
+                    )}
                   </span>
                   <span className="block text-[10px] text-muted-foreground tabular">
                     <span aria-hidden="true">
@@ -450,7 +682,19 @@ export function ScoreHeatmap({ record, ranked = false, onStageClick }: ScoreHeat
   );
 }
 
-/** Heatmap de evolucao: variante x rodada; celula = judge-score arredondado. */
+/**
+ * Chave ESTÁVEL da linha no placar de evolução (web-code#4). Os ids de
+ * contestant são POSICIONAIS por rodada (`v0`, `v1`… = i-ésima técnica que
+ * sobreviveu ao filtro, com a lista de técnicas rodando entre rodadas) — ligar
+ * as rodadas por `c.id` juntava prompts sem relação numa linha e a sparkline
+ * inventava uma evolução. A técnica é estável; `original`, `carry` (o campeão
+ * re-testado) e as manuais `m<i>` (verbatim a cada rodada) mantêm o id.
+ */
+export function evolutionRowKey(c: { id: string; techniqueId?: string }): string {
+  return c.techniqueId ? `t:${c.techniqueId}` : c.id;
+}
+
+/** Heatmap de evolucao: técnica/controle x rodada; celula = judge-score arredondado. */
 export function EvolutionHeatmap({
   rounds,
   holdoutAt,
@@ -461,7 +705,13 @@ export function EvolutionHeatmap({
   const cols = useMemo(
     () =>
       rounds.map((r) => {
-        const scores = r.judgeScoreByContestant ?? {};
+        const js = r.judgeScoreByContestant ?? {};
+        // Nota da rodada re-chaveada pela linha estável.
+        const scores: Record<string, number> = {};
+        for (const c of r.contestants ?? []) {
+          const s = js[c.id];
+          if (s !== undefined) scores[evolutionRowKey(c)] = s;
+        }
         return {
           iteration: r.iteration ?? 0,
           isHoldout: r.iteration === holdoutAt,
@@ -470,15 +720,23 @@ export function EvolutionHeatmap({
       }),
     [rounds, holdoutAt],
   );
-  // Ordem estavel: primeira aparicao da variante ao longo das rodadas.
+  // Ordem estavel: primeira aparicao da linha ao longo das rodadas.
   const vars = useMemo(() => {
     const seen = new Set<string>();
-    const out: { id: string; label: string; isOriginal?: boolean }[] = [];
+    const out: { id: string; label: string; isOriginal?: boolean; technique: boolean }[] = [];
     for (const r of rounds) {
       for (const c of r.contestants ?? []) {
-        if (seen.has(c.id)) continue;
-        seen.add(c.id);
-        out.push({ id: c.id, label: c.label, isOriginal: c.isOriginal });
+        const key = evolutionRowKey(c);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          id: key,
+          // 'carry' muda de prompt a cada promoção e de rótulo a cada rodada
+          // ("Melhor it.N"): a linha é o PAPEL — o campeão re-testado.
+          label: c.id === 'carry' ? 'Campeão anterior (re-testado)' : c.label,
+          isOriginal: c.isOriginal,
+          technique: Boolean(c.techniqueId),
+        });
       }
     }
     return out;
@@ -504,13 +762,15 @@ export function EvolutionHeatmap({
 
   return (
     <div className="rounded-xl bg-card ring-1 ring-foreground/10">
-      <div className="scroll-slim overflow-x-auto p-3">
+      <div className="scroll-slim relative overflow-x-auto p-3">
         {/* Tabela NATIVA (IMPL-108): caption, th scope="col"/"row" e td com o
             valor em texto — a associação cabeçalho/célula existe na árvore de
             acessibilidade e o Tab só passa pelos cabeçalhos. */}
         <table className="w-full min-w-fit border-separate border-spacing-x-1 border-spacing-y-0.5">
           <caption className="caption-top px-1 pb-2 text-left text-[12px] text-muted-foreground">
-            Evolução do treino — linhas: variantes; colunas: rodadas; célula: judge-score.{' '}
+            Evolução do treino — linhas: técnica ou controle; colunas: rodadas; célula: judge-score.
+            Cada técnica reescreve a partir do campeão da rodada, então a linha é a técnica — não o
+            mesmo prompt evoluindo; “Campeão anterior” é o campeão re-testado em cada rodada.{' '}
             <span aria-hidden="true">–</span> não participou ·{' '}
             <span aria-hidden="true">E</span> empatado com a mesma nota.
           </caption>
@@ -520,7 +780,7 @@ export function EvolutionHeatmap({
                 scope="col"
                 className="min-w-[8rem] px-1 pb-1 text-left text-[11px] font-normal text-muted-foreground"
               >
-                variante
+                técnica / controle
               </th>
               {cols.map((col) => (
                 <th
@@ -593,7 +853,7 @@ export function EvolutionHeatmap({
                           width={64}
                           height={22}
                           tone="primary"
-                          label={sparklineTrend(v.label, history)}
+                          label={sparklineTrend(v.label, history, v.technique ? 'technique' : 'evolution')}
                         />
                       </span>
                     ) : (
@@ -668,7 +928,14 @@ export function FinalsPanel({ record, progress }: FinalsPanelProps) {
   const rows = useMemo<FinalsRow[]>(() => {
     const labelOf = (id: string) => record.contestants?.find((c) => c.id === id)?.label ?? id;
     const finalistas = new Set(finalistIds);
-    const standings = (record.standings ?? []).filter((s) => !finalistas.size || finalistas.has(s.id));
+    // Mesma ordem da régua única (`winnerFromStandings`): records gravados
+    // antes do desempate guardavam a ordem de cadastro no empate (controle 1º)
+    // — sem re-ordenar, o pódio contradizia o vencedor do resumo.
+    const standings = sortStandings(
+      (record.standings ?? []).filter((s) => !finalistas.size || finalistas.has(s.id)),
+      record.judgeScoreByContestant,
+      seedFromId(record.id),
+    );
     if (standings.length) {
       return standings.map((s) => ({
         id: s.id,
@@ -829,7 +1096,11 @@ export function applyEvent(prev: RunRecord, event: any): RunRecord {
   };
   switch (event.type) {
     case 'run.started':
-      return event.record;
+      // Cópia rasa: o motor da SPA MUTA o record vivo no lugar. Devolver a
+      // mesma referência que já está no estado faz o React ignorar a
+      // atualização (Object.is) — a run cancelada ainda na geração, sem
+      // nenhum evento entre o snapshot e o fim, ficava "em andamento" na tela.
+      return { ...event.record };
     case 'variants.generated':
       return { ...next, contestants: event.contestants };
     case 'stage.generating': {
@@ -928,7 +1199,7 @@ export function applyEvent(prev: RunRecord, event: any): RunRecord {
       // stoppedReason/stoppedAtPhase. Nada a dobrar aqui.
       return prev;
     case 'run.finished':
-      return event.record;
+      return { ...event.record }; // nova referência (ver 'run.started')
     case 'run.error':
       return { ...next, status: 'error', error: event.error };
     default:

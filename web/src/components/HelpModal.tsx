@@ -82,7 +82,7 @@ export const TUTORIALS: Record<HelpTutorial, Step[]> = {
     {
       kicker: 'Como ler',
       title: 'Rodada, evolução e melhor prompt',
-      body: 'O heatmap acompanha a rodada corrente e “Evolução” mostra o score de cada variante por rodada. Em “Melhor prompt” você compara com o original, copia e salva na biblioteca.',
+      body: 'O heatmap acompanha a rodada corrente e “Evolução” mostra o judge-score de cada técnica (e do controle e do campeão re-testado) por rodada — a técnica reescreve a partir do campeão de cada rodada, não é o mesmo prompt evoluindo. Em “Melhor prompt” você compara com o original, copia e salva na biblioteca.',
     },
   ],
   runs: [
