@@ -15,6 +15,7 @@ type Env = Record<string, string | undefined>;
  * OPENROUTER_APP_URL → appUrl (header HTTP-Referer)
  * OPENROUTER_APP_TITLE → appTitle (header X-Title)
  * OPENROUTER_MAX_CONCURRENCY → maxConcurrency (nao numerico = default 32)
+ * OPENROUTER_DECISIONS_URL → decisionsUrl (modo JEV; vazio = derivada da base)
  */
 export function gatewayConfigFromEnv(env: Env): Partial<GatewayConfig> {
   const out: Partial<GatewayConfig> = {};
@@ -22,6 +23,8 @@ export function gatewayConfigFromEnv(env: Env): Partial<GatewayConfig> {
   if (base) out.baseUrl = base;
   if (env.OPENROUTER_APP_URL !== undefined) out.appUrl = env.OPENROUTER_APP_URL;
   if (env.OPENROUTER_APP_TITLE !== undefined) out.appTitle = env.OPENROUTER_APP_TITLE;
+  const decisions = env.OPENROUTER_DECISIONS_URL?.trim();
+  if (decisions) out.decisionsUrl = decisions;
   const conc = env.OPENROUTER_MAX_CONCURRENCY?.trim();
   if (conc) {
     const n = Number(conc);
