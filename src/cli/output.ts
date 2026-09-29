@@ -135,9 +135,12 @@ const DEFAULT_CODE: Record<ErrorKind, string> = {
  */
 export const DEFAULT_HINT: Readonly<Record<ErrorKind, string>> = {
   usage: 'Veja comandos e flags em `prompt-builder --help` (e o fluxo em `prompt-builder docs quickstart`).',
+  // cli#20: a config nem sempre veio de arquivo — flags de compare/vary/train
+  // também montam uma. O `config validate` aceita os três dialetos de arquivo.
   config:
-    'Valide o arquivo com `prompt-builder config validate <arquivo.json>`; ' +
-    '`prompt-builder config example -o arena.json` gera um exemplo válido.',
+    'Se a config veio de arquivo, valide com `prompt-builder config validate <arquivo.json>` ' +
+    '(aceita arena-config@1, arena-agent-config@1|@2 e RunConfig cru); se veio de flags, corrija a ' +
+    'flag citada no erro. `prompt-builder config example -o arena.json` gera um exemplo válido.',
   auth:
     'Grave a key com `prompt-builder key set --stdin` (lida da entrada padrão) ou exporte ' +
     'OPENROUTER_API_KEY; confira com `prompt-builder key check`.',
@@ -199,7 +202,14 @@ export function isCliError(e: unknown): e is CliError {
 
 /** Erros de sistema de arquivo que significam "caminho errado/sem permissao". */
 const FS_ERRNO = new Set(['ENOENT', 'EACCES', 'EISDIR', 'ENOTDIR', 'EPERM', 'ENAMETOOLONG']);
-/** Erros de socket/DNS/undici que significam "rede", nao bug. */
+/**
+ * Erros de socket/DNS/undici que significam "rede", nao bug. cli#19: `EPIPE`
+ * NAO entra — no CLI ele e quase sempre o consumidor fechando o stdout (`| head`),
+ * tratado ANTES pela guarda do pipe (`context.ts`, sai 0); o EPIPE de socket
+ * real chega do undici como `UND_ERR_SOCKET`/`fetch failed` (cobertos abaixo).
+ * Um EPIPE cru que escape (stdin de processo filho, …) e `internal`, nunca
+ * "confira a conexão com openrouter.ai".
+ */
 const NET_ERRNO = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
@@ -208,7 +218,6 @@ const NET_ERRNO = new Set([
   'EAI_AGAIN',
   'EHOSTUNREACH',
   'ENETUNREACH',
-  'EPIPE',
   'UND_ERR_CONNECT_TIMEOUT',
   'UND_ERR_HEADERS_TIMEOUT',
   'UND_ERR_BODY_TIMEOUT',
