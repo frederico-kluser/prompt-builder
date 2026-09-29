@@ -24,6 +24,7 @@ import { JevTrainingView } from './pages/jev/JevTrainingView';
 import { JevReportPage } from './pages/jev/JevReportPage';
 import { getStoredKey, startOrphanWatch } from './api';
 import { startJevOrphanWatch } from './jev/api';
+import { startLocalRetention } from './localRetention';
 import './index.css';
 
 // IMPL-023: na carga, runs/treinos 'running' sem dono (a aba que os executava
@@ -31,6 +32,8 @@ import './index.css';
 startOrphanWatch();
 // Modo JEV: a mesma regra para as runs/sessões JEV (lock livre = órfã).
 void startJevOrphanWatch();
+// left#6 (IMPL-100): TTL LGPD do histórico local — o vencido sai na abertura.
+void startLocalRetention();
 
 /**
  * "Pede direto a key" (pedido do dono): sem chave — e sem o "explorar sem
