@@ -70,7 +70,10 @@ function requireKey(req: Request, res: Response, next: NextFunction) {
 }
 
 router.post('/validate-key', ah(async (req, res) => {
-  const key = extractKey(req) ?? (req.body?.apiKey as string | undefined);
+  // `body.apiKey` vem do cliente: o cast não checa nada em runtime. Número,
+  // array ou objeto chegavam ao `.trim()` do gateway e viravam 500.
+  const bodyKey: unknown = req.body?.apiKey;
+  const key = extractKey(req) ?? ((typeof bodyKey === 'string' && bodyKey.trim()) || undefined);
   if (!key) {
     res.status(400).json({ ok: false, error: 'Key ausente.' });
     return;
