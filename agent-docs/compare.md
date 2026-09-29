@@ -4,7 +4,7 @@
 prompt-builder compare \
   --models openai/gpt-5-mini,google/gemini-3.8-flash,deepseek/deepseek-v4-pro \
   --judge anthropic/claude-sonnet-5 \
-  --datagen openai/gpt-5-mini \
+  --datagen xiaomi/mimo-v2.6-pro \
   --theme "Extração de dados de notas fiscais brasileiras" \
   --stages 8 --budget 2
 ```
@@ -28,7 +28,7 @@ contra si mesmo:
   "mode": "compare",
   "theme": "…",
   "models": {
-    "datagen": "openai/gpt-5-mini",
+    "datagen": "xiaomi/mimo-v2.6-pro",
     "judges": ["anthropic/claude-sonnet-5"],
     "competitorConfigs": [
       { "model": "openai/gpt-5-mini", "reasoning": "low" },

@@ -1,23 +1,28 @@
-// IMPL-119 (R-19:REC-1) — lint da documentação embarcada (agent-docs/):
+// IMPL-119 (R-19:REC-1) — lint da documentação embarcada (agent-docs/ E skills/,
+// as duas viajam no tarball):
 //   (1) exemplos de configuração da doc são EXECUTADOS no validador real
 //       (`config validate` / parser de arena-agent-config) e saem exit 0 — ou
 //       estão marcados como negativos e são RECUSADOS;
-//   (2) exemplo novo adicionado à doc reprova o CI se não validar;
+//   (2) exemplo novo adicionado à doc reprova o CI se não validar — inclusive os
+//       de `compare`/`vary`/`train` por FLAGS (parser + buildFromFlags reais);
 //   (3) snapshot de `--help` por subcomando com cobertura 100% dos COMMANDS e
 //       "gerado ≠ commitado" reprova.
 // Mais: comandos dos blocos bash conferidos contra COMMANDS + help, e o drift
-// CONHECIDO só é isento com registo auditável (file+kind+hash do bloco).
+// CONHECIDO só é isento com registo auditável (file+kind+hash do bloco) — hoje
+// o registro está VAZIO: o drift do compare.md foi corrigido, não isentado.
 
 import { describe, expect, it } from 'vitest';
 import { COMMANDS, renderCommandHelp } from '../src/cli/help.js';
 import {
   KNOWN_DOC_DRIFT,
   blockHash,
-  helpSnapshot,
   helpSnapshotFindings,
   lintDocs,
+  readDocSources,
   readHelpSnapshot,
+  unquoteToken,
   type DocSource,
+  type KnownDrift,
 } from '../scripts/docs-lint.js';
 
 const doc = (markdown: string, file = 'agent-docs/teste.md'): DocSource[] => [{ file, markdown }];
@@ -33,27 +38,8 @@ const CONFIG_VALIDO = `{
   }
 }`;
 
-describe('IMPL-119 (1) — exemplos da doc passam pelo validador REAL', () => {
-  it('a doc embarcada de hoje: 0 achado (exit 0 no config validate real) e cobertura de verdade', async () => {
-    const r = await lintDocs();
-    expect(r.findings).toEqual([]);
-    // Exemplos de configuração EXECUTADOS no validador real (não "bonitos à vista").
-    expect(r.checked.configExamples).toBeGreaterThanOrEqual(2);
-    expect(r.checked.files).toBeGreaterThanOrEqual(10);
-    // Comandos conferidos contra COMMANDS + help (critério dos blocos bash).
-    expect(r.checked.commandInvocations).toBeGreaterThan(20);
-  });
-
-  it('todo drift conhecido é AUDITÁVEL (motivo + correção) e keyed por hash do bloco', () => {
-    expect(KNOWN_DOC_DRIFT.length).toBeGreaterThan(0); // o exemplo de compare.md é drift REAL e está registado
-    for (const d of KNOWN_DOC_DRIFT) {
-      expect(d.reason.trim().length, 'isenção sem motivo não entra').toBeGreaterThan(20);
-      expect(d.fix.trim().length, 'isenção sem correção esperada não entra').toBeGreaterThan(20);
-      expect(d.blockHash).toMatch(/^[0-9a-f]{16}$/);
-    }
-    // Isenção não é licença permanente: o hash é do bloco EXATO — editar o
-    // exemplo derruba a isenção e o CI reprova de novo.
-    const hashDoExemploDeCompare = blockHash(`{
+/** O exemplo que o compare.md ensinava (datagen = modelo dos concorrentes). */
+const COMPARE_ANTIGO = `{
   "format": "arena-config@1",
   "mode": "compare",
   "theme": "…",
@@ -65,8 +51,58 @@ describe('IMPL-119 (1) — exemplos da doc passam pelo validador REAL', () => {
       { "model": "openai/gpt-5-mini", "reasoning": "high" }
     ]
   }
-}`);
-    expect(KNOWN_DOC_DRIFT.some((d) => d.blockHash === hashDoExemploDeCompare)).toBe(true);
+}`;
+
+describe('IMPL-119 (1) — exemplos da doc passam pelo validador REAL', () => {
+  it('a doc embarcada de hoje: 0 achado (exit 0 no validador real), 0 isenção e cobertura de verdade', async () => {
+    const r = await lintDocs();
+    expect(r.findings).toEqual([]);
+    expect(r.waived).toEqual([]); // nada passa por isenção
+    // Exemplos de configuração EXECUTADOS no validador real (não "bonitos à vista").
+    expect(r.checked.configExamples).toBeGreaterThanOrEqual(2);
+    expect(r.checked.files).toBeGreaterThanOrEqual(10);
+    // Comandos conferidos contra COMMANDS + help (critério dos blocos bash).
+    expect(r.checked.commandInvocations).toBeGreaterThan(20);
+    // compare.md + vary.md + train.md por flags, no parser e no buildFromFlags reais.
+    expect(r.checked.runExamples).toBeGreaterThanOrEqual(3);
+  });
+
+  it('skills/ também é doc embarcada: SKILL.md e models.md entram no lint', () => {
+    const arquivos = readDocSources().map((d) => d.file);
+    expect(arquivos).toContain('skills/prompt-builder/SKILL.md');
+    expect(arquivos).toContain('skills/prompt-builder/models.md');
+    expect(arquivos).toContain('agent-docs/compare.md');
+    expect(arquivos.every((f) => f.startsWith('agent-docs/') || f.startsWith('skills/'))).toBe(true);
+  });
+
+  it('o drift do compare.md foi CORRIGIDO (não isentado): o registro de drift conhecido está vazio', () => {
+    expect(KNOWN_DOC_DRIFT).toEqual([]);
+    const compare = readDocSources().find((d) => d.file === 'agent-docs/compare.md')!.markdown;
+    expect(compare).not.toContain(COMPARE_ANTIGO);
+    expect(compare).toContain('"competitorConfigs"'); // o exemplo continua lá, agora válido
+  });
+
+  it('o exemplo antigo, se voltar à doc, reprova (sem isenção a que se agarrar)', async () => {
+    const r = await lintDocs(doc(`\`\`\`json\n${COMPARE_ANTIGO}\n\`\`\`\n`, 'agent-docs/compare.md'));
+    expect(r.findings.map((f) => f.kind)).toEqual(['config-invalid']);
+    expect(r.findings[0].message).toMatch(/gerador de cenarios/i);
+  });
+
+  it('o mecanismo de isenção segue auditável: casa file+kind+hash EXATO e cai quando o bloco muda', async () => {
+    const drift: KnownDrift = {
+      file: 'agent-docs/x.md',
+      kind: 'config-invalid',
+      blockHash: blockHash(COMPARE_ANTIGO),
+      reason: 'exemplo sintético do teste: datagen igual aos competidores',
+      fix: 'usar um models.datagen distinto dos competitorConfigs',
+    };
+    const isento = await lintDocs(doc(`\`\`\`json\n${COMPARE_ANTIGO}\n\`\`\`\n`, 'agent-docs/x.md'), [drift]);
+    expect(isento.findings).toEqual([]);
+    expect(isento.waived.map((f) => f.kind)).toEqual(['config-invalid']);
+    const editado = COMPARE_ANTIGO.replace('"…"', '"outro tema"');
+    const caiu = await lintDocs(doc(`\`\`\`json\n${editado}\n\`\`\`\n`, 'agent-docs/x.md'), [drift]);
+    expect(caiu.findings.map((f) => f.kind)).toEqual(['config-invalid']);
+    expect(caiu.waived).toEqual([]);
   });
 });
 
@@ -134,6 +170,62 @@ describe('IMPL-119 (1) — exemplos NEGATIVOS exigem marcação explícita', () 
     expect(r.findings).toEqual([]);
     expect(r.checked.snippets).toBe(1);
     expect(r.checked.configExamples).toBe(0);
+  });
+});
+
+describe('IMPL-119 (2) — exemplos de compare/vary/train por FLAGS rodam no CLI real', () => {
+  const bloco = (cmd: string): DocSource[] => doc(`\`\`\`bash\n${cmd}\n\`\`\`\n`);
+
+  it('compare com o datagen entre os competidores reprova (era o exemplo do compare.md: exit 3)', async () => {
+    const r = await lintDocs(
+      bloco(
+        'prompt-builder compare \\\n  --models openai/gpt-5-mini,deepseek/deepseek-v4-pro \\\n  --judge anthropic/claude-sonnet-5 \\\n  --datagen openai/gpt-5-mini \\\n  --theme "Notas fiscais" --stages 8 --budget 2',
+      ),
+    );
+    expect(r.findings.map((f) => f.kind)).toEqual(['command-config-invalid']);
+    expect(r.findings[0].message).toMatch(/exit 3/u);
+    expect(r.checked.runExamples).toBe(1);
+  });
+
+  it('train/vary sem --reference reprovam (era o exemplo do train.md e do vary.md: exit 3)', async () => {
+    for (const verbo of ['train', 'vary']) {
+      const r = await lintDocs(
+        bloco(`prompt-builder ${verbo} --model openai/gpt-5-mini --judge anthropic/claude-sonnet-5 --theme "Suporte" --base-prompt-file prompt.md --techniques persona,format --stages 8 --budget 1`),
+      );
+      expect(r.findings.map((f) => f.kind), verbo).toEqual(['command-config-invalid']);
+      expect(r.findings[0].message).toMatch(/referenceModelId/u);
+    }
+  });
+
+  it('flag que o CLI não conhece reprova (exit 2 do parser real)', async () => {
+    const r = await lintDocs(bloco('prompt-builder compare --models a/x,b/y --judge c/z --tema "x" --budget 1'));
+    expect(r.findings.map((f) => f.kind)).toEqual(['command-flag-invalid']);
+    expect(r.findings[0].message).toMatch(/--tema/u);
+  });
+
+  it('exemplo válido passa — com aspas, --base-prompt-file inexistente e flags globais', async () => {
+    const r = await lintDocs(
+      bloco(
+        'npx prompt-builder-cli train --model openai/gpt-5-mini --judge anthropic/claude-sonnet-5 --reference deepseek/deepseek-v4-pro --theme "Suporte técnico de um SaaS" --base-prompt-file prompt.md --techniques persona,format --stages 8 --iterations 3 --budget 3 --output-format ndjson',
+      ),
+    );
+    expect(r.findings).toEqual([]);
+    expect(r.checked.runExamples).toBe(1);
+  });
+
+  it('--config <arq> e valores placeholder não são validados por conteúdo (o arquivo/valor não existe)', async () => {
+    const r = await lintDocs(
+      bloco('prompt-builder train --config arena.json --budget 3 --dry-run\nprompt-builder compare --models <a>,<b> --judge <juiz> --theme "…" --budget 1'),
+    );
+    expect(r.findings).toEqual([]);
+    expect(r.checked.runExamples).toBe(2);
+  });
+
+  it('unquoteToken tira as aspas de shell sem comer o conteúdo', () => {
+    expect(unquoteToken('"a b"')).toBe('a b');
+    expect(unquoteToken("--theme='x y'")).toBe('--theme=x y');
+    expect(unquoteToken('"it\'s"')).toBe("it's");
+    expect(unquoteToken('plain')).toBe('plain');
   });
 });
 

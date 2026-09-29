@@ -4,6 +4,7 @@
 prompt-builder train \
   --model openai/gpt-5-mini \
   --judge anthropic/claude-sonnet-5 \
+  --reference deepseek/deepseek-v4-pro \
   --datagen openai/gpt-5-mini \
   --theme "Suporte técnico de um SaaS de faturamento" \
   --base-prompt-file prompt.md \
@@ -26,6 +27,7 @@ prompt-builder train --config arena.json --budget 3 --output-format ndjson
 |---|---|
 | `--model <id>` | o modelo sob teste (todas as variantes rodam nele) |
 | `--judge <id>` | juiz; repita para um painel. **Não pode ser o `--model`.** |
+| `--reference <id>` | quem escreve o gabarito — **obrigatório** em `train`/`vary` (sem ele: exit `3`); não pode ser juiz nem o `--model` |
 | `--techniques a,b,c` | técnicas de reescrita (`prompt-builder techniques`) |
 | `--base-prompt-file` | o prompt de partida; entra como controle |
 | `--iterations N` | teto de iterações (2–10; recomendado 3–5). O laço para antes se convergir: paciência = 2 iterações seguidas sem promoção (configurável via `patience` 1–5 no JSON do config — default 2) ou parada por platão (IC95 do ganho abaixo de `minGain`; `convergenceReason` diz qual foi) |
