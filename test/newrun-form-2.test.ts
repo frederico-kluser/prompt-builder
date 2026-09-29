@@ -42,6 +42,7 @@ import {
   trainingGateScenarios,
   trainingPowerNotice,
 } from '../web/src/arenaForm';
+import * as trainingPolicy from '../src/engine/trainingPolicy.js';
 import { catalogItem, fakeOpenRouter, noSleep } from './fakeOpenRouter.js';
 import { duelReply, listwiseReply, pointwiseReply } from './judgeReplies.js';
 
@@ -89,6 +90,14 @@ describe('web-live#5 — poder do gate de promoção do treino (amarrado ao best
     expect(minAchievablePAdjusted(n)).toBeLessThanOrEqual(GATE_ALPHA);
     expect(minAchievablePAdjusted(n - 1)).toBeGreaterThan(GATE_ALPHA);
     expect(minScenariosForPromotion(0.01)).toBe(7);
+  });
+
+  it('integração w2: a tela usa a régua do MOTOR (src/engine/trainingPolicy.ts), não uma cópia', () => {
+    expect(TRAINING_DEFAULT_STAGES).toBe(trainingPolicy.TRAINING_DEFAULT_STAGES);
+    expect(TRAINING_RECOMMENDED_STAGES).toBe(trainingPolicy.TRAINING_MIN_STAGES_RECOMMENDED);
+    expect(trainingGateScenarios).toBe(trainingPolicy.selectionScenariosFor);
+    expect(minAchievablePAdjusted).toBe(trainingPolicy.minAchievableGateP);
+    expect(minScenariosForPromotion).toBe(trainingPolicy.minPairsForPromotion);
   });
 
   it('o gate vê os cenários de TREINO: o holdout só sai com o piso (≥ 20 no total)', () => {

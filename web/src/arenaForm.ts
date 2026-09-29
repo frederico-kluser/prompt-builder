@@ -21,8 +21,15 @@ import {
   type ArenaConfigScenario,
 } from './engine/configFile';
 import { AREA_LIVRE, type PiiMode } from './lgpd';
-import { HOLDOUT_RATIO_DEFAULT, holdoutSplitSize, holdoutStrength } from './engine/holdout';
+import { HOLDOUT_RATIO_DEFAULT } from './engine/holdout';
 import { GATE_ALPHA } from './engine/rank';
+import {
+  minAchievableGateP,
+  minPairsForPromotion,
+  selectionScenariosFor,
+  TRAINING_DEFAULT_STAGES as ENGINE_TRAINING_DEFAULT_STAGES,
+  TRAINING_MIN_STAGES_RECOMMENDED,
+} from '../../src/engine/trainingPolicy.js';
 import type {
   ManualVariant,
   PromptContracts,
@@ -1036,10 +1043,11 @@ export function formatLanguages(languages: readonly string[]): string {
 // Poder do gate de promoção do treino (web-live#5)
 // ----------------------------------------------------------------------------
 //
-// REGRA LOCAL (onda 2): o helper equivalente do motor — `src/engine/
-// trainingPolicy.ts`, cluster trainer-features — ainda não existia quando isto
-// foi escrito. Quando existir, troque estas funções por ele (a conta é a mesma:
-// test/newrun-form-2.test.ts a amarra ao `bestOfKTest` REAL).
+// FONTE ÚNICA: `src/engine/trainingPolicy.ts` (a mesma regra do pré-voo/
+// estimate do CLI e do log do trainer). Na onda 2 isto nasceu como cópia local
+// porque o helper do motor ainda não existia; na integração virou re-export —
+// os nomes da tela ficam, a conta é uma só (test/newrun-form-2.test.ts a amarra
+// ao `bestOfKTest` REAL).
 //
 // A conta: o gate da melhor de K (IMPL-002, src/engine/bestOfK.ts) é um max-T
 // por troca de sinais EXATA sobre os n cenários de treino. O menor p possível
@@ -1051,34 +1059,28 @@ export function formatLanguages(languages: readonly string[]): string {
 // cenários e 0 promoções. Com 4, nem vencendo tudo.
 
 /** Cenários do treino quando o usuário escolhe o modo (antes: 5 — ver acima). */
-export const TRAINING_DEFAULT_STAGES = 10;
+export const TRAINING_DEFAULT_STAGES = ENGINE_TRAINING_DEFAULT_STAGES;
 /**
  * Abaixo disto o gate costuma segurar a promoção por UMA derrota: com 8
  * cenários de treino uma derrota (ou dois empates) ainda passa em α = 0,05.
  */
-export const TRAINING_RECOMMENDED_STAGES = 8;
+export const TRAINING_RECOMMENDED_STAGES = TRAINING_MIN_STAGES_RECOMMENDED;
 
 /**
  * Cenários que o GATE vê no treino: a seleção sem a fatia de holdout — que só
  * existe com o piso cumprido (`splitHoldout`: abaixo dele, tudo treina).
  */
-export function trainingGateScenarios(stages: number, holdoutRatio: number): number {
-  const n = Math.max(0, Math.floor(stages));
-  const reservados = holdoutSplitSize(n, holdoutRatio);
-  return holdoutStrength(reservados) === 'holdout' ? n - reservados : n;
-}
+export const trainingGateScenarios: (stages: number, holdoutRatio: number) => number = selectionScenariosFor;
 
 /** Menor p ajustado que o gate consegue dar com n cenários de treino: 1/2ⁿ. */
-export function minAchievablePAdjusted(n: number): number {
-  return 2 ** -Math.max(0, Math.floor(n));
-}
+export const minAchievablePAdjusted: (n: number) => number = minAchievableGateP;
 
-/** Menor nº de cenários de treino com que ALGUMA promoção é possível (1/2ⁿ ≤ α). */
-export function minScenariosForPromotion(alpha: number = GATE_ALPHA): number {
-  let n = 0;
-  while (minAchievablePAdjusted(n) > alpha) n += 1;
-  return n;
-}
+/**
+ * Menor nº de cenários de treino com que ALGUMA promoção é possível (1/2ⁿ ≤ α).
+ * ⚠️ É o `minPairsForPromotion` do motor — o `minScenariosForPromotion` de lá é
+ * outra régua (cenários CONFIGURADOS com folga de empates, depois do holdout).
+ */
+export const minScenariosForPromotion: (alpha?: number) => number = minPairsForPromotion;
 
 /** Nº de cenários que o modo treino subiu sozinho (de → para). */
 export interface AutoStages {
