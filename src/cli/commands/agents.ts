@@ -27,7 +27,7 @@ import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { runPreflight, type PreflightOpts } from '../../agent/doctor.js';
 import { agentVerdictTreeVersionOf, classifyStop } from '../../agent/verdictTree.js';
-import { assessInfraErrorRate } from '../../agent/infraError.js';
+import { assessInfraErrorRate, infraSummaryFields } from '../../agent/infraError.js';
 import { defaultPiImageTag } from '../../agent/container.js';
 import { compileAgentTaskToHarbor, HARBOR_VERSION } from '../../agent/harbor.js';
 import { parseAgentTaskSpec } from '../../agent/taskSchema.js';
@@ -483,15 +483,8 @@ function buildAgentSummary(record: RunRecord): AgentRunSummary | undefined {
     ...(record.agentUnscoredRepsByContestant
       ? { unscoredReps: Object.values(record.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0) }
       : {}),
-    ...(record.agentInfra
-      ? {
-          attempts: record.agentInfra.attempts,
-          retries: record.agentInfra.retries,
-          infraErrors: record.agentInfra.infraErrors,
-          defectStages: record.agentInfra.defectStages,
-        }
-      : {}),
-    ...(record.infraErrorRate !== undefined ? { infraErrorRate: record.infraErrorRate } : {}),
+    // IMPL-094: tentativas/retentativas/infra_error (fonte única dos 3 resumos).
+    ...infraSummaryFields(record),
   };
 }
 

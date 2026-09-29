@@ -264,6 +264,32 @@ export function stageInfraDefect(reps: readonly (InfraTallyRep & { infraError?: 
   return { message: (d.infraError ?? d.explanation ?? 'defeito da tarefa/ambiente').slice(0, 300) };
 }
 
+/**
+ * Campos de infraestrutura do `agentSummary` (IMPL-094) — FONTE ÚNICA para os
+ * três resumos (`result` do `agents run`, `run.finished` do NDJSON e o job do
+ * MCP): tentativas, retentativas cegas, infra_error, a taxa e as etapas
+ * invalidadas por defeito. Vazio em record sem `agentInfra` (legado).
+ */
+export function infraSummaryFields(rec: { agentInfra?: AgentInfraCounts; infraErrorRate?: number }): {
+  attempts?: number;
+  retries?: number;
+  infraErrors?: number;
+  infraErrorRate?: number;
+  defectStages?: number;
+} {
+  return {
+    ...(rec.agentInfra
+      ? {
+          attempts: rec.agentInfra.attempts,
+          retries: rec.agentInfra.retries,
+          infraErrors: rec.agentInfra.infraErrors,
+          defectStages: rec.agentInfra.defectStages,
+        }
+      : {}),
+    ...(rec.infraErrorRate !== undefined ? { infraErrorRate: rec.infraErrorRate } : {}),
+  };
+}
+
 export interface InfraRateAssessment {
   /** infra_error / execuções (0..1). */
   rate: number;

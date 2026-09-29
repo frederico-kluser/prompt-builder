@@ -71,6 +71,7 @@ import {
 } from './storage.js';
 import { trainToCompletion } from './trainer.js';
 import { agentVerdictTreeVersionOf, classifyStop } from './agent/verdictTree.js';
+import { infraSummaryFields, type AgentInfraCounts } from './agent/infraError.js';
 // IMPL-031 (revisão): as tools que GASTAM passam pelas mesmas camadas do CLI —
 // ledger da máquina (teto diário somando processos) e lock por config.
 import { withSpendGuards } from './cli/spendGuards.js';
@@ -220,6 +221,8 @@ export function agentSummary(rec: {
   agentVerdictTreeVersion?: number;
   agentJudgeErrorCount?: number;
   agentUnscoredRepsByContestant?: Record<string, number>;
+  agentInfra?: AgentInfraCounts;
+  infraErrorRate?: number;
   contestants: { runner?: 'chat' | 'agent' }[];
   stages: { responses: { costUsd: number; execution?: { turns: number; stopReason: string; oracle?: { score: number } } }[] }[];
 }) {
@@ -243,7 +246,20 @@ export function agentSummary(rec: {
   const unscoredReps = rec.agentUnscoredRepsByContestant
     ? Object.values(rec.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0)
     : undefined;
-  return { executions, failed, incomplete, limitCut, avgTurns, avgCostUsd, oracleRate, verdictTreeVersion, judgeErrors, unscoredReps };
+  return {
+    executions,
+    failed,
+    incomplete,
+    limitCut,
+    avgTurns,
+    avgCostUsd,
+    oracleRate,
+    verdictTreeVersion,
+    judgeErrors,
+    unscoredReps,
+    // IMPL-094: tentativas/retentativas cegas/infra_error (mesma fonte do CLI).
+    ...infraSummaryFields(rec),
+  };
 }
 
 export function benchmarkSummary(rec: RunRecord): Record<string, unknown> {

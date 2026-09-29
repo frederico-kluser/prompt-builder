@@ -15,6 +15,7 @@ import {
   type TruncationCell,
 } from '../engine/truncation.js';
 import { agentVerdictTreeVersionOf, classifyStop } from '../agent/verdictTree.js';
+import { infraSummaryFields } from '../agent/infraError.js';
 
 /**
  * Ledger SEM a lista de pendentes: no stream vao so os 6 numeros (um run com
@@ -33,7 +34,7 @@ export interface NdjsonMapperOptions {
   sessionId?: string;
 }
 
-export interface AgentSummary {
+export interface AgentSummary extends ReturnType<typeof infraSummaryFields> {
   /** Quantas respostas carregam ExecutionRef (execuções de agente). */
   executions: number;
   /** Execuções que morreram em erro de infra/processo (stopReason 'error'). */
@@ -114,6 +115,8 @@ function buildAgentSummary(record: RunRecord): AgentSummary | undefined {
     ...(record.agentUnscoredRepsByContestant
       ? { unscoredReps: Object.values(record.agentUnscoredRepsByContestant).reduce((a, n) => a + n, 0) }
       : {}),
+    // IMPL-094: tentativas/retentativas cegas/infra_error (mesma fonte do `result`).
+    ...infraSummaryFields(record),
   };
 }
 

@@ -118,6 +118,7 @@ import {
   INFRA_INVALID_RATE,
   INFRA_RETRIES,
   INFRA_WARN_RATE,
+  infraSummaryFields,
   mergeInfraCounts,
   shouldRetryAttempt,
   stageInfraDefect,
@@ -129,6 +130,7 @@ import { createGateway, setDefaultGateway, type OpenRouterGateway } from '../src
 import { getDataDir, setDataDir } from '../src/storage.js';
 import { runToCompletion } from '../src/orchestrator.js';
 import { cmdAgents } from '../src/cli/commands/agents.js';
+import { agentSummary as mcpAgentSummary } from '../src/jobManager.js';
 import { EXIT, isCliError, resetOutputState, type CliError } from '../src/cli/output.js';
 import type { RunConfig, RunRecord, StageSpec } from '../src/types.js';
 import type { AgentTaskSpec } from '../src/agent/types.js';
@@ -230,6 +232,19 @@ describe('classifyAgentFailure (pura) — uma classe por tipo de falha', () => {
     expect(stageInfraDefect([{ path: 'error', verdict: null, infraClass: 'defect', infraError: 'setup falhou' }])).toEqual({
       message: 'setup falhou',
     });
+  });
+
+  it('os resumos (MCP/NDJSON/result) trazem as tentativas da MESMA fonte', () => {
+    const rec = {
+      agentInfra: { executions: 6, infraErrors: 3, attempts: 12, retries: 6, defectStages: 1 },
+      infraErrorRate: 0.5,
+      contestants: [{ runner: 'agent' as const }],
+      stages: [{ responses: [{ costUsd: 0.01, execution: { turns: 1, stopReason: 'completed' } }] }],
+    };
+    const esperado = { attempts: 12, retries: 6, infraErrors: 3, infraErrorRate: 0.5, defectStages: 1 };
+    expect(infraSummaryFields(rec)).toEqual(esperado);
+    expect(mcpAgentSummary(rec)).toMatchObject(esperado);
+    expect(infraSummaryFields({})).toEqual({}); // record legado: nada inventado
   });
 });
 
