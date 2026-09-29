@@ -87,12 +87,14 @@ const PIPELINE = [
   {
     icon: Check,
     title: 'Juiz',
-    text: 'Um modelo juiz compara cada resposta com o gabarito: resolve, parcial ou não resolve.',
+    // web-live#10: comparando modelos (o default) não há gabarito — o juiz
+    // ranqueia as respostas lado a lado; não prometa régua que não existe.
+    text: 'Um modelo juiz compara cada resposta com o gabarito (ou com as rivais, quando não há gabarito): resolve, parcial ou não resolve.',
   },
   {
     icon: Trophy,
     title: 'Vencedor',
-    text: 'O placar mostra quem resolveu mais — e os melhores ainda duelam no fim.',
+    text: 'O placar mostra quem resolveu mais — e, havendo gabarito, os melhores ainda duelam no fim.',
   },
 ];
 

@@ -340,8 +340,12 @@ describe.skipIf(!alvo)('IMPL-106 (b) — "Iniciar" + custo na viewport, todas as
               custo: caixa(custo),
               vh: window.innerHeight,
               vw: window.innerWidth,
+              sw: document.documentElement.scrollWidth,
             };
           });
+          // web-live#13: a 390 px o cabeçalho (Importar/Exportar/Guiado/Completo)
+          // e a linha de custos do rodapé empurravam a página a 466 px.
+          expect(r.sw, `rolagem horizontal em ${sec} (${r.sw} > ${r.vw})`).toBeLessThanOrEqual(r.vw);
           expect(r.botao, `sem "Iniciar" em ${sec}`).not.toBeNull();
           expect(r.custo, `sem custo estimado em ${sec}`).not.toBeNull();
           for (const [nome, b] of [
@@ -738,8 +742,10 @@ describe.skipIf(!alvo)('IMPL-106 na superfície GUIADA (default) — viewport, T
               barra: caixa(document.querySelector('nav[aria-label="Navegação"]')),
               vh: window.innerHeight,
               vw: window.innerWidth,
+              sw: document.documentElement.scrollWidth,
             };
           });
+          expect(r.sw, `rolagem horizontal no passo ${passo} (${r.sw} > ${r.vw})`).toBeLessThanOrEqual(r.vw);
           for (const [nome, b] of [
             ['Iniciar', r.botao],
             ['custo', r.custo],
@@ -825,6 +831,54 @@ describe.skipIf(!alvo)('IMPL-106 na superfície GUIADA (default) — viewport, T
       await irAoPasso(page, 'Objetivo');
       expect(await page.getByRole('tab', { name: /Teste.*pendente/ }).count(), 'Teste não mostra o gerador').toBe(0);
       expect(await page.getByRole('tab', { name: /Participantes.*pendente/ }).count()).toBe(1);
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('web-live#13: /runs a 390 px — os 4 filtros à vista, sem rolagem horizontal', async () => {
+    const { contexto, page } = await paginaNova({ width: 390, height: 844 }, 'guided');
+    try {
+      await page.goto(`${url}runs`);
+      await page.getByRole('group', { name: 'Filtrar por status' }).waitFor({ timeout: 30_000 });
+      const r = await page.evaluate(() => {
+        const grupo = document.querySelector('[aria-label="Filtrar por status"]');
+        const opcoes = [...(grupo?.querySelectorAll('button') ?? [])].map((b) => {
+          const c = b.getBoundingClientRect();
+          return { texto: b.textContent ?? '', left: c.left, right: c.right };
+        });
+        return { opcoes, vw: window.innerWidth, sw: document.documentElement.scrollWidth };
+      });
+      expect(r.sw, `rolagem horizontal em /runs (${r.sw} > ${r.vw})`).toBeLessThanOrEqual(r.vw);
+      expect(r.opcoes.some((o) => o.texto.includes('Com erro'))).toBe(true);
+      for (const o of r.opcoes) {
+        expect(o.left, `${o.texto} cortado à esquerda`).toBeGreaterThanOrEqual(0);
+        expect(o.right, `${o.texto} cortado à direita`).toBeLessThanOrEqual(r.vw + 1);
+      }
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('web-live#5: o treino nasce com 10 cenários (poder para promover); 4 vira pendência', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided');
+    try {
+      await page.goto(`${url}new`);
+      await esperarFormulario(page);
+      await page.getByRole('button', { name: /Treinar um prompt/ }).first().click();
+      await irAoPasso(page, 'Limites');
+      const campo = page.getByLabel('Cenários', { exact: true });
+      expect(await campo.inputValue()).toBe('10');
+      expect(await page.locator('text=/não consegue promover|só é promovida se vencer/').count()).toBe(0);
+      await campo.fill('4');
+      await page.getByText(/Com 4 cenários o treino não consegue promover nenhuma variante/).first().waitFor({ timeout: 10_000 });
+      expect(await page.getByRole('tab', { name: /Limites.*pendente/ }).count()).toBe(1);
+      // De volta ao compare, o nº que o usuário escolheu fica (só o default sobe/desce sozinho).
+      await irAoPasso(page, 'Objetivo');
+      await page.getByRole('button', { name: /Comparar modelos/ }).first().click();
+      await irAoPasso(page, 'Limites');
+      expect(await page.getByLabel('Cenários', { exact: true }).inputValue()).toBe('4');
+      expect(await page.locator('[data-pendente]').count()).toBe(0);
     } finally {
       await contexto.close();
     }
