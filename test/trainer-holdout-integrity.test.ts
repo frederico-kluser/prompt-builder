@@ -343,26 +343,44 @@ describe('web-code#1 — o holdout fica FORA da seleção da iteração 0', () =
     });
   }
 
-  it('trainOnlyView: só as etapas de treino, sem os agregados de run inteira', () => {
-    const specs = Array.from({ length: 4 }, (_, i) => ({ question: `q${i}` }));
+  it('trainOnlyView: só as etapas de treino, judge-score recomputado nelas, sem agregados de run inteira', () => {
+    const specs = Array.from({ length: 5 }, (_, i) => ({ question: `q${i}` }));
+    const ref = (a: Verdict, b: Verdict, extra: Record<string, unknown> = {}) => ({
+      verdictByContestant: { a, b } as Record<string, Verdict>,
+      ...extra,
+    });
     const run = {
       id: 'r',
-      stages: [...specs.map((spec, index) => ({ index, spec })), { index: 4 }],
-      judgeScoreByContestant: { a: 100 },
+      contestants: [{ id: 'a' }, { id: 'b' }],
+      stages: [
+        { index: 0, spec: specs[0], referenceJudge: ref('resolve', 'nao') },
+        { index: 1, spec: specs[1], referenceJudge: ref('nao', 'resolve') }, // holdout
+        // treino com repetições (§18.4): cada rep é uma observação
+        { index: 2, spec: specs[2], referenceJudge: ref('resolve', 'nao', { verdictsByRep: { a: ['parcial', 'nao'] } }) },
+        { index: 3, spec: specs[3], referenceJudge: ref('nao', 'nao'), incomplete: true }, // cortada: fora
+        { index: 4, spec: specs[4], referenceJudge: ref('nao', 'resolve') }, // holdout
+        { index: 5 }, // sem spec (datagen curto): fora
+      ],
+      judgeScoreByContestant: { a: 100, b: 100 },
       standings: [{ contestantId: 'a' }],
-      completeness: { n: 5 },
+      completeness: { n: 6 },
       resolveRateByContestant: { a: 1 },
     };
-    const view = trainOnlyView(run, [specs[0], specs[2]]);
-    expect(view.stages.map((s) => s.index)).toEqual([0, 2]);
-    expect(view).not.toHaveProperty('judgeScoreByContestant');
+    const view = trainOnlyView(run, [specs[0], specs[2], specs[3]]);
+    expect(view.stages.map((s) => s.index)).toEqual([0, 2, 3]);
+    // a: resolve (etapa 0) + reps parcial/nao (etapa 2) → (1 + 0,5 + 0)/3; b: nao, nao → 0.
+    expect(view.judgeScoreByContestant).toEqual({ a: 50, b: 0 });
     expect(view).not.toHaveProperty('standings');
     expect(view).not.toHaveProperty('completeness');
     expect(view).not.toHaveProperty('resolveRateByContestant');
     expect(view.id).toBe('r');
     // A run original não muda.
-    expect(run.stages).toHaveLength(5);
-    expect(run.judgeScoreByContestant).toEqual({ a: 100 });
+    expect(run.stages).toHaveLength(6);
+    expect(run.judgeScoreByContestant).toEqual({ a: 100, b: 100 });
+    // Sem juiz de referência nas etapas de treino, o agregado some (o
+    // trainer cai nos vereditos listwise das etapas, como numa run legada).
+    const semRef = trainOnlyView({ ...run, stages: [{ index: 0, spec: specs[0] }] }, [specs[0]]);
+    expect(semRef).not.toHaveProperty('judgeScoreByContestant');
   });
 });
 

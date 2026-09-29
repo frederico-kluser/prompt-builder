@@ -9,7 +9,8 @@
 // confirmação a declarar). Com o piso de 10 e o teto de ratio 0,5, seleções com
 // menos de 20 cenários nunca produzem holdout — exatamente o limiar da pesquisa.
 
-import type { HoldoutSkipReason } from './types.js';
+import type { HoldoutSkipReason, Verdict } from './types.js';
+import { judgeScoreFromVerdicts } from './rank.js';
 
 /**
  * Mínimo de cenários em holdout para o gate final significar algo. Abaixo
@@ -94,6 +95,16 @@ export function splitHoldout<T>(
   };
 }
 
+/** O mínimo de uma etapa que a visão de seleção lê (estrutural: serve aos dois motores). */
+interface SelectionStage {
+  spec?: unknown;
+  incomplete?: boolean;
+  referenceJudge?: {
+    verdictByContestant: Record<string, Verdict>;
+    verdictsByRep?: Record<string, Verdict[]>;
+  };
+}
+
 /**
  * Visão de SELEÇÃO de uma run que cobriu a fatia de holdout (web-code#1).
  *
@@ -102,20 +113,36 @@ export function splitHoldout<T>(
  * a re-avaliação, as lições da iteração 1 e o pool Pareto liam a fatia que o
  * gate final depois "valida": o campeão era escolhido em parte nos MESMOS
  * cenários do teste cego. Aqui ficam só as etapas de TREINO (identidade de
- * objeto: `splitHoldout` devolve as mesmas specs que vieram de `run.stages`) e
- * saem os agregados de run inteira — `judgeScoreOf`/o placar os recomputam das
- * etapas que sobraram. A run gravada não muda (a UI segue mostrando tudo).
+ * objeto: `splitHoldout` devolve as mesmas specs que vieram de `run.stages`),
+ * o judge-score é RECOMPUTADO sobre elas com a regra do orchestrator (etapas
+ * com juiz de referência e não cortadas; o vetor por repetição quando existe —
+ * §18.4 —, senão o veredito agregado; ausente não é observação) e os demais
+ * agregados de run inteira saem. A run gravada não muda (a UI segue mostrando
+ * tudo).
  */
-export function trainOnlyView<R extends { stages: readonly { spec?: unknown }[] }>(
-  run: R,
-  train: readonly unknown[],
-): R {
+export function trainOnlyView<
+  R extends { stages: readonly SelectionStage[]; contestants: readonly { id: string }[] },
+>(run: R, train: readonly unknown[]): R {
   const keep = new Set<unknown>(train);
-  const view = {
-    ...run,
-    stages: run.stages.filter((s) => s.spec !== undefined && keep.has(s.spec)),
-  } as Record<string, unknown>;
+  const stages = run.stages.filter((s) => s.spec !== undefined && keep.has(s.spec));
+  const view = { ...run, stages } as Record<string, unknown>;
   for (const k of RUN_WIDE_AGGREGATES) delete view[k];
+  const comRef = stages.filter((s) => s.referenceJudge && !s.incomplete);
+  if (comRef.length > 0) {
+    view.judgeScoreByContestant = Object.fromEntries(
+      run.contestants.map((c) => [
+        c.id,
+        judgeScoreFromVerdicts(
+          comRef.flatMap((s) => {
+            const porRep = s.referenceJudge!.verdictsByRep?.[c.id];
+            if (porRep) return porRep;
+            const v = s.referenceJudge!.verdictByContestant[c.id];
+            return v === undefined ? [] : [v];
+          }),
+        ),
+      ]),
+    );
+  }
   return view as R;
 }
 
@@ -126,6 +153,7 @@ const RUN_WIDE_AGGREGATES = [
   'completeness',
   'resolveRateByContestant',
   'censoredResolveRateByContestant',
+  'limitCutsByContestant',
 ] as const;
 
 /** α unilateral do teste final em holdout (o único p de confirmação da sessão). */
