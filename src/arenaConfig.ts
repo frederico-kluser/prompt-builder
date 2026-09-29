@@ -13,6 +13,7 @@
 import { parseRunConfig } from './runConfigSchema.js';
 import { HOLDOUT_RATIO_DEFAULT, HOLDOUT_RATIO_MAX } from './holdout.js';
 import type { ArenaAgentConfigFile, ArenaConfigFile } from './configFile.js';
+import { TRAINING_DEFAULT_STAGES } from './engine/trainingPolicy.js';
 import type { ReasoningConfig, RunConfig, StageSpec } from './types.js';
 
 /** Defaults da UI, aplicados quando o arquivo omite o campo. */
@@ -58,7 +59,14 @@ export function arenaConfigToRunConfig(
   file: ArenaConfigFile,
   overrides: ArenaConfigDefaults = {},
 ): ArenaConfigToRunConfigResult {
-  const d = { ...DEFAULTS, ...overrides };
+  // web-live#5: no TREINO o default de cenários é o que deixa o gate da melhor
+  // de K conseguir promover (com 5, um único empate já segura — ver
+  // `trainingPromotionPower`); override explícito do chamador vence.
+  const d = {
+    ...DEFAULTS,
+    ...(file.mode === 'training' ? { stages: TRAINING_DEFAULT_STAGES } : {}),
+    ...overrides,
+  };
   const maxOutputTokens = Math.max(50, file.limits?.maxOutputTokens ?? d.maxOutputTokens);
 
   // Cenarios pinados viram `scenarioSeed` — sem o `id` (o motor re-rotula) e
@@ -130,6 +138,8 @@ export function arenaConfigToRunConfig(
     ...(file.compliance ? { compliance: file.compliance } : {}),
     ...(file.piiMode ? { piiMode: file.piiMode } : {}),
     ...(file.allowPii ? { allowPii: true } : {}),
+    // IMPL-075: modo auditável (juiz + gabarito com provedor travado).
+    ...(file.judging?.auditable ? { auditable: true } : {}),
     // Contratos never-break (F2/P0.3): vivem no perfil do prompt, valem para
     // toda reescrita do variator.
     ...(file.prompt?.contracts ? { contracts: file.prompt.contracts } : {}),
@@ -185,6 +195,16 @@ export function arenaConfigToRunConfig(
             feedbackDriven: file.training?.feedbackDriven !== false,
             ...(file.training?.reflection ? { reflection: file.training.reflection } : {}),
             ...(file.training?.paretoPool !== undefined ? { paretoPool: file.training.paretoPool } : {}),
+            // IMPL-062/IMPL-060/IMPL-065: campos do laço — sem estas linhas o
+            // arquivo os validava e a sessão rodava com o default em silêncio.
+            ...(file.training?.paretoCoverageSampling !== undefined
+              ? { paretoCoverageSampling: file.training.paretoCoverageSampling }
+              : {}),
+            ...(file.training?.maxLessonTokens !== undefined ? { maxLessonTokens: file.training.maxLessonTokens } : {}),
+            ...(file.training?.lessonsIncludeReference !== undefined
+              ? { lessonsIncludeReference: file.training.lessonsIncludeReference }
+              : {}),
+            ...(file.training?.minCuratedItems !== undefined ? { minCuratedItems: file.training.minCuratedItems } : {}),
           }
         : {}),
     };

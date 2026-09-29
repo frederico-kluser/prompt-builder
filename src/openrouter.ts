@@ -2995,7 +2995,9 @@ export class OpenRouterGateway {
    * e o caminho normal o classifica).
    */
   private verdictCacheFor(params: ChatCompletionParams): VerdictCache | undefined {
-    const cache = this.cfg.verdictCache;
+    // IMPL-080: o cache da SESSÃO de treino viaja no ledger (`sink.verdictCache`,
+    // escopo da cadeia de forks) — o do gateway é o interruptor global legado.
+    const cache = this.cfg.verdictCache || params.sink?.verdictCache?.();
     if (!cache) return undefined;
     const role = params.role;
     if (role !== 'judge' && role !== 'duel' && role !== 'gabarito') return undefined;
@@ -3019,6 +3021,7 @@ export class OpenRouterGateway {
   ): Promise<ChatCompletionResult> {
     const cache = this.verdictCacheFor(params);
     if (!cache) return run();
+    const promptText = params.messages.map((m) => `${m.role}\u0000${m.content}`).join('\u0000');
     const key = verdictCacheKey({
       modelId: params.modelId,
       effort: params.reasoningLevel ?? null,
@@ -3030,10 +3033,12 @@ export class OpenRouterGateway {
         responseSchema: params.responseSchema?.schema ?? null,
         responseFormatJson: params.responseFormatJson ?? null,
       }),
-      promptText: params.messages.map((m) => `${m.role}\u0000${m.content}`).join('\u0000'),
+      promptText,
     });
     const role = params.role ?? 'competitor';
-    const hit = cache.lookup(key);
+    // IMPL-080: o texto servido do cache é re-amarrado ao marcador/canário
+    // DESTA chamada (a blindagem do juiz sorteia os dois por veredito).
+    const hit = cache.lookup(key, promptText);
     if (hit) {
       params.sink?.noteVerdictCache?.({ role, hit: true });
       if (!hit.retest) return this.cachedVerdictResult(params, hit.entry);
@@ -3041,14 +3046,14 @@ export class OpenRouterGateway {
       // veredito (discordância acima do limiar invalida o cache) e devolve o
       // resultado REAL — quem serve é a nova medição, não o replay.
       const fresh = await run();
-      cache.noteRetest(key, this.storableOf(fresh));
+      cache.noteRetest(key, this.storableOf(fresh), promptText);
       return fresh;
     }
     params.sink?.noteVerdictCache?.({ role, hit: false });
     const result = await run();
     // Só guarda o que completou SEM bloqueio do guardrail (corte de moderação
     // não é veredito — re-julgar é sempre o caminho).
-    if (!result.blocked) cache.store(key, this.storableOf(result));
+    if (!result.blocked) cache.store(key, this.storableOf(result), promptText);
     return result;
   }
 

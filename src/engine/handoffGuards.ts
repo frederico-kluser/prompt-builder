@@ -28,6 +28,7 @@ import type { HoldoutSkipReason } from '../types.js';
 /** Identificador estável de cada sinal (vai no JSON, no log de auditoria e no trailer). */
 export type HandoffIssueCode =
   | 'holdout.regressed'
+  | 'champion.undeclared'
   | 'holdout.skipped'
   | 'holdout.missing'
   | 'significance.ci_contains_zero'
@@ -69,6 +70,8 @@ export interface HandoffGuardInput {
   budgetExhausted?: boolean;
   significance?: { ci95Pp: [number, number]; n?: number; meanDiffPp?: number; pValue?: number } | null;
   judgeDrift?: boolean;
+  /** IMPL-065: declaração sob âncora humana (ausente em record antigo = sem bloqueio). */
+  championDeclaration?: { declared: boolean; message?: string; curatedItems?: number; minCuratedItems?: number };
 }
 
 export interface HandoffGuardReport {
@@ -125,6 +128,19 @@ export function evaluateHandoffGuards(
       message:
         `campeão REGREDIU no holdout: ${fmtScore(h.championScore)} × base ${fmtScore(h.controlScore)} ` +
         `(${fmtPp(h.gain)} em ${h.n} cenários reservados) — o ganho do treino não generalizou.`,
+    });
+  }
+
+  // IMPL-065 (R-05:REC-4): a sessão RECUSOU declarar campeão (itens curados
+  // abaixo do piso) — o prompt é o melhor do bootstrap sintético, não
+  // evidência. Levar para produção exige override justificado.
+  if (input.championDeclaration?.declared === false) {
+    blocks.push({
+      code: 'champion.undeclared',
+      severity: 'block',
+      message:
+        input.championDeclaration.message ??
+        `campeão NÃO declarado: ${input.championDeclaration.curatedItems ?? 0} itens curados < piso ${input.championDeclaration.minCuratedItems ?? '?'}.`,
     });
   }
 

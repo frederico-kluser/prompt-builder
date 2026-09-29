@@ -48,6 +48,7 @@ export type {
 export type TokenPrice = number | null;
 import type { PiiRunReport } from './engine/pii.js';
 import type { SensitiveRouting } from './engine/sensitiveRouting.js';
+import type { VerdictCache } from './engine/verdictCache.js';
 
 export interface OpenRouterModelPricing {
   prompt: TokenPrice; // USD per token (null = desconhecido)
@@ -410,6 +411,13 @@ export interface CostSink {
    * ao preset do gateway. Opcional: sink sem ele = só o preset do gateway.
    */
   auditableRoles?(): readonly CostRole[] | undefined;
+  /**
+   * IMPL-080 (R-08:REC-3): cache EXATO de vereditos desta run/sessão (a
+   * sessão de treino liga um por sessão; a cadeia de forks o herda). O gateway
+   * o consulta nos papéis de juízo (judge/duel/gabarito). Opcional: sink sem
+   * ele = só o cache global do gateway (desligado por default).
+   */
+  verdictCache?(): VerdictCache | undefined;
 }
 
 /**
@@ -706,6 +714,14 @@ export interface RunConfigBase {
    * que quebrar — evolução com cinto de segurança, validação local sem LLM.
    */
   contracts?: PromptContracts;
+  /**
+   * IMPL-075 (R-07b:REC-4) — modo AUDITÁVEL da run/sessão: juiz e gabarito
+   * (`AUDITABLE_ROLES`) saem com provedor travado (`provider.order`,
+   * `allow_fallbacks:false`, `require_parameters:true`, quantizações de
+   * precisão cheia). Visível no artefato: `costByRole[*].auditableCalls` e
+   * `callLog[].auditable`. Ausente/false = só o preset do gateway (env).
+   */
+  auditable?: boolean;
 }
 
 /** Campos comuns aos modos de 1 LLM (variation/training). */
@@ -1062,6 +1078,13 @@ export interface CompetitorResponse {
   truncationRetried?: boolean;
   /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
   firstAttempt?: CallFinishSignals;
+  /**
+   * IMPL-075 (R-07b:REC-4) — provedor que SERVIU a resposta final (payload do
+   * OpenRouter; o GET /generation completa quando o gateway pede). Sem isto a
+   * variação entre provedores do mesmo id de pesos abertos ficava inseparável
+   * da variação de prompt. Ausente = nada recuperável (nunca inventado).
+   */
+  provider?: CallProviderInfo;
   /**
    * Ponteiro para os artefatos da execução de agente em disco. NUNCA o
    * conteúdo: o RunRecord é resserializado inteiro a cada saveRun (throttled

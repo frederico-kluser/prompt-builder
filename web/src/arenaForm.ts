@@ -290,6 +290,13 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
   'training.feedbackDriven': { kind: 'ui', control: 'Avançado › Lições das falhas', modes: TRAINING },
   'training.reflection': { kind: 'json-only', status: 'aplicado', note: "reflexão GEPA ('deterministic' | 'llm' | 'off')", modes: TRAINING },
   'training.paretoPool': { kind: 'json-only', status: 'aplicado', note: 'pool Pareto (>1 = população de prompts)', modes: TRAINING },
+  // IMPL-060/062/065/075 (w2 trainer-features): aceitos pelo schema e aplicados
+  // pelo CLI/servidor (`train --config`); a tela ainda não os repassa — ficam
+  // `ignorado` (com aviso no import) até ganharem controle/patch próprio.
+  'training.paretoCoverageSampling': { kind: 'json-only', status: 'ignorado', note: 'pai ∝ cobertura no pool Pareto (n ≥ 20) — aplicado pelo CLI; a tela não repassa' },
+  'training.maxLessonTokens': { kind: 'json-only', status: 'ignorado', note: 'teto do dossiê de lições em tokens (200–4000) — aplicado pelo CLI; a tela não repassa' },
+  'training.lessonsIncludeReference': { kind: 'json-only', status: 'ignorado', note: 'gabarito no dossiê de lições (default off) — aplicado pelo CLI; a tela não repassa' },
+  'training.minCuratedItems': { kind: 'json-only', status: 'ignorado', note: 'piso de itens curados p/ declarar campeão (default 20) — aplicado pelo CLI; a tela não repassa' },
   // IMPL-012 remove o sequential halving: o campo segue aceito por compat, mas
   // NÃO vai para a run — o import avisa em vez de engolir.
   'training.halving': { kind: 'json-only', status: 'ignorado', note: 'sequential halving descontinuado (IMPL-012)', modes: TRAINING, discontinued: true },
@@ -301,6 +308,7 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
   finalists: { kind: 'ui', control: 'Avançado › Finalistas' },
   'judging.reference': { kind: 'json-only', status: 'aplicado', note: 'força ligar/desligar o julgamento por gabarito (sem ele: default do modo)' },
   'judging.passes': { kind: 'ui', control: 'Avançado › Juiz em 2 ordens' },
+  'judging.auditable': { kind: 'json-only', status: 'ignorado', note: 'modo auditável (juiz + gabarito com provedor travado) — aplicado pelo CLI; a tela não repassa' },
   'limits.maxOutputTokens': { kind: 'ui', control: 'Avançado › Máx. tokens por resposta' },
   'limits.timeoutMs': { kind: 'ui', control: 'Avançado › Timeout' },
   // web-code#13: só REGISTRADO na run — nenhum motor limita chamadas por ele (o

@@ -23,6 +23,7 @@
 import { estimateInputFromConfig, estimateRunCost, toPerMTok, type CostEstimate } from '../estimate.js';
 import { isKnownPrice } from '../engine/pricing.js';
 import { ignoredReasoningLevels } from '../modelCaps.js';
+import { plannedTrainingStages, trainingPromotionPower } from '../engine/trainingPolicy.js';
 import type { KeyInfo } from '../openrouter.js';
 import type { OpenRouterModel, RunConfig } from '../types.js';
 import { CliError, EXIT, fmtUsd, isCliError, kindForExit, type ErrorKind } from './output.js';
@@ -231,6 +232,19 @@ export async function runPreflight(
   // 1. Orçamento explícito fora de TTY. Na execução real sai antes de qualquer
   //    rede (nada foi gasto, nem uma leitura).
   if (budget.kind === 'missing') refuse(budgetRequiredError());
+
+  // 1b. Poder do gate de promoção (web-live#5): o gate da melhor de K é exato
+  //     — com poucos cenários de SELEÇÃO o treino não consegue promover nada
+  //     (ou só sem nenhum empate). Aviso, não recusa: a config é válida, mas
+  //     ninguém deve pagar a sessão achando que ela pode evoluir o prompt.
+  if (config.mode === 'training') {
+    const poder = trainingPromotionPower({
+      stages: plannedTrainingStages(config),
+      holdoutRatio: config.holdoutRatio,
+      techniques: config.techniqueIds?.length,
+    });
+    if (poder.message) warn(`poder do gate: ${poder.message}`);
+  }
 
   // 2. Catálogo (público sem key). Sem ele não há o que conferir nem estimar.
   let catalog: LoadedCatalog | null = null;

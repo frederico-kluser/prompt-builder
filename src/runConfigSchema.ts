@@ -323,6 +323,12 @@ const baseFields = {
   // IMPL-011: schema fonte única (inclui judgeDiff e canaries — sem ele o zod
   // STRIPAVA os campos novos em silêncio e a camada 3 nunca rodava pela API).
   contracts: promptContractsSchema.optional(),
+  // IMPL-075 (R-07b:REC-4): modo AUDITÁVEL por run/sessão — juiz e gabarito
+  // saem com provedor travado (`provider.order`, `allow_fallbacks:false`,
+  // `require_parameters:true`, quantizações de precisão cheia). A contagem por
+  // papel (`costByRole[*].auditableCalls`) e o registo por chamada (`callLog`)
+  // tornam isso visível no artefato de replay.
+  auditable: z.boolean().optional(),
 };
 
 const manualVariantSchema = z.object({
@@ -405,6 +411,20 @@ const trainingObj = z.object({
   feedbackDriven: z.boolean().optional(),
   // Reflexao GEPA por LLM (opt-in, §7.5): default deterministico (zero custo).
   reflection: z.enum(['off', 'deterministic', 'llm']).optional(),
+  // ⚠️ Os campos do LAÇO abaixo existiam em TrainingConfig e o trainer os lia,
+  // mas o zod os STRIPAVA (chave desconhecida) — CLI (`train --config`), MCP e
+  // POST /sessions rodavam sempre com o default, enquanto a SPA os aplicava.
+  // IMPL-062 (R-02b:REC-4): pool Pareto (>1 = população) e amostragem de pai
+  // ∝ cobertura (feature-flag; só atua com fatias múltiplas e n ≥ 20).
+  paretoPool: z.number().int().min(0).max(8).optional(),
+  paretoCoverageSampling: z.boolean().optional(),
+  // IMPL-060 (R-02b:REC-1): teto do dossiê de lições em TOKENS (≤ 4000) e o
+  // gabarito no dossiê (default OFF — risco de exploração do juiz, R-03b).
+  maxLessonTokens: z.number().int().min(200).max(4000).optional(),
+  lessonsIncludeReference: z.boolean().optional(),
+  // IMPL-065 (R-05:REC-4): piso de itens CURADOS (âncora humana) para declarar
+  // campeão. Default 20 — proposta sem fonte (calibrar). 0 = não exige âncora.
+  minCuratedItems: z.number().int().min(0).max(1000).optional(),
   ...baseFields,
 });
 

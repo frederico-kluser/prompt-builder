@@ -123,7 +123,14 @@ const USO: Record<string, string> = {
   train: `  train --model <id>       treina um prompt ao longo de iterações
   train --config <arq>     usa um arena-config@1 (ver: docs config)
   Comuns: --iterations --holdout-ratio --budget --dry-run --detach
-  --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR)`,
+  --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR)
+  --stages N               default 10 no treino: com poucos cenários o gate não
+                           consegue promover (o pré-voo avisa)
+  --auditable              juiz e gabarito com provedor travado (sem fallback)
+  Campeão só é DECLARADO com ≥ N itens curados (âncora humana: gabarito/rótulo
+  escrito por gente — gabarito gerado por IA não conta). N = training.minCuratedItems,
+  default 20 — proposta SEM fonte (calibrar). Abaixo disso o resultado traz
+  championDeclaration.declared=false e o prompt sai como melhor do bootstrap.`,
   runs: `  runs list [--status X]   lista runs (teto 50; --all/--limit N)
   runs show <id>           record completo + diagnóstico do juiz
   runs winner <id> [--prompt-only]

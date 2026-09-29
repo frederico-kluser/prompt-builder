@@ -216,6 +216,11 @@ export async function runCompetitor(params: RunCompetitorParams): Promise<Compet
         maxTokens,
         ...(res.truncationSignals?.length ? { truncationSignals: res.truncationSignals } : {}),
         ...retryFields(),
+        // IMPL-075: o provedor que serviu (payload/GET /generation) vai para o
+        // record — sem ele a variação de provedor se confundia com a de prompt.
+        ...(res.provider && (res.provider.name || res.provider.upstreamId || res.provider.serviceTier)
+          ? { provider: { ...res.provider } }
+          : {}),
       };
     } catch (err) {
       // Orcamento/cancelamento sao SINAIS DE CONTROLE: repetir a chamada so

@@ -385,6 +385,11 @@ export interface RunConfigBase {
    * sessao (parentLedger) e quem controla.
    */
   budgetUsd?: number;
+  /**
+   * IMPL-075 — modo AUDITÁVEL (juiz + gabarito com provedor travado, sem
+   * fallback, `require_parameters`). Espelho de src/types.ts.
+   */
+  auditable?: boolean;
 }
 
 /** Campos comuns aos modos de 1 LLM (variation/training). */
@@ -605,6 +610,8 @@ export interface CompetitorResponse {
   truncationRetried?: boolean;
   /** Sinais da 1a tentativa (a truncada), quando houve retry por truncamento. */
   firstAttempt?: CallFinishSignals;
+  /** IMPL-075: provedor que serviu a resposta final (espelho de src/types.ts). */
+  provider?: { name?: string; upstreamId?: string; serviceTier?: string };
 }
 
 /**
