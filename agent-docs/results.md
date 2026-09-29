@@ -149,6 +149,24 @@ aviso `override.applied`) e no trailer `Override-Reason:` do commit
 (`wouldBlock`, `blocks`, `warnings`). `--prompt-only` imprime o prompt cru e
 **não** passa pelo gate (só avisa no stderr).
 
+### Retomar sem pagar de novo (`runs resume`)
+
+```bash
+prompt-builder runs resume <id>              # teto = o que SOBROU do original
+prompt-builder runs resume <id> --budget 2   # teto só da continuação
+```
+
+Run que parou sem terminar — processo morto (órfã), Ctrl-C/`runs cancel`,
+orçamento, erro de key/crédito/rede — roda de novo com o MESMO id e a MESMA
+config: cada chamada já concluída volta do journal (`<data-dir>/runs/<id>.journal`,
+1 linha por resposta, fsync) a US$ 0 e só o que faltava é pago. A etapa é
+refeita inteira (resposta + veredito) — nunca "meia etapa". No resultado:
+`resume.attempt`, `resume.replayedCalls` (US$ 0 nesta tentativa, `callLog`
+com `status: "replayed"`), `resume.priorSpentUsd` (gasto das tentativas
+anteriores, FORA de `totalCostUsd` — nunca somar os dois como gasto novo).
+Recusa (exit 2, `run.not_resumable`): run concluída/inconclusiva, ainda
+rodando, rodada de treino ou modo agente. Run concluída apaga o journal.
+
 ## Levar para outra máquina e apagar (troca e LGPD)
 
 ```bash
