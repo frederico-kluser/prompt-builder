@@ -19,9 +19,12 @@ import {
   fmtPct,
   cycleReevalText,
   fmtPp,
+  fmtReportP,
+  fmtReportPLine,
   fmtSignedNumber,
   fmtSignedUsd,
   fmtUsd,
+  reportPLabel,
   type CycleRow,
   type SessionReport,
 } from './sessionReport.js';
@@ -245,7 +248,7 @@ function summaryStrip(r: SessionReport): string {
     stat(fmtUsd(r.optimization.totalUsd), 'Custo da otimização', 'flat', r.optimization.budgetUsd != null ? `de ${fmtUsd(r.optimization.budgetUsd)}` : undefined),
     c.paybackCalls != null
       ? stat(fmtInt(c.paybackCalls), 'Chamadas p/ se pagar', 'good')
-      : stat(q.pValue == null ? '—' : q.pValue.toFixed(3).replace('.', ','), 'p-valor', q.significant ? 'good' : 'flat', q.pOrigin === 'holdout' ? 'confirmação' : q.pOrigin === 'selecao' ? 'da seleção' : undefined),
+      : stat(fmtReportP(q.pValue), reportPLabel(q), q.significant ? 'good' : 'flat', q.pOrigin === 'holdout' ? 'confirmação' : q.pOrigin === 'selecao' ? 'da seleção' : undefined),
   ];
   return `<div class="summary-strip">${cards.join('')}</div>`;
 }
@@ -266,7 +269,7 @@ function qualitySection(r: SessionReport): string {
   return `<div class="callout"><h3>${e(VERDICT_LABEL[r.verdict])}</h3><p>${e(q.basis)}</p>
 <span class="decide-with">n = ${q.n} (efetivo ${q.nEfetivo}) · IC95 ${
     q.ci95Pp ? `${e(fmtPp(q.ci95Pp[0]))} a ${e(fmtPp(q.ci95Pp[1]))}` : '—'
-  } · p ${q.pValue == null ? '—' : e(q.pValue.toFixed(4).replace('.', ','))}${
+  } · ${e(fmtReportPLine(q))}${
     q.pOrigin ? ` · ${q.pOrigin === 'holdout' ? 'teste de confirmação (holdout)' : 'p da própria seleção (anti-conservador)'}` : ''
   }</span></div>
 ${

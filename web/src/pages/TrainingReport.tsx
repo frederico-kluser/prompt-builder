@@ -12,10 +12,13 @@ import {
   fmtPct,
   cycleReevalText,
   fmtPp,
+  fmtReportP,
+  fmtReportPLine,
   fmtSignedNumber,
   fmtSignedUsd,
   fmtUsd,
   renderSessionReportMarkdown,
+  reportPLabel,
   ROLE_LABEL,
   VERDICT_LABEL,
   type CycleRow,
@@ -404,9 +407,10 @@ export function TrainingReport() {
         {c.paybackCalls != null ? (
           <Stat value={fmtInt(c.paybackCalls)} label="Chamadas p/ se pagar" t="good" />
         ) : (
+          // web-live#17: o p BILATERAL (o mesmo da tela de Treino), rotulado.
           <Stat
-            value={q.pValue == null ? '—' : q.pValue.toFixed(3).replace('.', ',')}
-            label="p-valor"
+            value={fmtReportP(q.pValue)}
+            label={reportPLabel(q)}
             t={q.significant ? 'good' : 'flat'}
             hint={q.pOrigin === 'holdout' ? 'confirmação' : q.pOrigin === 'selecao' ? 'da seleção' : undefined}
           />
@@ -417,8 +421,8 @@ export function TrainingReport() {
         <Callout title={VERDICT_LABEL[report.verdict]}>
           <p>{q.basis}</p>
           <p className="mt-2 font-mono text-xs text-primary">
-            n = {q.n} (efetivo {q.nEfetivo}) · IC95 {q.ci95Pp ? `${fmtPp(q.ci95Pp[0])} a ${fmtPp(q.ci95Pp[1])}` : '—'} · p{' '}
-            {q.pValue == null ? '—' : q.pValue.toFixed(4).replace('.', ',')}
+            n = {q.n} (efetivo {q.nEfetivo}) · IC95 {q.ci95Pp ? `${fmtPp(q.ci95Pp[0])} a ${fmtPp(q.ci95Pp[1])}` : '—'} ·{' '}
+            {fmtReportPLine(q)}
             {q.pOrigin === 'holdout' ? ' · teste de confirmação (holdout)' : q.pOrigin === 'selecao' ? ' · p da própria seleção (anti-conservador)' : ''}
           </p>
         </Callout>

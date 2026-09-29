@@ -59,6 +59,10 @@ decidir), o agente:
 
 - **Sem holdout**, o ganho vem dos cenários que escolheram o campeão: é otimista por construção.
 - **"Inconclusivo"** com Δ positivo = pista, não conclusão (sem significância).
+- O p exibido (`quality.pValue` no `--json`) é o **bilateral** do teste exato (`pKind:
+  "two-sided"`) — o mesmo número da tela de Treino e do `sessions show`; o **unilateral** que o gate
+  de promoção usa (e que decide `significant`) vem em `quality.pValueGate`. Sessão antiga, só com o
+  bootstrap, sai `pKind: "legacy"` (não é p-valor de verdade).
 - O custo por chamada vem do `usage.cost` cobrado; com `zeroCostCalls > 0` o Δ pode estar
   subestimado (preço desconhecido ou modelo gratuito).
 - O custo da otimização é da sessão inteira (inclui re-avaliações e holdout); o custo por ciclo

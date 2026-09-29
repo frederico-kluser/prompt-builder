@@ -45,11 +45,14 @@ import {
   formatSignificance,
   formatSignificanceOrigin,
   planPower,
-  recommendationFromStored,
   runCompleteness,
   type ContestantRepetitionReport,
 } from '../../stats.js';
-import { convergenceReasonText, sessionConfirmationText } from '../../engine/sessionDecision.js';
+import {
+  convergenceReasonText,
+  sessionConfirmationText,
+  sessionRecommendationOf,
+} from '../../engine/sessionDecision.js';
 import { plannedTrainingStages, trainingPromotionPower } from '../../engine/trainingPolicy.js';
 import { judgeScaleWarning } from '../../engine/verdictAggregate.js';
 import { winnerFromStandings } from '../../engine/duelCore.js';
@@ -122,17 +125,13 @@ import {
  */
 function sessionDecisionOf(record: SessionRecord): {
   confirmation: string;
-  recommendation: ReturnType<typeof recommendationFromStored>;
+  recommendation: ReturnType<typeof sessionRecommendationOf>;
 } {
   // IMPL-050: "validado" só com holdout forte que RODOU e CONFIRMOU (sem
   // regressão, p do próprio holdout ≤ 0,05); sem holdout, a frase traz o motivo.
   const confirmation = sessionConfirmationText(record);
-  const recommendation = recommendationFromStored(record.significance, {
-    labels: {
-      candidate: record.pairing?.championId ?? 'campeão',
-      control: record.pairing?.controlId ?? 'controle',
-    },
-  });
+  // Fonte única com a TrainingView (braços rotulados, nunca `holdout-control`).
+  const recommendation = sessionRecommendationOf(record);
   return { confirmation, recommendation };
 }
 

@@ -14,13 +14,22 @@
 //   paciência, com o mesmo texto no CLI e na UI.
 // - `reevalRunIdsOf`: as runs de re-avaliação limpa (web-code#18), fora de
 //   `runIds` de propósito.
+// - `sessionRecommendationOf`: o veredito de recomendação com recusa honesta
+//   (IMPL-046) — o MESMO objeto em `sessions show`/`winner` e na TrainingView,
+//   com os braços rotulados (nunca o id interno `holdout-control`).
 
 import {
   holdoutConfirmationText,
   holdoutStrength,
   type HoldoutOutcome,
 } from '../holdout.js';
-import { reportPValue, significanceOrigin, type SignificanceWithOrigin } from '../stats.js';
+import {
+  recommendationFromStored,
+  reportPValue,
+  significanceOrigin,
+  type RecommendationDecision,
+  type SignificanceWithOrigin,
+} from '../stats.js';
 import type { HoldoutSkipReason } from '../types.js';
 import { TRAINING_PATIENCE } from './trainingPolicy.js';
 
@@ -32,7 +41,7 @@ export interface SessionDecisionInput {
   stoppedReason?: string | null;
   budgetExhausted?: boolean;
   significance?: SignificanceWithOrigin | null;
-  pairing?: { source: 'holdout' | 'training' } | null;
+  pairing?: { source: 'holdout' | 'training'; controlId?: string; championId?: string } | null;
 }
 
 /**
@@ -88,6 +97,46 @@ export function sessionConfirmationText(s: SessionDecisionInput): string {
     skipped: Boolean(s.holdoutSkipped),
     strength: 'nenhum',
     skipReason: holdoutSkipReasonOf(s),
+  });
+}
+
+/**
+ * Rótulo legível de um braço do pareamento final (IMPL-046). Os ids são
+ * internos do trainer (`holdout-control`, `carry`, …) e vazavam no texto do
+ * veredito ("recomendo manter holdout-control"). O candidato é sempre o
+ * campeão da sessão; o controle é a régua do pareamento.
+ */
+export function pairingArmLabel(role: 'control' | 'candidate', id?: string): string {
+  if (role === 'candidate') return 'campeão';
+  switch (id) {
+    case 'holdout-control':
+      return 'controle (base)';
+    case 'original':
+      return 'original';
+    case 'carry':
+      return 'campeão anterior';
+    case undefined:
+    case '':
+      return 'controle';
+    default:
+      return id;
+  }
+}
+
+/**
+ * Veredito de recomendação da sessão (IMPL-046, R-11a:REC-4) — o objeto
+ * ESTÁVEL de `recommendationFromStored` sobre a significância gravada, com os
+ * braços rotulados por `pairingArmLabel`. É a MESMA chamada no CLI
+ * (`sessions show`/`sessions winner`) e na tela de Treino: a recusa honesta
+ * ("empate técnico … rode N=…") sai igual nas duas. `null` = sem significância
+ * gravada (menos de 5 pares) — quem chama mostra o "amostra insuficiente".
+ */
+export function sessionRecommendationOf(s: SessionDecisionInput): RecommendationDecision | null {
+  return recommendationFromStored(s.significance, {
+    labels: {
+      candidate: pairingArmLabel('candidate', s.pairing?.championId),
+      control: pairingArmLabel('control', s.pairing?.controlId),
+    },
   });
 }
 
