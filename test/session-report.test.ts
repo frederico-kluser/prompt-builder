@@ -86,7 +86,7 @@ describe('buildSessionReport — holdout presente', () => {
 
   it('otimização: total, papéis ordenados por gasto e uso do teto', () => {
     expect(r.optimization.totalUsd).toBe(0.32);
-    expect(r.optimization.byRole.map((x) => x.role)).toEqual(['judge', 'competitor', 'optimizer']);
+    expect(r.optimization.byRole.map((x) => x.role)).toEqual(['judge', 'competitor', 'rewriter']);
     expect(r.optimization.byRole[0].pct).toBe(50);
     expect(r.optimization.budgetUsedPct).toBe(16);
   });

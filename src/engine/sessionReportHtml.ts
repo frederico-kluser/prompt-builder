@@ -356,7 +356,6 @@ function optimizationSection(r: SessionReport): string {
       : `<p class="muted">${e(`Total gasto: ${fmtUsd(o.totalUsd)} (sessão sem teto registrado).`)}</p>`;
   const extra = [
     o.pendingUsd > 0 ? `pendente sem custo apurado: ${fmtUsd(o.pendingUsd)}` : '',
-    o.upstreamUsd > 0 ? `BYOK fora dos créditos: ${fmtUsd(o.upstreamUsd)}` : '',
     o.sessionOverheadUsd != null && o.sessionOverheadUsd > 0 ? `fora das runs (reescritor/reflexão): ${fmtUsd(o.sessionOverheadUsd)}` : '',
   ].filter(Boolean);
   const extraHtml = extra.length ? `<div class="tags">${extra.map((t) => `<span class="tag">${e(t)}</span>`).join('')}</div>` : '';

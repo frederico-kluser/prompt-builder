@@ -205,8 +205,6 @@ export interface SessionReport {
     totalUsd: number;
     /** Chamadas sem custo apurado (timeout/abort): o gasto real pode ir até total + pendente. */
     pendingUsd: number;
-    /** BYOK: custo cobrado pelo provedor FORA dos créditos do OpenRouter. */
-    upstreamUsd: number;
     /**
      * Gasto de nível de sessão que não pertence a nenhuma run (reescritor,
      * reflexão, contract gate) = total − Σ runs carregadas. null se faltou run.
@@ -419,7 +417,7 @@ function lineDiffCounts(a: string, b: string): { added: number; removed: number 
 // o relatório
 // ---------------------------------------------------------------------------
 
-const ROLE_LABEL_ORDER: string[] = ['competitor', 'judge', 'datagen', 'gabarito', 'optimizer', 'duel'];
+const ROLE_LABEL_ORDER: string[] = ['competitor', 'judge', 'datagen', 'gabarito', 'rewriter', 'duel', 'agent'];
 
 /**
  * Monta o relatório de ciclos de uma sessão de treino. `runs` pode trazer as
@@ -607,19 +605,17 @@ export function buildSessionReport(
       `US$ ${(session.costLedger?.pendingUsd ?? 0).toFixed(4)} em chamadas pendentes (sem custo apurado): o gasto real da otimização pode chegar a total + pendente.`,
     );
   }
-  if ((session.upstreamCostUsd ?? 0) > 0) {
-    warnings.push(
-      `BYOK: US$ ${(session.upstreamCostUsd ?? 0).toFixed(4)} cobrados pelo provedor fora dos créditos do OpenRouter — some ao custo da otimização.`,
-    );
-  }
   if (runs.some((r) => r.contestants?.some((c) => c.runner === 'agent'))) {
     warnings.push(
       'Modo agente: o custo por "chamada" é o custo de uma execução inteira do agente (derivado), não de uma chamada de LLM — compare com cautela.',
     );
   }
   if (session.costAccuracy && session.costAccuracy.unknown > 0) {
+    // `unknown` = sem `usage.cost`: ou a reserva inteira foi lançada como gasto
+    // (timeout/abort sem id — limite SUPERIOR, já dentro do total) ou o modelo
+    // não tinha preço. Nenhum dos dois é "custou zero".
     warnings.push(
-      `${session.costAccuracy.unknown} chamada(s) da sessão com custo DESCONHECIDO (fora do total) — o gasto real pode ser maior.`,
+      `${session.costAccuracy.unknown} chamada(s) sem custo medido pelo provedor (timeout/abort lançado pela reserva inteira — limite superior — ou modelo sem preço): o total é uma aproximação nessas chamadas.`,
     );
   }
 
@@ -689,7 +685,6 @@ export function buildSessionReport(
     optimization: {
       totalUsd: optimizationUsd,
       pendingUsd: round(session.costLedger?.pendingUsd ?? 0, 6),
-      upstreamUsd: round(session.upstreamCostUsd ?? 0, 6),
       sessionOverheadUsd:
         missingRuns.length > 0
           ? null
@@ -1011,8 +1006,9 @@ export const ROLE_LABEL: Record<string, string> = {
   judge: 'Juízes',
   datagen: 'Geração de cenários',
   gabarito: 'Gabaritos',
-  optimizer: 'Reescritor (variantes)',
+  rewriter: 'Reescritor (variantes)',
   duel: 'Duelos',
+  agent: 'Agente (LLM interno)',
 };
 
 function headlineOf(r: SessionReport): string {
@@ -1086,7 +1082,6 @@ export function renderSessionReportMarkdown(r: SessionReport): string {
   L.push('');
   L.push(`- Total: ${fmtUsd(r.optimization.totalUsd)}${r.optimization.budgetUsd != null ? ` de ${fmtUsd(r.optimization.budgetUsd)} (${fmtPct(r.optimization.budgetUsedPct, false)})` : ''}`);
   if (r.optimization.pendingUsd > 0) L.push(`- Pendente (sem custo apurado): ${fmtUsd(r.optimization.pendingUsd)}`);
-  if (r.optimization.upstreamUsd > 0) L.push(`- BYOK (fora dos créditos): ${fmtUsd(r.optimization.upstreamUsd)}`);
   if (r.optimization.sessionOverheadUsd != null && r.optimization.sessionOverheadUsd > 0) {
     L.push(`- Fora das runs (reescritor/reflexão): ${fmtUsd(r.optimization.sessionOverheadUsd)}`);
   }

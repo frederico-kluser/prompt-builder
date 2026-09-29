@@ -179,7 +179,7 @@ export function fixture(over: { champCall?: CallSpec; withHoldout?: boolean; cha
     costByRole: {
       competitor: { calls: 40, usd: 0.1, tokensIn: 1, tokensOut: 1 },
       judge: { calls: 40, usd: 0.16, tokensIn: 1, tokensOut: 1 },
-      optimizer: { calls: 6, usd: 0.06, tokensIn: 1, tokensOut: 1 },
+      rewriter: { calls: 6, usd: 0.06, tokensIn: 1, tokensOut: 1 },
     },
     costAccuracy: { exact: 86, estimated: 0, unknown: 0 },
     startedAt: '2026-09-28T10:00:00.000Z',
