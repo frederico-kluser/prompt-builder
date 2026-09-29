@@ -22,6 +22,7 @@ import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, toCliEr
 import { fatalGatewayErrorFromRecord } from '../../openrouter.js';
 import {
   assertNoUnknownConfigKeys,
+  closestMatch,
   buildContext,
   checkKey,
   isAgentContext,
@@ -71,6 +72,7 @@ import { emitRunEvent, emitSessionEventNdjson, truncationFields } from '../ndjso
 import { ROLE_LABEL } from '../../budget.js';
 import { forceExitNow, installGracefulStop } from '../runControl.js';
 import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
+import { REASONING_LEVELS } from '../../reasoning.js';
 import { retentionSweep } from '../records.js';
 import type {
   CostRole,
@@ -161,8 +163,25 @@ function list(v: unknown): string[] | undefined {
     .filter(Boolean);
 }
 
-function effort(v: unknown): ReasoningLevel | undefined {
-  return typeof v === 'string' && v.trim() ? (v.trim() as ReasoningLevel) : undefined;
+/**
+ * `--effort-*`: valor fora dos 7 degraus é USO (exit 2) citando a flag —
+ * cli#20: antes seguia para o schema e voltava como `config.invalid` com a
+ * dica "valide o arquivo", sem arquivo nenhum na história.
+ */
+function effort(v: unknown, flag: string): ReasoningLevel | undefined {
+  if (typeof v !== 'string' || !v.trim()) return undefined;
+  const nivel = v.trim();
+  if ((REASONING_LEVELS as readonly string[]).includes(nivel)) return nivel as ReasoningLevel;
+  const sugestao = closestMatch(nivel, REASONING_LEVELS);
+  throw new CliError(
+    `${flag} "${nivel}" inválido: use ${REASONING_LEVELS.join('|')}.`,
+    EXIT.USAGE,
+    { flag, value: nivel, accepted: [...REASONING_LEVELS] },
+    {
+      code: 'usage.invalid_flag_value',
+      hint: `${sugestao ? `Quis dizer \`${flag} ${sugestao}\`? ` : ''}O que cada modelo aceita: \`prompt-builder models show <id>\`.`,
+    },
+  );
 }
 
 /**
@@ -352,13 +371,13 @@ export async function buildFromFlags(
   }
 
   const reasoning: Record<string, ReasoningLevel> = {};
-  const ec = effort(values['effort-competitor']);
+  const ec = effort(values['effort-competitor'], '--effort-competitor');
   if (ec) reasoning.competitor = ec;
-  const ej = effort(values['effort-judge']);
+  const ej = effort(values['effort-judge'], '--effort-judge');
   if (ej) reasoning.judge = ej;
-  const ed = effort(values['effort-datagen']);
+  const ed = effort(values['effort-datagen'], '--effort-datagen');
   if (ed) reasoning.datagen = ed;
-  const er = effort(values['effort-rewriter']);
+  const er = effort(values['effort-rewriter'], '--effort-rewriter');
   if (er) reasoning.rewriter = er;
 
   let basePrompt: string | undefined;
@@ -454,7 +473,15 @@ export async function buildFromFlags(
   }
 
   const parsed = parseRunConfig(candidate);
-  if (!parsed.ok) throw new CliError(parsed.error, EXIT.CONFIG, parsed.details);
+  if (!parsed.ok) {
+    // cli#20: a config veio das FLAGS — a dica padrão ("valide o arquivo")
+    // mandava validar um arquivo que não existe.
+    throw new CliError(parsed.error, EXIT.CONFIG, parsed.details, {
+      hint:
+        'A config veio das flags (não de um arquivo): corrija a flag citada no erro, ou use `--config <arquivo.json>` ' +
+        '(`prompt-builder config example -o arena.json` gera um; `config validate` confere).',
+    });
+  }
   return parsed.config;
 }
 

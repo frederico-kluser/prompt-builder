@@ -22,7 +22,14 @@ import { z } from 'zod';
 import { listTechniques } from '../../techniques.js';
 import { allowlistHealth, getLgpdData, isSensitiveArea, PII_COVERAGE, PII_MODES } from '../../lgpd.js';
 import { parseRunConfig, runConfigSchema } from '../../runConfigSchema.js';
-import { parseArenaConfig, arenaConfigSummary, arenaConfigSchema, ARENA_CONFIG_FORMAT } from '../../configFile.js';
+import {
+  parseArenaConfig,
+  arenaConfigSummary,
+  arenaConfigSchema,
+  ARENA_CONFIG_FORMAT,
+  isArenaAgentConfigFormat,
+} from '../../configFile.js';
+import { loadAgentConfigFile } from './agents.js';
 import { arenaConfigToRunConfig } from '../../arenaConfig.js';
 import { estimateInputFromConfig, estimateRunCost, formatAssumptions, formatRoleBreakdown } from '../../estimate.js';
 import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
@@ -1350,6 +1357,19 @@ export async function cmdConfig(argv: string[]): Promise<number> {
   if (!file) throw new CliError('Uso: prompt-builder config validate <arquivo.json>', EXIT.USAGE);
   const json = await readJsonFile(file);
   const formato = (json as Record<string, unknown>)?.format;
+
+  if (isArenaAgentConfigFormat(formato)) {
+    // cli#20: o arquivo de AGENTE valida aqui também — antes saía "não é uma
+    // configuração do prompt-builder" (exit 3), e a dica de erro do `agents
+    // run` mandava justamente para este comando. Mesma leitura do `agents run`
+    // (schema, chave desconhecida, `files[].path` contido, `testsDir`).
+    const { config } = await loadAgentConfigFile(file);
+    out.info(
+      `válido (${formato}) — ${config.customStages?.length ?? 0} cenário(s), executor ${config.agent?.executor ?? '?'}`,
+    );
+    out.result(true, 'config.validate', { format: formato, config });
+    return EXIT.OK;
+  }
 
   if (typeof formato === 'string') {
     const p = parseArenaConfig(json);

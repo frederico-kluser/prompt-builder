@@ -193,7 +193,7 @@ const USO: Record<string, string> = {
   techniques: `  techniques               lista as técnicas de variação (id — o que faz)`,
   lgpd: `  lgpd                     áreas de dado pessoal, allowlist LGPD e cobertura
            da pseudonimização (IMPL-042)`,
-  config: `  config validate <arq>    valida arena-config@1 ou RunConfig cru (exit 3 se inválido)
+  config: `  config validate <arq>    valida arena-config@1, arena-agent-config@1|@2 ou RunConfig cru (exit 3 se inválido)
   config example [--mode compare|variation|training] [-o <arq>]
            gera um exemplo VÁLIDO para o modo pedido (aliases: train, vary)
   config schema [--dialect arena|run] [-o <arq>]
