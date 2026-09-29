@@ -13,6 +13,7 @@ import { RunView } from './pages/RunView';
 import { RunsList } from './pages/RunsList';
 import { TrainingView } from './pages/TrainingView';
 import { TrainingReport } from './pages/TrainingReport';
+import { RouteErrorBoundary } from './components/RouteErrorBoundary';
 import { SettingsPage } from './pages/Settings';
 import { PromptsPage } from './pages/PromptsPage';
 import { getStoredKey, startOrphanWatch } from './api';
@@ -43,6 +44,7 @@ createRoot(document.getElementById('root')!).render(
       <MotionUIThemeProvider theme={motionTheme}>
         <AppShell>
           <KeyFirstGate>
+            <RouteErrorBoundary>
             <Routes>
               <Route path="/" element={<Navigate to="/new" replace />} />
               <Route path="/welcome" element={<FirstRun />} />
@@ -54,6 +56,7 @@ createRoot(document.getElementById('root')!).render(
               <Route path="/prompts" element={<PromptsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Routes>
+            </RouteErrorBoundary>
           </KeyFirstGate>
         </AppShell>
       </MotionUIThemeProvider>

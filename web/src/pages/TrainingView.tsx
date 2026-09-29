@@ -693,11 +693,12 @@ export function TrainingView() {
         <EmptyState>Preparando a rodada…</EmptyState>
       )}
 
-      <VariantPromptDrawer
-        record={roundShown ?? rounds[rounds.length - 1]}
-        variantId={drawerVariant}
-        onClose={() => setDrawerVariant(null)}
-      />
+      {/* Sem rodada carregada ainda (sessão recém-aberta: runs chegam depois) não
+          há variante para mostrar — antes o drawer lia `undefined.contestants`
+          e derrubava a tela inteira. */}
+      {roundShown && (
+        <VariantPromptDrawer record={roundShown} variantId={drawerVariant} onClose={() => setDrawerVariant(null)} />
+      )}
 
       {rounds.length > 1 && (
         <>

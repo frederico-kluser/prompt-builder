@@ -180,15 +180,15 @@ export function VariantPromptDrawer({
   variantId,
   onClose,
 }: {
-  record: RunRecord;
+  record: RunRecord | undefined;
   variantId: string | null;
   onClose: () => void;
 }) {
   const [modo, setModo] = useState<DrawerMode>('completo');
-  const variante = (record.contestants ?? []).find((c) => c.id === variantId);
+  const variante = (record?.contestants ?? []).find((c) => c.id === variantId);
   const controle =
-    (record.contestants ?? []).find((c) => c.isOriginal) ??
-    (record.contestants ?? []).find((c) => c.id === 'carry');
+    (record?.contestants ?? []).find((c) => c.isOriginal) ??
+    (record?.contestants ?? []).find((c) => c.id === 'carry');
   const diff = useMemo(
     () => (variante ? diffLines(controle?.systemPrompt ?? '', variante.systemPrompt ?? '') : []),
     [variante, controle],
