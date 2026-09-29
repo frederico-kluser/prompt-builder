@@ -105,6 +105,7 @@ import {
   buildPromptApproval,
   PROMPT_APPROVAL_FORMAT,
   assertCleanApprover,
+  recordDirOutsideRepo,
   resolveApprover,
   writePromptApproval,
   type PromptApproval,
@@ -956,6 +957,8 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     'keep-runs': { type: 'boolean' },
     // IMPL-088: registro prompt-approval@1 versionado no repo (o --commit implica).
     record: { type: 'boolean' },
+    // left#9: onde gravar o registro (implica --record); default <repo>/.prompt-approvals/.
+    'record-dir': { type: 'string' },
     approver: { type: 'string' },
   });
   const ctx = buildContext(parsed);
@@ -1018,15 +1021,40 @@ export async function cmdSessions(argv: string[]): Promise<number> {
     if (wantCommit && !applyTo) {
       throw new CliError('--commit só faz sentido junto de --apply <arquivo>.', EXIT.USAGE);
     }
-    const wantRecord = parsed.values.record === true;
+    // left#9: `--record-dir <dir>` escolhe ONDE o registro vai (implica --record).
+    const recordDirRaw = parsed.values['record-dir'];
+    const recordDir = typeof recordDirRaw === 'string' ? recordDirRaw.trim() : undefined;
+    if (typeof recordDirRaw === 'string' && !recordDir) {
+      throw new CliError('--record-dir exige um diretório.', EXIT.USAGE, { flag: '--record-dir' }, {
+        code: 'usage.missing_flag_value',
+        hint: 'Ex.: `--record-dir docs/aprovacoes` (relativo ao diretório atual).',
+      });
+    }
+    const wantRecord = parsed.values.record === true || recordDir !== undefined;
     const approverRaw = typeof parsed.values.approver === 'string' ? parsed.values.approver : undefined;
     // Revisão w2: recusa ANTES de qualquer efeito (trilha, destino, commit).
     assertCleanApprover(approverRaw);
     if ((wantRecord || approverRaw !== undefined) && !applyTo) {
-      throw new CliError('--record/--approver só fazem sentido junto de --apply <arquivo>.', EXIT.USAGE, undefined, {
+      throw new CliError('--record/--record-dir/--approver só fazem sentido junto de --apply <arquivo>.', EXIT.USAGE, undefined, {
         code: 'usage.record_without_apply',
-        hint: 'Use `sessions winner <id> --apply <arquivo> --record [--approver "Nome <email>"]`.',
+        hint: 'Use `sessions winner <id> --apply <arquivo> --record [--record-dir <dir>] [--approver "Nome <email>"]`.',
       });
+    }
+    // Com --commit o registro entra no MESMO commit do prompt: fora do repo do
+    // destino ele não entraria (o `git add` falharia DEPOIS de aplicar).
+    if (applyTo && recordDir !== undefined && wantCommit) {
+      const raiz = recordDirOutsideRepo(path.resolve(applyTo), recordDir);
+      if (raiz) {
+        throw new CliError(
+          `--record-dir "${recordDir}" fica fora do repositório do destino (${raiz}): com --commit o registro vai no mesmo commit do prompt.`,
+          EXIT.USAGE,
+          { flag: '--record-dir', value: recordDir, repo: raiz },
+          {
+            code: 'usage.record_dir_outside_repo',
+            hint: 'Aponte um diretório dentro do repo do destino, ou rode sem --commit (o registro é gravado onde você pediu).',
+          },
+        );
+      }
     }
     if (typeof overrideRaw === 'string' && !applyTo) {
       throw new CliError('--override só faz sentido junto de --apply <arquivo>.', EXIT.USAGE, undefined, {
@@ -1104,7 +1132,7 @@ export async function cmdSessions(argv: string[]): Promise<number> {
         approver,
         override: guards.override,
       });
-      const approvalFile = versionar ? await writePromptApproval(destino, approval) : null;
+      const approvalFile = versionar ? await writePromptApproval(destino, approval, recordDir) : null;
       for (const w of guards.warnings) {
         // O override é parte do RESULTADO (quem lê só o stdout tem de vê-lo);
         // o resto é narração no stderr. Sob --json/ndjson ele vai no payload.

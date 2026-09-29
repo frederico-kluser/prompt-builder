@@ -172,10 +172,13 @@ const USO: Record<string, string> = {
   sessions winner <id> [--prompt-only | --apply <arq> [--commit] [--override "<motivo>"]]
            handoff com backup + diff; holdout regredido BLOQUEIA (exit 10)
            salvo --override com motivo (gravado na auditoria + trailer)
-  sessions winner <id> --apply <arq> [--record] [--commit] [--approver "Nome <email>"]
+  sessions winner <id> --apply <arq> [--record] [--record-dir <dir>] [--commit]
+           [--approver "Nome <email>"]
            registro prompt-approval@1 (hashes do prompt/dataset/config +
-           evidência) em <repo>/.prompt-approvals/; --commit implica --record e
-           leva os trailers Approved-by:/Prompt-Approval: no mesmo commit
+           evidência) em <repo>/.prompt-approvals/ (ou em --record-dir, que
+           implica --record); --commit implica --record e leva os trailers
+           Approved-by:/Prompt-Approval: no mesmo commit (--record-dir, então,
+           dentro do repo do destino)
   sessions export <id> [-o <dir|arq.json>]
            pacote prompt-builder-exchange@1 com a sessão E as runs dela
   sessions import <dir|arq.json> [--overwrite]

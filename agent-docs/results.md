@@ -190,8 +190,10 @@ de cenários: ordem e formatação não mudam o hash), `configHash`, sessão, ru
 aprovador, instante, evidência (holdout n/Δ/regressed, IC95%/p e a origem do p,
 custo, k de n curados) e o override. Ele vai **sempre** na linha da trilha
 local (`handoffs.jsonl`); com `--record` também em
-`<repo>/.prompt-approvals/<approvalId>.json`, e o `--commit` (que implica
-`--record`) commita o registro junto do prompt com os trailers
+`<repo>/.prompt-approvals/<approvalId>.json` (`--record-dir <dir>` escolhe
+outro diretório e implica `--record`), e o `--commit` (que implica
+`--record`; com `--record-dir`, ele tem de ficar dentro do repo do destino,
+senão exit `2`) commita o registro junto do prompt com os trailers
 `Approved-by:`, `Prompt-Approval:`, `Prompt-Hash:` e `Dataset-Hash:`
 (`git interpret-trailers --parse`). O aprovador é `--approver` ou a identidade
 que o git usaria no commit; sem nenhum dos dois, `--record`/`--commit` recusam
