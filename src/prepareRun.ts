@@ -72,6 +72,12 @@ export function prepareOptsFor(
         // Teto por requisição idem ao trainer (sem isto a run variation ignora
         // o maxPricePerMTok do config em silêncio).
         maxPricePerMTok: cfg.maxPricePerMTok,
+        // IMPL-066: `targetModel` fica de fora DE PROPÓSITO — o variator lê as
+        // capacidades do catálogo em cache (o orchestrator o aquece antes do
+        // `prepare`). IMPL-061: `labeledScenarios` também: na variation TODO
+        // cenário é avaliado, então uma demo tirada deles daria ao few-shot o
+        // gabarito de parte do próprio placar (não há seleção de onde tirá-la,
+        // como o leave-demos-out do treino). Aqui a técnica decai sem inventar.
       }),
   };
 }
