@@ -12,6 +12,9 @@
 //     conhecido e ≥ 1 endpoint ZDR de provedor conhecido — "desconhecido ⇒
 //     bloqueado" (a mesma postura do OpenRouter: política desconhecida é
 //     assumida como retenção + treino);
+//   • IMPL-101: no modo sensível, `:batch`, `:free` e `openrouter/*` são
+//     recusados pela forma do id, e endpoint com cache implícita não entra em
+//     `provider.only` (o cache fica fora da definição de ZDR);
 //   • a área "geral" (baixo risco) segue consultiva por criador, como antes.
 //
 // Quem consome: `src/lgpd.ts` (Node: lê os JSON do pacote), `web/src/lgpd.ts`
@@ -303,14 +306,21 @@ export type EndpointExclusion =
   | 'provedor_desconhecido'
   | 'provedor_origem_indefinida'
   | 'provedor_origem_restrita'
-  | 'provedor_treina';
+  | 'provedor_treina'
+  /** IMPL-101: `supports_implicit_caching` — o cache fica FORA da definição de ZDR. */
+  | 'cache_implicito';
 
 /**
  * Por que um endpoint ZDR NÃO serve à área sensível (null = elegível).
  * O ZDR vem do snapshot (política POR ENDPOINT — o `zdr` do mapa de provedores
  * é genérico e não manda aqui); o mapa só responde "quem é e onde está".
  * Provedor fora do mapa ou de jurisdição indefinida ⇒ desconhecido ⇒ fora.
- * (IMPL-101 acrescenta aqui a exclusão de `implicitCaching`.)
+ *
+ * IMPL-101 (R-16:REC-4): endpoint com cache implícita também sai. O OpenRouter
+ * lista esses endpoints em `/endpoints/zdr`, mas o prompt fica em cache do
+ * provedor — retenção que a definição de ZDR não cobre. A checagem vem por
+ * ÚLTIMO de propósito: `cache_implicito` significa "provedor aceitável, só o
+ * cache o tirou" — é o que deixa o motivo do modelo dizer isso ao usuário.
  */
 export function endpointExclusion(ep: AllowlistEndpoint, data: LgpdData): EndpointExclusion | null {
   const p = data.providers[ep.provider];
@@ -318,6 +328,27 @@ export function endpointExclusion(ep: AllowlistEndpoint, data: LgpdData): Endpoi
   if (p.treina) return 'provedor_treina';
   if (!p.origem || p.origem === 'Indefinido') return 'provedor_origem_indefinida';
   if (ORIGENS_RESTRITAS.has(p.origem)) return 'provedor_origem_restrita';
+  if (ep.implicitCaching === true) return 'cache_implicito';
+  return null;
+}
+
+/**
+ * IMPL-101 (R-16:REC-4) — ids que o modo sensível RECUSA pela forma, antes de
+ * olhar a allowlist (null = a forma não bloqueia):
+ *   • `…:batch` — a variante batch retém insumos e resultados (até 30 dias);
+ *   • `…:free`  — o provedor gratuito pode reter/usar os prompts;
+ *   • `openrouter/*` — roteadores do próprio OpenRouter: não há garantia
+ *     documentada de que `provider.*` (zdr/only/allow_fallbacks) se propaga ao
+ *     modelo que o roteador escolhe.
+ * Antes a recusa era ACIDENTAL (`:batch` sem endpoint no snapshot, `:free` e
+ * `openrouter/*` com criador desconhecido) — e `:free` com endpoint ZDR no
+ * snapshot passaria assim que o criador fosse classificado.
+ */
+export function sensitiveIdBlock(modelId: string): LgpdBlockReason | null {
+  const id = modelId.trim().toLowerCase();
+  if (id.endsWith(':batch')) return 'variante_batch';
+  if (id.endsWith(':free')) return 'variante_free';
+  if (creatorPrefix(id) === 'openrouter') return 'roteador_openrouter';
   return null;
 }
 
@@ -342,7 +373,15 @@ export type LgpdBlockReason =
   | 'sem_endpoint_zdr'
   | 'ressalvas_excluidas'
   /** IMPL-040: a requisição sensível ficaria sem algum dos 4 campos de privacidade. */
-  | 'roteamento_incompleto';
+  | 'roteamento_incompleto'
+  /** IMPL-101: variante `:batch` (retém insumos/resultados). */
+  | 'variante_batch'
+  /** IMPL-101: variante `:free` (o provedor gratuito pode reter os prompts). */
+  | 'variante_free'
+  /** IMPL-101: roteador `openrouter/*` (propagação de `provider.*` não documentada). */
+  | 'roteador_openrouter'
+  /** IMPL-101: os endpoints ZDR de provedor aceitável têm TODOS cache implícita. */
+  | 'cache_implicito';
 
 /** Texto curto (PT-BR) de cada motivo — UI, CLI e mensagens de erro. */
 export const LGPD_BLOCK_REASON_TEXT: Record<LgpdBlockReason, string> = {
@@ -357,6 +396,11 @@ export const LGPD_BLOCK_REASON_TEXT: Record<LgpdBlockReason, string> = {
   ressalvas_excluidas: 'só permitido com ressalvas, e o rigor escolhido exclui ressalvas',
   roteamento_incompleto:
     'requisição sensível sem os 4 campos de privacidade (zdr, data_collection, only, allow_fallbacks)',
+  variante_batch: 'variante :batch recusada em dado sensível (retém insumos e resultados)',
+  variante_free: 'variante :free recusada em dado sensível (o provedor gratuito pode reter os prompts)',
+  roteador_openrouter:
+    'roteador openrouter/* recusado em dado sensível (sem garantia de que a política de provedor se propaga)',
+  cache_implicito: 'só endpoints ZDR com cache implícita (o cache fica fora da definição de ZDR)',
 };
 
 export interface ModelPermission {
@@ -436,12 +480,21 @@ function permissionWith(
     motivo,
     ...meta,
   });
+  // IMPL-101: a FORMA do id (`:batch`/`:free`/`openrouter/*`) recusa antes de
+  // tudo — não depende do snapshot, então nem um snapshot novo a afrouxa.
+  const pelaForma = sensitiveIdBlock(modelId);
+  if (pelaForma) return block(pelaForma);
   if (!health.usable) return block(HEALTH_REASON[health.state] ?? 'allowlist_invalida');
   if (cv.motivo) return block(cv.motivo);
   const eps = data.allowlist?.modelos[modelId];
   if (!Array.isArray(eps)) return block('modelo_desconhecido');
-  const elegiveis = eps.filter((ep) => endpointExclusion(ep, data) === null);
-  if (elegiveis.length === 0) return block('sem_endpoint_zdr');
+  const exclusoes = eps.map((ep) => endpointExclusion(ep, data));
+  const elegiveis = eps.filter((_, i) => exclusoes[i] === null);
+  if (elegiveis.length === 0) {
+    // Havia endpoint de provedor aceitável e só o cache implícito o tirou: diga
+    // ISSO (a redução de oferta é comunicada, nunca escondida — REC-9).
+    return block(exclusoes.includes('cache_implicito') ? 'cache_implicito' : 'sem_endpoint_zdr');
+  }
   return { status: cv.status, sensivel, endpoints: elegiveis, ...meta };
 }
 
@@ -798,6 +851,11 @@ export interface AllowlistAreaReport {
   bloqueados: number;
   /** Liberados com criador/provedor desconhecido — o limiar é ZERO. */
   desconhecidos_liberados: number;
+  /**
+   * `bloqueados` quebrado por motivo (IMPL-101: a redução de oferta do modo
+   * sensível — variantes, roteadores, cache implícita — aparece, não some).
+   */
+  bloqueados_por_motivo: Partial<Record<LgpdBlockReason, number>>;
 }
 
 export interface AllowlistReport {
@@ -826,12 +884,17 @@ export function allowlistReport(data: LgpdData, now: Date | number = Date.now())
       com_ressalvas: 0,
       bloqueados: 0,
       desconhecidos_liberados: 0,
+      bloqueados_por_motivo: {},
     };
     for (const id of ids) {
       const p = permissionWith(id, a.id, data, health);
       if (p.status === 'permitido') r.permitidos += 1;
       else if (p.status === 'permitido com ressalvas') r.com_ressalvas += 1;
-      else r.bloqueados += 1;
+      else {
+        r.bloqueados += 1;
+        const m = p.motivo ?? 'nao_recomendado';
+        r.bloqueados_por_motivo[m] = (r.bloqueados_por_motivo[m] ?? 0) + 1;
+      }
       if (r.sensivel && p.status !== 'não recomendado') {
         const desconhecido =
           !isKnownCreator(id, data) ||

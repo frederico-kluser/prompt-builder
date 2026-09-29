@@ -16,6 +16,7 @@ import {
   writePrivateDataFile,
 } from '../../storage.js';
 import { LOCKLESS_ORPHAN_AFTER_MS } from '../../jobs.js';
+import { recordTelemetryEvent } from './telemetry.js';
 import { runsCancel, runsStatus, runsWait } from './runsJobs.js';
 import { isValidRecordId } from '../../pathSafety.js';
 import { z } from 'zod';
@@ -543,6 +544,7 @@ export async function cmdRuns(argv: string[]): Promise<number> {
       out.raw(texto);
     }
     out.result(true, 'runs.export', { runId: record.id, file: alvo ?? null, artifact });
+    recordTelemetryEvent('runs.export', ctx.dataDir); // IMPL-120: funil (no-op sem opt-in)
     return EXIT.OK;
   }
 

@@ -38,7 +38,7 @@ import {
 import { cmdLibrary } from './commands/library.js';
 import { cmdBaseline } from './commands/baseline.js';
 import { cmdLimits } from './commands/limits.js';
-import { cmdTelemetry } from './commands/telemetry.js';
+import { cmdTelemetry, recordExitTelemetry } from './commands/telemetry.js';
 import { installCostSamplesPersistence } from '../costSamplesStore.js';
 import { getDataDir } from '../storage.js';
 import { cmdCalib } from './commands/calib.js';
@@ -311,6 +311,8 @@ async function main(): Promise<void> {
     if (cliErr.code === EXIT.USAGE) emitClaudeHint();
     process.exitCode = cliErr.code;
   }
+  // IMPL-120: funil "parou por orçamento" (saída 7) — no-op sem opt-in.
+  recordExitTelemetry(cmd, process.exitCode, getDataDir());
 }
 
 void main();

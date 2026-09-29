@@ -86,6 +86,7 @@ import { forceExitNow, installGracefulStop } from '../runControl.js';
 import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
 import { REASONING_LEVELS } from '../../reasoning.js';
 import { retentionSweep } from '../records.js';
+import { recordRunCompletedTelemetry } from './telemetry.js';
 import type {
   CostRole,
   RunConfig,
@@ -462,8 +463,8 @@ async function configFromJsonUnchecked(
 ): Promise<RunConfig> {
   let json = input;
 
-  // Detecta o dialeto pela chave `format`: arena-config@1 (declarativo, o que a
-  // ARENA-CONFIG.md documenta) vs RunConfig cru.
+  // Detecta o dialeto pela chave `format`: arena-config@1 (declarativo, o que o
+  // agent-docs/config.md documenta — `docs config`) vs RunConfig cru.
   // As flags de dado pessoal valem sobre o arquivo (o dialeto cru e o arena).
   if (pii.piiMode && json && typeof json === 'object') {
     json = { ...(json as Record<string, unknown>), piiMode: pii.piiMode };
@@ -1474,6 +1475,7 @@ async function runSingle(
   }
 
   relatorioFinal(out, record);
+  await recordRunCompletedTelemetry({ runId: record.id, status: record.status }, ctx.dataDir); // IMPL-120 (no-op sem opt-in)
   return runOutcome(out, record, {
     ...(guards.claim ? { idempotency: { key: guards.claim.key, reused: false } } : {}),
     dailyCapReached: guards.machine.capHit,
@@ -1552,6 +1554,7 @@ async function runTraining(
   unsubSession();
   for (const u of unsubRuns) u();
 
+  await recordRunCompletedTelemetry({ sessionId: sessionId || record.id, status: record.status }, ctx.dataDir); // IMPL-120
   return sessionOutcome(out, record, sessionId || record.id, {
     ...(guards.claim ? { idempotency: { key: guards.claim.key, reused: false } } : {}),
     dailyCapReached: guards.machine.capHit,
