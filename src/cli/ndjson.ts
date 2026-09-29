@@ -414,6 +414,30 @@ export function emitRunEvent(out: Output, e: RunEvent, opts: NdjsonMapperOptions
   }
 }
 
+/**
+ * IMPL-090: `run.warning` AGREGADO da curadoria — UMA linha para todos os
+ * itens não aprovados (nunca uma por item) e FORA dos eventos de etapa: é
+ * emitido pelo CLI antes da run, não pelo motor, então nenhum reducer de
+ * etapas o vê. A lista de ids vai com teto (o stream é de agente).
+ */
+export function emitCurationWarning(
+  out: Output,
+  c: { profile: string; curated: number; total: number; curatedKofN: string; unapproved: Array<{ id: string; state: string }>; warnings: string[] },
+): void {
+  if (!out.isNdjson || c.warnings.length === 0) return;
+  out.event('run.warning', {
+    scope: 'run',
+    code: 'library.unapproved_items',
+    message: c.warnings.join(' '),
+    profile: c.profile,
+    curated: c.curated,
+    total: c.total,
+    curatedKofN: c.curatedKofN,
+    unapproved: c.unapproved.slice(0, 20),
+    ...(c.unapproved.length > 20 ? { unapprovedTruncated: c.unapproved.length - 20 } : {}),
+  });
+}
+
 export function emitSessionEventNdjson(out: Output, e: SessionEvent): void {
   if (!out.isNdjson) return;
   const base = { scope: 'session' as const, sessionId: e.sessionId };

@@ -202,6 +202,16 @@ grava `prompt-builder-exchange@1` (manifest.json + library.jsonl) e
 `library add --profile outro --file <dir>` o reimporta idêntico; campo que um
 formato não carrega aparece em `lostFields` (nunca some calado).
 
+**Curadoria.** Item curado = `state: "aprovado"` com o `contentHash` do conteúdo
+atual (editou depois da revisão, a aprovação caduca). Toda run com
+`scenarios.from: "library"` relata `curatedKofN` ("k de n itens curados") no
+resultado e, havendo não aprovados, UM aviso agregado (`run.warning` no NDJSON,
+stderr no texto) — sem bloquear. `--require-approved` (compare/vary/train)
+recusa com exit 3 (`library.unapproved_items`). O **holdout** exige 100%
+aprovados quando o perfil usa curadoria (algum item selecionado tem `state`):
+senão exit 3 (`library.unapproved_holdout`, ids em `details.holdoutIds`); perfil
+sem curadoria nenhuma só avisa.
+
 **Idioma.** O datagen gera 100% em pt-BR. Variar idioma é opt-in:
 `--languages pt-BR,en` (em `compare`/`vary`/`train` e no `library seed`) ou
 `"languages": ["pt-BR","en"]` no arena-config@1. Cenário de qualquer fonte com

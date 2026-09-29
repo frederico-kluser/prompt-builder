@@ -82,7 +82,7 @@ describe('`estimate --pilot-*` pelo processo real', { timeout: 120_000 }, () => 
   beforeAll(() => {
     home = mkdtempSync(path.join(tmpdir(), 'pb-est-pilot-'));
     mkdirSync(path.join(home, 'cache'), { recursive: true });
-    const modelo = (id: string) => ({ id, name: id, pricing: { prompt: '0.000001', completion: '0.000002' } });
+    const modelo = (id: string) => ({ id, name: id, pricing: { prompt: 1e-6, completion: 2e-6 } });
     writeFileSync(
       path.join(home, 'cache', 'models-public.json'),
       JSON.stringify({

@@ -14,7 +14,17 @@ import { parseArenaConfig, type ArenaConfigFile } from '../../configFile.js';
 import { checkRunPii, describeRunPii } from '../../engine/pii.js';
 import { arenaConfigToRunConfig, libraryRefFrom } from '../../arenaConfig.js';
 import { listItems } from '../../library.js';
-import { hasGabarito, labelIssue, toStageSpec } from '../../engine/libraryCore.js';
+import {
+  curatedKofN,
+  curationStatus,
+  curationWarnings,
+  hasGabarito,
+  labelIssue,
+  requireApprovedIssue,
+  toStageSpec,
+  type LibraryItem,
+} from '../../engine/libraryCore.js';
+import { HOLDOUT_RATIO_DEFAULT, splitHoldout } from '../../holdout.js';
 import { formatGateSummary, formatSignificance } from '../../stats.js';
 import { holdoutSkipReasonText } from '../../holdout.js';
 import { holdoutSkipReasonOf } from '../../engine/sessionDecision.js';
@@ -68,7 +78,7 @@ import {
 } from '../spendLedger.js';
 import { pruneSpendState } from '../spendGuards.js';
 import { seedFromId, sortStandings, winnerFromStandings } from '../../engine/duelCore.js';
-import { emitRunEvent, emitSessionEventNdjson, truncationFields } from '../ndjson.js';
+import { emitCurationWarning, emitRunEvent, emitSessionEventNdjson, truncationFields } from '../ndjson.js';
 import { ROLE_LABEL } from '../../budget.js';
 import { forceExitNow, installGracefulStop } from '../runControl.js';
 import { launchDetached, runAsDetachedChild, takeDetachedJobId, type DetachedBodyHooks } from '../detach.js';
@@ -132,6 +142,8 @@ const OPTIONS = {
   // = revisei o dado apontado e pode seguir pseudonimizado (modo 'redact').
   'pii-mode': { type: 'string' },
   'allow-pii': { type: 'boolean' },
+  // IMPL-090: item de biblioteca não aprovado recusa a run (exit 3) — opt-in.
+  'require-approved': { type: 'boolean' },
   // IMPL-030: roda num processo destacado; acompanhe por `runs status/wait/cancel`.
   detach: { type: 'boolean' },
 } as const;
@@ -217,7 +229,60 @@ function resolveBudget(values: Record<string, unknown>, warn: (m: string) => voi
  * (misc.ts) — revisão IMPL-003: antes só o `readConfigFile` conferia, e
  * `config validate` dizia "válido" para um arquivo que `vary --config` recusa.
  */
-export async function resolveArenaLibrary(file: ArenaConfigFile, config: RunConfig): Promise<RunConfig> {
+/**
+ * IMPL-090 (R-22:REC-7) — curadoria dos itens de biblioteca que a run usa:
+ * `k de n` curados (aprovado E com o `contentHash` do conteúdo atual) e o
+ * aviso AGREGADO dos não aprovados. Sem bloqueio por default (bloqueio total =
+ * curadoria nunca acontece com mantenedor solo).
+ */
+export interface LibraryCuration {
+  profile: string;
+  curated: number;
+  total: number;
+  /** `"k de n itens curados"` (o texto do resultado). */
+  curatedKofN: string;
+  unapproved: Array<{ id: string; state: string }>;
+  /** Aviso agregado (um só, nunca um por item) — vira `run.warning`. */
+  warnings: string[];
+}
+
+export interface ResolveLibraryOptions {
+  /** `--require-approved`: QUALQUER item não aprovado recusa (exit 3). */
+  requireApproved?: boolean;
+  /** Recebe a curadoria dos itens selecionados (só quando a config usa a biblioteca). */
+  onCuration?: (c: LibraryCuration) => void;
+}
+
+/**
+ * Holdout com item não aprovado (IMPL-090 crit. 3): a confirmação final não
+ * pode se apoiar em cenário que ninguém revisou. Vale quando o perfil USA
+ * curadoria (algum item selecionado tem `state`) — sem curadoria nenhuma,
+ * recusar travaria toda sessão de mantenedor solo; aí só avisa. O split é o
+ * MESMO do trainer (`splitHoldout` sobre os cenários na ordem da seleção).
+ */
+function holdoutCurationIssue(
+  selecionados: LibraryItem[],
+  config: RunConfig,
+): { issue: string; holdoutIds: string[]; enforced: boolean } | null {
+  if (config.mode !== 'training') return null;
+  const ratio = (config as TrainingConfig).holdoutRatio;
+  if (ratio === 0) return null;
+  const split = splitHoldout(selecionados, ratio ?? HOLDOUT_RATIO_DEFAULT);
+  if (split.strength !== 'holdout') return null;
+  const issue = requireApprovedIssue(split.holdout);
+  if (!issue) return null;
+  return {
+    issue,
+    holdoutIds: split.holdout.map((i) => i.id),
+    enforced: selecionados.some((i) => typeof i.state === 'string'),
+  };
+}
+
+export async function resolveArenaLibrary(
+  file: ArenaConfigFile,
+  config: RunConfig,
+  opts: ResolveLibraryOptions = {},
+): Promise<RunConfig> {
   // F1/P0.1: `scenarios.from: 'library'` — o config aponta o banco curado
   // estável em <data-dir>/library/. Resolvido AQUI (fs é assíncrono): os
   // itens viram customStages e os SEM GABARITO são RECUSADOS (paridade com o
@@ -257,6 +322,45 @@ export async function resolveArenaLibrary(file: ArenaConfigFile, config: RunConf
         EXIT.CONFIG,
       );
     }
+    // IMPL-090: curadoria (k de n) + recusas opt-in/holdout ANTES de gastar.
+    const status = curationStatus(selecionados);
+    const curation: LibraryCuration = {
+      profile: lib.profile,
+      curated: status.curated,
+      total: status.total,
+      curatedKofN: curatedKofN(selecionados),
+      unapproved: status.unapproved,
+      warnings: curationWarnings(selecionados),
+    };
+    if (opts.requireApproved) {
+      const issue = requireApprovedIssue(selecionados);
+      if (issue) {
+        throw new CliError(`--require-approved: ${issue}.`, EXIT.CONFIG, { curation }, {
+          code: 'library.unapproved_items',
+          hint:
+            'Aprove os itens na curadoria (estado `aprovado` com o contentHash do conteúdo atual) ou rode sem ' +
+            '--require-approved — a run relata `k de n` curados e avisa, sem bloquear.',
+        });
+      }
+    }
+    const holdout = holdoutCurationIssue(selecionados, config);
+    if (holdout?.enforced) {
+      throw new CliError(`Holdout com item não aprovado — a confirmação final exige 100% aprovados: ${holdout.issue}.`, EXIT.CONFIG, {
+        curation,
+        holdoutIds: holdout.holdoutIds,
+      }, {
+        code: 'library.unapproved_holdout',
+        hint:
+          'Aprove os itens do holdout (details.holdoutIds) ou selecione só itens aprovados (`scenarios.ids`); ' +
+          '`training.holdoutRatio: 0` roda sem holdout — e o campeão sai NÃO validado.',
+      });
+    }
+    if (holdout) {
+      curation.warnings.push(
+        `o holdout usa ${holdout.holdoutIds.length} cenário(s) sem curadoria — a confirmação final não se apoia em item revisado.`,
+      );
+    }
+    opts.onCuration?.(curation);
     config.customStages = selecionados.map((i) => toStageSpec(i));
     config.stages = selecionados.length;
   }
@@ -282,6 +386,8 @@ export interface ConfigFromJsonOptions {
    * quem vai RODAR a config recusa `agent`/`agentTask` (ver `agentExecFields`).
    */
   inspectOnly?: boolean;
+  /** IMPL-090: `--require-approved` e o relato de curadoria (ver `resolveArenaLibrary`). */
+  library?: ResolveLibraryOptions;
 }
 
 /**
@@ -301,7 +407,7 @@ export async function configFromJson(
   // olha o JSON cru ANTES do parse (a mensagem não depende de a config agente
   // ser válida — arena-agent-config@1 também cai aqui) e o resultado depois.
   if (!opts.inspectOnly) refuseAgentExec(input);
-  const config = await configFromJsonUnchecked(input, pii);
+  const config = await configFromJsonUnchecked(input, pii, opts.library);
   if (!opts.inspectOnly) refuseAgentExec(config);
   return config;
 }
@@ -318,6 +424,7 @@ function refuseAgentExec(config: unknown): void {
 async function configFromJsonUnchecked(
   input: unknown,
   pii: { allowPii?: boolean; piiMode?: 'redact' | 'synthetic' },
+  library: ResolveLibraryOptions = {},
 ): Promise<RunConfig> {
   let json = input;
 
@@ -337,7 +444,7 @@ async function configFromJsonUnchecked(
     for (const w of parsed.warnings ?? []) process.stderr.write(`! ${w}\n`);
     const conv = arenaConfigToRunConfig(parsed.config);
     if (!conv.ok) throw new CliError(conv.error, EXIT.CONFIG);
-    return resolveArenaLibrary(parsed.config, conv.config);
+    return resolveArenaLibrary(parsed.config, conv.config, library);
   }
   // RunConfig cru também é importação: o schema recusa dado pessoal de
   // aparência real nomeando o campo, até a revisão explícita (`--allow-pii`).
@@ -655,12 +762,27 @@ interface OutcomeExtras {
   idempotency?: IdempotencyInfo;
   /** A run parou (ou foi barrada) pelo teto DIARIO da maquina, nao pelo `--budget`. */
   dailyCapReached?: boolean;
+  /** IMPL-090: k de n itens de biblioteca curados (só com `scenarios.from: 'library'`). */
+  curation?: LibraryCuration;
 }
 
 function extrasData(x: OutcomeExtras): Record<string, unknown> {
   return {
     ...(x.idempotency ? { idempotency: x.idempotency } : {}),
     ...(x.dailyCapReached ? { dailyCapReached: true } : {}),
+    ...(x.curation ? { curatedKofN: x.curation.curatedKofN, curation: curationPayload(x.curation) } : {}),
+  };
+}
+
+/** A curadoria no resultado: a lista de não aprovados vai com teto (o stream é de agente). */
+function curationPayload(c: LibraryCuration): Record<string, unknown> {
+  return {
+    profile: c.profile,
+    curated: c.curated,
+    total: c.total,
+    unapproved: c.unapproved.slice(0, 50),
+    ...(c.unapproved.length > 50 ? { unapprovedTruncated: c.unapproved.length - 50 } : {}),
+    warnings: c.warnings,
   };
 }
 
@@ -998,13 +1120,32 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
   const allowConcurrent = values['allow-concurrent'] === true;
   const idemKey = values['idempotency-key'] !== undefined ? validateIdempotencyKey(values['idempotency-key']) : null;
 
+  // IMPL-090: curadoria dos itens de biblioteca (k de n) — relatada, e
+  // `--require-approved` recusa antes de qualquer gasto (dry-run idem).
+  let curation: LibraryCuration | undefined;
+  const requireApproved = values['require-approved'] === true;
   const config =
     typeof values.config === 'string'
-      ? await readConfigFile(values.config, {
-          allowPii: values['allow-pii'] === true,
-          piiMode: piiModeFlag(values['pii-mode']),
-        })
+      ? await readConfigFile(
+          values.config,
+          {
+            allowPii: values['allow-pii'] === true,
+            piiMode: piiModeFlag(values['pii-mode']),
+          },
+          { library: { requireApproved, onCuration: (c) => (curation = c) } },
+        )
       : await buildFromFlags(mode, values);
+  if (requireApproved && !curation) {
+    throw new CliError('--require-approved: esta config não usa a biblioteca — não há curadoria para exigir.', EXIT.USAGE, undefined, {
+      code: 'usage.require_approved_without_library',
+      hint: 'Use `scenarios: { from: "library", profile: "<id>" }` no arena-config@1, ou tire a flag.',
+    });
+  }
+  if (curation) {
+    // Aviso AGREGADO (um só): stderr + uma linha `run.warning` no NDJSON.
+    for (const w of curation.warnings) out.warn(w);
+    emitCurationWarning(out, curation);
+  }
 
   // LGPD (IMPL-042): o que sai pseudonimizado no envio é dito, nunca silencioso
   // (stderr: narração; o record guarda o mesmo relatório em `piiReport`).
@@ -1099,6 +1240,8 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
       warnings: rep.warnings,
       checks: rep.checks,
       ...(idemKey ? { idempotency: { key: idemKey, wouldReuse: false } } : {}),
+      // IMPL-090: o dry-run já diz quantos itens da biblioteca são curados.
+      ...(curation ? { curatedKofN: curation.curatedKofN, curation: curationPayload(curation) } : {}),
     };
     const primeira = rep.wouldRefuse[0];
     if (primeira) {
@@ -1226,8 +1369,8 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
 
   try {
     // `runId` nulo <=> mode efetivo 'training' (sessao: o id nasce no onSession).
-    if (runId === null) return await runTraining(ctx, configComOrcamento, ac.signal, guards, detached);
-    return await runSingle(ctx, configComOrcamento, ac.signal, runId, guards, detached);
+    if (runId === null) return await runTraining(ctx, configComOrcamento, ac.signal, guards, curation, detached);
+    return await runSingle(ctx, configComOrcamento, ac.signal, runId, guards, curation, detached);
   } finally {
     process.off('SIGINT', onSigint);
     stopGraceful();
@@ -1243,6 +1386,7 @@ async function runSingle(
   signal: AbortSignal,
   runId: string,
   guards: SpendGuards,
+  curation: LibraryCuration | undefined,
   detached?: DetachedBodyHooks,
 ): Promise<number> {
   const { out } = ctx;
@@ -1271,6 +1415,7 @@ async function runSingle(
   return runOutcome(out, record, {
     ...(guards.claim ? { idempotency: { key: guards.claim.key, reused: false } } : {}),
     dailyCapReached: guards.machine.capHit,
+    ...(curation ? { curation } : {}),
   });
 }
 
@@ -1279,6 +1424,7 @@ async function runTraining(
   config: RunConfig,
   signal: AbortSignal,
   guards: SpendGuards,
+  curation: LibraryCuration | undefined,
   detached?: DetachedBodyHooks,
 ): Promise<number> {
   const { out } = ctx;
@@ -1347,5 +1493,6 @@ async function runTraining(
   return sessionOutcome(out, record, sessionId || record.id, {
     ...(guards.claim ? { idempotency: { key: guards.claim.key, reused: false } } : {}),
     dailyCapReached: guards.machine.capHit,
+    ...(curation ? { curation } : {}),
   });
 }

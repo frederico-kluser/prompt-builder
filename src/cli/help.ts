@@ -117,15 +117,20 @@ const USO: Record<string, string> = {
   compare --config <arq>   usa um arena-config@1 (ver: docs config)
   Comuns: --theme --stages --judge --budget <usd|none> --dry-run
   --output-format ndjson --idempotency-key <k> --allow-concurrent --detach
+  --require-approved       biblioteca: item não aprovado recusa (exit 3)
   --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR —
                            cenário fora da política vira aviso no record)`,
   vary: `  vary --model <id>        testa variações de prompt num modelo
   vary --config <arq>      usa um arena-config@1 (ver: docs config)
   Comuns: --theme --stages --judge --techniques --budget --dry-run --detach
+  --require-approved       biblioteca: item não aprovado recusa (exit 3)
   --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR)`,
   train: `  train --model <id>       treina um prompt ao longo de iterações
   train --config <arq>     usa um arena-config@1 (ver: docs config)
   Comuns: --iterations --holdout-ratio --budget --dry-run --detach
+  --require-approved       biblioteca: item não aprovado recusa (exit 3); sem a flag
+                           a run relata curatedKofN e avisa (run.warning); o holdout
+                           exige 100% aprovados quando o perfil usa curadoria
   --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR)`,
   runs: `  runs list [--status X]   lista runs (teto 50; --all/--limit N)
   runs show <id>           record completo + diagnóstico do juiz

@@ -92,7 +92,7 @@ import {
 import type { RunRecord, SessionRecord } from '../../types.js';
 import { buildSessionReport, renderSessionReportMarkdown } from '../../engine/sessionReport.js';
 import { renderSessionReportHtml } from '../../engine/sessionReportHtml.js';
-import { readConfigFile, resolveArenaLibrary } from './run.js';
+import { readConfigFile, resolveArenaLibrary, type LibraryCuration } from './run.js';
 import { loadPilot } from '../pilot.js';
 import {
   importRecords,
@@ -1404,9 +1404,16 @@ export async function cmdConfig(argv: string[]): Promise<number> {
     const c = arenaConfigToRunConfig(p.config);
     if (!c.ok) throw new CliError(c.error, EXIT.CONFIG);
     // `scenarios.from: 'library'`: mesma resolução/checagem do `vary --config`.
-    const config = await resolveArenaLibrary(p.config, c.config);
+    let curation: LibraryCuration | undefined;
+    const config = await resolveArenaLibrary(p.config, c.config, { onCuration: (x) => (curation = x) });
     out.info(`válido — ${arenaConfigSummary(p.config)}`);
-    out.result(true, 'config.validate', { format: formato, config });
+    // IMPL-090: o validate já diz o k de n curados (e avisa o que a run avisaria).
+    if (curation) for (const w of curation.warnings) out.warn(w);
+    out.result(true, 'config.validate', {
+      format: formato,
+      config,
+      ...(curation ? { curatedKofN: curation.curatedKofN, curation } : {}),
+    });
     return EXIT.OK;
   }
   const p = parseRunConfig(json);
