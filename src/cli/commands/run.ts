@@ -18,7 +18,8 @@ import { hasGabarito, labelIssue, toStageSpec } from '../../engine/libraryCore.j
 import { formatGateSummary, formatSignificance } from '../../stats.js';
 import { holdoutSkipReasonText } from '../../holdout.js';
 import { holdoutSkipReasonOf } from '../../engine/sessionDecision.js';
-import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, type Output } from '../output.js';
+import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, toCliError, type Output } from '../output.js';
+import { fatalGatewayErrorFromRecord } from '../../openrouter.js';
 import {
   assertNoUnknownConfigKeys,
   buildContext,
@@ -567,6 +568,27 @@ function extrasData(x: OutcomeExtras): Record<string, unknown> {
 }
 
 /**
+ * cli#3 — run/sessao derrubada por key RECUSADA ou SEM CREDITO sai pelo MESMO
+ * classificador do gateway (exit 4 `auth.failed` / 5 `credit.insufficient`),
+ * com o resumo da run em `details`. Antes todo `status: 'error'` virava exit 1
+ * `run.failed` (kind internal) — o agente trocava a key boa ou repetia a run
+ * sem credito. `undefined` = outra falha (segue o `run.failed` de sempre).
+ */
+function fatalGatewayOutcome(
+  rec: { error?: string; errorKind?: string; errorHttpStatus?: number },
+  details: Record<string, unknown>,
+): CliError | undefined {
+  const gw = fatalGatewayErrorFromRecord(rec);
+  if (!gw) return undefined;
+  const base = toCliError(gw);
+  const baseDetails = base.details && typeof base.details === 'object' ? (base.details as Record<string, unknown>) : {};
+  return new CliError(base.message, base.code, { ...baseDetails, ...details }, {
+    code: base.errorCode,
+    ...(base.hint ? { hint: base.hint } : {}),
+  });
+}
+
+/**
  * Desfecho de uma run compare/vary — o MESMO para a run recem-rodada e para a
  * reaproveitada por --idempotency-key (o agente nao distingue pelo formato, so
  * por `idempotency.reused`).
@@ -581,17 +603,19 @@ function runOutcome(out: Output, record: RunRecord, x: OutcomeExtras): number {
   // Falha vira o envelope de erro (com o resumo em `details`), nunca um
   // `result` ok:false seguido de um segundo objeto — dois JSONs no stdout.
   if (record.status === 'error') {
-    throw new CliError(
-      record.error ?? 'run falhou',
-      EXIT.ERROR,
-      {
-        runId: record.id,
-        status: record.status,
-        totalCostUsd: record.totalCostUsd,
-        stoppedAtPhase: record.stoppedAtPhase ?? null,
-        ...extrasData(x),
-      },
-      { code: 'run.failed', hint: `Veja o record em \`prompt-builder runs show ${record.id} --json\`.` },
+    const detalhes = {
+      runId: record.id,
+      status: record.status,
+      totalCostUsd: record.totalCostUsd,
+      stoppedAtPhase: record.stoppedAtPhase ?? null,
+      ...extrasData(x),
+    };
+    throw (
+      fatalGatewayOutcome(record, detalhes) ??
+      new CliError(record.error ?? 'run falhou', EXIT.ERROR, detalhes, {
+        code: 'run.failed',
+        hint: `Veja o record em \`prompt-builder runs show ${record.id} --json\`.`,
+      })
     );
   }
   // ok:true com exit != 0 so para PARCIAL (7/130): `stoppedReason` diz qual.
@@ -676,20 +700,21 @@ function sessionOutcome(out: Output, record: SessionRecord, sessionId: string, x
   }
 
   if (record.status === 'error') {
-    throw new CliError(
-      record.error ?? 'treino falhou',
-      EXIT.ERROR,
-      {
-        sessionId,
-        status: record.status,
-        totalCostUsd: record.totalCostUsd,
-        iterationsDone: record.bestPromptByIteration.length,
-        ...extrasData(x),
-      },
-      {
+    const detalhes = {
+      sessionId,
+      status: record.status,
+      totalCostUsd: record.totalCostUsd,
+      iterationsDone: record.bestPromptByIteration.length,
+      ...extrasData(x),
+    };
+    // Sessão: só a MENSAGEM sobrevive (o treino repassa a da run) — o
+    // reconhecimento cai no início canônico da mensagem do gateway.
+    throw (
+      fatalGatewayOutcome(record, detalhes) ??
+      new CliError(record.error ?? 'treino falhou', EXIT.ERROR, detalhes, {
         code: 'session.failed',
         hint: `Veja a sessão em \`prompt-builder sessions show ${sessionId} --json\`.`,
-      },
+      })
     );
   }
   out.result(true, 'train', {

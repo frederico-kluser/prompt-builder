@@ -22,6 +22,7 @@
 
 import { estimateInputFromConfig, estimateRunCost, toPerMTok, type CostEstimate } from '../estimate.js';
 import { isKnownPrice } from '../engine/pricing.js';
+import { ignoredReasoningLevels } from '../modelCaps.js';
 import type { KeyInfo } from '../openrouter.js';
 import type { OpenRouterModel, RunConfig } from '../types.js';
 import { CliError, EXIT, fmtUsd, isCliError, kindForExit, type ErrorKind } from './output.js';
@@ -254,6 +255,12 @@ export async function runPreflight(
     //    tomaria 400 — vira veredito degradado, não resultado.
     const desconhecidos = chamados.filter((id) => !isKnownModel(id, byId));
     if (desconhecidos.length) refuse(unknownModelError(desconhecidos, catalog));
+
+    // cli#2: nível de raciocínio pedido a modelo SEM raciocínio — o gateway
+    // não envia nada; avisa em vez de o esforço sumir em silêncio.
+    for (const i of ignoredReasoningLevels(config as Parameters<typeof ignoredReasoningLevels>[0], models)) {
+      warn(`"${i.modelId}" não aceita raciocínio: o nível "${i.level}" (${i.role}) será ignorado — nada vai no fio.`);
+    }
 
     // 4. Sem preço exato. Duas naturezas:
     //    (a) sem entrada no catálogo (variante de roteamento `:nitro`…): com

@@ -10,12 +10,10 @@
 //        conciliação (guarda anti-reenvio): o laço do competidor não reenvia
 //        "sem verificação" (critério (ii));
 //   (d)  cobranças duplicadas = 0 por id de geração (critério (iv)).
-// ⚠️ O critério (i) (<= 5 tentativas HTTP por resposta, somando o laço do
-// competidor) depende de reduzir MAX_RETRIES (hoje 6 => 7 envios por chamada,
-// 14 somando o competidor), mas test/gateway.test.ts:309 fixa por contrato
-// `expect(MAX_RETRIES).toBe(6)` + 7 envios — fora da fronteira deste lote. O
-// teto de envios por chamada é assertado aqui como está (1 + MAX_RETRIES) até
-// o contrato antigo ser atualizado em conjunto.
+// O critério (i) (<= 5 tentativas HTTP por resposta, somando o laço do
+// competidor) é provado em test/gateway-transport.test.ts: MAX_RETRIES = 4
+// (5 envios por chamada) e o laço do competidor não repete o que o gateway já
+// re-tentou (`isCallerRetryable`). Antes: 7 por chamada, 14 por resposta.
 
 import { afterEach, describe, expect, it } from 'vitest';
 import {

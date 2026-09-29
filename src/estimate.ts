@@ -560,6 +560,31 @@ export class CostCalibration {
   }
 }
 
+/**
+ * IMPL-113 — PROVEDOR da calibração padrão: quem persiste as amostras
+ * estimado × real (CLI: `src/costSamplesStore.ts`; SPA: o shim do gateway)
+ * registra aqui a função que devolve a calibração acumulada. `estimateRunCost`
+ * sem `calibration` explícita usa ela — é o que faz a faixa publicada sair dos
+ * quantis empíricos em vez do prior. `undefined` desliga (volta ao prior).
+ * ⚠️ Só a FAIXA reportada muda: `byRole`/`perIteration` (o que as portas de
+ * orçamento comparam) continuam o teto — calibração nunca afrouxa porta.
+ */
+let calibrationProvider: (() => CostCalibration | undefined) | undefined;
+
+export function setCostCalibrationProvider(provider: (() => CostCalibration | undefined) | undefined): void {
+  calibrationProvider = provider;
+}
+
+/** A calibração do provedor registrado (ou `undefined`: sem provedor/sem amostras). */
+export function defaultCostCalibration(): CostCalibration | undefined {
+  try {
+    const cal = calibrationProvider?.();
+    return cal && cal.size > 0 ? cal : undefined;
+  } catch {
+    return undefined; // provedor quebrado nunca derruba a estimativa
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Precificação com variantes de lote (IMPL-113): o slug `:batch` (lote, 0,5x do
 // preço do modelo base) não vem no catálogo — resolve pelo id base AO VIVO e
@@ -831,7 +856,11 @@ export function estimateRunCost(
   // Cada papel multiplica o seu teto pela banda da SUA distribuição
   // real/estimado (p10 − margem, p50, p90 + margem); sem amostras vem o prior
   // documentado em `CostCalibration`. Sem fator fixo sobre o total publicado.
-  const cal = opts.calibration ?? new CostCalibration();
+  // IMPL-113: sem calibração explícita, a do PROVEDOR registrado pelo ponto de
+  // entrada (CLI: amostras persistidas no diretório de dados; SPA: no
+  // navegador) — antes nenhum chamador passava `calibration` e a faixa
+  // publicada era SEMPRE o prior. Sem provedor/amostras = prior (como antes).
+  const cal = opts.calibration ?? defaultCostCalibration() ?? new CostCalibration();
   const familiaDe = (id?: string): string | undefined => (id && id.trim() ? modelFamilyOf(id) : undefined);
   const compId = input.contestantModelIds[0];
   const juizId = input.judgeModelIds[0];
@@ -925,6 +954,50 @@ export function estimateRunCost(
       },
     },
   };
+}
+
+/**
+ * cli#11 — linhas "Por papel" da estimativa para humanos. Em TRAINING o
+ * `byRole` é o teto de UMA iteração (a soma dele = `perIteration`, e o total
+ * publicado = iterações × isso, + holdout): o rótulo diz isso e cada linha
+ * mostra também o valor × iterações — antes as linhas somavam ~1/N do total
+ * sem aviso nenhum. `fmt` formata dólar (o CLI passa o seu `fmtUsd`).
+ */
+export function formatRoleBreakdown(
+  est: Pick<CostEstimate, 'byRole' | 'perIteration' | 'assumptions'>,
+  mode: RunMode,
+  fmt: (usd: number) => string,
+): string[] {
+  const treino = mode === 'training';
+  const iters = Math.max(1, est.assumptions.iterations);
+  const linhas = [treino ? `Por papel (teto por iteração; × ${iters} iterações):` : 'Por papel (no teto):'];
+  for (const [role, usd] of Object.entries(est.byRole).sort((a, b) => b[1] - a[1])) {
+    if (!(usd > 0)) continue;
+    linhas.push(`  ${role.padEnd(12)} ${fmt(usd)}${treino ? `  (× ${iters} = ${fmt(usd * iters)})` : ''}`);
+  }
+  if (treino) linhas.push(`  ${'por iteração'.padEnd(12)} ${fmt(est.perIteration)}`);
+  return linhas;
+}
+
+/**
+ * cli#11 — linhas "Premissas" (chave × valor). O objeto `range` (IMPL-113) sai
+ * resumido — cobertura, n e a FONTE da faixa por papel (empirico/pool/prior) —
+ * em vez do `[object Object]` que a interpolação crua imprimia.
+ */
+export function formatAssumptions(assumptions: CostEstimate['assumptions']): string[] {
+  const linhas: string[] = [];
+  for (const [k, v] of Object.entries(assumptions)) {
+    if (k === 'range') {
+      const r = assumptions.range;
+      const fontes = Object.entries(r.perRole)
+        .map(([papel, b]) => `${papel}:${b!.source}`)
+        .join(' ');
+      linhas.push(`  ${'faixa'.padEnd(18)} cobertura ${(r.coverage * 100).toFixed(0)}% · n=${r.n}${fontes ? ` · ${fontes}` : ''}`);
+      continue;
+    }
+    linhas.push(`  ${k.padEnd(18)} ${typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)}`);
+  }
+  return linhas;
 }
 
 /**

@@ -615,6 +615,9 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** Ledger: spent/committed/pending (IMPL-017). Ausente em records antigos. */
   costLedger?: CostLedgerSummary;
+  /** IMPL-074: registo por chamada (id de geração/provedor/conciliação), fora do ledger enxuto. */
+  callLog?: import('../../src/types.js').CallLogEntry[];
+  callLogDropped?: number;
   /** BYOK: cobrado pelo provedor upstream, fora dos créditos do OpenRouter. */
   upstreamCostUsd?: number;
   /** Ciclo de vida de todo modelo da run + alertas 30/14/7 dias (IMPL-019). */
@@ -650,6 +653,14 @@ export interface RunRecord {
   startedAt: string;
   finishedAt?: string;
   error?: string;
+  /**
+   * cli#3 — classe da falha do gateway que derrubou a run (`auth` = key
+   * recusada, `no_credit` = sem crédito…) e o status HTTP. Com isto o CLI sai
+   * com o código documentado (4/5) em vez de 1; ausente = falha não
+   * classificada ou record antigo.
+   */
+  errorKind?: 'auth' | 'blocked' | 'no_credit' | 'rate_limit' | 'http';
+  errorHttpStatus?: number;
   sessionId?: string;
   iteration?: number;
   parentRunId?: string;

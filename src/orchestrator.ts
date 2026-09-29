@@ -38,7 +38,7 @@ import { contestantsFromConfig } from './normalize.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { reasoningLevelForRole } from './modelCaps.js';
-import { listModels } from './openrouter.js';
+import { gatewayErrorFields, listModels, reconcileAtRunEnd } from './openrouter.js';
 import {
   cutDuels,
   cutVerdicts,
@@ -255,16 +255,26 @@ interface Saver {
    * era gravada com o gasto do ÚLTIMO marco (ou zero, antes das respostas) —
    * o parcial mentia sobre o dinheiro já cobrado (IMPL-025).
    */
-  bindLedger(sync: () => void): void;
+  bindLedger(sync: () => void, settle?: () => Promise<void>): void;
+  /**
+   * IMPL-074 / IMPL-017 (iv): concilia as pendentes do ledger pela fatura
+   * (GET /generation) ANTES da escrita terminal. Nunca lança.
+   */
+  settle(): Promise<void>;
 }
 
 function createSaver(record: RunRecord): Saver {
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let lastSave = 0;
   let syncLedger: (() => void) | undefined;
+  let settleLedger: (() => Promise<void>) | undefined;
   return {
-    bindLedger(sync: () => void): void {
+    bindLedger(sync: () => void, settle?: () => Promise<void>): void {
       syncLedger = sync;
+      settleLedger = settle;
+    },
+    async settle(): Promise<void> {
+      await settleLedger?.().catch(() => undefined);
     },
     schedule(): void {
       if (saveTimer) return;
@@ -326,10 +336,17 @@ async function executeRun(
       console.error(`[bench ${record.id}] run.error:`, err);
       record.status = 'error';
       record.error = err instanceof Error ? err.message : String(err);
+      // cli#3: a CLASSE da falha do gateway (auth/no_credit…) vai estruturada
+      // no record — o CLI sai com 4/5 em vez de 1 (`internal`).
+      Object.assign(record, gatewayErrorFields(err));
       record.finishedAt = nowIso();
       emitEvent({ type: 'run.error', runId: record.id, error: record.error });
     }
   } finally {
+    // IMPL-074: pendentes conciliadas pela fatura antes da escrita terminal —
+    // menos no Cancelar (o usuário pediu para parar: sai na hora; as
+    // pendentes ficam no record, conciliáveis depois).
+    if (record.stoppedReason !== 'cancelled') await saver.settle();
     // UMA escrita terminal, sem timer orfao — vale para os tres desfechos.
     await saver.flush();
   }
@@ -450,10 +467,13 @@ async function runLoop(
     record.costByRole = snap.byRole;
     record.costAccuracy = snap.accuracy;
     record.costLedger = ledger.summary(); // IMPL-017: spent/committed/pending
+    // IMPL-074: registo por chamada (id de geração/provedor/conciliação).
+    record.callLog = ledger.callLog();
+    if (ledger.callLogDropped > 0) record.callLogDropped = ledger.callLogDropped;
     if (snap.upstreamUsd > 0) record.upstreamCostUsd = snap.upstreamUsd;
     Object.assign(record, truncationRecordFields(snap.finishByRole));
   };
-  saver.bindLedger(syncLedger);
+  saver.bindLedger(syncLedger, () => reconcileAtRunEnd(ledger, apiKey));
 
   /**
    * IMPL-019 (R-07b:REC-8) — ciclo de vida de TODO modelo da run, do catálogo
@@ -1620,6 +1640,7 @@ async function runLoop(
 
   record.status = integridade.inconclusive ? 'inconclusive' : 'finished';
   record.finishedAt = nowIso();
+  await saver.settle(); // IMPL-074: pendentes conciliadas antes da escrita terminal
   await saver.flush();
   emitEvent({ type: 'run.finished', runId, record });
   log(runId, record.status, { totalCostUsd: record.totalCostUsd });

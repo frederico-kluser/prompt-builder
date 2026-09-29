@@ -5,10 +5,10 @@
 //   (3) nenhum envio em CI/agente salvo opt-in explícito;
 //   (4) `PROMPT_BUILDER_NO_ATTRIBUTION` suprime os headers de atribuição
 //       (HTTP-Referer/X-Title/X-OpenRouter-Categories — dado enviado ao
-//       OpenRouter). ⚠️ A aplicação da flag no gateway (src/openrouter.ts e o
-//       shim web) e a menção em help/agent-docs ficaram FORA da fronteira do
-//       lote O-p2-resto: aqui se prova o contrato canónico que o gateway passa
-//       a consumir (`attributionHeadersFor`), não o fio ainda por ligar.
+//       OpenRouter). Aqui se prova o contrato canónico (`attributionHeadersFor`);
+//       a flag NO FIO (gateway Node + shim da SPA) e a menção em help/agent-docs
+//       são provadas em test/gateway-transport.test.ts e
+//       test/gateway-cli-surface.test.ts.
 //
 // Tudo com transporte falso: zero rede, zero gasto.
 

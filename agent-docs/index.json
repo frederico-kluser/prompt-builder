@@ -68,8 +68,8 @@
   {
     "topic": "troubleshooting",
     "title": "Problemas comuns",
-    "summary": "400 no esforço, 402 sem crédito, 403 = bloqueio (não é key), dado pessoal recusado (--allow-pii/--pii-mode), modelo fora do catálogo, run.locked, teto diário, doctor exit 4, truncamento > 2%, run inconclusiva (código 6), tudo 'parcial', run travada",
-    "approxTokens": 1700
+    "summary": "400 no esforço, 402 sem crédito (também no meio da run: código 5), 403 = bloqueio (não é key), headers de atribuição (PROMPT_BUILDER_NO_ATTRIBUTION), custo pendente e conciliação, proxy sem streaming, dado pessoal recusado (--allow-pii/--pii-mode), modelo fora do catálogo, run.locked, teto diário, doctor exit 4, truncamento > 2%, run inconclusiva (código 6), tudo 'parcial', run travada",
+    "approxTokens": 2150
   },
   {
     "topic": "config",

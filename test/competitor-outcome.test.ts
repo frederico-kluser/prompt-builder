@@ -227,7 +227,7 @@ describe('IMPL-010 (2) — finish_reason de filtro => blocked', () => {
     }
   });
 
-  it('erro de infra continua error (com retry), separado de bloqueio', async () => {
+  it('erro de infra continua error, separado de bloqueio (HTTP 4xx NÃO repete — IMPL-073)', async () => {
     const fake = fakeOpenRouter({ chat: () => ({ status: 400, bodyText: 'bad request' }) });
     const prev = setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));
     const silencio = vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -235,7 +235,9 @@ describe('IMPL-010 (2) — finish_reason de filtro => blocked', () => {
       const r = await runCompetitor({ apiKey: KEY, contestantId: 'c', modelId: 'x/y', stage: STAGE, retries: 1 });
       expect(r.status).toBe('error');
       expect(r.errorMsg).toMatch(/HTTP 400/);
-      expect(fake.chatRequests()).toHaveLength(2); // 1 + 1 retry do competidor
+      // IMPL-073: HTTP classificado não passa pelo laço do competidor — 4xx não
+      // muda repetindo (e 429/5xx o gateway já re-tentou). Antes: 1 + 1 retry.
+      expect(fake.chatRequests()).toHaveLength(1);
     } finally {
       silencio.mockRestore();
       setDefaultGateway(prev);

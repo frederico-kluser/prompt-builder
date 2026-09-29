@@ -363,9 +363,14 @@ export async function cmdModels(argv: string[]): Promise<number> {
       );
       out.line(`  think levels    ${row.thinkLevels.accepted.join(', ') || '—'}`);
       if (row.thinkLevels.default) out.line(`  padrão          ${row.thinkLevels.default}`);
-      out.line('  encaixe (o que vai no fio para cada nível pedido):');
-      for (const [pedido, real] of Object.entries(row.thinkLevels.fit)) {
-        out.line(`    ${pedido.padEnd(8)} -> ${real}`);
+      if (row.thinkLevels.accepted.length > 0) {
+        out.line('  encaixe (o que vai no fio para cada nível pedido):');
+        for (const [pedido, real] of Object.entries(row.thinkLevels.fit)) {
+          out.line(`    ${pedido.padEnd(8)} -> ${real}`);
+        }
+      } else {
+        // cli#2: o gateway não envia `reasoning` a este modelo — nenhum nível vale.
+        out.line('  encaixe         (nenhum: o modelo não aceita raciocínio — nada vai no fio)');
       }
       // IMPL-019: ciclo de vida — o snapshot por trás do id e quando ele sai.
       if (row.lifecycle.canonicalSlug) out.line(`  snapshot        ${row.lifecycle.canonicalSlug}`);

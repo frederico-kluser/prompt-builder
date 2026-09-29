@@ -29,6 +29,9 @@ import {
 import { cmdLibrary } from './commands/library.js';
 import { cmdBaseline } from './commands/baseline.js';
 import { cmdLimits } from './commands/limits.js';
+import { cmdTelemetry } from './commands/telemetry.js';
+import { installCostSamplesPersistence } from '../costSamplesStore.js';
+import { getDataDir } from '../storage.js';
 
 const VERSION = pkgVersion();
 
@@ -105,6 +108,8 @@ OUTROS
                            sem re-baseline declarada (ver: docs lifecycle)
   baseline declare --reason "…" [--judge a,b] [--reference x]
   mcp                      servidor MCP por stdio (mesmo binário)
+  telemetry [status|schema|counters]
+                           telemetria opt-in (desligada por padrão) e atribuição
 
 AGENTES (modo agente — mesmo motor, executor pi)
   agents doctor [--deep] [--container] [--config <arq>]
@@ -130,6 +135,11 @@ OPÇÕES GLOBAIS
   --data-dir <caminho>     onde gravar runs (padrão ~/.prompt-builder)
   --refresh-models         ignora o cache de catálogo (24h)
   --quiet · --verbose · --no-color · --pretty · --help · --version
+
+AMBIENTE (dado enviado a terceiros)
+  PROMPT_BUILDER_NO_ATTRIBUTION=on  não envia HTTP-Referer/X-Title ao OpenRouter
+  PROMPT_BUILDER_TELEMETRY=on       telemetria opt-in (padrão: desligada)
+  OPENROUTER_STREAM_TRANSPORT=0     papéis de avaliação sem streaming (JSON)
 
   \`<comando> --help\` mostra o help daquele comando — todos terminam com a
   tabela de códigos de saída (IMPL-092).
@@ -195,6 +205,8 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdMcp(argv);
     case 'agents':
       return cmdAgents(argv);
+    case 'telemetry':
+      return cmdTelemetry(argv);
     default: {
       const sugestao = cmd ? closestMatch(cmd, COMMANDS) : undefined;
       throw new CliError(
@@ -233,6 +245,9 @@ async function main(): Promise<void> {
     // comando tocar a rede — o gateway em si nao le o processo (IMPL-021).
     // Dentro do try: nem a configuracao escapa do envelope.
     configureGatewayFromEnv();
+    // IMPL-113: calibração da estimativa persistida entre processos (amostras
+    // estimado × real no diretório de dados, resolvido quando o comando o fixa).
+    installCostSamplesPersistence(() => getDataDir());
 
     // `--version` ANTES do help: sem comando, `!cmd` e verdadeiro e um
     // `prompt-builder --version` cairia no help.

@@ -146,6 +146,50 @@ export interface CostEntry {
    */
   cacheHits?: number;
   cacheTotal?: number;
+  /**
+   * IMPL-075 (R-07b:REC-4) — chamadas por PROVEDOR que as serviu
+   * (`provider_name` do payload ou do GET /generation), somadas pelo ledger no
+   * ponto único. Cobertura de registro do papel = Σ providers / calls.
+   */
+  providers?: Record<string, number>;
+  /** IMPL-075 — chamadas deste papel enviadas no modo AUDITÁVEL (provider travado). */
+  auditableCalls?: number;
+}
+
+/**
+ * IMPL-074 (R-07a:REC-4) — UMA chamada contabilizada, com o id de geração
+ * (`gen-…`) que a liga à fatura (GET /api/v1/generation). Vai no RunRecord
+ * (`callLog`), FORA do `costLedger`: o ledger enxuto viaja em NDJSON/MCP e o
+ * registo por chamada só interessa a auditoria/conciliação.
+ */
+export interface CallLogEntry {
+  role: CostRole;
+  modelId: string;
+  /** Id de geração do OpenRouter; ausente = a resposta não trouxe id. */
+  generationId?: string;
+  /** false = o id não tem o formato `gen-…` documentado (não é conciliável). */
+  generationIdValid?: boolean;
+  /** Valor lançado (medido, reserva pendente/conservadora ou conciliado). */
+  usd: number;
+  source: CostSource;
+  /**
+   * `measured` = `usage.cost` da resposta; `pending` = reserva mantida à
+   * espera do /generation; `conservative` = reserva inteira (sem id ou 404
+   * persistente); `reconciled` = trocada pelo `total_cost` do /generation.
+   */
+  status: 'measured' | 'pending' | 'conservative' | 'reconciled';
+  /** Provedor que serviu (IMPL-075). */
+  provider?: string;
+  /** Latência observada pelo cliente (ms). */
+  latencyMs?: number;
+  /** true = corpo enviado no modo auditável (IMPL-075). */
+  auditable?: boolean;
+  /** Do GET /generation (IMPL-074): a geração foi cancelada no provedor. */
+  cancelled?: boolean;
+  /** Do GET /generation: tempo de geração no provedor (ms). */
+  generationTimeMs?: number;
+  /** Do GET /generation: `upstream_id` no provedor. */
+  upstreamId?: string;
 }
 
 /**
@@ -231,6 +275,20 @@ export interface CostLedgerSummary {
    * contagens deixavam o `pendingUsd` preso no record para sempre.
    */
   pendingEntries?: PendingCall[];
+  /**
+   * IMPL-074 — última conciliação pelo GET /generation (contagens). Ausente =
+   * nunca conciliado (sem pendentes, ou record anterior).
+   */
+  reconciliation?: {
+    /** Pendentes consultados. */
+    attempted: number;
+    /** Trocados pelo `total_cost` da fatura. */
+    settled: number;
+    /** 404 persistente / id fora do formato: viraram gasto conservador. */
+    notFound: number;
+    /** Falha de rede/HTTP: seguem pendentes (conciliáveis depois). */
+    failed: number;
+  };
 }
 
 /**
@@ -280,6 +338,8 @@ export interface CostSink {
       provider?: CallProviderInfo;
       /** IMPL-078: latência observada até o corte/abort, em ms. */
       latencyMs?: number;
+      /** IMPL-075: corpo enviado no modo auditável. */
+      auditable?: boolean;
     },
   ): void;
   /** Chamado DEPOIS do fetch, sempre: troca a reserva pelo custo real. */
@@ -306,6 +366,10 @@ export interface CostSink {
       estimatedUsd?: number;
       /** IMPL-075: provedor que efetivamente serviu a chamada. */
       provider?: CallProviderInfo;
+      /** IMPL-074: id de geração (`gen-…`) da resposta — a ponte com a fatura. */
+      generationId?: string;
+      /** IMPL-075: corpo enviado no modo auditável. */
+      auditable?: boolean;
       /**
        * Sinais de fim da chamada (IMPL-014) — presentes quando a chamada
        * COMPLETOU (ausentes no 200 com corpo de erro, que lanca). E por aqui
@@ -337,6 +401,12 @@ export interface CostSink {
    * faltou campo, lanca antes do fetch. Opcional: sink sem ele = modo desligado.
    */
   sensitiveRouting?(): SensitiveRouting | undefined;
+  /**
+   * IMPL-075 (R-07b:REC-4): papéis que ESTA run/sessão manda no modo
+   * AUDITÁVEL (provider travado, sem fallback, `require_parameters`), somados
+   * ao preset do gateway. Opcional: sink sem ele = só o preset do gateway.
+   */
+  auditableRoles?(): readonly CostRole[] | undefined;
 }
 
 /**
@@ -1651,6 +1721,14 @@ export interface RunRecord {
   costAccuracy?: { exact: number; estimated: number; unknown: number };
   /** Ledger: spent/committed/pending (IMPL-017). Ausente em records antigos. */
   costLedger?: CostLedgerSummary;
+  /**
+   * IMPL-074 — registo POR CHAMADA (id de geração, provedor, custo, estado da
+   * conciliação), com teto `CALL_LOG_LIMIT`. Fora do `costLedger` de propósito:
+   * não viaja em NDJSON/MCP. Ausente em records antigos.
+   */
+  callLog?: CallLogEntry[];
+  /** Entradas que passaram do teto do `callLog` (não registadas). */
+  callLogDropped?: number;
   /** BYOK: cobrado pelo provedor upstream, fora dos creditos do OpenRouter. */
   upstreamCostUsd?: number;
   /**
@@ -1700,6 +1778,14 @@ export interface RunRecord {
   startedAt: string;
   finishedAt?: string;
   error?: string;
+  /**
+   * cli#3 — classe da falha do gateway que derrubou a run (`auth` = key
+   * recusada, `no_credit` = sem crédito…) e o status HTTP. Com isto o CLI sai
+   * com o código documentado (4/5) em vez de 1; ausente = falha não
+   * classificada ou record antigo.
+   */
+  errorKind?: 'auth' | 'blocked' | 'no_credit' | 'rate_limit' | 'http';
+  errorHttpStatus?: number;
   // Lineage de treino (ausente em compare/variation):
   sessionId?: string;
   iteration?: number; // 0-based

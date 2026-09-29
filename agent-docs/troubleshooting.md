@@ -47,6 +47,38 @@ o que é só **aviso** (CNPJ, telefone fixo, CEP, e-mail funcional, nome) segue
 `prompt-builder key check` mostra uso, limite e saldo. O pré-voo recusa antes de
 gastar quando o saldo não cobre nem o piso da estimativa.
 
+O crédito também pode acabar NO MEIO da run: ela para com código `5`
+(`credit.insufficient`) e o record guarda a causa em `errorKind: "no_credit"` /
+`errorHttpStatus`. Key revogada no meio da run = código `4` (`auth.failed`,
+`errorKind: "auth"`). Nenhum retry nem outro modelo conserta essas duas — não
+repita a run antes de resolver a key/o saldo.
+
+## Headers de atribuição (dado enviado ao OpenRouter)
+
+Toda chamada ao OpenRouter leva `HTTP-Referer` e `X-Title` — atribuição do app,
+um DADO partilhado com terceiro. `PROMPT_BUILDER_NO_ATTRIBUTION=on` suprime os
+dois no fio (chat, `/models`, `/key`, `/generation`); na SPA, a mesma escolha é
+a preferência `pb.noAttribution` do navegador. `prompt-builder telemetry` mostra
+o estado; a telemetria em si é opt-in (`PROMPT_BUILDER_TELEMETRY=on`) e fica
+DESLIGADA por padrão, inclusive em CI/agente.
+
+## Custo `pendente` / `costLedger.reconciliation`
+
+Chamada cortada (timeout/abort) ou sem `usage` na resposta fica PENDENTE: a
+reserva é mantida (nunca "custou zero"). No fim da run o CLI concilia pelo id de
+geração (`GET /generation`): troca a reserva pelo valor cobrado (`settled`) ou,
+com 404 persistente, lança a reserva inteira como gasto conservador
+(`notFound`). `callLog` no record lista cada chamada com o id `gen-…`, o
+provedor e o estado. Cancelar (Ctrl-C/`runs cancel`) NÃO espera a conciliação:
+as pendentes ficam em `costLedger.pendingEntries`.
+
+## Proxy que não entende streaming
+
+Todo papel (juiz, duelo, gabarito, datagen, reescritor) vai em streaming: em
+abort o provedor para de gerar em vez de cobrar a resposta inteira. Um proxy
+que devolve o JSON inteiro funciona igual; se ele quebrar com `stream: true`,
+`OPENROUTER_STREAM_TRANSPORT=0` volta os papéis de avaliação ao JSON.
+
 ## `status: "blocked"` / `OpenRouter bloqueou a requisicao` (HTTP 403)
 
 **Não é problema de key.** O 403 do OpenRouter é moderação/guardrail: o conteúdo

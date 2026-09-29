@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { chatCompletion, type ChatMessage } from './openrouter.js';
+import { chatCompletion, isFatalGatewayError, type ChatMessage } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { dedupeAdvanced, dedupeSemantic, combineDedupeReports, type DedupeOptions, type DedupeReport } from './dedup.js';
 import { contentHash, sha256Hex } from './engine/hash.js';
@@ -514,8 +514,10 @@ export async function generateStages(opts: GenerateStagesParams): Promise<StageS
         ctx,
       }).catch((err: unknown) => {
         // Orcamento/cancelamento nao viram "lote vazio": isso faria a run
-        // seguir com menos cenarios do que o pedido, calada.
-        if (isControlSignal(err)) throw err;
+        // seguir com menos cenarios do que o pedido, calada. Key recusada/sem
+        // credito (cli#3) tambem sobem: nenhum outro lote conserta, e engolir
+        // trocava o 401/402 por "datagen nao entregou cenario" (exit 1).
+        if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
         console.warn(`[datagen] lote ${b + 1}/${batchCount} falhou: ${(err as Error).message}`);
         return [] as StageSpec[];
       });
@@ -550,7 +552,7 @@ export async function generateStages(opts: GenerateStagesParams): Promise<StageS
       reasoningLevel,
       ctx,
     }).catch((err: unknown) => {
-      if (isControlSignal(err)) throw err;
+      if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
       console.warn(`[datagen] backfill falhou: ${(err as Error).message}`);
       return [] as StageSpec[];
     });
@@ -754,7 +756,7 @@ export async function generateAdversarialStages(
   const lotes = await Promise.all(
     ADVERSARIAL_CATEGORIES.map((category) =>
       runAdversarialBatch({ ...p, category, count: porCategoria }).catch((err: unknown) => {
-        if (isControlSignal(err)) throw err;
+        if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
         console.warn(`[datagen] lote adversarial ${category} falhou: ${(err as Error).message}`);
         return [] as StageSpec[];
       }),

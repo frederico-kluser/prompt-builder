@@ -301,7 +301,10 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
   'judging.passes': { kind: 'ui', control: 'Avançado › Juiz em 2 ordens' },
   'limits.maxOutputTokens': { kind: 'ui', control: 'Avançado › Máx. tokens por resposta' },
   'limits.timeoutMs': { kind: 'ui', control: 'Avançado › Timeout' },
-  'limits.concurrency': { kind: 'ui', control: 'Avançado › Concorrência' },
+  // web-code#13: só REGISTRADO na run — nenhum motor limita chamadas por ele (o
+  // paralelismo é do limitador global adaptativo do gateway; AGENTS.md proíbe
+  // cap local). O controle fica pelo round-trip do arena-config, com a cópia honesta.
+  'limits.concurrency': { kind: 'ui', control: 'Avançado › Concorrência (só registrada; o paralelismo é do limitador global)' },
   'compliance.area': { kind: 'ui', control: 'Avançado › Conformidade (área)' },
   'compliance.includeRessalvas': { kind: 'ui', control: 'Avançado › Conformidade (ressalvas)' },
   // LGPD (IMPL-040).

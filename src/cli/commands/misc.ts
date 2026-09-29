@@ -24,7 +24,7 @@ import { allowlistHealth, getLgpdData, isSensitiveArea, PII_COVERAGE, PII_MODES 
 import { parseRunConfig, runConfigSchema } from '../../runConfigSchema.js';
 import { parseArenaConfig, arenaConfigSummary, arenaConfigSchema, ARENA_CONFIG_FORMAT } from '../../configFile.js';
 import { arenaConfigToRunConfig } from '../../arenaConfig.js';
-import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
+import { estimateInputFromConfig, estimateRunCost, formatAssumptions, formatRoleBreakdown } from '../../estimate.js';
 import { exampleRegistryJson, parseRegistry, validateRegistry } from '../../registry.js';
 import { sampleSizeWarning } from '../../engine/judgeCalibration.js';
 import {
@@ -202,19 +202,6 @@ export async function cmdKey(argv: string[]): Promise<number> {
 
 // --- estimate ----------------------------------------------------------------
 
-/** Premissa da estimativa em texto (a faixa por papel resumida às fontes). */
-function fmtAssumption(k: string, v: unknown): string {
-  if (v === null || typeof v !== 'object') return String(v);
-  if (k === 'range') {
-    const r = v as { coverage?: number; n?: number; perRole?: Record<string, { source?: string } | undefined> };
-    const fontes = Object.entries(r.perRole ?? {})
-      .map(([role, x]) => `${role}=${x?.source ?? '?'}`)
-      .join(', ');
-    return `cobertura ${Math.round((r.coverage ?? 0) * 100)}% · n=${r.n ?? 0}${fontes ? ` · fontes: ${fontes}` : ''}`;
-  }
-  return JSON.stringify(v);
-}
-
 export async function cmdEstimate(argv: string[]): Promise<number> {
   const parsed = parse(argv, { config: { type: 'string', short: 'c' } });
   const file = parsed.values.config;
@@ -245,10 +232,8 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
   if (out.isText) {
     out.line(`Estimativa: ${fmtUsd(est.low)} – ${fmtUsd(est.high)}`);
     out.line();
-    out.line('Por papel (no teto):');
-    for (const [role, usd] of Object.entries(est.byRole).sort((a, b) => b[1] - a[1])) {
-      if (usd > 0) out.line(`  ${role.padEnd(12)} ${fmtUsd(usd)}`);
-    }
+    // cli#11: em training o teto por papel é POR ITERAÇÃO (e o rótulo diz isso).
+    for (const l of formatRoleBreakdown(est, config.mode, fmtUsd)) out.line(l);
     out.line();
     out.line('Poder (IMPL-050):');
     for (const l of formatPowerPlan(power)) out.line(`  ${l}`);
@@ -267,8 +252,8 @@ export async function cmdEstimate(argv: string[]): Promise<number> {
     );
     out.line();
     out.line('Premissas:');
-    // IMPL-050: `range` é objeto — antes saía "[object Object]".
-    for (const [k, v] of Object.entries(est.assumptions)) out.line(`  ${k.padEnd(18)} ${fmtAssumption(k, v)}`);
+    // cli#11/IMPL-050: `range` (objeto) sai resumido, nunca `[object Object]`.
+    for (const l of formatAssumptions(est.assumptions)) out.line(l);
     if (est.unpricedModelIds.length) {
       out.warn(`sem preço no catálogo: ${est.unpricedModelIds.join(', ')}`);
     }
