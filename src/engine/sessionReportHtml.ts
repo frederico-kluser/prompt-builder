@@ -18,6 +18,9 @@ import {
   fmtInt,
   fmtPct,
   cycleReevalText,
+  cycleHoldLabels,
+  cycleHoldText,
+  noChangeText,
   fmtPp,
   fmtReportP,
   fmtReportPLine,
@@ -291,7 +294,7 @@ function cyclesSection(r: SessionReport): string {
       )}">${e(fmtPp(c.gainPp))}</td><td>${e(fmtPp(c.gainCorrectedPp))}</td><td>${
         c.pAdjusted == null ? '—' : e(c.pAdjusted.toFixed(3).replace('.', ','))
       }</td><td><span class="badge ${DECISION_BADGE[c.decision]}">${e(DECISION_LABEL[c.decision])}</span>${
-        c.heldBy?.length ? `<span class="why">${e(c.heldBy.join(', '))}</span>` : ''
+        cycleHoldLabels(c).length ? `<span class="why">${e(cycleHoldLabels(c).join(', '))}</span>` : ''
       }</td><td>${e(fmtUsd(c.costUsd))}</td><td>${e(fmtUsd(c.cumulativeCostUsd))}</td></tr>`,
     )
     .join('');
@@ -310,13 +313,17 @@ function cyclesSection(r: SessionReport): string {
           c.gainPp,
         )}${c.gainCorrectedPp != null ? `, corrigido ${fmtPp(c.gainCorrectedPp)}` : ''}${
           c.minGainPp != null ? `, margem exigida ${fmtPp(c.minGainPp)}` : ''
-        }${c.reeval ? `; ${cycleReevalText(c.reeval)}` : ''}.`.replace(/\.\.$/, '.'),
+        }${c.reeval ? `; ${cycleReevalText(c.reeval)}` : ''}${cycleHoldText(c) ? `; ${cycleHoldText(c)}` : ''}.`.replace(/\.\.$/, '.'),
       )}</p><div class="tags"><span class="tag">custo ${e(fmtUsd(c.costUsd))}</span>${
         c.technique ? `<span class="tag highlight">${e(c.technique)}</span>` : ''
       }<span class="tag">run ${e(c.runId.slice(0, 8))}</span></div></div></div>`,
     )
     .join('');
-  return `${cyclesChart(r)}<div class="milestones">${timeline}</div>
+  // left#2: sessão sem mudança diz POR QUE o original segurou e o que mudar.
+  const porque = r.noChange
+    ? `<div class="callout warn"><h3>Por que o original segurou</h3><p>${e(noChangeText(r.noChange))}</p></div>`
+    : '';
+  return `${porque}${cyclesChart(r)}<div class="milestones">${timeline}</div>
 <div class="table-wrap"><table><thead><tr><th>Ciclo</th><th>Régua</th><th>Melhor</th><th>Δ bruto</th><th>Δ corrigido</th><th>p aj.</th><th>Decisão</th><th>Custo</th><th>Acumulado</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
@@ -369,7 +376,9 @@ function optimizationSection(r: SessionReport): string {
 function promptSection(r: SessionReport): string {
   const p = r.prompts;
   if (!p.changed) {
-    return `<div class="callout"><p>Nenhuma variante superou a régua: o prompt campeão é o original.</p></div><details><summary>Prompt original</summary><div class="details-body"><pre class="prompt">${e(
+    return `<div class="callout"><p>${e(
+      r.noChange ? `Nenhuma variante foi promovida: o prompt campeão é o original. ${noChangeText(r.noChange)}` : 'Nenhuma variante foi promovida: o prompt campeão é o original.',
+    )}</p></div><details><summary>Prompt original</summary><div class="details-body"><pre class="prompt">${e(
       p.original || '(vazio)',
     )}</pre></div></details>`;
   }

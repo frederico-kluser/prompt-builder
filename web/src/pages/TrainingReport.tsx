@@ -11,6 +11,9 @@ import {
   fmtInt,
   fmtPct,
   cycleReevalText,
+  cycleHoldLabels,
+  cycleHoldText,
+  noChangeText,
   fmtPp,
   fmtReportP,
   fmtReportPLine,
@@ -440,6 +443,12 @@ export function TrainingReport() {
       </Section>
 
       <Section n={2} title="Ciclos de melhoria" id="ciclos">
+        {/* left#2: sem mudança, o relatório diz POR QUE o original segurou e o que mudar. */}
+        {report.noChange && (
+          <Callout title="Por que o original segurou" warn>
+            {noChangeText(report.noChange)}
+          </Callout>
+        )}
         <CyclesChart report={report} />
         <ol className="mt-8 flex flex-col">
           {report.cycles.map((cy, i) => (
@@ -473,6 +482,8 @@ export function TrainingReport() {
                   {cy.minGainPp != null && `, margem exigida ${fmtPp(cy.minGainPp)}`}
                   {/* cli#8: interrompida/não rodou não mostra Δ nem n — régua única do relatório. */}
                   {cy.reeval && `; ${cycleReevalText(cy.reeval)}`}
+                  {/* left#2: o que segurou — significância com n pequeno NÃO é "sem margem". */}
+                  {cycleHoldText(cy) && `; ${cycleHoldText(cy)}`}
                 </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <Chip>custo {fmtUsd(cy.costUsd)}</Chip>
@@ -513,7 +524,9 @@ export function TrainingReport() {
                     <span className={cn('rounded-md px-2 py-0.5 font-mono text-[10.5px] font-semibold uppercase', DECISION_CHIP[cy.decision])}>
                       {DECISION_LABEL[cy.decision]}
                     </span>
-                    {cy.heldBy?.length ? <div className="mt-0.5 text-[11px] text-muted-foreground">{cy.heldBy.join(', ')}</div> : null}
+                    {cycleHoldLabels(cy).length ? (
+                      <div className="mt-0.5 text-[11px] text-muted-foreground">{cycleHoldLabels(cy).join(', ')}</div>
+                    ) : null}
                   </td>
                   <td className="px-3.5 py-2.5">{fmtUsd(cy.costUsd)}</td>
                   <td className="px-3.5 py-2.5">{fmtUsd(cy.cumulativeCostUsd)}</td>
@@ -684,7 +697,10 @@ export function TrainingReport() {
             </details>
           </>
         ) : (
-          <Callout>Nenhuma variante superou a régua: o prompt campeão é o original.</Callout>
+          <Callout>
+            Nenhuma variante foi promovida: o prompt campeão é o original.
+            {report.noChange ? ` ${noChangeText(report.noChange)}` : ''}
+          </Callout>
         )}
       </Section>
 
