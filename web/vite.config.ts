@@ -26,6 +26,12 @@ const FALLBACK_DIR = path.resolve(import.meta.dirname, './src/motion-plus-fallba
 
 export default defineConfig({
   resolve: {
+    // left#15: o motor em `../src` importa `zod` e resolvia a cópia da RAIZ
+    // (node_modules/zod), o web a de `web/node_modules` — o bundle levava o zod
+    // DUAS vezes (~170 KB de fonte a mais no chunk principal). Mesma versão
+    // (a config `jitless` já é global, via `globalThis.__zod_globalConfig`);
+    // `dedupe` resolve as duas pela raiz do projeto web.
+    dedupe: ['zod'],
     alias: [
       { find: '@', replacement: path.resolve(import.meta.dirname, './src') },
       // Ordem importa: o subpath mais específico antes do pacote (o alias de

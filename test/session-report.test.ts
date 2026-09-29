@@ -22,7 +22,10 @@ import type { SessionRecord } from '../src/types.js';
 import { CHAMP, ORIG, fixture } from './support/sessionReportFixture.js';
 import {
   buildSessionReport,
+  cycleHoldLabels,
+  cycleHoldText,
   cycleReevalText,
+  gatePowerNote,
   renderSessionReportMarkdown,
   SESSION_REPORT_FORMAT,
 } from '../src/engine/sessionReport.js';
@@ -146,7 +149,11 @@ describe('buildSessionReport — degradações honestas', () => {
     expect(r.verdict).toBe('sem-mudanca');
     expect(r.quality.gainPp).toBe(0);
     expect(r.cost.deltaCostPerCallUsd).toBe(0);
-    expect(r.headline).toMatch(/nenhuma variante superou/);
+    // left#2: o ciclo 1 passou da margem (+45,8 > +5) e só a significância
+    // segurou — a manchete NÃO diz mais "nenhuma variante superou com margem".
+    expect(r.headline).toMatch(/nenhuma variante foi promovida/);
+    expect(r.headline).not.toMatch(/superou/);
+    expect(r.noChange?.cause).toBe('significance');
   });
 
   it('run ausente e custo 0 viram AVISO — nunca exceção nem "grátis"', () => {
@@ -250,6 +257,134 @@ describe('cli#8 — re-avaliação que NÃO terminou/NÃO rodou não inventa Δ 
     expect(pagina).toContain('cycleReevalText(cy.reeval)');
     expect(pagina).not.toMatch(/cy\.reeval\.(size|gainPp)/u);
     expect(webShim.cycleReevalText).toBe(cycleReevalText);
+  });
+});
+
+describe('left#2 (web-live#5) — sessão sem mudança diz POR QUE e o que mudar', () => {
+  type Gate = NonNullable<SessionRecord['bestPromptByIteration'][number]['gate']>;
+  /**
+   * Sessão sem mudança (campeão == original) com os gates dados, um por ciclo.
+   * `n` = pares completos do gate; `stages` = cenários da config.
+   */
+  const semMudanca = (gates: Array<Partial<Gate> & { n?: number }>, stages = 5) => {
+    const { session, runs } = fixture({ champion: ORIG, withHoldout: false });
+    const lineage = gates.map((g, i) => {
+      const { n = 5, ...rest } = g;
+      return {
+        iteration: i,
+        runId: i === 0 ? 'r0' : 'r1',
+        winnerContestantId: i === 0 ? 'original' : 'carry',
+        systemPrompt: ORIG,
+        score: 0,
+        gate: {
+          controlId: i === 0 ? 'original' : 'carry',
+          bestId: i === 0 ? 'v1' : 'w0',
+          minGain: 10,
+          minGainSource: 'default',
+          gainPp: 50,
+          pairing: { n, nEfetivo: n, excludedPairs: 0, completeness: 1, controlMeanPp: 40, championMeanPp: 90, meanDiffPp: 50 },
+          test: { pAdjusted: 0.0625, alpha: 0.05, nScenarios: n, k: 4 },
+          decision: 'held',
+          heldBy: ['significance'],
+          ...rest,
+        } as Gate,
+      };
+    });
+    const s = {
+      ...session,
+      config: { ...session.config, stages },
+      bestPromptByIteration: lineage,
+      pairing: undefined,
+      significance: null,
+    } as unknown as SessionRecord;
+    const r = buildSessionReport(s, runs);
+    return { r, md: renderSessionReportMarkdown(r), html: renderSessionReportHtml(r) };
+  };
+
+  it('o caso do s17: +50 p.p. acima da margem, segurada SÓ pela significância com n=5 → "ganho não significativo (n pequeno)" + mais cenários', () => {
+    const { r, md, html } = semMudanca([{}, {}]);
+    expect(r.noChange).toMatchObject({ cause: 'significance', iteration: 0, gainPp: 50, recommendedStages: 8 });
+    expect(r.power).toMatchObject({ level: 'fragile', selectionScenarios: 5, recommendedStages: 8 });
+    // Manchete: por que (significância, n pequeno) E o que mudar (≥ 8 cenários).
+    expect(r.headline).toMatch(/nenhuma variante foi promovida/);
+    expect(r.headline).toMatch(/\+50,0 p\.p\. \(acima da margem de \+10,0 p\.p\.\)/);
+    expect(r.headline).toMatch(/n[ãa]o foi significativo — n pequeno \(p aj\. 0,063 > α 0,05\)/);
+    expect(r.headline).toMatch(/um único empate já segura/);
+    expect(r.headline).toMatch(/Use ao menos 8 cenários/);
+    // Não é "pior" nem "sem margem": a variante passou da margem 5×.
+    for (const saida of [r.headline, md, html]) {
+      expect(saida).not.toMatch(/superou/);
+      expect(saida).not.toMatch(/sem margem/);
+    }
+    // Rótulo da tabela e texto do ciclo: a MESMA fonte nos três formatos.
+    expect(cycleHoldLabels(r.cycles[0])).toEqual(['ganho não significativo (n pequeno)']);
+    expect(cycleHoldText(r.cycles[0])).toMatch(/^segurou: ganho não significativo \(n pequeno\): Δ \+50,0 p\.p\. acima da margem/);
+    for (const saida of [md, html]) {
+      expect(saida).toContain('ganho não significativo (n pequeno)');
+      expect(saida).toContain('Por que o original segurou');
+    }
+  });
+
+  it('poder: com 4 pares o p mínimo é 0,0625 > α — "nenhuma variante poderia ser promovida" + cenários recomendados', () => {
+    const { r } = semMudanca([{ n: 4 }, { n: 4 }], 4);
+    expect(r.noChange?.cause).toBe('power');
+    expect(r.power.level).toBe('impossible');
+    expect(r.headline).toMatch(/com 4 par\(es\) completo\(s\) por ciclo o gate NÃO conseguia promover/);
+    expect(r.headline).toMatch(/0,063 \(2\^-4\) > α 0,05/);
+    expect(r.headline).toMatch(/Use ao menos 8 cenários/);
+    expect(gatePowerNote(4, 0.05)).toMatch(/nenhuma variante poderia ser promovida/);
+    expect(gatePowerNote(8, 0.05)).toBeNull(); // folga: o p alto é do ganho, não do n
+  });
+
+  it('min-gain: SÓ quando a margem segurou o relatório fala em margem', () => {
+    const { r, md } = semMudanca([{ gainPp: 4, heldBy: ['min-gain'] }, { gainPp: -3, heldBy: ['min-gain', 'significance'] }], 10);
+    expect(r.noChange).toMatchObject({ cause: 'min-gain', iteration: 0, gainPp: 4 });
+    expect(r.headline).toMatch(/o melhor Δ \(\+4,0 p\.p\.\) ficou abaixo da margem exigida \(\+10,0 p\.p\., default max\(1; 50\/n\)\)/);
+    expect(r.headline).toMatch(/Mais cenários baixam a margem default/);
+    expect(cycleHoldLabels(r.cycles[0])).toEqual(['abaixo da margem']);
+    expect(md).toContain('segurada: abaixo da margem');
+    // Δ ≤ 0 não é "abaixo da margem": é "não ganhou da régua".
+    expect(cycleHoldText(r.cycles[1])).toMatch(/não ganhou da régua \(Δ −3,0 p\.p\.\)/);
+  });
+
+  it('margem configurada: a ação aponta o minGain, não os 50/n', () => {
+    const { r } = semMudanca([{ gainPp: 4, heldBy: ['min-gain'], minGainSource: 'config' }], 10);
+    expect(r.headline).toMatch(/configurada em minGain/);
+    expect(r.headline).toMatch(/Reveja a margem \(minGain\)/);
+  });
+
+  it('re-avaliação: passou no gate, não se confirmou → diz isso (não "sem margem")', () => {
+    const { r } = semMudanca([{ heldBy: ['reeval'], test: { pAdjusted: 0.01, alpha: 0.05 } as Gate['test'] }], 10);
+    expect(r.noChange?.cause).toBe('reeval');
+    expect(r.headline).toMatch(/não se confirmou na re-avaliação limpa/);
+    expect(cycleHoldLabels(r.cycles[0])).toEqual(['re-avaliação não confirmou']);
+  });
+
+  it('nenhuma variante ganhou (Δ ≤ 0) → "não ganhou da régua" e a ação é trocar de técnica', () => {
+    const { r } = semMudanca([{ gainPp: -5 }, { gainPp: 0 }], 10);
+    expect(r.noChange?.cause).toBe('no-gain');
+    expect(r.headline).toMatch(/nenhuma variante ganhou da régua \(melhor Δ ±0,0 p\.p\.\)/);
+    expect(r.headline).toMatch(/Tente outras técnicas/);
+  });
+
+  it('sessão interrompida antes do gate → "parou antes"; sessão com mudança → noChange null', () => {
+    const { session, runs } = fixture({ champion: ORIG, withHoldout: false });
+    const s = { ...session, bestPromptByIteration: [], stoppedReason: 'budget', pairing: undefined, significance: null } as unknown as SessionRecord;
+    const r = buildSessionReport(s, runs);
+    expect(r.noChange?.cause).toBe('stopped');
+    expect(r.headline).toMatch(/parou antes de algum ciclo chegar ao gate de promoção \(budget\)/);
+    const mudou = fixture();
+    expect(buildSessionReport(mudou.session, mudou.runs).noChange).toBeNull();
+  });
+
+  it('a página da SPA usa os MESMOS formatadores (nada de heldBy cru)', () => {
+    const pagina = readFileSync(path.join(ROOT, 'web', 'src', 'pages', 'TrainingReport.tsx'), 'utf-8');
+    expect(pagina).toContain('cycleHoldLabels(cy)');
+    expect(pagina).toContain('cycleHoldText(cy)');
+    expect(pagina).toContain('noChangeText(report.noChange)');
+    expect(pagina).not.toMatch(/heldBy\.join/u);
+    expect(pagina).not.toMatch(/superou a régua/u);
+    expect(webShim.cycleHoldText).toBe(cycleHoldText);
   });
 });
 

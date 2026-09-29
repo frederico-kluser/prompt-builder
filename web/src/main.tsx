@@ -1,36 +1,89 @@
 // IMPL-083: PRIMEIRO import — liga o `jitless` do zod antes de qualquer schema
 // nascer (sem a sonda de eval que a CSP reporta como violação em toda rota).
 import './zodJitless';
-import React from 'react';
+import React, { Suspense, lazy, type ComponentType } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { MotionUIThemeProvider } from '@/components/motion-ui/ui-theme';
+import { Skeleton } from '@/components/motion-ui/skeleton';
 // Fica na raiz do web/ porque é lá que o CLI da Motion o gerencia (e o único
 // comando que o sobrescreve é `add @motion/motion-theme` — não rode de novo).
 import motionTheme from '../motion.theme';
 import { AppShell, RouteTransition } from './components/AppShell';
 import { FirstRun, keyAskSkipped } from './components/FirstRun';
 import { KeyGate } from './components/KeySetup';
+import { Screen } from './components/primitives';
 import { NewBenchmark } from './pages/NewBenchmark';
-import { RunView } from './pages/RunView';
-import { RunsList } from './pages/RunsList';
-import { TrainingView } from './pages/TrainingView';
-import { TrainingReport } from './pages/TrainingReport';
 import { RouteErrorBoundary } from './components/RouteErrorBoundary';
-import { SettingsPage } from './pages/Settings';
-import { PromptsPage } from './pages/PromptsPage';
-import { JevRunView } from './pages/jev/JevRunView';
-import { JevTrainingView } from './pages/jev/JevTrainingView';
-import { JevReportPage } from './pages/jev/JevReportPage';
 import { getStoredKey, startOrphanWatch } from './api';
-import { startJevOrphanWatch } from './jev/api';
+import { startLocalRetention } from './localRetention';
+import { listJevSummaries } from './jev/store';
 import './index.css';
+
+// left#15: o SPA saía num chunk único de ~1,7 MB. A Nova Run (`/new`, a rota
+// de entrada — `/` redireciona para ela) e o first-run ficam no chunk
+// principal; as demais telas viram chunks sob demanda (React.lazy): quem abre
+// só a Nova Run não baixa o relatório, o modo JEV, o histórico nem as telas de
+// run/treino. A fronteira de erro por rota continua em volta (chunk que falha
+// ao carregar cai nela, com "Recarregar"), e o carregamento mostra o esqueleto.
+function lazyPage<M, K extends keyof M>(load: () => Promise<M>, name: K) {
+  return lazy(async () => ({ default: (await load())[name] as unknown as ComponentType }));
+}
+const RunView = lazyPage(() => import('./pages/RunView'), 'RunView');
+const RunsList = lazyPage(() => import('./pages/RunsList'), 'RunsList');
+const TrainingView = lazyPage(() => import('./pages/TrainingView'), 'TrainingView');
+const TrainingReport = lazyPage(() => import('./pages/TrainingReport'), 'TrainingReport');
+const SettingsPage = lazyPage(() => import('./pages/Settings'), 'SettingsPage');
+const PromptsPage = lazyPage(() => import('./pages/PromptsPage'), 'PromptsPage');
+const JevRunView = lazyPage(() => import('./pages/jev/JevRunView'), 'JevRunView');
+const JevTrainingView = lazyPage(() => import('./pages/jev/JevTrainingView'), 'JevTrainingView');
+const JevReportPage = lazyPage(() => import('./pages/jev/JevReportPage'), 'JevReportPage');
+
+/**
+ * Deploy novo com a aba aberta: os chunks antigos somem (o rewrite da Vercel
+ * devolve o index.html no lugar) e o `import()` da rota falha. Recarrega UMA
+ * vez para pegar o index novo; se falhar de novo em seguida, a fronteira da
+ * rota mostra o erro (sem laço de recarga).
+ */
+window.addEventListener('vite:preloadError', (event) => {
+  try {
+    const ultima = Number(sessionStorage.getItem('pb.chunkReloadAt') ?? 0);
+    if (Date.now() - ultima < 30_000) return;
+    sessionStorage.setItem('pb.chunkReloadAt', String(Date.now()));
+  } catch {
+    return; // sem sessionStorage não há como evitar o laço: deixa a fronteira mostrar
+  }
+  event.preventDefault();
+  window.location.reload();
+});
+
+/** Esqueleto de rota enquanto o chunk da tela chega. */
+function RouteSkeleton() {
+  return (
+    <Screen wide>
+      <div className="flex flex-col gap-4 pt-6" role="status" aria-label="Carregando a tela…">
+        <Skeleton className="h-10 w-2/3 rounded-lg" />
+        <Skeleton className="h-28 w-full rounded-xl" />
+        <Skeleton className="h-72 w-full rounded-xl" />
+      </div>
+    </Screen>
+  );
+}
 
 // IMPL-023: na carga, runs/treinos 'running' sem dono (a aba que os executava
 // fechou ou recarregou) viram interrompidos — sem ninguém precisar abri-los.
 startOrphanWatch();
-// Modo JEV: a mesma regra para as runs/sessões JEV (lock livre = órfã).
-void startJevOrphanWatch();
+// Modo JEV: a mesma regra para as runs/sessões JEV (lock livre = órfã). A
+// varredura só age sobre record `running` — os resumos (store leve) dizem se
+// há algum; só então o motor JEV (chunk próprio) é baixado. Quem não usa o
+// JEV não o baixa nem na carga.
+void listJevSummaries()
+  .then((rows) =>
+    rows.some((r) => r.status === 'running') ? import('./jev/api').then((m) => m.startJevOrphanWatch()) : undefined,
+  )
+  .catch((err: unknown) => console.warn('[jev] varredura de órfãs não rodou:', err));
+// left#6 (IMPL-100): TTL LGPD do histórico local — o vencido sai na abertura.
+void startLocalRetention();
 
 /**
  * "Pede direto a key" (pedido do dono): sem chave — e sem o "explorar sem
@@ -80,7 +133,10 @@ function AppRoutes() {
           element={
             <KeyFirstGate>
               <RouteErrorBoundary>
-                <Outlet />
+                {/* Dentro da fronteira: chunk que não carrega vira a tela de erro da rota. */}
+                <Suspense fallback={<RouteSkeleton />}>
+                  <Outlet />
+                </Suspense>
               </RouteErrorBoundary>
             </KeyFirstGate>
           }

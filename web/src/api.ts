@@ -102,15 +102,15 @@ import {
   type PiiRunReport,
 } from './lgpd';
 import { BudgetLedger } from '../../src/budget.js';
-import {
-  cancelRun as engineCancelRun,
-  isRunCancellable,
-  resumeRun as engineResumeRun,
-  startRun,
-} from './engine/orchestrator';
+// left#15: orchestrator/trainer/variator (o PIPELINE: competidores, juízes,
+// gabarito, datagen, duelos…) só carregam quando uma run/treino COMEÇA nesta
+// aba — ver `loadOrchestrator`/`loadTrainer`. Abrir o app, o histórico ou uma
+// run salva não paga por eles.
+import type * as OrchestratorModule from './engine/orchestrator';
+import type * as TrainerModule from './engine/trainer';
+// IMPL-081: o núcleo do journal é puro e leve (shim) — a recusa de retomada é
+// síncrona e não justifica chunk próprio.
 import { resumeRefusal } from './engine/callJournal';
-import { cancelTraining, isTrainingCancellable, startTraining } from './engine/trainer';
-import { generateContestants, generateBasePrompt as engineGenerateBasePrompt } from './engine/variator';
 import { listModels, validateKey as engineValidateKey, currentConcurrency } from './engine/openrouter';
 import { listTechniques } from './engine/techniques';
 import {
@@ -1035,6 +1035,25 @@ async function assertCostConfirmed(config: RunConfig, opts: LaunchOpts): Promise
   if (est.requiresConfirmation) throw new CostConfirmationRequiredError(est);
 }
 
+// -------------- Motor sob demanda (left#15) --------------
+
+// Os módulos ficam guardados depois do primeiro import: cancelar/perguntar se
+// dá para cancelar é SÍNCRONO, e só existe run cancelável nesta aba se ela foi
+// iniciada aqui — o que já carregou o módulo. Módulo não carregado ⇒ nada
+// roda nesta aba ⇒ `false` é a resposta certa, não uma aproximação.
+let orchestratorMod: typeof OrchestratorModule | null = null;
+let trainerMod: typeof TrainerModule | null = null;
+
+function loadOrchestrator(): Promise<typeof OrchestratorModule> {
+  return import('./engine/orchestrator').then((m) => (orchestratorMod = m));
+}
+
+function loadTrainer(): Promise<typeof TrainerModule> {
+  // O trainer inicia as runs das iterações pelo orchestrator: guarda os dois
+  // (cancelar a run de uma iteração passa por `orchestratorMod`).
+  return Promise.all([import('./engine/trainer'), loadOrchestrator()]).then(([m]) => (trainerMod = m));
+}
+
 // -------------- Cancelamento (IMPL-020) --------------
 
 /**
@@ -1043,22 +1062,22 @@ async function assertCostConfirmed(config: RunConfig, opts: LaunchOpts): Promise
  * `aborted` + `stoppedReason: 'cancelled'`, com o parcial honesto.
  */
 export function cancelRun(id: string): boolean {
-  return engineCancelRun(id);
+  return orchestratorMod?.cancelRun(id) ?? false;
 }
 
 /** Cancela o treino NESTA aba (a run da iteração em voo cai junto). */
 export function cancelSession(id: string): boolean {
-  return cancelTraining(id);
+  return trainerMod?.cancelTraining(id) ?? false;
 }
 
 /** true = a run roda nesta aba e ainda pode ser cancelada. */
 export function canCancelRun(id: string): boolean {
-  return isRunCancellable(id);
+  return orchestratorMod?.isRunCancellable(id) ?? false;
 }
 
 /** true = o treino roda nesta aba e ainda pode ser cancelado. */
 export function canCancelSession(id: string): boolean {
-  return isTrainingCancellable(id);
+  return trainerMod?.isTrainingCancellable(id) ?? false;
 }
 
 export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Promise<string> {
@@ -1074,7 +1093,9 @@ export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Pro
   // de qualquer chamada paga, com a mesma mensagem do schema.
   assertRoleSeparation(config);
   await assertCostConfirmed(config, launch);
-  const { runId, record } = startRun(config as never, apiKey, engineOptsFor(config, apiKey) as never);
+  // left#15: o pipeline chega agora (chunk próprio), só quando a run começa.
+  const { startRun } = await loadOrchestrator();
+  const { runId, record } = startRun(config as never, apiKey, (await engineOptsFor(config, apiKey)) as never);
   cacheRunRecord(record);
   return runId;
 }
@@ -1084,11 +1105,13 @@ export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Pro
  * Client-side: o run roda na própria aba (engine). Para variação, as variantes
  * são geradas via "optimizer" antes do loop (igual ao prepare do backend) — na
  * retomada o reescritor volta do journal a US$ 0, com as mesmas variantes.
+ * left#15: o variator carrega sob demanda (chunk próprio) — daí `async`.
  */
-function engineOptsFor(config: RunConfig, apiKey: string): Record<string, unknown> {
+async function engineOptsFor(config: RunConfig, apiKey: string): Promise<Record<string, unknown>> {
   const cfg = config as Record<string, any>;
   const opts: Record<string, unknown> = {};
   if (cfg.mode === 'variation') {
+    const { generateContestants } = await import('./engine/variator');
     const optimizerModelId = cfg.optimizerModelId ?? cfg.datagenModelId;
     const promptOptimization = cfg.promptOptimization !== false;
     // `runCtx` = ledger da run: o custo do reescritor entra na conta da run.
@@ -1153,7 +1176,9 @@ export async function resumeRun(id: string): Promise<string> {
   if (motivo) throw new Error(`Esta run não pode ser retomada: ${motivo}`);
   // IMPL-048: o record veio do disco — a mesma recusa de papéis do createRun.
   assertRoleSeparation(rec.config);
-  const { runId, record } = await engineResumeRun(id, apiKey, engineOptsFor(rec.config, apiKey) as never);
+  // left#15: o pipeline (e o resumeRun do engine) chega no próprio chunk.
+  const { resumeRun: engineResumeRun } = await loadOrchestrator();
+  const { runId, record } = await engineResumeRun(id, apiKey, (await engineOptsFor(rec.config, apiKey)) as never);
   cacheRunRecord(record);
   return runId;
 }
@@ -1184,6 +1209,7 @@ export async function generateBasePrompt(
     ctx = { sink };
   }
   const apiKey = requireKey(); // IMPL-082: re-prompt em vez de fetch sem key
+  const { generateBasePrompt: engineGenerateBasePrompt } = await import('./engine/variator'); // left#15
   return engineGenerateBasePrompt({ apiKey, modelId, taskDescription, theme, ctx });
 }
 
@@ -1376,7 +1402,9 @@ export async function createSession(config: RunConfig, launch: LaunchOpts = {}):
   const apiKey = requireKey(); // IMPL-082: "key sumida" => re-prompt, não fetch
   assertRoleSeparation(config); // IMPL-048: ver createRun
   await assertCostConfirmed(config, launch);
-  // Client-side: a sessão de treino roda na própria aba (engine trainer).
+  // Client-side: a sessão de treino roda na própria aba (engine trainer),
+  // carregado sob demanda (left#15).
+  const { startTraining } = await loadTrainer();
   const { sessionId, record } = await startTraining(config as never, apiKey);
   cacheSessionRecord(record);
   return sessionId;

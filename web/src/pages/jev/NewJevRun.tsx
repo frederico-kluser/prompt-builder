@@ -767,7 +767,10 @@ export function NewJevRun() {
         {formStyle === 'guided' ? (
           <div className="mt-1">
             <SmoothTabs value={step} onValueChange={(v) => setStep(v as JevStep)}>
-              <SmoothTabsList ariaLabel="Passos da configuração JEV" className="w-fit max-w-full overflow-x-auto">
+              {/* left#16: mesmo arranjo do trilho do guiado LLM — a 390 px os
+                  passos QUEBRAM em linhas em vez de rolar (a pista de
+                  pendência nunca fica atrás de uma rolagem horizontal). */}
+              <SmoothTabsList ariaLabel="Passos da configuração JEV" className="w-fit max-w-full flex-wrap overflow-x-auto">
                 {STEPS.map((s, i) => (
                   <SmoothTabsTab key={s} value={s} className="px-3 py-1.5 text-[13px]">
                     <span className="flex items-center gap-1.5 whitespace-nowrap">

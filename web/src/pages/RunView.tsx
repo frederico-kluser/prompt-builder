@@ -18,6 +18,7 @@ import { CancelHoldButton, OwnershipBanner, StopBanner } from '../components/Run
 import { RunNarrative } from '../components/RunNarrative';
 import { StorageNotice } from '../components/StorageNotice';
 import { csvCell } from '../engine/csv';
+import { runExchangeJson } from '../recordExchange';
 import {
   Accordion,
   AccordionItem,
@@ -378,7 +379,8 @@ export function RunView() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => download(`run-${record.id}.json`, JSON.stringify(record, null, 2), 'application/json')}
+            // left#11 (IMPL-089): exchange@1 — o `runs import` do terminal e o «Importar» do Histórico leem.
+            onClick={() => download(`run-${record.id}.json`, runExchangeJson(record), 'application/json')}
           >
             <Download aria-hidden="true" />
             JSON

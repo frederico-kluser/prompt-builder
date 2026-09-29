@@ -1,9 +1,12 @@
-import { useState } from 'react';
+import { Suspense, lazy, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
 import { NewRun } from './NewRun';
-import { NewJevRun } from './jev/NewJevRun';
-import { BENCH_KIND_KEY, initialBenchKind, type BenchKind } from '../jev/form';
+import { BENCH_KIND_KEY, initialBenchKind, type BenchKind } from '../jev/benchKind';
+
+// left#15: o formulário JEV (e o motor JEV) vira chunk próprio — "quem nunca
+// abre o JEV não paga nada por ele" passa a valer também para o download.
+const NewJevRun = lazy(async () => ({ default: (await import('./jev/NewJevRun')).NewJevRun }));
 
 /**
  * `/new` — o SELETOR "LLM | JEV" (D-12) é a primeira escolha da página, acima
@@ -82,7 +85,16 @@ export function NewBenchmark() {
       )}
       {visitados.has('jev') && (
         <div hidden={kind !== 'jev'} data-bench="jev">
-          <NewJevRun />
+          <Suspense
+            fallback={
+              <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-5 sm:px-6" role="status" aria-label="Carregando o formulário JEV…">
+                <div className="h-10 w-2/3 animate-pulse rounded-lg bg-muted" />
+                <div className="h-72 w-full animate-pulse rounded-xl bg-muted" />
+              </div>
+            }
+          >
+            <NewJevRun />
+          </Suspense>
         </div>
       )}
     </>

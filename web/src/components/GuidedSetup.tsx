@@ -369,7 +369,13 @@ export function GuidedSetup(p: GuidedSetupProps) {
   return (
     <div className="mt-5">
       <SmoothTabs value={p.step} onValueChange={(v) => p.onStepChange(v as GuidedStep)}>
-        <SmoothTabsList ariaLabel="Passos da configuração guiada" className="w-fit max-w-full overflow-x-auto">
+        {/* left#16: a 390 px os 5 passos não cabem numa linha — o trilho media
+            548 px e ROLAVA, escondendo "Limites"/"Revisão" e a pista de
+            pendência deles atrás da rolagem horizontal. Em tela estreita o
+            trilho QUEBRA em linhas, como os filtros do Histórico (web-live#13):
+            tudo à vista, sem rolagem escondida. O `overflow-x-auto` fica só
+            como rede de segurança para rótulo maior que a linha. */}
+        <SmoothTabsList ariaLabel="Passos da configuração guiada" className="w-fit max-w-full flex-wrap overflow-x-auto">
           {GUIDED_STEPS.map((s, i) => (
             <SmoothTabsTab key={s} value={s} className="px-3 py-1.5 text-[13px]">
               <span className="flex items-center gap-1.5 whitespace-nowrap">

@@ -26,6 +26,15 @@ import type {
 import { pairCoverage, reportPValue, stageScoresByContestant, type PairScore } from '../stats.js';
 import { holdoutSkipReasonText } from '../holdout.js';
 import { holdoutSkipReasonOf } from './sessionDecision.js';
+import { GATE_ALPHA } from './bestOfK.js';
+import {
+  TRAINING_TIE_ALLOWANCE,
+  minAchievableGateP,
+  minPairsForPromotion,
+  plannedTrainingStages,
+  trainingPromotionPower,
+  type TrainingPowerCheck,
+} from './trainingPolicy.js';
 
 export const SESSION_REPORT_FORMAT = 'prompt-builder-session-report@1';
 
@@ -115,6 +124,15 @@ export interface CycleRow {
   gainCorrectedPp: number | null;
   pAdjusted: number | null;
   minGainPp: number | null;
+  /** left#2: margem do config (`minGain` explícito) ou o default max(1; 50/n). */
+  minGainSource?: 'config' | 'default';
+  /**
+   * left#2: pares COMPLETOS que o gate usou (`gate.pairing.nEfetivo`) — o n do
+   * piso 2^-n do teste exato. null = ciclo sem gate (interrompido/legado).
+   */
+  gateN: number | null;
+  /** α do gate (`gate.test.alpha`); null em sessão sem o teste registrado. */
+  alpha: number | null;
   /**
    * Re-avaliação limpa do candidato (quando houve). `runStatus` (cli#8): a run
    * dela NÃO terminou — sem evidência, Δ/n não valem. `ran: false` = nunca
@@ -177,6 +195,49 @@ export interface RoleCost {
 
 export type ReportVerdict = 'melhorou' | 'piorou' | 'sem-diferenca' | 'inconclusivo' | 'sem-mudanca';
 
+/**
+ * left#2 (web-live#5): POR QUE uma sessão terminou sem trocar o prompt. Antes a
+ * manchete dizia "nenhuma variante superou o prompt original com margem" mesmo
+ * quando a melhor variante passou da margem 5× e só o TESTE DE SIGNIFICÂNCIA
+ * segurou (n pequeno: com 5 cenários o p mínimo é 1/32) — o usuário lia "o
+ * prompt já era ótimo" quando o certo era "use mais cenários".
+ *
+ *  - `power`: com o n de pares do gate NENHUM ciclo podia promover (2^-n > α);
+ *  - `significance`: Δ positivo (acima da margem), p ajustado > α;
+ *  - `min-gain`: Δ abaixo da margem exigida;
+ *  - `reeval`: passou no gate, não se confirmou na re-avaliação limpa;
+ *  - `no-gain`: a melhor variante não ganhou da régua (Δ ≤ 0);
+ *  - `guard`: bloqueada por contaminação ou segurança;
+ *  - `no-pairs` / `inconclusive`: faltou dado para decidir;
+ *  - `stopped`: a sessão parou antes de qualquer ciclo chegar ao gate;
+ *  - `unrecorded`: sessão antiga, sem o gate por ciclo no record.
+ */
+export type NoChangeCause =
+  | 'power'
+  | 'significance'
+  | 'min-gain'
+  | 'reeval'
+  | 'no-gain'
+  | 'guard'
+  | 'no-pairs'
+  | 'inconclusive'
+  | 'stopped'
+  | 'unrecorded';
+
+export interface NoChangeDiagnosis {
+  cause: NoChangeCause;
+  /** Ciclo (0-based) que chegou mais perto (maior Δ bruto entre os decididos); null = nenhum. */
+  iteration: number | null;
+  /** Δ bruto (p.p.) desse ciclo. */
+  gainPp: number | null;
+  /** Por que nada foi promovido (PT-BR, sem ponto final). */
+  why: string;
+  /** O que mudar na próxima sessão (PT-BR, frase completa). */
+  action: string;
+  /** Cenários recomendados para o gate ter folga (quando a causa é poder/significância). */
+  recommendedStages?: number;
+}
+
 export interface SessionReport {
   format: typeof SESSION_REPORT_FORMAT;
   generatedAt: string;
@@ -235,6 +296,13 @@ export interface SessionReport {
     perCycleMeanUsd: number | null;
   };
   verdict: ReportVerdict;
+  /**
+   * left#2: poder do gate para a config da sessão (`trainingPromotionPower`,
+   * a MESMA régua do formulário, do pré-voo do CLI e do log do trainer).
+   */
+  power: TrainingPowerCheck;
+  /** left#2: por que o original segurou e o que mudar — null quando o prompt mudou. */
+  noChange: NoChangeDiagnosis | null;
   /** Uma frase PT-BR com a conclusão (quanto melhorou + quanto muda o custo). */
   headline: string;
   /** Ressalvas que mudam a leitura (drift de juiz, holdout pulado, custo desconhecido…). */
@@ -524,6 +592,9 @@ export function buildSessionReport(
       gainCorrectedPp: gate?.gainCorrectedPp != null ? round(gate.gainCorrectedPp, 2) : null,
       pAdjusted: test?.pAdjusted ?? null,
       minGainPp: gate?.minGain ?? null,
+      ...(gate?.minGainSource ? { minGainSource: gate.minGainSource } : {}),
+      gateN: gate ? (gate.pairing?.nEfetivo ?? test?.nScenarios ?? null) : null,
+      alpha: typeof test?.alpha === 'number' ? test.alpha : null,
       ...(gate?.reeval
         ? {
             reeval: {
@@ -564,6 +635,8 @@ export function buildSessionReport(
       gainCorrectedPp: null,
       pAdjusted: null,
       minGainPp: null,
+      gateN: null,
+      alpha: null,
       costUsd: round(r.totalCostUsd ?? 0, 6),
       cumulativeCostUsd: cumulative,
       championScorePp: null,
@@ -575,7 +648,9 @@ export function buildSessionReport(
   // O campeão final veio de uma promoção? (a linhagem repete o campeão vigente)
   if (!changed) promotedAtIteration = null;
   const championLabel = (() => {
-    if (!changed) return 'Original (nenhuma variante superou a régua)';
+    // left#2: "nenhuma foi promovida" — NÃO "nenhuma superou": a melhor pode ter
+    // passado da margem e só o teste de significância (n pequeno) segurado.
+    if (!changed) return 'Original (nenhuma variante foi promovida)';
     if (promotedAtIteration == null) return last?.winnerContestantId ?? 'campeão';
     const c = cycles.find((x) => x.iteration === promotedAtIteration);
     return c?.championLabel ?? 'campeão';
@@ -675,6 +750,13 @@ export function buildSessionReport(
   const finished = session.finishedAt ? Date.parse(session.finishedAt) : NaN;
 
   const verdict = verdictOf(quality, changed);
+  // left#2: a MESMA régua de poder do formulário/pré-voo/trainer.
+  const power = trainingPromotionPower({
+    stages: plannedTrainingStages(cfg),
+    holdoutRatio: cfg.holdoutRatio,
+    techniques: cfg.techniqueIds?.length,
+  });
+  const noChange = changed ? null : noChangeOf(cycles, power, session.stoppedReason);
   const report: SessionReport = {
     format: SESSION_REPORT_FORMAT,
     generatedAt: opts.generatedAt ?? session.finishedAt ?? session.startedAt,
@@ -731,6 +813,8 @@ export function buildSessionReport(
       perCycleMeanUsd: cycles.length > 0 ? round(cycles.reduce((a, c) => a + c.costUsd, 0) / cycles.length, 6) : null,
     },
     verdict,
+    power,
+    noChange,
     headline: '',
     warnings,
   };
@@ -823,7 +907,7 @@ function qualityOf(
     source: 'none',
     basis: changed
       ? 'Sem comparação pareada disponível (sessão interrompida antes do fim).'
-      : 'Nenhuma variante superou a régua: o campeão É o original (sem mudança para medir).',
+      : 'Nenhuma variante foi promovida: o campeão É o original (sem mudança para medir).',
     originalScorePp: o,
     championScorePp: changed ? scorePp(championScoresOf(iterationRuns, lineage)) : o,
     gainPp: changed ? null : 0,
@@ -976,9 +1060,238 @@ function verdictOf(q: QualitySummary, changed: boolean): ReportVerdict {
   return 'inconclusivo';
 }
 
+/** O Δ passou da margem exigida? (mesma tolerância do gate em `rank.ts`). */
+function aboveMargin(c: Pick<CycleRow, 'gainPp' | 'minGainPp'>): boolean {
+  return c.gainPp != null && (c.minGainPp == null || c.gainPp >= c.minGainPp - 1e-9);
+}
+
+/** Segurada SÓ pelo teste de significância, com Δ positivo acima da margem (o caso do n pequeno). */
+export function isSignificanceOnlyHold(c: Pick<CycleRow, 'decision' | 'heldBy' | 'gainPp' | 'minGainPp'>): boolean {
+  const held = c.heldBy ?? [];
+  return (
+    c.decision === 'held' &&
+    held.length === 1 &&
+    held[0] === 'significance' &&
+    c.gainPp != null &&
+    c.gainPp > 0 &&
+    aboveMargin(c)
+  );
+}
+
+/**
+ * left#2: diagnóstico da sessão SEM mudança — por que o original segurou e o
+ * que mudar. Lê o ciclo que chegou mais perto (maior Δ bruto entre os que o
+ * gate decidiu); o piso de poder vem do n REAL de pares de cada ciclo.
+ */
+function noChangeOf(cycles: readonly CycleRow[], power: TrainingPowerCheck, stoppedReason?: string): NoChangeDiagnosis {
+  const decididos = cycles.filter((c) => c.decision === 'held' || c.decision === 'inconclusive');
+  if (decididos.length === 0) {
+    if (cycles.some((c) => c.decision === 'baseline')) {
+      return {
+        cause: 'unrecorded',
+        iteration: null,
+        gainPp: null,
+        why: 'o record desta sessão (anterior ao gate por ciclo) não registra o que segurou cada variante',
+        action: 'Rode um treino novo para ter o diagnóstico por ciclo.',
+      };
+    }
+    return {
+      cause: 'stopped',
+      iteration: null,
+      gainPp: null,
+      why: `a sessão parou antes de algum ciclo chegar ao gate de promoção${stoppedReason ? ` (${stoppedReason})` : ''}`,
+      action: 'Rode de novo até o fim (confira o orçamento e se houve cancelamento).',
+    };
+  }
+  const melhor = decididos.reduce((a, b) => ((b.gainPp ?? -Infinity) > (a.gainPp ?? -Infinity) ? b : a));
+  const held = melhor.heldBy ?? [];
+  const base = { iteration: melhor.iteration, gainPp: melhor.gainPp };
+  const alfa = (c: CycleRow): number => c.alpha ?? GATE_ALPHA;
+  const recomendados = power.recommendedStages;
+  const maisCenarios = `Use ao menos ${recomendados} cenários: com mais n o teste exato ganha poder e tolera empates.`;
+
+  // Poder: nenhum ciclo decidido PODIA promover (2^-n > α em todos).
+  const comN = decididos.filter((c) => c.gateN != null && c.gateN > 0);
+  if (comN.length > 0 && comN.length === decididos.length && comN.every((c) => minAchievableGateP(c.gateN!) > alfa(c))) {
+    const n = Math.max(...comN.map((c) => c.gateN!));
+    const a = alfa(melhor);
+    return {
+      cause: 'power',
+      ...base,
+      why:
+        `com ${n} par(es) completo(s) por ciclo o gate NÃO conseguia promover nenhuma variante — o menor p possível é ` +
+        `${fmtReportP(minAchievableGateP(n))} (2^-${n}) > α ${fmtAlpha(a)}` +
+        (melhor.gainPp != null && melhor.gainPp > 0 ? `, mesmo com a melhor variante ${fmtPp(melhor.gainPp)} à frente no ${melhor.label.toLowerCase()}` : ''),
+      action: maisCenarios,
+      recommendedStages: recomendados,
+    };
+  }
+  if (melhor.decision === 'inconclusive') {
+    return {
+      cause: 'inconclusive',
+      ...base,
+      why: `no ${melhor.label.toLowerCase()}, pares excluídos demais: a decisão mudava entre o pior e o melhor caso das respostas/vereditos faltantes`,
+      action: 'Resolva as falhas de resposta ou de juiz (veja a completude das runs dos ciclos) e rode de novo.',
+    };
+  }
+  if (held.includes('contamination') || held.includes('safety')) {
+    return {
+      cause: 'guard',
+      ...base,
+      why: `no ${melhor.label.toLowerCase()}, a melhor variante foi bloqueada por ${held.includes('contamination') ? 'contaminação (copiou trecho dos cenários/gabaritos)' : 'segurança (violação nova em cenário adversarial crítico)'}`,
+      action: 'Veja o ciclo na tela de Treino: essa variante não pode ser usada como está.',
+    };
+  }
+  if (held.includes('no-pairs')) {
+    return {
+      cause: 'no-pairs',
+      ...base,
+      why: 'a comparação ficou sem par completo (respostas ou vereditos faltando nos dois lados)',
+      action: 'Veja os erros das runs dos ciclos (respostas e juiz) antes de treinar de novo.',
+    };
+  }
+  if (melhor.gainPp != null && melhor.gainPp <= 0) {
+    return {
+      cause: 'no-gain',
+      ...base,
+      why: `nenhuma variante ganhou da régua (melhor Δ ${fmtPp(melhor.gainPp)})`,
+      action: 'Tente outras técnicas (ou outro otimizador) e confira se os cenários medem o que importa.',
+    };
+  }
+  if (held.includes('min-gain')) {
+    const origem = melhor.minGainSource === 'config' ? 'configurada em minGain' : 'default max(1; 50/n)';
+    return {
+      cause: 'min-gain',
+      ...base,
+      why: `no ${melhor.label.toLowerCase()}, o melhor Δ (${fmtPp(melhor.gainPp)}) ficou abaixo da margem exigida (${fmtPp(melhor.minGainPp)}, ${origem})${held.includes('significance') ? ' e sem significância' : ''}`,
+      action:
+        melhor.minGainSource === 'config'
+          ? 'Reveja a margem (minGain) ou use mais cenários para medir ganhos menores.'
+          : `Mais cenários baixam a margem default (50/n) e o ruído — use ao menos ${recomendados}.`,
+      recommendedStages: recomendados,
+    };
+  }
+  if (held.includes('significance')) {
+    const nota = gatePowerNote(melhor.gateN, melhor.alpha);
+    return {
+      cause: 'significance',
+      ...base,
+      why:
+        `no ${melhor.label.toLowerCase()}, a melhor variante ganhou ${fmtPp(melhor.gainPp)}` +
+        (melhor.minGainPp != null ? ` (acima da margem de ${fmtPp(melhor.minGainPp)})` : '') +
+        `, mas o ganho não foi significativo — n pequeno (p aj. ${fmtReportP(melhor.pAdjusted)} > α ${fmtAlpha(alfa(melhor))})` +
+        (nota ? `; ${nota}` : ''),
+      action: maisCenarios,
+      recommendedStages: recomendados,
+    };
+  }
+  if (held.includes('reeval')) {
+    return {
+      cause: 'reeval',
+      ...base,
+      why: `no ${melhor.label.toLowerCase()}, a melhor variante passou no gate, mas o ganho não se confirmou na re-avaliação limpa (provável ruído da seleção)`,
+      action: `Mais cenários tornam a seleção mais estável (ao menos ${recomendados}); confira também a consistência do juiz.`,
+      recommendedStages: recomendados,
+    };
+  }
+  return {
+    cause: 'no-gain',
+    ...base,
+    why: `nenhuma variante ganhou da régua (melhor Δ ${fmtPp(melhor.gainPp)})`,
+    action: 'Tente outras técnicas (ou outro otimizador) e confira se os cenários medem o que importa.',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // formatação (compartilhada por CLI, HTML e web)
 // ---------------------------------------------------------------------------
+
+/** α em PT-BR ("0,05"). */
+function fmtAlpha(a: number): string {
+  return String(a).replace('.', ',');
+}
+
+/**
+ * left#2: nota de PODER do gate para um ciclo — o teste é exato, então com n
+ * pares o menor p ajustado possível é 2^-n (o K não move o piso). `null`
+ * quando o n dá folga (o p alto é do ganho inconsistente, não do n).
+ */
+export function gatePowerNote(n: number | null | undefined, alpha: number | null | undefined): string | null {
+  if (n == null || !Number.isFinite(n) || n <= 0) return null;
+  const a = alpha ?? GATE_ALPHA;
+  const minP = minAchievableGateP(n);
+  if (minP > a) {
+    return `com ${n} par(es) o menor p possível do gate é ${fmtReportP(minP)} (2^-${n}) > α ${fmtAlpha(a)}: nenhuma variante poderia ser promovida`;
+  }
+  const folga = n - minPairsForPromotion(a);
+  if (folga < TRAINING_TIE_ALLOWANCE) {
+    return (
+      `com ${n} pares o gate só promove se a variante vencer em ${folga === 0 ? 'todos' : 'quase todos'} ` +
+      `(p mínimo ${fmtReportP(minP)}): ${folga === 0 ? 'um único empate já segura' : `${folga + 1} empates já seguram`}`
+    );
+  }
+  return null;
+}
+
+/** Rótulo curto PT-BR de cada condição que segurou o gate (tabela de ciclos). */
+export const HOLD_LABEL: Record<string, string> = {
+  'no-pairs': 'sem par completo',
+  'min-gain': 'abaixo da margem',
+  significance: 'sem significância',
+  reeval: 're-avaliação não confirmou',
+  contamination: 'contaminação',
+  safety: 'segurança',
+};
+
+/**
+ * left#2: rótulos do que segurou o ciclo — FONTE ÚNICA (Markdown, HTML e a
+ * página da SPA). Segurada SÓ pela significância com Δ acima da margem vira
+ * "ganho não significativo (n pequeno)", não um código cru que soa a "pior".
+ */
+export function cycleHoldLabels(c: Pick<CycleRow, 'decision' | 'heldBy' | 'gainPp' | 'minGainPp'>): string[] {
+  if (isSignificanceOnlyHold(c)) return ['ganho não significativo (n pequeno)'];
+  return (c.heldBy ?? []).map((h) => HOLD_LABEL[h] ?? h);
+}
+
+/**
+ * left#2: frase do que segurou um ciclo (linha do tempo do relatório). `null`
+ * quando o ciclo não foi segurado pelo gate (promovido, interrompido, legado).
+ */
+export function cycleHoldText(c: CycleRow): string | null {
+  if (c.decision === 'inconclusive') {
+    return 'inconclusiva: com os pares excluídos, a decisão mudava entre o pior e o melhor caso — não promove';
+  }
+  if (c.decision !== 'held') return null;
+  const held = c.heldBy ?? [];
+  const partes: string[] = [];
+  const a = fmtAlpha(c.alpha ?? GATE_ALPHA);
+  if (held.includes('no-pairs')) partes.push('sem par completo (resposta ou veredito faltando nos dois lados)');
+  if (held.includes('contamination')) partes.push('bloqueada por contaminação: o prompt copiou trecho dos cenários/gabaritos');
+  if (held.includes('safety')) partes.push('bloqueada por segurança: violação nova em cenário adversarial crítico');
+  const sig = held.includes('significance');
+  const mg = held.includes('min-gain');
+  if ((sig || mg) && c.gainPp != null && c.gainPp <= 0) {
+    partes.push(`a melhor variante não ganhou da régua (Δ ${fmtPp(c.gainPp)})`);
+  } else if (mg) {
+    partes.push(`Δ ${fmtPp(c.gainPp)} abaixo da margem exigida (${fmtPp(c.minGainPp)})${sig ? ' e sem significância' : ''}`);
+  } else if (sig) {
+    const nota = gatePowerNote(c.gateN, c.alpha);
+    partes.push(
+      `ganho não significativo (n pequeno): Δ ${fmtPp(c.gainPp)}` +
+        (c.minGainPp != null ? ` acima da margem (${fmtPp(c.minGainPp)})` : '') +
+        `, mas p aj. ${fmtReportP(c.pAdjusted)} > α ${a}` +
+        (nota ? ` — ${nota}` : ''),
+    );
+  }
+  if (held.includes('reeval')) partes.push('o ganho não se confirmou na re-avaliação limpa');
+  return partes.length ? `segurou: ${partes.join('; ')}` : null;
+}
+
+/** left#2: o diagnóstico da sessão sem mudança numa frase (manchete e seções). */
+export function noChangeText(d: NoChangeDiagnosis): string {
+  const why = d.why.charAt(0).toUpperCase() + d.why.slice(1);
+  return `${why}. ${d.action}`;
+}
 
 /**
  * Texto da re-avaliação limpa de um ciclo — FONTE ÚNICA do relatório (HTML,
@@ -1096,7 +1409,10 @@ function headlineOf(r: SessionReport): string {
   const q = r.quality;
   const c = r.cost;
   if (!r.prompts.changed) {
-    return `Em ${r.session.cyclesRun} ciclo(s), nenhuma variante superou o prompt original com margem — o original segue campeão (custo por chamada inalterado). Otimizar custou ${fmtUsd(r.optimization.totalUsd)}.`;
+    // left#2: diz POR QUE (poder/margem/significância/re-avaliação) e o que
+    // mudar — "nenhuma superou com margem" só era verdade no caso min-gain.
+    const porque = r.noChange ? ` Por quê: ${r.noChange.why}. ${r.noChange.action}` : '';
+    return `Em ${r.session.cyclesRun} ciclo(s), nenhuma variante foi promovida — o original segue campeão (custo por chamada inalterado).${porque} Otimizar custou ${fmtUsd(r.optimization.totalUsd)}.`;
   }
   const ganho =
     q.gainPp == null
@@ -1144,13 +1460,19 @@ export function renderSessionReportMarkdown(r: SessionReport): string {
   L.push('|---|---|---|---|---|---|---|---|---|');
   for (const cy of r.cycles) {
     L.push(
-      `| ${cy.label} | ${fmtPp(cy.controlScorePp, false)} | ${fmtPp(cy.bestScorePp, false)} | ${fmtPp(cy.gainPp)} | ${fmtPp(cy.gainCorrectedPp)} | ${cy.pAdjusted == null ? '—' : cy.pAdjusted.toFixed(3).replace('.', ',')} | ${DECISION_LABEL[cy.decision]}${cy.heldBy?.length ? ` (${cy.heldBy.join(', ')})` : ''} | ${fmtUsd(cy.costUsd)} | ${fmtUsd(cy.cumulativeCostUsd)} |`,
+      `| ${cy.label} | ${fmtPp(cy.controlScorePp, false)} | ${fmtPp(cy.bestScorePp, false)} | ${fmtPp(cy.gainPp)} | ${fmtPp(cy.gainCorrectedPp)} | ${cy.pAdjusted == null ? '—' : cy.pAdjusted.toFixed(3).replace('.', ',')} | ${DECISION_LABEL[cy.decision]}${cycleHoldLabels(cy).length ? `: ${cycleHoldLabels(cy).join(', ')}` : ''} | ${fmtUsd(cy.costUsd)} | ${fmtUsd(cy.cumulativeCostUsd)} |`,
     );
   }
-  const reevals = r.cycles.filter((cy) => cy.reeval);
-  if (reevals.length > 0) {
+  const notas = r.cycles
+    .map((cy) => ({ cy, textos: [cycleHoldText(cy), cy.reeval ? cycleReevalText(cy.reeval) : null].filter(Boolean) }))
+    .filter((x) => x.textos.length > 0);
+  if (notas.length > 0) {
     L.push('');
-    for (const cy of reevals) L.push(`- ${cy.label}: ${cycleReevalText(cy.reeval!)}`);
+    for (const { cy, textos } of notas) L.push(`- ${cy.label}: ${textos.join('; ')}`);
+  }
+  if (r.noChange) {
+    L.push('');
+    L.push(`**Por que o original segurou:** ${noChangeText(r.noChange)}`);
   }
   L.push('');
   L.push('## Quanto a mudança mexe no custo de uso');

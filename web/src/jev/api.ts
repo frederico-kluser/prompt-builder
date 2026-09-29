@@ -373,7 +373,14 @@ export async function importJevRecordFiles(files: readonly { name: string; text:
       porNome.set(l, { name, ok: false, kind: r.kind, id, error: 'este id está executando nesta aba.' });
       continue;
     }
-    const gravou = r.kind === 'run' ? await saveJevRun(r.record) : await saveJevSession(r.record, casosDaSessao.get(id)?.size ?? 0);
+    // left#6: o TTL LGPD da SPA (`localRetention.ts`) conta da IMPORTAÇÃO — sem
+    // o carimbo, importar um record do terminal com > 90 dias "dava certo" e a
+    // próxima abertura do app o apagava em silêncio (mesma regra do Node).
+    const importedAt = new Date().toISOString();
+    const gravou =
+      r.kind === 'run'
+        ? await saveJevRun(Object.assign({}, r.record, { importedAt }))
+        : await saveJevSession(Object.assign({}, r.record, { importedAt }), casosDaSessao.get(id)?.size ?? 0);
     // A cópia viva (se houver) ficaria na frente do IndexedDB nas leituras.
     live.delete(id);
     porNome.set(

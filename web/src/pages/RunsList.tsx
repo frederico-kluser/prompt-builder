@@ -1,14 +1,24 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Search } from 'lucide-react';
+import { Download, Search, Upload } from 'lucide-react';
 import type { RunMode, RunSummary, SessionSummary } from '../api';
 import { fetchRuns, fetchSessions } from '../api';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
 import { SkeletonResolveList, SkeletonResolveRow, Skeleton } from '@/components/motion-ui/skeleton';
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Banner, EmptyState, PageHeader, Screen, StatusPill, Tag } from '../components/primitives';
 import { StorageNotice } from '../components/StorageNotice';
-import { JevHistory } from '../components/jev/JevHistory';
+import {
+  historyExchangeJson,
+  importRecordFiles,
+  isRecordImportError,
+  type RecordImportResult,
+} from '../recordExchange';
+
+// left#15: o histórico JEV (e o motor JEV que ele puxa) só baixa quando a aba
+// "JEV (decisões)" é aberta.
+const JevHistory = lazy(async () => ({ default: (await import('../components/jev/JevHistory')).JevHistory }));
 
 const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 
@@ -109,6 +119,168 @@ function Row({
   );
 }
 
+function baixar(nome: string, texto: string): void {
+  const url = URL.createObjectURL(new Blob([texto], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = nome;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+type Arquivo = { name: string; text: string };
+type ImportState =
+  | { kind: 'ok'; result: RecordImportResult }
+  | { kind: 'conflict'; message: string; ids: string[]; files: Arquivo[] }
+  | { kind: 'error'; message: string };
+
+const plural = (n: number, um: string, varios: string): string => `${n} ${n === 1 ? um : varios}`;
+
+/** Resumo do que entrou (e do que o pacote declara ter perdido NA ORIGEM). */
+function ImportOk({ result: r }: { result: RecordImportResult }) {
+  const partes = [
+    r.imported.runs.length ? plural(r.imported.runs.length, 'run', 'runs') : '',
+    r.imported.sessions.length ? plural(r.imported.sessions.length, 'treino', 'treinos') : '',
+  ].filter(Boolean);
+  const perdidos = Object.entries(r.lostFields).filter(([, campos]) => campos && campos.length > 0);
+  const abrir = r.imported.sessions[0]
+    ? { to: `/training/${r.imported.sessions[0]}`, label: 'Abrir o treino' }
+    : r.imported.runs.length === 1
+      ? { to: `/runs/${r.imported.runs[0]}`, label: 'Abrir a run' }
+      : null;
+  return (
+    <>
+      <strong>{partes.length ? `Importado: ${partes.join(' e ')}.` : 'Nada novo para importar.'}</strong>
+      {r.skipped.length > 0 && <> {plural(r.skipped.length, 'registro idêntico pulado', 'registros idênticos pulados')}.</>}
+      {r.overwritten.length > 0 && <> {plural(r.overwritten.length, 'registro substituído', 'registros substituídos')}.</>}
+      {r.failed.length > 0 && <> {plural(r.failed.length, 'registro não coube', 'registros não couberam')} no armazenamento do navegador.</>}
+      {perdidos.length > 0 && (
+        <> O pacote declara campos perdidos na origem: {perdidos.map(([k, c]) => `${k}: ${c!.join(', ')}`).join(' · ')}.</>
+      )}
+      {r.libraryItemsIgnored > 0 && (
+        <>
+          {' '}
+          {plural(r.libraryItemsIgnored, 'item', 'itens')} de biblioteca de cenários ficaram de fora (ela mora no terminal:{' '}
+          <code className="font-mono text-[12px]">prompt-builder library add &lt;arquivo&gt;</code>).
+        </>
+      )}
+      {abrir && (
+        <>
+          {' '}
+          <Link to={abrir.to} className="font-medium text-primary underline-offset-2 hover:underline">
+            {abrir.label}
+          </Link>
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * left#11 (IMPL-089): troca com o terminal em `prompt-builder-exchange@1` —
+ * «Importar» aceita o pacote do CLI (`runs|sessions export`, arquivo único ou
+ * o diretório inteiro) e os JSON antigos; «Exportar histórico» baixa as runs e
+ * os treinos DESTE navegador no mesmo formato (backup antes de apagar/do TTL).
+ */
+function HistoryTransfer({ onImported }: { onImported: () => void }) {
+  const ref = useRef<HTMLInputElement>(null);
+  const [estado, setEstado] = useState<ImportState | null>(null);
+  const [ocupado, setOcupado] = useState(false);
+
+  async function importar(files: Arquivo[], overwrite = false) {
+    setOcupado(true);
+    try {
+      const result = await importRecordFiles(files, { overwrite });
+      setEstado({ kind: 'ok', result });
+      onImported();
+    } catch (err) {
+      if (isRecordImportError(err) && err.conflicts.length > 0) {
+        setEstado({ kind: 'conflict', message: err.message, ids: err.conflicts.map((c) => c.id), files });
+      } else {
+        setEstado({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
+      }
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  async function exportar() {
+    setOcupado(true);
+    try {
+      const { json, runs, sessions } = await historyExchangeJson();
+      if (runs + sessions === 0) {
+        setEstado({ kind: 'error', message: 'Nada para exportar: não há runs nem treinos salvos neste navegador.' });
+        return;
+      }
+      baixar(`prompt-builder-historico-${new Date().toISOString().slice(0, 10)}.json`, json);
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  return (
+    <div className="mb-4 flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={ocupado}
+          onClick={() => ref.current?.click()}
+          title="Pacote prompt-builder-exchange@1 (runs export --format exchange / sessions export) ou o JSON de uma run"
+        >
+          <Upload aria-hidden="true" />
+          Importar
+        </Button>
+        <Button type="button" variant="outline" size="sm" disabled={ocupado} onClick={() => void exportar()}>
+          <Download aria-hidden="true" />
+          Exportar histórico
+        </Button>
+        <input
+          ref={ref}
+          type="file"
+          multiple
+          accept="application/json,.json,.jsonl"
+          className="hidden"
+          aria-label="Pacote exchange@1 ou JSON de run/treino"
+          onChange={(e) => {
+            const fs = e.target.files ? [...e.target.files] : [];
+            e.target.value = '';
+            if (fs.length) void Promise.all(fs.map(async (f) => ({ name: f.name, text: await f.text() }))).then((lidos) => importar(lidos));
+          }}
+        />
+      </div>
+      {estado?.kind === 'ok' && (
+        <Banner tone="neutral">
+          <ImportOk result={estado.result} />
+        </Banner>
+      )}
+      {estado?.kind === 'error' && <Banner tone="error">{estado.message}</Banner>}
+      {estado?.kind === 'conflict' && (
+        <Banner tone="warn" alert>
+          <strong>{estado.message}</strong>{' '}
+          {estado.ids.slice(0, 5).map((id) => (
+            <code key={id} className="mr-1 font-mono text-[12px]">
+              {id.slice(0, 8)}
+            </code>
+          ))}
+          {estado.ids.length > 5 && <>+{estado.ids.length - 5}</>}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button type="button" size="sm" disabled={ocupado} onClick={() => void importar(estado.files, true)}>
+              Substituir pelos do arquivo
+            </Button>
+            <Button type="button" size="sm" variant="outline" onClick={() => setEstado(null)}>
+              Cancelar
+            </Button>
+          </div>
+        </Banner>
+      )}
+    </div>
+  );
+}
+
 export function RunsList() {
   // Modo JEV (chunk 2): aba "LLM | JEV" sobre a lista; `?tipo=jev` abre direto nela.
   const location = useLocation();
@@ -119,6 +291,8 @@ export function RunsList() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | Group>('all');
   const [query, setQuery] = useState('');
+  // Recarrega a lista depois de um import (left#11).
+  const [recarga, setRecarga] = useState(0);
 
   useEffect(() => {
     Promise.all([fetchRuns(), fetchSessions().catch(() => [] as SessionSummary[])])
@@ -128,7 +302,7 @@ export function RunsList() {
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [recarga]);
 
   // Sessões de treino viram uma linha (link p/ /training); as runs-filhas (iterações)
   // ficam ocultas da lista plana — são acessíveis pela tela da sessão.
@@ -186,7 +360,9 @@ export function RunsList() {
             />
             <Input className="pl-8" placeholder="Buscar por tema…" aria-label="Buscar por tema" value={query} onChange={(e) => setQuery(e.target.value)} />
           </div>
-          <JevHistory query={query} />
+          <Suspense fallback={<Skeleton className="h-40 w-full rounded-xl" />}>
+            <JevHistory query={query} />
+          </Suspense>
         </>
       ) : (
       <>
@@ -227,6 +403,8 @@ export function RunsList() {
           />
         </div>
       </div>
+
+      <HistoryTransfer onImported={() => setRecarga((n) => n + 1)} />
 
       <div className="overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
         {loading ? (

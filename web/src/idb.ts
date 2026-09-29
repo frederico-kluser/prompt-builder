@@ -304,6 +304,28 @@ export async function idbGet<T>(store: Store, key: string): Promise<T | undefine
   }
 }
 
+/**
+ * Só as CHAVES de uma store (left#6: o prune do TTL acha as entradas de journal
+ * de uma run sem trazer para a memória os records inteiros, que chegam a
+ * centenas de KB cada). Sem `getAllKeys` (IndexedDB 1.0), cai no `getAll`.
+ * Degrada para vazio, como as outras leituras.
+ */
+export async function idbGetAllKeys(store: Store): Promise<string[]> {
+  try {
+    const db = await openDb();
+    const os = db.transaction(store, 'readonly').objectStore(store);
+    if (typeof (os as { getAllKeys?: unknown }).getAllKeys === 'function') {
+      const keys = (await reqProm(os.getAllKeys())) ?? [];
+      return keys.filter((k): k is string => typeof k === 'string');
+    }
+    const all = (await reqProm<{ id?: unknown }[]>(os.getAll() as IDBRequest<{ id?: unknown }[]>)) ?? [];
+    return all.map((r) => r?.id).filter((k): k is string => typeof k === 'string');
+  } catch (err) {
+    warnRead(store, err);
+    return [];
+  }
+}
+
 export async function idbGetAll<T>(store: Store): Promise<T[]> {
   try {
     const db = await openDb();
