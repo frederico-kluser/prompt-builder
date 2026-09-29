@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { chatCompletion } from './openrouter.js';
 import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { callJudgeWithRetry, JUDGE_TEMPERATURE, withReminder } from './engine/judgeRetry.js';
+import { caseParts } from './engine/caseInput.js';
 import { isJudgeCutKind } from './engine/truncation.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
 import { aggregateVerdicts } from './engine/verdictAggregate.js';
@@ -197,17 +198,26 @@ export interface ListwisePrompt {
  */
 export function buildListwisePrompt(stage: StageSpec, ordered: { text: string }[]): ListwisePrompt {
   const rubric = stage.rubric?.trim();
-  const guard = newJudgeGuard([stage.question, stage.productContext ?? '', rubric ?? '', ...ordered.map((r) => r.text)]);
+  // IMPL-059 (R-05:REC-2): o CASO byte a byte como os modelos o receberam
+  // (`caseParts`: o bloco delimitado do contexto + a pergunta), na MESMA ordem
+  // do competidor — contexto antes da pergunta. Sem contexto, sem bloco (como
+  // no competidor).
+  const caso = caseParts(stage);
+  const guard = newJudgeGuard([caso.context, caso.question, rubric ?? '', ...ordered.map((r) => r.text)]);
   const labels = ordered.map((_, i) => letterFor(i));
   const blocks = ordered.map((r, i) => markedBlock(`RESPOSTA ${labels[i]}`, guard.nonce, r.text));
   const schema = listwiseSchema(labels);
   const partes = [
-    'PERGUNTA DO USUARIO:',
-    markedBlock('PERGUNTA', guard.nonce, stage.question),
     // IMPL-009: o contexto do caso É entregue a todos os modelos (bloco de dado
     // antes da pergunta) — o rótulo antigo "fornecido aos modelos" era falso p/ variante.
-    'CONTEXTO DO CASO (entregue a todos os modelos como dado, antes da pergunta):',
-    markedBlock('CONTEXTO', guard.nonce, stage.productContext ?? ''),
+    ...(caso.context
+      ? [
+          'CONTEXTO DO CASO (entregue a todos os modelos como dado, antes da pergunta):',
+          markedBlock('CONTEXTO', guard.nonce, caso.context),
+        ]
+      : []),
+    'PERGUNTA DO USUARIO:',
+    markedBlock('PERGUNTA', guard.nonce, caso.question),
   ];
   if (rubric) {
     partes.push(

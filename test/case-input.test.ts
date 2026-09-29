@@ -168,7 +168,8 @@ describe('IMPL-009 — rótulo do listwise deixa de ser falso', () => {
     expect(user).not.toContain('CONTEXTO FORNECIDO AOS MODELOS');
     // IMPL-006: o contexto vai num bloco marcado logo depois do rótulo.
     expect(user).toContain('CONTEXTO DO CASO (entregue a todos os modelos como dado, antes da pergunta):');
-    expect(readMarkedBlock(user, 'CONTEXTO')).toBe(STAGE.productContext);
+    // IMPL-059: o conteúdo é o bloco do caso BYTE A BYTE como o competidor o recebe.
+    expect(readMarkedBlock(user, 'CONTEXTO')).toBe(renderCaseContext(STAGE.productContext));
   });
 });
 
@@ -260,8 +261,9 @@ describe('IMPL-009 (1) ponta a ponta — run variation nos DOIS motores', () => 
 });
 
 describe('IMPL-009 (2) — snapshot das mensagens montadas por papel', () => {
-  // Hoje só o competidor usa buildCaseInput; gabarito/juízes/duelo/datagen
-  // entram aqui no IMPL-059 (R-05:REC-2). As mensagens vêm do corpo REAL
+  // Gabarito/juízes/duelo consomem o MESMO caso desde o IMPL-059 (R-05:REC-2)
+  // — a paridade byte a byte por papel é test/case-input-parity.test.ts; o
+  // snapshot dos corpos de juízo, test/contracts-prompt-snapshot.test.ts. As mensagens vêm do corpo REAL
   // enviado ao gateway — mudar a montagem (ordem, rótulos, separadores, quem
   // vai no system) sem atualizar este snapshot REPROVA.
   it('competidor: compare, variante e contexto vazio', async () => {

@@ -3,6 +3,7 @@ import { chatCompletion } from './openrouter.js';
 import { ROLE_MAX_TOKENS } from './roleLimits.js';
 import { matchExpected } from './engine/groundTruth.js';
 import { callJudgeWithRetry, JUDGE_TEMPERATURE, withReminder } from './engine/judgeRetry.js';
+import { caseParts } from './engine/caseInput.js';
 import { unjudgeableReason } from './engine/verdictIntegrity.js';
 import { isJudgeCutKind } from './engine/truncation.js';
 import { aggregateVerdicts, tieLabel } from './engine/verdictAggregate.js';
@@ -131,8 +132,9 @@ export interface ReferenceJudgePrompt {
 }
 
 /**
- * Prompt do usuario (IMPL-006): referencia, pergunta, rubrica (prioritaria) e
- * candidato, CADA UM num bloco marcado com o codigo sorteado para ESTE
+ * Prompt do usuario (IMPL-006): referencia, contexto do caso (IMPL-059),
+ * pergunta, rubrica (prioritaria) e candidato, CADA UM num bloco marcado com o
+ * codigo sorteado para ESTE
  * veredito, e o bloco INSTRUCOES anti-injecao por ultimo. O texto do candidato
  * so aparece escapado e dentro de `⟦CANDIDATO·codigo⟧ … ⟦/CANDIDATO·codigo⟧`.
  */
@@ -142,12 +144,19 @@ export function buildReferenceJudgePrompt(
   candidateText: string,
 ): ReferenceJudgePrompt {
   const rubric = stage.rubric?.trim();
-  const guard = newJudgeGuard([reference, stage.question, rubric ?? '', candidateText]);
+  // IMPL-059 (R-05:REC-2): o CASO que o candidato recebeu — contexto + pergunta,
+  // byte a byte (`caseParts`). Antes o pointwise NÃO via o productContext: a
+  // referência (escrita com ele) punia o candidato por informação privilegiada.
+  const caso = caseParts(stage);
+  const guard = newJudgeGuard([reference, caso.context, caso.question, rubric ?? '', candidateText]);
   const partes = [
     'REFERÊNCIA (resposta CANDIDATA de outro modelo — pode estar errada):',
     markedBlock('REFERÊNCIA', guard.nonce, reference),
+    ...(caso.context
+      ? ['CONTEXTO DO CASO (o mesmo que o candidato recebeu, como dado):', markedBlock('CONTEXTO', guard.nonce, caso.context)]
+      : []),
     'PERGUNTA:',
-    markedBlock('PERGUNTA', guard.nonce, stage.question),
+    markedBlock('PERGUNTA', guard.nonce, caso.question),
   ];
   if (rubric) {
     partes.push('CRITÉRIO DE CORRETUDE DESTA ETAPA (tem prioridade):', markedBlock('CRITÉRIO', guard.nonce, rubric));

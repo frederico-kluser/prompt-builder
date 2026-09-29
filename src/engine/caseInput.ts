@@ -19,8 +19,10 @@
 //
 // Módulo PURO (sem rede, sem Node): fonte única em `src/`, o web re-exporta
 // por shim (`web/src/engine/caseInput.ts`, classificado em
-// test/engine-sync.test.ts). Hoje só o competidor consome; estender a
-// gabarito/juízes/duelo/datagen é o IMPL-059 (R-05:REC-2).
+// test/engine-sync.test.ts). Desde o IMPL-059 (R-05:REC-2) TODO papel que lê
+// o caso consome `caseParts`/`renderCaseInput`: competidor, gabarito (+ o
+// verificador e o 2º gabarito), juiz pointwise, listwise e duelo — o caso é
+// byte a byte o mesmo, só as instruções de papel mudam.
 
 import type { StageSpec } from '../types.js';
 
@@ -56,6 +58,26 @@ export function renderCaseContext(productContext: string | undefined): string {
 }
 
 /**
+ * As DUAS partes do caso, BYTE A BYTE como o competidor as recebe (IMPL-059,
+ * R-05:REC-2): o bloco delimitado do contexto ('' sem contexto) e a pergunta.
+ * TODO papel que lê o caso (gabarito, verificador do gabarito, juiz pointwise,
+ * listwise e duelo) consome ESTAS strings — antes o pointwise e o duelo nem
+ * recebiam o productContext (o juiz punia o candidato por informação que só a
+ * referência tinha) e o gabarito o recebia como SYSTEM. Os juízes as colocam
+ * em blocos marcados (anti-injeção); o conteúdo é o mesmo. Nunca inclui o
+ * system prompt do candidato (vetor de hacking do julgamento).
+ */
+export function caseParts(stage: CaseStage): { context: string; question: string } {
+  return { context: renderCaseContext(stage.productContext), question: stage.question.trim() };
+}
+
+/** O texto do caso como o competidor o recebe no `user`: bloco do contexto + linha em branco + pergunta. */
+export function renderCaseInput(stage: CaseStage): string {
+  const { context, question } = caseParts(stage);
+  return context ? `${context}\n\n${question}` : question;
+}
+
+/**
  * Mensagens do caso na ordem documentada acima. `variant` = o system prompt
  * sob teste do contestant (ausente ou em branco = sem system).
  */
@@ -64,8 +86,6 @@ export function buildCaseInput(stage: CaseStage, variant?: string): CaseMessage[
   if (typeof variant === 'string' && variant.trim() !== '') {
     messages.push({ role: 'system', content: variant });
   }
-  const block = renderCaseContext(stage.productContext);
-  const question = stage.question.trim();
-  messages.push({ role: 'user', content: block ? `${block}\n\n${question}` : question });
+  messages.push({ role: 'user', content: renderCaseInput(stage) });
   return messages;
 }

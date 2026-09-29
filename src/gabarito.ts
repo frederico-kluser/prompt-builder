@@ -13,6 +13,7 @@ import {
   strictObjectSchema,
 } from './engine/judgeGuard.js';
 import { callJudgeWithRetry, JUDGE_TEMPERATURE, withReminder } from './engine/judgeRetry.js';
+import { caseParts, renderCaseInput } from './engine/caseInput.js';
 import {
   DEFAULT_AUDIT_SAMPLE_RATE,
   checkReferenceAgainstRubric,
@@ -68,22 +69,24 @@ export interface GenerateReferencesParams {
   stageNumbers?: number[];
 }
 
-// System = productContext da etapa (idêntico ao que os competidores recebem) +
-// o papel de modelo de referência. User = pergunta + rubrica (quando houver)
-// como critério obrigatório + instrução de saída limpa (sem meta-comentários,
-// para o gabarito poder ser comparado diretamente com as respostas).
+/** Instrução de PAPEL do gabarito (system) — o caso NÃO mora aqui (IMPL-059). */
+export const GABARITO_ROLE_PROMPT =
+  'Você é o MODELO DE REFERÊNCIA deste benchmark: sua tarefa é produzir o GABARITO — a resposta ideal que servirá de régua para julgar as respostas dos competidores. O contexto do caso chega como DADO no início da mensagem do usuário, exatamente como os competidores o recebem.';
+
+// IMPL-059 (R-05:REC-2): System = SÓ a instrução de papel. User = o CASO byte a
+// byte como o competidor o recebe (`renderCaseInput`: bloco delimitado do
+// contexto + pergunta) + rubrica (quando houver) como critério obrigatório +
+// instrução de saída limpa (sem meta-comentários, para o gabarito poder ser
+// comparado diretamente com as respostas). Antes o productContext ia no SYSTEM
+// do gabarito e como bloco de dado no user do competidor — o input do caso não
+// era o mesmo entre quem escreve a régua e quem é medido por ela.
 function buildMessages(stage: StageSpec): ChatMessage[] {
   const rubrica = stage.rubric?.trim();
   return [
-    {
-      role: 'system',
-      content: `${stage.productContext}
-
-Você é o MODELO DE REFERÊNCIA deste benchmark: sua tarefa é produzir o GABARITO — a resposta ideal que servirá de régua para julgar as respostas dos competidores.`,
-    },
+    { role: 'system', content: GABARITO_ROLE_PROMPT },
     {
       role: 'user',
-      content: `${stage.question}${
+      content: `${renderCaseInput(stage)}${
         rubrica
           ? `\n\nCRITÉRIO DE CORRETUDE (rubrica) — a resposta ideal DEVE satisfazer:\n${rubrica}`
           : ''
@@ -249,12 +252,17 @@ export async function verifyReferenceAgainstRubric(params: {
   if (!rubrica && stage.expected === undefined) {
     return inconclusivo('sem rubrica nem rótulo esperado: nada contra o que verificar o gabarito.');
   }
-  const guard = newJudgeGuard([referencia, stage.question, rubrica]);
+  // IMPL-059: o CASO byte a byte como o competidor o recebe (contexto + pergunta).
+  const caso = caseParts(stage);
+  const guard = newJudgeGuard([referencia, caso.context, caso.question, rubrica]);
   const partes = [
     'REFERÊNCIA (gabarito gerado por outro modelo — pode estar errada):',
     markedBlock('REFERÊNCIA', guard.nonce, referencia),
+    ...(caso.context
+      ? ['CONTEXTO DO CASO (o mesmo que os competidores recebem, como dado):', markedBlock('CONTEXTO', guard.nonce, caso.context)]
+      : []),
     'PERGUNTA:',
-    markedBlock('PERGUNTA', guard.nonce, stage.question),
+    markedBlock('PERGUNTA', guard.nonce, caso.question),
   ];
   if (rubrica) {
     partes.push(
