@@ -20,6 +20,7 @@ import { holdoutSkipReasonText } from '../../holdout.js';
 import { holdoutSkipReasonOf } from '../../engine/sessionDecision.js';
 import { CliError, DEFAULT_HINT, EXIT, failAndExit, fmtUsd, renderSpend, toCliError, type Output } from '../output.js';
 import { fatalGatewayErrorFromRecord } from '../../openrouter.js';
+import { effectiveRoleTimeouts } from '../../roleLimits.js';
 import {
   assertNoUnknownConfigKeys,
   buildContext,
@@ -474,6 +475,12 @@ function renderDryRun(out: Output, config: RunConfig, rep: PreflightReport): voi
   out.line(JSON.stringify(config, null, 2));
   out.line();
   out.line(`Custo estimado: ${fmtUsd(rep.estimate.low)} – ${fmtUsd(rep.estimate.high)}`);
+  // extra#2: timeout EFETIVO por papel (juiz/gabarito/datagen/reescritor têm piso).
+  const t = effectiveRoleTimeouts(config);
+  out.line(
+    `Timeouts:       competidor ${t.competitor / 1000}s · juiz ${t.judge / 1000}s · duelo ${t.duel / 1000}s · ` +
+      `gabarito ${t.gabarito / 1000}s · datagen ${t.datagen / 1000}s · reescritor ${t.rewriter / 1000}s`,
+  );
   const c = rep.checks;
   out.line(
     'Pré-voo:        ' +
@@ -1066,6 +1073,8 @@ async function runCommand(mode: RunMode, argv: string[], detached?: DetachedBody
     const resumo = {
       dryRun: true,
       estimate: rep.estimate,
+      // extra#2: timeouts efetivos por papel (ms) — o piso do papel sobre `timeoutMs`.
+      roleTimeoutsMs: effectiveRoleTimeouts(configComOrcamento),
       wouldRefuse: rep.wouldRefuse,
       requires: rep.requires,
       warnings: rep.warnings,

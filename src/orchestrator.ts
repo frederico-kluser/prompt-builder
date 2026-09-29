@@ -52,6 +52,7 @@ import { contestantsFromConfig } from './normalize.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { reasoningLevelForRole } from './modelCaps.js';
+import { roleTimeoutMs } from './roleLimits.js';
 import { gatewayErrorFields, isFatalGatewayError, listModels, reconcileAtRunEnd } from './openrouter.js';
 import {
   cutDuels,
@@ -658,7 +659,17 @@ async function runLoop(
 
   // Datagen em lote/gabaritos podem ser lentos (varios cenarios por chamada,
   // as vezes com reasoning): folga alem do timeout dos competidores.
-  const datagenTimeout = Math.max(record.config.timeoutMs ?? 60_000, 120_000);
+  // extra#2: timeout EFETIVO por papel (src/roleLimits.ts). `config.timeoutMs`
+  // (default 60 s) é da RESPOSTA do competidor; juiz/duelo/gabarito/datagen têm
+  // piso próprio — num treino real o juiz e o reescritor estouravam os 60 s.
+  const cfgTimeout = record.config.timeoutMs;
+  const tempoPapel = {
+    datagen: roleTimeoutMs('datagen', cfgTimeout, record.config.reasoning?.datagen),
+    gabarito: roleTimeoutMs('gabarito', cfgTimeout, reasoningLevelForRole(record.config.reasoning, 'gab')),
+    judge: roleTimeoutMs('judge', cfgTimeout, reasoningLevelForRole(record.config.reasoning, 'judge')),
+    duel: roleTimeoutMs('duel', cfgTimeout, reasoningLevelForRole(record.config.reasoning, 'duel')),
+  };
+  const datagenTimeout = tempoPapel.datagen;
 
   // Saneia maxTokens (o competidor faz Math.min(maxOutputTokens, stage.maxTokens);
   // ausente/<=0 viraria NaN). Aplica-se a pinadas, seed e geradas.
@@ -829,7 +840,7 @@ async function runLoop(
       verifyModelId: record.config.judgeModelIds[0],
       secondModelId: record.config.secondReferenceModelId,
       reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
-      timeoutMs: datagenTimeout,
+      timeoutMs: tempoPapel.gabarito,
       ctx,
       maxPricePerMTok,
       seed: seedFromId(record.id),
@@ -866,7 +877,7 @@ async function runLoop(
       modelId: record.config.referenceModelId ?? record.config.judgeModelIds[0],
       // IMPL-079: gabarito tem esforço PRÓPRIO (default high) — não mais o do juiz.
       reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'gab'),
-      timeoutMs: datagenTimeout,
+      timeoutMs: tempoPapel.gabarito,
       ctx,
       maxPricePerMTok,
       // stageIndex -1 = progresso AGREGADO do lote (done/total de gabaritos
@@ -1267,7 +1278,7 @@ async function runLoop(
                 judgeModelIds: record.config.judgeModelIds,
                 apiKey,
                 reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
-                timeoutMs: record.config.timeoutMs,
+                timeoutMs: tempoPapel.judge,
                 ctx,
                 maxPricePerMTok,
               });
@@ -1313,7 +1324,7 @@ async function runLoop(
                 judgeModelIds: record.config.judgeModelIds,
                 apiKey,
                 reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
-                timeoutMs: record.config.timeoutMs,
+                timeoutMs: tempoPapel.judge,
                 ctx,
                 maxPricePerMTok,
               });
@@ -1400,7 +1411,7 @@ async function runLoop(
               stage: stageSpec,
               responses: stageRecord.responses,
               judgeModelIds: record.config.judgeModelIds,
-              timeoutMs: record.config.timeoutMs,
+              timeoutMs: tempoPapel.judge,
               passes: record.config.judgePasses,
               reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
               ctx,
@@ -1636,7 +1647,7 @@ async function runLoop(
               apiKey,
               // IMPL-079: duelo tem esforço PRÓPRIO (default low) — não mais o do juiz.
               reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'duel'),
-              timeoutMs: record.config.timeoutMs,
+              timeoutMs: tempoPapel.duel,
               ctx,
               maxPricePerMTok,
             });
@@ -1781,7 +1792,7 @@ async function runLoop(
           judgeModelIds: record.config.judgeModelIds,
           apiKey,
           reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
-          timeoutMs: record.config.timeoutMs,
+          timeoutMs: tempoPapel.judge,
           ctx,
           maxPricePerMTok,
         });
