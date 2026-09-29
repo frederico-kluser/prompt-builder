@@ -27,11 +27,11 @@
 // como superfície "Completa" num toggle, com o MESMO estado e o MESMO rodapé
 // fixo. Os contratos acima medem a completa; o describe final cobre o guiado.
 //
-// Sobre o "axe sem violação de aria" do IMPL-107 (b): não há axe-core no
-// projeto (adicionar dependência está fora do lote) — a conformidade de
-// estrutura ARIA (combobox/listbox/aria-activedescendant/aria-selected) é
-// assertada em test/ux-nova-run.test.ts e reconfirmada aqui pelos atributos
-// reais do DOM.
+// A superfície GUIADA (default) tem os MESMOS gates (b) e (c) — medidos em
+// todos os passos e nos 3 modos — e o (d) na forma que cabe num assistente
+// (decisão do dono, ef07ce2): nenhum obrigatório oculto SEM pista visível —
+// ponto de pendência no trilho (sempre à vista), 1ª pendência no rodapé fixo
+// com link para o passo.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -222,13 +222,21 @@ async function esperarFormulario(page: Page): Promise<void> {
 
 /** Paradas de Tab do PRIMEIRO controle do formulário até o "Iniciar". */
 async function paradasAteIniciar(page: Page): Promise<number> {
-  await page.evaluate(() => {
-    const form = document.querySelector('form');
-    const primeiro = form?.querySelector<HTMLElement>(
-      'button:not([tabindex="-1"]), input:not([type="hidden"]), select, textarea, a[href]',
-    );
-    primeiro?.focus();
-  });
+  // O foco inicial tem de CAIR no formulário: logo depois de uma troca de
+  // passo/rota um re-render pode engolir o focus() (a contagem começaria no
+  // <body> e mediria o cabeçalho da app, não o formulário).
+  await page.waitForFunction(
+    () => {
+      const form = document.querySelector('form');
+      const primeiro = form?.querySelector<HTMLElement>(
+        'button:not([tabindex="-1"]), input:not([type="hidden"]), select, textarea, a[href]',
+      );
+      primeiro?.focus();
+      return !!primeiro && document.activeElement === primeiro;
+    },
+    undefined,
+    { polling: 100, timeout: 10_000 },
+  );
   for (let presses = 0; presses <= 40; presses++) {
     const noIniciar = await page.evaluate(
       () => document.activeElement?.getAttribute('aria-label') === 'Iniciar a run',
@@ -635,6 +643,150 @@ describe.skipIf(!alvo)('BYOK — «Lembrar neste dispositivo» num browser real'
       await sw.click();
       await page.getByText(/só na memória desta aba — recarregar/).first().waitFor({ timeout: 10_000 });
       expect(await lida(page), 'desmarcar remove a cópia persistida').toBeNull();
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+});
+
+/* ============================================ GUIADO — gates do IMPL-106 */
+
+// IMPL-106 (b)/(c)/(d) medidos na superfície DEFAULT (guiada). O auditor achou
+// os gates rodando só com pb.formStyle='complete' — o default nunca era medido.
+describe.skipIf(!alvo)('IMPL-106 na superfície GUIADA (default) — viewport, Tab e pendência visível', () => {
+  const PASSOS = ['Objetivo', 'Teste', 'Participantes', 'Limites', 'Revisão'];
+
+  async function irAoPasso(page: Page, passo: string): Promise<void> {
+    await page.getByRole('tab', { name: new RegExp(passo) }).first().click();
+    await page.waitForTimeout(250); // painel do SmoothTabs assenta
+  }
+
+  for (const vp of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    it(`(b) ${vp.width}×${vp.height}: "Iniciar" e custo inteiros na viewport em TODOS os passos`, async () => {
+      const { contexto, page } = await paginaNova(vp, 'guided');
+      try {
+        await page.goto(`${url}new`);
+        await esperarFormulario(page);
+        for (const passo of PASSOS) {
+          await irAoPasso(page, passo);
+          const r = await page.evaluate(() => {
+            const caixa = (el: Element | null | undefined) => {
+              const b = el?.getBoundingClientRect();
+              return b ? { top: b.top, bottom: b.bottom, left: b.left, right: b.right } : null;
+            };
+            return {
+              botao: caixa(document.querySelector('[aria-label="Iniciar a run"]')),
+              custo: caixa([...document.querySelectorAll('span')].find((s) => s.textContent?.includes('custo estimado'))),
+              barra: caixa(document.querySelector('nav[aria-label="Navegação"]')),
+              vh: window.innerHeight,
+              vw: window.innerWidth,
+            };
+          });
+          for (const [nome, b] of [
+            ['Iniciar', r.botao],
+            ['custo', r.custo],
+          ] as const) {
+            expect(b, `sem ${nome} no passo ${passo}`).not.toBeNull();
+            expect(b!.top, `${nome} cortado em cima (${passo})`).toBeGreaterThanOrEqual(0);
+            expect(b!.bottom, `${nome} cortado embaixo (${passo})`).toBeLessThanOrEqual(r.vh + 1);
+            expect(b!.left, `${nome} cortado à esquerda (${passo})`).toBeGreaterThanOrEqual(0);
+            expect(b!.right, `${nome} cortado à direita (${passo})`).toBeLessThanOrEqual(r.vw + 1);
+          }
+          if (vp.width < 768 && r.barra) {
+            expect(r.botao!.bottom, `rodapé colide com a barra inferior (${passo})`).toBeLessThanOrEqual(r.barra.top + 1);
+          }
+        }
+      } finally {
+        await contexto.close();
+      }
+    }, 180_000);
+  }
+
+  it('(c) ≤ 10 paradas de Tab do topo do formulário até "Iniciar" — 3 modos × 5 passos', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided');
+    try {
+      const contagens: Record<string, number> = {};
+      for (const objetivo of ['Comparar modelos', 'Testar o meu prompt', 'Treinar um prompt']) {
+        await page.goto(`${url}new`);
+        await esperarFormulario(page);
+        await page.getByRole('button', { name: new RegExp(objetivo) }).first().click();
+        for (const passo of PASSOS) {
+          await irAoPasso(page, passo);
+          const n = (await paradasAteIniciar(page)) + 1;
+          contagens[`${objetivo} › ${passo}`] = n;
+          expect(n, `${objetivo} › ${passo}: ${n} paradas`).toBeLessThanOrEqual(10);
+        }
+      }
+      expect(Math.max(...Object.values(contagens))).toBeLessThanOrEqual(10);
+    } finally {
+      await contexto.close();
+    }
+  }, 240_000);
+
+  it('(d) obrigatório pendente nunca fica oculto sem pista: ponto no trilho + rodapé que leva ao passo', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided');
+    try {
+      await page.goto(`${url}new`);
+      await esperarFormulario(page);
+      // Defaults válidos: nenhum passo marcado como pendente.
+      expect(await page.locator('[data-pendente]').count()).toBe(0);
+
+      // Tira os juízes (obrigatórios) no passo Participantes e volta ao início.
+      await irAoPasso(page, 'Participantes');
+      // (No compare o gerador default também é o muse — o chip certo é o do toolbar Juízes.)
+      const juizes = page.getByRole('toolbar', { name: 'Juízes' }).first();
+      for (const id of ['google/gemini-3.8-flash', 'meta/muse-spark-1.3']) {
+        await juizes.getByRole('button', { name: `Remover ${id}`, exact: true }).click();
+      }
+      await irAoPasso(page, 'Objetivo');
+      expect(await page.locator('text=Selecione ao menos 1 juiz.').count(), 'no passo Objetivo o campo não está à vista').toBe(1);
+
+      // Pista visível no TRILHO (sempre à vista) — e no nome acessível do passo.
+      const aba = page.getByRole('tab', { name: /Participantes.*pendente/ });
+      expect(await aba.count()).toBe(1);
+      expect(await aba.locator('[data-pendente]').isVisible()).toBe(true);
+      // Os passos sem pendência não ganham o ponto.
+      expect(await page.locator('[data-pendente]').count()).toBe(1);
+
+      // Rodapé fixo: nomeia a pendência, dentro da viewport, e LEVA ao passo.
+      const rodape = page.getByRole('button', { name: 'Selecione ao menos 1 juiz.' });
+      expect(await rodape.isVisible()).toBe(true);
+      const caixa = await rodape.boundingBox();
+      expect(caixa!.y + caixa!.height).toBeLessThanOrEqual(900 + 1);
+      await rodape.click();
+      await page.getByText('Quem compete, quem escreve e quem avalia?').first().waitFor({ timeout: 10_000 });
+      expect(await page.getByRole('toolbar', { name: 'Juízes' }).first().isVisible()).toBe(true);
+
+      // O GERADOR também mora em Participantes no guiado: a pendência dele
+      // aponta para lá (antes apontava para "Teste", que não mostra o seletor).
+      await page
+        .getByRole('toolbar', { name: 'Gerador' })
+        .first()
+        .getByRole('button', { name: 'Remover meta/muse-spark-1.3', exact: true })
+        .click();
+      await irAoPasso(page, 'Objetivo');
+      expect(await page.getByRole('tab', { name: /Teste.*pendente/ }).count(), 'Teste não mostra o gerador').toBe(0);
+      expect(await page.getByRole('tab', { name: /Participantes.*pendente/ }).count()).toBe(1);
+    } finally {
+      await contexto.close();
+    }
+  }, 120_000);
+
+  it('IMPL-048: teste de prompt nasce com gabarito próprio (sem pendência) e o plano o nomeia', async () => {
+    const { contexto, page } = await paginaNova({ width: 1440, height: 900 }, 'guided');
+    try {
+      await page.goto(`${url}new`);
+      await esperarFormulario(page);
+      await page.getByRole('button', { name: /Testar o meu prompt/ }).first().click();
+      await irAoPasso(page, 'Participantes');
+      expect(await page.getByRole('toolbar', { name: 'Gabarito' }).first().isVisible()).toBe(true);
+      await irAoPasso(page, 'Revisão');
+      await page.getByText('Tudo pronto').first().waitFor({ timeout: 10_000 });
+      expect(await page.locator('text=/escreve o gabarito/').first().isVisible()).toBe(true);
+      expect(await page.locator('[data-pendente]').count()).toBe(0);
     } finally {
       await contexto.close();
     }

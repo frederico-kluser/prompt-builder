@@ -2,7 +2,7 @@
 name: task-edit-newrun-form
 description: Procedimento para alterar o formulário de Nova Run (web/src/pages/NewRun.tsx), que tem DUAS superfícies sobre o mesmo estado — o fluxo GUIADO de 5 passos (default, components/GuidedSetup.tsx) e a página única COMPLETA (seções + Avançado recolhível). Adicionar/remover campo, mexer na validação, nos seletores de modelo, no guiado, no Avançado ou no import de JSON. Use sempre que a tarefa tocar a tela de criação de run/sessão ou a montagem do RunConfig enviado.
 metadata:
-  version: 0.4.0
+  version: 0.5.0
   type: task
 ---
 # Tarefa: alterar o formulário de Nova Run
@@ -31,9 +31,17 @@ orçamento; ponha-o no roving, fora do `<form>` ou depois do "Iniciar".
 - As seções da completa têm **ids estáveis**: `cenarios | sujeitos | juizes | avancado`. Só o
   rótulo de `sujeitos` muda por modo (`Modelos` no compare, `Prompts` em variation/training).
   **Não crie uma seção condicional** — a âncora sumiria ao trocar de modo.
-- `problems()` continua devolvendo `{ section, text }`; no guiado o `irPara` mapeia section → passo
-  via `SECTION_STEP` (`components/GuidedSetup.tsx`). Ao adicionar pendência nova, escolha a
-  `section` certa E confira o passo que o `SECTION_STEP` aponta.
+- `problems()` devolve `{ section, text, step?, onlyComplete? }`; no guiado o `irPara` vai ao
+  `step` explícito ou ao que o `SECTION_STEP` (`components/GuidedSetup.tsx`) mapeia da seção —
+  e, com `onlyComplete`, abre a completa (campo que o guiado não tem). Ao adicionar pendência
+  nova, escolha a `section` certa E confira que o passo apontado MOSTRA o campo (o gerador é
+  seção `cenarios`, mas mora em "Participantes" no guiado). O trilho mostra o ponto de pendência
+  por passo (IMPL-106 d no guiado; gate E2E em `test/ux-nova-run-e2e.test.ts`).
+- Gabarito (IMPL-048): obrigatório e distinto de juízes/sob teste em variation/training — regra
+  única em `src/engine/roleSeparation.ts` (schema, portão da SPA e `referenceProblemTexts`). Na
+  completa fica no Avançado (orçamento de Tab) e é citado na seção Juízes; no guiado, em
+  "Participantes". Regras puras do form em `web/src/newRunRules.ts` (esforço por papel,
+  `clampStages`, default de gabarito) — teste direto em `test/newrun-rules.test.ts`.
 
 - As abas têm **ids estáveis**: `cenarios | sujeitos | juizes | avancado`. Só o rótulo de
   `sujeitos` muda por modo (`Modelos` no compare, `Prompts` em variation/training). **Não crie uma

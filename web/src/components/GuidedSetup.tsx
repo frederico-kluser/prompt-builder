@@ -25,6 +25,14 @@ import type { OpenRouterModel, RunMode } from '../api';
  * `SmoothTabs` faz de trilho de passos: 5 painéis estáveis (os MESMOS em todos
  * os modos — nada de painel condicional), navegação livre (voltar/avançar e
  * clique direto no trilho), pois nada aqui é obrigatório antes do envio.
+ *
+ * IMPL-106 (d) na superfície GUIADA (decisão do dono, ef07ce2: o guiado é o
+ * default e é um assistente — os campos de um passo não ficam à vista nos
+ * outros). O critério "nenhum obrigatório oculto" vira aqui "nenhum obrigatório
+ * oculto SEM pista visível": o passo com pendência ganha um ponto no TRILHO
+ * (sempre à vista, com "pendente" no nome acessível), o rodapé fixo nomeia a
+ * 1ª pendência e leva ao passo, e a Revisão lista todas com link. Contrato E2E
+ * em test/ux-nova-run-e2e.test.ts (superfície guiada).
  */
 
 /** As 5 seções da página única (IMPL-106) — mesmo vocabulário do NewRun. */
@@ -36,6 +44,8 @@ export interface GuidedProblem {
   text: string;
   /** Passo que mostra o campo, quando não é o da seção (ver `stepOfProblem`). */
   step?: GuidedStep;
+  /** O campo só existe na configuração completa: o link a abre. */
+  onlyComplete?: boolean;
 }
 
 export type GuidedStep = 'objetivo' | 'teste' | 'participantes' | 'limites' | 'revisao';
@@ -145,6 +155,8 @@ export interface GuidedSetupProps {
   estimate: { low: number; high: number } | null;
   /** Sai para o formulário completo (mesmo estado). */
   onOpenClassic: () => void;
+  /** Já tentou iniciar: o ponto de pendência do trilho fica vermelho (como nas seções). */
+  tried?: boolean;
 }
 
 function usd(v: number): string {
@@ -272,6 +284,11 @@ export function GuidedSetup(p: GuidedSetupProps) {
     return step !== 'revisao' && step !== 'objetivo' && !(pendentes.get(step)?.length);
   }
 
+  /** Passo com campo obrigatório pendente (a Revisão só lista, não pisca). */
+  function pendente(step: GuidedStep): boolean {
+    return step !== 'revisao' && !!pendentes.get(step)?.length;
+  }
+
   function go(delta: number) {
     const next = GUIDED_STEPS[Math.min(GUIDED_STEPS.length - 1, Math.max(0, stepIdx + delta))];
     p.onStepChange(next);
@@ -294,6 +311,17 @@ export function GuidedSetup(p: GuidedSetupProps) {
                 <span className="font-mono text-[11px] tabular opacity-70">{i + 1}</span>
                 {STEP_LABEL[s]}
                 {resolvido(s) && <Check className="size-3.5 text-resolve" aria-hidden="true" />}
+                {pendente(s) && (
+                  <>
+                    {/* Pista VISÍVEL de obrigatório pendente neste passo (IMPL-106 d). */}
+                    <span
+                      data-pendente=""
+                      aria-hidden="true"
+                      className={cn('size-1.5 rounded-full', p.tried ? 'bg-destructive' : 'bg-muted-foreground/60')}
+                    />
+                    <span className="sr-only">(pendente)</span>
+                  </>
+                )}
               </span>
             </SmoothTabsTab>
           ))}
@@ -519,9 +547,10 @@ export function GuidedSetup(p: GuidedSetupProps) {
                         <button
                           type="button"
                           className="text-left text-[13px] text-primary underline-offset-4 hover:underline"
-                          onClick={() => p.onStepChange(stepOfProblem(pr))}
+                          onClick={() => (pr.onlyComplete ? p.onOpenClassic() : p.onStepChange(stepOfProblem(pr)))}
                         >
                           {pr.text}
+                          {pr.onlyComplete && ' — na configuração completa'}
                         </button>
                       </li>
                     ))}

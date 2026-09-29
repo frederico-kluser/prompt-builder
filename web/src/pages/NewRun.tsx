@@ -137,6 +137,12 @@ interface Problem {
    * gabarito mora no Avançado da completa mas em "Participantes" no guiado).
    */
   step?: GuidedStep;
+  /**
+   * O campo NÃO existe no guiado (técnicas/variantes manuais, eixo de configs,
+   * grupo multi-prompt): no guiado a pendência abre a configuração COMPLETA na
+   * seção — nunca um passo que não mostra o campo (IMPL-106 d).
+   */
+  onlyComplete?: boolean;
 }
 
 function fmtUsd(x: number): string {
@@ -730,12 +736,13 @@ export function NewRun() {
     // O gerador só é exigido quando ele vai ser chamado: com os cenários já
     // prontos no arquivo, o campo nem aparece — não pode travar o botão.
     if (precisaGerar && datagen.length !== 1)
-      out.push({ section: 'cenarios', text: 'Selecione 1 modelo gerador.' });
+      // No guiado o seletor do gerador mora em "Participantes" (não em "Teste").
+      out.push({ section: 'cenarios', step: 'participantes', text: 'Selecione 1 modelo gerador.' });
     if (judge.length < 1) out.push({ section: 'juizes', text: 'Selecione ao menos 1 juiz.' });
     if (mode === 'compare') {
       if (compareAxis === 'configs') {
         if (competitorConfigs.filter((r) => r.modelId).length < 2)
-          out.push({ section: 'sujeitos', text: 'Preencha o modelo em pelo menos 2 configs.' });
+          out.push({ section: 'sujeitos', text: 'Preencha o modelo em pelo menos 2 configs.', onlyComplete: true });
       } else if (competitors.length < 2) {
         out.push({ section: 'sujeitos', text: 'Selecione pelo menos 2 modelos competidores.' });
       }
@@ -745,6 +752,8 @@ export function NewRun() {
       if (variantCount < 2)
         out.push({
           section: 'sujeitos',
+          // Técnicas e variantes manuais só existem na completa.
+          onlyComplete: true,
           text: optimize
             ? 'Selecione ao menos 2 técnicas (ou 1 técnica + prompt base).'
             : 'Escreva ao menos 2 variantes manuais (ou 1 + prompt base).',
@@ -766,7 +775,7 @@ export function NewRun() {
     const cenarios = rawStages ? null : stagesProblem(stages);
     if (cenarios) out.push({ section: 'avancado', text: cenarios });
     const grupo = promptGroupProblem({ mode, promptGroup, promptId });
-    if (grupo) out.push({ section: 'avancado', text: grupo });
+    if (grupo) out.push({ section: 'avancado', text: grupo, onlyComplete: true });
     if (budget.trim() !== '' && !(parseFloat(budget) > 0))
       out.push({
         section: 'avancado',
@@ -786,11 +795,13 @@ export function NewRun() {
    * no completo, abre o "Avançado" se preciso e rola/foca a âncora. Nunca troca
    * de aba (a página é única).
    */
-  function irPara(section: SectionId, step?: GuidedStep) {
-    if (formStyle === 'guided') {
+  function irPara(section: SectionId, step?: GuidedStep, onlyComplete?: boolean) {
+    if (formStyle === 'guided' && !onlyComplete) {
       setGuidedStep(step ?? SECTION_STEP[section]);
       return;
     }
+    // Campo que o guiado não tem: abre a completa (mesmo estado) na seção.
+    if (formStyle === 'guided') setFormStyle('complete');
     if (section === 'avancado') setAvancadoOpen(true);
     // Depois do render (o Avançado precisa abrir antes de existir no layout).
     requestAnimationFrame(() => {
@@ -987,7 +998,7 @@ export function NewRun() {
     const faltas = problems();
     if (faltas.length) {
       setTried(true);
-      irPara(faltas[0].section, faltas[0].step);
+      irPara(faltas[0].section, faltas[0].step, faltas[0].onlyComplete);
       return setError(faltas[0].text);
     }
     let config = buildConfig();
@@ -1283,6 +1294,7 @@ export function NewRun() {
             problems={pendencias}
             estimate={launchEstimate ? { low: launchEstimate.low, high: launchEstimate.high } : null}
             onOpenClassic={() => setFormStyle('complete')}
+            tried={tried}
           />
         ) : (
         <div className="mt-6 flex flex-col gap-5">
@@ -1962,7 +1974,7 @@ export function NewRun() {
               <button
                 type="button"
                 className="text-left text-destructive underline-offset-4 hover:underline"
-                onClick={() => primeira && irPara(primeira.section, primeira.step)}
+                onClick={() => primeira && irPara(primeira.section, primeira.step, primeira.onlyComplete)}
               >
                 {tried && primeira ? primeira.text : error}
               </button>
@@ -1970,7 +1982,7 @@ export function NewRun() {
               <button
                 type="button"
                 className="text-left text-muted-foreground underline-offset-4 hover:underline"
-                onClick={() => irPara(primeira.section, primeira.step)}
+                onClick={() => irPara(primeira.section, primeira.step, primeira.onlyComplete)}
               >
                 {primeira.text}
               </button>

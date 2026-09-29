@@ -169,7 +169,7 @@ describe('IMPL-106 — Nova Run: página única COMPLETA + superfície GUIADA', 
     // O submit nunca troca de aba: leva à seção (rolagem + foco) — ou, na
     // superfície guiada, ao PASSO que resolve (SECTION_STEP, ou o passo
     // explícito da pendência — ex.: o gabarito mora em "Participantes").
-    expect(src).toMatch(/irPara\(faltas\[0\]\.section, faltas\[0\]\.step\)/);
+    expect(src).toMatch(/irPara\(faltas\[0\]\.section, faltas\[0\]\.step, faltas\[0\]\.onlyComplete\)/);
     expect(src).toMatch(/step \?\? SECTION_STEP\[section\]/);
   });
 
