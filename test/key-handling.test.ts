@@ -135,6 +135,9 @@ describe('web-code#3 (i) — «Lembrar neste dispositivo»: persiste só com opt
     expect(src).toMatch(/useState\(\(\) => keyPersistence\(\) === 'remembered'\)/);
     // Desmarcar com key conectada vale na hora (tira do disco já).
     expect(src).toMatch(/if \(atual && status === 'valid'\) store\(atual, v\)/);
+    // Enter valida e NUNCA submete o <form> em volta (o re-prompt da Nova Run
+    // vive dentro do formulário da run: Enter lá iniciaria a run).
+    expect(src).toMatch(/if \(e\.key === 'Enter'\) \{\s*e\.preventDefault\(\);\s*void handleValidate\(\);/);
   });
 
   it('com lembrar: sobrevive ao reload e o revalidar NÃO apaga a cópia persistida', async () => {

@@ -158,6 +158,14 @@ export function KeySetup({ onSaved }: { onSaved?: () => void }) {
           placeholder="sk-or-v1-..."
           value={key}
           onChange={(e) => setKey(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter valida a key — e nunca submete um <form> em volta (na Nova
+            // Run o re-prompt vive DENTRO do formulário da run).
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              void handleValidate();
+            }
+          }}
           onPaste={(e) => {
             const pasted = e.clipboardData.getData('text').trim();
             if (pasted) {
