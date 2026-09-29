@@ -93,7 +93,7 @@ import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { ARENA_AGENT_CONFIG_FORMAT, parseArenaAgentConfig } from '../../configFile.js';
 import { arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { readArtifact } from '../../agent/store.js';
-import { assertNoUnknownConfigKeys, parse, resolveHome, resolveKey } from '../context.js';
+import { assertNoUnknownConfigKeys, parse, resolveHome, resolveKey, tryResolveKey } from '../context.js';
 import { assertAgentFilesContained, ensureExecConfigApproved } from './agents.js';
 import { configFromJson } from './run.js';
 import { EXIT, isCliError } from '../output.js';
@@ -218,6 +218,12 @@ export interface McpTool {
   outputSchema?: Record<string, unknown>;
   /** Não precisa de key (lê disco/docs embarcadas): funciona sem OPENROUTER_API_KEY. */
   noKey?: boolean;
+  /**
+   * Key OPCIONAL (IMPL-029): usa a key se houver e, sem ela, o catálogo
+   * PÚBLICO — `list_models`/`estimate_cost` funcionam sem key, como o
+   * `models`/`estimate` do CLI. Recebe `''` quando não há key.
+   */
+  optionalKey?: boolean;
   /** Saída em JSON compacto (tools de poll: cada chamada custa tokens). */
   compact?: boolean;
   /**
@@ -227,6 +233,13 @@ export interface McpTool {
   oversizeHint?: string;
   run: (args: Record<string, unknown>, apiKey: string, ctx: ToolCtx) => Promise<unknown>;
 }
+
+/**
+ * Resolve a key sob demanda. `{ optional: true }` devolve `''` quando não há
+ * key em lugar nenhum (tool de dado público); sem ele, key ausente é erro
+ * (`auth.key_missing`).
+ */
+export type KeyResolver = (opts?: { optional?: boolean }) => Promise<string>;
 
 /**
  * Recusa de ferramenta com dados estruturados (IMPL-086): sai como `isError`
@@ -993,6 +1006,8 @@ const TOOLS: McpTool[] = [
     argsSchema: LIST_MODELS_ARGS,
     inputSchema: inputSchemaFrom(LIST_MODELS_ARGS),
     outputSchema: MODELOS_OUTPUT,
+    // Catálogo PÚBLICO sem key (IMPL-029), como o `models list` do CLI.
+    optionalKey: true,
     oversizeHint: `use um limit menor (máx. ${LIST_MODELS_MAX_LIMIT}), pagine por offset/nextOffset ou filtre por search`,
     run: async (args, apiKey) => {
       const cat = await ensureCatalog(apiKey);
@@ -1036,6 +1051,9 @@ const TOOLS: McpTool[] = [
     argsSchema: ESTIMATE_COST_ARGS,
     inputSchema: inputSchemaFrom(ESTIMATE_COST_ARGS, { config: CONFIG_OBJECT_SCHEMA }),
     outputSchema: { type: 'object', additionalProperties: true },
+    // Estimar não chama modelo nenhum: catálogo PÚBLICO sem key (IMPL-029),
+    // como o `estimate` do CLI.
+    optionalKey: true,
     run: async (args, apiKey) => {
       const cfg = await toRunConfig(args.config);
       const cat = await ensureCatalog(apiKey);
@@ -1423,7 +1441,7 @@ const NUNCA_ABORTA = new AbortController().signal;
 export async function callTool(
   name: unknown,
   args: Record<string, unknown>,
-  getKey: () => Promise<string> = async () => '',
+  getKey: KeyResolver = async () => '',
   opts: CallToolOptions = {},
 ): Promise<ToolCallResponse | null> {
   const tool = (opts.tools ?? TOOLS).find((t) => t.name === name);
@@ -1447,10 +1465,11 @@ export async function callTool(
     blockingWaitMs: Math.min(opts.blockingWaitMs ?? BLOCKING_TOOL_LIMIT_MS, BLOCKING_TOOL_LIMIT_MS),
   };
   try {
-    const key = tool.noKey ? '' : await getKey();
     // IMPL-085: argumentos contra o schema ESTRITO — campo desconhecido é
-    // rejeitado (com sugestão) em vez de engolido sem erro.
+    // rejeitado (com sugestão) em vez de engolido sem erro. ANTES da key
+    // (mcp#4): argumento errado tem de dizer o que está errado, não "falta key".
     const dados = tool.argsSchema ? validateToolArgs(tool.argsSchema, args) : args;
+    const key = tool.noKey ? '' : await getKey(tool.optionalKey ? { optional: true } : undefined);
     const out = await tool.run(dados, key, ctx);
     if (isRawResult(out)) return out[RAW_RESULT] as unknown as CreateTaskResult;
     // IMPL-086: JSON COMPACTO (0 espaços após ':' e ',') em toda saída — a
@@ -1503,7 +1522,7 @@ export interface McpSessionOptions {
    */
   writeBatch?: (msgs: Record<string, unknown>[]) => void;
   /** Resolvida preguiçosamente: `read_docs` funciona sem key. */
-  getKey?: () => Promise<string>;
+  getKey?: KeyResolver;
   log?: (msg: string) => void;
   lane?: HeavyLane;
   /** Graça do encerramento (EOF/SIGTERM). Padrão SHUTDOWN_GRACE_MS (10 s). */
@@ -1981,18 +2000,32 @@ function flushStdout(maxMs: number): Promise<void> {
   });
 }
 
+/**
+ * Key resolvida PREGUIÇOSAMENTE (`--key` → OPENROUTER_API_KEY → `key set`):
+ * `read_docs` funciona sem key nenhuma, e um servidor MCP não deve morrer no
+ * boot por causa disso. `{ optional: true }` (list_models/estimate_cost)
+ * devolve `''` sem key — catálogo público, como `models`/`estimate` do CLI
+ * (IMPL-029); sem o `optional`, key ausente é `auth.key_missing`.
+ */
+export function lazyKeyResolver(values: Record<string, unknown>): KeyResolver {
+  let apiKeyCache: string | null = null;
+  return async (opts) => {
+    if (apiKeyCache) return apiKeyCache;
+    if (opts?.optional) {
+      const k = await tryResolveKey(values);
+      if (k) apiKeyCache = k;
+      return k ?? '';
+    }
+    apiKeyCache = await resolveKey(values);
+    return apiKeyCache;
+  };
+}
+
 export async function cmdMcp(argv: string[]): Promise<number> {
   const parsed = parse(argv, {});
   setDataDir(resolveHome(parsed.values));
 
-  // A key e resolvida preguicosamente: `read_docs` funciona sem nenhuma key, e
-  // um servidor MCP nao deve morrer no boot por causa disso.
-  let apiKeyCache: string | null = null;
-  const getKey = async (): Promise<string> => {
-    if (apiKeyCache) return apiKeyCache;
-    apiKeyCache = await resolveKey(parsed.values);
-    return apiKeyCache;
-  };
+  const getKey = lazyKeyResolver(parsed.values);
 
   // stdout é o canal JSON-RPC; narração vai para o stderr (o cliente a loga).
   let stdoutQuebrado = false;

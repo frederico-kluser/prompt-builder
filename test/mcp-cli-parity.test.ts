@@ -7,6 +7,8 @@
 //   • mcp#1/IMPL-093 — chave desconhecida é erro (fail-closed), inclusive em
 //     arena-agent-config (+ files[] contido ao workspace);
 //   • mcp#3 — `config` como string JSON vale em toda tool que o anuncia;
+//   • mcp#4 — list_models/estimate_cost sem key (catálogo público) e validação
+//     de argumento ANTES da key;
 //   • mcp#6 — list_models pagina (offset/nextOffset) e o teto nunca estoura;
 //   • cli#12/mcp#2 — get_result traz o DESFECHO (placar/vencedor; campeão,
 //     holdout, significância);
@@ -31,6 +33,7 @@ import {
   SOFT_RESULT_TOKENS,
   callTool,
   estimateTokens,
+  lazyKeyResolver,
   type ToolCallResult,
 } from '../src/cli/commands/mcp.js';
 import type { LibraryItem } from '../src/engine/libraryCore.js';
@@ -276,6 +279,62 @@ describe('mcp#3 — config como string JSON em toda tool que o anuncia', () => {
       expect(texto(r), tool).toMatch(/config não é um JSON válido/u);
       expect(texto(r), tool).not.toMatch(/expected object/iu);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcp#4 — key opcional (catálogo público) e validação antes da key
+// ---------------------------------------------------------------------------
+
+describe('mcp#4 — list_models/estimate_cost sem key; argumento validado antes da key', () => {
+  beforeEach(() => {
+    // Sem key em lugar nenhum: env vazio e data dir novo (o arquivo de `key set` mora nele).
+    vi.stubEnv('OPENROUTER_API_KEY', '');
+  });
+
+  it('sem key: list_models e estimate_cost funcionam (catálogo PÚBLICO, como o CLI)', async () => {
+    instalarCatalogo();
+    const getKey = lazyKeyResolver({});
+    const lm = await chamar('list_models', {}, {}, getKey);
+    expect(lm.isError).toBeUndefined();
+    expect((json(lm).models as unknown[]).length).toBeGreaterThan(0);
+    const est = await chamar('estimate_cost', { config: COMPARE }, {}, getKey);
+    expect(est.isError).toBeUndefined();
+    expect(typeof json(est).point).toBe('number');
+  });
+
+  it('sem key: tool que GASTA continua exigindo key (auth.key_missing com dica)', async () => {
+    const { executor, inputs } = executorEspiao();
+    const jobs = new JobManager({ lane: new HeavyLane(1), executor });
+    const r = await chamar('start_run', { config: COMPARE, budgetUsd: 1, idempotencyKey: 'k' }, { jobs }, lazyKeyResolver({}));
+    expect(r.isError).toBe(true);
+    expect(json(r)).toMatchObject({ ok: false, code: 'auth.key_missing' });
+    expect(String(json(r).hint)).toMatch(/OPENROUTER_API_KEY/u);
+    expect(inputs).toHaveLength(0);
+  });
+
+  it('argumento inválido sem key → o erro do ARGUMENTO (antes: "Key do OpenRouter ausente")', async () => {
+    const r = await chamar('start_run', { config: COMPARE, idempotencyKey: 'k' }, {}, lazyKeyResolver({}));
+    expect(r.isError).toBe(true);
+    expect(texto(r)).toMatch(/budgetUsd/u);
+    expect(texto(r)).not.toMatch(/Key do OpenRouter ausente/u);
+  });
+
+  it('com key presente, a tool de key opcional usa a key (escopo do catálogo da conta)', async () => {
+    vi.stubEnv('OPENROUTER_API_KEY', KEY);
+    let recebida: string | undefined;
+    const espia = {
+      name: 'espia',
+      description: 'devolve a key recebida',
+      inputSchema: { type: 'object' },
+      optionalKey: true,
+      run: async (_a: Record<string, unknown>, k: string) => {
+        recebida = k;
+        return {};
+      },
+    };
+    await callTool('espia', {}, lazyKeyResolver({}), { tools: [espia] });
+    expect(recebida).toBe(KEY);
   });
 });
 
