@@ -26,6 +26,14 @@ export type {
   LaunchCostEstimate,
 } from '../../src/engine/costConfirmation.js';
 export { COST_CONFIRM_THRESHOLD_USD, costConfirmationReason } from '../../src/engine/costConfirmation.js';
+// Papéis separados (IMPL-048): a MESMA regra do runConfigSchema do Node — o
+// formulário mostra a pendência e o createRun/createSession recusa (fail-closed).
+import { assertRoleSeparation } from '../../src/engine/roleSeparation.js';
+export {
+  competingModelIds,
+  roleSeparationIssues,
+  type RoleConflict,
+} from '../../src/engine/roleSeparation.js';
 // Significância pareada: fonte única em src/types.ts (IMPL-001), como os tipos de custo.
 export type { PairedSignificance, SignificanceMethod, StoredSignificance } from '../../src/types.js';
 // Pareamento honesto (IMPL-005): fonte única em src/types.ts, como a significância.
@@ -925,6 +933,10 @@ export async function createRun(config: RunConfig, launch: LaunchOpts = {}): Pro
   // IMPL-082: "key sumida" (Safari ITP/limpeza) recusa ANTES de qualquer fetch:
   // vira re-prompt (`isKeyMissing`), nunca erro de rede opaco.
   const apiKey = requireKey();
+  // IMPL-048: a SPA não passa pelo zod do servidor — sem isto a referência
+  // ausente caía no 1º juiz (gabarito e veredito do mesmo modelo). Recusa antes
+  // de qualquer chamada paga, com a mesma mensagem do schema.
+  assertRoleSeparation(config);
   await assertCostConfirmed(config, launch);
   // Client-side: o run roda na própria aba (engine). Para variação, as variantes
   // são geradas via "optimizer" antes do loop (igual ao prepare do backend).
@@ -1163,6 +1175,7 @@ export interface ScenarioPack {
 export async function createSession(config: RunConfig, launch: LaunchOpts = {}): Promise<string> {
   void requestPersistentStorage(); // IMPL-022: ver createRun
   const apiKey = requireKey(); // IMPL-082: "key sumida" => re-prompt, não fetch
+  assertRoleSeparation(config); // IMPL-048: ver createRun
   await assertCostConfirmed(config, launch);
   // Client-side: a sessão de treino roda na própria aba (engine trainer).
   const { sessionId, record } = await startTraining(config as never, apiKey);

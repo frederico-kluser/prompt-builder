@@ -11,6 +11,7 @@ import { validatePromptGroup } from './engine/promptGroup.js';
 import { promptContractsSchema } from './engine/contracts.js';
 import { checkRunPii, runPiiMessage, runPiiRefusal } from './engine/pii.js';
 import { stageLabelIssues } from './engine/groundTruth.js';
+import { roleConflictMessage, roleSeparationIssues } from './engine/roleSeparation.js';
 import type { RunConfig } from './types.js';
 
 // Nivel de esforco de raciocinio (ReasoningLevel de types.ts / REASONING_LEVELS
@@ -451,45 +452,13 @@ export const runConfigSchema = z
     // CORRELACIONADOS que não se cancelam (DEC-2). Modelo igual => ERRO de
     // config; mesmo vendor/família => AVISO em `fairnessWarnings` (a validação
     // não bloqueia famílias — o mercado muda de vendor mais rápido que o schema).
-    if (cfg.referenceModelId) {
-      const ref = cfg.referenceModelId;
-      const juiz = cfg.judgeModelIds.find((id) => id === ref);
-      if (juiz) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['referenceModelId'],
-          message:
-            `A referência "${ref}" não pode ser também juiz: o mesmo modelo escreveria o gabarito e emitiria o veredito sobre ele (viés de auto-preferência). Escolha modelos distintos.`,
-        });
-      }
-      const competidores =
-        cfg.mode === 'compare'
-          ? [
-              ...(cfg.competitorModelIds ?? []),
-              ...(cfg.competitorConfigs ?? []).map((c) => c.modelId),
-            ]
-          : [cfg.contestantModelId];
-      const concorrente = competidores.find((id) => id === ref);
-      if (concorrente) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['referenceModelId'],
-          message:
-            `A referência "${ref}" não pode ser também competidor: quem escreve o gabarito não compete contra ele (viés de auto-preferência). Escolha modelos distintos.`,
-        });
-      }
-    }
-    // IMPL-048: `referenceModelId` é OBRIGATÓRIO em training/variation. Em
-    // compare o default (1º juiz) continua existindo, explícito e documentado
-    // no campo acima + `fairnessWarnings` — mas train/vary sem referência
-    // própria reprova AQUI: a régua do treino inteiro não sai do painel.
-    if (cfg.mode !== 'compare' && !cfg.referenceModelId?.trim()) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['referenceModelId'],
-        message:
-          'referenceModelId é obrigatório em training/variation: o gabarito não pode sair do 1º juiz (o mesmo modelo escreveria a régua e julgaria contra ela).',
-      });
+    // IMPL-048: `referenceModelId` também é OBRIGATÓRIO em training/variation.
+    // Em compare o default (1º juiz) continua existindo, explícito e documentado
+    // + `fairnessWarnings` — mas train/vary sem referência própria reprova AQUI.
+    // A regra é FONTE ÚNICA em src/engine/roleSeparation.ts (a SPA recusa com
+    // ela no createRun/createSession e o formulário a mostra como pendência).
+    for (const conflito of roleSeparationIssues(cfg)) {
+      ctx.addIssue({ code: 'custom', path: ['referenceModelId'], message: roleConflictMessage(conflito) });
     }
 
     // Gerador e juiz PODEM repetir o mesmo modelo (repeticao permitida).

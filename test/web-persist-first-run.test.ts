@@ -64,6 +64,9 @@ const CONFIG = {
   datagenModelId: 'fake/gen',
   judgeModelIds: ['fake/judge'],
   competitorModelIds: ['fake/a', 'fake/b'],
+  // IMPL-048: o portão da SPA exige gabarito próprio em training (o teste
+  // reusa este config como sessão).
+  referenceModelId: 'fake/ref',
 } as never;
 
 describe('IMPL-022 (a) persist() na primeira run da página', () => {
