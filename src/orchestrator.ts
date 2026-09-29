@@ -52,7 +52,7 @@ import { contestantsFromConfig } from './normalize.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
 import { reasoningLevelForRole } from './modelCaps.js';
-import { gatewayErrorFields, listModels, reconcileAtRunEnd } from './openrouter.js';
+import { gatewayErrorFields, isFatalGatewayError, listModels, reconcileAtRunEnd } from './openrouter.js';
 import {
   cutDuels,
   cutVerdicts,
@@ -106,6 +106,16 @@ import type {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * cli#3 — o que NUNCA degrada numa etapa: sinal de CONTROLE (orçamento/
+ * cancelamento) e falha FATAL do gateway (401 key recusada / 402 sem crédito).
+ * Nenhum retry nem outro modelo conserta estas; degradar deixava a run
+ * "concluir" com etapas vazias e sair com exit 1 em vez do 4/5 documentado.
+ */
+function mustPropagate(err: unknown): boolean {
+  return isControlSignal(err) || isFatalGatewayError(err);
 }
 
 function log(runId: string, msg: string, extra?: Record<string, unknown>): void {
@@ -1126,7 +1136,7 @@ async function runLoop(
           }),
         );
         for (const r of respSettled) {
-          if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
+          if (r.status === 'rejected' && mustPropagate(r.reason)) throw r.reason;
         }
         // IMPL-004: agente 'incomplete' (§18.3) não tem veredito — o motivo fica
         // registrado (conta em failureCountByRole.agent), nunca um 'nao'.
@@ -1399,8 +1409,8 @@ async function runLoop(
           }
         } catch (judgeErr) {
           // Sem isto, orcamento estourado viraria "juiz inconclusivo" e a etapa
-          // entraria no placar como se tivesse sido avaliada.
-          if (isControlSignal(judgeErr)) throw judgeErr;
+          // entraria no placar como se tivesse sido avaliada. 401/402 idem (cli#3).
+          if (mustPropagate(judgeErr)) throw judgeErr;
           const motivo = judgeErr instanceof Error ? judgeErr.message : String(judgeErr);
           // IMPL-004: a etapa fica SEM veredito para todos — com o motivo, para
           // a falha entrar em failureCountByRole (nunca passa por run íntegra).
@@ -1485,6 +1495,13 @@ async function runLoop(
           throw stageErr;
         }
         const msg = stageErr instanceof Error ? stageErr.message : String(stageErr);
+        if (isFatalGatewayError(stageErr)) {
+          // cli#3: key recusada/sem crédito derruba a RUN (exit 4/5), não só a
+          // etapa — a etapa guarda o motivo e o erro sobe ao desfecho.
+          stageRecord.error = stageRecord.error ?? msg;
+          stageRecord.finishedAt = nowIso();
+          throw stageErr;
+        }
         stageRecord.error = stageRecord.error ?? msg;
         stageRecord.finishedAt = nowIso();
         emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
@@ -1493,7 +1510,7 @@ async function runLoop(
     }),
   );
   for (const r of etapasSettled) {
-    if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
+    if (r.status === 'rejected' && mustPropagate(r.reason)) throw r.reason;
   }
   syncLedger();
 
@@ -1645,8 +1662,9 @@ async function runLoop(
             }
             emitEvent({ type: 'stage.dueled', runId, stageIndex: st.index, duels: st.duels });
           } catch (err) {
-            if (isControlSignal(err)) throw err;
-            // Degrada: a etapa fica sem duelo; a final NUNCA derruba a run.
+            if (mustPropagate(err)) throw err;
+            // Degrada: a etapa fica sem duelo; a final NUNCA derruba a run
+            // (salvo controle e 401/402 — cli#3).
             log(runId, `duelo da etapa ${st.index + 1} falhou`, {
               error: err instanceof Error ? err.message : String(err),
             });
@@ -1658,7 +1676,7 @@ async function runLoop(
         }),
       );
       for (const r of dueloSettled) {
-        if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
+        if (r.status === 'rejected' && mustPropagate(r.reason)) throw r.reason;
       }
       syncLedger();
     }

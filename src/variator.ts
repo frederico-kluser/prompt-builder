@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { chatCompletion } from './openrouter.js';
+import { chatCompletion, isFatalGatewayError } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { getTechnique, filterTechniquesForTarget, TECHNIQUE_LIBRARY, type TechniqueTarget, type TargetModelInfo } from './techniques.js';
 import { modelFamily } from './llmVariants.js';
@@ -374,7 +374,8 @@ async function generateOneVariant(
   } catch (err) {
     // Sem o rethrow, orcamento estourado produziria uma lista de variantes
     // menor do que o pedido — o treino "converge" por falta de candidatos.
-    if (isControlSignal(err)) throw err;
+    // 401/402 (cli#3) idem: nenhuma outra técnica conserta key/crédito.
+    if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
     console.warn(`[variator] tecnica ${technique.id} falhou: ${(err as Error).message}`);
     return null;
   }

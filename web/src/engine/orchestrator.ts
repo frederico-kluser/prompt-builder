@@ -40,7 +40,7 @@ import { runCompleteness } from './stats';
 import { emitEvent } from './events';
 import { listRuns, loadRun, saveRun } from './storage';
 import { contestantsFromConfig } from './normalize';
-import { gatewayErrorFields, listModels, reconcileAtRunEnd } from './openrouter';
+import { gatewayErrorFields, isFatalGatewayError, listModels, reconcileAtRunEnd } from './openrouter';
 import { enforceRunCompliance } from '../lgpd';
 import { BudgetLedger, isControlSignal, RunCancelled, toControlSignal } from './budget';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate';
@@ -72,6 +72,16 @@ import type {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * cli#3 (espelho do Node) — o que NUNCA degrada numa etapa: sinal de CONTROLE (orçamento/
+ * cancelamento) e falha FATAL do gateway (401 key recusada / 402 sem crédito).
+ * Nenhum retry nem outro modelo conserta estas; degradar deixava a run
+ * "concluir" com etapas vazias e sair com exit 1 em vez do 4/5 documentado.
+ */
+function mustPropagate(err: unknown): boolean {
+  return isControlSignal(err) || isFatalGatewayError(err);
 }
 
 function log(runId: string, msg: string, extra?: Record<string, unknown>): void {
@@ -1006,7 +1016,8 @@ async function runLoop(
           }
         } catch (judgeErr) {
           // Sinal de controle (orcamento/cancelamento) nao e "juiz inconclusivo".
-          if (isControlSignal(judgeErr)) throw judgeErr;
+          // 401/402 idem (cli#3).
+          if (mustPropagate(judgeErr)) throw judgeErr;
           const motivo = judgeErr instanceof Error ? judgeErr.message : String(judgeErr);
           // IMPL-004: a etapa fica SEM veredito para todos — com o motivo, para
           // a falha entrar em failureCountByRole (espelho de src/).
@@ -1093,6 +1104,12 @@ async function runLoop(
           throw stageErr;
         }
         const msg = stageErr instanceof Error ? stageErr.message : String(stageErr);
+        if (isFatalGatewayError(stageErr)) {
+          // cli#3 (espelho do Node): 401/402 derruba a RUN, não só a etapa.
+          stageRecord.error = stageRecord.error ?? msg;
+          stageRecord.finishedAt = nowIso();
+          throw stageErr;
+        }
         stageRecord.error = stageRecord.error ?? msg;
         stageRecord.finishedAt = nowIso();
         emitEvent({ type: 'stage.failed', runId, stageIndex: i, error: msg });
@@ -1101,7 +1118,7 @@ async function runLoop(
     }),
   );
   for (const r of etapasSettled) {
-    if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
+    if (r.status === 'rejected' && mustPropagate(r.reason)) throw r.reason;
   }
   syncLedger(record, ledger);
 
@@ -1212,7 +1229,7 @@ async function runLoop(
             }
             emitEvent({ type: 'stage.dueled', runId, stageIndex: st.index, duels: st.duels });
           } catch (duelErr) {
-            if (isControlSignal(duelErr)) throw duelErr;
+            if (mustPropagate(duelErr)) throw duelErr;
             // Degrada: a etapa fica sem duelo, a run NUNCA cai por causa disso.
             log(
               runId,
@@ -1228,7 +1245,7 @@ async function runLoop(
         }),
       );
       for (const r of dueloSettled) {
-        if (r.status === 'rejected' && isControlSignal(r.reason)) throw r.reason;
+        if (r.status === 'rejected' && mustPropagate(r.reason)) throw r.reason;
       }
       // Duelo decidido depois do Cancelar pode ter sido degradado para empate.
       throwIfCancelled();

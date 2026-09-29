@@ -1,4 +1,4 @@
-import { chatCompletion } from './openrouter.js';
+import { chatCompletion, isFatalGatewayError } from './openrouter.js';
 import type { ChatCompletionResult, ChatMessage } from './openrouter.js';
 import { isControlSignal } from './budget.js';
 import { finishSignalsOf, retryMaxTokens } from './engine/truncation.js';
@@ -170,7 +170,8 @@ export async function generateReferences(
       } catch (err) {
         // Orcamento/cancelamento nao sao "falha de gabarito": deixar passar aqui
         // faria a run seguir SEM referencia e o juiz degradar tudo p/ 'parcial'.
-        if (isControlSignal(err)) throw err;
+        // Key recusada/sem credito (cli#3) tambem: nenhuma etapa conserta.
+        if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
         // Degradação, nunca crash: sem gabarito o juiz pointwise cai para 'parcial'.
         console.warn(
           `[gabarito] falha ao gerar referência da etapa ${etapa(index)}: ${(err as Error).message}`,
@@ -185,7 +186,7 @@ export async function generateReferences(
   // allSettled em vez de all: com `all`, a primeira rejeicao desenrola o
   // chamador enquanto as irmas continuam gastando e perdendo o resultado.
   for (const s of settled) {
-    if (s.status === 'rejected' && isControlSignal(s.reason)) throw s.reason;
+    if (s.status === 'rejected' && (isControlSignal(s.reason) || isFatalGatewayError(s.reason))) throw s.reason;
   }
   return out;
 }
@@ -356,7 +357,7 @@ async function generateSecondReference(params: {
     const text = result.text.trim();
     return text || null;
   } catch (err) {
-    if (isControlSignal(err)) throw err;
+    if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
     return null;
   }
 }
@@ -479,7 +480,7 @@ export async function validateGeneratedReferences(
         }
         resultados[ordem] = { index, stage, check, ...(second ? { second } : {}) };
       } catch (err) {
-        if (isControlSignal(err)) throw err;
+        if (isControlSignal(err) || isFatalGatewayError(err)) throw err;
         console.warn(
           `[gabarito] validação da etapa ${etapa(index)} falhou: ${(err as Error).message}`,
         );
@@ -490,7 +491,7 @@ export async function validateGeneratedReferences(
     }),
   );
   for (const s of settled) {
-    if (s.status === 'rejected' && isControlSignal(s.reason)) throw s.reason;
+    if (s.status === 'rejected' && (isControlSignal(s.reason) || isFatalGatewayError(s.reason))) throw s.reason;
   }
 
   // 3) fila needs-human-review: divergência + discordância + amostra humana
