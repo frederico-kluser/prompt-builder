@@ -3,6 +3,7 @@
 import type { ExpectedSpec, ReferenceValidation } from '../../../src/engine/groundTruth.js';
 import type { PromptContracts } from '../../../src/engine/contracts.js';
 import type { PromptGroup } from '../../../src/engine/promptGroup.js';
+import type { ItemSaturationReport } from '../../../src/datagen.js';
 import type { PiiRunReport } from '../../../src/engine/pii.js';
 import type {
   CallFinishSignals,
@@ -322,6 +323,27 @@ export interface RunConfigBase {
   referenceModelId?: string;
   /** Julgamento por referencia (pointwise vs gabarito + duelos). Default: true em variation/training, false em compare. */
   referenceJudging?: boolean;
+  /**
+   * IMPL-053 (R-03b:REC-1) — sondas CONTRAFACTUAIS do diagnóstico de
+   * verbosidade: re-julga ~20% das respostas com o texto truncado/preenchido
+   * em 20% e publica a taxa de INVERSÃO (`verbosityDiag.taxaInversaoSondas`,
+   * bom < 10%). OPT-IN: custa chamadas extras de juiz (papel `judge`, no
+   * ledger). Ausente/false = sem sondas (taxa `null`).
+   */
+  verbosityProbes?: boolean;
+  /**
+   * IMPL-055 (R-03a:REC-1) — valida os gabaritos GERADOS antes do julgamento:
+   * verificação dirigida pela rubrica (1º juiz) + amostra humana de 5–10% →
+   * `RunRecord.needsHumanReview`. OPT-IN (chamadas extras). Implícito quando
+   * `secondReferenceModelId` está presente.
+   */
+  validateReferences?: boolean;
+  /**
+   * IMPL-055 — modelo do 2º GABARITO (família DISTINTA do `referenceModelId`),
+   * disparado só quando a verificação acusa 'parcial'/divergência. Liga a
+   * validação dos gabaritos.
+   */
+  secondReferenceModelId?: string;
   /** Descricao detalhada do que testar — guia o datagen na geracao de cenarios. */
   scenarioBrief?: string;
   /** Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`. */
@@ -826,6 +848,13 @@ export interface RunRecord {
    */
   needsHumanReview?: HumanReviewItem[];
   /**
+   * IMPL-112 (R-05:REC-8) — taxa de acerto POR ITEM × contestants da run e a
+   * fila de REVISÃO HUMANA do gabarito (100% 'resolve' ou 100% 'nao' em k
+   * execuções — nunca descarte automático). Sai de `itemSaturationReport`
+   * (src/datagen.ts) no fim do julgamento. Ausente em records antigos.
+   */
+  itemSaturation?: ItemSaturationReport;
+  /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com
    * `allowPii`. E o registro de que os identificadores foram pseudonimizados
@@ -844,6 +873,19 @@ export interface RunRecord {
       modelIds: string[];
       pinnedAt: string;
       components?: JudgeContractComponents;
+    };
+    /**
+     * Auditoria do contrato ENTRE runs (IMPL-049/IMPL-057): o pin da última
+     * run gravada antes desta (a âncora sobrevive a processos/abas) e a linha
+     * curta "juiz: <modelo> (mesmo contrato desde a última run)" — `detail`
+     * (12 chars do hash) é o que vai no detalhe/export.
+     */
+    contractAudit?: {
+      changed: boolean;
+      previousHash?: string;
+      previousRunId?: string;
+      line: string;
+      detail: string;
     };
     /**
      * Viés de verbosidade (IMPL-052): regressão só com amostras VÁLIDAS da

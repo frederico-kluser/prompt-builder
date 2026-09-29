@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { cpus } from 'node:os';
-import { generateStages } from './datagen.js';
+import { generateStages, itemSaturationReport } from './datagen.js';
 import { countCompetitorOutcomes, runCompetitor } from './competitor.js';
 import { judgeStage, JUDGE_LISTWISE_CONTRACT_TEXT } from './judge.js';
-import { generateReferences } from './gabarito.js';
+import { generateReferences, validateGeneratedReferences } from './gabarito.js';
 import { judgeStageReference } from './refJudge.js';
 import {
   blindRankMap,
@@ -16,15 +16,21 @@ import {
 } from './duels.js';
 import { buildFinalStandings, oracleScoresFromVerdicts } from './engine/duelCore.js';
 import { assessVerdictIntegrity } from './engine/verdictIntegrity.js';
-import { VERDICT_AGGREGATION } from './engine/verdictAggregate.js';
+import { lowConfidenceReviewItems, stageCountsInJudgeScore, VERDICT_AGGREGATION } from './engine/verdictAggregate.js';
+import { humanReviewQueueFromStages } from './engine/groundTruth.js';
 import { fairnessWarningsForModels } from './llmVariants.js';
 import { JUDGE_CONTRACT_TEXT } from './refJudge.js';
 import {
+  contractDrift,
+  judgeContractAudit,
   noteJudgeContract,
   pinJudgeContract,
   pipelineContractComponents,
+  previousContractPin,
+  runCounterfactualProbes,
   verbosityReport,
   verbositySamples,
+  type CounterfactualProbePair,
   type VerbositySampleRow,
 } from './engine/judgeCalibration.js';
 import type { JudgeContractComponents } from './types.js';
@@ -34,7 +40,7 @@ import { sanitizeLlmVariants, variantsToContestants } from './llmVariants.js';
 import { judgeScoreFromVerdicts } from './rank.js';
 import { runCompleteness } from './stats.js';
 import { emitEvent } from './events.js';
-import { saveRun, getDataDir } from './storage.js';
+import { saveRun, getDataDir, listRuns, loadRun } from './storage.js';
 import { contestantsFromConfig } from './normalize.js';
 import { BudgetLedger, isControlSignal } from './budget.js';
 import { estimateInputFromConfig, estimateRunCost, makeCallEstimator } from './estimate.js';
@@ -659,6 +665,39 @@ async function runLoop(
     }
   }
 
+  /**
+   * IMPL-055 (R-03a:REC-1) — valida os gabaritos GERADOS nesta run, antes do
+   * julgamento: verificação dirigida pela rubrica (1º juiz), 2º gabarito de
+   * família distinta CONDICIONADO a 'parcial'/divergência e a amostra humana de
+   * 5–10% → `referenceValidation` na spec e a fila `needsHumanReview` no fim.
+   * OPT-IN (`validateReferences`/`secondReferenceModelId`): são chamadas extras.
+   * Suporte, não régua: sem folga no orçamento a validação é PULADA com aviso
+   * (nunca corta a run); orçamento/cancelamento no meio sobem (controle).
+   */
+  const validacaoLigada = Boolean(record.config.validateReferences || record.config.secondReferenceModelId);
+  const validarGabaritos = async (indices: number[]): Promise<Map<number, StageSpec>> => {
+    const out = new Map<number, StageSpec>();
+    if (!validacaoLigada || indices.length === 0) return out;
+    if (!ledger.canAfford(est.byRole.gabarito)) {
+      log(runId, 'validação dos gabaritos pulada: sem folga no orçamento (IMPL-055)');
+      return out;
+    }
+    const validadas = await validateGeneratedReferences({
+      stages: indices.map((i) => specs[i]),
+      stageNumbers: indices.map((i) => i + 1),
+      apiKey,
+      verifyModelId: record.config.judgeModelIds[0],
+      secondModelId: record.config.secondReferenceModelId,
+      reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
+      timeoutMs: datagenTimeout,
+      ctx,
+      maxPricePerMTok,
+      seed: seedFromId(record.id),
+    });
+    indices.forEach((i, k) => out.set(i, validadas[k]));
+    return out;
+  };
+
   // === FASE 1.5: gabaritos (respostas de referencia), um por cenario — cada
   // cenario roda uma unica vez. Etapas que ja trazem reference (seed/pinadas)
   // passam intactas; falha num gabarito so deixa a etapa sem reference
@@ -701,6 +740,14 @@ async function runLoop(
     specs = specs.slice();
     precisamGabarito.forEach((p, k) => {
       specs[p.idx] = preenchidas[k];
+    });
+    // IMPL-055 (R-03a:REC-1): valida os gabaritos GERADOS agora, antes do
+    // julgamento (opt-in — chamadas extras). Mesmo grupo de fase do gabarito.
+    const validados = await validarGabaritos(
+      precisamGabarito.filter((p) => !p.spec.reference?.trim() && specs[p.idx].reference?.trim()).map((p) => p.idx),
+    );
+    validados.forEach((spec, idx) => {
+      specs[idx] = spec;
     });
   }
 
@@ -1288,7 +1335,8 @@ async function runLoop(
   // === Agregados do julgamento por referencia (trainer/UI consomem). ===
   // Etapas `incomplete` (cortadas por orcamento) ficam de fora: contar uma
   // etapa sem julgamento como 'nao' rebaixaria todo mundo por falta de dinheiro.
-  const stagesComRef = record.stages.filter((s) => s.referenceJudge && !s.incomplete);
+  // A regra "etapa entra no judge-score" é fonte única (web-code#12).
+  const stagesComRef = record.stages.filter(stageCountsInJudgeScore);
   if (stagesComRef.length > 0) {
     // judge-score = (resolve + 0.5*parcial) / julgados * 100, por contestant,
     // sobre as etapas com juiz de referencia. Veredito AUSENTE (IMPL-004: juiz
@@ -1491,6 +1539,74 @@ async function runLoop(
   // em `runs show`/UI, em vez de sumir numa media com ausente contado como 'nao'.
   record.completeness = runCompleteness(record);
 
+  // IMPL-112 (R-05:REC-8): taxa de acerto POR ITEM × contestants + fila de
+  // revisão HUMANA do gabarito (100% 'resolve' / 100% 'nao' em k execuções —
+  // clones de repeat somam no MESMO item). Nunca descarta item. Zero LLM.
+  record.itemSaturation = itemSaturationReport(record.stages.filter((s) => !s.incomplete && !s.error));
+  // IMPL-055 + IMPL-047: fila `needs-human-review` — validação dos gabaritos
+  // (1 item por cenário: com repeats, só o 1º clone carrega a chamada) e os
+  // vereditos com confiança 'baixa'. Com a validação ligada, fila vazia também
+  // é informação ("0 itens").
+  const filaRevisao = [
+    ...humanReviewQueueFromStages(record.stages).filter((it) => it.stageIndex % repeats === 0),
+    ...lowConfidenceReviewItems(record.stages),
+  ];
+  if (filaRevisao.length > 0 || validacaoLigada) record.needsHumanReview = filaRevisao;
+
+  /**
+   * IMPL-053 (R-03b:REC-1) — sondas CONTRAFACTUAIS do diagnóstico de
+   * verbosidade: re-julga (pointwise, mesmo painel, mesmo gabarito/rubrica)
+   * ~20% das respostas com o texto truncado/preenchido em 20%. OPT-IN
+   * (`verbosityProbes`), só em runs de chat com julgamento por referência.
+   * `undefined` = sondas não rodaram (taxa `null`, nunca inventada).
+   */
+  const sondasDeVerbosidade = async (
+    rows: VerbositySampleRow[],
+    specDaAmostra: Map<VerbositySampleRow, StageSpec>,
+  ): Promise<CounterfactualProbePair[] | undefined> => {
+    if (!record.config.verbosityProbes || hasAgent) return undefined;
+    const alvo = rows.filter((r) => r.source === 'pointwise' && specDaAmostra.get(r)?.reference?.trim());
+    if (alvo.length === 0) return undefined;
+    // ~20% das respostas julgadas re-julgadas pelo painel: a fatia do papel juiz.
+    if (!ledger.canAfford(est.byRole.judge * 0.25)) {
+      log(runId, 'sondas de verbosidade puladas: sem folga no orçamento (IMPL-053)');
+      return undefined;
+    }
+    const contestantDe = new Map(record.contestants.map((c) => [c.id, c]));
+    return runCounterfactualProbes({
+      rows: alvo,
+      seed: seedFromId(record.id),
+      rejudge: async (probeText, row) => {
+        const stage = specDaAmostra.get(row)!;
+        const contestant = contestantDe.get(row.contestantId);
+        if (!contestant) return null;
+        const res = await judgeStageReference({
+          stage,
+          responses: [
+            {
+              contestantId: row.contestantId,
+              modelId: contestant.modelId,
+              text: probeText,
+              latencyMs: 0,
+              tokensIn: 0,
+              tokensOut: 0,
+              costUsd: 0,
+              status: 'ok',
+            },
+          ],
+          contestants: [contestant],
+          judgeModelIds: record.config.judgeModelIds,
+          apiKey,
+          reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
+          timeoutMs: record.config.timeoutMs,
+          ctx,
+          maxPricePerMTok,
+        });
+        return res.verdictByContestant[row.contestantId] ?? null;
+      },
+    });
+  };
+
   // F3.6 + F4.2 (PLANO-PARIDADE): avisos de imparcialidade + diagnostico do
   // juiz ficam NO RECORD — zero LLM, tudo derivado do que ja rodou. O pin do
   // contrato (hash do prompt do juiz + modelos) denuncia calibration drift ao
@@ -1511,6 +1627,9 @@ async function runLoop(
     // contados, comprimento em TOKENS com razão candidato/referência (caracteres
     // só como fallback) e n por célula (fonte × contestant) no relatório.
     const rows: VerbositySampleRow[] = [];
+    // Spec de cada amostra — as sondas contrafactuais (IMPL-053) re-julgam
+    // contra o MESMO gabarito/rubrica da etapa.
+    const specDaAmostra = new Map<VerbositySampleRow, StageSpec>();
     for (const st of record.stages) {
       const refJudge = st.referenceJudge;
       const listwise = st.judge;
@@ -1545,7 +1664,11 @@ async function runLoop(
           referenceTokens: st.gabaritoCall?.tokensOut ? st.gabaritoCall.tokensOut : undefined,
           maxTokens: r.maxTokens ?? st.spec?.maxTokens,
           truncated: r.truncated === true || r.finishReason === 'length',
+          // IMPL-053: efeito fixo do CENÁRIO + permutação dentro dele — com
+          // repeats, os clones são o MESMO cenário (índice antes da expansão).
+          scenarioId: String(Math.floor(st.index / repeats)),
         });
+        if (st.spec) specDaAmostra.set(rows[rows.length - 1], st.spec);
       }
     }
     // IMPL-034: numa run com agente quem dá as notas é o juiz de DOSSIÊ — o
@@ -1578,10 +1701,36 @@ async function runLoop(
       undefined,
       components,
     );
-    const drift = noteJudgeContract(contract.hash);
+    // IMPL-049: âncora do drift = o pin da última run GRAVADA antes desta (vale
+    // entre processos do CLI e com runs concorrentes no servidor); a memória do
+    // processo fica de reserva quando não há run gravada legível.
+    const memoria = noteJudgeContract(contract.hash);
+    const anterior = await previousContractPin({
+      runId: record.id,
+      startedAt: record.startedAt,
+      listRuns,
+      loadRun,
+    });
+    const drift = contractDrift(anterior?.hash ?? memoria.previousHash, contract.hash);
+    const audit = judgeContractAudit({
+      modelIds: record.config.judgeModelIds,
+      hash: contract.hash,
+      previousHash: drift.previousHash,
+    });
+    // IMPL-053: sondas contrafactuais (opt-in) — ~20% das respostas julgadas
+    // POINTWISE re-julgadas com o texto truncado/preenchido em 20%; a taxa de
+    // INVERSÃO vai no `verbosityDiag`. Custam chamadas de juiz: porta suave
+    // (sem folga, puladas com aviso — diagnóstico nunca corta a run).
+    const sondas = await sondasDeVerbosidade(rows, specDaAmostra);
     record.judgeDiagnostics = {
       contract,
-      verbosity: verbosityReport(verbositySamples(rows)),
+      contractAudit: {
+        changed: drift.changed,
+        ...(drift.previousHash ? { previousHash: drift.previousHash } : {}),
+        ...(anterior && anterior.hash === drift.previousHash ? { previousRunId: anterior.runId } : {}),
+        ...audit,
+      },
+      verbosity: verbosityReport(verbositySamples(rows), sondas ? { probes: sondas } : undefined),
     };
     if (drift.changed) {
       const detail = `judge.contract.changed: ${drift.message}`;
@@ -1615,6 +1764,9 @@ async function runLoop(
     const alertaCelula = truncationCellAlert(truncationByRoleEffort(record.finishSignalsByRole));
     if (alertaCelula) log(runId, `ALERTA de truncamento: ${alertaCelula}`);
   } catch (err) {
+    // Orçamento/cancelamento no meio das sondas (IMPL-053) é CONTROLE, não
+    // falha de diagnóstico: sobe (a run fecha como parcial, honesta).
+    if (isControlSignal(err)) throw err;
     // Diagnostico e SUPORTE, nunca derruba a finalizacao.
     log(runId, `diagnostico do juiz falhou (ignorado): ${err instanceof Error ? err.message : String(err)}`);
   }

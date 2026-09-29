@@ -578,7 +578,10 @@ export function verdictFailuresFromStages(
   const entradas: VerdictFailureEntry[] = [];
   stages.forEach((st, stageIndex) => {
     const scenario = st.spec?.question;
-    for (const res of [st.referenceJudge, st.judge]) {
+    // Etapa POR REFERÊNCIA: o `judge` dela é o SINTETIZADO a partir do
+    // `referenceJudge` (mesmos erros copiados) — ler os dois contava cada falha
+    // duas vezes. Só a etapa sem referência (listwise) usa o `judge`.
+    for (const res of st.referenceJudge ? [st.referenceJudge] : [st.judge]) {
       const erros = res?.verdictErrorByContestant;
       if (!erros) continue;
       for (const [contestantId, error] of Object.entries(erros)) {

@@ -44,6 +44,7 @@ import {
 import { holdoutConfirmationText, holdoutStrength } from '../../holdout.js';
 import { judgeScaleWarning } from '../../engine/verdictAggregate.js';
 import { winnerFromStandings } from '../../engine/duelCore.js';
+import { groupVerdictFailures, verdictFailuresFromStages } from '../../refJudge.js';
 import { buildReproduceArtifact, buildRunArtifact, configFileForRun } from '../../runArtifact.js';
 import {
   assertNoUnknownConfigKeys,
@@ -426,6 +427,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   // IMPL-054: ICC, design effect, nEfetivo e pass@k/pass^k sempre que há
   // repetição (compare `repeats` ou agente `repetitions`) — no texto E no JSON.
   const repeticao = repetitionReportOf(record);
+  // IMPL-057: falhas de veredito agrupadas (derivadas das etapas — vale para runs antigas).
+  const gruposDeFalha = groupVerdictFailures(verdictFailuresFromStages(record.stages));
   if (out.isText) {
     out.line(`${record.id}  ${record.status}  ${record.mode}`);
     out.line(`tema: ${record.config.theme}`);
@@ -449,7 +452,30 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     if (diag) {
       out.line();
       out.line(`juiz: contrato ${diag.contract.hash.slice(0, 12)} (${diag.contract.modelIds.join(', ')})`);
+      // IMPL-049/IMPL-057: o contrato comparado com a ÚLTIMA run gravada.
+      if (diag.contractAudit) out.line(`${diag.contractAudit.changed ? '! ' : ''}${diag.contractAudit.line}`);
       if (diag.verbosity.warning) out.line(`! ${diag.verbosity.warning}`);
+    }
+    // IMPL-057: falhas de veredito AGRUPADAS por (cenário, categoria, causa) —
+    // 'degraded' (painel reduzido) nunca é falha do candidato.
+    if (gruposDeFalha.length > 0) {
+      const total = gruposDeFalha.reduce((s, g) => s + g.count, 0);
+      out.line(`falhas de veredito: ${total} em ${gruposDeFalha.length} grupo(s) (cenário × categoria × causa)`);
+      for (const g of gruposDeFalha.slice(0, 4)) {
+        out.line(`  ${g.count}× ${g.category}/${g.cause}${g.scenario ? ` — ${g.scenario.slice(0, 60)}` : ''}`);
+      }
+      if (gruposDeFalha.length > 4) out.line(`  … +${gruposDeFalha.length - 4} grupo(s) no --json`);
+    }
+    // IMPL-055/IMPL-047: fila needs-human-review; IMPL-112: itens saturados.
+    if (record.needsHumanReview?.length) {
+      const motivos = [...new Set(record.needsHumanReview.map((i) => i.reason))].join(', ');
+      out.line(`! revisão humana: ${record.needsHumanReview.length} item(ns) na fila needs-human-review (${motivos})`);
+    }
+    if (record.itemSaturation?.reviewQueue.length) {
+      out.line(
+        `! saturação: ${record.itemSaturation.reviewQueue.length} item(ns) com 100% 'resolve' ou 100% 'nao' em ` +
+          `≥${record.itemSaturation.minExecutions} execuções — revise o GABARITO (nunca descarte o item)`,
+      );
     }
     for (const aviso of record.fairnessWarnings ?? []) out.line(`! ${aviso}`);
     // IMPL-019: alertas de ciclo de vida gravados NO INÍCIO da run (30/14/7
@@ -469,6 +495,8 @@ export async function cmdRuns(argv: string[]): Promise<number> {
     // `--json` vê exatamente o que o texto mostra (null sem repetição).
     repetition: repeticao ? { repeats: repeticao.repeats, contestants: repeticao.contestants } : null,
     judgeDiagnostics: record.judgeDiagnostics ?? null,
+    // IMPL-057: falhas agrupadas (cenário × categoria × causa) no mesmo payload do texto.
+    verdictFailureGroups: gruposDeFalha,
     fairnessWarnings: record.fairnessWarnings ?? [],
     lifecycleAlerts: record.modelLifecycle?.alerts ?? [],
     // IMPL-007: judge-score de painel em escala antiga (média ordinal inflada).
