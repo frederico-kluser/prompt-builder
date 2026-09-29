@@ -227,9 +227,12 @@ async function residueOf(dataDir: string, runId: string): Promise<Array<{ abs: s
   add(path.posix.join('jobs', `${runId}.log`), dataSub(dataDir, 'jobs', `${runId}.log`));
   // Diretório inteiro: artefatos + `repo-cache` (o "cache" da run).
   add(path.posix.join('agent-runs', runId), dataSub(dataDir, 'agent-runs', runId));
+  // Modo JEV: record da run ou da sessão (estados dos casos = dado do usuário).
+  add(path.posix.join('jev-runs', `${runId}.json`), dataSub(dataDir, 'jev-runs', `${runId}.json`));
+  add(path.posix.join('jev-sessions', `${runId}.json`), dataSub(dataDir, 'jev-sessions', `${runId}.json`));
 
-  // Sobras `.tmp` de escrita atômica interrompida em runs/ e jobs/.
-  for (const dir of ['runs', 'jobs']) {
+  // Sobras `.tmp` de escrita atômica interrompida em runs/, jobs/ e jev-*/.
+  for (const dir of ['runs', 'jobs', 'jev-runs', 'jev-sessions']) {
     let nomes: string[] = [];
     try {
       nomes = await fs.readdir(dataSub(dataDir, dir));
@@ -358,38 +361,41 @@ export async function pruneExpiredRuns(opts: PruneOptions = {}): Promise<PruneRe
     const cutoff = retentionCutoffMs(now, retentionDays);
     if (cutoff === null) return report; // TTL desligado: nada vence
 
-    const dir = dataSub(dataDir, 'runs');
-    let nomes: string[] = [];
-    try {
-      nomes = await fs.readdir(dir);
-    } catch {
-      return report; // data-dir ainda sem runs/
-    }
-    for (const nome of nomes) {
-      if (!nome.endsWith('.json')) continue;
-      const id = nome.slice(0, -'.json'.length);
+    // Modo JEV: jev-runs/ e jev-sessions/ seguem o MESMO TTL das runs.
+    for (const sub of ['runs', 'jev-runs', 'jev-sessions']) {
+      const dir = dataSub(dataDir, sub);
+      let nomes: string[] = [];
       try {
-        assertValidRecordId(id, 'id de run');
+        nomes = await fs.readdir(dir);
       } catch {
-        continue; // nome estranho em runs/ não é run nossa
+        continue; // data-dir ainda sem este diretório
       }
-      report.scanned += 1;
-      try {
-        let ref: number | string = (await fs.stat(path.join(dir, nome))).mtimeMs;
+      for (const nome of nomes) {
+        if (!nome.endsWith('.json')) continue;
+        const id = nome.slice(0, -'.json'.length);
         try {
-          const rec = JSON.parse(await fs.readFile(path.join(dir, nome), 'utf-8')) as { startedAt?: string };
-          if (rec.startedAt) ref = rec.startedAt;
+          assertValidRecordId(id, 'id de run');
         } catch {
-          // record corrompido ⇒ idade pelo mtime (nunca trava o prune)
+          continue; // nome estranho em runs/ não é run nossa
         }
-        if (!isOlderThan(ref, now, retentionDays)) {
-          report.kept.push(id);
-          continue;
+        report.scanned += 1;
+        try {
+          let ref: number | string = (await fs.stat(path.join(dir, nome))).mtimeMs;
+          try {
+            const rec = JSON.parse(await fs.readFile(path.join(dir, nome), 'utf-8')) as { startedAt?: string };
+            if (rec.startedAt) ref = rec.startedAt;
+          } catch {
+            // record corrompido ⇒ idade pelo mtime (nunca trava o prune)
+          }
+          if (!isOlderThan(ref, now, retentionDays)) {
+            report.kept.push(id);
+            continue;
+          }
+          await eraseRunFiles(dataDir, id);
+          report.deleted.push(id);
+        } catch (err) {
+          report.errors.push({ id, error: err instanceof Error ? err.message : String(err) });
         }
-        await eraseRunFiles(dataDir, id);
-        report.deleted.push(id);
-      } catch (err) {
-        report.errors.push({ id, error: err instanceof Error ? err.message : String(err) });
       }
     }
   } catch (err) {

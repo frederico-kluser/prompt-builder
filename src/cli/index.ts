@@ -29,6 +29,7 @@ import {
 import { cmdLibrary } from './commands/library.js';
 import { cmdBaseline } from './commands/baseline.js';
 import { cmdLimits } from './commands/limits.js';
+import { cmdJev } from './commands/jev.js';
 
 const VERSION = pkgVersion();
 
@@ -102,6 +103,10 @@ OUTROS
                            sem re-baseline declarada (ver: docs lifecycle)
   baseline declare --reason "…" [--judge a,b] [--reference x]
   mcp                      servidor MCP por stdio (mesmo binário)
+
+DECISÕES TIPADAS (modo JEV — noul/choice/score em casos rotulados)
+  jev validate|example|models|import|run|eval|compare|train|list|show|report|export|techniques
+                           mede e evolui definições de decisão do Jev (ver: docs jev)
 
 AGENTES (modo agente — mesmo motor, executor pi)
   agents doctor [--deep] [--container] [--config <arq>]
@@ -192,6 +197,9 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
       return cmdMcp(argv);
     case 'agents':
       return cmdAgents(argv);
+    case 'jev':
+    case 'decisions':
+      return cmdJev(argv);
     default: {
       const sugestao = cmd ? closestMatch(cmd, COMMANDS) : undefined;
       throw new CliError(

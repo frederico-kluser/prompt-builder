@@ -82,5 +82,11 @@
     "title": "Contrato arena-agent-config@1",
     "summary": "o contrato do modo agente inteiro, campo a campo, com JSON e os erros comuns (longo)",
     "approxTokens": 4700
+  },
+  {
+    "topic": "jev",
+    "title": "Modo JEV (decisões tipadas)",
+    "summary": "benchmark e evolução de definições de decisão do Jev (noul/choice/score) em casos rotulados: jev-config@1, métricas de calibração e bandas, custo por decisão, comparação com LLM e cascata",
+    "approxTokens": 3900
   }
 ]
