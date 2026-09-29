@@ -63,6 +63,7 @@ import {
   saveJevRun,
   saveJevSession,
 } from '../../jev/store.js';
+import { jevGuardConfig } from '../../jev/job.js';
 import type { OpenRouterModel } from '../../types.js';
 import {
   buildContext,
@@ -252,20 +253,6 @@ async function chatCatalogIfNeeded(ctx: CliContext, resolved: ResolvedJevConfig,
   }
 }
 
-/** Identidade do EXPERIMENTO para o lock (o hash ignora `budgetUsd`). */
-function guardConfigOf(r: ResolvedJevConfig): Record<string, unknown> & { budgetUsd?: number } {
-  return {
-    format: JEV_CONFIG_FORMAT,
-    mode: r.mode,
-    specHash: r.specHash,
-    datasetHash: r.datasetHash,
-    contestants: r.contestants.map((c) => c.id),
-    repeats: r.repeats,
-    ...(r.train ? { train: r.train } : {}),
-    ...(r.budgetUsd !== undefined ? { budgetUsd: r.budgetUsd } : {}),
-  };
-}
-
 function modeOf(v: unknown): JevMode | undefined {
   if (v === undefined) return undefined;
   if (v === 'eval' || v === 'compare' || v === 'train') return v;
@@ -357,7 +344,7 @@ async function cmdRunJev(argv: string[], forcedMode?: JevMode): Promise<number> 
       recusas.push(toRefusal(err));
     }
     recusas.push(
-      ...spendGuardRefusals({ dataDir: ctx.dataDir, config: guardConfigOf(resolved), lock: values['allow-concurrent'] !== true }).map(toRefusal),
+      ...spendGuardRefusals({ dataDir: ctx.dataDir, config: jevGuardConfig(resolved), lock: values['allow-concurrent'] !== true }).map(toRefusal),
     );
     const requires = apiKey ? [] : [keyRequirement()];
     if (resolved.budgetUsd !== undefined && est.reserveUsd > resolved.budgetUsd) {
@@ -408,7 +395,7 @@ async function cmdRunJev(argv: string[], forcedMode?: JevMode): Promise<number> 
   const ac = new AbortController();
   const guards: SpendGuards = openSpendGuards({
     dataDir: ctx.dataDir,
-    config: guardConfigOf(resolved),
+    config: jevGuardConfig(resolved),
     command: `jev ${resolved.mode}`,
     models: [...chatCatalog, ...decisionCatalog],
     signal: ac.signal,

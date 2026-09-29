@@ -70,6 +70,8 @@ import { toExportRow } from '../../modelCaps.js';
 import { estimateInputFromConfig, estimateRunCost } from '../../estimate.js';
 import { parseRunConfig } from '../../runConfigSchema.js';
 import { ARENA_AGENT_CONFIG_FORMAT, parseArenaConfig, parseArenaAgentConfig } from '../../configFile.js';
+// Modo JEV (jev-config@1): ganchos de 1 linha; a lógica mora em src/jev/job.ts.
+import { estimateJevForTool, isJevConfigRaw, jevJobInput, jevResultForTool, listDecisionModelsForTool } from '../../jev/job.js';
 import { arenaConfigToRunConfig, arenaAgentConfigToRunConfig } from '../../arenaConfig.js';
 import { readArtifact } from '../../agent/store.js';
 import { resolveHome, resolveKey, parse } from '../context.js';
@@ -417,6 +419,7 @@ async function jobInputFromStartArgs(args: Record<string, unknown>): Promise<Run
     }
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config é obrigatório (objeto).');
+  if (isJevConfigRaw(raw)) return jevJobInput(raw, budgetUsd);
   if ((raw as Record<string, unknown>).format === ARENA_AGENT_CONFIG_FORMAT) {
     const cfg = parseAgentConfigRaw(raw);
     return { kind: cfg.mode === 'training' ? 'training' : 'agent', config: { ...cfg, budgetUsd }, budgetUsd };
@@ -544,6 +547,7 @@ const CONFIG_STRING_SCHEMA = {
 const LIST_MODELS_ARGS = z.strictObject({
   search: z.string().describe('filtra por parte do id ou do nome').optional(),
   limit: z.number().describe('máximo de resultados (padrão 20)').optional(),
+  modality: z.enum(['text', 'decisions']).describe('decisions = modelos de decisão (modo JEV)').optional(),
 });
 const ESTIMATE_COST_ARGS = z.strictObject({
   config: zRunConfig.describe('a configuração da run'),
@@ -617,6 +621,7 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : und
 const numOf = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined);
 
 async function toRunConfig(raw: unknown): Promise<RunConfig> {
+  if (isJevConfigRaw(raw)) throw new Error('jev-config@1 (modo JEV) roda como job: use start_run (e run_status/get_result).');
   if (typeof (raw as Record<string, unknown>)?.format === 'string') {
     const p = parseArenaConfig(raw);
     if (!p.ok) throw new Error(p.error);
@@ -811,6 +816,9 @@ const TOOLS: McpTool[] = [
     inputSchema: inputSchemaFrom(LIST_MODELS_ARGS),
     outputSchema: MODELOS_OUTPUT,
     run: async (args, apiKey) => {
+      if (args.modality === 'decisions') {
+        return listDecisionModelsForTool(apiKey, str(args.search)?.toLowerCase(), Math.min(Math.max(Math.trunc(numOf(args.limit) ?? 20), 1), 200));
+      }
       const cat = await ensureCatalog(apiKey);
       const busca = str(args.search)?.toLowerCase();
       let rows = cat.models;
@@ -844,6 +852,7 @@ const TOOLS: McpTool[] = [
     inputSchema: inputSchemaFrom(ESTIMATE_COST_ARGS, { config: CONFIG_OBJECT_SCHEMA }),
     outputSchema: { type: 'object', additionalProperties: true },
     run: async (args, apiKey) => {
+      if (isJevConfigRaw(args.config)) return estimateJevForTool(rawConfigObject(args.config), apiKey);
       const cfg = await toRunConfig(args.config);
       const cat = await ensureCatalog(apiKey);
       return estimateRunCost(estimateInputFromConfig(cfg), cat.models);
@@ -859,7 +868,7 @@ const TOOLS: McpTool[] = [
       openWorldHint: true,
     },
     description:
-      'Inicia uma run (compare/vary/training/agentes) em segundo plano e devolve o jobId na hora. ' +
+      'Inicia uma run (compare/vary/training/agentes, ou jev-config@1 = modo JEV com casos inline) em segundo plano e devolve o jobId na hora. ' +
       'Depois: run_status (poll ≥ 5 s) e cancel_run. idempotencyKey obrigatória: reuse-a nos retries ' +
       '(mesma chave = mesmo job, nunca uma 2ª run paga). arena-agent-config é EXECUTÁVEL e exige ' +
       'allowExecConfig: true no primeiro aceite (pin SHA-256; ver run_agent_benchmark).',
@@ -1005,7 +1014,7 @@ const TOOLS: McpTool[] = [
     outputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['run', 'session'] },
+        kind: { type: 'string', enum: ['run', 'session', 'jev-run', 'jev-session'] },
         detail: { type: 'string', enum: ['summary', 'full'] },
         id: { type: 'string' },
         status: { type: 'string' },
@@ -1028,7 +1037,7 @@ const TOOLS: McpTool[] = [
       if (kind === 'session') {
         rec = await loadSession(id);
         tipo = 'session';
-        if (!rec) return { error: 'sessão não encontrada' };
+        if (!rec) return (await jevResultForTool(id, args.detail)) ?? { error: 'sessão não encontrada' };
       } else {
         const run = await loadRun(id);
         if (run) {
@@ -1037,7 +1046,7 @@ const TOOLS: McpTool[] = [
         } else {
           rec = await loadSession(id);
           tipo = 'session';
-          if (!rec) return { error: 'não encontrado' };
+          if (!rec) return (await jevResultForTool(id, args.detail)) ?? { error: 'não encontrado' };
         }
       }
       if (args.detail === 'full') return recordOuResumo(tipo, rec, paginacao);

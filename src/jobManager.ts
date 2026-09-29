@@ -75,17 +75,22 @@ import { agentVerdictTreeVersionOf, classifyStop } from './agent/verdictTree.js'
 // ledger da máquina (teto diário somando processos) e lock por config.
 import { withSpendGuards } from './cli/spendGuards.js';
 import type { RunConfig, RunRecord, SessionRecord } from './types.js';
+// Modo JEV: executor e progresso vivem em src/jev/job.ts (aqui só ganchos).
+import { executeJevJob, jevJobProgress, type JevJobInput } from './jev/job.js';
 
 // ---------------------------------------------------------------------------
 // Tipos
 // ---------------------------------------------------------------------------
 
 /** O trabalho pedido, já validado (config parseada, orçamento aplicado). */
-export interface RunJobInput {
-  kind: JobKind;
-  config: RunConfig;
-  budgetUsd: number;
-}
+export type RunJobInput =
+  | {
+      kind: Exclude<JobKind, 'jev'>;
+      config: RunConfig;
+      budgetUsd: number;
+    }
+  /** Modo JEV: jev-config@1 com casos INLINE (a impressão digital cobre o conteúdo). */
+  | JevJobInput;
 
 /** Progresso barato (lido do record em disco, regravado a cada ~800 ms). */
 export interface JobProgress {
@@ -94,6 +99,9 @@ export interface JobProgress {
   iterationsPlanned?: number;
   iterationsDone?: number;
   spentUsd?: number;
+  /** Modo JEV: requests de decisão planejadas/feitas. */
+  requestsPlanned?: number;
+  requestsDone?: number;
 }
 
 /** Por que um job terminou 'failed'. */
@@ -306,9 +314,11 @@ const SPEND_LABEL: Record<JobKind, string> = {
   benchmark: 'mcp run_benchmark',
   training: 'mcp train_prompt',
   agent: 'mcp run_agent_benchmark',
+  jev: 'mcp start_run (jev)',
 };
 
 export const executeRunJob: JobExecutor = async (input, apiKey, hooks) => {
+  if (input.kind === 'jev') return executeJevJob(input, apiKey, hooks);
   const cat = await ensureCatalog(apiKey);
   // Cancelado durante o catálogo (que não aceita sinal): não começa a gastar.
   throwIfAborted(hooks.signal);
@@ -1192,6 +1202,7 @@ function leituraDoResultado(rec: JobRecord, id: string | undefined): string | un
 }
 
 async function progressOf(rec: JobRecord): Promise<JobProgress | undefined> {
+  if (rec.kind === 'jev') return jevJobProgress(rec);
   if (rec.sessionId) {
     const s = await loadSession(rec.sessionId);
     if (!s) return undefined;
