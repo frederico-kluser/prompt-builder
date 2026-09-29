@@ -188,7 +188,9 @@ function judgeCascadeFlag(v: unknown): { cheap: string[]; strong: string } | und
       { flag: '--judge-cascade', value: v },
       {
         code: 'usage.invalid_flag_value',
-        hint: 'Ex.: `--judge-cascade google/gemini-2.5-flash-lite,openai/gpt-5-nano:anthropic/claude-sonnet-4.5`.',
+        // Exemplo SEM modelos com expiração anunciada (skill-install#14): o
+        // antigo `google/gemini-2.5-flash-lite` sai do catálogo em 2026-10-20.
+        hint: 'Ex.: `--judge-cascade google/gemini-3.8-flash,openai/gpt-5-nano:anthropic/claude-sonnet-4.5`.',
       },
     );
   }
