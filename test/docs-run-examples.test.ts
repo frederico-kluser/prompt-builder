@@ -147,3 +147,46 @@ describe('exemplos de run documentados passam no pré-voo (--dry-run, sem key, c
     expect(out.ok, diag).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// skill-install#7 — `… --json | jq <caminho>` entra pelo ENVELOPE.
+//
+// Todo `--json` do CLI sai como `{ok, command, data}` (ou `{ok:false, command,
+// error}`). A receita "nunca chute um think level" mandava `jq .model.thinkLevels`,
+// que devolve `null` em silêncio (o certo é `.data.model.thinkLevels`) — o agente
+// que a seguia não recebia nada. Aqui todo caminho jq aplicado a uma saída
+// `--json` documentada tem de começar por `.data`, `.ok`, `.command` ou `.error`.
+// (NDJSON não entra: lá cada linha é um evento e o caminho é `.type`, `.spentUsd`…)
+// ---------------------------------------------------------------------------
+
+const JQ_AFTER_JSON =
+  /(?:prompt-builder-cli|prompt-builder|pbuilder)\b[^|`\n]*?--json\b[^|`\n]*\|\s*jq\s+(?:-[A-Za-z]+\s+)*['"]?(\.[^'"`\s|]*)/gu;
+const ENVELOPE = /^\.(?:data|ok|command|error)(?![\w-])/u;
+
+function jqPathsOutsideEnvelope(docs: DocSource[]): { file: string; path: string }[] {
+  const out: { file: string; path: string }[] = [];
+  for (const { file, markdown } of docs) {
+    for (const m of markdown.matchAll(JQ_AFTER_JSON)) {
+      if (!ENVELOPE.test(m[1])) out.push({ file, path: m[1] });
+    }
+  }
+  return out;
+}
+
+describe('`--json | jq` documentado lê pelo envelope {ok, command, data}', () => {
+  it('o detector pega o caminho sem envelope (e aceita o com envelope)', () => {
+    const doc = (markdown: string): DocSource[] => [{ file: 'x.md', markdown }];
+    expect(jqPathsOutsideEnvelope(doc('`prompt-builder models show a/b --json | jq .model.thinkLevels`'))).toEqual([
+      { file: 'x.md', path: '.model.thinkLevels' },
+    ]);
+    expect(jqPathsOutsideEnvelope(doc("prompt-builder runs show r --json | jq -r '.data.run | {x}'"))).toEqual([]);
+    expect(jqPathsOutsideEnvelope(doc("prompt-builder train --output-format ndjson | jq '.type'"))).toEqual([]);
+  });
+
+  it('nenhuma doc ensina um caminho jq que devolveria null', () => {
+    const docs = sources();
+    const usos = docs.flatMap(({ markdown }) => [...markdown.matchAll(JQ_AFTER_JSON)]);
+    expect(usos.length).toBeGreaterThanOrEqual(5);
+    expect(jqPathsOutsideEnvelope(docs)).toEqual([]);
+  });
+});
