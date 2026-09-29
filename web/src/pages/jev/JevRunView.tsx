@@ -34,6 +34,7 @@ import {
 import { cancelJev, markJevInterrupted } from '../../jev/api';
 import { useJevRecord } from '../../jev/useJevRecord';
 import { caseGrid, questionOf, reliabilitySeries, rescoreRun } from '../../jev/view';
+import { networkDiagnosis } from '../../jev/transfer';
 
 /**
  * Resultado de uma run JEV (eval/compare): métricas por competidor, a
@@ -103,6 +104,33 @@ function StopInfo({ run }: { run: JevRunRecord }) {
     );
   }
   return null;
+}
+
+/**
+ * A aba não alcançou o endpoint de decisões (o `fetch` rejeitou sem resposta
+ * HTTP). O navegador esconde a causa de propósito, então a tela lista as
+ * prováveis e o caminho que não depende da aba: o terminal (mesmo JSON).
+ */
+function NetworkInfo({ run }: { run: JevRunRecord }) {
+  const d = networkDiagnosis(run);
+  if (!d || run.client !== 'browser') return null;
+  return (
+    <Banner tone={d.total ? 'error' : 'warn'}>
+      <strong>
+        {d.total
+          ? 'Esta aba não alcançou o endpoint de decisões: nenhum request teve resposta.'
+          : `${d.failed} de ${d.attempted} request(s) ficaram sem resposta (falha de rede) e estão fora das métricas.`}
+      </strong>{' '}
+      O navegador não diz a causa. As prováveis: rede corporativa/proxy, bloqueador ou extensão, VPN, conexão caída, ou o CORS do endpoint de decisões
+      da OpenRouter (hoje aberto) ter mudado. Se o pedido chegou ao provedor e só a resposta foi barrada, ele pode
+      ter sido cobrado sem aparecer aqui: confira a atividade da key na OpenRouter. Se persistir, rode o mesmo JSON pelo terminal (Nova run → JEV → Exportar
+      JSON, depois <code className="font-mono">prompt-builder jev run -c jev-config.json --budget &lt;usd&gt;</code>) e abra o resultado aqui em{' '}
+      <Link className="text-primary underline-offset-4 hover:underline" to="/runs?tipo=jev">
+        Histórico → JEV → Importar do terminal
+      </Link>
+      .
+    </Banner>
+  );
 }
 
 export function JevRunView() {
@@ -222,6 +250,7 @@ export function JevRunView() {
 
       <div className="flex flex-col gap-3">
         <StopInfo run={run} />
+        <NetworkInfo run={run} />
       </div>
 
       {run.status !== 'running' && (
@@ -371,8 +400,12 @@ export function JevRunView() {
                 {temPolitica && ' A política ajustada vai no handoff completo (JSON).'}
               </p>
               <div className="flex flex-wrap items-center gap-2">
-                <CopyButton variant="label" value={JSON.stringify(request, null, 2)} label="Copiar request (JSON)" copiedLabel="Request copiado" />
-                <CopyButton variant="label" value={handoffCurl(request)} label="Copiar cURL" copiedLabel="cURL copiado" />
+                <CopyButton variant="label" value={JSON.stringify(request, null, 2)} label="Copiar request (JSON)" copiedLabel="Request copiado" copiedText="Copiado">
+                  Request JSON
+                </CopyButton>
+                <CopyButton variant="label" value={handoffCurl(request)} label="Copiar cURL" copiedLabel="cURL copiado" copiedText="Copiado">
+                  cURL
+                </CopyButton>
                 {handoff && !isHandoffBlocked(handoff) && (
                   <Button type="button" variant="outline" size="sm" onClick={() => baixar('jev-handoff.json', JSON.stringify(handoff, null, 2), 'application/json')}>
                     <Download aria-hidden="true" />

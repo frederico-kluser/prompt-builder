@@ -632,6 +632,11 @@ export function NewJevRun() {
             {n}
           </p>
         ))}
+        {/* Os dois caminhos (web/src/jev/transfer.ts): a aba é o principal; o terminal é o reserva. */}
+        <p className="mt-1 text-[12px] text-muted-foreground">
+          Roda nesta aba, direto no endpoint de decisões da OpenRouter (sem servidor no meio). Se a sua rede bloquear, o mesmo arquivo de «Exportar JSON» roda no
+          terminal com <code className="font-mono">prompt-builder jev run -c</code>, e o resultado volta para o Histórico por «Importar do terminal».
+        </p>
         {problems.length > 0 ? (
           <div className="mt-3 rounded-lg border border-border p-3">
             <p className="text-[13px] font-medium">Antes de iniciar, falta:</p>
@@ -672,7 +677,7 @@ export function NewJevRun() {
           subtitle={MODE_SUBTITLE[draft.mode]}
           actions={
             <>
-              <RovingToolbar label="Ações da configuração JEV" count={4} className="flex items-center gap-2">
+              <RovingToolbar label="Ações da configuração JEV" count={4} className="flex flex-wrap items-center gap-2">
                 <RovingItem index={0}>
                   {(roving) => (
                     <Button type="button" variant="outline" size="sm" {...roving} onClick={() => importRef.current?.click()}>

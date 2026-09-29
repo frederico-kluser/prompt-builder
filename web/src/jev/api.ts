@@ -1,5 +1,5 @@
 // Modo JEV na SPA — o MOTOR RODA NA ABA (D-13): o endpoint de decisões
-// (`/api/alpha/decisions`) tem CORS aberto (preflight 204 com `Authorization`,
+// da OpenRouter tem CORS aberto (preflight 204 com `Authorization`,
 // `HTTP-Referer` e `X-Title` permitidos), então não há proxy — ao contrário do
 // jev-simulator, cujo proxy same-origin existia à toa. Tudo passa pelo MESMO
 // gateway do Node (shim `../engine/openrouter`): limitador AIMD, reserva,
@@ -42,6 +42,7 @@ import { enforceRunCompliance } from '../lgpd';
 import { requestPersistentStorage } from '../storageHealth';
 import { COST_CONFIRM_THRESHOLD_USD, requireKey } from '../api';
 import { listJevSummaries, loadJevRun, loadJevSession, saveJevRun, saveJevSession, type JevSummary } from './store';
+import { parseJevRecordFile } from './transfer';
 
 export type JevRecordKind = 'run' | 'session';
 export type JevAnyRecord = JevRunRecord | JevSessionRecord;
@@ -303,6 +304,61 @@ export async function getJevSessionRuns(s: JevSessionRecord): Promise<JevRunReco
 
 export function listJevHistory(): Promise<JevSummary[]> {
   return listJevSummaries();
+}
+
+// ---------------------------------------------------------------------------
+// Importar do terminal (a UI serve os dois caminhos — ver `./transfer.ts`)
+// ---------------------------------------------------------------------------
+
+export interface JevImportResult {
+  name: string;
+  ok: boolean;
+  kind?: JevRecordKind;
+  id?: string;
+  theme?: string;
+  error?: string;
+}
+
+/**
+ * Grava no IndexedDB desta aba os records vindos do terminal (arquivos de
+ * `~/.prompt-builder/jev-runs|jev-sessions/` ou `jev show --full --json`). Runs
+ * antes das sessões, para o relatório de ciclos já achar as runs de ciclo.
+ * Nunca sobrescreve o que roda NESTA aba. Nada vai para a rede.
+ */
+export async function importJevRecordFiles(files: readonly { name: string; text: string }[]): Promise<JevImportResult[]> {
+  const lidos = files.map((f) => ({ name: f.name, r: parseJevRecordFile(f.text) }));
+  const casosDaSessao = new Map<string, Set<string>>();
+  for (const { r } of lidos) {
+    if (r.ok && r.kind === 'run' && r.record.sessionId) {
+      const set = casosDaSessao.get(r.record.sessionId) ?? new Set<string>();
+      for (const c of r.record.cases) set.add(c.id);
+      casosDaSessao.set(r.record.sessionId, set);
+    }
+  }
+  const ordem = [...lidos.filter((l) => l.r.ok && l.r.kind === 'run'), ...lidos.filter((l) => !(l.r.ok && l.r.kind === 'run'))];
+  const porNome = new Map<(typeof lidos)[number], JevImportResult>();
+  for (const l of ordem) {
+    const { name, r } = l;
+    if (!r.ok) {
+      porNome.set(l, { name, ok: false, error: r.error });
+      continue;
+    }
+    const id = r.record.id;
+    if (controllers.has(id)) {
+      porNome.set(l, { name, ok: false, kind: r.kind, id, error: 'este id está executando nesta aba.' });
+      continue;
+    }
+    const gravou = r.kind === 'run' ? await saveJevRun(r.record) : await saveJevSession(r.record, casosDaSessao.get(id)?.size ?? 0);
+    // A cópia viva (se houver) ficaria na frente do IndexedDB nas leituras.
+    live.delete(id);
+    porNome.set(
+      l,
+      gravou
+        ? { name, ok: true, kind: r.kind, id, theme: r.record.theme }
+        : { name, ok: false, kind: r.kind, id, error: 'o navegador não conseguiu gravar (armazenamento cheio ou bloqueado).' },
+    );
+  }
+  return lidos.map((l) => porNome.get(l)!);
 }
 
 export const ORPHAN_MESSAGE = 'a aba que executava fechou, recarregou ou travou com o trabalho em andamento (órfã): parcial preservado.';

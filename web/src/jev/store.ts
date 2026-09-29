@@ -71,7 +71,8 @@ export function jevSessionSummary(s: JevSessionRecord, cases = 0): JevSummary {
     startedAt: s.startedAt,
     ...(s.finishedAt ? { finishedAt: s.finishedAt } : {}),
     totalCostUsd: s.totalCostUsd ?? 0,
-    client: 'browser',
+    // Só o Node grava o dono (pid/host): sessão com `owner` veio do terminal (importada).
+    client: s.owner ? 'node' : 'browser',
     cases,
     contestants: 1,
     iterationsDone: s.iterations.filter((i) => i.iteration > 0).length,

@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { Upload } from 'lucide-react';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
 import { SkeletonResolveList, SkeletonResolveRow, Skeleton } from '@/components/motion-ui/skeleton';
-import { EmptyState, StatusPill, Tag } from '../primitives';
+import { Button } from '@/components/ui/button';
+import { Banner, EmptyState, StatusPill, Tag } from '../primitives';
 import { fmtPct, fmtUsd } from '../../engine/jev';
-import { listJevHistory, sweepJevOrphans } from '../../jev/api';
+import { importJevRecordFiles, listJevHistory, sweepJevOrphans, type JevImportResult } from '../../jev/api';
 import type { JevSummary } from '../../jev/store';
 
 /**
@@ -32,9 +34,46 @@ function groupOf(status: string): Exclude<Group, 'all'> {
   return 'error';
 }
 
+/** Resultado de "Importar do terminal": o que entrou (com link) e o que foi recusado (com o motivo). */
+function ImportReport({ results, onDismiss }: { results: JevImportResult[]; onDismiss: () => void }) {
+  const ok = results.filter((r) => r.ok);
+  const falhas = results.filter((r) => !r.ok);
+  return (
+    <Banner tone={falhas.length && !ok.length ? 'error' : falhas.length ? 'warn' : 'neutral'} className="flex flex-col gap-1.5">
+      <p>
+        <strong>
+          {ok.length} record(s) importado(s) do terminal
+          {falhas.length ? `, ${falhas.length} recusado(s)` : ''}.
+        </strong>{' '}
+        <button type="button" className="text-primary underline-offset-4 hover:underline" onClick={onDismiss}>
+          dispensar
+        </button>
+      </p>
+      <ul className="flex flex-col gap-1 text-[13px]">
+        {ok.map((r) => (
+          <li key={`${r.name}-${r.id}`}>
+            <Link className="text-primary underline-offset-4 hover:underline" to={r.kind === 'session' ? `/jev/training/${r.id}` : `/jev/runs/${r.id}`}>
+              {r.theme || r.id}
+            </Link>{' '}
+            <span className="text-muted-foreground">({r.kind === 'session' ? 'treino' : 'run'} · {r.name})</span>
+          </li>
+        ))}
+        {falhas.map((r, i) => (
+          <li key={`${r.name}-${i}`}>
+            <code className="font-mono">{r.name}</code>: {r.error}
+          </li>
+        ))}
+      </ul>
+    </Banner>
+  );
+}
+
 export function JevHistory({ query }: { query: string }) {
   const [rows, setRows] = useState<JevSummary[] | null>(null);
   const [filter, setFilter] = useState<Group>('all');
+  const [importados, setImportados] = useState<JevImportResult[] | null>(null);
+  const [recarga, setRecarga] = useState(0);
+  const arquivoRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let ativo = true;
@@ -45,7 +84,13 @@ export function JevHistory({ query }: { query: string }) {
     return () => {
       ativo = false;
     };
-  }, []);
+  }, [recarga]);
+
+  async function importar(files: FileList): Promise<void> {
+    const lidos = await Promise.all([...files].map(async (f) => ({ name: f.name, text: await f.text() })));
+    setImportados(await importJevRecordFiles(lidos));
+    setRecarga((n) => n + 1);
+  }
 
   const itens = useMemo(() => (rows ?? []).filter((r) => !(r.kind === 'run' && r.sessionId)), [rows]);
   const counts = useMemo(() => {
@@ -60,21 +105,45 @@ export function JevHistory({ query }: { query: string }) {
 
   return (
     <div className="flex flex-col gap-4">
-      <SegmentedToggle value={filter} onChange={(v) => setFilter(v as Group)} ariaLabel="Filtrar runs JEV por status">
-        {(
-          [
-            ['all', 'Todas'],
-            ['running', 'Em andamento'],
-            ['finished', 'Concluídas'],
-            ['error', 'Com erro'],
-          ] as const
-        ).map(([k, label]) => (
-          <SegmentedToggleOption key={k} value={k} className="px-3 py-1.5 text-[13px]">
-            {label}
-            <span className="text-[11px] opacity-70 tabular">{counts[k]}</span>
-          </SegmentedToggleOption>
-        ))}
-      </SegmentedToggle>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {/* Em 390px os 4 filtros não cabem: rolam dentro da própria faixa, nunca a página. */}
+        <div className="scroll-slim max-w-full overflow-x-auto">
+          <SegmentedToggle value={filter} onChange={(v) => setFilter(v as Group)} ariaLabel="Filtrar runs JEV por status">
+            {(
+              [
+                ['all', 'Todas'],
+                ['running', 'Em andamento'],
+                ['finished', 'Concluídas'],
+                ['error', 'Com erro'],
+              ] as const
+            ).map(([k, label]) => (
+              <SegmentedToggleOption key={k} value={k} className="px-3 py-1.5 text-[13px]">
+                {label}
+                <span className="text-[11px] opacity-70 tabular">{counts[k]}</span>
+              </SegmentedToggleOption>
+            ))}
+          </SegmentedToggle>
+        </div>
+        {/* Os dois caminhos (ver web/src/jev/transfer.ts): o que rodou no terminal abre nas mesmas telas. */}
+        <Button type="button" variant="outline" size="sm" onClick={() => arquivoRef.current?.click()} title="Records de ~/.prompt-builder/jev-runs e jev-sessions, ou jev show <id> --full --json">
+          <Upload aria-hidden="true" />
+          Importar do terminal
+        </Button>
+        <input
+          ref={arquivoRef}
+          type="file"
+          multiple
+          accept="application/json,.json"
+          className="hidden"
+          aria-label="Records JEV do terminal (jev-run@1 / jev-session@1)"
+          onChange={(e) => {
+            const fs = e.target.files;
+            if (fs && fs.length) void importar(fs);
+            e.target.value = '';
+          }}
+        />
+      </div>
+      {importados && <ImportReport results={importados} onDismiss={() => setImportados(null)} />}
       <div className="overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
         {rows === null ? (
           <SkeletonResolveList loading>
@@ -83,7 +152,11 @@ export function JevHistory({ query }: { query: string }) {
             ))}
           </SkeletonResolveList>
         ) : visiveis.length === 0 ? (
-          <EmptyState>{itens.length === 0 ? 'Nenhuma run JEV neste navegador ainda.' : 'Nenhuma run JEV corresponde a esse filtro.'}</EmptyState>
+          <EmptyState>
+            {itens.length === 0
+              ? 'Nenhuma run JEV neste navegador ainda. Rodou no terminal? «Importar do terminal» abre o record aqui.'
+              : 'Nenhuma run JEV corresponde a esse filtro.'}
+          </EmptyState>
         ) : (
           visiveis.map((it) => (
             <Link
