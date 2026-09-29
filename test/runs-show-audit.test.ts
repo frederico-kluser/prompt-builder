@@ -207,6 +207,19 @@ describe('runs show — fila de revisão, contrato do juiz, datagen e modo econ�
     }).data;
     expect(v).toMatchObject({ itemReviewQueue: [], needsHumanReview: [], judgeContractAudit: null, datagenReport: null, judgeCascade: null });
   });
+
+  it('argumento solto não some em silêncio: `runs show <id> <extra>` → exit 2 usage.unexpected_argument', async () => {
+    const r = registro(EXTRAS);
+    await saveRun(r);
+    let erro: { code?: number; errorCode?: string; message?: string } | undefined;
+    try {
+      await capturar(() => cmdRuns(cli(['show', r.id, 'extra-qualquer', '--json'])));
+    } catch (e) {
+      erro = e as { code?: number; errorCode?: string; message?: string };
+    }
+    expect(erro).toMatchObject({ code: 2, errorCode: 'usage.unexpected_argument' });
+    expect(erro!.message).toContain('extra-qualquer');
+  });
 });
 
 describe('runs export — bloco `audit` explícito no artefato', () => {

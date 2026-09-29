@@ -116,6 +116,17 @@ describe('library review — fila de curadoria (sem ação)', () => {
     expect(fila[1].issue).toBe('estado rejeitado');
     expect(fila[2].issue).toMatch(/sem estado/);
   });
+
+  it('id solto (argumento posicional) não é ignorado em silêncio: exit 2 apontando as flags', async () => {
+    await saveItems('acme', [item(1)]);
+    // `library review --profile acme item-01` (os ids vão pelas flags) era
+    // engolido: o comando listava a fila como se nada tivesse pedido (left#7).
+    const e = falha(await review(['item-01']));
+    expect(e).toMatchObject({ code: EXIT.USAGE, errorCode: 'usage.unexpected_argument' });
+    expect(e.message).toContain('item-01');
+    expect(e.hint).toContain('--approve item-01');
+    expect((await getItem('acme', 'item-01'))!.state).toBeUndefined();
+  });
 });
 
 describe('library review — aprovação amarrada ao contentHash', () => {

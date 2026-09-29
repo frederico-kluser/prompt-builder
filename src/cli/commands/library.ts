@@ -687,7 +687,7 @@ async function cmdLibraryInner(argv: string[]): Promise<number> {
     }
 
     case 'review':
-      return libraryReview(exigirProfile(parsed.values), parsed.values, out);
+      return libraryReview(exigirProfile(parsed.values), parsed.values, out, ctx.positionals);
 
     case 'rm': {
       const profileId = exigirProfile(parsed.values);
@@ -777,7 +777,26 @@ function revisorDe(values: Record<string, unknown>): string {
   return revisor;
 }
 
-async function libraryReview(profileId: string, values: Record<string, unknown>, out: Output): Promise<number> {
+async function libraryReview(
+  profileId: string,
+  values: Record<string, unknown>,
+  out: Output,
+  positionals: readonly string[] = [],
+): Promise<number> {
+  // Os ids vão SEMPRE pelas flags (--approve/--reject/--adjust/--reopen): um id
+  // solto (`library review --profile X item-01`) era ignorado em silêncio e o
+  // comando listava a fila como se nada tivesse sido pedido (left#7).
+  if (positionals.length) {
+    throw new CliError(
+      `Argumento inesperado para "library review": "${positionals[0]}" — os ids dos itens vão pelas flags.`,
+      EXIT.USAGE,
+      { command: 'library review', positionals: [...positionals] },
+      {
+        code: 'usage.unexpected_argument',
+        hint: `Use \`library review --profile ${profileId} --approve ${positionals[0]}\` (ou --reject/--adjust/--reopen); sem ação, o comando lista a fila.`,
+      },
+    );
+  }
   for (const acao of ACOES_DE_REVISAO) {
     if (values[acao] !== undefined && idsDaFlag(values[acao]).length === 0) {
       throw new CliError(`--${acao} exige ids de item separados por vírgula.`, EXIT.USAGE, { flag: `--${acao}` }, {

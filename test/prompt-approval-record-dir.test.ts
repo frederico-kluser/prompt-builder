@@ -140,4 +140,30 @@ describe('sessions winner --apply --record-dir (processo real)', { timeout: 120_
     expect(semApply.status).toBe(EXIT.USAGE);
     expect(JSON.parse(semApply.stdout).error.code).toBe('usage.record_without_apply');
   });
+
+  it('argumento solto não some em silêncio: `--record <caminho>` (forma errada) → exit 2 com a dica do --record-dir', () => {
+    const { dir, file } = repo('record-caminho');
+    // O `--record` é booleano: `--record docs/aprov` punha "docs/aprov" em
+    // positional e ele era ignorado — o registro ia para o default e o
+    // usuário achava que escolhera o lugar (left#9).
+    const r = cli(['sessions', 'winner', 's1', '--apply', file, '--record', 'registros/x', '--json']);
+    expect(r.status, r.stdout).toBe(EXIT.USAGE);
+    const erro = JSON.parse(r.stdout).error as { code: string; hint: string; details: { positionals: string[] } };
+    expect(erro.code).toBe('usage.unexpected_argument');
+    expect(erro.hint).toContain('--record-dir');
+    expect(erro.details.positionals).toEqual(['registros/x']);
+    // Nada tocado: nem prompt, nem backup, nem registro em lugar nenhum.
+    expect(readFileSync(file, 'utf-8')).toBe(ORIGINAL);
+    expect(readdirSync(path.dirname(file)).filter((f) => f.includes('.bak-'))).toEqual([]);
+    expect(existsSync(path.join(dir, '.prompt-approvals'))).toBe(false);
+    expect(existsSync(path.join(work, 'registros', 'x'))).toBe(false);
+  });
+
+  it('o mesmo guarda vale para show/report/export: `sessions show <id> <extra>` → exit 2', () => {
+    const r = cli(['sessions', 'show', 's1', 'de-mais', '--json']);
+    expect(r.status).toBe(EXIT.USAGE);
+    const erro = JSON.parse(r.stdout).error as { code: string; hint: string };
+    expect(erro.code).toBe('usage.unexpected_argument');
+    expect(erro.hint).toContain('sessions show <id>');
+  });
 });

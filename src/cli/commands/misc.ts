@@ -436,6 +436,18 @@ export async function cmdRuns(argv: string[]): Promise<number> {
   if (!id) throw new CliError(`Uso: prompt-builder runs ${sub} <id>`, EXIT.USAGE);
   // IMPL-024: id fora do formato nem chega ao disco (e não é ecoado).
   if (!isValidRecordId(id)) throw new CliError('Id de run inválido: use o id listado em `prompt-builder runs list`.', EXIT.USAGE);
+  // Argumento solto nunca é ignorado em silêncio (cli#13, mesmo critério do
+  // `assertNoPositionals`): `runs show <id> <extra>` descartava o extra e o
+  // agente achava que o comando o levara em conta (left#10).
+  const extrasRuns = parsed.positionals.slice(1);
+  if (extrasRuns.length) {
+    throw new CliError(
+      `Argumento inesperado para "runs ${sub}": "${extrasRuns[0]}" — o comando leva só o id da run.`,
+      EXIT.USAGE,
+      { command: `runs ${sub}`, positionals: extrasRuns },
+      { code: 'usage.unexpected_argument', hint: `Use: \`prompt-builder runs ${sub} <id>\`.` },
+    );
+  }
   await sweepOrphanRecords({ only: { kind: 'run', id }, locklessAfterMs: LOCKLESS_ORPHAN_AFTER_MS });
   const record = await loadRun(id);
   // IMPL-024: sem caminho absoluto do data dir no erro (o id já passou pela regex)
@@ -991,6 +1003,27 @@ export async function cmdSessions(argv: string[]): Promise<number> {
   const id = parsed.positionals[0];
   if (!id) throw new CliError(`Uso: prompt-builder sessions ${sub} <id>`, EXIT.USAGE);
   if (!isValidRecordId(id)) throw new CliError('Id de sessão inválido: use o id listado em `prompt-builder sessions list`.', EXIT.USAGE);
+  // Argumento solto nunca é ignorado em silêncio (cli#13, mesmo critério do
+  // `assertNoPositionals`): `sessions winner <id> --record <caminho>` (o
+  // `--record` é booleano) punha o caminho em positional e ele sumia — o
+  // registro ia para o default e o usuário achava que escolhera o lugar
+  // (left#9). Estes subcomandos levam SÓ o id; o resto é erro de uso com a
+  // dica que resolve.
+  const extras = parsed.positionals.slice(1);
+  if (extras.length) {
+    throw new CliError(
+      `Argumento inesperado para "sessions ${sub}": "${extras[0]}" — o comando leva só o id da sessão.`,
+      EXIT.USAGE,
+      { command: `sessions ${sub}`, positionals: extras },
+      {
+        code: 'usage.unexpected_argument',
+        hint:
+          sub === 'winner'
+            ? 'Para escolher ONDE gravar o registro prompt-approval@1, use `--record-dir <dir>` (o `--record` sozinho grava em <repo>/.prompt-approvals/).'
+            : `Use: \`prompt-builder sessions ${sub} <id>\`.`,
+      },
+    );
+  }
   await sweepOrphanRecords({ only: { kind: 'session', id }, locklessAfterMs: LOCKLESS_ORPHAN_AFTER_MS }); // IMPL-030
   const record = await loadSession(id);
   if (!record) throw new CliError(`Sessão "${id}" não encontrada.`, EXIT.USAGE);
