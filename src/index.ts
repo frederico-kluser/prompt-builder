@@ -151,6 +151,13 @@ export type {
   DatagenReport,
 } from './datagen.js';
 
+// Embedder de produção do dedup de cenários (IMPL-063): /embeddings pelo MESMO
+// gateway/ledger do chat — para quem deduplica pacotes fora de uma run.
+export { createOpenRouterEmbedder, DEFAULT_DEDUP_EMBED_MODEL } from './embeddings.js';
+export type { OpenRouterEmbedderOptions } from './embeddings.js';
+export { meteredInputCall } from './openrouter.js';
+export type { MeteredInputParams, MeteredInputResult } from './openrouter.js';
+
 export { REASONING_LEVELS, fitEffort, applyReasoning, coerceLevel } from './reasoning.js';
 export { listTechniques, getTechnique } from './techniques.js';
 export { subscribe, subscribeSession } from './events.js';

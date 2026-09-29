@@ -2052,6 +2052,32 @@ export interface ChatStreamParams extends ChatCompletionParams {
   onDelta?: (delta: string, fullText: string) => void;
 }
 
+/**
+ * IMPL-063 — chamada paga NÃO-chat com lista de textos (`meteredInputCall`):
+ * o `path` é relativo à base (ex.: o ponto de representação usado pelo dedup
+ * do datagen, em `src/embeddings.ts`). Mesmo ledger/limitador do chat.
+ */
+export interface MeteredInputParams {
+  apiKey: string;
+  modelId: string;
+  /** Caminho relativo à base da API (sem barra inicial). */
+  path: string;
+  /** Textos do pedido — passam pela cascata de dado pessoal como mensagens. */
+  input: string[];
+  /** Papel no ledger (obrigatório: o default 'competitor' do chat seria errado aqui). */
+  role: CostRole;
+  sink?: CostSink;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+export interface MeteredInputResult {
+  /** JSON cru da resposta 200. */
+  raw: unknown;
+  cost: CallCost;
+  latencyMs: number;
+}
+
 export interface KeyInfo {
   /** Rotulo/nome da key configurado no OpenRouter. */
   label?: string;
@@ -2987,6 +3013,86 @@ export class OpenRouterGateway {
   }
 
   /**
+   * IMPL-063 — chamada PAGA não-chat com lista de textos (`input`), pelo MESMO
+   * caminho do chat: cascata de dado pessoal nos textos (IMPL-042), roteamento
+   * sensível fail-closed, reserva no ledger ANTES do slot (role + sink), o
+   * limitador AIMD/retry/watchdog de `guardedFetch` e o custo MEDIDO por
+   * `usage.cost` (`account`) — sem `usage`, pendente/conservador
+   * (`accountUnmeasured`), nunca zero. Quem usa: `src/embeddings.ts` (dedup de
+   * cenários do datagen). Devolve o JSON cru da resposta 200.
+   */
+  async meteredInputCall(params: MeteredInputParams): Promise<MeteredInputResult> {
+    const { apiKey, modelId, sink, signal: externalSignal } = params;
+    const role = params.role;
+    // A MESMA forma de pedido que a reserva/cascata conhecem: cada texto é uma
+    // mensagem `user`; teto de saída 1 token (estes pontos não geram texto).
+    const comoChat: ChatCompletionParams = {
+      apiKey,
+      modelId,
+      messages: params.input.map((content) => ({ role: 'user' as const, content })),
+      maxTokens: 1,
+      role,
+      ...(typeof params.timeoutMs === 'number' ? { timeoutMs: params.timeoutMs } : {}),
+      ...(sink ? { sink } : {}),
+      ...(externalSignal ? { signal: externalSignal } : {}),
+    };
+    const protegidas = this.protectMessages(comoChat.messages, sink).map((m) => m.content);
+    const corpo: Record<string, unknown> = { model: modelId, input: protegidas };
+    applySensitiveRouting(corpo, sink?.sensitiveRouting?.(), modelId, role);
+    const timeouts = this.timeoutsFor(comoChat, false);
+    const reservation = await this.reserveFor(comoChat, role);
+    const track: DispatchTrack = {};
+    let guarded: GuardedResponse;
+    try {
+      guarded = await this.guardedFetch(
+        `${this.cfg.baseUrl}/${params.path.replace(/^\/+/, '')}`,
+        { method: 'POST', headers: this.headers(apiKey), body: JSON.stringify(corpo) },
+        timeouts,
+        role,
+        limiterScopeOf(apiKey, modelId, corpo),
+        externalSignal,
+        track,
+      );
+    } catch (err) {
+      if (track.abortedInFlight) this.accountUnmeasured(comoChat, reservation, track.abortedInFlight, undefined);
+      else reservation?.release();
+      throw err;
+    }
+    const { res, startedAt, finish } = guarded;
+    let contabilizado = false;
+    let ok = false;
+    let generationId: string | undefined;
+    try {
+      const json = (await res.json()) as { id?: unknown; usage?: unknown; error?: unknown };
+      generationId = typeof json?.id === 'string' && json.id ? json.id : undefined;
+      const latencyMs = Date.now() - startedAt;
+      const cost = hasUsage(json?.usage)
+        ? this.account(comoChat, reservation, extractUsage(json.usage), undefined, {
+            latencyMs,
+            ...(generationId ? { generationId } : {}),
+          })
+        : this.accountUnmeasured(comoChat, reservation, 'no_usage', generationId, undefined, { latencyMs });
+      contabilizado = true;
+      // 200 com corpo de erro (provedor recusou): falha, já contabilizada.
+      if (json?.error) {
+        const e = json.error as { message?: unknown };
+        throw new Error(`OpenRouter: ${typeof e?.message === 'string' ? e.message : JSON.stringify(json.error)}`);
+      }
+      ok = true;
+      return { raw: json, cost, latencyMs };
+    } catch (err) {
+      throw controlIfAborted(err, externalSignal);
+    } finally {
+      if (!contabilizado) {
+        this.accountUnmeasured(comoChat, reservation, guarded.abortReason() ?? 'no_usage', generationId, undefined, {
+          latencyMs: Date.now() - startedAt,
+        });
+      }
+      finish(ok);
+    }
+  }
+
+  /**
    * Cache de vereditos desta chamada (IMPL-080), quando o reuso é LEGÍTIMO:
    * papel de juízo (judge/duel/gabarito — é o veredito que se reusa; respostas
    * de competidor amostram variância e nunca entram), cache ligado, SEM
@@ -3703,6 +3809,11 @@ export function chatCompletion(params: ChatCompletionParams): Promise<ChatComple
 
 export function chatCompletionStream(params: ChatStreamParams): Promise<ChatCompletionResult> {
   return defaultGateway.chatCompletionStream(params);
+}
+
+/** IMPL-063 — chamada paga não-chat pelo gateway padrão (ver `OpenRouterGateway.meteredInputCall`). */
+export function meteredInputCall(params: MeteredInputParams): Promise<MeteredInputResult> {
+  return defaultGateway.meteredInputCall(params);
 }
 
 /** Pseudonimiza `value` com o cofre do escopo de `sink` na instancia padrao (ver o metodo). */

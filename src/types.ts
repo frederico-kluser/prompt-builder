@@ -26,6 +26,8 @@ import type { PromptContracts } from './engine/contracts.js';
 import type { PromptGroup } from './engine/promptGroup.js';
 import type { ModelLifecycleSnapshot } from './engine/modelLifecycle.js';
 import type { DatagenReport, ItemSaturationReport } from './datagen.js';
+import type { CascadeReport, JudgeCascadeConfig, JudgeCascadeSummary } from './judge.js';
+import type { ScenarioDedupConfig } from './dedup.js';
 
 // Ciclo de vida de modelos (IMPL-019): fonte única em src/engine/modelLifecycle.ts.
 export type {
@@ -667,6 +669,18 @@ export interface RunConfigBase {
    * fora desta lista vira aviso em `RunRecord.languageWarnings`.
    */
   languages?: string[];
+  /**
+   * IMPL-063 — dedup SEMÂNTICO dos cenários gerados: `semantic: true` liga
+   * os embeddings do OpenRouter (mesmo gateway/ledger do chat, custo no papel
+   * datagen) com limiares calibráveis. Ausente = só a passe exata do par.
+   */
+  scenarioDedup?: ScenarioDedupConfig;
+  /**
+   * IMPL-115 — modo ECONÔMICO do julgamento: 2 juízes baratos em paralelo e o
+   * forte só nos vereditos em dúvida (discordância, 'parcial', anomalia de
+   * comprimento). Ausente = julgamento normal por `judgeModelIds`.
+   */
+  judgeCascade?: JudgeCascadeConfig;
   /** Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`. */
   scenarioSeed?: StageSpec[];
   /**
@@ -1314,6 +1328,8 @@ export interface SingleJudgeResult {
  * tambem o resultado individual de cada juiz (placar aditivo + justificativas).
  */
 export interface JudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /** Consenso entre juizes (posicao media): melhor -> pior. Placar/heatmap/CSV usam isto. */
   rankedContestantIds: string[];
   /**
@@ -1350,6 +1366,8 @@ export interface JudgeResult {
  * sem comparar contestants entre si. Base do judge-score.
  */
 export interface ReferenceJudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /**
    * Veredito ternario por contestant (consenso entre juizes, quando ha mais de
    * um). SO vereditos legitimos: falha do juiz/competidor deixa a chave AUSENTE
@@ -1781,6 +1799,12 @@ export interface RunRecord {
    * ou record antigo. Sai de `generateStages` (`onReport`).
    */
   datagenReport?: DatagenReport;
+  /**
+   * IMPL-115 — resumo do modo econômico: vereditos julgados/escalonados ao
+   * juiz forte, fração escalonada e histograma dos gatilhos. O custo por
+   * veredito sai MEDIDO do ledger (`costByRole.judge`). Ausente = sem cascata.
+   */
+  judgeCascade?: JudgeCascadeSummary;
   /**
    * LGPD (IMPL-042): campos do config com dado pessoal que o pre-voo achou
    * (caminho + tipos + veredito, NUNCA o valor) e se o usuario os liberou com

@@ -235,6 +235,8 @@ describe('whitelists silenciosos — os campos NÃO podem sumir', () => {
       validateReferences: true, // IMPL-055
       secondReferenceModelId: 's/x', // IMPL-055
       scenarioBrief: 'brief',
+      scenarioDedup: { semantic: true, cosineThreshold: 0.92 }, // IMPL-063
+      judgeCascade: { cheap: ['b/1', 'b/2'], strong: 'f/1' }, // IMPL-115
       duels: false,
       finalists: 4,
       temperature: 0.3,

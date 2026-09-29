@@ -11,7 +11,9 @@ import {
   type DedupeOptions,
   type DedupeReport,
   type EmbedFn,
+  type ScenarioDedupConfig,
 } from './dedup.js';
+import { createOpenRouterEmbedder, DEFAULT_DEDUP_EMBED_MODEL } from './embeddings.js';
 import { renderCaseInput } from './engine/caseInput.js';
 import { contentHash, sha256Hex } from './engine/hash.js';
 import { renderScenarioRules } from './engine/scenarioRules.js';
@@ -392,6 +394,13 @@ export interface GenerateStagesParams {
    * camada semantica fica desligada (so a exata + relatorio de eco agem).
    */
   dedup?: DedupeOptions;
+  /**
+   * Config de RUN do dedup (IMPL-063, `RunConfigBase.scenarioDedup`):
+   * `semantic: true` e sem `dedup.embed` explícito => o embedder de PRODUÇÃO
+   * (`createOpenRouterEmbedder`: /embeddings pelo mesmo gateway/ledger, papel
+   * datagen, com o `ctx` da run). Limiares daqui valem quando `dedup` não os traz.
+   */
+  scenarioDedup?: ScenarioDedupConfig;
   /** Relatorio de duplicatas removidas desta geracao (uma chamada = uma run de datagen). */
   onDedupReport?: (report: DedupeReport) => void;
   /**
@@ -659,6 +668,8 @@ export interface DatagenReport {
   alert: boolean;
   /** Camada semantica ligada (havia embedder e ele respondeu). */
   semantic: boolean;
+  /** Modelo de representação usado (IMPL-063) — só com a camada semântica ligada. */
+  embedModelId?: string;
   /** Embedder falhou (erro nao-controle): a geracao seguiu so com a passe exata. */
   semanticError?: string;
   /** Limiar semantico configurado e o efetivamente usado (relaxado p/ o piso). */
@@ -793,12 +804,18 @@ export async function generateStages(opts: GenerateStagesParams): Promise<StageS
   // Exclusao base: o que o chamador pediu + as perguntas do seed (sem repetir).
   const exclusaoBase = [...new Set([...(excludePrompts ?? []), ...seed.map((s) => s.question)])];
   const exclude = exclusaoBase.slice(0, 30);
-  const cosineThreshold = dedup?.cosineThreshold ?? DEFAULT_COSINE_THRESHOLD;
-  const echoThreshold = dedup?.echoThreshold ?? DEFAULT_ECHO_THRESHOLD;
+  const cfgDedup = opts.scenarioDedup;
+  const cosineThreshold = dedup?.cosineThreshold ?? cfgDedup?.cosineThreshold ?? DEFAULT_COSINE_THRESHOLD;
+  const echoThreshold = dedup?.echoThreshold ?? cfgDedup?.echoThreshold ?? DEFAULT_ECHO_THRESHOLD;
+  // IMPL-063: embedder de PRODUÇÃO quando a run liga a camada semântica (o
+  // explícito de `dedup.embed` — testes/biblioteca — tem precedência).
+  const embedModelId = cfgDedup?.semantic ? cfgDedup.embedModelId?.trim() || DEFAULT_DEDUP_EMBED_MODEL : undefined;
+  const embedEscolhido =
+    dedup?.embed ?? (embedModelId ? createOpenRouterEmbedder({ apiKey, modelId: embedModelId, ctx, timeoutMs }) : undefined);
   // Embedder com memoria: cada rodada re-deduplica TUDO (relatorio sem
   // dupla-contagem) sem pagar o embedding do mesmo texto duas vezes.
   let semanticError: string | undefined;
-  const embedBase = dedup?.embed ? memoEmbed(dedup.embed) : undefined;
+  const embedBase = embedEscolhido ? memoEmbed(embedEscolhido) : undefined;
   const dedupOpts: DedupeOptions = {
     ...dedup,
     cosineThreshold,
@@ -974,6 +991,7 @@ export async function generateStages(opts: GenerateStagesParams): Promise<StageS
     rate: relatorio.rate,
     alert: relatorio.alert,
     semantic: Boolean(dedupOpts.embed),
+    ...(dedupOpts.embed && embedModelId && !dedup?.embed ? { embedModelId } : {}),
     ...(semanticError ? { semanticError } : {}),
     cosineThreshold,
     effectiveCosineThreshold,

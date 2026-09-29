@@ -9,9 +9,19 @@ import {
   type DatagenReport,
 } from './datagen.js';
 import { countCompetitorOutcomes, runCompetitor } from './competitor.js';
-import { judgeStage, JUDGE_LISTWISE_CONTRACT_TEXT } from './judge.js';
+import {
+  judgeStage,
+  judgeStageCascade,
+  JUDGE_LISTWISE_CONTRACT_TEXT,
+  summarizeJudgeCascade,
+  type JudgeStageParams,
+} from './judge.js';
 import { generateReferences, validateGeneratedReferences } from './gabarito.js';
-import { judgeStageReference } from './refJudge.js';
+import {
+  judgeStageReference,
+  judgeStageReferenceCascade,
+  type JudgeStageReferenceParams,
+} from './refJudge.js';
 import {
   blindRankMap,
   DUEL_AGENT_TRUST,
@@ -670,6 +680,17 @@ async function runLoop(
     duel: roleTimeoutMs('duel', cfgTimeout, reasoningLevelForRole(record.config.reasoning, 'duel')),
   };
   const datagenTimeout = tempoPapel.datagen;
+  // IMPL-115: modo ECONÔMICO do julgamento — 2 juízes baratos em paralelo e o
+  // forte só nos vereditos em dúvida. Ausente = o painel de `judgeModelIds`.
+  const cascata = record.config.judgeCascade;
+  const julgarPorReferencia = (p: Omit<JudgeStageReferenceParams, 'judgeModelIds'>) =>
+    cascata
+      ? judgeStageReferenceCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
+      : judgeStageReference({ ...p, judgeModelIds: record.config.judgeModelIds });
+  const julgarListwise = (p: Omit<JudgeStageParams, 'judgeModelIds'>) =>
+    cascata
+      ? judgeStageCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
+      : judgeStage({ ...p, judgeModelIds: record.config.judgeModelIds });
 
   // Saneia maxTokens (o competidor faz Math.min(maxOutputTokens, stage.maxTokens);
   // ausente/<=0 viraria NaN). Aplica-se a pinadas, seed e geradas.
@@ -772,6 +793,8 @@ async function runLoop(
       // (todas as fontes, logo abaixo) — sem duplicar no console do datagen.
       languages: record.config.languages,
       onLanguageWarnings: () => undefined,
+      // IMPL-063: dedup semântico da run (embedder de produção dentro do datagen).
+      scenarioDedup: record.config.scenarioDedup,
       canAffordBatch: () => ledger.canAfford(custoLote),
       onReport: (r) => {
         datagenReport = r;
@@ -1271,11 +1294,10 @@ async function runLoop(
             let refJudge: ReferenceJudgeResult;
             if (agentContestants.length === 0) {
               // 100% chat — fluxo de hoje, intacto.
-              refJudge = await judgeStageReference({
+              refJudge = await julgarPorReferencia({
                 stage: stageSpec,
                 responses: stageRecord.responses,
                 contestants: record.contestants,
-                judgeModelIds: record.config.judgeModelIds,
                 apiKey,
                 reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
                 timeoutMs: tempoPapel.judge,
@@ -1317,11 +1339,10 @@ async function runLoop(
               const chatResponses = stageRecord.responses.filter(
                 (r) => !agentContestants.some((a) => a.id === r.contestantId),
               );
-              const base = await judgeStageReference({
+              const base = await julgarPorReferencia({
                 stage: stageSpec,
                 responses: chatResponses,
                 contestants: chatContestants,
-                judgeModelIds: record.config.judgeModelIds,
                 apiKey,
                 reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
                 timeoutMs: tempoPapel.judge,
@@ -1406,11 +1427,10 @@ async function runLoop(
                 'etapa sem gabarito em modo agente — candidato julgado pelo resumo (1 linha); use verify[] ou reference para modo agente',
               );
             }
-            stageRecord.judge = await judgeStage({
+            stageRecord.judge = await julgarListwise({
               apiKey,
               stage: stageSpec,
               responses: stageRecord.responses,
-              judgeModelIds: record.config.judgeModelIds,
               timeoutMs: tempoPapel.judge,
               passes: record.config.judgePasses,
               reasoningLevel: reasoningLevelForRole(record.config.reasoning, 'judge'),
@@ -1522,6 +1542,20 @@ async function runLoop(
   );
   for (const r of etapasSettled) {
     if (r.status === 'rejected' && mustPropagate(r.reason)) throw r.reason;
+  }
+  // IMPL-115: resumo do modo econômico (fração escalonada + gatilhos). O
+  // custo por veredito sai MEDIDO do ledger (costByRole.judge), nunca daqui.
+  if (cascata) {
+    const relatorios = record.stages.flatMap((s) => {
+      const c = s.referenceJudge?.cascade ?? s.judge?.cascade;
+      return c ? [c] : [];
+    });
+    record.judgeCascade = summarizeJudgeCascade(cascata, relatorios);
+    log(
+      runId,
+      `modo econômico: ${record.judgeCascade.escalatedVerdicts}/${record.judgeCascade.verdicts} veredito(s) ao juiz forte ` +
+        `(${(record.judgeCascade.escalatedFraction * 100).toFixed(0)}%)`,
+    );
   }
   syncLedger();
 
@@ -1889,8 +1923,13 @@ async function runLoop(
         ? JSON.stringify(ctx.sink.sensitiveRouting!())
         : undefined,
     });
+    // IMPL-115: no modo econômico quem julga as etapas são os baratos + o forte
+    // — o contrato pinado os inclui (trocar a cascata = contrato novo).
+    const juizesDoContrato = cascata
+      ? [...new Set([...record.config.judgeModelIds, ...cascata.cheap, cascata.strong])]
+      : record.config.judgeModelIds;
     const contract = pinJudgeContract(
-      record.config.judgeModelIds,
+      juizesDoContrato,
       judgePromptText,
       undefined,
       components,
@@ -1907,7 +1946,7 @@ async function runLoop(
     });
     const drift = contractDrift(anterior?.hash ?? memoria.previousHash, contract.hash);
     const audit = judgeContractAudit({
-      modelIds: record.config.judgeModelIds,
+      modelIds: juizesDoContrato,
       hash: contract.hash,
       previousHash: drift.previousHash,
     });

@@ -18,6 +18,12 @@ describe('IMPL-112 — itemSaturationReport & cia. na API de biblioteca', () => 
     expect(lib.describeDatagenShortfall).toBe(datagen.describeDatagenShortfall);
   });
 
+  it('IMPL-063: o embedder de produção também sai pela API de biblioteca', async () => {
+    const emb = await import('../src/embeddings.js');
+    expect(lib.createOpenRouterEmbedder).toBe(emb.createOpenRouterEmbedder);
+    expect(typeof lib.meteredInputCall).toBe('function');
+  });
+
   it('item 100% resolve em k execuções entra na fila de revisão pela API pública', () => {
     const spec = { question: 'Qual o prazo de troca?', productContext: 'Trocas em 30 dias.' };
     const stages = [0, 1, 2].map((index) => ({

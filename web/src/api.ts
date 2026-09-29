@@ -4,6 +4,8 @@ import type { ExpectedSpec, ReferenceValidation } from '../../src/engine/groundT
 import type { PromptContracts } from '../../src/engine/contracts.js';
 import type { PromptGroup } from '../../src/engine/promptGroup.js';
 import type { DatagenReport, ItemSaturationReport } from '../../src/datagen.js';
+import type { CascadeReport, JudgeCascadeConfig, JudgeCascadeSummary } from '../../src/judge.js';
+import type { ScenarioDedupConfig } from '../../src/dedup.js';
 import type {
   CallFinishSignals,
   CostEntry,
@@ -318,6 +320,18 @@ export interface RunConfig {
   scenarioBrief?: string;
   /** Idiomas permitidos no datagen (IMPL-056) — opt-in; ausente = só pt-BR. */
   languages?: string[];
+  /**
+   * IMPL-063 — dedup SEMÂNTICO dos cenários gerados: `semantic: true` liga
+   * os embeddings do OpenRouter (mesmo gateway/ledger do chat, custo no papel
+   * datagen) com limiares calibráveis. Ausente = só a passe exata do par.
+   */
+  scenarioDedup?: ScenarioDedupConfig;
+  /**
+   * IMPL-115 — modo ECONÔMICO do julgamento: 2 juízes baratos em paralelo e o
+   * forte só nos vereditos em dúvida (discordância, 'parcial', anomalia de
+   * comprimento). Ausente = julgamento normal por `judgeModelIds`.
+   */
+  judgeCascade?: JudgeCascadeConfig;
   /** Contratos never-break do prompt base (pos-rewriter rejeita o que quebrar). */
   contracts?: PromptContracts;
   /** Multi-prompt (F2/P0.4): grupo de fragmentos; evolui-se `promptId` por sessao. */
@@ -470,6 +484,8 @@ export interface SingleJudgeResult {
 }
 
 export interface JudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /** Consenso entre juizes (posicao media): melhor -> pior. */
   rankedContestantIds: string[];
   /** Aceitavel por contestant = maioria dos juizes (derivado do ternario). */
@@ -495,6 +511,8 @@ export interface JudgeResult {
 
 /** Julgamento pointwise contra o gabarito (`StageSpec.reference`). Base do judge-score. */
 export interface ReferenceJudgeResult {
+  /** IMPL-115 — o que cada camada da cascata decidiu nesta etapa (modo econômico). */
+  cascade?: CascadeReport;
   /** Veredito ternario por contestant (consenso entre juizes, quando ha mais de um). */
   verdictByContestant: Record<string, Verdict>;
   /** Explicacao curta (1 frase) por contestant. */
@@ -662,6 +680,12 @@ export interface RunRecord {
   itemSaturation?: ItemSaturationReport;
   /** web-live#7 — relatório da geração de cenários (espelho de src/types.ts). */
   datagenReport?: DatagenReport;
+  /**
+   * IMPL-115 — resumo do modo econômico: vereditos julgados/escalonados ao
+   * juiz forte, fração escalonada e histograma dos gatilhos. O custo por
+   * veredito sai MEDIDO do ledger (`costByRole.judge`). Ausente = sem cascata.
+   */
+  judgeCascade?: JudgeCascadeSummary;
   /**
    * Classificacao final agregada dos duelos das finais, ordenada por TAXA DE
    * VITÓRIA (`winRate` = (vitórias + ½·empates) / duelos disputados).

@@ -680,6 +680,11 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     // IMPL-056: sem repassar, TODA iteracao (e o holdout) voltaria ao pt-BR
     // exclusivo e os avisos de idioma usariam a politica errada.
     languages: cfg.languages,
+    // IMPL-063/IMPL-115: dedup semântico e modo econômico do juiz são escolhas
+    // da SESSÃO — sem repassar, a iteração 0 (que gera os cenários) e todas as
+    // outras voltariam ao exato/ao juiz normal em silêncio.
+    scenarioDedup: cfg.scenarioDedup,
+    judgeCascade: cfg.judgeCascade,
     scenarioSeed: cfg.scenarioSeed,
     // Fase de finais: sem repassar, TODA iteracao (e o holdout) cairia no
     // default de 3 finalistas — a escolha do usuario era descartada em silencio.

@@ -130,6 +130,23 @@ export interface DedupeOptions {
   anchors?: { question: string; productContext?: string }[];
 }
 
+/**
+ * Config de RUN do dedup de cenários (IMPL-063) — `RunConfigBase.scenarioDedup`.
+ * `semantic: true` liga a camada de embeddings com o embedder de produção
+ * (`src/embeddings.ts`: /embeddings do OpenRouter pelo MESMO gateway/ledger do
+ * chat, custo no papel `datagen`). Ausente/false = só a passe exata do par (o
+ * comportamento de antes). Limiares calibráveis por domínio (R-05:DEC-4).
+ */
+export interface ScenarioDedupConfig {
+  semantic?: boolean;
+  /** Modelo de representação (default `DEFAULT_DEDUP_EMBED_MODEL`). */
+  embedModelId?: string;
+  /** Cosseno mínimo para fundir (default `DEFAULT_COSINE_THRESHOLD`). */
+  cosineThreshold?: number;
+  /** Limiar só-pergunta do eco de template (default `DEFAULT_ECHO_THRESHOLD`). */
+  echoThreshold?: number;
+}
+
 /** Relatório de duplicatas removidas por run (R-05:REC-7): taxa + alerta > 20%. */
 export interface DedupeReport {
   /** Itens considerados. */

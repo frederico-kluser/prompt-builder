@@ -115,7 +115,10 @@ const USO: Record<string, string> = {
   Comuns: --theme --stages --judge --budget <usd|none> --dry-run
   --output-format ndjson --idempotency-key <k> --allow-concurrent --detach
   --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR —
-                           cenário fora da política vira aviso no record)`,
+                           cenário fora da política vira aviso no record)
+  --judge-cascade b1,b2:forte  modo econômico: 2 juízes baratos; o forte só
+                           nos vereditos em dúvida (fração escalonada no record)
+  --semantic-dedup         dedup semântico dos cenários (embeddings, papel datagen)`,
   vary: `  vary --model <id>        testa variações de prompt num modelo
   vary --config <arq>      usa um arena-config@1 (ver: docs config)
   Comuns: --theme --stages --judge --techniques --budget --dry-run --detach
