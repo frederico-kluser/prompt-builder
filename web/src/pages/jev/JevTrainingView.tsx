@@ -23,6 +23,7 @@ import {
 } from '../../engine/jev';
 import { cancelJev, markJevInterrupted } from '../../jev/api';
 import { useJevRecord } from '../../jev/useJevRecord';
+import { CYCLE_DECISION_LABEL } from '../../jev/view';
 
 /**
  * Treino JEV (evolução da definição de decisão): ciclos com o gate
@@ -30,13 +31,7 @@ import { useJevRecord } from '../../jev/useJevRecord';
  * original × campeã, a política ajustada por pergunta, o holdout e o handoff.
  */
 
-const DECISION_LABEL: Record<string, string> = {
-  baseline: 'linha de base',
-  promoted: 'promovida',
-  held: 'mantida',
-  inconclusive: 'inconclusivo',
-  stopped: 'parou',
-};
+const DECISION_LABEL = CYCLE_DECISION_LABEL;
 
 const VERDICT_TEXT: Record<ReturnType<typeof sessionVerdict>, { tone: 'neutral' | 'warn' | 'error'; text: string }> = {
   melhorou: { tone: 'neutral', text: 'Melhorou: a campeã superou a original no holdout, com significância.' },
@@ -76,8 +71,12 @@ function Handoff({ s }: { s: JevSessionRecord }) {
         handoff completo. O <code className="font-mono">jev.mjs</code> da jev-agent-skill aplica UM par de limiares a todas as perguntas e não aplica temperatura.
       </p>
       <div className="flex flex-wrap items-center gap-2">
-        <CopyButton variant="label" value={JSON.stringify(h.request, null, 2)} label="Copiar request (JSON)" copiedLabel="Request copiado" />
-        <CopyButton variant="label" value={handoffCurl(h.request)} label="Copiar cURL" copiedLabel="cURL copiado" />
+        <CopyButton variant="label" value={JSON.stringify(h.request, null, 2)} label="Copiar request (JSON)" copiedLabel="Request copiado" copiedText="Copiado">
+          Request JSON
+        </CopyButton>
+        <CopyButton variant="label" value={handoffCurl(h.request)} label="Copiar cURL" copiedLabel="cURL copiado" copiedText="Copiado">
+          cURL
+        </CopyButton>
         <Button type="button" variant="outline" size="sm" onClick={() => baixar('jev-handoff.json', JSON.stringify(h, null, 2), 'application/json')}>
           <Download aria-hidden="true" />
           Handoff completo

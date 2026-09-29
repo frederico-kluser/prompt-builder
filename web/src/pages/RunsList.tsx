@@ -157,7 +157,7 @@ export function RunsList() {
         <SegmentedToggleOption value="llm" className="px-4 py-1.5 text-[13px]">
           LLM
         </SegmentedToggleOption>
-        <SegmentedToggleOption value="jev" className="px-4 py-1.5 text-[13px]">
+        <SegmentedToggleOption value="jev" className="px-4 py-1.5 text-[13px] whitespace-nowrap">
           JEV (decisões)
         </SegmentedToggleOption>
       </SegmentedToggle>

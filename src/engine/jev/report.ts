@@ -50,6 +50,11 @@ export function fmtP(p: number | null | undefined): string {
   if (p === null || p === undefined || !Number.isFinite(p)) return '—';
   return p < 0.001 ? '< 0,001' : p.toFixed(3).replace('.', ',');
 }
+/** "p=0,003" ou "p < 0,001" (nunca "p=< 0,001"). */
+export function fmtPLabel(p: number | null | undefined): string {
+  const v = fmtP(p);
+  return v.startsWith('<') ? `p ${v}` : `p=${v}`;
+}
 const ms = (v: number | null | undefined): string => (v === null || v === undefined ? '—' : `${Math.round(v)} ms`);
 
 // ---------------------------------------------------------------------------
@@ -594,7 +599,7 @@ export function buildJevSessionReport(
     const acc = camp.accuracy !== null ? fmtPct(camp.accuracy) : '—';
     const d = quality.deltaPp.accuracy;
     const custo = per1k ? ` e custa ${per1k.deltaUsd >= 0 ? '+' : ''}${fmtNum(per1k.originalUsd > 0 ? (100 * per1k.deltaUsd) / per1k.originalUsd : 0, 1)}% por request (${fmtUsd((per1k.deltaUsd * rpm) / 1000)} por ${rpm.toLocaleString('pt-BR')} decisões)` : '';
-    const base = `A definição campeã acertou ${acc} (${fmtPp(d, 1)} de acurácia, Brier ${fmtPp(quality.deltaPp.brierScore, 1)}, p=${fmtP(quality.pValue)} no holdout)${custo}.`;
+    const base = `A definição campeã acertou ${acc} (${fmtPp(d, 1)} de acurácia, Brier ${fmtPp(quality.deltaPp.brierScore, 1)}, ${fmtPLabel(quality.pValue)} no holdout)${custo}.`;
     if (verdict === 'piorou') return `REGREDIU no holdout — não promova. ${base}`;
     if (verdict === 'inconclusivo') return `Inconclusivo (${h?.text ?? 'sem holdout'}). ${base}`;
     return base;
@@ -684,7 +689,7 @@ export function renderJevSessionReportMarkdown(r: JevSessionReport): string {
   L.push(linha('Original', r.quality.original));
   L.push(linha('Campeã', r.quality.champion));
   L.push('');
-  L.push(`Δ acurácia ${fmtPp(r.quality.deltaPp.accuracy)} · Δ Brier ${fmtPp(r.quality.deltaPp.brierScore)} · IC95% ${r.quality.ci95Pp ? `[${fmtNum(r.quality.ci95Pp[0], 2)}; ${fmtNum(r.quality.ci95Pp[1], 2)}]` : '—'} · p=${fmtP(r.quality.pValue)} · ${r.quality.basis}`);
+  L.push(`Δ acurácia ${fmtPp(r.quality.deltaPp.accuracy)} · Δ Brier ${fmtPp(r.quality.deltaPp.brierScore)} · IC95% ${r.quality.ci95Pp ? `[${fmtNum(r.quality.ci95Pp[0], 2)}; ${fmtNum(r.quality.ci95Pp[1], 2)}]` : '—'} · ${fmtPLabel(r.quality.pValue)} · ${r.quality.basis}`);
   L.push('', '## Ciclos', '');
   L.push('| Ciclo | Decisão | Operadores | Avaliadas | Ganho | Ganho corrigido | p ajustado | minGain | Δ acurácia | Exemplos fora do gate | Custo | Acumulado |');
   L.push('|---|---|---|---|---|---|---|---|---|---|---|---|');

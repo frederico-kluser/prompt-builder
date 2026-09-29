@@ -63,10 +63,10 @@ export function NewBenchmark() {
             ariaLabel="Tipo de benchmark"
             className="w-full sm:w-fit"
           >
-            <SegmentedToggleOption value="llm" className="flex-1 justify-center px-4 py-1.5 text-[13px]">
+            <SegmentedToggleOption value="llm" className="flex-1 justify-center px-4 py-1.5 text-[13px] whitespace-nowrap">
               LLM
             </SegmentedToggleOption>
-            <SegmentedToggleOption value="jev" className="flex-1 justify-center px-4 py-1.5 text-[13px]">
+            <SegmentedToggleOption value="jev" className="flex-1 justify-center px-4 py-1.5 text-[13px] whitespace-nowrap">
               JEV (decisões)
             </SegmentedToggleOption>
           </SegmentedToggle>

@@ -58,7 +58,8 @@ export function PageHeader({
           </StaggerRevealItem>
         )}
       </div>
-      {actions && <StaggerRevealItem className="flex shrink-0 items-center gap-2">{actions}</StaggerRevealItem>}
+      {/* max-w-full + wrap: em 390px as ações quebram linha em vez de rolar a página. */}
+      {actions && <StaggerRevealItem className="flex max-w-full flex-wrap items-center gap-2">{actions}</StaggerRevealItem>}
     </StaggerReveal>
   );
 }

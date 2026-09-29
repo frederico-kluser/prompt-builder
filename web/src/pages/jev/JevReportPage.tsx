@@ -20,6 +20,7 @@ import {
 } from '../../engine/jev';
 import { getJevSessionRuns } from '../../jev/api';
 import { useJevRecord } from '../../jev/useJevRecord';
+import { CYCLE_DECISION_LABEL } from '../../jev/view';
 
 /**
  * Relatório de CICLOS do treino JEV (`prompt-builder-jev-report@1`, o MESMO
@@ -218,7 +219,7 @@ export function JevReportPage() {
                   {c.iteration}
                 </th>
                 <td className="px-2 py-2">
-                  {c.decision}
+                  {CYCLE_DECISION_LABEL[c.decision] ?? c.decision}
                   {c.heldBy.length > 0 && <span className="block text-[11px] text-muted-foreground">{c.heldBy.join('; ')}</span>}
                 </td>
                 <td className="px-2 py-2">{c.operators.join(', ') || '—'}</td>

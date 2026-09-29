@@ -4,7 +4,7 @@
 // vem do usuário/modelo (tema, rubricas, avisos) passa por `escapeHtml`.
 
 import type { JevRunReport, JevSessionReport, JevHeadline } from './report.js';
-import { fmtNum, fmtP, fmtPct, fmtPp, fmtUsd } from './report.js';
+import { fmtNum, fmtP, fmtPLabel, fmtPct, fmtPp, fmtUsd } from './report.js';
 
 export function escapeHtml(v: unknown): string {
   return String(v ?? '')
@@ -75,7 +75,7 @@ export function renderJevSessionReportHtml(r: JevSessionReport): string {
   B.push('<h2>Qualidade (holdout, política ajustada)</h2>');
   B.push(
     `<div class="card wrap"><table><thead><tr><th></th><th class="n">Acurácia</th><th class="n">Brier (p.p.)</th><th class="n">ECE</th><th class="n">Cobertura auto</th><th class="n">Precisão auto</th></tr></thead><tbody>${headlineRow('Original', r.quality.original)}${headlineRow('Campeã', r.quality.champion)}</tbody></table>` +
-      `<p class="muted">Δ acurácia ${fmtPp(r.quality.deltaPp.accuracy)} · Δ Brier ${fmtPp(r.quality.deltaPp.brierScore)} · IC95% ${r.quality.ci95Pp ? `[${fmtNum(r.quality.ci95Pp[0], 2)}; ${fmtNum(r.quality.ci95Pp[1], 2)}]` : '—'} · p=${fmtP(r.quality.pValue)} · ${escapeHtml(r.quality.basis)}</p></div>`,
+      `<p class="muted">Δ acurácia ${fmtPp(r.quality.deltaPp.accuracy)} · Δ Brier ${fmtPp(r.quality.deltaPp.brierScore)} · IC95% ${r.quality.ci95Pp ? `[${fmtNum(r.quality.ci95Pp[0], 2)}; ${fmtNum(r.quality.ci95Pp[1], 2)}]` : '—'} · ${fmtPLabel(r.quality.pValue)} · ${escapeHtml(r.quality.basis)}</p></div>`,
   );
   B.push('<h2>Ciclos</h2>');
   B.push(

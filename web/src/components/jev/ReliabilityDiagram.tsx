@@ -90,10 +90,10 @@ export function ReliabilityDiagram({ series, title }: { series: ReliabilitySerie
         <line x1={x(0)} y1={y(0)} x2={x(1)} y2={y(1)} stroke="var(--muted-foreground)" strokeOpacity={0.55} strokeWidth={1} />
         {plot.map((s) => {
           const cor = contestantColor(s.index)!;
-          const pts = s.bins.map((b) => `${x(b.conf)},${y(b.acc)}`).join(' ');
+          const pontos = s.bins.map((b) => `${x(b.conf)},${y(b.acc)}`).join(' ');
           return (
             <g key={s.contestant.id}>
-              {s.bins.length > 1 && <polyline points={pts} fill="none" stroke={cor} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />}
+              {s.bins.length > 1 && <polyline points={pontos} fill="none" stroke={cor} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />}
               {s.bins.map((b) => (
                 <g key={b.lo}>
                   <title>

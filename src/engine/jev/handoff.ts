@@ -7,6 +7,7 @@ import type { DecisionsRequest, JevQuestionPolicy, JevRunRecord, JevSessionRecor
 import { buildDecisionsRequest } from './wire.js';
 import { sessionVerdict } from './train.js';
 import { summarizeJevRun } from './report.js';
+import { DEFAULT_OPENROUTER_BASE_URL, deriveDecisionsUrl } from '../../openrouter.js';
 
 export const JEV_HANDOFF_FORMAT = 'jev-handoff@1';
 /** O marcador que o usuário troca pelo estado real. */
@@ -108,7 +109,7 @@ export function isHandoffBlocked(h: JevHandoff | JevHandoffBlocked): h is JevHan
  * O MESMO request como cURL (a key vem de `$OPENROUTER_API_KEY` — nunca
  * embutida). Aspas simples do JSON são escapadas para o shell POSIX.
  */
-export function handoffCurl(req: DecisionsRequest, url = 'https://openrouter.ai/api/alpha/decisions'): string {
+export function handoffCurl(req: DecisionsRequest, url = deriveDecisionsUrl(DEFAULT_OPENROUTER_BASE_URL)): string {
   const corpo = JSON.stringify(req, null, 2).replace(/'/g, `'\\''`);
   return [
     `curl -sS ${url} \\`,

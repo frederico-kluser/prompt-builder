@@ -199,3 +199,12 @@ export function reliabilitySeries(run: JevRunRecord, qid: string | null): Reliab
   });
   return out;
 }
+
+/** Decisão do gate por ciclo, em PT-BR (treino e relatório de ciclos usam a mesma). */
+export const CYCLE_DECISION_LABEL: Record<string, string> = {
+  baseline: 'linha de base',
+  promoted: 'promovida',
+  held: 'mantida',
+  inconclusive: 'inconclusivo',
+  stopped: 'parou',
+};

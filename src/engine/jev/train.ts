@@ -651,7 +651,7 @@ export async function trainJev(resolved: ResolvedJevConfig, deps: JevTrainDeps):
         regressed,
         text:
           forca === 'holdout'
-            ? `validado em holdout intocado (n=${n} casos, α=0,05 unilateral${sig ? `, p=${sig.pValue.toFixed(3)}` : ''})${regressed ? ' — REGREDIU' : ''}`
+            ? `validado em holdout intocado (n=${n} casos, α=0,05 unilateral${sig ? (sig.pValue < 0.001 ? ', p < 0,001' : `, p=${sig.pValue.toFixed(3).replace('.', ',')}`) : ''})${regressed ? ' — REGREDIU' : ''}`
             : `confirmação fraca: holdout com n=${n} < ${MIN_HOLDOUT_SCENARIOS} casos — sem confirmação contra sobreajuste`,
       };
       if (parada(run)) session.stoppedReason = session.stoppedReason ?? parada(run);

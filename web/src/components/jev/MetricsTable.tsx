@@ -65,7 +65,8 @@ export function MetricsTable({
                     {rejected?.[c.id] ? <Tag className="border-destructive/30 text-destructive">recusado (400)</Tag> : null}
                   </span>
                 </th>
-                {m ? (
+                {/* Nenhum caso pontuado (tudo sem nota): 0% seria uma nota inventada. */}
+                {m && m.nScored > 0 ? (
                   <>
                     <td className="px-2 py-2 text-right">{fmtPct(m.accuracy)}</td>
                     <td className="px-2 py-2 text-right">{fmtPct(m.macroF1)}</td>
