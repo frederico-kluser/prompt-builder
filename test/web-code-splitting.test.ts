@@ -74,8 +74,10 @@ describe('left#15 (2) o modo JEV fica fora do chunk de entrada', () => {
   it('histórico: o JEV só baixa quando a aba JEV abre; a varredura de órfãs JEV é import dinâmico', () => {
     expect(read('web/src/pages/RunsList.tsx')).toMatch(/const JevHistory = lazy\(/);
     const main = read('web/src/main.tsx');
-    expect(main).toMatch(/import\('\.\/jev\/api'\)[\s\S]*?startJevOrphanWatch\(\)/);
+    // Só baixa o motor JEV se houver record `running` (os resumos vêm da store leve).
+    expect(main).toMatch(/listJevSummaries\(\)[\s\S]*?status === 'running'[\s\S]*?import\('\.\/jev\/api'\)[\s\S]*?startJevOrphanWatch\(\)/);
     expect(main).not.toMatch(/^import .* from '\.\/jev\/api';$/m);
+    expect(read('web/src/jev/store.ts')).not.toMatch(/^import (?!type)[^;]*from '\.\.\/engine\/jev';/m);
   });
 
   it('o seletor leve decide igual ao que o form re-exporta', async () => {

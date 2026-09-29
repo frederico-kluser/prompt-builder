@@ -17,6 +17,7 @@ import { NewBenchmark } from './pages/NewBenchmark';
 import { RouteErrorBoundary } from './components/RouteErrorBoundary';
 import { getStoredKey, startOrphanWatch } from './api';
 import { startLocalRetention } from './localRetention';
+import { listJevSummaries } from './jev/store';
 import './index.css';
 
 // left#15: o SPA saía num chunk único de ~1,7 MB. A Nova Run (`/new`, a rota
@@ -72,10 +73,14 @@ function RouteSkeleton() {
 // IMPL-023: na carga, runs/treinos 'running' sem dono (a aba que os executava
 // fechou ou recarregou) viram interrompidos — sem ninguém precisar abri-los.
 startOrphanWatch();
-// Modo JEV: a mesma regra para as runs/sessões JEV (lock livre = órfã). O
-// motor JEV vem num chunk próprio, fora do caminho da primeira pintura.
-void import('./jev/api')
-  .then((m) => m.startJevOrphanWatch())
+// Modo JEV: a mesma regra para as runs/sessões JEV (lock livre = órfã). A
+// varredura só age sobre record `running` — os resumos (store leve) dizem se
+// há algum; só então o motor JEV (chunk próprio) é baixado. Quem não usa o
+// JEV não o baixa nem na carga.
+void listJevSummaries()
+  .then((rows) =>
+    rows.some((r) => r.status === 'running') ? import('./jev/api').then((m) => m.startJevOrphanWatch()) : undefined,
+  )
   .catch((err: unknown) => console.warn('[jev] varredura de órfãs não rodou:', err));
 // left#6 (IMPL-100): TTL LGPD do histórico local — o vencido sai na abertura.
 void startLocalRetention();
