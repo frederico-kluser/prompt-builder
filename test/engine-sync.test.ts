@@ -69,6 +69,9 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   // src/engine/ — o web re-exporta por shim (nunca uma terceira cópia).
   libraryCore: 'shim',
   exchange: 'shim',
+  // Modo JEV (decisões tipadas): runner, métricas, lint, treino e relatórios
+  // são fonte única em src/engine/jev/ — o web re-exporta o barrel.
+  jev: 'shim',
   // Pares mantidos à mão (seams diferentes). Ao mudar UM lado, mude o outro.
   configFile: 'mirror',
   duels: 'mirror', // a MATEMÁTICA é compartilhada via src/engine/duelCore.ts (src lê dossiê de agente do disco)
@@ -96,6 +99,7 @@ const CANONICO_EM: Record<string, string> = {
   verdictCache: 'engine/verdictCache',
   libraryCore: 'engine/libraryCore',
   exchange: 'engine/exchange',
+  jev: 'engine/jev/index',
 };
 
 /**
