@@ -93,6 +93,8 @@ const OPTIONS = {
   'base-prompt': { type: 'string' },
   'base-prompt-file': { type: 'string' },
   'scenario-brief': { type: 'string' },
+  // IMPL-056: idiomas do datagen (opt-in, lista por vírgula). Sem a flag, 100% pt-BR.
+  languages: { type: 'string' },
   'effort-competitor': { type: 'string' },
   'effort-judge': { type: 'string' },
   'effort-datagen': { type: 'string' },
@@ -276,7 +278,8 @@ export async function readConfigFile(
   return parsed.config;
 }
 
-async function buildFromFlags(
+/** Flags → RunConfig validado. Exportado para o teste de contrato das flags (IMPL-056). */
+export async function buildFromFlags(
   mode: RunMode,
   values: Record<string, unknown>,
 ): Promise<RunConfig> {
@@ -326,6 +329,7 @@ async function buildFromFlags(
     ...(typeof values['scenario-brief'] === 'string'
       ? { scenarioBrief: values['scenario-brief'] }
       : {}),
+    ...(list(values.languages) ? { languages: list(values.languages) } : {}),
     ...(Object.keys(reasoning).length ? { reasoning } : {}),
     ...(piiModeFlag(values['pii-mode']) ? { piiMode: piiModeFlag(values['pii-mode']) } : {}),
     ...(values['allow-pii'] === true ? { allowPii: true } : {}),

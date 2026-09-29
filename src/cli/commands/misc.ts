@@ -433,6 +433,17 @@ export async function cmdRuns(argv: string[]): Promise<number> {
       if (diag.verbosity.warning) out.line(`! ${diag.verbosity.warning}`);
     }
     for (const aviso of record.fairnessWarnings ?? []) out.line(`! ${aviso}`);
+    // IMPL-056/068: política dos cenários gravada no início da run (todas as fontes).
+    for (const aviso of record.languageWarnings ?? []) out.line(`! idioma: ${aviso}`);
+    const adv = record.adversarialCoverage;
+    if (adv) {
+      out.line(
+        `adversarial (${adv.turnLabel}: ASR@1 é limite inferior): ${Object.entries(adv.byCategory)
+          .map(([k, v]) => `${k}=${v}`)
+          .join('  ')}`,
+      );
+      if (adv.gaps.length) out.line(`! cobertura adversarial abaixo de ${adv.minPerCategory}/categoria: ${adv.gaps.join(', ')}`);
+    }
     // IMPL-019: alertas de ciclo de vida gravados NO INÍCIO da run (30/14/7
     // dias, expirado, ausente). Para o estado de hoje: `baseline check`.
     for (const a of record.modelLifecycle?.alerts ?? []) {

@@ -658,6 +658,9 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     referenceModelId: cfg.referenceModelId,
     referenceJudging: cfg.referenceJudging,
     scenarioBrief: cfg.scenarioBrief,
+    // IMPL-056: sem repassar, TODA iteracao (e o holdout) voltaria ao pt-BR
+    // exclusivo e os avisos de idioma usariam a politica errada.
+    languages: cfg.languages,
     scenarioSeed: cfg.scenarioSeed,
     // Fase de finais: sem repassar, TODA iteracao (e o holdout) cairia no
     // default de 3 finalistas — a escolha do usuario era descartada em silencio.

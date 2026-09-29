@@ -425,7 +425,7 @@ export const CHAVES_LEGADO_ACEITAS: readonly string[] = ['training.halving', 'ju
  */
 const CHAVES_CANONICAS: readonly string[] = [
   // raiz (arena-config@1 / arena-agent-config@1 / RunConfig cru)
-  'format', 'mode', 'theme', 'scenarioBrief', 'stages', 'scenarios', 'prompt', 'models', 'effort',
+  'format', 'mode', 'theme', 'scenarioBrief', 'languages', 'stages', 'scenarios', 'prompt', 'models', 'effort',
   'variation', 'training', 'judging', 'limits', 'compliance', 'piiMode', 'allowPii', 'agent',
   'duels', 'repeats', 'finalists', 'budgetUsd',
   // RunConfig cru
@@ -436,7 +436,8 @@ const CHAVES_CANONICAS: readonly string[] = [
   'maxOutputTokens', 'timeoutMs', 'concurrency',
   // cenário / etapa
   'id', 'question', 'productContext', 'maxTokens', 'rubric', 'reference', 'expected', 'labelSet',
-  'origin', 'agentTask',
+  'origin', 'agentTask', 'tier', 'dimensionTags', 'language', 'persona', 'difficultyEstimate',
+  'invarianceGroup', 'adversarialCategory', 'turnLabel', 'basePromptHash',
   // biblioteca / prompt
   'from', 'profile', 'ids', 'text', 'generateFrom', 'contracts', 'group',
   // models

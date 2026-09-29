@@ -173,6 +173,18 @@ const stageSpecSchema = z.object({
   labelSet: z.array(z.string().min(1)).min(1).max(200).optional(),
   // Proveniencia da etapa: gerada pela IA ou importada de pacote JSON.
   origin: z.enum(['ai', 'import']).optional(),
+  // Metadados de curriculo/idioma/seguranca do StageSpec (IMPL-064/056/068):
+  // sem eles o zod os stripava de customStages/scenarioSeed e o fail-closed
+  // (IMPL-093) recusava o proprio cenario exportado pela biblioteca/datagen.
+  tier: z.string().min(1).optional(),
+  dimensionTags: z.array(z.string()).optional(),
+  language: z.string().min(2).optional(),
+  persona: z.string().optional(),
+  difficultyEstimate: z.number().optional(),
+  invarianceGroup: z.string().optional(),
+  adversarialCategory: z.string().optional(),
+  turnLabel: z.string().optional(),
+  basePromptHash: z.string().optional(),
   // A etapa, quando executada por um agente. AUSENTE => a etapa so serve ao
   // runner 'chat'. Em modo agente (config.agent presente) e obrigatorio em toda
   // etapa — o superRefine abaixo exige.
@@ -238,6 +250,13 @@ const baseFields = {
   referenceJudging: z.boolean().optional(),
   // Descricao detalhada do que testar — guia o datagen na geracao de cenarios.
   scenarioBrief: z.string().max(4000).optional(),
+  // IMPL-056 (R-03a:REC-6): idiomas permitidos no datagen — opt-in; ausente =
+  // 100% pt-BR. Tag de idioma curta (BCP 47: 'pt-BR', 'en', 'es-419').
+  languages: z
+    .array(z.string().trim().regex(/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/, 'idioma deve ser uma tag BCP 47 (ex.: pt-BR, en)'))
+    .min(1)
+    .max(10)
+    .optional(),
   // Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`.
   scenarioSeed: z.array(stageSpecSchema).max(50).optional(),
   // Nº de finalistas (melhores por judge-score) que disputam os duelos. 0 = sem finais.

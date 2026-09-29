@@ -267,6 +267,8 @@ export function JudgeDiagnostics({ record }: { record: RunRecord }) {
   const avisos = [
     ...(escala ? [escala] : []),
     ...((record as unknown as { fairnessWarnings?: string[] }).fairnessWarnings ?? []),
+    // IMPL-056: idioma fora da política é confundidor no veredito.
+    ...(record.languageWarnings ?? []).map((a) => `Idioma: ${a}`),
   ];
   if (!diag && avisos.length === 0) return null;
   return (

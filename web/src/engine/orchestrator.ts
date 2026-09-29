@@ -1,5 +1,5 @@
 const randomUUID = (): string => crypto.randomUUID();
-import { generateStages } from './datagen';
+import { generateStages, scenarioPolicyReport } from './datagen';
 import { countCompetitorOutcomes, runCompetitor } from './competitor';
 import { judgeStage, JUDGE_LISTWISE_CONTRACT_TEXT } from './judge';
 import { generateReferences } from './gabarito';
@@ -616,6 +616,10 @@ async function runLoop(
       excludePrompts: seed.map((s) => s.question),
       reasoningLevel: record.config.reasoning?.datagen,
       timeoutMs: datagenTimeout,
+      // IMPL-056: idioma opt-in; o aviso de idioma sai do relatório da run
+      // (todas as fontes, logo abaixo) — sem duplicar no console do datagen.
+      languages: record.config.languages,
+      onLanguageWarnings: () => undefined,
       ctx,
     });
     // Cancelou no meio do lote: "nenhum cenário" seria um erro falso.
@@ -624,6 +628,23 @@ async function runLoop(
     if (specs.length === 0) {
       throw new Error(
         `Datagen nao entregou nenhum cenario valido (alvo: ${alvo}). Verifique o modelo gerador (${record.config.datagenModelId}) ou importe um pacote de cenarios.`,
+      );
+    }
+  }
+
+  // IMPL-056 + IMPL-068: política dos cenários sobre TODAS as fontes (seed,
+  // pinadas, biblioteca, datagen) — idioma fora da política vira aviso e a
+  // cobertura adversarial por categoria fica NO RECORD (antes: só console.warn
+  // do datagen, e a cobertura não era contada em lugar nenhum).
+  {
+    const politica = scenarioPolicyReport(specs, { languages: record.config.languages });
+    record.languageWarnings = politica.languageWarnings;
+    if (politica.adversarialCoverage) record.adversarialCoverage = politica.adversarialCoverage;
+    for (const aviso of politica.languageWarnings) log(runId, `idioma: ${aviso}`);
+    if (politica.adversarialCoverage?.gaps.length) {
+      log(
+        runId,
+        `cobertura adversarial abaixo de ${politica.adversarialCoverage.minPerCategory}/categoria: ${politica.adversarialCoverage.gaps.join(', ')}`,
       );
     }
   }

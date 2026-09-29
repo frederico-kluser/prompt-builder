@@ -83,6 +83,11 @@ export interface ArenaConfigFile {
   theme: string; // min 1
   /** Briefing detalhado para guiar o datagen (max 4000). */
   scenarioBrief?: string;
+  /**
+   * Idiomas permitidos no datagen (IMPL-056) — opt-in; ausente = 100% pt-BR.
+   * Aplicado pelo CLI; a SPA avisa no import e gera só pt-BR.
+   */
+  languages?: string[];
   stages?: number; // int 1..50
   /** Cenários pinados (viram scenarioSeed) OU referência à biblioteca (F1). */
   scenarios?: ArenaConfigScenario[] | ArenaConfigLibraryRef;
@@ -337,6 +342,17 @@ export const arenaConfigSchema = z
       scenarioBrief: z
         .string('deve ser texto')
         .max(4000, 'não pode passar de 4000 caracteres')
+        .optional(),
+      languages: z
+        .array(
+          z
+            .string('idioma deve ser texto')
+            .trim()
+            .regex(/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/, 'idioma deve ser uma tag BCP 47 (ex.: pt-BR, en)'),
+          'languages deve ser uma lista de idiomas',
+        )
+        .min(1, 'languages não pode ser vazia')
+        .max(10, 'no máximo 10 idiomas')
         .optional(),
       stages: z
         .number('deve ser número inteiro')

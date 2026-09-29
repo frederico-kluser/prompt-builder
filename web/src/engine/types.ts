@@ -322,6 +322,13 @@ export interface RunConfigBase {
   referenceJudging?: boolean;
   /** Descricao detalhada do que testar — guia o datagen na geracao de cenarios. */
   scenarioBrief?: string;
+  /**
+   * Idiomas permitidos no datagen (IMPL-056, R-03a:REC-6) — opt-in,
+   * OFF-BY-DEFAULT. Ausente = produto monolíngue: 100% dos cenários em pt-BR e
+   * nenhuma variação de idioma pedida. Cenário (de QUALQUER fonte) com idioma
+   * fora desta lista vira aviso em `RunRecord.languageWarnings`.
+   */
+  languages?: string[];
   /** Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`. */
   scenarioSeed?: StageSpec[];
   /**
@@ -814,6 +821,24 @@ export interface RunRecord {
   finalists?: string[];
   /** Avisos de imparcialidade (F3.6): juiz da familia do competidor, etc. NAO-bloqueantes. */
   fairnessWarnings?: string[];
+  /**
+   * Cenários com idioma DECLARADO fora da política da run (IMPL-056): todas as
+   * fontes (datagen, seed/pacote, customStages, biblioteca). Idioma diferente
+   * é confundidor no veredito. Ausente = record antigo; [] = tudo na política.
+   */
+  languageWarnings?: string[];
+  /**
+   * Cobertura ADVERSARIAL das specs da run (IMPL-068): cenários por categoria
+   * (6 mínimas), lacunas abaixo do mínimo e o rótulo de turno (ASR@1
+   * single-turn = limite inferior). Ausente = run sem item adversarial.
+   */
+  adversarialCoverage?: {
+    byCategory: Record<string, number>;
+    gaps: string[];
+    minPerCategory: number;
+    total: number;
+    turnLabel: string;
+  };
   /**
    * Fila `needs-human-review` (IMPL-055): gabarito divergente da rubrica, 2º
    * gabarito discordante ou amostra humana de auditoria (5–10%). Sai de

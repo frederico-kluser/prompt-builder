@@ -232,6 +232,8 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
   mode: { kind: 'ui', control: 'seletor de modo (topo)' },
   theme: { kind: 'ui', control: 'Cenários › Tema' },
   scenarioBrief: { kind: 'ui', control: 'Cenários › Briefing' },
+  // IMPL-056: idiomas do datagen — o CLI aplica; a SPA gera só pt-BR e avisa.
+  languages: { kind: 'json-only', status: 'ignorado', note: 'idiomas do datagen (opt-in) — aplicado pelo CLI; a tela gera só pt-BR' },
   stages: { kind: 'ui', control: 'Cenários › Nº de cenários' },
   'scenarios[].id': { kind: 'ui', control: 'Cenários › lista importada' },
   'scenarios[].question': { kind: 'ui', control: 'Cenários › lista importada' },
