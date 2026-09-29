@@ -2,23 +2,28 @@
 
 ```bash
 prompt-builder train \
-  --model openai/gpt-5-mini \
-  --judge anthropic/claude-sonnet-5 \
-  --reference deepseek/deepseek-v4-pro \
-  --datagen openai/gpt-5-mini \
+  --model xiaomi/mimo-v2.6-pro \
+  --judge google/gemini-3.8-flash --judge meta/muse-spark-1.3 \
+  --reference z-ai/glm-5.3-flash \
+  --datagen xiaomi/mimo-v2.6-pro \
   --theme "Suporte técnico de um SaaS de faturamento" \
   --base-prompt-file prompt.md \
   --techniques persona,constraints,format \
   --stages 8 --iterations 3 \
-  --budget 3 --output-format ndjson
+  --budget 10 --output-format ndjson
 ```
+
+Os modelos acima são os defaults por papel (skill `prompt-builder`, `models.md`);
+o pré-voo desse exemplo estima ~US$ 6–8 (preços de 2026-09). Orçamento abaixo do
+teto estimado recusa com exit `2` antes de gastar — `error.details.estimate.high`
+diz o valor que passa.
 
 Ou, melhor para um agente, tudo declarado num arquivo:
 
 ```bash
 prompt-builder config example --mode train -o arena.json
-prompt-builder train --config arena.json --budget 3 --dry-run
-prompt-builder train --config arena.json --budget 3 --output-format ndjson
+prompt-builder train --config arena.json --budget 10 --dry-run
+prompt-builder train --config arena.json --budget 10 --output-format ndjson
 ```
 
 ## Flags que importam
@@ -30,13 +35,15 @@ prompt-builder train --config arena.json --budget 3 --output-format ndjson
 | `--reference <id>` | quem escreve o gabarito — **obrigatório** em `train`/`vary` (sem ele: exit `3`); não pode ser juiz nem o `--model` |
 | `--techniques a,b,c` | técnicas de reescrita (`prompt-builder techniques`) |
 | `--base-prompt-file` | o prompt de partida; entra como controle |
-| `--iterations N` | teto de iterações (2–10; recomendado 3–5). O laço para antes se convergir: paciência = 2 iterações seguidas sem promoção (configurável via `patience` 1–5 no JSON do config — default 2) ou parada por platão (IC95 do ganho abaixo de `minGain`; `convergenceReason` diz qual foi) |
+| `--iterations N` | teto de iterações (2–10; recomendado 3–5). O laço para antes se convergir: paciência = 2 iterações seguidas sem promoção (`patience` 1–5 num RunConfig cru em `--config` — o `arena-config@1` não tem a chave; default 2) ou parada por platão (IC95 do ganho abaixo de `minGain`; `convergenceReason` diz qual foi) |
 | `--min-gain N` | margem PRÁTICA mínima em pontos de judge-score para promover. Padrão: `max(1; 50/n)` — meia granularidade (com 8 cenários, 6,25 pontos). Além dela, o gate exige p ajustado ≤ 0,05 (ver abaixo) |
 | `--holdout-ratio N` | fatia reservada para o gate final (padrão 0,3; 0 desliga). **Piso absoluto de 10 cenários**: fatia menor não é holdout — é "confirmação fraca" (`holdoutSkipped`) e a palavra "validado" fica bloqueada no resultado |
-| `--stages N` | quantos cenários (1–50). Recomendado 6–12; veja a tabela de poder abaixo (`stages ≤ 5` = **modo econômico**, o `estimate` avisa) |
+| `--stages N` | quantos cenários (1–50; **padrão 10 no `train`**, 5 nos outros). Recomendado 6–12; veja a tabela de poder abaixo (`stages ≤ 5` = **modo econômico**, o `estimate` avisa) |
 | `--effort-judge high` | o juiz é a tarefa mais sensível — vale gastar aqui |
 | `--effort-datagen low` | gerar cenários é mecânico |
 | `--finalists N` / `--no-duels` | tamanho da final / desliga a final |
+| `--judge-cascade b1,b2:forte` | modo econômico do juiz: 2 juízes baratos votam e o forte só julga os vereditos em dúvida (`docs compare`) |
+| `--auditable` | juiz, duelo e gabarito com provedor travado (sem fallback) |
 | `--pii-mode synthetic` | recusa dado pessoal de aparência real, sem exceção (vale em `compare`/`vary` também) |
 | `--allow-pii` | revisei o dado pessoal apontado: segue pseudonimizado (nomes não cobertos) |
 
@@ -87,6 +94,7 @@ referência rápida é esta (α=0,05 unilateral, poder 80%, σd=0,5):
 prompt-builder sessions winner <sessionId>              # legível
 prompt-builder sessions winner <sessionId> --json       # estruturado
 prompt-builder sessions winner <sessionId> --prompt-only > prompt.md
+prompt-builder sessions report <sessionId>              # relatório de ciclos (docs report)
 ```
 
 - `holdout` — campeão vs. base nos cenários **reservados**. É a evidência de que

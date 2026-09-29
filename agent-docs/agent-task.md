@@ -1,9 +1,8 @@
 # O contrato `arena-agent-config@1|@2` (a configuração do modo agente)
 
-O arquivo de configuração do modo agente, campo a campo. Formato
-**`arena-agent-config@1`** (ou `@2`) — não um campo a mais no `arena-config@1`:
-este também é lido pelo motor do navegador, e aceitar campos de agente lá faria
-a UI validar uma configuração que ela nunca poderia executar.
+O arquivo do modo agente, campo a campo. Formato **`arena-agent-config@1`**
+(ou `@2`) — não um campo a mais no `arena-config@1`, que o navegador também lê:
+aceitar campos de agente lá faria a UI validar o que nunca poderia executar.
 
 ```jsonc
 {
@@ -148,8 +147,8 @@ Os mesmos papéis do `arena-config@1`, com um cuidado extra:
 
 - **`competitors`** — os modelos que rodam como agentes. É neles (e no `agent`
   config) que as variantes competem.
-- **`judges` / `reference`** — o modelo juiz/contagem. **Não pode ser o modelo do
-  agente sob teste** (viés de auto-preferência).
+- **`judges`** — **não pode ser o modelo do agente sob teste** (auto-preferência).
+- **`reference`** — o gabarito; distinto de juízes e competidores (IMPL-048).
 - **`datagen`** — barato e decente; gera cenários (chat). Para agentes na v1 não
   há datagen de tarefa — os cenários são pinados.
 
@@ -158,7 +157,7 @@ Os mesmos papéis do `arena-config@1`, com um cuidado extra:
 Se um modelo vem de provider **BYOK** (traga sua própria key) e essa key não tem
 saldo, a execução do agente falha por cima do orçamento e todos os contestants
 saem com aparência de erro de infra. Antes de culpar a config, troque por um
-modelo com saldo garantido no provider do `pi`, ex.: **`google/gemini-2.5-flash`**.
+modelo com saldo garantido no provider do `pi`, ex.: **`google/gemini-3.8-flash`**.
 
 ## `scenarios[]` — a espinha (idêntica ao chat + `agentTask`)
 
@@ -280,7 +279,7 @@ O duelo atual:
 | `maxCostUsd` obrigatório (exit `3`) | `agent.limits.maxCostUsd` ausente | Preencha o teto por execução. Sem ele não há estimativa nem orçamento. |
 | `scenario agentTask ausente` (exit `3`) | Cenário com runner `'agent'` sem `agentTask` | Adicione o bloco. Cair para chat em silêncio mediria outra coisa. |
 | "datagen não suportado" / sem `stages` | Datagen de tarefa de agente não existe na v1 | Pinee os cenários. Não peça `stages` > nº de `scenarios`. |
-| Agente falha pronto, todos `nao`, custo certo | Modelo **BYOK** sem saldo no provider do `pi` | Use modelo com saldo, ex. **`gemini-2.5-flash`**. |
+| Agente falha pronto, todos `nao`, custo certo | Modelo **BYOK** sem saldo no provider do `pi` | Use modelo com saldo, ex. **`google/gemini-3.8-flash`**. |
 | `variation`/`training` estranhos | PromptMode confundido | `replace` mede o prompt inteiro; `append` (default) mede a instrução sobre um agente competente; `none` isola o modelo. |
 | `docker: comando não encontrado` (ou daemon indisponível) em `kind: "container"` | Docker CLI fora do PATH ou daemon inacessível **sem sudo** | Instale/ative o Docker e garanta acesso sem sudo. Confirme com `agents doctor --container` (falha com exit `3` quando o CLI/imagem faltam). |
 | imagem docker `prompt-builder-pi:<ver>` ausente em `kind: "container"` | A imagem ainda não existe no daemon | A **primeira preparação de run em container** cria/cacheia automaticamente. Adiantar: `docker build` seguindo o Dockerfile documentado (em produção, o Dockerfile está **embutido em `src/agent/container.ts`**). |

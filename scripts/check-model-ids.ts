@@ -1,7 +1,9 @@
 #!/usr/bin/env -S npx tsx
 // Job SEMANAL (IMPL-019): confere os ids de modelo citados em agent-docs/,
-// skills/ e README.md contra o catálogo PÚBLICO do OpenRouter (GET /models —
-// sem key, sem custo; cache de 24 h em disco).
+// skills/ e README.md contra o catálogo PÚBLICO do OpenRouter
+// (GET /models?output_modalities=all — o universo COMPLETO: chat + modelos de
+// DECISÃO do modo JEV, ex. `typesafe/jev-1.13`, que NÃO saem no `/models`
+// puro; sem key, sem custo; cache de 24 h em disco, por escopo).
 //
 //   id ausente ou expirado          → ERRO  (exit 1)
 //   expiration_date em ≤ 30 dias    → AVISO com sucedâneo (não reprova)
@@ -15,6 +17,9 @@
 //         --cache <arq> (default: $XDG_CACHE_HOME|~/.cache/prompt-builder/public-catalog.json)
 //         --target <caminho> (repetível; default agent-docs skills README.md)
 //         --now <ISO> (data de referência — reprodutibilidade)
+//         ⚠️ o snapshot de `--catalog` deve ser o de `?output_modalities=all`:
+//         o `/models` puro não tem os modelos de decisão e reprova o que a doc
+//         cita de propósito (é o falso-positivo medido em `agent-docs/jev.md`).
 // Exit: 0 ok · 1 reprovado · 2 uso · 8 catálogo indisponível (fail-closed).
 //
 // Roda no workflow `.github/workflows/model-ids-weekly.yml`.
@@ -69,6 +74,9 @@ async function main(): Promise<number> {
       const r = await loadPublicCatalog({
         cachePath: values.cache ? path.resolve(values.cache) : defaultCachePath(),
         force: values.refresh === true,
+        // Universo COMPLETO: os modelos de decisão do modo JEV só aparecem com
+        // `output_modalities=all` (o `/models` puro reprova `agent-docs/jev.md`).
+        query: '?output_modalities=all',
         baseUrl: process.env.OPENROUTER_BASE_URL?.trim() || undefined,
         onWarn: (m) => process.stderr.write(`! ${m}\n`),
       });

@@ -40,18 +40,26 @@ Erro é a linha `result` com `ok: false` e o **mesmo** objeto `error` do
 | `attached` | a `--idempotency-key` já tem run em voo: esperando ela (nada é gasto) | `idempotencyKey`, `runId` ou `sessionId`, `ownerPid` |
 | `run.started` | run começou | `mode`, `stages`, `contestants[]` |
 | `variants.generating` / `variants.generated` | geração de variantes | `contestants[]` |
+| `run.warning` | aviso agregado ANTES da run (hoje: itens da biblioteca não curados) | `code`, `message`, `curatedKofN`, `unapproved[]` (teto 20) |
+| `datagen.report` | uma vez, logo após gerar os cenários e antes de gastar com o resto | `requested`, `generated`, `final`, `shortfall`, `dedupedExact`/`dedupedSemantic`, `backfillRounds`, `stoppedBy`, `warning` (faltou cenário) |
 | `stage.generating` / `stage.generated` | cenários | `stageIndex`, `question`, `hasReference`; `referenceTruncated` + `warning` quando o gabarito truncou mesmo após o retry x2 e foi descartado (etapa julgada sem gabarito) |
+| `stage.failed` | a geração da etapa falhou (etapa pulada) | `stageIndex`, `error` |
 | `progress` | lotes agregados | `phase` (`gabarito` \| `duels`), `done`, `total` |
 | `competitor.finished` | uma resposta pronta | `contestantId`, `status` (`ok`\|`blocked`\|`refused`\|`error`), `tokensIn/Out`, `costUsd`, `chars`, `truncated`/`truncationRetried` (só quando `true`) |
 | `stage.incomplete` | etapa fora do placar e das médias | `stageIndex`, `reason` (`truncation`), `detail`, `contestantIds` (quem truncou) |
+| `judge.truncated` | veredito invalidado por saída do juiz cortada (teto/timeout) — o contestant fica SEM veredito, o duelo sem resultado | `stageIndex`, `phase` (`judge`\|`duel`), `contestantIds`, `kinds`, `detail` |
 | `stage.judging` / `stage.judged` | julgamento | `verdicts`, `missing` (id → motivo do veredito **ausente**), `ranked`, `scoreboard`, `totalCostUsd` |
 | `finals.started` | finais | `finalists[]` |
 | `stage.dueled` | duelos de um cenário | `pairs[]`, `failedPairs[]` (sem resultado — não pontuam) |
 | `budget` | gasto acumulado | `spentUsd` (da run/iteração), `totalSpentUsd` (só no `train`: a sessão inteira — é ele que se compara com `budgetUsd`), `budgetUsd` (teto do comando), `byRole` |
 | `budget.gate` | uma porta decidiu | `phase`, `projectedUsd`, `remainingUsd`, `decision` |
-| `run.finished` | run terminou | `status` (`finished` \| `inconclusive` \| …), `totalCostUsd`, `standings`, `failureCountByRole`, `inconclusiveReasons`, `competitorOutcomeCounts`, `truncationRate`/`truncationCounts`/`truncationByRole` (todos os papéis; + `truncationAlert` acima de 2%) |
+| `run.finished` | run terminou | `status` (`finished` \| `inconclusive` \| …), `totalCostUsd`, `standings`, `failureCountByRole`, `inconclusiveReasons`, `competitorOutcomeCounts`, `truncationRate`/`truncationCounts`/`truncationByRole` (todos os papéis; + `truncationAlert` acima de 2%), `costLedger` (spent/committed/pending), `judgeCascade` (vereditos/escalonados/fração, com `--judge-cascade`), `securitySummary` (com cenários adversariais) |
+| `run.error` | a run falhou | `error` |
+| `agent.started` / `agent.turn` / `agent.tool` / `agent.finished` / `agent.verified` | modo agente (`docs agents`) | ids + `turn`/`toolName`/`stopReason`/`results`; nunca a saída da ferramenta |
+| `session.started` | treino começou | `iterations`, `theme` |
 | `iteration.started` / `iteration.finished` / `iteration.promoted` | treino | `iteration`, `runId`, `gain` (bruto); no `promoted` também `gainCorrected`, `pAdjusted`, `k`, `method`, `minGain` |
-| `session.holdout` / `session.converged` / `session.finished` | treino | ver `docs train` |
+| `session.holdout` / `session.converged` / `session.finished` | treino | ver `docs train`; o `finished` traz `significance`, `pairing`, `holdoutSkipped` + `holdoutSkipReason`, `costLedger` |
+| `session.error` | o treino falhou | `error` |
 | `result` | última linha | `ok`, `status`, `totalCostUsd`, `budgetExhausted`, `stoppedReason`, `dailyCapReached`, `idempotency` (`reused` = nada gasto agora), … — ou `ok:false` + `error` |
 
 ## O que **não** vem no stream
@@ -69,10 +77,10 @@ Para o conteúdo completo use `runs show <id> --json` (lê do disco) ou
 ```bash
 # acompanhar só o custo (no train, `spentUsd` é da iteração e zera a cada uma;
 # o acumulado da sessão é `totalSpentUsd`)
-prompt-builder train --config a.json --budget 3 --output-format ndjson \
+prompt-builder train --config a.json --budget 10 --output-format ndjson \
   | jq -r 'select(.type=="budget") | "\(.totalSpentUsd // .spentUsd)/\(.budgetUsd)"'
 
 # guardar tudo e ler o resultado no fim
-prompt-builder train --config a.json --budget 3 --output-format ndjson | tee run.ndjson
+prompt-builder train --config a.json --budget 10 --output-format ndjson | tee run.ndjson
 jq 'select(.type=="result")' run.ndjson
 ```

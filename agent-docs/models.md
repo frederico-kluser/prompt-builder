@@ -45,25 +45,33 @@ prompt-builder models allowlist --area saude       # liberados + tags p/ provide
 
 ## O formato de export (`prompt-builder-models@2`)
 
+Uma entrada REAL (`models show openai/gpt-5-mini --json` → `.data.model`, catálogo
+de 2026-09-29) — um modelo de raciocínio **obrigatório**, sem `temperature`:
+
 ```json
 {
   "id": "openai/gpt-5-mini",
+  "name": "OpenAI: GPT-5 Mini",
   "contextLength": 400000,
   "pricing": { "prompt": 2.5e-7, "completion": 2e-6, "unit": "usd-per-token" },
-  "pricePerMTok": { "prompt": 0.25, "completion": 2.0 },
-  "supportedParameters": ["temperature", "seed", "reasoning_effort"],
+  "pricePerMTok": { "prompt": 0.25, "completion": 2 },
+  "supportedParameters": [
+    "include_reasoning", "max_completion_tokens", "max_tokens", "reasoning",
+    "reasoning_effort", "response_format", "seed", "structured_outputs",
+    "tool_choice", "tools"
+  ],
   "caps": {
-    "temperature": true, "reasoning": true, "effort": true,
-    "mandatory": false, "defaultEffort": "medium",
-    "supportedEfforts": ["high", "medium", "low", "minimal"]
+    "temperature": false, "reasoning": true, "effort": true,
+    "supportedEfforts": ["high", "medium", "low", "minimal"],
+    "defaultEffort": "medium", "mandatory": true
   },
   "thinkLevels": {
-    "accepted": ["off", "minimal", "low", "medium", "high"],
+    "accepted": ["minimal", "low", "medium", "high"],
     "default": "medium",
-    "canDisable": true,
+    "canDisable": false,
     "fit": {
-      "off": "none", "minimal": "minimal", "low": "low", "medium": "medium",
-      "high": "high", "xhigh": "high", "max": "high"
+      "off": "(ignorado: raciocínio obrigatório)", "minimal": "minimal",
+      "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"
     }
   },
   "lifecycle": {
@@ -98,11 +106,16 @@ desconhecido (fail-open, com alerta); `supported_parameters` ou
 ## `thinkLevels` — o campo que evita HTTP 400
 
 A escala tem **sete degraus**: `off < minimal < low < medium < high < xhigh < max`.
-Cada modelo declara quais aceita; medindo o catálogo, 214 de 345 modelos têm
-raciocínio e 83 declaram uma allowlist — em **20 conjuntos distintos**.
+Cada modelo declara quais aceita; no catálogo de 2026-09-29, 328 de 460 modelos
+têm raciocínio e 190 declaram uma allowlist — em **26 conjuntos distintos**.
+Nunca presuma: leia o modelo que vai usar.
 
 - `accepted` — os níveis que você pode pedir a este modelo.
-- `canDisable: false` — raciocínio **obrigatório**: `off` é ignorado, não enviado.
+- `canDisable: false` — raciocínio **obrigatório**: `off` é ignorado, não enviado
+  (`fit.off` = `"(ignorado: raciocínio obrigatório)"`). Em modelo de raciocínio
+  **não** obrigatório, `fit.off` = `"reasoning.enabled=false"`: desligar é uma
+  flag (`reasoning: { enabled: false }`), não um degrau — nunca `"none"` nem o
+  degrau mais baixo da allowlist.
 - `fit` — o que realmente vai no fio para cada nível pedido. O pedido é encaixado
   na allowlist pela menor distância ordinal e, em empate, pelo degrau **mais
   barato**: pedir `max` a um modelo com `["xhigh","high"]` vira `xhigh`.
@@ -113,12 +126,19 @@ prompt-builder models show anthropic/claude-sonnet-5
 
 ## Escolhendo os papéis
 
-- **`judges[0]` / `reference`** — o modelo **mais forte** disponível. Ele escreve
-  os gabaritos e julga tudo; a qualidade da avaliação inteira tem teto aqui.
-  Esforço `high` ou mais.
+- **`judges`** — os modelos **mais fortes** disponíveis: julgam tudo (com 2+,
+  vale a maioria; `judges[0]` também julga os duelos), então a qualidade da
+  avaliação inteira tem teto aqui. Esforço `high` ou mais.
+- **`reference`** (gabarito) — outro modelo forte, que escreve os gabaritos
+  temp-0. **Obrigatório em `vary`/`train`** e **nunca** juiz nem competidor/modelo
+  sob teste (IMPL-048: o mesmo modelo escrever a régua e julgar contra ela dá
+  erros correlacionados). No `compare`, ausente = `judges[0]`, com aviso em
+  `fairnessWarnings`. Defaults sugeridos: `models.md` da skill `prompt-builder`.
 - **`contestant`** — o modelo sob teste (ou o que vai rodar em produção).
 - **`datagen`** — barato e decente; gera os cenários. Esforço `low`/`medium`.
 - **`rewriter`** — reescreve as variantes de prompt. Forte o bastante para
   escrever bem; default é o `datagen`.
 
-O juiz **não pode** ser competidor nem o modelo sob teste — o schema rejeita.
+O juiz **não pode** ser competidor nem o modelo sob teste, e a referência não
+pode ser juiz nem competidor/modelo sob teste — o schema rejeita (exit `3`,
+`config.invalid`).

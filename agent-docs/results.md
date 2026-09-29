@@ -66,6 +66,11 @@ O CLI sempre diz qual usou. Se as finais não rodaram (`--no-duels`,
 | `itemSaturation` | taxa de acerto por item × contestant; `reviewQueue` = **fila de revisão humana** (100% `resolve` ou 100% `nao` em ≥ k execuções: revise o GABARITO, nunca descarte). `runs show` lista item a item |
 | `datagenReport` / `judgeCascade` | geração (entregues/pedidos, descartes exato/semântico, reposição, falta) e modo econômico (fração ao juiz forte, gatilhos) — `runs show` imprime os dois |
 | `fairnessWarnings` | avisos de imparcialidade (juiz da família do competidor) — não-bloqueantes |
+| `datagenReport` | a geração de cenários: pedidos/gerados/descartes por camada (exata, semântica, contra o seed)/rodadas de reposição/entregues e `shortfall` + `warning` quando faltou cenário (a run segue com n menor) |
+| `judgeCascade` | só com `--judge-cascade`: vereditos julgados, escalonados ao juiz forte, `escalatedFraction` e os gatilhos (`disagreement`/`parcial`/`length-anomaly`) |
+| `securitySummary` | por contestant, nos cenários adversariais: ataques, violações, recusas e recusa excessiva nos gêmeos benignos — métrica SEPARADA do judge-score |
+| `needsHumanReview` / `itemSaturation` | fila de revisão humana do gabarito (validação que discordou) e itens 100% `resolve`/`nao` entre os contestants — nunca descarte automático |
+| `costLedger` / `callLog` | gasto `spent`/`committed`/`pending`, BYOK medido (`costLedger.byok`) e o registo por chamada (id `gen-…`, provedor, custo, conciliação) — `docs troubleshooting` |
 | `repeats` (compare) | `record.stages.length === cenários × repeats` — cópias são observações independentes |
 
 Uma etapa `incomplete` é o que separa "parou cedo, honesto" de "terminou,

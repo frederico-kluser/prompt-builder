@@ -24,15 +24,18 @@ import {
   removalAction,
   snapshotModelLifecycle,
   suggestSuccessor,
+  type CatalogModelLike,
 } from '../src/engine/modelLifecycle.js';
-import { createGateway, parseModelsPayload, setDefaultGateway, type OpenRouterGateway } from '../src/openrouter.js';
+import { createGateway, parseModelsPayload, setDefaultGateway, type FetchLike, type OpenRouterGateway } from '../src/openrouter.js';
 import { normalizeRunRecord } from '../src/normalize.js';
 import { toExportRow } from '../src/modelCaps.js';
 import { runModelIdsCheck } from '../src/modelIdsCheck.js';
+import { loadPublicCatalog } from '../src/publicCatalog.js';
 import { setDataDir, getDataDir } from '../src/storage.js';
 import { runToCompletion as runNode } from '../src/orchestrator.js';
 import { runToCompletion as runWeb } from '../web/src/engine/orchestrator.js';
 import { prepareOptsFor } from '../src/prepareRun.js';
+import { DEFAULT_CANARY_MODEL } from '../src/cli/commands/agents.js';
 import type { OpenRouterModel, RunConfig, RunRecord } from '../src/types.js';
 import { catalogItem, fakeOpenRouter, noSleep, type FakeOpenRouter } from './fakeOpenRouter.js';
 import { expectPipelineDone } from './runOutcome.js';
@@ -531,4 +534,103 @@ describe('(ii) scripts/check-model-ids.ts — exit code de verdade (o que o work
     expect(r.status, r.stdout).toBe(0);
     expect(r.stdout).toContain('0 reprovado(s)');
   }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// skill-install#14 — o canário do `agents doctor --deep` não pode ser um
+// modelo com expiração anunciada. O default era `google/gemini-2.5-flash`, que
+// sai do catálogo em 2026-10-20: depois da data o doctor sem `--model` falharia
+// por modelo inexistente EM PRODUÇÃO. O teste trava a classe inteira — qualquer
+// default com data (mesmo longe) reprova aqui.
+// ---------------------------------------------------------------------------
+
+describe('skill-install#14 — DEFAULT_CANARY_MODEL é modelo SEM expiração anunciada', () => {
+  const DEPOIS_DE_TUDO = new Date('2027-12-01T00:00:00Z');
+
+  it('existe no catálogo e não gera alerta de ciclo de vida — nem hoje, nem depois de qualquer data', () => {
+    const cat = catalogoReal();
+    const entry = cat.find((m) => m.id === DEFAULT_CANARY_MODEL);
+    expect(entry, `canário ${DEFAULT_CANARY_MODEL} fora do catálogo`).toBeDefined();
+    expect(lifecycleAlertFor(DEFAULT_CANARY_MODEL, ['judge'], entry, cat, HOJE)).toBeNull();
+    expect(lifecycleAlertFor(DEFAULT_CANARY_MODEL, ['judge'], entry, cat, DEPOIS_DE_TUDO)).toBeNull();
+  });
+
+  it('a guarda pega a REGRESSÃO: o antigo default (gemini-2.5-flash) já avisava em HOJE e expira depois', () => {
+    const cat = catalogoReal();
+    const antigo = cat.find((m) => m.id === 'google/gemini-2.5-flash');
+    expect(lifecycleAlertFor('google/gemini-2.5-flash', ['judge'], antigo, cat, HOJE)).not.toBeNull();
+    expect(lifecycleAlertFor('google/gemini-2.5-flash', ['judge'], antigo, cat, DEPOIS_DE_TUDO)).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Modelos de DECISÃO (modo JEV) — o job semanal de ids tem de olhar o universo
+// `GET /models?output_modalities=all`, não o `/models` puro.
+//
+// Falso-positivo medido em 2026-09-29: `typesafe/jev-1.13` é REAL (catálogo de
+// decisões — `jev models`, público) e `agent-docs/jev.md` está certa em citá-lo,
+// mas o `/models` puro só tem o `typesafe/jev-router` (de chat) → o job
+// reprovava 4 citações certas. Com o universo completo, a citação passa — e
+// continua SENDO conferida (se o modelo de decisão for removido, reprova).
+// ---------------------------------------------------------------------------
+
+describe('ids do modo JEV: modelo de decisão existe no catálogo de DECISÕES', () => {
+  const jevRouter: CatalogModelLike = {
+    id: 'typesafe/jev-router',
+    canonicalSlug: 'typesafe/jev-router',
+    expirationDate: null,
+    aliasTarget: null,
+  };
+  const jev113: CatalogModelLike = {
+    id: 'typesafe/jev-1.13',
+    canonicalSlug: 'typesafe/jev-1.13-20260917',
+    expirationDate: null,
+    aliasTarget: null,
+  };
+  const citado = [{ id: 'typesafe/jev-1.13', file: 'agent-docs/jev.md', line: 73 }];
+
+  it('só o chat reprova a citação (falso-positivo); o universo chat+decisões fecha', () => {
+    const soChat = [...catalogoReal(), jevRouter];
+    const antes = checkCitedModelIds(citado, soChat, HOJE);
+    expect(antes.ok).toBe(false);
+    expect(antes.failures[0].alert.kind).toBe('missing');
+    // Com o universo completo passa — e CONTINUA conferido: se o modelo de
+    // decisão sair do catálogo amanhã, o mesmo teste volta a reprovar.
+    const universo = [...soChat, jev113];
+    expect(checkCitedModelIds(citado, universo, HOJE).ok).toBe(true);
+  });
+
+  it('loadPublicCatalog pede o escopo pedido e NÃO reusa o cache de outro escopo', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pb-pubcat-'));
+    const cachePath = join(dir, 'public-catalog.json');
+    const urls: string[] = [];
+    const fetchFake: FetchLike = async (input) => {
+      urls.push(String(input));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [catalogItem(jevRouter.id, 4.2e-8, 0)] }),
+      } as unknown as Response;
+    };
+    try {
+      const chat = await loadPublicCatalog({ cachePath, fetch: fetchFake, now: () => 1_000 });
+      expect(chat.source).toBe('network');
+      expect(urls[0]).toMatch(/\/models$/u);
+      // mesmo escopo: o cache de 24 h serve (sem rede)
+      expect((await loadPublicCatalog({ cachePath, fetch: fetchFake, now: () => 2_000 })).source).toBe('disk');
+      expect(urls.length).toBe(1);
+      // escopo novo NÃO herda o cache do outro (armadilha: sobrescrever o
+      // `/models` puro com o universo — ou o contrário — em silêncio)
+      const todos = await loadPublicCatalog({
+        cachePath,
+        query: '?output_modalities=all',
+        fetch: fetchFake,
+        now: () => 3_000,
+      });
+      expect(todos.source).toBe('network');
+      expect(urls[1]).toMatch(/\/models\?output_modalities=all$/u);
+    } finally {
+      rmSync(dir, { force: true, recursive: true });
+    }
+  });
 });

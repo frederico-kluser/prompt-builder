@@ -93,6 +93,28 @@ expirou (ele não roda mais). Sem catálogo (rede fora e sem cache), sai com `8`
 O catálogo é o **público** (`GET /models`, sem key, sem custo, cache de 24 h).
 `--catalog <models.json>` usa um snapshot salvo (offline/reprodutível).
 
+## Meta-prompts internos: `prompts regression`
+
+O contrato do juiz não cobre os prompts EMBUTIDOS do reescritor, da reflexão,
+das técnicas, do datagen e do gabarito. Toda run grava no pin do juiz
+`metaPromptsFingerprint` + `runContractHash` (juiz + meta-prompts): qualquer
+edição de texto interno muda o hash da run, sem mexer no hash do juiz (o
+`baseline check` acima segue só sobre o julgamento). Quando o fingerprint mudar
+(ex.: atualizou o pacote), rode a suíte fixa:
+
+```bash
+prompt-builder prompts regression --model xiaomi/mimo-v2.6-pro --judge google/gemini-3.8-flash --dry-run
+```
+
+São 80 reescritas × técnicas + 40 canários de contrato + casos rotulados de
+reflexão, datagen, gabarito e juiz. Limiares: inválidas ≤ 10%, diversidade
+(1 − 8-gramas) ≥ 0,4, acerto do juiz ≥ 85%, κ do gabarito ≥ 0,6 — abaixo, exit
+`10` (`gate.prompts_regression`, relatório em `error.details.report`).
+`--dry-run` estima o TETO pelo catálogo, sem key (o par acima: ~US$ 1,7 em
+2026-09; a meta da suíte é ≤ US$ 2 — juiz caro passa disso), e `--budget` é
+obrigatório fora de um terminal. Ganho por técnica NÃO é medido
+aqui (sai `null`): isso é o `vary`.
+
 ## Docs e exemplos
 
 O repositório roda um job semanal (`scripts/check-model-ids.ts`) que confere os

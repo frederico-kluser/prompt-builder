@@ -39,7 +39,8 @@ contra si mesmo:
 ```
 
 Confira antes que os dois níveis existem naquele modelo:
-`prompt-builder models show openai/gpt-5-mini --json | jq .model.thinkLevels`.
+`prompt-builder models show openai/gpt-5-mini --json | jq .data.model.thinkLevels`
+(o `--json` vem no envelope `{ok, command, data}` — o modelo fica em `.data.model`).
 
 ## Julgamento
 
@@ -48,6 +49,17 @@ o juiz ordena as respostas às cegas. Com `competitorConfigs`, ou passando
 `referenceJudging: true` no arquivo, o julgamento passa a ser **por gabarito**
 (pointwise + finais), que é mais estável e produz judge-score comparável entre
 runs.
+
+## Modo econômico do juiz (`--judge-cascade`)
+
+O papel juiz domina o custo. `--judge-cascade barato1,barato2:forte` troca o
+painel por uma **cascata**: os 2 juízes baratos votam em paralelo e o forte só
+julga os vereditos em dúvida — os baratos divergem (ou um não votou), algum
+voto saiu `parcial`, ou a resposta é o extremo de comprimento de uma etapa com
+razão > 3×. Sem gatilho, vale o consenso barato. Os 3 modelos são distintos e
+nenhum pode competir (exit `3`). O record traz `judgeCascade` (vereditos,
+escalonados e `escalatedFraction`); o custo segue medido em `costByRole.judge`.
+Vale em `compare`/`vary`/`train` por flag (o `arena-config@1` não tem a chave).
 
 ## Resultado
 

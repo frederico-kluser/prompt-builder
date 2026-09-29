@@ -79,8 +79,14 @@ import type { AgentRunnerConfig, AgentTaskSpec, ExecutionRef } from '../../agent
 
 /** Versão pinada do executor `pi` (plano §22/§26). Divergência => doctor falha. */
 const EXPECTED_PI_VERSION = '0.84.2';
-/** Modelo usado no canário real (`--deep`). Barato, usado UMA vez. */
-const DEFAULT_CANARY_MODEL = 'google/gemini-2.5-flash';
+/**
+ * Modelo usado no canário real (`--deep`). Barato, usado UMA vez. skill-install#14:
+ * o `google/gemini-2.5-flash` sai do catálogo em 2026-10-20 — o sucessor nomeado
+ * pelo próprio catálogo (via `~google/gemini-flash-latest`) é o 3.8-flash.
+ * Exportado para o teste que trava isso (`test/model-lifecycle.test.ts`): o
+ * default tem de ser um modelo SEM expiração anunciada, sempre.
+ */
+export const DEFAULT_CANARY_MODEL = 'google/gemini-3.8-flash';
 /** Default do `--what` em `logs`. */
 const DEFAULT_WHAT = 'dossier';
 
