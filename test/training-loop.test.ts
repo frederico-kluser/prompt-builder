@@ -39,7 +39,7 @@ const dubles = vi.hoisted(() => {
     politica: Politica;
     nCenarios: number;
     variantes: string[];
-    runs: { kind: Kind; iteration: number; ids: string[]; questions: string[]; duels: unknown }[];
+    runs: { kind: Kind; iteration: number; ids: string[]; questions: string[]; duels: unknown; stages: unknown }[];
     geracoes: { includeOriginal?: boolean; carryPrompt?: string; techniqueIds?: string[]; analysisHint?: string }[];
   } = {
     politica: () => 'parcial',
@@ -73,6 +73,8 @@ const dubles = vi.hoisted(() => {
       ids: contestants.map((c) => c.id),
       questions: specs.map((s) => s.question),
       duels: config.duels,
+      // web-code#11: o que a run DECLARA em `config.stages` (tela e estimativa).
+      stages: config.stages,
     });
     const stages = specs.map((spec, i) => {
       const scenario = Number(spec.question.replace('cenario ', ''));
@@ -482,6 +484,26 @@ describe('IMPL-013 — re-avaliação LIMPA antes de confirmar a promoção', ()
       const hint = dubles.estado.geracoes[2].analysisHint ?? '';
       expect(hint).toContain('motivo-carry-it1');
       expect(hint).not.toContain('motivo-v0-it1');
+    });
+  }
+});
+
+// web-code#11: a rodada pinada roda SÓ a fatia de treino — `config.stages` da
+// run tem de dizer isso (como o holdout e a re-avaliação já diziam). Com o
+// `cfg.stages` da sessão a tela mostrava "10/20" para sempre e a estimativa
+// das portas de orçamento contava cenários que não rodam.
+describe('web-code#11 — rodada pinada declara os cenários que EXECUTA', () => {
+  for (const [nome, treinar] of MOTORES) {
+    it(`${nome}: 20 cenários com holdout → a rodada ≥ 1 declara stages = fatia de treino`, async () => {
+      dubles.estado.politica = () => 'parcial';
+      const { rec } = await treinar(config({ iterations: 2, holdoutRatio: 0.25 }));
+      expect(rec.status, rec.error).toBe('finished');
+      const [it0, it1] = selecoes();
+      // Iteração 0 gera o pool inteiro; daí em diante roda a fatia pinada.
+      expect(it0.stages).toBe(20);
+      expect(it1.questions).toHaveLength(10);
+      expect(it1.stages).toBe(it1.questions.length);
+      for (const r of dubles.estado.runs) expect(r.stages).toBe(r.questions.length);
     });
   }
 });

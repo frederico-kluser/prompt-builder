@@ -1050,16 +1050,24 @@ async function trainingLoop(
       emitSessionEvent({ type: 'iteration.started', sessionId, iteration: i, runId });
       log(sessionId, `iteracao ${i + 1}/${cfg.iterations} -> run ${runId} (${contestants.length} variantes)`);
 
-      const runRec = await runToCompletion(variationConfigFrom(cfg), apiKey, {
-        runId,
-        contestants,
-        pinnedStages,
-        sessionId,
-        iteration: i,
-        parentRunId: prevRun?.id,
-        parentLedger: ledger,
-        signal,
-      });
+      // web-code#11: a rodada pinada roda SÓ a fatia de treino — `stages` diz
+      // isso (como o holdout e a re-avaliação já faziam). Com `cfg.stages` a
+      // tela mostrava "10/20" para sempre e a estimativa das portas de
+      // orçamento contava cenários que não rodam. Espelho do Node.
+      const runRec = await runToCompletion(
+        { ...variationConfigFrom(cfg), stages: pinnedStages?.length ?? cfg.stages },
+        apiKey,
+        {
+          runId,
+          contestants,
+          pinnedStages,
+          sessionId,
+          iteration: i,
+          parentRunId: prevRun?.id,
+          parentLedger: ledger,
+          signal,
+        },
+      );
 
       // O ledger e a fonte de verdade do gasto (todos os papeis de todas as
       // runs + reescritor); somar `runRec.totalCostUsd` contaria duas vezes.

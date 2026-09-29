@@ -1061,16 +1061,24 @@ async function trainingLoop(
       emitSessionEvent({ type: 'iteration.started', sessionId, iteration: i, runId });
       log(sessionId, `iteracao ${i + 1}/${cfg.iterations} -> run ${runId} (${contestants.length} variantes)`);
 
-      const runRec = await runToCompletion(variationConfigFrom(cfg), apiKey, {
-        runId,
-        contestants,
-        pinnedStages,
-        sessionId,
-        iteration: i,
-        parentRunId: prevRun?.id,
-        parentLedger: ledger,
-        signal: opts.signal,
-      });
+      // web-code#11: a rodada pinada roda SÓ a fatia de treino — `stages` diz
+      // isso (como o holdout e a re-avaliação já faziam). Com `cfg.stages` a
+      // tela mostrava "10/20" para sempre e a estimativa das portas de
+      // orçamento contava cenários que não rodam. Espelho do web.
+      const runRec = await runToCompletion(
+        { ...variationConfigFrom(cfg), stages: pinnedStages?.length ?? cfg.stages },
+        apiKey,
+        {
+          runId,
+          contestants,
+          pinnedStages,
+          sessionId,
+          iteration: i,
+          parentRunId: prevRun?.id,
+          parentLedger: ledger,
+          signal: opts.signal,
+        },
+      );
 
       // IMPL-004: vereditos perdidos da sessao = soma das runs (iteracoes,
       // triagem e holdout) — a mesma conta que cada run carrega.
