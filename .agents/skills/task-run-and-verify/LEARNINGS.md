@@ -30,3 +30,18 @@
 ## 2026-09-27 — verificação da superfície guiada (fonte: sessão DSH)
 - [2026-09-27] [session:dshe-premium] [e2e] `test/ux-nova-run-e2e.test.ts` já roda o SPA de verdade (vite build + playwright-core + fixture de 459 modelos) e aceita `pb.formStyle` via `addInitScript` — gates de UI headless não precisam de Playwright de fora. `páginaNova(viewport, 'guided'|'complete')`.
 - [2026-09-27] [session:dshe-premium] [armadilha] `pkill -f "dist/server.js"` MATA o próprio shell do agente (o padrão casa com a linha de comando do bash); use padrão que não casa com a própria linha (`pgrep -af "dist/server"`) e confirme o fim.
+
+## 2026-09-29 — auditoria de docs da wave3 (fonte: sessão DSH)
+- [2026-09-29] [inferência] [armadilha] Para reproduzir exemplos do CLI com `HOME` descartável, use
+  `<repo>/node_modules/.bin/tsx` + caminho ABSOLUTO de `src/cli/index.ts`: o `npx tsx` com HOME de
+  scratch rebaixa o cache do npx (baixa o tsx de novo) e um cwd fora da raiz quebra o entrypoint
+  relativo com ERR_MODULE_NOT_FOUND.
+- [2026-09-29] [inferência] [armadilha] O universo de ids do OpenRouter é
+  `GET /models?output_modalities=all` (631 modelos em 2026-09-29): os modelos de DECISÃO do modo
+  JEV (`typesafe/jev-1.13`) só saem aí — o `/models` puro (460) reprova `agent-docs/jev.md` como
+  falso-positivo. `scripts/check-model-ids.ts` usa o escopo completo; o cache do catálogo público
+  é por escopo (`q` no arquivo).
+- [2026-09-29] [inferência] No caminho feliz `config example --mode train`, o pré-voo real estima
+  US$ 5,94–7,94: `--budget 10` passa (exit 0); dentro da faixa (ex.: 7) pede `--yes`
+  (`usage.confirmation_required`) e abaixo do piso recusa (`usage.budget_below_estimate`). Exemplos
+  de doc têm de ter folga sobre o `estimate.high`.
