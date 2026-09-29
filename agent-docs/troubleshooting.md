@@ -70,7 +70,10 @@ geração (`GET /generation`): troca a reserva pelo valor cobrado (`settled`) ou
 com 404 persistente, lança a reserva inteira como gasto conservador
 (`notFound`). `callLog` no record lista cada chamada com o id `gen-…`, o
 provedor e o estado. Cancelar (Ctrl-C/`runs cancel`) NÃO espera a conciliação:
-as pendentes ficam em `costLedger.pendingEntries`.
+as pendentes ficam em `costLedger.pendingEntries` — inclusive a chamada cortada
+ANTES de qualquer resposta (`generationId: ""`, sem id para conciliar): o
+limite superior fica em `pendingUsd`, fora de `totalCostUsd`; uma conciliação
+posterior a lança como conservadora.
 
 ## BYOK / `upstream_inference_cost` / `upstreamCostUsd`
 

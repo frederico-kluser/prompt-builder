@@ -51,6 +51,7 @@ export type TokenPrice = number | null;
 import type { PiiRunReport } from './engine/pii.js';
 import type { SensitiveRouting } from './engine/sensitiveRouting.js';
 import type { VerdictCache } from './engine/verdictCache.js';
+import type { CallJournal } from './engine/callJournal.js';
 
 export interface OpenRouterModelPricing {
   prompt: TokenPrice; // USD per token (null = desconhecido)
@@ -129,6 +130,13 @@ export interface CallCost {
    * conciliacao. `usd: 0` com este campo NAO e "custou zero".
    */
   pendingUsd?: number;
+  /**
+   * IMPL-081 — resposta servida do JOURNAL de chamadas numa run RETOMADA:
+   * nenhuma chamada saiu para o provedor nesta tentativa (`usd: 0` é medido,
+   * não inferido). O custo original foi pago UMA vez, na tentativa que gravou
+   * a resposta, e aparece à parte em `CostEntry.replayedUsd`.
+   */
+  replayed?: boolean;
 }
 
 export interface CostEntry {
@@ -172,6 +180,14 @@ export interface CostEntry {
   providers?: Record<string, number>;
   /** IMPL-075 — chamadas deste papel enviadas no modo AUDITÁVEL (provider travado). */
   auditableCalls?: number;
+  /**
+   * IMPL-081 — respostas deste papel servidas do JOURNAL numa run retomada:
+   * NÃO contam em `calls`/`usd` (não houve chamada nem gasto nesta tentativa).
+   * `replayedUsd` = custo MEDIDO original delas (já pago antes — informativo,
+   * fora do gasto e do orçamento desta tentativa; nunca somar a `usd`).
+   */
+  replayedCalls?: number;
+  replayedUsd?: number;
 }
 
 /**
@@ -193,9 +209,13 @@ export interface CallLogEntry {
   /**
    * `measured` = `usage.cost` da resposta; `pending` = reserva mantida à
    * espera do /generation; `conservative` = reserva inteira (sem id ou 404
-   * persistente); `reconciled` = trocada pelo `total_cost` do /generation.
+   * persistente); `reconciled` = trocada pelo `total_cost` do /generation;
+   * `replayed` (IMPL-081) = resposta servida do journal numa run retomada —
+   * `usd` 0 nesta tentativa, o valor pago antes em `replayedFromUsd`.
    */
-  status: 'measured' | 'pending' | 'conservative' | 'reconciled';
+  status: 'measured' | 'pending' | 'conservative' | 'reconciled' | 'replayed';
+  /** IMPL-081 — só em `replayed`: custo medido da chamada ORIGINAL (paga uma vez, antes). */
+  replayedFromUsd?: number;
   /** Provedor que serviu (IMPL-075). */
   provider?: string;
   /** Latência observada pelo cliente (ms). */
@@ -261,6 +281,12 @@ export type PendingReason = 'timeout' | 'aborted' | 'no_usage';
  * (IMPL-074 concilia via GET /api/v1/generation?id=…).
  */
 export interface PendingCall {
+  /**
+   * Id de geração para conciliar. `''` (left#14) = chamada interrompida pelo
+   * CANCELAR sem id recuperável (nenhuma resposta chegou): não é conciliável
+   * pelo /generation — segue pendente (limite superior, fora do gasto) e uma
+   * conciliação posterior a lança como conservadora.
+   */
   generationId: string;
   role: CostRole;
   modelId: string;
@@ -446,6 +472,27 @@ export interface CostSink {
    * ele = só o cache global do gateway (desligado por default).
    */
   verdictCache?(): VerdictCache | undefined;
+  /**
+   * IMPL-081 (R-10:REC-2): journal de chamadas pagas desta run (a retomada o
+   * carrega com as respostas das tentativas anteriores). O gateway o consulta
+   * ANTES de reservar/enviar e grava DEPOIS de cada resposta. Opcional: sink
+   * sem ele = nada é gravado nem replayado.
+   */
+  callJournal?(): CallJournal | undefined;
+  /**
+   * IMPL-081: resposta servida do journal — NÃO é chamada nem gasto desta
+   * tentativa (não toca `calls`/`usd`/`spentUsd`/`committedUsd`): sobe como
+   * `replayedCalls`/`replayedUsd` por papel e entra no registo por chamada
+   * como `replayed`. Os sinais de fim (IMPL-014) contam: a resposta está no
+   * record. Opcional: sinks antigos simplesmente não registram.
+   */
+  noteReplayed?(entry: {
+    role: CostRole;
+    modelId: string;
+    /** Custo da chamada ORIGINAL (paga uma vez, na tentativa que a gravou). */
+    originalCost?: CallCost;
+    finish?: CallFinishSignals;
+  }): void;
 }
 
 /**
@@ -2023,6 +2070,37 @@ export interface RunRecord {
   sessionId?: string;
   iteration?: number; // 0-based
   parentRunId?: string;
+  /**
+   * IMPL-081 — presente quando ESTA execução é uma RETOMADA (crash, aba
+   * recarregada, cancelamento, orçamento ou erro): o pipeline rodou de novo e
+   * as chamadas já pagas vieram do journal a US$ 0. `totalCostUsd` é só o
+   * gasto DESTA tentativa; o das anteriores está em `priorSpentUsd`.
+   */
+  resume?: RunResumeInfo;
+}
+
+/** IMPL-081 — carimbo de uma run retomada (ver `RunRecord.resume`). */
+export interface RunResumeInfo {
+  /** Tentativa atual (2 = primeira retomada). */
+  attempt: number;
+  resumedAt: string;
+  /**
+   * Gasto GRAVADO das tentativas anteriores (FORA de `totalCostUsd`). Limite
+   * inferior: é o último snapshot de cada uma — chamadas em voo num crash
+   * podem ter sido cobradas sem aparecer aqui.
+   */
+  priorSpentUsd: number;
+  /** Pendente (sem custo medido) das tentativas anteriores — pode ter sido cobrado. */
+  priorPendingUsd: number;
+  /** Respostas do journal disponíveis para replay no início desta tentativa. */
+  journalCalls: number;
+  /** Chamadas desta tentativa servidas do journal (US$ 0 nesta tentativa). */
+  replayedCalls: number;
+  /** Custo MEDIDO original das respostas replayadas (já dentro de `priorSpentUsd`). */
+  replayedUsd: number;
+  /** Como a tentativa anterior terminou (`aborted`/`error`) e por quê. */
+  previousStatus: string;
+  previousStoppedReason?: string;
 }
 
 // ----------------------------------------------------------------------------

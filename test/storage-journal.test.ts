@@ -1,25 +1,24 @@
 // IMPL-081 (R-10:REC-2) — journal de retomada: crash/reload não repete chamadas
-// pagas.
+// pagas. Aqui o que depende do ARMAZENAMENTO e da morte REAL do processo (o
+// núcleo e o seam do gateway estão em test/call-journal.test.ts; a retomada em
+// processo nos dois motores e no CLI, em test/run-resume.test.ts):
 //
-// Antes não havia journal/checkpoint/retomada em lugar nenhum (grep vazio fora
-// de comentários): o saveRun guardava só o snapshot e, depois de um kill no
-// meio da run, o usuário reexecutava TUDO — as chamadas já pagas eram repetidas
-// do zero. O contrato verificado aqui:
-//  (i) kill do motor após 3 chamadas concluídas (grupos fechados) + retomada =>
-//      0 chamadas pagas repetidas — o replay devolve o resultado gravado ANTES
-//      de a chamada ser refeita (teste com SIGKILL de verdade no processo que
-//      gravava o journal);
-//  (ii) grupo atômico (competidores+julgamento) NUNCA retomado pela metade:
-//      kill em cada fase (1ª, 2ª, 3ª chamada antes do commit) => nenhuma
-//      entrada é replayable e o grupo inteiro é refeito;
+//  (i)  kill -9 do motor com K chamadas concluídas + retomada em OUTRO
+//       processo => só as N−K que faltavam são pagas (0 paga repetida) — o
+//       journal já estava em disco (fsync por entrada);
+//  (ii) o grupo competidores+julgamento NUNCA é retomado pela metade: kill no
+//       MEIO do julgamento => a retomada reconstrói toda etapa (resposta +
+//       veredito), pagando só as chamadas que não chegaram ao journal. (Não há
+//       "commit de grupo": travar o replay até o grupo fechar faria o kill no
+//       meio do julgamento pagar de novo todas as respostas — o contrário do
+//       critério (i). A chave é o conteúdo do pedido, então resposta refeita =>
+//       pedido do juiz novo => juiz chamado de novo; nunca nota de outra
+//       resposta.)
 //  (iii) record e resumo gravados numa ÚNICA transação (grava os dois ou
 //       nenhum — rollback com cota simulada);
 //  (iv) durability 'strict' por INSPEÇÃO do código (fsync por entrada no Node,
-//      `durability: 'strict'` no IndexedDB) + teste de perda simulada (linha
-//      rasgada por kill no meio do append; commit perdido).
-//
-// Chave de idempotência = hash canônico de model+messages+params — paridade
-// obrigatória entre os dois runtimes (o replay pode vir de outro processo).
+//       `durability: 'strict'` no IndexedDB) + perda simulada (linha rasgada
+//       por kill no meio do append).
 
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
@@ -27,64 +26,25 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CALL_JOURNAL_FORMAT, journalEntryId, type JournalEntry } from '../src/engine/callJournal.js';
+import { createGateway, setDefaultGateway } from '../src/openrouter.js';
+import { planResume, resumeToCompletion } from '../src/orchestrator.js';
 import {
   appendCallJournal,
-  callJournalKey,
+  callJournalStore,
   clearCallJournal,
-  commitCallGroup,
+  loadCallJournal,
+  loadRun,
   readCallJournal,
-  replayCall,
-  saveRun,
   setDataDir,
+  sweepOrphanRecords,
 } from '../src/storage.js';
 import type { RunRecord } from '../src/types.js';
+import { noSleep } from './fakeOpenRouter.js';
+import { JOURNAL_COMPARE_CALLS, JOURNAL_KEY, journalPipeline } from './journalFixture.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const RUN_ID = 'run-journal-teste';
-
-// ---------------------------------------------------------------------------
-// Chamadas de mentira (0 rede, 0 gasto): 3 chamadas pagas num grupo + 1 noutro.
-// ---------------------------------------------------------------------------
-
-interface Chamada {
-  model: string;
-  messages: unknown;
-  params: unknown;
-  group: string;
-  result: unknown;
-}
-
-const CHAMADAS: Chamada[] = [
-  {
-    model: 'openai/gpt-4o-mini',
-    messages: [
-      { role: 'system', content: 'responda curto' },
-      { role: 'user', content: 'pergunta 1' },
-    ],
-    params: { temperature: 0, max_tokens: 64 },
-    group: 'stage:1:competitors+judge',
-    result: { text: 'resposta paga 1', usage: { cost: 0.001 } },
-  },
-  {
-    model: 'openai/gpt-4o-mini',
-    messages: [
-      { role: 'system', content: 'responda curto' },
-      { role: 'user', content: 'pergunta 2' },
-    ],
-    params: { temperature: 0, max_tokens: 64 },
-    group: 'stage:1:competitors+judge',
-    result: { text: 'resposta paga 2', usage: { cost: 0.001 } },
-  },
-  {
-    model: 'anthropic/claude-3.5-haiku',
-    messages: [{ role: 'user', content: 'pergunta 3' }],
-    params: { temperature: 0 },
-    group: 'stage:2:competitors+judge',
-    result: { text: 'resposta paga 3', usage: { cost: 0.002 } },
-  },
-];
-
-const keyDe = (c: Chamada): string => callJournalKey(c.model, c.messages, c.params);
 
 let dir: string;
 
@@ -92,6 +52,7 @@ beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(tmpdir(), 'pb-journal-'));
   setDataDir(dir);
   vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
 });
 
 afterEach(async () => {
@@ -99,203 +60,46 @@ afterEach(async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+const entrada = (seq: number, text: string): JournalEntry => ({
+  format: CALL_JOURNAL_FORMAT,
+  key: `sha256:${'a'.repeat(64)}`,
+  seq,
+  role: 'competitor',
+  modelId: 'fake/a',
+  at: '2026-09-29T00:00:00.000Z',
+  result: { text, tokensIn: 1, tokensOut: 1, latencyMs: 1, cost: { usd: 0.001, source: 'usage' } },
+});
+
 // ---------------------------------------------------------------------------
-// Filho SIGKILL-ável: grava o journal do pai até a fase pedida e fica vivo.
+// Arquivo append-only (Node)
 // ---------------------------------------------------------------------------
 
-const FILHO = `
-import { writeFileSync } from 'node:fs';
-import { appendCallJournal, commitCallGroup, callJournalKey, setDataDir } from '${path.join(ROOT, 'src', 'storage.js')}';
-
-const [dir, modo, stopAfter] = process.argv.slice(2);
-setDataDir(dir);
-const chamadas = ${JSON.stringify(
-  CHAMADAS.map((c) => ({ model: c.model, messages: c.messages, params: c.params, group: c.group, result: c.result })),
-)};
-
-if (modo === 'fechando-grupos') {
-  // 3 chamadas CONCLUÍDAS com os grupos fechados (crit. i).
-  const feitos = new Set();
-  for (let i = 0; i < chamadas.length; i++) {
-    const c = chamadas[i];
-    await appendCallJournal('${RUN_ID}', {
-      key: callJournalKey(c.model, c.messages, c.params),
-      group: c.group,
-      at: new Date().toISOString(),
-      result: c.result,
-    });
-    writeFileSync(dir + '/marker-c' + (i + 1), 'ok');
-    feitos.add(c.group);
-    const doGrupo = chamadas.filter((x) => x.group === c.group);
-    const jaForam = chamadas.slice(0, i + 1).filter((x) => x.group === c.group).length;
-    if (jaForam === doGrupo.length) {
-      await commitCallGroup('${RUN_ID}', c.group);
-      writeFileSync(dir + '/marker-g-' + c.group, 'ok');
-    }
-  }
-} else {
-  // Para em N entradas SEM commit (crit. ii: kill em cada fase do grupo).
-  for (let i = 0; i < Number(stopAfter); i++) {
-    const c = chamadas[i];
-    await appendCallJournal('${RUN_ID}', {
-      key: callJournalKey(c.model, c.messages, c.params),
-      group: c.group,
-      at: new Date().toISOString(),
-      result: c.result,
-    });
-    writeFileSync(dir + '/marker-c' + (i + 1), 'ok');
-  }
-}
-writeFileSync(dir + '/marker-pronto', 'ok');
-setInterval(() => {}, 1000); // vivo até o SIGKILL
-`;
-
-async function filhoAte(marker: string, args: string[]): Promise<ReturnType<typeof spawn>> {
-  // `.mts` de propósito: top-level await exige ESM e o tmpdir não tem
-  // package.json com "type": "module".
-  const script = path.join(dir, 'filho-journal.mts');
-  await fs.writeFile(script, FILHO, 'utf-8');
-  const filho = spawn(process.execPath, ['--import', 'tsx', script, dir, ...args], {
-    cwd: ROOT,
-    stdio: ['ignore', 'ignore', 'pipe'],
-  });
-  let stderr = '';
-  filho.stderr?.on('data', (d: Buffer) => {
-    stderr += d.toString();
-  });
-  const limite = Date.now() + 20_000;
-  for (;;) {
-    const ok = await fs
-      .access(path.join(dir, marker))
-      .then(() => true)
-      .catch(() => false);
-    if (ok) break;
-    if (Date.now() > limite) {
-      filho.kill('SIGKILL');
-      throw new Error(`filho não chegou a ${marker}: ${stderr.slice(0, 500)}`);
-    }
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  return filho;
-}
-
-function matar(filho: ReturnType<typeof spawn>): Promise<void> {
-  return new Promise((resolve) => {
-    filho.on('exit', () => resolve());
-    filho.kill('SIGKILL');
-  });
-}
-
-/** "Motor de retomada": replay antes de cada chamada; conta o que sai caro. */
-async function retomar(grupos: string[]): Promise<{ pagas: number; replayadas: number }> {
-  let pagas = 0;
-  let replayadas = 0;
-  for (const grupo of grupos) {
-    for (const c of CHAMADAS.filter((x) => x.group === grupo)) {
-      const hit = await replayCall(RUN_ID, keyDe(c));
-      if (hit === undefined) pagas++;
-      else replayadas++;
-    }
-  }
-  return { pagas, replayadas };
-}
-
-describe('journal de chamadas: retomada idempotente (IMPL-081)', () => {
-  it('chave de idempotência é paridade exata src × web e independe da ordem das chaves', async () => {
-    const web = await import('../web/src/engine/storage.js');
-    for (const c of CHAMADAS) {
-      expect(callJournalKey(c.model, c.messages, c.params)).toBe(web.callJournalKey(c.model, c.messages, c.params));
-    }
-    // JCS: ordem de chaves do params não muda a identidade da chamada.
-    expect(callJournalKey('m', [{ role: 'user', content: 'oi' }], { b: 2, a: 1 })).toBe(
-      callJournalKey('m', [{ role: 'user', content: 'oi' }], { a: 1, b: 2 }),
-    );
-    // Parâmetro diferente = chamada diferente (nunca replay errado).
-    expect(callJournalKey('m', [{ role: 'user', content: 'oi' }], { temperature: 0 })).not.toBe(
-      callJournalKey('m', [{ role: 'user', content: 'oi' }], { temperature: 1 }),
-    );
-  });
-
-  it('kill do motor após 3 chamadas concluídas + retomada => 0 chamadas pagas repetidas (crit. i)', async () => {
-    // Motor 1: executa as 3 chamadas, grava o journal e fecha os grupos.
-    const filho = await filhoAte('marker-pronto', ['fechando-grupos']);
-    await matar(filho); // SIGKILL: nada de flush gracioso — o journal já está em disco
-
-    // Retomada (processo novo): replay antes de cada chamada.
-    const { pagas, replayadas } = await retomar(['stage:1:competitors+judge', 'stage:2:competitors+judge']);
-    expect(replayadas, 'as 3 chamadas pagas vêm do journal').toBe(3);
-    expect(pagas, 'chamadas pagas repetidas na retomada').toBe(0);
-
-    // E o resultado replayado é EXATAMENTE o que foi pago.
-    const hit = await replayCall<{ text: string }>(RUN_ID, keyDe(CHAMADAS[0]));
-    expect(hit).toEqual(CHAMADAS[0].result);
-  }, 60_000);
-
-  it('grupo atômico nunca retomado pela metade: kill em cada fase => grupo refeito inteiro (crit. ii)', async () => {
-    for (let fase = 1; fase <= 3; fase++) {
-      // motor morre depois da fase-ésima chamada, ANTES do commit do grupo.
-      const filho = await filhoAte(`marker-c${fase}`, ['parcial', String(fase)]);
-      await matar(filho);
-
-      // O journal guarda as `fase` chamadas já pagas…
-      expect((await readCallJournal(RUN_ID)).length).toBe(fase);
-      // …mas NADA do grupo aberto é replayable — nem o que já foi pago. A
-      // retomada re-executa o grupo INTEIRO: 3 chamadas pagas de novo, nunca
-      // etapa com resposta e sem nota.
-      const { pagas, replayadas } = await retomar(['stage:1:competitors+judge', 'stage:2:competitors+judge']);
-      expect(replayadas, `fase ${fase}: zero replay de grupo aberto`).toBe(0);
-      expect(pagas, `fase ${fase}: o grupo inteiro é refeito`).toBe(CHAMADAS.length);
-
-      // Re-execução completa do grupo + commit => aí sim o replay vale.
-      for (const c of CHAMADAS) {
-        await appendCallJournal(RUN_ID, {
-          key: keyDe(c),
-          group: c.group,
-          at: new Date().toISOString(),
-          result: c.result,
-        });
-      }
-      await commitCallGroup(RUN_ID, 'stage:1:competitors+judge');
-      await commitCallGroup(RUN_ID, 'stage:2:competitors+judge');
-      const depois = await retomar(['stage:1:competitors+judge', 'stage:2:competitors+judge']);
-      expect(depois.replayadas, `fase ${fase}: grupo fechado => replay total`).toBe(3);
-      expect(depois.pagas).toBe(0);
-      await clearCallJournal(RUN_ID); // ciclo seguinte começa limpo
-    }
-  }, 90_000);
-
-  it('perda simulada: linha rasgada por kill no meio do append não derruba o journal (crit. iv)', async () => {
-    for (const c of CHAMADAS.slice(0, 2)) {
-      await appendCallJournal(RUN_ID, {
-        key: keyDe(c),
-        group: c.group,
-        at: new Date().toISOString(),
-        result: c.result,
-      });
-    }
-    await commitCallJournalSafe('stage:1:competitors+judge');
+describe('journal em disco (Node): append-only, perda simulada, limpeza', () => {
+  it('perda simulada: linha rasgada por kill no meio do append é descartada; as anteriores valem (crit. iv)', async () => {
+    const store = callJournalStore(RUN_ID);
+    await store.append(entrada(0, 'r0'));
+    await store.append(entrada(1, 'r1'));
     // O kill no meio do append seguinte deixa UMA linha incompleta no fim:
     await fs.appendFile(path.join(dir, 'runs', `${RUN_ID}.journal`), '{"t":"call","key":"abc","gro', 'utf-8');
-
-    const entradas = await readCallJournal(RUN_ID);
-    expect(entradas, 'as entradas com fsync sobrevivem; a rasgada é descartada').toHaveLength(2);
-    const { replayadas } = await retomar(['stage:1:competitors+judge']);
-    expect(replayadas).toBe(2);
+    const lidas = await loadCallJournal(RUN_ID);
+    expect(lidas.map((e) => e.result.text)).toEqual(['r0', 'r1']);
+    expect((await readCallJournal(RUN_ID)).map((e) => e.key)).toEqual([journalEntryId(entrada(0, '')), journalEntryId(entrada(1, ''))]);
   });
 
-  it('perda simulada: commit perdido (kill antes dele) => sem replay, sem resultado meio-alvo', async () => {
-    for (const c of CHAMADAS.slice(0, 2)) {
-      await appendCallJournal(RUN_ID, {
-        key: keyDe(c),
-        group: c.group,
-        at: new Date().toISOString(),
-        result: c.result,
-      });
-    }
-    // SEM commitCallGroup — o motor morreu aqui.
-    for (const c of CHAMADAS.slice(0, 2)) {
-      expect(await replayCall(RUN_ID, keyDe(c)), 'grupo aberto não é replayable').toBeUndefined();
-    }
+  it('entrada adulterada/antiga (id ≠ conteúdo, formato velho, linha `commit` legada) é ignorada — paga de novo', async () => {
+    await callJournalStore(RUN_ID).append(entrada(0, 'boa'));
+    // id que não bate com a entrada (adulterado) e formato antigo de outra versão
+    await appendCallJournal(RUN_ID, { key: 'sha256:outra#0', group: 'competitor', at: '', result: entrada(5, 'ruim') });
+    await appendCallJournal(RUN_ID, { key: 'x#0', group: 'competitor', at: '', result: { format: 'call-journal@0' } });
+    await fs.appendFile(path.join(dir, 'runs', `${RUN_ID}.journal`), '{"t":"commit","group":"stage:1","at":"x"}\n', 'utf-8');
+    expect((await loadCallJournal(RUN_ID)).map((e) => e.result.text)).toEqual(['boa']);
+  });
+
+  it('clearCallJournal apaga só o journal (idempotente)', async () => {
+    await callJournalStore(RUN_ID).append(entrada(0, 'r0'));
+    await clearCallJournal(RUN_ID);
+    await clearCallJournal(RUN_ID);
+    expect(await loadCallJournal(RUN_ID)).toEqual([]);
   });
 
   it('durability strict por inspeção: fsync por entrada (Node) e durability strict (IndexedDB)', async () => {
@@ -313,24 +117,113 @@ describe('journal de chamadas: retomada idempotente (IMPL-081)', () => {
     expect(iRename, 'rename DEPOIS do fsync do arquivo').toBeGreaterThan(iSync);
     expect(iDirSync, 'fsync do diretório DEPOIS do rename').toBeGreaterThan(iRename);
 
-    const webSrc = await fs.readFile(path.join(ROOT, 'web', 'src', 'engine', 'storage.ts'), 'utf-8');
-    const webAppend = webSrc.slice(webSrc.indexOf('export async function appendCallJournal'));
-    const webCommit = webSrc.slice(webSrc.indexOf('export async function commitCallGroup'));
-    expect(webAppend, 'append do journal é checkpoint: strict explícito').toContain("durability: 'strict'");
-    expect(webCommit, 'commit do grupo idem').toContain("durability: 'strict'");
+    const webJournal = await fs.readFile(path.join(ROOT, 'web', 'src', 'engine', 'callJournal.ts'), 'utf-8');
+    const webAppend = webJournal.slice(webJournal.indexOf('export function idbCallJournalStore'));
+    expect(webAppend.slice(0, webAppend.indexOf('\n}')), 'append do journal é checkpoint: strict explícito').toContain(
+      "durability: 'strict'",
+    );
     // …e o default do record segue strict, com o escape 'relaxed' das batidas
     // de 800 ms (SaveOpts) mantido de propósito (R-10:DEC-2).
-    expect(webSrc).toContain("opts.durability ?? 'strict'");
+    const webStorage = await fs.readFile(path.join(ROOT, 'web', 'src', 'engine', 'storage.ts'), 'utf-8');
+    expect(webStorage).toContain("opts.durability ?? 'strict'");
   });
 });
 
-async function commitCallJournalSafe(group: string): Promise<void> {
-  await commitCallGroup(RUN_ID, group);
+// ---------------------------------------------------------------------------
+// Morte REAL do processo (SIGKILL) + retomada em outro processo
+// ---------------------------------------------------------------------------
+
+// Filho: roda a run de verdade (motor Node + pipeline falso) com K chamadas
+// concluídas e o resto segurado em voo; fica vivo até o SIGKILL.
+const FILHO = `
+import { createGateway, setDefaultGateway } from '${path.join(ROOT, 'src', 'openrouter.js')}';
+import { runToCompletion } from '${path.join(ROOT, 'src', 'orchestrator.js')}';
+import { setDataDir } from '${path.join(ROOT, 'src', 'storage.js')}';
+import { noSleep } from '${path.join(ROOT, 'test', 'fakeOpenRouter.js')}';
+import { JOURNAL_COMPARE, JOURNAL_KEY, journalPipeline } from '${path.join(ROOT, 'test', 'journalFixture.js')}';
+
+const [dir, runId, k] = process.argv.slice(2);
+setDataDir(dir);
+const fake = journalPipeline({ hangAfter: Number(k) });
+setDefaultGateway(createGateway({ fetch: fake.fetch, sleep: noSleep }));
+void runToCompletion({ ...JOURNAL_COMPARE, budgetUsd: 1 }, JOURNAL_KEY, { runId });
+setInterval(() => {}, 1000); // vivo até o SIGKILL
+`;
+
+async function filhoComJournal(runId: string, k: number): Promise<ReturnType<typeof spawn>> {
+  // `.mts` de propósito: top-level import ESM e o tmpdir não tem package.json.
+  const script = path.join(dir, 'filho-journal.mts');
+  await fs.writeFile(script, FILHO, 'utf-8');
+  const filho = spawn(process.execPath, ['--import', 'tsx', script, dir, runId, String(k)], {
+    cwd: ROOT,
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  filho.stderr?.on('data', (d: Buffer) => {
+    stderr += d.toString();
+  });
+  const limite = Date.now() + 30_000;
+  for (;;) {
+    if ((await loadCallJournal(runId).catch(() => [])).length >= k) break;
+    if (filho.exitCode !== null || Date.now() > limite) {
+      filho.kill('SIGKILL');
+      throw new Error(`filho não gravou ${k} entradas: ${stderr.slice(-800)}`);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return filho;
 }
 
+function matar(filho: ReturnType<typeof spawn>): Promise<void> {
+  return new Promise((resolve) => {
+    filho.on('exit', () => resolve());
+    filho.kill('SIGKILL');
+  });
+}
+
+describe('kill -9 do motor + retomada em outro processo (crit. i e ii)', () => {
+  it('K=22 (meio do julgamento): SIGKILL, órfã detectada, retomada paga só N−K e fecha toda etapa', async () => {
+    // N = chamadas pagas de uma run completa (conferido em test/run-resume.test.ts).
+    const N = JOURNAL_COMPARE_CALLS;
+
+    const K = 22;
+    const filho = await filhoComJournal(RUN_ID, K);
+    await matar(filho); // SIGKILL: nada de flush gracioso — o journal já está em disco
+    expect((await loadRun(RUN_ID))?.status, 'o disco ficou com a run "running"').toBe('running');
+
+    // Outro processo (este): o dono morreu => órfã => 'aborted', retomável.
+    const varrida = await sweepOrphanRecords({ only: { kind: 'run', id: RUN_ID } });
+    expect(varrida.runs).toEqual([RUN_ID]);
+    const plano = await planResume(RUN_ID);
+    if (!plano.ok) throw new Error(plano.reason);
+    expect(plano.plan.entries).toHaveLength(K);
+
+    const f2 = journalPipeline();
+    const prev2 = setDefaultGateway(createGateway({ fetch: f2.fetch, sleep: noSleep }));
+    let rec: RunRecord;
+    try {
+      rec = (await resumeToCompletion(plano.plan, JOURNAL_KEY)) as RunRecord;
+    } finally {
+      setDefaultGateway(prev2);
+    }
+    // (i) 0 chamada paga repetida
+    expect(f2.chatRequests().length, 'pagas na retomada').toBe(N - K);
+    expect(rec.resume).toMatchObject({ attempt: 2, journalCalls: K, replayedCalls: K, previousStatus: 'aborted' });
+    expect(rec.totalCostUsd).toBeCloseTo(f2.billedUsd(), 10);
+    // (ii) etapa inteira: resposta E veredito em todas, nenhuma cortada
+    expect(rec.status, rec.error).toBe('finished');
+    for (const st of rec.stages) {
+      expect(st.incomplete).toBeFalsy();
+      expect(st.responses).toHaveLength(2);
+      expect(st.referenceJudge).toBeDefined();
+    }
+    expect(await loadCallJournal(RUN_ID), 'concluída: journal limpo').toEqual([]);
+  }, 90_000);
+});
+
 // ---------------------------------------------------------------------------
-// Seam do navegador (IndexedDB): mesmo contrato na transação do record+resumo
-// (crit. iii) e nos appends do journal.
+// Seam do navegador (IndexedDB): transação do record+resumo (crit. iii) e o
+// adaptador do journal (crit. iv).
 // ---------------------------------------------------------------------------
 
 describe('journal no IndexedDB + record/resumo numa transação (IMPL-081)', () => {
@@ -344,8 +237,6 @@ describe('journal no IndexedDB + record/resumo numa transação (IMPL-081)', () 
     const { resetStorageHealth } = await import('../web/src/storageHealth.js');
     resetStorageHealth();
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
   });
 
   afterEach(async () => {
@@ -392,56 +283,39 @@ describe('journal no IndexedDB + record/resumo numa transação (IMPL-081)', () 
     expect((await storage.listRuns<Array<{ id: string }>>()).map((s) => s.id)).not.toContain('run-transacao-2');
   });
 
-  it('journal no IndexedDB: replay por chave, grupo atômico e limpeza', async () => {
+  it('adaptador IndexedDB: append strict, releitura depois do "reload", limpeza só do journal', async () => {
+    const cj = await import('../web/src/engine/callJournal.js');
     const storage = await import('../web/src/engine/storage.js');
     const id = 'run-web-journal';
-    const c = CHAMADAS[0];
-    const key = storage.callJournalKey(c.model, c.messages, c.params);
-    expect(key).toBe(callJournalKey(c.model, c.messages, c.params)); // paridade src × web
+    const store = cj.idbCallJournalStore(id);
+    expect(await store.append(entrada(0, 'r0'))).toBe(true);
+    expect(await store.append(entrada(1, 'r1'))).toBe(true);
+    const doJournal = fake.transactions.filter((t) => t.ops.some((o) => o.id.startsWith(`journal:${id}:`)));
+    expect(doJournal).toHaveLength(2);
+    for (const t of doJournal) expect(t.durability, 'checkpoint do journal = strict').toBe('strict');
 
-    expect(await storage.appendCallJournal(id, { key, group: c.group, at: '2026-01-01T00:00:00.000Z', result: c.result })).toBe(true);
-    expect(await storage.replayCall(id, key), 'grupo aberto: sem replay').toBeUndefined();
-    expect(await storage.commitCallGroup(id, c.group)).toBe(true);
-    expect(await storage.replayCall(id, key), 'grupo fechado: replay do resultado pago').toEqual(c.result);
-
-    // "Reload" da aba: o estado vive no IndexedDB, não em memória. (O reload
-    // também zera os módulos de idb — o fake precisa ser reinstalado neles.)
+    // "Reload" da aba: o estado vive no IndexedDB, não em memória.
     vi.resetModules();
-    const storage2 = await import('../web/src/engine/storage.js');
     const { setIdbFactory: reinstalar } = await import('../web/src/idb.js');
     reinstalar(fake.factory);
-    expect(await storage2.replayCall(id, key)).toEqual(c.result);
-
-    // Limpeza apaga SÓ o journal.
+    const cj2 = await import('../web/src/engine/callJournal.js');
+    expect((await cj2.loadIdbCallJournal(id)).map((e) => e.result.text)).toEqual(['r0', 'r1']);
+    // Records de run convivem na store: a limpeza apaga SÓ o journal.
     await storage.saveRun(recordWeb('run-web-journal-record'));
-    await storage2.clearCallJournal(id);
-    expect(await storage2.readCallJournal(id)).toHaveLength(0);
-    expect(await storage2.replayCall(id, key)).toBeUndefined();
+    await cj2.clearIdbCallJournal(id);
+    expect(await cj2.loadIdbCallJournal(id)).toEqual([]);
+    const storage2 = await import('../web/src/engine/storage.js');
     expect(await storage2.loadRun('run-web-journal-record'), 'records intactos').not.toBeNull();
+    // loadRun nunca devolve uma entrada do journal como record
+    expect(await storage2.loadRun(`journal:${id}:call:${journalEntryId(entrada(0, ''))}`)).toBeNull();
   });
 
-  it('appends do journal são durability strict — e as batidas do throttle podem ser relaxed', async () => {
-    const storage = await import('../web/src/engine/storage.js');
-    const id = 'run-durabilidade';
-    const c = CHAMADAS[0];
-    await storage.appendCallJournal(id, {
-      key: storage.callJournalKey(c.model, c.messages, c.params),
-      group: c.group,
-      at: '2026-01-01T00:00:00.000Z',
-      result: c.result,
-    });
-    await storage.commitCallGroup(id, c.group);
-    await storage.saveRun(recordWeb('run-durabilidade-rec'));
-    await storage.saveRun(recordWeb('run-durabilidade-rec'), { durability: 'relaxed' });
-
-    const doJournal = fake.transactions.filter((t) => t.ops.some((o) => o.id.startsWith('journal:')));
-    expect(doJournal.length, 'append + commit no journal').toBeGreaterThanOrEqual(2);
-    for (const t of doJournal) {
-      expect(t.durability, 'checkpoint do journal = strict').toBe('strict');
-    }
-    const doRecord = fake.transactions.filter(
-      (t) => t.ops.some((o) => o.id === 'run-durabilidade-rec') && t.stores.includes('runSummaries'),
-    );
-    expect(doRecord.map((t) => t.durability), 'default strict; batida de 800 ms pode ser relaxed').toEqual(['strict', 'relaxed']);
+  it('sem IndexedDB: o adaptador responde "unavailable" (não grava, não avisa) — a run segue', async () => {
+    const { setIdbFactory } = await import('../web/src/idb.js');
+    setIdbFactory(null);
+    const cj = await import('../web/src/engine/callJournal.js');
+    expect(await cj.idbCallJournalStore('x').append(entrada(0, 'r'))).toBe('unavailable');
+    expect(await cj.loadIdbCallJournal('x')).toEqual([]);
+    await expect(cj.clearIdbCallJournal('x')).resolves.toBeUndefined();
   });
 });

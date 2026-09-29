@@ -49,6 +49,18 @@ import { judgeScoreFromVerdicts } from './rank';
 import { runCompleteness } from './stats';
 import { emitEvent } from './events';
 import { listRuns, loadRun, saveRun } from './storage';
+import {
+  CallJournal,
+  clearIdbCallJournal,
+  discountByRole,
+  idbCallJournalStore,
+  journalEnabledFor,
+  loadIdbCallJournal,
+  resumeBudgetUsd,
+  resumeInfoFor,
+  resumeRefusal,
+} from './callJournal';
+import { withStageCountInRange } from '../../../src/engine/stageCount.js';
 import { contestantsFromConfig } from './normalize';
 import { AUDITABLE_ROLES, gatewayErrorFields, isFatalGatewayError, listModels, reconcileAtRunEnd } from './openrouter';
 import { enforceRunCompliance } from '../lgpd';
@@ -58,7 +70,7 @@ import { reasoningLevelForRole } from '../modelCaps';
 import { roleTimeoutMs } from './roleLimits';
 import { pipelineMetaPromptsFingerprint } from '../../../src/metaPrompts.js';
 import { stageSecurity, summarizeSecurity } from '../../../src/engine/contracts.js';
-import { judgingModelIds } from '../../../src/engine/roleSeparation.js';
+import { assertRoleSeparation, judgingModelIds } from '../../../src/engine/roleSeparation.js';
 import { acquireLock } from './runLocks';
 import {
   cutDuels,
@@ -178,6 +190,17 @@ export interface StartRunOpts {
    * com o teto `config.budgetUsd`.
    */
   parentLedger?: BudgetLedger;
+  /**
+   * IMPL-081 (espelho do Node) — journal de chamadas PRONTO (a retomada o passa
+   * carregado com as respostas das tentativas anteriores). Ausente => a run
+   * avulsa de chat cria o seu, vazio (IndexedDB); rodada de treino não grava.
+   */
+  callJournal?: CallJournal;
+  /**
+   * Teto EFETIVO desta execução quando a run cria o próprio ledger. A
+   * retomada passa o que SOBROU do teto original — nunca o teto inteiro de novo.
+   */
+  budgetUsd?: number;
 }
 
 /**
@@ -198,6 +221,13 @@ function syncLedger(record: RunRecord, ledger: BudgetLedger): void {
   // IMPL-014 (espelho do Node): sinais de fim por papel + taxa de truncamento
   // da run, do MESMO ponto unico do custo — 100% das chamadas, juiz inclusive.
   Object.assign(record, truncationRecordFields(snap.finishByRole));
+  // IMPL-081 (espelho do Node): quantas respostas desta tentativa vieram do journal.
+  const journal = ledger.callJournal();
+  if (record.resume && journal) {
+    const st = journal.stats();
+    record.resume.replayedCalls = st.replayedCalls;
+    record.resume.replayedUsd = st.replayedUsd;
+  }
 }
 
 /**
@@ -229,11 +259,17 @@ function buildRecord(config: RunConfig, opts: StartRunOpts): RunRecord {
   const concurrency = Math.max(1, config.concurrency ?? 8);
   const timeoutMs = config.timeoutMs ?? 60_000;
   const contestants = opts.contestants ?? compareContestants(config);
+  // left#13 (web-code#15, espelho do Node): nº de cenários na faixa documentada
+  // (inteiro 1–50) também no motor — a SPA não tem zod na frente do startRun.
+  const noIntervalo = withStageCountInRange(config);
+  if (noIntervalo !== config) {
+    console.warn(`[bench ${runId}] stages ${String(config.stages)} fora da faixa (inteiro 1–50): usando ${noIntervalo.stages}`);
+  }
 
   return {
     id: runId,
     status: 'running',
-    config: { ...config, concurrency, timeoutMs },
+    config: { ...noIntervalo, concurrency, timeoutMs },
     mode: config.mode,
     contestants,
     stages: [],
@@ -360,6 +396,12 @@ async function executeRun(
   } finally {
     runControllers.delete(record.id);
     opts.signal?.removeEventListener('abort', onParentAbort);
+    // IMPL-081 (espelho do Node): run CONCLUÍDA não tem o que retomar — o
+    // journal some. Abortada/com erro mantém o dela para a retomada.
+    const journal = state.ledger?.callJournal();
+    if ((record.status === 'finished' || record.status === 'inconclusive') && journal && journalEnabledFor(record)) {
+      await clearIdbCallJournal(record.id, journal.entryIds());
+    }
     // Só depois do checkpoint final (os `await saveRun` acima): soltar antes
     // abriria a janela em que outra aba vê 'running' sem dono.
     lock.release();
@@ -384,6 +426,51 @@ export function runToCompletion(
   return executeRun(record, apiKey, opts);
 }
 
+// ---------------------------------------------------------------------------
+// IMPL-081 (espelho do Node) — RETOMADA: a run órfã (aba fechada/recarregada),
+// cancelada, cortada por orçamento ou com erro roda de novo com o MESMO id e a
+// MESMA config; as chamadas já pagas voltam do journal (IndexedDB) a US$ 0.
+// ---------------------------------------------------------------------------
+
+/** Refusa com o motivo quando a run não pode ser retomada. */
+export class ResumeRefusedError extends Error {
+  readonly code = 'run.not_resumable' as const;
+  constructor(readonly reason: string) {
+    super(`Esta run não pode ser retomada: ${reason}`);
+    this.name = 'ResumeRefusedError';
+  }
+}
+
+/**
+ * Retoma a run NESTA aba (em background, como `startRun`). O record é
+ * RECONSTRUÍDO do zero — nenhuma etapa carregada pela metade; só as chamadas
+ * vêm do journal — e carimbado com `resume`. O teto é o que sobrou do original.
+ * Quem chama decide órfã × viva antes (o lock da run: `reconcileRun`); se
+ * outra aba segurar a run, o `executeRun` recusa sem gastar nada.
+ */
+export async function resumeRun(runId: string, apiKey: string, opts: StartRunOpts = {}): Promise<StartRunResult> {
+  const prev = await loadRun(runId);
+  if (!prev) throw new ResumeRefusedError('run não encontrada neste navegador.');
+  const motivo = resumeRefusal(prev);
+  if (motivo) throw new ResumeRefusedError(motivo);
+  const entries = await loadIdbCallJournal(runId);
+  const record = buildRecord(prev.config, { ...opts, runId });
+  record.startedAt = prev.startedAt;
+  record.resume = resumeInfoFor(prev, entries.length);
+  const callJournal = new CallJournal({
+    store: idbCallJournalStore(runId),
+    entries,
+    onError: (err) => console.warn(`[bench ${runId}] journal de chamadas: falhou ao gravar (a retomada pagaria de novo):`, err),
+  });
+  void executeRun(record, apiKey, {
+    ...opts,
+    runId,
+    callJournal,
+    budgetUsd: opts.budgetUsd ?? resumeBudgetUsd(prev),
+  });
+  return { runId, record };
+}
+
 async function runLoop(
   record: RunRecord,
   apiKey: string,
@@ -392,6 +479,11 @@ async function runLoop(
   state: RunState,
 ): Promise<void> {
   const { id: runId } = record;
+
+  // left#13 (IMPL-048, espelho do Node): papéis separados ANTES de qualquer
+  // chamada. O portão da SPA (api.ts) já barra; isto é a defesa para quem
+  // chama o motor direto (a run sai 'error', nada gasto).
+  assertRoleSeparation(record.config);
 
   // --- Persistencia com THROTTLE: as etapas paralelas geram MUITAS escritas;
   // coalescemos em no max. 1x/SAVE_INTERVAL_MS (trailing) e damos flush nos
@@ -464,11 +556,23 @@ async function runLoop(
   const ledger =
     opts.parentLedger?.fork() ??
     new BudgetLedger({
-      budgetUsd: record.config.budgetUsd,
+      budgetUsd: opts.budgetUsd ?? record.config.budgetUsd,
       signal,
       estimateCall: makeCallEstimator(catalogo),
     });
   state.ledger = ledger;
+  // IMPL-081 (espelho do Node): journal de chamadas PAGAS no IndexedDB — replay
+  // a US$ 0 na retomada, gravação 'strict' depois de cada resposta. Só a run
+  // AVULSA de chat (rodada de treino e modo agente não gravam).
+  const journal =
+    opts.callJournal ??
+    (journalEnabledFor(record)
+      ? new CallJournal({
+          store: idbCallJournalStore(runId),
+          onError: (err) => console.warn(`[bench ${runId}] journal de chamadas: falhou ao gravar (a retomada pagaria de novo):`, err),
+        })
+      : undefined);
+  if (journal) ledger.setCallJournal(journal);
   // Contexto que atravessa todos os módulos de papel: o gateway contabiliza
   // cada chamada no ledger com o papel certo e repassa o sinal RAIZ da run ao
   // fetch e à fila do limitador — um ponto só, o mesmo do Node.
@@ -486,11 +590,15 @@ async function runLoop(
   // Degrau por contestant = o que o competidor recebe (IMPL-016, espelho do Node).
   // `stagesReais` (web-live#7, espelho do Node): se o datagen entregou menos,
   // a porta G2 projeta com o n REAL.
+  // IMPL-081 (espelho do Node): na RETOMADA a projeção desconta o que o journal cobre.
+  const jaPagoPorPapel = journal?.loadedUsdByRole() ?? {};
+  const descontarJournal = <E extends { byRole: Record<string, number> }>(e: E): E =>
+    Object.keys(jaPagoPorPapel).length > 0 ? { ...e, byRole: discountByRole(e.byRole, jaPagoPorPapel) } : e;
   const estimar = (
     contestants: ReadonlyArray<{ id: string; reasoningLevel?: ReasoningLevel }>,
     stagesReais?: number,
   ) =>
-    estimateRunCost(
+    descontarJournal(estimateRunCost(
       estimateInputFromConfig(
         (stagesReais !== undefined
           ? { ...record.config, stages: Math.max(1, stagesReais) }
@@ -507,7 +615,7 @@ async function runLoop(
       catalogo,
       // Preço desconhecido (roteador, "-1") pelo PIOR CASO — espelho do Node (IMPL-018).
       { unknownPrice: 'worst-case' },
-    );
+    ));
   let est = estimar(record.contestants);
 
   /** Cancelamento: a raiz da run (ou a sessão, via ledger) abortou => controle. */

@@ -35,6 +35,7 @@ import {
 } from './engine/trainingPolicy.js';
 import { VerdictCache } from './engine/verdictCache.js';
 import { assertRoleSeparation } from './engine/roleSeparation.js';
+import { withStageCountInRange } from './engine/stageCount.js';
 import { targetModelFor, type LabeledScenario } from './techniques.js';
 import { emitSessionEvent } from './events.js';
 import { saveSession } from './storage.js';
@@ -590,7 +591,9 @@ export async function startTraining(
   // IMPL-048: papéis separados (referência/2º gabarito × juiz × modelo sob
   // teste) — defesa em profundidade para quem chama o motor sem o schema.
   assertRoleSeparation(config);
-  const record = newSessionRecord(config);
+  // left#13: nº de cenários na faixa documentada (inteiro 1–50) — o schema
+  // barra na entrada; isto cobre quem chama o motor direto.
+  const record = newSessionRecord(withStageCountInRange(config));
   const sessionId = record.id;
   // Persiste ANTES de responder ao cliente, para a TrainingView nunca pegar 404.
   await saveSession(record);
@@ -616,7 +619,7 @@ export async function trainToCompletion(
   opts: StartTrainingOpts = {},
 ): Promise<SessionRecord> {
   assertRoleSeparation(config); // IMPL-048 (ver startTraining)
-  const record = newSessionRecord(config);
+  const record = newSessionRecord(withStageCountInRange(config)); // left#13 (ver startTraining)
   await saveSession(record);
   opts.onSession?.(record.id, record);
   await trainingLoop(record, apiKey, opts);

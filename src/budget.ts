@@ -34,6 +34,7 @@ import { COST_ROLES } from './types.js';
 import { cloneFinishCounts, emptyFinishCounts, tallyFinish } from './engine/truncation.js';
 import type { SensitiveRouting } from './engine/sensitiveRouting.js';
 import type { VerdictCache } from './engine/verdictCache.js';
+import type { CallJournal } from './engine/callJournal.js';
 
 // ---------------------------------------------------------------------------
 // Sinais de controle
@@ -344,6 +345,24 @@ export class BudgetLedger implements CostSink {
     return undefined;
   }
 
+  // IMPL-081 (R-10:REC-2): journal de chamadas pagas da RUN (a retomada o
+  // carrega com as respostas das tentativas anteriores). Mora no ledger da run
+  // e vale para os níveis abaixo dele; o gateway o acha pelo `sink`.
+  private callJournalSlot?: CallJournal;
+
+  /** Liga o journal de chamadas neste nível (e abaixo). */
+  setCallJournal(journal: CallJournal | undefined): void {
+    this.callJournalSlot = journal;
+  }
+
+  /** O journal mais próximo subindo a cadeia (este ledger → raiz). */
+  callJournal(): CallJournal | undefined {
+    for (let n: BudgetLedger | undefined = this; n; n = n.parent) {
+      if (n.callJournalSlot) return n.callJournalSlot;
+    }
+    return undefined;
+  }
+
   private root(): BudgetLedger {
     let node: BudgetLedger = this;
     while (node.parent) node = node.parent;
@@ -638,6 +657,39 @@ export class BudgetLedger implements CostSink {
     });
   }
 
+  /**
+   * IMPL-081 — resposta servida do JOURNAL numa run retomada. NÃO é chamada nem
+   * gasto desta tentativa: nada de reserva, `calls`, `usd`, `spentUsd` ou
+   * `committedUsd` (o dinheiro foi pago UMA vez, na tentativa que gravou a
+   * resposta — somá-lo de novo seria contar em dobro). Sobe à parte em
+   * `replayedCalls`/`replayedUsd` (custo MEDIDO original) e entra no registo
+   * como `replayed`. Os sinais de fim contam (a resposta está no record: a
+   * taxa de truncamento da run a inclui).
+   */
+  noteReplayed(entry: {
+    role: CostRole;
+    modelId: string;
+    originalCost?: CallCost;
+    finish?: CallFinishSignals;
+  }): void {
+    const orig = entry.originalCost;
+    const pago = orig && orig.source === 'usage' && Number.isFinite(orig.usd) ? orig.usd : undefined;
+    for (const n of BudgetLedger.chain(this)) {
+      const slot = n.byRole[entry.role];
+      slot.replayedCalls = (slot.replayedCalls ?? 0) + 1;
+      if (pago !== undefined) slot.replayedUsd = (slot.replayedUsd ?? 0) + pago;
+      if (entry.finish) tallyFinish((n.finishByRole[entry.role] ??= emptyFinishCounts()), entry.finish);
+    }
+    BudgetLedger.log(this, {
+      role: entry.role,
+      modelId: entry.modelId,
+      usd: 0,
+      source: orig?.source ?? 'unknown',
+      status: 'replayed',
+      ...(orig && Number.isFinite(orig.usd) ? { replayedFromUsd: orig.usd } : {}),
+    });
+  }
+
   /** IMPL-074 — anexa uma chamada ao registo de cada nivel da cadeia (com teto). */
   private static log(from: BudgetLedger, entry: CallLogEntry): CallLogEntry {
     for (const n of BudgetLedger.chain(from)) {
@@ -673,8 +725,18 @@ export class BudgetLedger implements CostSink {
    * nao-streaming ele segue gerando depois do abort).
    * - com `generationId`: fica PENDENTE (committed estavel; nem gasto nem
    *   devolvida) ate `settlePending` conciliar pelo GET /generation;
-   * - sem id: vira gasto CONSERVADOR — a reserva inteira, `source: 'unknown'`
-   *   (nao medido nao e "custou zero").
+   * - sem id e `reason: 'aborted'` (o CANCELAR — Ctrl-C, botão, `runs
+   *   cancel`, cancel do MCP): tambem PENDENTE, com id `''` (left#14). Antes a
+   *   reserva inteira (o PIOR caso, max_tokens x preco) virava gasto: cancelar
+   *   no datagen mostrava US$ 0,0622 "gastos" numa chamada que nem respondeu.
+   *   O desfecho e desconhecido — limite superior FORA do gasto, como o do
+   *   cancelado que ja tinha id (o Cancelar nao concilia; ninguem vira
+   *   "custou zero": fica em `pendingUsd`/`committedUsd`, na porta e no teto
+   *   diario). Uma conciliacao posterior o lanca como conservador (id `''`
+   *   nao e conciliavel pelo /generation);
+   * - sem id nos demais casos (timeout, 200 sem usage): vira gasto
+   *   CONSERVADOR — a reserva inteira, `source: 'unknown'` (nao medido nao e
+   *   "custou zero"; a run segue e o gasto tem de pesar ja).
    */
   pending(
     reservation: Reservation,
@@ -698,18 +760,20 @@ export class BudgetLedger implements CostSink {
         tallyFinish((n.finishByRole[entry.role] ??= emptyFinishCounts()), entry.finish);
       }
     }
-    const generationId = entry.generationId?.trim();
+    const idLido = entry.generationId?.trim();
+    // left#14: cancelado sem id = pendente NAO conciliavel (id '').
+    const generationId = idLido || (entry.reason === 'aborted' ? '' : undefined);
     const logBase = {
       role: entry.role,
       modelId: entry.modelId,
-      ...generationIdFields(generationId),
+      ...generationIdFields(idLido),
       usd,
       source: 'unknown' as const,
       ...(entry.provider?.name ? { provider: entry.provider.name } : {}),
       ...(typeof entry.latencyMs === 'number' ? { latencyMs: entry.latencyMs } : {}),
       ...(entry.auditable ? { auditable: true } : {}),
     };
-    if (state && generationId) {
+    if (state && generationId !== undefined) {
       this.close(state, 'pending');
       state.log = BudgetLedger.log(owner, { ...logBase, status: 'pending' });
       const item = {

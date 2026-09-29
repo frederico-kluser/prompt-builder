@@ -166,7 +166,11 @@ const USO: Record<string, string> = {
   runs prune [--older-than 30d] [--dry-run]
                            TTL agora; o TTL (90 dias, PB_RETENTION_DAYS; 0 desliga)
                            também roda sozinho no \`runs list\` e antes de cada run
-  runs status|wait|cancel <id>  job (--detach), run ou sessão`,
+  runs status|wait|cancel <id>  job (--detach), run ou sessão
+  runs resume <id> [--budget <usd>|none]
+                           retoma a run parada (órfã/cancelada/orçamento/erro): as
+                           chamadas já pagas voltam do journal a US$ 0; teto = o
+                           que sobrou do original (--budget = teto da continuação)`,
   sessions: `  sessions list            lista sessões (teto 50; --all/--limit N)
   sessions show <id>
   sessions winner <id> [--prompt-only | --apply <arq> [--commit] [--override "<motivo>"]]

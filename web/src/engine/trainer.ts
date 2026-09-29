@@ -37,6 +37,7 @@ import {
 } from '../../../src/engine/trainingPolicy.js';
 import { VerdictCache } from './verdictCache';
 import { assertRoleSeparation } from '../../../src/engine/roleSeparation.js';
+import { withStageCountInRange } from '../../../src/engine/stageCount.js';
 import { targetModelFor, type LabeledScenario } from './techniques';
 import { emitSessionEvent } from './events';
 import { saveSession } from './storage';
@@ -577,14 +578,16 @@ export function isTrainingCancellable(sessionId: string): boolean {
 }
 
 export async function startTraining(
-  config: TrainingConfig,
+  configIn: TrainingConfig,
   apiKey: string,
   opts: StartTrainingOpts = {},
 ): Promise<StartTrainingResult> {
   // IMPL-048 (espelho de src/trainer.ts): papéis separados — o portão da SPA
   // (api.ts) já recusa; aqui é a defesa em profundidade do próprio motor,
   // ANTES de qualquer chamada paga.
-  assertRoleSeparation(config);
+  assertRoleSeparation(configIn);
+  // left#13 (espelho de src/trainer.ts): nº de cenários na faixa documentada (1–50).
+  const config = withStageCountInRange(configIn);
   const sessionId = randomUUID();
   const record: SessionRecord = {
     id: sessionId,
