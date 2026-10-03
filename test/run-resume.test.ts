@@ -108,7 +108,7 @@ function conferirRetomada(rec: RunRecord, o: { N: number; K: number; pagasAgora:
   expect(rec.budgetUsd).toBeCloseTo(JOURNAL_CFG.budgetUsd - prior, 10);
 }
 
-const JOURNAL_CFG = { ...JOURNAL_COMPARE, budgetUsd: 1 };
+const JOURNAL_CFG = { ...JOURNAL_COMPARE, budgetUsd: 1, judgeEngine: 'llm' };
 
 /**
  * Pontos de corte (K chamadas concluídas) em cada fase do pipeline da fixture
@@ -431,7 +431,7 @@ describe('IMPL-081 — CLI `runs resume <id>`', () => {
 
   it('compare cortado por falta de crédito (exit 5) e retomado: exit 0, só N−K pagas, `resume` no payload; 2ª vez recusa', async () => {
     const cfgFile = path.join(dir, 'compare.json');
-    writeFileSync(cfgFile, JSON.stringify(JOURNAL_COMPARE));
+    writeFileSync(cfgFile, JSON.stringify({ ...JOURNAL_COMPARE, judgeEngine: 'llm' }));
     const N = JOURNAL_COMPARE_CALLS;
 
     // Tentativa 1: K=17 e a conta fica sem crédito (402 — exit 5, run 'error').

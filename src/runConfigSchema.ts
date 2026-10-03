@@ -330,6 +330,18 @@ const baseFields = {
       message: 'judgeCascade: os 2 baratos e o forte precisam ser modelos distintos',
     })
     .optional(),
+  // Juiz JEV (default em todos os modos): `jev` = modelo de decisão tipada com
+  // cascata para `judgeModelIds`; `llm` = painel puro. Ausente = `jev`.
+  judgeEngine: z.enum(['jev', 'llm']).optional(),
+  jevJudge: z
+    .object({
+      decisionModelId: z.string().min(1).optional(),
+      autoBand: z.number().min(0).max(1).optional(),
+      hitlBand: z.number().min(0).max(1).optional(),
+      rubricQuestions: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
   // Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`.
   scenarioSeed: z.array(stageSpecSchema).max(50).optional(),
   // Nº de finalistas (melhores por judge-score) que disputam os duelos. 0 = sem finais.

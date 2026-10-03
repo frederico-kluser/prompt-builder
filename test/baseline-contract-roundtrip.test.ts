@@ -62,6 +62,7 @@ const baseConfig = (extra: Record<string, unknown> = {}): RunConfig =>
     competitorModelIds: COMP,
     finalists: 0,
     duels: false,
+    judgeEngine: 'llm',
     timeoutMs: 5_000,
     customStages: [
       {

@@ -671,6 +671,10 @@ export function variationConfigFrom(cfg: TrainingConfig): VariationConfig {
     // outras voltariam ao exato/ao juiz normal em silêncio.
     scenarioDedup: cfg.scenarioDedup,
     judgeCascade: cfg.judgeCascade,
+    // Juiz JEV (motor + config): escolha da SESSÃO — sem repassar, cada
+    // iteração e o holdout cairiam no juiz default em silêncio.
+    judgeEngine: cfg.judgeEngine,
+    jevJudge: cfg.jevJudge,
     scenarioSeed: cfg.scenarioSeed,
     // Fase de finais: sem repassar, TODA iteracao (e o holdout) cairia no
     // default de 3 finalistas — a escolha do usuario era descartada em silencio.

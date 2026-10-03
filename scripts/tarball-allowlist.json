@@ -295,6 +295,8 @@
   "dist/jev/job.js",
   "dist/jev/store.d.ts",
   "dist/jev/store.js",
+  "dist/jevJudge.d.ts",
+  "dist/jevJudge.js",
   "dist/jobManager.d.ts",
   "dist/jobManager.js",
   "dist/jobs.d.ts",

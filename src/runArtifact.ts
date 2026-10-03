@@ -311,6 +311,17 @@ export function runConfigToArenaConfig(config: RunConfig): ArenaConfigFile {
   const judging: NonNullable<ArenaConfigFile['judging']> = {};
   if (config.referenceJudging !== undefined) judging.reference = config.referenceJudging;
   if (config.judgePasses !== undefined) judging.passes = config.judgePasses;
+  // Juiz JEV: sem isto a vista arena perdia o motor/modelo do juiz no
+  // round-trip (`runs reproduce` → re-rodar). Ausente no config = default `jev`.
+  if (config.judgeEngine !== undefined) judging.engine = config.judgeEngine;
+  if (config.jevJudge) {
+    const jev: NonNullable<NonNullable<ArenaConfigFile['judging']>['jev']> = {};
+    if (config.jevJudge.decisionModelId) jev.model = config.jevJudge.decisionModelId;
+    if (config.jevJudge.autoBand !== undefined) jev.autoBand = config.jevJudge.autoBand;
+    if (config.jevJudge.hitlBand !== undefined) jev.hitlBand = config.jevJudge.hitlBand;
+    if (config.jevJudge.rubricQuestions !== undefined) jev.rubricQuestions = config.jevJudge.rubricQuestions;
+    if (Object.keys(jev).length) judging.jev = jev;
+  }
   if (Object.keys(judging).length) arena.judging = judging;
 
   const limits: NonNullable<ArenaConfigFile['limits']> = {};

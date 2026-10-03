@@ -135,6 +135,16 @@ export interface ArenaFormState {
   duelsOn: boolean;
   finalists: number;
   twoPassJudge: boolean;
+  /**
+   * Motor do juiz (Juízes › Motor do juiz): `jev` (DEFAULT — modelo de decisão
+   * tipada, com cascata para o painel LLM) ou `llm` (painel puro).
+   */
+  judgeEngine: 'jev' | 'llm';
+  /**
+   * Config do juiz JEV (`judging.jev`): modelo de decisão + bandas de ação.
+   * `null` = defaults do motor (`typesafe/jev-1.13`, auto 0,90 / hitl 0,50).
+   */
+  jevJudge: { model?: string; autoBand?: number; hitlBand?: number; rubricQuestions?: boolean } | null;
   maxOutputTokens: string;
   timeoutMs: number;
   concurrency: number;
@@ -192,6 +202,9 @@ export function defaultArenaFormState(): ArenaFormState {
     duelsOn: true,
     finalists: DEFAULT_FINALISTS,
     twoPassJudge: false,
+    // Juiz JEV é o DEFAULT em todos os modos (o painel LLM vira escalada).
+    judgeEngine: 'jev',
+    jevJudge: null,
     maxOutputTokens: String(DEFAULT_MAX_OUTPUT_TOKENS),
     timeoutMs: 60000,
     concurrency: 8,
@@ -323,6 +336,14 @@ export const ARENA_FIELD_HANDLING: Record<string, ArenaFieldHandling> = {
   finalists: { kind: 'ui', control: 'Avançado › Finalistas' },
   'judging.reference': { kind: 'json-only', status: 'aplicado', note: 'força ligar/desligar o julgamento por gabarito (sem ele: default do modo)' },
   'judging.passes': { kind: 'ui', control: 'Avançado › Juiz em 2 ordens' },
+  // Juiz JEV (motor de julgamento): o segmentado da seção Juízes decide o
+  // motor (default `jev`); modelo de decisão e bandas vêm do arquivo JSON
+  // (round-trip pelo estado, aplicados na run pelo CLI e pela SPA).
+  'judging.engine': { kind: 'ui', control: 'Avançado › Motor do juiz (Jev | LLM)' },
+  'judging.jev.model': { kind: 'json-only', status: 'aplicado', note: 'modelo de decisão do juiz JEV (default `typesafe/jev-1.13`, snapshot fixado)' },
+  'judging.jev.autoBand': { kind: 'json-only', status: 'aplicado', note: 'limiar da banda `auto` do juiz JEV (0–1; default 0,90)' },
+  'judging.jev.hitlBand': { kind: 'json-only', status: 'aplicado', note: 'limiar da banda `hitl` do juiz JEV (0–1; default 0,50)' },
+  'judging.jev.rubricQuestions': { kind: 'json-only', status: 'aplicado', note: 'decompõe a rubrica em perguntas por critério no juiz JEV (default true)' },
   'judging.auditable': { kind: 'json-only', status: 'ignorado', note: 'modo auditável (juiz + duelo + gabarito com provedor travado) — aplicado pelo CLI; a tela não repassa' },
   'limits.maxOutputTokens': { kind: 'ui', control: 'Avançado › Máx. tokens por resposta' },
   'limits.timeoutMs': { kind: 'ui', control: 'Avançado › Timeout' },
@@ -698,6 +719,12 @@ export function applyArenaConfigToForm(
   const finalistsCfg = alias(config.finalists, config.training?.finalists, 'finalists');
   if (finalistsCfg !== undefined) s.finalists = finalistsCfg;
   if (config.judging?.passes !== undefined) s.twoPassJudge = config.judging.passes === 2;
+  // Juiz JEV: `judging.engine`/`judging.jev` espelham o arquivo quando vêm;
+  // `undefined` NÃO pisa o estado atual (contrato do apply).
+  if (config.judging?.engine !== undefined) s.judgeEngine = config.judging.engine;
+  if (config.judging?.jev !== undefined) {
+    s.jevJudge = Object.keys(config.judging.jev).length > 0 ? { ...config.judging.jev } : null;
+  }
   // Clamp na entrada: os inputs têm min/max nativos e um valor fora da faixa
   // faz o browser abortar o submit SEM mensagem — ajustar sim, mas avisando.
   if (config.limits?.maxOutputTokens !== undefined)
@@ -879,6 +906,10 @@ export function exportArenaConfig(s: ArenaFormState): { config: ArenaConfigFile;
     judging: {
       ...(s.refJudgingChoice !== null ? { reference: s.refJudgingChoice } : {}),
       passes: s.twoPassJudge ? 2 : 1,
+      // Juiz JEV: o motor vai SEMPRE explícito (default `jev`) e a config do
+      // modelo/bandas segue quando o usuário a ajustou.
+      engine: s.judgeEngine,
+      ...(s.jevJudge ? { jev: { ...s.jevJudge } } : {}),
     },
     limits: {
       ...(Number.isFinite(maxTok) && maxTok > 0 ? { maxOutputTokens: Math.round(maxTok) } : {}),

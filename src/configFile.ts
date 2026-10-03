@@ -181,7 +181,19 @@ export interface ArenaConfigFile {
   /** Nº de finalistas que duelam entre si em cada cenário (0 = sem finais). Default 3. */
   finalists?: number; // int 0..12
   /** `auditable` (IMPL-075): juiz, duelo e gabarito com provedor travado, sem fallback e `require_parameters`. */
-  judging?: { reference?: boolean; passes?: 1 | 2; auditable?: boolean };
+  judging?: {
+    reference?: boolean;
+    passes?: 1 | 2;
+    auditable?: boolean;
+    /**
+     * Motor de julgamento: `jev` (DEFAULT — modelo de decisão tipada, com
+     * cascata para os `models.judges`) ou `llm` (painel puro). Ver
+     * `src/jevJudge.ts`.
+     */
+    engine?: 'jev' | 'llm';
+    /** Config do juiz JEV (modelo de decisão + bandas de ação). */
+    jev?: { model?: string; autoBand?: number; hitlBand?: number; rubricQuestions?: boolean };
+  };
   limits?: { maxOutputTokens?: number; timeoutMs?: number; concurrency?: number }; // int positivos
   compliance?: { area: string; includeRessalvas: boolean };
   /** Dado pessoal (IMPL-042): 'synthetic' = "só sintético" (recusa dado de aparência real). */
@@ -297,7 +309,15 @@ export interface ArenaAgentConfigFile {
     agentTask?: ArenaAgentTaskConfig;
     limits?: ArenaAgentConfigLimits;
   }[];
-  judging?: { reference?: boolean; passes?: 1 | 2; dossierTokens?: number };
+  judging?: {
+    reference?: boolean;
+    passes?: 1 | 2;
+    dossierTokens?: number;
+    /** Motor de julgamento das etapas de CHAT: `jev` (DEFAULT) ou `llm`. */
+    engine?: 'jev' | 'llm';
+    /** Config do juiz JEV (modelo de decisão + bandas de ação). */
+    jev?: { model?: string; autoBand?: number; hitlBand?: number; rubricQuestions?: boolean };
+  };
   duels?: boolean;
   finalists?: number; // int 0..12
 }
@@ -547,6 +567,19 @@ export const arenaConfigSchema = z
             passes: z.union([z.literal(1), z.literal(2)], 'deve ser 1 ou 2').optional(),
             // IMPL-075: modo auditável (juiz + duelo + gabarito com provedor travado).
             auditable: z.boolean('deve ser boolean').optional(),
+            // Juiz JEV (default): motor de julgamento + config do modelo de decisão.
+            engine: z.enum(['jev', 'llm'], "deve ser 'jev' ou 'llm'").optional(),
+            jev: z
+              .object(
+                {
+                  model: z.string('deve ser texto').min(1, 'não pode ser vazio').optional(),
+                  autoBand: z.number('deve ser número').min(0, 'mínimo 0').max(1, 'máximo 1').optional(),
+                  hitlBand: z.number('deve ser número').min(0, 'mínimo 0').max(1, 'máximo 1').optional(),
+                  rubricQuestions: z.boolean('deve ser boolean').optional(),
+                },
+                'judging.jev deve ser um objeto',
+              )
+              .optional(),
           },
           'judging deve ser um objeto',
         )
@@ -1032,6 +1065,19 @@ const arenaAgentConfigSchema = z
               .int('deve ser número inteiro')
               .min(1000, 'mínimo 1000')
               .max(200000, 'máximo 200000')
+              .optional(),
+            // Juiz JEV (default): motor de julgamento das etapas de chat.
+            engine: z.enum(['jev', 'llm'], "deve ser 'jev' ou 'llm'").optional(),
+            jev: z
+              .object(
+                {
+                  model: z.string('deve ser texto').min(1, 'não pode ser vazio').optional(),
+                  autoBand: z.number('deve ser número').min(0, 'mínimo 0').max(1, 'máximo 1').optional(),
+                  hitlBand: z.number('deve ser número').min(0, 'mínimo 0').max(1, 'máximo 1').optional(),
+                  rubricQuestions: z.boolean('deve ser boolean').optional(),
+                },
+                'judging.jev deve ser um objeto',
+              )
               .optional(),
           },
           'judging deve ser um objeto',

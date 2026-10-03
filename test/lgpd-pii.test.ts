@@ -621,6 +621,7 @@ function treino(extra: Record<string, unknown> = {}): Record<string, unknown> {
     iterations: 1,
     holdoutRatio: 0,
     finalists: 2,
+    judgeEngine: 'llm',
     timeoutMs: 5_000,
     ...extra,
   };
@@ -755,6 +756,7 @@ describe('IMPL-042 (3) — prova DINÂMICA nos 6 papéis, Node e SPA (dado do us
       judgeModelIds: [M.judge],
       competitorModelIds: [M.a, M.ref],
       piiMode: 'synthetic',
+      judgeEngine: 'llm',
       timeoutMs: 5_000,
     };
     for (const run of [runNode, runWeb] as const) {
@@ -1151,6 +1153,7 @@ describe('IMPL-042 (revisão) — run avulsa "redigir" revisada grava o relatór
           customStages: [
             { question: `Meu CPF é ${CPF_2}, cadê o laudo?`, productContext: `Central: ${CEL_1}.`, maxTokens: 200 },
           ],
+          judgeEngine: 'llm',
           timeoutMs: 5_000,
         };
         const recusada = await run(cfg as never, KEY, {});

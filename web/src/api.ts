@@ -84,6 +84,20 @@ export type {
   JudgeVote,
   VerbosityDiag,
 } from '../../src/types.js';
+// Juiz JEV (modelo de decisão como juiz — src/jevJudge.ts): fonte única em src/types.ts.
+import type {
+  JevJudgeCell,
+  JevJudgeConfig,
+  JevJudgeFallback,
+  JudgeEngine,
+} from '../../src/types.js';
+export type {
+  JudgeEngine,
+  JevJudgeBand,
+  JevJudgeCell,
+  JevJudgeConfig,
+  JevJudgeFallback,
+} from '../../src/types.js';
 export type { PromptContracts } from '../../src/engine/contracts.js';
 import type { ModelLifecycleSnapshot } from '../../src/engine/modelLifecycle.js';
 export type {
@@ -340,6 +354,13 @@ export interface RunConfig {
    * comprimento). Ausente = julgamento normal por `judgeModelIds`.
    */
   judgeCascade?: JudgeCascadeConfig;
+  /**
+   * Motor de julgamento: `jev` (DEFAULT — modelo de decisão tipada, com cascata
+   * para o painel `judgeModelIds`) ou `llm` (painel puro). Ausente = `jev`.
+   */
+  judgeEngine?: JudgeEngine;
+  /** Config do juiz JEV (modelo de decisão, bandas, decomposição de rubrica). */
+  jevJudge?: JevJudgeConfig;
   /** Contratos never-break do prompt base (pos-rewriter rejeita o que quebrar). */
   contracts?: PromptContracts;
   /** IMPL-075: modo auditável (juiz + duelo + gabarito com provedor travado) — ver src/types.ts. */
@@ -528,6 +549,10 @@ export interface JudgeResult {
   judges: SingleJudgeResult[];
   blindMap: Record<string, string>;
   rawJudgeText: string;
+  /** Juiz JEV (src/jevJudge.ts): célula de decisão por contestant. */
+  jevByContestant?: Record<string, JevJudgeCell>;
+  /** Fallback do juiz JEV ao painel LLM (LGPD/indisponível). */
+  jevFallback?: JevJudgeFallback;
   inconclusive?: boolean;
 }
 
@@ -565,6 +590,10 @@ export interface ReferenceJudgeResult {
    */
   judgeVotesByContestant?: Record<string, JudgeVote[]>;
   judgeModelId: string;
+  /** Juiz JEV (src/jevJudge.ts): célula de decisão por contestant. */
+  jevByContestant?: Record<string, JevJudgeCell>;
+  /** Fallback do juiz JEV ao painel LLM (LGPD/indisponível). */
+  jevFallback?: JevJudgeFallback;
   inconclusive?: boolean;
 }
 

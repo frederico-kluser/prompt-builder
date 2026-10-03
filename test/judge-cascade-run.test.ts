@@ -218,6 +218,7 @@ describe('IMPL-115 (2)/(3) — a run com judgeCascade grava a fração escalonad
       finalists: 0,
       timeoutMs: 5_000,
       judgeCascade: CASCATA,
+      judgeEngine: 'llm',
       ...extra,
     }) as unknown as RunConfig;
 
@@ -329,6 +330,7 @@ describe('IMPL-115 (4) — --judge-cascade e o schema', () => {
     try {
       const exit = await cmdRun('compare', [
         '--theme', 'suporte', '--models', 'fake/a,fake/b', '--judge', 'fake/judge', '--datagen', 'fake/gen',
+        '--judge-engine', 'llm',
         '--budget', '1', '--dry-run', '--json', '--key', KEY, '--data-dir', dir, ...extra,
       ]);
       return { exit, payload: JSON.parse(saida.trim().split('\n').pop() ?? '{}') as Record<string, unknown> };

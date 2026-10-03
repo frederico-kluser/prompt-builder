@@ -762,6 +762,15 @@ export interface RunConfigBase {
    * comprimento). Ausente = julgamento normal por `judgeModelIds`.
    */
   judgeCascade?: JudgeCascadeConfig;
+  /**
+   * Motor de julgamento: `jev` (DEFAULT — modelo de decisão tipada, com cascata
+   * para o painel `judgeModelIds` nas bandas hitl/abstain) ou `llm` (painel
+   * puro de juízes LLM). Ausente = `jev`. Ver `src/jevJudge.ts`. O modo
+   * agente mantém o juiz LLM (árvore de veredito própria).
+   */
+  judgeEngine?: JudgeEngine;
+  /** Config do juiz JEV (modelo de decisão, bandas de ação, decomposição de rubrica). */
+  jevJudge?: JevJudgeConfig;
   /** Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`. */
   scenarioSeed?: StageSpec[];
   /**
@@ -1295,9 +1304,11 @@ export interface VerbosityDiag {
  * Origem de um veredito PRESENTE. `judge` = juiz LLM com o painel completo;
  * `auto` = regra determinística sem LLM (resposta ok VAZIA => 'nao');
  * `ground-truth` = rótulo esperado/oráculo; `degraded` = juiz LLM com painel
- * REDUZIDO (parte dos juízes falhou) — conta na regra de run inconclusiva.
+ * REDUZIDO (parte dos juízes falhou) — conta na regra de run inconclusiva;
+ * `jev` = modelo de decisão (juiz JEV, `src/jevJudge.ts`) com o veredito
+ * DECLARADO na banda `auto` (ou mantido após falha da escalada LLM).
  */
-export type VerdictSource = 'judge' | 'auto' | 'ground-truth' | 'degraded';
+export type VerdictSource = 'judge' | 'auto' | 'ground-truth' | 'degraded' | 'jev';
 
 export type VerdictErrorKind =
   | 'judge_failed'
@@ -1389,6 +1400,55 @@ export interface HumanReviewItem {
   estimatedCostUsd?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Juiz JEV (modelo de decisão como juiz dos modos — `src/jevJudge.ts`)
+// ---------------------------------------------------------------------------
+
+/** Motor de julgamento da run: `jev` (DEFAULT) = decisão tipada com cascata para o painel LLM. */
+export type JudgeEngine = 'jev' | 'llm';
+
+/** Banda de ação da política do juiz JEV (sobre o `confidence`/pTop da decisão). */
+export type JevJudgeBand = 'auto' | 'hitl' | 'abstain' | 'failed';
+
+/** Config do juiz JEV (só quando `judgeEngine` !== 'llm'). */
+export interface JevJudgeConfig {
+  /** Modelo de decisão (default `typesafe/jev-1.13` — SNAPSHOT fixado, nunca o alias). */
+  decisionModelId?: string;
+  /** Limiar da banda `auto` (sinal ≥ → decide sozinho). Default 0,90. */
+  autoBand?: number;
+  /** Limiar da banda `hitl` (≥ → escalada/revisão; abaixo → abstém). Default 0,50. */
+  hitlBand?: number;
+  /** Decompõe a rubrica em perguntas `noul` por critério de checklist. Default true. */
+  rubricQuestions?: boolean;
+}
+
+/** Célula de julgamento do juiz JEV (UMA resposta de candidato). */
+export interface JevJudgeCell {
+  /** Veredito DECLARADO pela pergunta `verdict` (nunca o argmax das probabilidades). */
+  verdict?: Verdict;
+  /** Distribuição declarada (2 casas) por veredito — score suave e diagnóstico. */
+  probabilities?: Partial<Record<Verdict, number>>;
+  /** `confidence` opaco da API — decide a banda. Ausente = pTop (max p) usado. */
+  confidence?: number;
+  /** Banda da política; `failed` = resposta fora do contrato ou decisão falhou. */
+  band: JevJudgeBand;
+  /** Resposta das perguntas `noul` por critério da rubrica (diagnóstico decomposto). */
+  criteria?: Record<string, boolean>;
+  /** Motivo DETERMINÍSTICO (probabilidades · critérios · banda) — sem geração de texto. */
+  motivo: string;
+  /** Quem decidiu de fato: `jev` | `judge` (escalada ao LLM) | `auto` | `ground-truth`. */
+  source: VerdictSource;
+  /** Banda que disparou a escalada, quando houve (`error` = falha da decisão). */
+  escalated?: 'hitl' | 'abstain' | 'error';
+}
+
+/** Por que o juiz JEV não pôde ser usado (a run cai no painel LLM). */
+export interface JevJudgeFallback {
+  /** `lgpd` = fail-closed ZDR (Jev não é ZDR); `error` = modelo de decisão indisponível. */
+  reason: 'lgpd' | 'error';
+  message: string;
+}
+
 /** Veredito COMPACTO de UM juiz para UMA resposta: justificativa + veredito ternario. */
 export interface JudgeVerdict {
   contestantId: string;
@@ -1463,6 +1523,10 @@ export interface JudgeResult {
   judges: SingleJudgeResult[];
   blindMap: Record<string, string>; // letra -> contestantId (do 1o juiz; cosmetico)
   rawJudgeText: string;
+  /** Juiz JEV (`src/jevJudge.ts`): célula de decisão por contestant (probabilidades/banda). */
+  jevByContestant?: Record<string, JevJudgeCell>;
+  /** Fallback do juiz JEV ao painel LLM (LGPD/indisponível). */
+  jevFallback?: JevJudgeFallback;
   inconclusive?: boolean;
 }
 
@@ -1514,6 +1578,10 @@ export interface ReferenceJudgeResult {
    */
   judgeVotesByContestant?: Record<string, JudgeVote[]>;
   judgeModelId: string;
+  /** Juiz JEV (`src/jevJudge.ts`): célula de decisão por contestant (probabilidades/banda). */
+  jevByContestant?: Record<string, JevJudgeCell>;
+  /** Fallback do juiz JEV ao painel LLM (LGPD/indisponível). */
+  jevFallback?: JevJudgeFallback;
   inconclusive?: boolean;
   /**
    * Veredito DE CADA repeticao, por contestant — contestantId -> vetor de

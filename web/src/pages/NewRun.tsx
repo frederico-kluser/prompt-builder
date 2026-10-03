@@ -269,6 +269,11 @@ export function NewRun() {
   const [manualVariants, setManualVariants] = useState<ManualVariant[]>(INIT.manualVariants);
   const [iterations, setIterations] = useState(INIT.iterations);
   const [twoPassJudge, setTwoPassJudge] = useState(INIT.twoPassJudge);
+  // Juiz JEV (Juízes › Motor do juiz): `jev` (DEFAULT — decisão tipada com
+  // cascata para o painel) ou `llm` (painel puro). A config do modelo/bandas
+  // (`jevJudge`) é só-JSON: entra pelo arquivo importado e vai para a run.
+  const [judgeEngine, setJudgeEngine] = useState<ArenaFormState['judgeEngine']>(INIT.judgeEngine);
+  const [jevJudge, setJevJudge] = useState<ArenaFormState['jevJudge']>(INIT.jevJudge);
 
   // Cenários prontos: pacote importado (seed do datagen) OU etapas cruas (array
   // JSON), que substituem o gerador por completo.
@@ -603,7 +608,8 @@ export function NewRun() {
       mode, theme, scenarioBrief, languages, stages, pack, customStages, basePrompt, taskDescription, promptImported,
       datagen, judge, referenceModel, contestantModel, competitors, compareAxis, competitorConfigs,
       rewriterModel, tuning, optimize, techniques, manualVariants, iterations, minGain, holdoutRatio,
-      feedbackDriven, duelsOn, finalists, twoPassJudge, maxOutputTokens, timeoutMs, concurrency,
+      feedbackDriven, duelsOn, finalists, twoPassJudge, judgeEngine, jevJudge,
+      maxOutputTokens, timeoutMs, concurrency,
       complianceArea, includeRessalvas, piiMode, refJudgingChoice, promptContracts, promptGroup, promptId,
       repeats, reflection, paretoPool,
     };
@@ -641,6 +647,8 @@ export function NewRun() {
     setDuelsOn(f.duelsOn);
     setFinalists(f.finalists);
     setTwoPassJudge(f.twoPassJudge);
+    setJudgeEngine(f.judgeEngine);
+    setJevJudge(f.jevJudge);
     setMaxOutputTokens(f.maxOutputTokens);
     setTimeoutMs(f.timeoutMs);
     setConcurrency(f.concurrency);
@@ -943,6 +951,19 @@ export function NewRun() {
       // Vale nos TRÊS modos: no compare clássico o julgamento é o listwise, que é
       // justamente quem usa `judgePasses` (antes só ia em variation/training).
       judgePasses: (twoPassJudge ? 2 : 1) as 1 | 2,
+      // Juiz JEV (DEFAULT em todos os modos): o motor vai SEMPRE explícito —
+      // `jev` = decisão tipada com cascata para o painel; `llm` = painel puro.
+      judgeEngine,
+      ...(jevJudge
+        ? {
+            jevJudge: {
+              ...(jevJudge.model ? { decisionModelId: jevJudge.model } : {}),
+              ...(jevJudge.autoBand !== undefined ? { autoBand: jevJudge.autoBand } : {}),
+              ...(jevJudge.hitlBand !== undefined ? { hitlBand: jevJudge.hitlBand } : {}),
+              ...(jevJudge.rubricQuestions !== undefined ? { rubricQuestions: jevJudge.rubricQuestions } : {}),
+            },
+          }
+        : {}),
       ...(referenceModel[0] ? { referenceModelId: referenceModel[0] } : {}),
       ...(Object.keys(reasoning).length ? { reasoning } : {}),
       // Só nos modos de 1 modelo (no compare a temperatura é por concorrente).
@@ -1675,6 +1696,15 @@ export function NewRun() {
                     em Avançado.
                   </span>
                 )}
+                <span className="mb-1 block">
+                  Motor do juiz:{' '}
+                  <span className="font-mono text-[12px] text-foreground">
+                    {judgeEngine === 'jev' ? 'Jev (decisão tipada)' : 'LLM (painel)'}
+                  </span>{' '}
+                  — {judgeEngine === 'jev'
+                    ? 'o modelo de decisão julga cada resposta e o que ficar em dúvida escala para os juízes acima'
+                    : 'os juízes acima julgam tudo (comportamento clássico)'}. Troque em Avançado › Motor do juiz.
+                </span>
                 Gerador e juízes rodam com temperatura fixa para o resultado ser reproduzível.
               </>
             }
@@ -1841,6 +1871,24 @@ export function NewRun() {
 
                 {/* Vale nos 3 modos: quem consome `judgePasses` é o juiz listwise, que é
                     justamente o default do compare clássico. */}
+                <SettingRow
+                  label="Motor do juiz"
+                  sub={
+                    judgeEngine === 'jev'
+                      ? 'Jev (decisão tipada, default): o modelo de decisão julga cada resposta e o que ficar na banda de baixa confiança escala para os juízes da seção Juízes. Modelo de decisão e bandas ajustam-se pelo arquivo JSON.'
+                      : 'LLM (painel): os juízes da seção Juízes julgam tudo (comportamento clássico).'
+                  }
+                >
+                  <SegmentedToggle
+                    value={judgeEngine}
+                    onChange={(v) => setJudgeEngine(v as ArenaFormState['judgeEngine'])}
+                    ariaLabel="Motor do juiz"
+                    className="w-[260px]"
+                  >
+                    <SegmentedToggleOption value="jev">Jev (decisão)</SegmentedToggleOption>
+                    <SegmentedToggleOption value="llm">LLM (painel)</SegmentedToggleOption>
+                  </SegmentedToggle>
+                </SettingRow>
                 <SwitchRow
                   label="Juiz em 2 ordens"
                   sub="Julga cada cenário duas vezes, invertendo a ordem das respostas. Corrige o viés de posição e dobra o custo do juiz."

@@ -846,6 +846,7 @@ const COMPARE = {
   competitorModelIds: ['fake/a', 'fake/b'],
   customStages: SETE,
   finalists: 2,
+  judgeEngine: 'llm',
   timeoutMs: 5_000,
 } as const;
 
@@ -966,6 +967,7 @@ describe('pipeline — juiz que falha em > 10% termina inconclusive (Node e SPA)
       iterations: 2,
       holdoutRatio: 0,
       finalists: 2,
+      judgeEngine: 'llm',
       timeoutMs: 5_000,
       customStages: SETE,
     };

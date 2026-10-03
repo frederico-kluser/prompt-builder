@@ -79,6 +79,8 @@
     "dist/jobManager.d.ts",
     "dist/jobs.js",
     "dist/jobs.d.ts",
+    "dist/jevJudge.js",
+    "dist/jevJudge.d.ts",
     "dist/judge.js",
     "dist/judge.d.ts",
     "dist/lgpd.js",
