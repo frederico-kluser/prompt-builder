@@ -407,6 +407,7 @@ const PAINEL = {
   competitorModelIds: ['fake/a', 'fake/b'],
   customStages: SEIS,
   finalists: 2,
+  judgeEngine: 'llm',
   timeoutMs: 5_000,
 } as const;
 

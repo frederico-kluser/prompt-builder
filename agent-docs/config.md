@@ -23,24 +23,24 @@ prompt-builder estimate -c arena.json                      # custo antes de gast
 prompt-builder train --config arena.json --budget 10 --dry-run --json
 ```
 
-O `--dry-run` roda o pré-voo inteiro sem gastar e sai com o MESMO código que a
-run real teria (`docs budget`). O `config example` é o esqueleto de cada modo.
+O `--dry-run` roda o pré-voo sem gastar e sai com o MESMO código da run real
+(`docs budget`); `config example` = esqueleto de cada modo.
 
 ## 2. Regras para quem GERA o arquivo (humano ou IA)
 
 1. **JSON puro**, sem comentários nem prosa. `"format": "arena-config@1"` é
    literal e obrigatório.
 2. **Ids de modelo são slugs do OpenRouter** (`provedor/modelo`). Confira com
-   `prompt-builder models show <id> --json` (existe? que níveis aceita?).
-3. **Papéis separados** (o schema recusa, exit `3`): juiz nunca é o modelo sob
-   teste nem competidor; a referência (autora do gabarito) nunca é juiz nem
-   competidor — e é **obrigatória** em `variation`/`training` (no `compare` cai
-   em `judges[0]`, com aviso de viés); no `compare` o gerador não compete.
+   `prompt-builder models show <id> --json` (existe? que níveis?).
+3. **Papéis separados** (o schema recusa, exit `3`): juiz ≠ sob teste ≠
+   competidor; referência (autora do gabarito) ≠ juiz ≠ competidor — e é
+   **obrigatória** em `variation`/`training` (no `compare` cai em `judges[0]`,
+   com aviso de viés); no `compare` o gerador não compete.
 4. **`judges[0]` é o juiz principal** (vereditos e duelos das finais).
 5. **Raciocínio**: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
    Ausente = padrão do modelo; o motor encaixa o pedido no que ele aceita.
-6. **Modo**: comparar modelos/configurações → `compare`; variações de um prompt
-   → `variation`; evoluir um prompt em rodadas → `training`.
+6. **Modo**: comparar modelos/configs → `compare`; variações de prompt →
+   `variation`; evoluir em rodadas → `training`.
 
 ## 3. Referência campo a campo
 
@@ -134,7 +134,7 @@ pattern?, forbid?, json?, requiredKeys?, fill?, maxTokens? }` — `format` exige
 
 `competitor`, `judge`, `rewriter`, `datagen`: um dos 7 níveis. `effort.judge`
 vale também para o gabarito. No eixo `competitorConfigs` o nível vai em cada
-config (`reasoning`). Em modelo de raciocínio obrigatório, `off` não é enviado.
+config (`reasoning`). Em modelo obrigatório, `off` não é enviado.
 
 ### 3.7 `variation`
 
@@ -155,24 +155,37 @@ Ids: `persona`, `cot`, `fewshot`, `format`, `constraints`, `decompose`,
 |---|---|---|---|
 | `iterations` | int | 3 | Rodadas, 2..10: desafiantes contra a campeã. |
 | `minGain` | 0..100 | max(1; 50/n) | Margem de promoção em pontos de judge-score (`docs train`). |
-| `holdoutRatio` | 0..0.5 | 0.3 | Fatia anti-overfit reavaliada no fim. Piso ABSOLUTO de 10 cenários: com menos de 20 cenários não há holdout. `0` desliga. |
+| `holdoutRatio` | 0..0.5 | 0.3 | Fatia anti-overfit reavaliada no fim. Piso ABSOLUTO de 10 cenários (com < 20 não há holdout). `0` desliga. |
 | `feedbackDriven` | bool | `true` | Lições da rodada anterior entram no rewriter. |
 | `reflection` | string | `deterministic` | `deterministic` (custo zero), `llm` (custo contado) ou `off`. |
 | `paretoPool` | int | 1 | 0..8; > 1 = população Pareto por fatia como base de derivação. |
 | `paretoCoverageSampling` | bool | `false` | Pai ∝ cobertura candidato × cenário (só com fatias múltiplas e n ≥ 20). |
 | `maxLessonTokens` | int | 4000 | 200..4000: teto do dossiê de lições, em tokens. |
 | `lessonsIncludeReference` | bool | `false` | Gabarito no dossiê de lições (risco de o rewriter explorar o juiz). |
-| `minCuratedItems` | int | 20 | 0..1000: itens curados (gabarito escrito por gente) para DECLARAR campeão; proposta sem fonte, calibrar. |
+| `minCuratedItems` | int | 20 | 0..1000: itens curados (gabarito por gente) para DECLARAR campeão; proposta sem fonte, calibrar. |
 
 ### 3.9 `judging`
 
 `reference` (bool): julgamento **por gabarito** (vereditos resolve/parcial/não +
 finais). Default ligado em variation/training e no compare com
-`competitorConfigs`; desligado no compare clássico, que usa o juiz **listwise**
-(sem finais). `passes` (1 \| 2, default 1): passes do listwise (2 = as duas
-ordens, anti-viés de posição). `auditable` (bool, default `false`): juiz,
-duelo das finais e gabarito com provedor travado (sem fallback,
-`require_parameters`) — o duelo entra porque as finais decidem o vencedor.
+`competitorConfigs`; off no compare clássico (juiz **listwise**, sem finais).
+`passes` (1 \| 2, default 1): passes do listwise (2 = ordens trocadas,
+anti-viés). `auditable` (bool, default `false`): juiz, duelo das finais e
+gabarito com provedor travado (sem fallback, `require_parameters`) — o duelo
+entra porque as finais decidem o vencedor.
+
+`engine` ("jev" \| "llm", default `"jev"`): **motor do julgamento**. `jev` = o
+juiz JEV (modelo de decisão tipada) julga cada resposta (veredito `choice` +
+probabilidades) e o que estiver fora da banda `auto`
+escala para os `models.judges`; `llm` = painel LLM puro. Vale no pointwise,
+listwise e duelos. Em área `compliance` sensível o Jev não é ZDR: cai no painel
+(fail-closed, `jevFallback`).
+
+`jev` (objeto, opcional): `model` (default `typesafe/jev-1.13`, fixado — nunca
+`~typesafe/jev-latest`), `autoBand` (0–1, default 0,90: sinal ≥ decide sozinho),
+`hitlBand` (0–1, default 0,50: ≥ escala para o painel; abaixo, abstém e escala)
+e `rubricQuestions` (bool, default `true`: a rubrica vira perguntas por
+critério).
 
 ### 3.10 `limits`
 
@@ -188,28 +201,28 @@ bloco. Áreas: `geral`, `juridico`, `saude`, `financeiro`,
 `criancas_adolescentes`, `setor_publico` (**sensíveis**) e `livre` (sem
 filtro). `includeRessalvas: false` = rigor máximo.
 
-Em área **sensível** a run é recusada antes da 1ª chamada se QUALQUER papel
-usar modelo fora da allowlist por endpoint (snapshot ≤ 90 dias; ≥ 1 endpoint
-ZDR), e toda requisição sai com `provider: { zdr, data_collection: "deny",
-only, allow_fallbacks: false }`. Recusados pela forma do id: `:batch`, `:free`
-e `openrouter/*`; endpoint com **cache implícita** nunca entra em `only`.
-`prompt-builder models allowlist --area saude` mostra quem passa e por quê.
+Em área **sensível** a run é recusada antes da 1ª chamada se QUALQUER papel usar
+modelo fora da allowlist (snapshot ≤ 90 dias; ≥ 1 endpoint ZDR); toda requisição
+sai com `provider: { zdr, data_collection: "deny", only, allow_fallbacks:
+false }`. Recusados pela forma do id: `:batch`, `:free` e `openrouter/*`;
+endpoint com **cache implícita** nunca entra em `only`. `models allowlist --area
+saude` mostra quem passa.
 
 ## 4. Como os cenários se formam
 
 Total = `stages`: pinados primeiro, o gerador completa guiado por `theme` +
-`scenarioBrief` (com deduplicação). Gabarito pinado = avaliação mais estável e
-barata; rótulo (`expected` + `labelSet`) = custo zero de juiz. Bom conjunto
-(6–12; treino com holdout pede ≥ 20): típicos, bordas, adversariais e
-discriminativos — cenário em que todos acertam não ranqueia nada.
+`scenarioBrief` (com deduplicação). Gabarito pinado = avaliação mais estável;
+rótulo (`expected` + `labelSet`) = juiz grátis. Conjunto bom (6–12; treino com
+holdout pede ≥ 20): típicos, bordas, adversariais e discriminativos — cenário
+que todos acertam não ranqueia.
 
 ## 5. Exemplos completos e válidos
 
-Todos passam em `config validate` (o CI roda cada um no validador real).
+Todos passam em `config validate`.
 
 ### 5.a `training` — gabaritos pinados, holdout de verdade e contratos
 
-`stages: 24` com `holdoutRatio: 0.3` ⇒ 10 cenários no holdout, 14 na seleção.
+`stages: 24` com `holdoutRatio: 0.3` ⇒ 10 no holdout, 14 na seleção.
 
 ```json
 {
@@ -314,9 +327,9 @@ Eixo de **modelos distintos**: troque `competitorConfigs` por
 
 ## 6. Erros comuns (`config validate`, exit `3`)
 
-Duas etapas: o schema do arquivo (caminhos `models.*`) e o da run, que usa os
-nomes do RunConfig (`referenceModelId` = `models.reference`, `judgeModelIds` =
-`models.judges`, `datagenModelId` = `models.datagen`).
+Duas etapas: o schema do arquivo (`models.*`) e o da run (nomes do RunConfig:
+`referenceModelId` = `models.reference`, `judgeModelIds` = `models.judges`,
+`datagenModelId` = `models.datagen`).
 
 | Mensagem (início) | Correção |
 |---|---|

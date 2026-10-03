@@ -117,6 +117,11 @@ const OPTIONS = {
   languages: { type: 'string' },
   // IMPL-115: modo ECONÔMICO do juiz — `barato1,barato2:forte`.
   'judge-cascade': { type: 'string' },
+  // Juiz JEV (DEFAULT): `jev` = modelo de decisão tipada (com cascata para os
+  // `--judge`) | `llm` = painel de juízes puro. Ver `src/jevJudge.ts`.
+  'judge-engine': { type: 'string' },
+  // Modelo de decisão do juiz JEV (default `typesafe/jev-1.13`, snapshot fixado).
+  'jev-judge-model': { type: 'string' },
   // IMPL-063: dedup SEMÂNTICO dos cenários gerados (embeddings; custo no datagen).
   'semantic-dedup': { type: 'boolean' },
   'effort-competitor': { type: 'string' },
@@ -167,6 +172,16 @@ function piiModeFlag(v: unknown): 'redact' | 'synthetic' | undefined {
   throw new CliError('--pii-mode deve ser "redact" ou "synthetic".', EXIT.USAGE, { flag: '--pii-mode', value: v }, {
     code: 'usage.invalid_flag_value',
     hint: 'Use `--pii-mode redact` (pseudonimiza no envio) ou `--pii-mode synthetic` (só dado sintético).',
+  });
+}
+
+/** `--judge-engine` validado (uso errado = exit 2, nada gasto). Ausente = `jev` (default). */
+function judgeEngineFlag(v: unknown): 'jev' | 'llm' | undefined {
+  if (v === undefined) return undefined;
+  if (v === 'jev' || v === 'llm') return v;
+  throw new CliError('--judge-engine deve ser "jev" ou "llm".', EXIT.USAGE, { flag: '--judge-engine', value: v }, {
+    code: 'usage.invalid_flag_value',
+    hint: '`jev` (default) = modelo de decisão tipada com cascata para os juízes; `llm` = painel de juízes puro.',
   });
 }
 
@@ -550,6 +565,11 @@ export async function buildFromFlags(
       : {}),
     ...(list(values.languages) ? { languages: list(values.languages) } : {}),
     ...(judgeCascadeFlag(values['judge-cascade']) ? { judgeCascade: judgeCascadeFlag(values['judge-cascade']) } : {}),
+    // Juiz JEV (default): ausente = `jev`; `--judge-engine llm` volta ao painel.
+    ...(judgeEngineFlag(values['judge-engine']) ? { judgeEngine: judgeEngineFlag(values['judge-engine']) } : {}),
+    ...(typeof values['jev-judge-model'] === 'string' && values['jev-judge-model'].trim()
+      ? { jevJudge: { decisionModelId: values['jev-judge-model'].trim() } }
+      : {}),
     ...(values['semantic-dedup'] === true ? { scenarioDedup: { semantic: true } } : {}),
     ...(Object.keys(reasoning).length ? { reasoning } : {}),
     ...(piiModeFlag(values['pii-mode']) ? { piiMode: piiModeFlag(values['pii-mode']) } : {}),

@@ -48,6 +48,7 @@ const CONFIG = {
   competitorModelIds: ['fake/a', 'fake/b', 'fake/c'],
   customStages: ETAPAS,
   finalists: 3,
+  judgeEngine: 'llm',
   timeoutMs: 5_000,
 } as unknown as RunConfig;
 

@@ -91,6 +91,7 @@ const CONFIG = {
   referenceJudging: true,
   competitorModelIds: ['fake/a', 'fake/b'],
   finalists: 2,
+  judgeEngine: 'llm',
   timeoutMs: 5_000,
 } as const;
 
@@ -210,6 +211,7 @@ describe('IMPL-021 — soma(papéis) == total nos dois motores (transporte falso
     promptOptimization: true,
     optimizerModelId: 'fake/opt',
     finalists: 2,
+    judgeEngine: 'llm',
     timeoutMs: 5_000,
   } as const;
 
@@ -282,6 +284,7 @@ describe('IMPL-021 — soma(papéis) == total nos dois motores (transporte falso
         iterations: 1,
         holdoutRatio: 0,
         finalists: 2,
+        judgeEngine: 'llm',
         timeoutMs: 5_000,
       };
       const { sessionId, record } = await startWebTraining(cfg as never, KEY);

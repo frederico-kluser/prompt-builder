@@ -83,7 +83,13 @@ const comum = {
   scenarios: cenarios,
   duels: false,
   finalists: 5,
-  judging: { reference: true, passes: 2 },
+  judging: {
+    reference: true,
+    passes: 2,
+    // Juiz JEV (motor + config do modelo de decisão/bandas).
+    engine: 'jev' as const,
+    jev: { model: 'typesafe/jev-1.13', autoBand: 0.85, hitlBand: 0.45, rubricQuestions: false },
+  },
   limits: { maxOutputTokens: 900, timeoutMs: 45000, concurrency: 4 },
   compliance: { area: 'saude', includeRessalvas: false },
   // LGPD (IMPL-040): 'synthetic' é o único valor que o export escreve.

@@ -166,6 +166,7 @@ describe('IMPL-053 — diagnóstico de verbosidade ligado', () => {
     customStages: SEIS,
     finalists: 0,
     duels: false,
+    judgeEngine: 'llm',
     timeoutMs: 5_000,
   } as unknown as RunConfig;
 
@@ -231,6 +232,7 @@ describe('IMPL-055 — validação dos gabaritos no pipeline', () => {
     finalists: 2,
     validateReferences: true,
     secondReferenceModelId: 'fake/ref2',
+    judgeEngine: 'llm',
     timeoutMs: 5_000,
   } as unknown as RunConfig;
 
@@ -314,6 +316,7 @@ describe('IMPL-112 — saturação por item na run; IMPL-047 — confiança baix
     customStages: DOIS,
     finalists: 0,
     duels: false,
+    judgeEngine: 'llm',
     timeoutMs: 5_000,
   } as unknown as RunConfig;
   const fake = () =>
@@ -375,6 +378,7 @@ describe('IMPL-057/055/112 — `runs show` mostra o que a run gravou', () => {
         competitorModelIds: ['fake/a', 'fake/b', 'fake/c'],
         finalists: 0,
         duels: false,
+        judgeEngine: 'llm',
         timeoutMs: 5_000,
         customStages: Array.from({ length: 3 }, (_, i) => ({
           question: `CEN-${i} Prazo?`,
@@ -431,6 +435,7 @@ describe('IMPL-049 — drift do contrato entre PROCESSOS (âncora gravada)', () 
     competitorModelIds: ['fake/a', 'fake/b'],
     finalists: 0,
     duels: false,
+    judgeEngine: 'llm',
     timeoutMs: 5_000,
     customStages: [{ question: 'CEN-X Prazo?', productContext: 'c', maxTokens: 200, reference: 'R' }],
   } as unknown as RunConfig;

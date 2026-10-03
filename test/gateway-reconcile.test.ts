@@ -402,6 +402,7 @@ describe('IMPL-017 (iv) — a run concilia SOZINHA no fim: |ledger − Σ fatura
           referenceJudging: true,
           competitorModelIds: ['fake/a', 'fake/b'],
           finalists: 2,
+          judgeEngine: 'llm',
           timeoutMs: 5_000,
           budgetUsd: 5,
         } as unknown as RunConfig;
@@ -482,6 +483,7 @@ describe('IMPL-017 (iv) — a run concilia SOZINHA no fim: |ledger − Σ fatura
           referenceModelId: 'fake/ref',
           referenceJudging: true,
           competitorModelIds: ['fake/a', 'fake/b'],
+          judgeEngine: 'llm',
           timeoutMs: 60_000,
         } as unknown as RunConfig;
         const fim = runToCompletion(config, { signal: ctl.signal });

@@ -81,6 +81,12 @@ onde a chamada for roteada. Isso vira **desconhecido** — nunca `-1`, nunca
   estejam definidos — aí o orçamento é conferido por esse pior caso;
 - o custo cobrado continua vindo de `usage.cost` da resposta.
 
+### Juiz JEV (default, `judging.engine: "jev"`)
+
+A estimativa trata o juiz como o painel LLM inteiro — teto CONSERVADOR: o juiz
+JEV cobra ~US$ 0,042/Mtok de ENTRADA (saída grátis) e só as células escaladas
+pagam LLM. O gasto real de julgamento cai muito.
+
 ## Pré-voo
 
 Antes de gastar, na ordem (a primeira recusa encerra a execução real):

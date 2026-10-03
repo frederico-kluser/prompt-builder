@@ -92,6 +92,9 @@ const CHAVES_CANONICAS: readonly string[] = [
   'competitorConfigs', 'competitorAnchor', 'customStages', 'scenarioSeed', 'reasoning', 'referenceModelId',
   'referenceJudging', 'promptOptimization', 'optimizerModelId', 'judgePasses', 'maxPricePerMTok',
   'maxOutputTokens', 'timeoutMs', 'concurrency',
+  // juiz JEV (motor de julgamento + config do modelo de decisão)
+  'judgeEngine', 'jevJudge', 'engine', 'jev', 'decisionModelId', 'autoBand', 'hitlBand',
+  'rubricQuestions',
   // cenário / etapa
   'id', 'question', 'productContext', 'maxTokens', 'rubric', 'reference', 'expected', 'labelSet',
   'origin', 'agentTask', 'tier', 'dimensionTags', 'language', 'persona', 'difficultyEstimate',

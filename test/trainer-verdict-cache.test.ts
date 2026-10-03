@@ -89,6 +89,7 @@ function config(over: Partial<TrainingConfig> = {}): TrainingConfig {
     duels: false,
     finalists: 0,
     feedbackDriven: false,
+    judgeEngine: 'llm',
     timeoutMs: 5_000,
     ...over,
   } as TrainingConfig;

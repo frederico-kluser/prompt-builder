@@ -5,11 +5,11 @@ license: MIT
 metadata:
   homepage: https://www.npmjs.com/package/prompt-builder-cli
 ---
-Benchmark sem UI (CLI/MCP): cenários → respostas → juiz contra gabarito → duelos.
+Benchmark sem UI (CLI/MCP): cenários → respostas → juiz JEV (default) contra gabarito → duelos.
 `compare`=modelos · `vary`/`train`=prompts · `sessions report`=relatório de ciclos ·
 `models show --json`=think level · `estimate`/`--dry-run`=custo · `agents run`=agentes ·
 `jev`=decisões tipadas (docs `jev`).
-CLI: `prompt-builder` (bins do `npm run agent-setup`; fora do repo: `npx prompt-builder-cli`).
+CLI: `prompt-builder` (`npm run agent-setup`; fora do repo: `npx prompt-builder-cli`).
 
 ## Caminho feliz
 
@@ -22,20 +22,21 @@ prompt-builder sessions report <sessionId> --html relatorio.html
 
 ## Relatório de ciclos
 
-`sessions report <id>` = quanto melhorou (original × campeão, por ciclo/holdout) e Δ custo
-por chamada. Relatório completo: Markdown dele como brief da skill
-**plannotator-visual-explainer**; entregue com `plannotator annotate <arq>` (docs `report`).
+`sessions report <id>` = quanto melhorou (original × campeão, por ciclo/holdout) e Δ custo por
+chamada. Completo: Markdown = brief da **plannotator-visual-explainer**
+(`plannotator annotate <arq>`; docs `report`).
 
 ## Modelos
 
-Defaults por papel e listas: `models.md` (ao lado desta skill). Juiz ≠ sob teste.
+Defaults por papel e listas: `models.md`. Juiz ≠ sob teste. Motor do juiz
+= JEV (default; `--judge-engine llm` = painel).
 
 ## MCP e modo agente
 
 - **MCP** (`prompt-builder mcp`): `start_run`+`idempotencyKey`→`jobId`, `run_status`,
   `cancel_run`, `get_result`, `get_session_report`, `estimate_cost`, `list_models`, `read_docs`.
 - **Agente**: `agents doctor` · `agents run --config <arq> --budget <usd> [--allow-exec-config] [--dry-run]`
-  (config executa comandos: aprove 1×; sem pin = exit `3`, até no dry-run).
+  (config executa comandos: aprove 1×; sem pin = exit `3`, mesmo no dry-run).
 
 ## Regras
 
@@ -47,4 +48,4 @@ Defaults por papel e listas: `models.md` (ao lado desta skill). Juiz ≠ sob tes
 6. `sessions winner --apply` = handoff; holdout regredido → exit `10` salvo `--override`.
    Exit: `6` inconclusiva · `7` parcial · `8` rede · `130` SIGINT (`--help`).
 
-Docs embarcadas: `prompt-builder docs --list` e `docs <tópico>` (à versão instalada).
+Docs embarcadas: `prompt-builder docs --list` e `docs <tópico>`.

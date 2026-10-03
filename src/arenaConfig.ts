@@ -14,7 +14,20 @@ import { parseRunConfig } from './runConfigSchema.js';
 import { HOLDOUT_RATIO_DEFAULT, HOLDOUT_RATIO_MAX } from './holdout.js';
 import type { ArenaAgentConfigFile, ArenaConfigFile } from './configFile.js';
 import { TRAINING_DEFAULT_STAGES } from './engine/trainingPolicy.js';
-import type { ReasoningConfig, RunConfig, StageSpec } from './types.js';
+import type { JevJudgeConfig, JudgeEngine, ReasoningConfig, RunConfig, StageSpec } from './types.js';
+
+/** `judging.jev` do arquivo → `RunConfigBase.jevJudge` (só o que veio preenchido). */
+function jevJudgeFromFile(
+  jev: { model?: string; autoBand?: number; hitlBand?: number; rubricQuestions?: boolean } | undefined,
+): JevJudgeConfig | undefined {
+  if (!jev) return undefined;
+  const out: JevJudgeConfig = {};
+  if (jev.model?.trim()) out.decisionModelId = jev.model.trim();
+  if (typeof jev.autoBand === 'number') out.autoBand = jev.autoBand;
+  if (typeof jev.hitlBand === 'number') out.hitlBand = jev.hitlBand;
+  if (typeof jev.rubricQuestions === 'boolean') out.rubricQuestions = jev.rubricQuestions;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 /** Defaults da UI, aplicados quando o arquivo omite o campo. */
 export interface ArenaConfigDefaults {
@@ -125,6 +138,10 @@ export function arenaConfigToRunConfig(
     referenceJudging,
     finalists,
     judgePasses: (file.judging?.passes === 2 ? 2 : 1) as 1 | 2,
+    // Juiz JEV (default em todos os modos): `judging.engine` escolhe o motor e
+    // `judging.jev` configura o modelo de decisão e as bandas de ação.
+    judgeEngine: (file.judging?.engine ?? 'jev') as JudgeEngine,
+    ...(jevJudgeFromFile(file.judging?.jev) ? { jevJudge: jevJudgeFromFile(file.judging?.jev) } : {}),
     ...(semFinais ? { duels: false } : {}),
     // Repeticoes por cenario (F2 §7.9): so o compare expande; nos demais modos
     // a chave e descartada pelo schema (retrocompat).
@@ -332,6 +349,10 @@ export function arenaAgentConfigToRunConfig(
     finalists,
     judgePasses: (file.judging?.passes === 2 ? 2 : 1) as 1 | 2,
     customStages: stageSpecs,
+    // Juiz JEV (default): nas etapas de CHAT da run de agente — os vereditos
+    // do agente vêm da árvore própria e não passam por aqui.
+    judgeEngine: (file.judging?.engine ?? 'jev') as JudgeEngine,
+    ...(jevJudgeFromFile(file.judging?.jev) ? { jevJudge: jevJudgeFromFile(file.judging?.jev) } : {}),
     ...(semFinais ? { duels: false } : {}),
     ...(file.scenarioBrief?.trim() ? { scenarioBrief: file.scenarioBrief.trim() } : {}),
     ...(file.models.reference ? { referenceModelId: file.models.reference } : {}),

@@ -22,6 +22,7 @@ import {
   judgeStageReferenceCascade,
   type JudgeStageReferenceParams,
 } from './refJudge.js';
+import { judgeStageListwiseJev, judgeStageReferenceJev, JEV_JUDGE_CONTRACT_TEXT } from './jevJudge.js';
 import {
   blindRankMap,
   DUEL_AGENT_TRUST,
@@ -817,14 +818,26 @@ async function runLoop(
   // IMPL-115: modo ECONÔMICO do julgamento — 2 juízes baratos em paralelo e o
   // forte só nos vereditos em dúvida. Ausente = o painel de `judgeModelIds`.
   const cascata = record.config.judgeCascade;
+  // JUÍZ JEV (default em todos os modos): o modelo de decisão julga com
+  // perguntas tipadas e as bandas auto/hitl/abstain escalam o RESTO para o
+  // painel LLM (`judgeModelIds`). `judgeEngine: 'llm'` volta ao painel puro;
+  // LGPD/indisponibilidade do Jev caem no painel automaticamente
+  // (`jevFallback` no record). O `judgeCascade` não se aplica ao Jev — ele já
+  // é a camada barata.
+  const judgeEngine = record.config.judgeEngine ?? 'jev';
+  const jevJudgeCfg = record.config.jevJudge;
   const julgarPorReferencia = (p: Omit<JudgeStageReferenceParams, 'judgeModelIds'>) =>
-    cascata
-      ? judgeStageReferenceCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
-      : judgeStageReference({ ...p, judgeModelIds: record.config.judgeModelIds });
+    judgeEngine === 'jev'
+      ? judgeStageReferenceJev({ ...p, judgeModelIds: record.config.judgeModelIds, jevJudge: jevJudgeCfg })
+      : cascata
+        ? judgeStageReferenceCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
+        : judgeStageReference({ ...p, judgeModelIds: record.config.judgeModelIds });
   const julgarListwise = (p: Omit<JudgeStageParams, 'judgeModelIds'>) =>
-    cascata
-      ? judgeStageCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
-      : judgeStage({ ...p, judgeModelIds: record.config.judgeModelIds });
+    judgeEngine === 'jev'
+      ? judgeStageListwiseJev({ ...p, judgeModelIds: record.config.judgeModelIds, jevJudge: jevJudgeCfg })
+      : cascata
+        ? judgeStageCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
+        : judgeStage({ ...p, judgeModelIds: record.config.judgeModelIds });
 
   // Saneia maxTokens (o competidor faz Math.min(maxOutputTokens, stage.maxTokens);
   // ausente/<=0 viraria NaN). Aplica-se a pinadas, seed e geradas.
@@ -1808,6 +1821,10 @@ async function runLoop(
               responses: st.responses,
               contestants: record.contestants,
               judgeModelId: record.config.judgeModelIds[0],
+              // Juiz JEV do duelo (default em todos os modos): decide `choice`
+              // por ordem e escala hitl/abstain para o judgeModelId.
+              judgeEngine: record.config.judgeEngine ?? 'jev',
+              jevJudge: record.config.jevJudge,
               duelists: finalistas,
               topK: finalistas.length,
               verdictByContestant: st.referenceJudge?.verdictByContestant,
@@ -2049,11 +2066,17 @@ async function runLoop(
     }
     // IMPL-034: numa run com agente quem dá as notas é o juiz de DOSSIÊ — o
     // pin precisa mudar quando o prompt DELE muda (senão o drift some).
-    const judgePromptText = !hasAgent
-      ? JUDGE_CONTRACT_TEXT
-      : record.contestants.every((c) => c.runner === 'agent')
-        ? AGENT_JUDGE_SYSTEM_PROMPT
-        : `${JUDGE_CONTRACT_TEXT}\n\n${AGENT_JUDGE_SYSTEM_PROMPT}`;
+    // Juiz JEV: o contrato é a escala tipada do `src/jevJudge.ts` — trocar o
+    // motor do juiz muda o hash e sinaliza drift (recalibrar).
+    const judgeEngineDiag = record.config.judgeEngine ?? 'jev';
+    const judgePromptText =
+      judgeEngineDiag === 'jev'
+        ? JEV_JUDGE_CONTRACT_TEXT
+        : !hasAgent
+          ? JUDGE_CONTRACT_TEXT
+          : record.contestants.every((c) => c.runner === 'agent')
+            ? AGENT_JUDGE_SYSTEM_PROMPT
+            : `${JUDGE_CONTRACT_TEXT}\n\n${AGENT_JUDGE_SYSTEM_PROMPT}`;
     // IMPL-049 (R-03a:REC-9): o contrato do juiz cobre juízes + prompt
     // pointwise + prompt do duelo + prompt listwise + modelo de referência +
     // think level + provedor — trocar QUALQUER um muda a distribuição de

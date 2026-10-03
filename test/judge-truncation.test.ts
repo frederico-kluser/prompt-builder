@@ -485,6 +485,7 @@ const CONFIG = {
   customStages: SETE,
   finalists: 2,
   reasoning: { judge: 'high' },
+  judgeEngine: 'llm',
   timeoutMs: 5_000,
 } as const;
 

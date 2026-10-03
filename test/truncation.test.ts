@@ -570,6 +570,7 @@ const CONFIG = {
   referenceJudging: true,
   competitorModelIds: ['fake/a', 'fake/b', 'fake/long'],
   finalists: 2,
+  judgeEngine: 'llm',
   timeoutMs: 5_000,
 } as const;
 
@@ -815,6 +816,7 @@ const CONFIG_JUIZ = {
   referenceJudging: true,
   competitorModelIds: ['fake/a', 'fake/b'],
   finalists: 0,
+  judgeEngine: 'llm',
   timeoutMs: 5_000,
 } as const;
 
@@ -975,6 +977,7 @@ describe('IMPL-014 (iii) — `run --json` emite truncationRate e o alerta acima 
         '--reference', 'fake/ref',
         '--max-output-tokens', '300',
         '--no-duels',
+        '--judge-engine', 'llm',
         '--budget', '5',
         '--yes',
         '--json',
@@ -1184,6 +1187,7 @@ describe('IMPL-014 (iv) — whitelists: normalizeRunRecord e variationConfigFrom
         iterations: 1,
         customStages: CENARIOS,
         finalists: 0,
+        judgeEngine: 'llm',
         timeoutMs: 5_000,
       };
       const cfg = variationConfigFrom(training);

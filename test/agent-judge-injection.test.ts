@@ -753,6 +753,7 @@ function configAgente(tasks: AgentTaskSpec[], extra: Partial<RunConfig> = {}): R
     competitorModelIds: ['fake/a', 'fake/b'],
     duels: true,
     finalists: 2,
+    judgeEngine: 'llm',
     timeoutMs: 5_000,
     customStages: tasks.map((t, i) => etapa(i, t)),
     agent: {

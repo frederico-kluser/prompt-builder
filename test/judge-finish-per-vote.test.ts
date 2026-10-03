@@ -57,6 +57,7 @@ const CONFIG = {
   competitorModelIds: ['fake/a', 'fake/b'],
   customStages: [...COM_REF, SEM_REF],
   finalists: 2,
+  judgeEngine: 'llm',
   timeoutMs: 5_000,
 } as unknown as RunConfig;
 

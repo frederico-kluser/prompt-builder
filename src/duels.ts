@@ -23,7 +23,9 @@ import type {
   Contestant,
   DuelFailure,
   DuelOutcome,
+  JevJudgeConfig,
   JudgeConfidence,
+  JudgeEngine,
   ReasoningLevel,
   StageDuels,
   StageSpec,
@@ -31,6 +33,7 @@ import type {
   VerdictError,
   RunCtx,
 } from './types.js';
+import { judgeDuelOrderJev } from './jevJudge.js';
 
 import {
   blindRankMap,
@@ -147,6 +150,15 @@ export interface RunStageDuelsOptions {
   contestants: Contestant[];
   /** Juiz dos duelos (orquestrador passa judgeModelIds[0]). */
   judgeModelId: string;
+  /**
+   * Motor do juiz do duelo: `jev` = modelo de decisão (choice a_melhor/
+   * b_melhor/empate, escalando para o `judgeModelId` nas bandas hitl/abstain);
+   * `llm`/ausente = juiz LLM clássico. O default `jev` é aplicado pelo
+   * ORQUESTRADOR (a partir de `RunConfigBase.judgeEngine`).
+   */
+  judgeEngine?: JudgeEngine;
+  /** Config do juiz JEV (modelo de decisão + bandas de ação). */
+  jevJudge?: JevJudgeConfig;
   /** Contestant de controle — entra no bracket SEMPRE. Ausente => sem vaga garantida. */
   controlId?: string;
   /** Tamanho do bracket (controle + K−1 melhores). 0 = round-robin completo. */
@@ -198,6 +210,8 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
     responses,
     contestants,
     judgeModelId,
+    judgeEngine,
+    jevJudge,
     controlId,
     topK,
     duelists,
@@ -287,7 +301,7 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
   // re-tentativa SELETIVA do juiz (timeout 1×; saída inválida => 1 pedido com
   // lembrete). Orçamento/cancelamento SOBEM de dentro de callJudgeWithRetry:
   // sem isso, dinheiro estourado viraria duelo "sem resultado" em TODA a final.
-  const judgeOnce = (
+  const llmJudgeOnce = (
     firstId: string,
     secondId: string,
   ): Promise<
@@ -331,6 +345,31 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
       signal: ctx?.signal,
     });
   };
+
+  // JUÍZ JEV nas ordens de duelo (o default `jev` é aplicado pelo orquestrador):
+  // uma decisão tipada por ordem — `choice` a_melhor/b_melhor/empate sobre o
+  // par. Banda `auto` decide sozinha; hitl/abstain/falha escalam para o juiz
+  // LLM do par (`fallback` = o `llmJudgeOnce` clássico, com retentativa e
+  // canário). Sem canário no Jev: a saída é tipada, não passa por parse.
+  const judgeOnce = (
+    firstId: string,
+    secondId: string,
+  ): Promise<
+    JudgeAttempt<{ winner: 'A' | 'B' | 'tie'; explanation: string; canary: string; confianca?: JudgeConfidence }>
+  > =>
+    judgeEngine === 'jev'
+      ? judgeDuelOrderJev({
+          apiKey,
+          stage,
+          reference,
+          textA: textById.get(firstId) ?? '',
+          textB: textById.get(secondId) ?? '',
+          jevJudge,
+          ctx,
+          timeoutMs,
+          fallback: () => llmJudgeOnce(firstId, secondId),
+        })
+      : llmJudgeOnce(firstId, secondId);
 
   // Todos os pares em paralelo (o limitador global do openrouter gateia a
   // concorrência — sem cap local). Cada par é julgado 2× EM PARALELO, nas duas
@@ -406,7 +445,7 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
                   order1: {
                     winner: o1,
                     explanation: v1.value.explanation,
-                    canary: v1.value.canary,
+                    ...(v1.value.canary ? { canary: v1.value.canary } : {}),
                     ...(v1.value.confianca ? { confidence: v1.value.confianca } : {}),
                     ...(v1.finish ?? {}),
                   },
@@ -417,7 +456,7 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
                   order2: {
                     winner: o2,
                     explanation: v2.value.explanation,
-                    canary: v2.value.canary,
+                    ...(v2.value.canary ? { canary: v2.value.canary } : {}),
                     ...(v2.value.confianca ? { confidence: v2.value.confianca } : {}),
                     ...(v2.finish ?? {}),
                   },
@@ -436,7 +475,7 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
         order1: {
           winner: o1,
           explanation: v1.value.explanation,
-          canary: v1.value.canary,
+          ...(v1.value.canary ? { canary: v1.value.canary } : {}),
           ...(v1.value.confianca ? { confidence: v1.value.confianca } : {}),
           // IMPL-014: sinais de fim da chamada desta ordem (+ artefato, IMPL-117).
           ...(v1.finish ?? {}),
@@ -444,7 +483,7 @@ export async function runStageDuels(opts: RunStageDuelsOptions): Promise<StageDu
         order2: {
           winner: o2,
           explanation: v2.value.explanation,
-          canary: v2.value.canary,
+          ...(v2.value.canary ? { canary: v2.value.canary } : {}),
           ...(v2.value.confianca ? { confidence: v2.value.confianca } : {}),
           // IMPL-014: sinais de fim da chamada desta ordem (+ artefato, IMPL-117).
           ...(v2.finish ?? {}),

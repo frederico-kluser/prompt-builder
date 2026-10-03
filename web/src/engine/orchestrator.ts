@@ -28,6 +28,7 @@ import { lowConfidenceReviewItems, stageCountsInJudgeScore, VERDICT_AGGREGATION 
 import { humanReviewQueueFromStages } from '../../../src/engine/groundTruth.js';
 import { fairnessWarningsForModels } from './llmVariants';
 import { JUDGE_CONTRACT_TEXT } from './refJudge';
+import { judgeStageListwiseJev, judgeStageReferenceJev, JEV_JUDGE_CONTRACT_TEXT } from './jevJudge';
 import {
   contractDrift,
   judgeContractAudit,
@@ -724,14 +725,25 @@ async function runLoop(
   // IMPL-115: modo ECONÔMICO do julgamento — 2 juízes baratos em paralelo e o
   // forte só nos vereditos em dúvida. Ausente = o painel de `judgeModelIds`.
   const cascata = record.config.judgeCascade;
+  // JUÍZ JEV (default em todos os modos, espelho de src/orchestrator.ts): o
+  // modelo de decisão julga com perguntas tipadas e as bandas auto/hitl/abstain
+  // escalam o RESTO para o painel LLM (`judgeModelIds`). `judgeEngine: 'llm'`
+  // volta ao painel puro; LGPD/indisponibilidade do Jev caem no painel
+  // automaticamente (`jevFallback` no record).
+  const judgeEngine = record.config.judgeEngine ?? 'jev';
+  const jevJudgeCfg = record.config.jevJudge;
   const julgarPorReferencia = (p: Omit<JudgeStageReferenceParams, 'judgeModelIds'>) =>
-    cascata
-      ? judgeStageReferenceCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
-      : judgeStageReference({ ...p, judgeModelIds: record.config.judgeModelIds });
+    judgeEngine === 'jev'
+      ? judgeStageReferenceJev({ ...p, judgeModelIds: record.config.judgeModelIds, jevJudge: jevJudgeCfg })
+      : cascata
+        ? judgeStageReferenceCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
+        : judgeStageReference({ ...p, judgeModelIds: record.config.judgeModelIds });
   const julgarListwise = (p: Omit<JudgeStageParams, 'judgeModelIds'>) =>
-    cascata
-      ? judgeStageCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
-      : judgeStage({ ...p, judgeModelIds: record.config.judgeModelIds });
+    judgeEngine === 'jev'
+      ? judgeStageListwiseJev({ ...p, judgeModelIds: record.config.judgeModelIds, jevJudge: jevJudgeCfg })
+      : cascata
+        ? judgeStageCascade({ ...p, cheapJudgeIds: cascata.cheap, strongJudgeId: cascata.strong })
+        : judgeStage({ ...p, judgeModelIds: record.config.judgeModelIds });
 
   // Saneia maxTokens (o competidor faz Math.min(maxOutputTokens, stage.maxTokens);
   // ausente/<=0 viraria NaN). Aplica-se a pinadas, seed e geradas.
@@ -1358,6 +1370,9 @@ async function runLoop(
               responses: st.responses,
               contestants: record.contestants,
               judgeModelId: record.config.judgeModelIds[0],
+              // Juiz JEV do duelo (default em todos os modos).
+              judgeEngine: record.config.judgeEngine ?? 'jev',
+              jevJudge: record.config.jevJudge,
               duelists: finalistas,
               topK: finalistas.length,
               verdictByContestant: st.referenceJudge?.verdictByContestant,
@@ -1582,9 +1597,11 @@ async function runLoop(
       : record.config.judgeModelIds;
     // IMPL-070: o pin carrega o fingerprint dos meta-prompts do pipeline e o
     // hash de contrato DA RUN (juiz + meta-prompts) — o hash do juiz não muda.
+    // Juiz JEV: o contrato é a escala tipada de src/jevJudge.ts (trocar o motor
+    // do juiz muda o hash e sinaliza drift — espelho de src/orchestrator.ts).
     const contract = pinJudgeContract(
       juizesDoContrato,
-      JUDGE_CONTRACT_TEXT,
+      (record.config.judgeEngine ?? 'jev') === 'jev' ? JEV_JUDGE_CONTRACT_TEXT : JUDGE_CONTRACT_TEXT,
       undefined,
       components,
       { metaPromptsFingerprint: pipelineMetaPromptsFingerprint() },

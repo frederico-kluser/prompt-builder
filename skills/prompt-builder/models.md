@@ -36,3 +36,10 @@ livre do universo preferido — decisão do dono).
 Obrigatório e ≠ juiz ≠ modelo sob teste (IMPL-048). Default sugerido:
 `z-ai/glm-5.3-flash` (o 1º livre quando os juízes são os 2 primeiros e o modelo
 sob teste é o `xiaomi/mimo-v2.6-pro`).
+
+## Motor do juiz (default: JEV)
+
+- `typesafe/jev-1.13` — snapshot FIXADO (nunca `~typesafe/jev-latest`); troca por
+  `--jev-judge-model`/`judging.jev.model`.
+- A lista de **Juízes** acima vira a camada de ESCALADA: o Jev decide a banda `auto`
+  (confiança ≥ 0,90) e o resto vai para o painel LLM. `--judge-engine llm` = só o painel.

@@ -130,16 +130,22 @@ const USO: Record<string, string> = {
                            cenário fora da política vira aviso no record)
   --judge-cascade b1,b2:forte  modo econômico: 2 juízes baratos; o forte só
                            nos vereditos em dúvida (fração escalonada no record)
+  --judge-engine jev|llm   motor do juiz (DEFAULT jev: modelo de decisão tipada
+                           com cascata para os juízes nas bandas de baixa
+                           confiança; llm = painel de juízes puro)
+  --jev-judge-model <id>   modelo de decisão do juiz JEV (default typesafe/jev-1.13)
   --semantic-dedup         dedup semântico dos cenários (embeddings, papel datagen)`,
   vary: `  vary --model <id>        testa variações de prompt num modelo
   vary --config <arq>      usa um arena-config@1 (ver: docs config)
   Comuns: --theme --stages --judge --techniques --budget --dry-run --detach
+  --judge-engine jev|llm   motor do juiz (default jev, com cascata — ver docs compare)
   --reference <id>         quem escreve o gabarito — OBRIGATÓRIO (≠ juiz, ≠ --model)
   --require-approved       biblioteca: item não aprovado recusa (exit 3)
   --languages pt-BR,en     idiomas do datagen (opt-in; sem a flag, 100% pt-BR)`,
   train: `  train --model <id>       treina um prompt ao longo de iterações
   train --config <arq>     usa um arena-config@1 (ver: docs config)
   Comuns: --iterations --holdout-ratio --budget --dry-run --detach
+  --judge-engine jev|llm   motor do juiz (default jev, com cascata — ver docs compare)
   --reference <id>         quem escreve o gabarito — OBRIGATÓRIO (≠ juiz, ≠ --model)
   --require-approved       biblioteca: item não aprovado recusa (exit 3); sem a flag
                            a run relata curatedKofN e avisa (run.warning); o holdout

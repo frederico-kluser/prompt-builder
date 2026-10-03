@@ -191,10 +191,14 @@ describe('(a) seletor LLM | JEV em /new', () => {
     expect(html).toContain('data-bench="jev"');
   });
 
-  it('fonte: NewRun e GuidedSetup não importam nada do JEV (wrapper, D-12)', () => {
+  it('fonte: NewRun e GuidedSetup não importam nada do MODO JEV (wrapper, D-12)', () => {
     for (const f of ['web/src/pages/NewRun.tsx', 'web/src/components/GuidedSetup.tsx']) {
       const src = readFileSync(join(ROOT, f), 'utf8');
-      expect(src).not.toMatch(/jev/i);
+      // O juiz JEV dos modos de benchmark (`judgeEngine`/"Motor do juiz") vive AQUI
+      // por direito — o proibido é o MODO JEV (`jev-config@1`: engine/jev, pages/jev,
+      // web/src/jev, NewJevRun/useJevRecord/…): a aba própria dele é o NewBenchmark.
+      expect(src, f).not.toMatch(/from ['"][^'"]*jev[^'"]*['"]/i);
+      expect(src, f).not.toMatch(/NewJevRun|useJevRecord|jev-config|jevRuns|jevSessions|jevSummaries/i);
     }
     const main = readFileSync(join(ROOT, 'web/src/main.tsx'), 'utf8');
     expect(main).toMatch(/path="\/new" element=\{<KeyGate><NewBenchmark \/><\/KeyGate>\}/);

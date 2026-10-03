@@ -112,6 +112,15 @@ export type {
   JudgeContractComponents,
   VerdictSampleSource,
 } from '../../../src/types.js';
+// Juiz JEV (modelo de decisão como juiz — src/jevJudge.ts): FONTE ÚNICA em
+// src/types.ts, como acima.
+export type {
+  JudgeEngine,
+  JevJudgeBand,
+  JevJudgeCell,
+  JevJudgeConfig,
+  JevJudgeFallback,
+} from '../../../src/types.js';
 // Fila `needs-human-review` + voto de cada juiz + diagnóstico de verbosidade em
 // camadas (IMPL-055/057/053): FONTE ÚNICA em src/types.ts, como acima — os
 // juízes (refJudge/judgeCalibration) já são shim/compartilhados e devolvem
@@ -128,9 +137,13 @@ import type {
   DuelFailure,
   DuelOrderResult,
   HumanReviewItem,
+  JevJudgeCell,
+  JevJudgeConfig,
+  JevJudgeFallback,
   JudgeCallFinish,
   JudgeConfidence,
   JudgeContractComponents,
+  JudgeEngine,
   JudgeVote,
   VerdictError,
   VerdictIntegrity,
@@ -374,6 +387,14 @@ export interface RunConfigBase {
    * comprimento). Ausente = julgamento normal por `judgeModelIds`.
    */
   judgeCascade?: JudgeCascadeConfig;
+  /**
+   * Motor de julgamento: `jev` (DEFAULT — modelo de decisão tipada, com cascata
+   * para o painel `judgeModelIds`) ou `llm` (painel puro). Ausente = `jev`.
+   * Espelho de src/types.ts (src/jevJudge.ts).
+   */
+  judgeEngine?: JudgeEngine;
+  /** Config do juiz JEV (modelo de decisão, bandas, decomposição de rubrica). */
+  jevJudge?: JevJudgeConfig;
   /** Cenarios importados de pacote JSON (seed); o datagen complementa ate `stages`. */
   scenarioSeed?: StageSpec[];
   /**
@@ -711,6 +732,10 @@ export interface JudgeResult {
   judges: SingleJudgeResult[];
   blindMap: Record<string, string>; // letra -> contestantId (do 1o juiz; cosmetico)
   rawJudgeText: string;
+  /** Juiz JEV (src/jevJudge.ts): célula de decisão por contestant. */
+  jevByContestant?: Record<string, JevJudgeCell>;
+  /** Fallback do juiz JEV ao painel LLM (LGPD/indisponível). */
+  jevFallback?: JevJudgeFallback;
   inconclusive?: boolean;
 }
 
@@ -757,6 +782,10 @@ export interface ReferenceJudgeResult {
    */
   judgeVotesByContestant?: Record<string, JudgeVote[]>;
   judgeModelId: string;
+  /** Juiz JEV (src/jevJudge.ts): célula de decisão por contestant. */
+  jevByContestant?: Record<string, JevJudgeCell>;
+  /** Fallback do juiz JEV ao painel LLM (LGPD/indisponível). */
+  jevFallback?: JevJudgeFallback;
   inconclusive?: boolean;
 }
 

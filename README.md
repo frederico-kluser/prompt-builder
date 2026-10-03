@@ -123,6 +123,12 @@ graça; um job que passa do prazo (`ttlSeconds`, padrão 2 h) também.
   não), painel por maioria simples e finais com duelos nas duas ordens. O juiz listwise é o fallback
   do compare clássico. **Modo econômico** (`--judge-cascade barato1,barato2:forte`): dois juízes
   baratos votam e o forte só julga os vereditos em dúvida.
+- **Juiz JEV por default** — o **modelo de decisão** (Jev, da TypeSafe) julga cada resposta com uma
+  pergunta tipada (`choice` resolve/parcial/não) mais uma pergunta por critério da rubrica, com
+  probabilidades calibradas e motivo determinístico; o que ficar fora da banda `auto` **escala para
+  os juízes LLM** (cascata), e indisponibilidade (ex.: área LGPD sensível, onde o Jev não é ZDR)
+  cai no painel automaticamente. `--judge-engine llm` volta ao painel clássico;
+  `--jev-judge-model` troca o modelo de decisão (`docs config`, seção `judging`).
 - **Relatório de ciclos do treino** — quanto o prompt melhorou (original × campeão, por ciclo e no
   holdout) e quanto a mudança muda o custo **por chamada**. Está no CLI (`sessions report`), no MCP
   (`get_session_report`), na API (`GET /v1/benchmark/sessions/:id/report`) e na tela
@@ -222,10 +228,13 @@ flowchart LR
 3. **Julgamento** — por default (fora do compare clássico) é **por referência**: um **gabarito**
    temp-0 é gerado por cenário, o juiz classifica cada resposta isoladamente contra ele
    (**resolve / parcial / não**, com explicação de 1 frase; com 2+ juízes vale a **maioria
-   simples**, e painel dividido é **empate técnico**, nunca arredondado para cima). Sem gabarito
+   simples**, e painel dividido é **empate técnico**, nunca arredondado para cima). O **motor do
+   juiz** é por default o **JEV** (modelo de decisão tipada, milissegundos por resposta): o veredito
+   vem com probabilidades, e o que ficar na banda de baixa confiança escala para os juízes LLM
+   (`--judge-engine llm` desliga e usa só o painel). Sem gabarito
    (ou no compare clássico), cai no **juiz listwise** clássico: ordena as respostas às cegas e dá o
    veredito de aceitabilidade ("dá para usar em produção sem causar erro/dano?"). Com
-   `--judge-cascade` (modo econômico), dois juízes baratos votam e o forte só julga os vereditos em
+   `--judge-cascade` (modo econômico, só com juiz LLM), dois juízes baratos votam e o forte só julga os vereditos em
    dúvida (divergência, voto `parcial` ou resposta de comprimento extremo).
 4. **Finais** — depois de todas as etapas julgadas, os **N melhores por judge-score médio**
    (`finalists`, padrão 3) duelam entre si em **todos** os cenários, cada par nas duas ordens
@@ -318,6 +327,9 @@ que cai na banda de confiança e escala o resto). Formato próprio `jev-config@1
 - **CLI:** `prompt-builder jev validate|example|models|import|run|eval|compare|train|list|show|report|export|techniques`
   (alias `decisions`); `jev validate` e `--dry-run` não gastam.
 - **MCP:** as tools existentes aceitam `jev-config@1` (`start_run`, `estimate_cost`, `get_result`, `list_models`).
+- **O Jev também é o juiz default** dos três modos de benchmark: cada resposta vira uma decisão
+  tipada (veredito + critérios da rubrica) e o que o Jev deixa em dúvida escala para os juízes LLM
+  — ver "Juiz JEV por default" acima e `docs config` (seção `judging`).
 
 O Jev não é ZDR: em área LGPD sensível o modo fica indisponível. Contrato completo:
 `prompt-builder docs jev`.

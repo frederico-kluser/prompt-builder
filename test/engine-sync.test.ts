@@ -46,6 +46,9 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   gabarito: 'shim',
   judge: 'shim',
   refJudge: 'shim',
+  // Juiz JEV (modelo de decisão como juiz dos modos): fonte única em src/jevJudge.ts
+  // (mapping célula/banda + cascata para o painel LLM).
+  jevJudge: 'shim',
   variator: 'shim',
   // IMPL-020 (R-10:REC-3): o ledger de orçamento e o estimador são FONTE ÚNICA
   // em src/ — o motor do navegador injeta só o teto, o AbortSignal raiz e o
