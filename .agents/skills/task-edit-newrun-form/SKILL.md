@@ -10,7 +10,7 @@ metadata:
 Pré-requisitos: memória CoALA — `coala.py search "frontend nova run"`. A rota `/new` é o wrapper
 `web/src/pages/NewBenchmark.tsx`: o seletor **LLM | JEV** fica no topo (`?tipo=jev|llm`, escolha
 lembrada em `localStorage['pb.benchKind']`) e cada lado só monta quando visitado. O lado JEV é
-`pages/jev/NewJevRun.tsx` (decisões tipadas, contrato próprio `jev-config@1`); **não** misture campo de JEV no `NewRun` nem o contrário. O formulário LLM vive em
+`pages/jev/NewJevRun.tsx` (decisões tipadas, contrato próprio `jev-config@1`); **não** misture campo do MODO JEV no `NewRun` nem o contrário (o teste D-12 de `test/ux-jev-selector` ban é IMPORT do modo JEV). O **juiz** JEV dos modos de benchmark (`judgeEngine`/"Motor do juiz") é campo do `NewRun` por direito — ver "Onde pôr um campo novo". O formulário LLM vive em
 `web/src/pages/NewRun.tsx` e tem, desde 2026-09-27 (pedido do dono), **DUAS superfícies sobre o
 MESMO estado**: o fluxo **GUIADO** (default, `components/GuidedSetup.tsx` — `SmoothTabs` de 5
 passos: `objetivo | teste | participantes | limites | revisao`, uma pergunta por passo + plano em
@@ -59,7 +59,7 @@ orçamento; ponha-o no roving, fora do `<form>` ou depois do "Iniciar".
 ### Onde pôr um campo novo
 Regra: **se 9 em 10 runs não mexem nele, vai na seção Avançado**; só sobe para uma seção de
 conteúdo o que muda o resultado da run com frequência. O Avançado já concentra finalistas,
-tokens/timeout/concorrência, juiz em 2 ordens, modelos de referência e reescritor, esforço por
+tokens/timeout/concorrência, motor do juiz (Jev | LLM) e juiz em 2 ordens, modelos de referência e reescritor, esforço por
 papel, o eixo compare-llms, os gates de training, LGPD e o filtro de preço. Campo que o guiado
 não mostra ganha `onlyComplete` na pendência (ver abaixo).
 
