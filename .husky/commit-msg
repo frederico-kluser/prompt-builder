@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# .husky/commit-msg — Gate 1: Commits Convencionais (husky v9).
+# Rejeita mensagens fora do formato `tipo(escopo)!: descrição`.
+# Alternativa sem Node: python3 scripts/oss-gate.sh commit-msg "$1"
+npx --no -- commitlint --edit "$1"
