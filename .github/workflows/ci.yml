@@ -53,6 +53,11 @@ jobs:
 
       - name: Test (testes de contrato + guarda de sincronia)
         run: npm test
+        env:
+          # Folga do runner partilhado para o benchmark p95 de listRuns
+          # (IMPL-091): medido 260–268 ms no ubuntu-latest; o contrato LOCAL
+          # continua nos 200 ms (ver test/storage-runstore.test.ts).
+          PB_LISTRUNS_TETO_MS: 400
 
       - name: Build (dist/ — o que o npm publica)
         run: npm run build

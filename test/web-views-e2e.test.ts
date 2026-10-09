@@ -31,6 +31,7 @@ import { build } from 'esbuild';
 import { createServer, type Server } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -87,6 +88,24 @@ let spaUrl = '';
 
 /* ------------------------------------------------- harness (esbuild + fake) */
 
+/**
+ * IMPL-118: sem o pacote privado (`motion-plus` = @motionplus/core, registry
+ * autenticado por MOTION_TOKEN), os componentes Motion UI caem nos substitutos
+ * de `web/src/motion-plus-fallback/`. O `vite.config.ts` tem o MESMO alias
+ * condicional — aqui espelhamo-lo para o harness esbuild (sem ele, o bundle do
+ * harness rebenta com "Could not resolve motion-plus" em CI, onde o token não
+ * existe e o optionalDependency é pulado).
+ */
+const FALLBACK_MOTION = join(ROOT, 'web/src/motion-plus-fallback');
+const SEM_MOTION_PLUS = (() => {
+  try {
+    createRequire(join(ROOT, 'web', 'noop.js')).resolve('motion-plus');
+    return false;
+  } catch {
+    return true;
+  }
+})();
+
 const HARNESS_HTML = `<!doctype html><html lang="pt-br"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" /></head>
 <body><div id="root"></div><script type="module" src="/harness.js"></script></body></html>`;
@@ -109,6 +128,23 @@ async function buildHarness(dir: string): Promise<void> {
     loader: { '.css': 'empty' },
     logLevel: 'silent',
     plugins: [
+      // Ordem importa: o subpath mais específico antes do pacote (mesma receita
+      // do alias do vite.config.ts).
+      ...(SEM_MOTION_PLUS
+        ? [
+            {
+              name: 'motion-plus-fallback',
+              setup(b) {
+                b.onResolve({ filter: /^motion-plus(\/|$)/ }, (a) => ({
+                  path:
+                    a.path === 'motion-plus/animate-view'
+                      ? join(FALLBACK_MOTION, 'animate-view.ts')
+                      : join(FALLBACK_MOTION, 'split-text.ts'),
+                }));
+              },
+            },
+          ]
+        : []),
       {
         name: 'fake-api',
         setup(b) {
