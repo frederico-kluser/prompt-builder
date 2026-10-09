@@ -1,0 +1,63 @@
+# =============================================================================
+# CI — prompt-builder (frederico-kluser/prompt-builder)
+#
+# O job chama-se `build` de propósito: é o CONTEXT exigido pelo ruleset de main
+# (.github/rulesets/regras-main.json). Se renomear o job, atualize o ruleset.
+#
+# As actions estão fixadas por SHA (OpenSSF — pinned dependencies); ao atualizar,
+# corra o oss-pin-actions.sh da skill opensource-project.
+# Formato em TODO o `uses:`: owner/repo@<sha> # vX.Y.Z
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# Privilégio mínimo: o CI só precisa de ler o repositório.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # Node 24 = o que a suíte espera (web-locks usa o navigator.locks do 24)
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies (root + web)
+        run: npm ci && npm run setup
+
+      - name: Type-check (motor/CLI/servidor)
+        run: npm run typecheck
+
+      - name: Type-check (frontend)
+        working-directory: web
+        run: npx tsc -b
+
+      - name: Test (testes de contrato + guarda de sincronia)
+        run: npm test
+        env:
+          # Folga do runner partilhado para o benchmark p95 de listRuns
+          # (IMPL-091): medido 260–268 ms no ubuntu-latest; o contrato LOCAL
+          # continua nos 200 ms (ver test/storage-runstore.test.ts).
+          PB_LISTRUNS_TETO_MS: 400
+
+      - name: Build (dist/ — o que o npm publica)
+        run: npm run build

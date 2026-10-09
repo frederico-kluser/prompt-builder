@@ -1,0 +1,14 @@
+# Configuração dos templates de issue do prompt-builder (frederico-kluser/prompt-builder).
+# Issues em branco ficam desativadas: todo o reporte usa um template e os reportes de
+# segurança passam pelo canal privado definido no SECURITY.md.
+blank_issues_enabled: false
+contact_links:
+  - name: Vulnerabilidade de segurança
+    url: https://github.com/frederico-kluser/prompt-builder/security/advisories/new
+    about: Reporte vulnerabilidades de segurança em privado (Private Vulnerability Reporting). Nunca as abra como issues públicas.
+  - name: Política de segurança (SECURITY.md)
+    url: https://github.com/frederico-kluser/prompt-builder/security/policy
+    about: Versões suportadas, processo de divulgação e SLA de resposta.
+  - name: Perguntas e discussão
+    url: https://github.com/frederico-kluser/prompt-builder/discussions
+    about: Tire dúvidas de uso e discuta ideias antes de abrir um pedido de funcionalidade.

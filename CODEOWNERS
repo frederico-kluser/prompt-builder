@@ -1,0 +1,23 @@
+# CODEOWNERS — prompt-builder
+#
+# Obrigação de revisão: toda a mudança tem de ser aprovada pelo dono dos caminhos
+# afetados antes de entrar (a revisão de code owner é exigida pelos rulesets do
+# repositório — .github/rulesets/regras-main.json). O padrão mais específico vence;
+# mantenha as regras mais específicas em baixo.
+
+# Predefinição: tudo no repositório.
+*       @frederico-kluser
+
+# Motor, CLI e servidor — API pública do pacote prompt-builder-cli.
+/src/       @frederico-kluser
+
+# Frontend (SPA client-side) e contrato motor × web.
+/web/       @frederico-kluser
+
+# Documentação e material embarcado dos agentes (vai no tarball do npm).
+*.md            @frederico-kluser
+/agent-docs/    @frederico-kluser
+/skills/        @frederico-kluser
+
+# CI/CD, workflows e configuração do repositório (governança como código).
+/.github/   @frederico-kluser
