@@ -1,5 +1,9 @@
 # Prompt Builder
 
+[![build](https://img.shields.io/github/actions/workflow/status/frederico-kluser/prompt-builder/ci.yml?branch=main&label=build)](https://github.com/frederico-kluser/prompt-builder/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/prompt-builder-cli)](https://www.npmjs.com/package/prompt-builder-cli)
+[![license](https://img.shields.io/github/license/frederico-kluser/prompt-builder)](./LICENSE)
+
 Arena de benchmark **paralelo** de LLMs sobre a [OpenRouter](https://openrouter.ai), com três
 superfícies para o mesmo motor: **interface web**, **CLI** e **servidor MCP**. Em três modos:
 **comparar** vários modelos no mesmo desafio, **testar** vários prompts em um modelo, ou **treinar**
