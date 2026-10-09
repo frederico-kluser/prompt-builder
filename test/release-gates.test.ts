@@ -133,7 +133,9 @@ describe('IMPL-105 changesets: notas humanas e PR de versionamento', () => {
   });
 
   it('PR "Version Packages" vem do changesets/action com tag/dispatch no publish', () => {
-    expect(publish).toContain('changesets/action@v1');
+    // Governança OSS: a action vem FIXADA por SHA (OpenSSF pinned dependencies),
+    // com a tag original no comentário — `owner/repo@<sha> # v1`.
+    expect(publish).toMatch(/uses: changesets\/action@[0-9a-f]{40} # v1\b/u);
     expect(publish).toContain('version: npm run version-packages');
     expect(publish).toContain('publish: node scripts/release-tag.mjs');
     expect(existsSync(path.join(ROOT, 'scripts', 'release-tag.mjs'))).toBe(true);
