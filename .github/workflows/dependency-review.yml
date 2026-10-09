@@ -1,0 +1,33 @@
+# =============================================================================
+# Dependency Review — prompt-builder (frederico-kluser/prompt-builder)
+#
+# Bloqueia PRs que introduzem dependências com vulnerabilidade conhecida
+# (GitHub Dependency Graph / Advisory DB). Exige Dependency Graph ativo
+# (ativo por predefinição em repositórios públicos).
+#
+# As actions estão fixadas por SHA (pinned dependencies) — atualize com o
+# oss-pin-actions.sh da skill opensource-project.
+# =============================================================================
+
+name: Dependency Review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@3b139cfc5fae8b618d3eae3675e383bb1769c019 # v4.5.0

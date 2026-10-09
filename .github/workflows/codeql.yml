@@ -1,0 +1,53 @@
+# =============================================================================
+# CodeQL — prompt-builder (frederico-kluser/prompt-builder)
+#
+# Análise estática (SAST) do TypeScript do monorepo em push/PR e semanalmente.
+# Resultados no separador Security → Code scanning.
+#
+# As actions estão fixadas por SHA (pinned dependencies) — atualize com o
+# oss-pin-actions.sh da skill opensource-project.
+# =============================================================================
+
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "30 6 * * 2" # semanalmente, terça-feira às 06:30 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      security-events: write # gravar alertas em code scanning
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: "/language:javascript-typescript"

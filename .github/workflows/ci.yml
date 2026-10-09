@@ -1,0 +1,57 @@
+# =============================================================================
+# CI — prompt-builder (frederico-kluser/prompt-builder)
+#
+# O job chama-se `build` de propósito: é o CONTEXT exigido pelo ruleset de main
+# (.github/rulesets/regras-main.json). Se renomear o job, atualize o ruleset.
+#
+# As actions estão fixadas por SHA (OpenSSF — pinned dependencies); ao atualizar,
+# corra o oss-pin-actions.sh da skill opensource-project.
+# Formato em TODO o `uses:`: owner/repo@<sha> # vX.Y.Z
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# Privilégio mínimo: o CI só precisa de ler o repositório.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies (root + web)
+        run: npm ci && npm run setup
+
+      - name: Type-check (motor/CLI/servidor)
+        run: npm run typecheck
+
+      - name: Type-check (frontend)
+        working-directory: web
+        run: npx tsc -b
+
+      - name: Test (testes de contrato + guarda de sincronia)
+        run: npm test
+
+      - name: Build (dist/ — o que o npm publica)
+        run: npm run build

@@ -1,0 +1,31 @@
+# Dependabot — prompt-builder (frederico-kluser/prompt-builder)
+# Alertas + atualizações de dependências vulneráveis (referido no SECURITY.md).
+# Os PRs do Dependabot passam pelos mesmos gates: CI `build` verde + squash merge.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
