@@ -1,11 +1,21 @@
 # skills/ — skill de agente do prompt-builder
 
-Fonte **única** da skill `prompt-builder` ([`prompt-builder/SKILL.md`](./prompt-builder/SKILL.md) +
-[`prompt-builder/models.md`](./prompt-builder/models.md), os modelos sugeridos por papel):
-instruções enxutas para um agente de código operar o benchmark **sem interface web** (CLI/MCP),
-apontando para a documentação embarcada (`npx prompt-builder-cli docs <tópico>`) em vez de a
-duplicar. Vai no tarball npm (controlado pelo `files` do `package.json`) e é o que o CLI imprime
-com `prompt-builder skill`. **Não crie cópias**: instale por symlink ou use o `init` abaixo.
+Fonte **única** da skill `prompt-builder`: instruções enxutas para um agente de código operar o
+benchmark **sem interface web** (CLI/MCP), apontando para a documentação embarcada
+(`npx prompt-builder-cli docs <tópico>`) em vez de a duplicar. Vai no tarball npm (controlado pelo
+`files` do `package.json`) e é o que o CLI imprime com `prompt-builder skill`. **Não crie cópias**:
+instale por symlink ou use o `init` abaixo.
+
+| Arquivo | Papel |
+|---|---|
+| [`SKILL.md`](./prompt-builder/SKILL.md) | o fluxo: onde está → opções recomendadas → pergunta sobre outro modelo → `--dry-run` → run |
+| [`where.sh`](./prompt-builder/where.sh) | **onde o projeto está de verdade**: chamado pelo symlink de qualquer agente, segue o link até a pasta real e diz a raiz (checkout, pacote npm ou cópia), o comando do CLI para usar de qualquer diretório, build, key (só a presença), dados, worktree efêmero e o comando exato que corrige o que faltar. Só lê |
+| [`terminal.md`](./prompt-builder/terminal.md) | guia completo pelo terminal: os modos, as opções recomendadas, a pergunta obrigatória, o mapa de comandos, MCP, Jev, agente e os códigos de saída (`prompt-builder skill terminal`) |
+| [`models.md`](./prompt-builder/models.md) | os modelos sugeridos por papel (os defaults do `config example`) |
+
+Duas regras de comportamento vivem na skill, não no CLI: o agente **mantém as opções recomendadas**
+(só muda um default quando o usuário pede) e **sempre pergunta ao usuário** se ele quer sugerir
+outro modelo para rodar antes de gastar (`terminal.md` §3).
 
 ## Instalar num agente
 
@@ -63,4 +73,12 @@ também roda do pacote: `node_modules/prompt-builder-cli/scripts/install-agent-s
   `compare`/`vary`/`train` como `--dry-run` com o `--budget` escrito — exemplo que o pré-voo
   recusaria reprova. O que não existe não se escreve.
 - Frontmatter no padrão Agent Skills (`name` = `prompt-builder` = nome da pasta, `description`
-  rica em gatilhos, em PT-BR).
+  rica em gatilhos, em PT-BR, **até 1.024 caracteres** — o limite da especificação).
+- **Sem injeção `!`comando`` no SKILL.md.** Medido em 2026-10-10 (Claude Code 2.1): quando é o
+  MODELO que invoca a skill em modo de permissão padrão, uma linha `!`…`` faz o conteúdo inteiro
+  não carregar (o agente recebe só "Execute skill"), mesmo com `allowed-tools` pré-aprovando o
+  comando. A substituição só em TEXTO de `${CLAUDE_SKILL_DIR}` é segura (vira o caminho do link;
+  o `where.sh` resolve o real) — por isso o passo 1 manda o agente rodar o `where.sh`.
+- O `where.sh` e o `terminal.md` são arquivos de primeiro nível de propósito: o `init` copia só
+  esses (sem subpastas). Arquivo novo na skill exige `node scripts/tarball-gate.mjs --update`
+  (allowlist versionada do tarball).

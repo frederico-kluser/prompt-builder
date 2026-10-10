@@ -94,7 +94,13 @@ Opções: `--no-build`, `--no-bin`, `--no-plannotator`, `--target <dir>` (repet�
 
 A skill ([`skills/prompt-builder/SKILL.md`](./skills/prompt-builder/SKILL.md)) ensina o agente a
 operar o benchmark **sem interface web** — orçamento, `--dry-run`, NDJSON, MCP, modo agente, JEV,
-`sessions report`, exit codes — apontando para as docs embarcadas em vez de as duplicar.
+`sessions report`, exit codes — apontando para as docs embarcadas em vez de as duplicar. O primeiro
+passo dela é o [`where.sh`](./skills/prompt-builder/where.sh): chamado pelo symlink de qualquer
+agente, ele segue o link até a pasta **real** e diz onde o projeto está no disco, que comando do
+CLI usar de qualquer diretório e o que falta (build, lançadores, key). O guia completo pelo terminal
+fica em [`terminal.md`](./skills/prompt-builder/terminal.md). A skill parte das opções
+recomendadas (`models.md`, `config example`) e **sempre pergunta ao usuário** se ele quer sugerir
+outro modelo para rodar antes de gastar.
 
 **Servidor MCP** no mesmo binário:
 
@@ -621,7 +627,7 @@ prompt-builder/
 │                            #   TrainingReport, PromptsPage, Settings, jev/*
 │
 ├─ agent-docs/               # Docs embarcadas no pacote (`prompt-builder docs <tópico>`)
-├─ skills/prompt-builder/    # Skill de agente (SKILL.md + models.md) — fonte única, vai no tarball
+├─ skills/prompt-builder/    # Skill de agente (SKILL.md, models.md, terminal.md, where.sh) — fonte única, vai no tarball
 ├─ scripts/                  # agent-setup.sh, install-agent-skill.sh, docs-lint.ts, check-model-ids.ts,
 │                            #   gen-lgpd-allowlist.mjs, tarball-gate/smoke, release-tag, stats-sim
 ├─ test/                     # Testes de contrato (vitest) — `npm test`

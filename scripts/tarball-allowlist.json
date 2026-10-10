@@ -369,6 +369,8 @@
   "skills/README.md",
   "skills/prompt-builder/SKILL.md",
   "skills/prompt-builder/models.md",
+  "skills/prompt-builder/terminal.md",
+  "skills/prompt-builder/where.sh",
   "src/data/lgpd-allowlist.generated.json",
   "src/data/lgpd-compliance.json",
   "src/data/lgpd-retention.json"

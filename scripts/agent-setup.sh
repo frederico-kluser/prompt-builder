@@ -44,7 +44,10 @@
 # Ambiente: PB_BIN_DIR (destino dos lançadores) · PB_EXTRA_AGENT_DIRS="d1:d2"
 # (alvos extra) · PB_PLANNOTATOR_INSTALL=0 (nunca instala o binário) ·
 # PB_PLANNOTATOR_REPO / PB_VE_REPO / PB_SKILLS_REF (origem das skills) ·
-# PB_PLANNOTATOR_INSTALL_URL (instalador oficial).
+# PB_PLANNOTATOR_INSTALL_URL (instalador oficial) · PB_ALLOW_WORKTREE=1 (rodado
+# de um worktree LIGADO, o setup se re-executa a partir da cópia principal do
+# repo — lançadores e skill globais não podem apontar para uma pasta que some no
+# `git worktree remove`; a variável usa o worktree mesmo assim).
 #
 # Nunca usa sudo, nunca `npm -g`, nunca sobrescreve o que não escreveu.
 # Exit codes: 0 ok · 1 operacional (detalhe no fim) · 2 uso inválido.
@@ -105,6 +108,33 @@ CLI_JS="$ROOT/dist/cli/index.js"
 SKILL_INSTALLER="$SCRIPT_DIR/install-agent-skill.sh"
 BIN_DIR=${PB_BIN_DIR:-${HOME:-}/.local/bin}
 CANON=${HOME:-}/.agents/skills
+
+# Raiz da cópia PRINCIPAL do repo quando <raiz> é um worktree LIGADO (`git
+# worktree add`) do prompt-builder-cli; falha em checkout normal, pacote npm ou
+# repo alheio. (Mesma regra no scripts/install-agent-skill.sh.)
+raiz_principal() {
+  command -v git >/dev/null 2>&1 || return 1
+  topo=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ "$(CDPATH='' cd -P -- "$topo" 2>/dev/null && pwd)" = "$1" ] || return 1
+  gitdir=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  comum=$(cd "$1" 2>/dev/null && CDPATH='' cd -P -- "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd) || return 1
+  [ "$gitdir" != "$comum" ] || return 1
+  case $comum in
+    */.git) principal=${comum%/.git} ;;
+    *) return 1 ;; # repo bare: não há cópia principal
+  esac
+  grep -q '"name"[[:space:]]*:[[:space:]]*"prompt-builder-cli"' "$principal/package.json" 2>/dev/null || return 1
+  printf '%s\n' "$principal"
+}
+
+# Worktree ligado: lançadores e skill apontados para ELE quebram no `git worktree
+# remove` (foi assim que a skill sumiu de todos os agentes em 2026-10). O setup
+# global roda a partir da cópia principal; PB_ALLOW_WORKTREE=1 usa o worktree.
+if [ "${PB_ALLOW_WORKTREE:-0}" != 1 ] && principal=$(raiz_principal "$ROOT") &&
+  [ -f "$principal/scripts/agent-setup.sh" ]; then
+  aviso "$ROOT é um worktree ligado (some no \`git worktree remove\`): o setup global roda a partir da cópia principal $principal (PB_ALLOW_WORKTREE=1 usa o worktree)."
+  exec bash "$principal/scripts/agent-setup.sh" "$@"
+fi
 
 N_ERROS=0
 falha() {

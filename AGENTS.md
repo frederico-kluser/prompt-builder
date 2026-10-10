@@ -14,6 +14,11 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
 - agentes: `npm run agent-setup` (bins em `~/.local/bin` → ESTE `dist/`; skill por symlink em todo dir
   de agente, perfis `~/.claude-*`/`$CLAUDE_CONFIG_DIR` inclusos; Plannotator + skills do relatório);
   `:doctor`/`:uninstall`. Descoberta de dirs: fonte única `scripts/install-agent-skill.sh`.
+  ⚠️ Rodados de um **worktree ligado**, setup e instalador se re-executam da cópia principal (link
+  global para worktree quebrou a skill em todos os agentes em 2026-10; `PB_ALLOW_WORKTREE=1` força).
+  A skill começa por `skills/prompt-builder/where.sh` (segue o symlink até o local real e diz o
+  comando do CLI); **sem `!`comando`` no SKILL.md** — com injeção a skill não carrega quando o
+  modelo a invoca em modo de permissão padrão (medido; `test/skill-where.test.ts`).
 - start (prod): `npm start` — `node dist/server.js` (serve `web/dist` na raiz)
 - SPA estática (client-side, deploy Vercel): `npm run web:build` → `web/dist` (roda sem backend; ver `vercel.json`)
 - type-check backend: `npx tsc -p tsconfig.json --noEmit` · frontend: `cd web && npx tsc -b`

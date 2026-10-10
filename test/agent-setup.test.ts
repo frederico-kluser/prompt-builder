@@ -80,6 +80,10 @@ function envFor(home: string, extra: Record<string, string> = {}): NodeJS.Proces
     PATH: [stub, path.dirname(process.execPath), '/usr/local/bin', '/usr/bin', '/bin'].join(':'),
     XDG_CONFIG_HOME: path.join(home, '.config'),
     LANG: 'C.UTF-8',
+    // Rodando a suíte DENTRO de um worktree ligado, os instaladores se
+    // re-executariam da cópia principal (test/skill-where.test.ts cobre isso);
+    // aqui o alvo é sempre a skill DESTA árvore.
+    PB_ALLOW_WORKTREE: '1',
     ...extra,
   };
 }
