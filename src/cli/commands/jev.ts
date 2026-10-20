@@ -9,6 +9,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getGateway } from '../../openrouter.js';
+import { LOCAL_MODEL_PREFIX } from '../../localModels.js';
 import { enforceRunCompliance, isLgpdPolicyError, isPiiPolicyError } from '../../lgpd.js';
 import {
   JEV_CONFIG_FORMAT,
@@ -234,6 +235,14 @@ async function preflightCompliance(resolved: ResolvedJevConfig): Promise<JevComp
   }
 }
 
+/** A rodada usa SÓ modelos locais (competidores e reescritor `local/*`)? Então a key do OpenRouter é dispensável. */
+export function jevAllLocal(resolved: ResolvedJevConfig): boolean {
+  const ids = [...resolved.contestants.map((c) => c.modelId), resolved.train?.rewriterModelId].filter(
+    (m): m is string => typeof m === 'string' && m.length > 0,
+  );
+  return ids.length > 0 && ids.every((m) => m.startsWith(LOCAL_MODEL_PREFIX));
+}
+
 async function decisionCatalogOf(apiKey: string | null, out: Output): Promise<OpenRouterModel[]> {
   try {
     return await getGateway().listDecisionModels(apiKey ?? '');
@@ -348,7 +357,7 @@ async function cmdRunJev(argv: string[], forcedMode?: JevMode): Promise<number> 
     recusas.push(
       ...spendGuardRefusals({ dataDir: ctx.dataDir, config: jevGuardConfig(resolved), lock: values['allow-concurrent'] !== true }).map(toRefusal),
     );
-    const requires = apiKey ? [] : [keyRequirement()];
+    const requires = apiKey || jevAllLocal(resolved) ? [] : [keyRequirement()];
     if (resolved.budgetUsd !== undefined && est.reserveUsd > resolved.budgetUsd) {
       out.warn(`a reserva da porta dura (${usd(est.reserveUsd)}) passa do teto (${usd(resolved.budgetUsd)}): os últimos casos podem ser cortados.`);
     }
@@ -382,7 +391,8 @@ async function cmdRunJev(argv: string[], forcedMode?: JevMode): Promise<number> 
   if (budget.kind === 'missing') throw budgetRequiredError();
   let apiKey = '';
   try {
-    apiKey = await resolveKey(values);
+    // Tudo local (`local/*`: os competidores e o reescritor) não fala com o OpenRouter: sem key, segue.
+    apiKey = jevAllLocal(resolved) ? ((await tryResolveKey(values)) ?? '') : await resolveKey(values);
   } catch (err) {
     throw new CliError(`Exige a key do OpenRouter (OPENROUTER_API_KEY ou \`key set\`): ${(err as Error).message}`, EXIT.AUTH, isCliError(err) ? err.details : undefined, {
       code: 'auth.key_missing',

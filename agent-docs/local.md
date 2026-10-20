@@ -53,9 +53,26 @@ export OPENROUTER_ROLE_TIMEOUTS="competitor=300/900"
 { "models": { "competitors": ["deepseek/deepseek-v4-flash", "local/k2-horizon"], "judges": ["google/gemini-3.8-flash"] } }
 ```
 
+## Rodada 100% local (sem nuvem e sem key)
+
+Todos os papéis em `local/*` e o **juiz** também local — o juiz padrão do comparar é o JEV da nuvem
+(`typesafe/jev-1.13`, contra o gabarito), então escolha um dos dois:
+
+```json
+{ "jevJudge": { "decisionModelId": "local/laya-ptes" } }
+```
+
+```json
+{ "judgeEngine": "llm", "models": { "judges": ["local/k2-horizon"] } }
+```
+
+- `jev eval/compare/train` com competidores e reescritor só `local/*` rodam **sem key** (o pré-voo não a pede).
+- Teste de contrato: `test/local-models-offline.test.ts` (nuvem fora do ar, nenhum POST nela, custo 0).
+
 ## Armadilhas
 
-- O juiz e o gabarito continuam na nuvem por padrão: a key do OpenRouter segue necessária para eles.
+- O juiz e o gabarito continuam na nuvem por padrão: sem a configuração acima, a key do OpenRouter segue
+  necessária para eles.
 - Modelo local pequeno costuma truncar ou fugir do formato com prompt longo: meça o prompt **da versão
   local** (curto, com exemplos no formato exato) contra o da nuvem, não o mesmo prompt nos dois.
 - Um checkpoint de decisão só serve na pergunta para a qual foi treinado: meça antes de trocar o decisor
