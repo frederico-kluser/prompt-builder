@@ -473,8 +473,11 @@ describe('IMPL-042 (3) — prova ESTÁTICA: o ponto único é o único caminho a
     // repassa as chamadas do PRÓPRIO agente (a key fica nele). O modo agente não
     // passa pela cascata no envio — por isso o pré-voo RECUSA dado pessoal de
     // aparência real em run de agente sem exceção (runConfigSchema/enforceRunCompliance).
+    // Segunda exceção CONHECIDA (2026-10-20): src/localModels.ts é o interceptador do `fetch` DO
+    // gateway para modelos locais — recebe o corpo JÁ montado por buildBody (cascata aplicada) e só o
+    // entrega a um endpoint na própria máquina; não monta corpo próprio nem chama a nuvem.
     // Qualquer OUTRO arquivo aqui é um caminho novo fora do ponto único.
-    expect(quem.sort()).toEqual(['src/agent/inferenceProxy.ts', 'src/openrouter.ts']);
+    expect(quem.sort()).toEqual(['src/agent/inferenceProxy.ts', 'src/localModels.ts', 'src/openrouter.ts']);
   });
 
   it('em src/openrouter.ts todo POST de chat usa o corpo de buildBody, e buildBody passa pela cascata', () => {

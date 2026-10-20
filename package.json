@@ -85,6 +85,8 @@
     "dist/judge.d.ts",
     "dist/lgpd.js",
     "dist/lgpd.d.ts",
+    "dist/localModels.js",
+    "dist/localModels.d.ts",
     "dist/library.js",
     "dist/library.d.ts",
     "dist/llmVariants.js",

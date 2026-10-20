@@ -100,5 +100,11 @@
     "title": "Modo JEV (decisões tipadas)",
     "summary": "benchmark e evolução de definições de decisão do Jev (noul/choice/score) em casos rotulados: jev-config@1, métricas de calibração e bandas, custo por decisão, comparação com LLM e cascata",
     "approxTokens": 4300
+  },
+  {
+    "topic": "local",
+    "title": "Modelos locais",
+    "summary": "medir modelos que rodam na máquina lado a lado com a nuvem, sem proxy: decisões (llama-server SystemOne) e chat (endpoint OpenAI-compatível) por PB_LOCAL_MODELS/PB_LOCAL_CHAT; custo 0, uma chamada por vez por endpoint, `local list --check`",
+    "approxTokens": 800
   }
 ]

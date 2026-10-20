@@ -14,6 +14,7 @@ import {
   type RoleTimeouts,
 } from './openrouter.js';
 import { COST_ROLES, type CostRole } from './types.js';
+import { createLocalModelsFetch, parseLocalModelsEnv } from './localModels.js';
 
 type Env = Record<string, string | undefined>;
 
@@ -118,6 +119,10 @@ export function gatewayConfigFromEnv(env: Env): Partial<GatewayConfig> {
     .map((s) => s.trim())
     .filter(Boolean);
   if (ordem.length > 0) out.auditableProviderOrder = ordem;
+  // Modelos LOCAIS (PB_LOCAL_MODELS / PB_LOCAL_CHAT — src/localModels.ts): o transporte passa a
+  // atender `local/*` na própria máquina; sem as variáveis, o fetch segue o de sempre.
+  const local = parseLocalModelsEnv(env);
+  if (local.models.length > 0) out.fetch = createLocalModelsFetch((input, init) => globalThis.fetch(input, init), local);
   return out;
 }
 

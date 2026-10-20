@@ -40,6 +40,7 @@ import {
 import { cmdLibrary } from './commands/library.js';
 import { cmdBaseline } from './commands/baseline.js';
 import { cmdLimits } from './commands/limits.js';
+import { cmdLocal } from './commands/local.js';
 import { cmdTelemetry, recordExitTelemetry } from './commands/telemetry.js';
 import { installCostSamplesPersistence } from '../costSamplesStore.js';
 import { getDataDir } from '../storage.js';
@@ -249,6 +250,8 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
     case 'jev':
     case 'decisions':
       return cmdJev(argv);
+    case 'local':
+      return cmdLocal(argv);
     default: {
       const sugestao = cmd ? closestMatch(cmd, COMMANDS) : undefined;
       throw new CliError(

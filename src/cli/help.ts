@@ -37,6 +37,7 @@ export const COMMANDS = [
   'agents',
   'telemetry',
   'jev',
+  'local',
 ] as const;
 
 /** Rodapé comum de TODO help: contrato de saída + a tabela de códigos. */
@@ -85,6 +86,7 @@ const RESUMO: Record<string, string> = {
   prompts: 'regressão dos meta-prompts internos (reescritor, reflexão, datagen, gabarito, juiz)',
   doctor: 'diagnostica key, limites e o ambiente do modo agente',
   limits: 'teto diário de gasto da máquina',
+  local: 'modelos locais (llama-server, endpoint OpenAI-compatível) configurados',
   mcp: 'servidor MCP por stdio (mesmo binário)',
   agents: 'modo agente: arena de agentes com executor pi',
   telemetry: 'telemetria opt-in e os headers de atribuição enviados ao OpenRouter',
@@ -302,6 +304,10 @@ const USO: Record<string, string> = {
            sala do modo agente (canário real com --deep)`,
   limits: `  limits show              teto diário da máquina (UTC) e quem gastou hoje
   limits set --daily <usd|none>   teto somando TODOS os processos (default US$ 20)`,
+  local: `  local list [--check]     modelos locais de PB_LOCAL_MODELS (decisões, llama-server) e
+                           PB_LOCAL_CHAT (chat, OpenAI-compatível); --check pinga cada endpoint.
+                           Ids começam por local/, custo 0, uma chamada por vez por endpoint.
+                           Guia: docs local`,
   mcp: `  mcp [--data-dir <caminho>]
            servidor MCP por stdio (mesmo binário). Tools longas viram jobs
            (start_run → run_status → cancel_run); o modo agente passa pelo
