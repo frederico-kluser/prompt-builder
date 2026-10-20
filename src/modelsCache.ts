@@ -14,7 +14,8 @@
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { getGateway, listModels, primeModelsCache } from './openrouter.js';
+import { getGateway, listModels, parseModelsPayload, primeModelsCache } from './openrouter.js';
+import { LOCAL_MODEL_PREFIX, localCatalogEntries, parseLocalModelsEnv } from './localModels.js';
 import { isKnownPrice } from './engine/pricing.js';
 import { ensurePrivateDataDir, getDataDir } from './storage.js';
 import type { OpenRouterModel, OpenRouterModelPricing } from './types.js';
@@ -116,6 +117,22 @@ async function readFreshestCatalog(): Promise<CatalogFile | null> {
   return melhor;
 }
 
+/** Sem os modelos LOCAIS: eles dependem do ambiente desta invocação e nunca vão para o cache em disco. */
+export function stripLocalModels(models: OpenRouterModel[]): OpenRouterModel[] {
+  return models.filter((m) => !m.id.startsWith(LOCAL_MODEL_PREFIX));
+}
+
+/**
+ * Os modelos de chat LOCAIS (`PB_LOCAL_CHAT`, src/localModels.ts) entram em TODA leitura do catálogo — também
+ * quando ele vem do disco (o pré-voo e o gateway leem o cache e recusariam `local/…` como desconhecido).
+ */
+export function withLocalModels(models: OpenRouterModel[], env: Record<string, string | undefined> = process.env): OpenRouterModel[] {
+  const reg = parseLocalModelsEnv(env);
+  const remote = stripLocalModels(models);
+  if (!reg.models.some((m) => m.kind === 'chat')) return remote;
+  return [...remote, ...parseModelsPayload({ data: localCatalogEntries(reg, 'chat') })];
+}
+
 async function writeCatalog(apiKey: string, data: OpenRouterModel[]): Promise<void> {
   const target = catalogPath(apiKey);
   const dir = path.dirname(target);
@@ -125,7 +142,7 @@ async function writeCatalog(apiKey: string, data: OpenRouterModel[]): Promise<vo
     await ensurePrivateDataDir(dir);
     // `raw` e o payload cru do OpenRouter e nada em src/ o le — manter
     // persistiria megabytes por invocacao.
-    const enxuto = data.map(({ raw: _raw, ...rest }) => rest);
+    const enxuto = stripLocalModels(data).map(({ raw: _raw, ...rest }) => rest);
     const file: CatalogFile = {
       v: CACHE_VERSION,
       fetchedAt: Date.now(),
@@ -167,12 +184,13 @@ export async function ensureCatalog(
   const fresco = disk && Date.now() - disk.fetchedAt < ttl;
 
   if (!opts.force && disk && fresco) {
-    primeModelsCache(apiKey, disk.data, disk.fetchedAt);
-    return { models: disk.data, fetchedAt: disk.fetchedAt, source: 'disk', scope };
+    const models = withLocalModels(disk.data);
+    primeModelsCache(apiKey, models, disk.fetchedAt);
+    return { models, fetchedAt: disk.fetchedAt, source: 'disk', scope };
   }
 
   try {
-    const data = await listModels(apiKey, true);
+    const data = withLocalModels(await listModels(apiKey, true));
     await writeCatalog(apiKey, data);
     // Validacao do /models (IMPL-018): so os fail-closed viram alerta — o "-1"
     // dos roteadores e esperado e nao gera ruido.
@@ -191,12 +209,13 @@ export async function ensureCatalog(
     return { models: data, fetchedAt: Date.now(), source: 'network', scope };
   } catch (err) {
     if (disk) {
-      primeModelsCache(apiKey, disk.data, disk.fetchedAt);
+      const models = withLocalModels(disk.data);
+      primeModelsCache(apiKey, models, disk.fetchedAt);
       const horas = Math.round((Date.now() - disk.fetchedAt) / 3_600_000);
       opts.onWarn?.(
         `catálogo offline (${(err as Error).message}); usando cache de ${horas}h atrás.`,
       );
-      return { models: disk.data, fetchedAt: disk.fetchedAt, source: 'stale', scope };
+      return { models, fetchedAt: disk.fetchedAt, source: 'stale', scope };
     }
     throw err;
   }

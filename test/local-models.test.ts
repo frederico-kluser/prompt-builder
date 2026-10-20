@@ -177,3 +177,18 @@ describe('gateway com modelos locais', () => {
     expect(dec.answers).toEqual({ serve: { type: 'noul', noul: 0.91 } });
   });
 });
+
+describe('catálogo em disco × modelos locais', () => {
+  it('toda leitura traz os locais de chat (também do disco) e o disco nunca guarda um local', async () => {
+    const { withLocalModels, stripLocalModels } = await import('../src/modelsCache.js');
+    const { parseModelsPayload } = await import('../src/openrouter.js');
+    const remote = parseModelsPayload({ data: [{ id: 'deepseek/deepseek-v4-flash', pricing: { prompt: '0.0000001', completion: '0.0000003' } }] });
+    const env = { PB_LOCAL_CHAT: 'local/k2-horizon=http://127.0.0.1:18100/v1' };
+    const merged = withLocalModels(remote, env);
+    expect(merged.map((m) => m.id)).toEqual(['deepseek/deepseek-v4-flash', 'local/k2-horizon']);
+    // Um local que já estivesse no cache (de outra invocação) não duplica nem sobra sem a variável.
+    expect(withLocalModels(merged, env).map((m) => m.id)).toEqual(['deepseek/deepseek-v4-flash', 'local/k2-horizon']);
+    expect(withLocalModels(merged, {}).map((m) => m.id)).toEqual(['deepseek/deepseek-v4-flash']);
+    expect(stripLocalModels(merged).map((m) => m.id)).toEqual(['deepseek/deepseek-v4-flash']);
+  });
+});
