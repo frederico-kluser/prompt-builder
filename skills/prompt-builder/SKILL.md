@@ -38,6 +38,7 @@ prompt-builder sessions report <sessionId> --html relatorio.html
 Vencedor: `runs winner <id>` · handoff com gate: `sessions winner <id> --apply prompt.md` ·
 relatório para quem decide: brief da **plannotator-visual-explainer** (docs `report`).
 Guia completo (modos, Jev, agente, MCP, códigos de saída): `terminal.md`.
+Modelos locais: `PB_LOCAL_MODELS`/`PB_LOCAL_CHAT` + `local list --check` (docs `local`).
 Docs embarcadas: `prompt-builder docs --list`.
 
 ## Regras
