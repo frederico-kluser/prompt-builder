@@ -36,12 +36,20 @@ prompt-builder local list --check                                      # o que e
 | esforço | sem `reasoning` no catálogo: o modelo local roda como o servidor dele estiver configurado |
 
 Run com muitas chamadas locais: abaixe a concorrência global e suba os timeouts, porque a fila local
-conta no relógio de cada chamada (e rode a run como sempre):
+conta no relógio de cada chamada. O timeout do **competidor** é o `limits.timeoutMs` do config (padrão
+60 s); o `OPENROUTER_ROLE_TIMEOUTS` só define o teto do papel no gateway, que **encurta** e nunca alonga —
+suba os dois:
+
+```json
+{ "limits": { "timeoutMs": 300000 } }
+```
 
 ```bash
 export OPENROUTER_MAX_CONCURRENCY=4
 export OPENROUTER_ROLE_TIMEOUTS="competitor=300/900"
 ```
+
+O `--dry-run` mostra o timeout efetivo de cada papel (`Timeouts: competidor …`).
 
 ## Exemplos
 
@@ -77,3 +85,10 @@ Todos os papéis em `local/*` e o **juiz** também local — o juiz padrão do c
   local** (curto, com exemplos no formato exato) contra o da nuvem, não o mesmo prompt nos dois.
 - Um checkpoint de decisão só serve na pergunta para a qual foi treinado: meça antes de trocar o decisor
   de nuvem por ele (p≈0,5 em tudo = a pergunta está fora do que ele aprendeu).
+- Prompt feito para o runtime de um app (biblioteca própria no sandbox, código que roda no corpo de uma
+  função sem declarar outra, JSON lido pela gramática do app): o gerador de cenários e a referência não
+  conhecem esse contrato, e o juiz pune a resposta CERTA ("API inventada", "faltou a função principal",
+  "devolveu JSON"). Use cenários **pinados** com o gabarito conferido no runtime real e uma `rubric` que
+  descreva o contrato (as funções que existem, onde o código roda, qual campo do JSON julgar).
+- Aqui o competidor responde em texto livre: um prompt que depende da gramática do app (resposta presa a
+  um JSON Schema no motor local) é medido SEM ela. Leia o resultado como o efeito do prompt sozinho.
