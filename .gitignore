@@ -16,3 +16,7 @@ web/tsconfig.tsbuildinfo
 .env*
 
 .deep-orchestrator/
+
+# Memória CoALA local v3 (motor BM25F): base SQLite e backups são estado da
+# máquina (182 MB), não código. A versão versionada é a `-memory-agent-skill`.
+.agents/prompt-builder-coala-agent-skill/
