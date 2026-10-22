@@ -11,11 +11,23 @@
 
 import { z } from 'zod';
 import { contentHash } from '../hash.js';
-import { VISION_DATASET_FORMAT, VISION_ELEMENT_TYPES, VISION_FAMILIES, VISION_TASKS, VISION_VIEWPORT } from './types.js';
+import {
+  VISION_DATASET_FORMAT,
+  VISION_ELEMENT_TYPES,
+  VISION_FAMILIES,
+  VISION_GRID_VARIANTS,
+  VISION_RESOLUTIONS,
+  VISION_TASKS,
+  VISION_VIEWPORT,
+} from './types.js';
 import type {
   VisionAction,
+  VisionBenchmark,
   VisionDataset,
   VisionFamily,
+  VisionGridOverlay,
+  VisionGridVariant,
+  VisionResolutionRef,
   VisionScene,
   VisionTaskKind,
 } from './types.js';
@@ -61,6 +73,43 @@ const taskSchema = z.strictObject({
   tags: z.array(z.string().min(1)).optional(),
 });
 
+const imageRefSchema = z.strictObject({
+  file: z.string().min(1),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  bytes: z.number().int().positive(),
+});
+
+const resolutionRefSchema = imageRefSchema.extend({
+  id: z.enum(VISION_RESOLUTIONS),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+});
+
+const viewportSchema = z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() });
+
+const gridCellSchema = z.strictObject({
+  id: z.string().regex(/^[A-Z][0-9]+$/),
+  bbox: bboxSchema,
+  image: imageRefSchema,
+  viewport: viewportSchema,
+  source: bboxSchema,
+});
+
+const overlaySchema = z.strictObject({
+  id: z.enum(VISION_GRID_VARIANTS.filter((v) => v !== 'plain') as ['grid-simple', 'axis-grid', 'mark-grid']),
+  image: imageRefSchema,
+  viewport: viewportSchema,
+  cols: z.number().int().positive().optional(),
+  rows: z.number().int().positive().optional(),
+  step: z.number().positive().optional(),
+  cells: z.array(gridCellSchema).optional(),
+});
+
+const probesSchema = z.strictObject({
+  resolutions: z.array(resolutionRefSchema).optional(),
+  overlays: z.array(overlaySchema).optional(),
+});
+
 const sceneSchema = z.strictObject({
   id: z.string().min(1),
   family: z.enum(VISION_FAMILIES),
@@ -75,6 +124,7 @@ const sceneSchema = z.strictObject({
   code: z.strictObject({ file: z.string().min(1) }),
   elements: z.array(elementSchema),
   tasks: z.array(taskSchema),
+  probes: probesSchema.optional(),
   tags: z.array(z.string().min(1)).optional(),
 });
 
@@ -153,6 +203,39 @@ export function validateDatasetSemantics(dataset: VisionDataset): string[] {
         issues.push(`${ondeEl}: center (${el.center.x},${el.center.y}) ≠ centro da caixa (${cx.toFixed(1)},${cy.toFixed(1)})`);
       }
     }
+    if (scene.probes) {
+      const ondeProbe = `${onde} → probes`;
+      const resIds = new Set<string>();
+      for (const r of scene.probes.resolutions ?? []) {
+        if (resIds.has(r.id)) issues.push(`${ondeProbe}: resolução "${r.id}" duplicada`);
+        resIds.add(r.id);
+        if (r.width !== Number(r.id.split('x')[0]) || r.height !== Number(r.id.split('x')[1])) {
+          issues.push(`${ondeProbe}: resolução "${r.id}" não casa com ${r.width}×${r.height}`);
+        }
+      }
+      const overlayIds = new Set<string>();
+      for (const ov of scene.probes.overlays ?? []) {
+        if (overlayIds.has(ov.id)) issues.push(`${ondeProbe}: overlay "${ov.id}" duplicado`);
+        overlayIds.add(ov.id);
+        if (ov.viewport.width !== viewport.width || ov.viewport.height !== viewport.height) {
+          issues.push(`${ondeProbe}: overlay "${ov.id}" tem viewport ${ov.viewport.width}×${ov.viewport.height} ≠ dataset`);
+        }
+        if (ov.id === 'mark-grid' && (!ov.cells || ov.cells.length === 0)) {
+          issues.push(`${ondeProbe}: "mark-grid" sem células/crops`);
+        }
+        const celIds = new Set<string>();
+        for (const c of ov.cells ?? []) {
+          if (celIds.has(c.id)) issues.push(`${ondeProbe}: célula "${c.id}" duplicada no mark-grid`);
+          celIds.add(c.id);
+          if (c.bbox.x + c.bbox.w > viewport.width + 1 || c.bbox.y + c.bbox.h > viewport.height + 1) {
+            issues.push(`${ondeProbe}: célula "${c.id}" fora da imagem`);
+          }
+          if (c.source.x + c.source.w > viewport.width + 1 || c.source.y + c.source.h > viewport.height + 1) {
+            issues.push(`${ondeProbe}: recorte de "${c.id}" fora da imagem`);
+          }
+        }
+      }
+    }
     for (const task of scene.tasks) {
       const ondeTask = `${onde} → tarefa "${task.id}"`;
       if (taskIds.has(task.id)) issues.push(`${ondeTask}: id duplicado (global)`);
@@ -212,14 +295,82 @@ export interface VisionPlannedCell {
   kind: VisionTaskKind;
   scene: VisionScene;
   task?: VisionScene['tasks'][number];
+  /** Banco de probe desta célula (ausente = F0). */
+  benchmark?: VisionBenchmark;
+  /** Escala (`resolution`) ou variante (`grid`). */
+  variant?: string;
+  resolution?: VisionResolutionRef;
+  overlay?: VisionGridOverlay;
 }
 
-/** Planejamento determinístico de todas as células do run. */
+/** Opções do planejamento dos bancos de probe. */
+export interface VisionPlanOptions {
+  benchmark?: VisionBenchmark;
+  resolutions?: readonly string[];
+  gridVariants?: readonly VisionGridVariant[];
+}
+
+/**
+ * Planejamento determinístico de todas as células do run.
+ *
+ * O F0 (`grounding`) não muda: 1 mapa por cena + 1 ação por tarefa. Os bancos
+ * de probe trocam a APRESENTAÇÃO e mantêm a mesma verdade:
+ *   • `resolution`: 1 mapa por (cena × escala) — só o modo mapa faz sentido;
+ *   • `grid`: 1 ação por (tarefa × variante) — só o modo ação faz sentido.
+ * Variante ausente do manifesto é simplesmente omitida; o CLI recusa o run
+ * vazio antes de gastar.
+ */
 export function planCells(
   scenes: readonly VisionScene[],
   tasks: readonly VisionTaskKind[],
+  opts: VisionPlanOptions = {},
 ): VisionPlannedCell[] {
+  const benchmark = opts.benchmark ?? 'grounding';
   const plan: VisionPlannedCell[] = [];
+  if (benchmark === 'resolution') {
+    if (!tasks.includes('map')) return plan;
+    for (const scene of scenes) {
+      const disponiveis = scene.probes?.resolutions ?? [];
+      const wanted = opts.resolutions ? new Set(opts.resolutions) : null;
+      for (const r of disponiveis) {
+        if (wanted && !wanted.has(r.id)) continue;
+        plan.push({
+          cellId: `map:${scene.id}@${r.id}`,
+          kind: 'map',
+          scene,
+          benchmark,
+          variant: r.id,
+          resolution: r,
+        });
+      }
+    }
+    return plan;
+  }
+  if (benchmark === 'grid') {
+    if (!tasks.includes('action')) return plan;
+    const wanted = new Set(opts.gridVariants ?? VISION_GRID_VARIANTS);
+    for (const scene of scenes) {
+      for (const task of scene.tasks) {
+        for (const variant of VISION_GRID_VARIANTS) {
+          if (!wanted.has(variant)) continue;
+          const overlay =
+            variant === 'plain' ? undefined : scene.probes?.overlays?.find((o) => o.id === variant);
+          // Sem o overlay pinado a variante não existe naquele cenário.
+          if (variant !== 'plain' && !overlay) continue;
+          plan.push({
+            cellId: `action:${task.id}@${variant}`,
+            kind: 'action',
+            scene,
+            task,
+            benchmark,
+            variant,
+            ...(overlay ? { overlay } : {}),
+          });
+        }
+      }
+    }
+    return plan;
+  }
   if (tasks.includes('map')) {
     for (const scene of scenes) plan.push({ cellId: `map:${scene.id}`, kind: 'map', scene });
   }

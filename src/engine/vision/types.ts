@@ -77,6 +77,61 @@ export const VISION_TASKS = ['map', 'action'] as const;
 
 export type VisionTaskKind = (typeof VISION_TASKS)[number];
 
+/**
+ * Bancos de prova do MESMO dataset. `grounding` é o F0 (imagem crua); os
+ * demais são experimentos CONTROLADOS que mudam UMA variável por célula:
+ *   • `resolution` — a mesma tela em 1080p/720p/540p/360p, com coordenadas
+ *     convertidas de volta para a grade canônica (mede robustez à escala);
+ *   • `grid` — a mesma tarefa de ação com (ou sem) overlay de grade e, no
+ *     `mark-grid`, uma segunda rodada sobre o recorte da célula escolhida.
+ * A prova em si (imagem + verdade do DOM) é a mesma; o que muda é a
+ * APRESENTAÇÃO. Nunca se cria uma prova na hora da run.
+ */
+export const VISION_BENCHMARKS = ['grounding', 'resolution', 'grid'] as const;
+
+export type VisionBenchmark = (typeof VISION_BENCHMARKS)[number];
+
+/** Escalas do banco `resolution` — todas 16:9, para não misturar recorte. */
+export const VISION_RESOLUTIONS = ['1920x1080', '1280x720', '960x540', '640x360'] as const;
+
+export type VisionResolution = (typeof VISION_RESOLUTIONS)[number];
+
+/** Variantes do banco `grid` (controle + técnicas do roadmap). */
+export const VISION_GRID_VARIANTS = ['plain', 'grid-simple', 'axis-grid', 'mark-grid'] as const;
+
+export type VisionGridVariant = (typeof VISION_GRID_VARIANTS)[number];
+
+/** Célula do `mark-grid`: caixa canônica + o recorte que a segunda rodada vê. */
+export interface VisionGridCellSpec {
+  id: string;
+  bbox: VisionBBox;
+  /** Recorte com padding, já ampliado — o que a rodada 2 recebe. */
+  image: VisionImageRef;
+  viewport: { width: number; height: number };
+  /** Caixa canônica efetivamente recortada (inclui o padding). */
+  source: VisionBBox;
+}
+
+/** Overlay de grade renderizado no build (nunca desenhado na hora da prova). */
+export interface VisionGridOverlay {
+  id: Exclude<VisionGridVariant, 'plain'>;
+  image: VisionImageRef;
+  viewport: { width: number; height: number };
+  cols?: number;
+  rows?: number;
+  /** Passo dos eixos (px canônicos), no `axis-grid`. */
+  step?: number;
+  /** Células rotuladas do `mark-grid` (com os recortes da rodada 2). */
+  cells?: VisionGridCellSpec[];
+}
+
+/** Variante de resolução pinada no manifesto (o native reusa a imagem base). */
+export interface VisionResolutionRef extends VisionImageRef {
+  id: VisionResolution;
+  width: number;
+  height: number;
+}
+
 /** Caixa em PIXELS da imagem (1920×1080) — sempre normalizada para essa grade. */
 export interface VisionBBox {
   x: number;
@@ -136,6 +191,13 @@ export interface VisionActionTask {
   tags?: string[];
 }
 
+/** Referência de imagem pinada por sha256 (base e variantes). */
+export interface VisionImageRef {
+  file: string;
+  sha256: string;
+  bytes: number;
+}
+
 /** Um cenário = uma imagem 1080p + os elementos + as tarefas + o código. */
 export interface VisionScene {
   id: string;
@@ -151,6 +213,14 @@ export interface VisionScene {
   elements: VisionElement[];
   /** Tarefas do modo ação (o modo mapa usa o cenário inteiro). */
   tasks: VisionActionTask[];
+  /**
+   * Variantes de APRESENTAÇÃO pinadas junto com a tela base. Ausente = o
+   * dataset só tem o F0; os bancos novos recusam rodar sem as variantes.
+   */
+  probes?: {
+    resolutions?: VisionResolutionRef[];
+    overlays?: VisionGridOverlay[];
+  };
   tags?: string[];
 }
 
@@ -198,6 +268,29 @@ export interface VisionActionPrediction {
   x: number | null;
   y: number | null;
   text: string | null;
+  /** Célula declarada no `mark-grid` (ex.: "C3"); ausente nos outros bancos. */
+  cell?: string | null;
+}
+
+/** Rastro de uma rodada do `mark-grid` (a 1ª e a 2ª são medidas e cobradas). */
+export interface VisionRoundTrace {
+  round: 1 | 2;
+  prompt: string;
+  status: 'ok' | 'error' | 'skipped';
+  error?: string;
+  latencyMs: number;
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+  provider?: string;
+  parseOk: boolean;
+  coordScale: VisionCoordScale;
+  raw: string;
+  prediction: VisionActionPrediction | null;
+  /** Célula da grade (rodada 1) / recorte usado (rodada 2). */
+  cell?: string | null;
+  crop?: VisionBBox;
+  imageViewport?: { width: number; height: number };
 }
 
 /** Resultado do parser sobre a saída crua do modelo. */
@@ -242,6 +335,11 @@ export interface VisionMapCell {
   coordScale: VisionCoordScale;
   predictions: VisionElementPrediction[];
   score?: VisionMapScore;
+  /** Banco e variante desta célula (`resolution`: 1280x720 etc.). */
+  benchmark?: VisionBenchmark;
+  variant?: string;
+  /** Viewport da imagem ENVIADA (as previsões já estão na grade canônica). */
+  imageViewport?: { width: number; height: number };
 }
 
 export interface VisionActionCell {
@@ -266,6 +364,13 @@ export interface VisionActionCell {
   coordScale: VisionCoordScale;
   prediction: VisionActionPrediction | null;
   score?: VisionActionScore;
+  /** Banco e variante desta célula (`grid`: plain/grid-simple/...). */
+  benchmark?: VisionBenchmark;
+  variant?: string;
+  /** Rodadas efetivamente executadas (2 no `mark-grid` com recorte). */
+  rounds?: 1 | 2;
+  /** Rastros das rodadas (a 1ª também custou e fica auditável). */
+  trace?: VisionRoundTrace[];
 }
 
 export type VisionCell = VisionMapCell | VisionActionCell;
@@ -360,12 +465,49 @@ export interface VisionActionAggregate {
   byAction: Record<string, { tasks: number; passed: number; passRate: number }>;
 }
 
+/** Agregado de UMA variante (resolução ou grade) para um modelo. */
+export interface VisionVariantAggregate {
+  variant: string;
+  benchmark: VisionBenchmark;
+  cells: number;
+  errors: number;
+  skipped: number;
+  calls: number;
+  costUsd: number;
+  meanLatencyMs: number;
+  tokensIn: number;
+  tokensOut: number;
+  /** Presente no banco `resolution` (métricas de mapa). */
+  map?: {
+    scenes: number;
+    f1: number;
+    precision: number;
+    recall: number;
+    labelF1: number;
+    typeAccuracy: number | null;
+  };
+  /** Presente no banco `grid` (métricas de ação). */
+  action?: {
+    tasks: number;
+    passed: number;
+    passRate: number;
+    actionAccuracy: number;
+    targetHitRate: number | null;
+    textOkRate: number | null;
+  };
+}
+
 /** Um competidor = um modelo, com os dois agregados. */
 export interface VisionContestant {
   contestantId: string;
   modelId: string;
   map?: VisionMapAggregate;
   action?: VisionActionAggregate;
+  /**
+   * Recorte por variante do banco (o que responde "cai quanto em 360p?" ou
+   * "o Mark-Grid bate o controle?"). Fora dos bancos de probe, ausente.
+   */
+  variants?: VisionVariantAggregate[];
   /** Nota de manchete: média das notas disponíveis (map F1, action passRate). */
   score: number;
   calls: number;
@@ -381,6 +523,18 @@ export interface VisionContestant {
 /** Configuração RESOLVIDA de uma run (vai no record para reprodutibilidade). */
 export interface VisionRunConfig {
   models: string[];
+  /** Banco de prova; ausente/`grounding` = F0 (compatível com runs antigas). */
+  benchmark?: VisionBenchmark;
+  /** `resolution`: escalas a rodar (default: todas as do dataset). */
+  resolutions?: string[];
+  /** `grid`: variantes a rodar (default: todas). */
+  gridVariants?: VisionGridVariant[];
+  /**
+   * Provedor FIXADO no OpenRouter (ex.: `DeepInfra`). Sem pin, o roteamento
+   * automático troca de provedor entre células — e um provedor que ignora a
+   * imagem vira "resultado do modelo". Com pin, a comparação mede o modelo.
+   */
+  provider?: string;
   tasks: VisionTaskKind[];
   families: VisionFamily[] | null;
   scenes: string[] | null;
@@ -402,10 +556,15 @@ export interface VisionRunRecord {
   dataset: { version: string; hash: string; scenes: string[]; images: Record<string, string> };
   /** Versão do contrato de prompt (muda o texto = muda a medição). */
   promptVersion: string;
+  /** Banco de prova (ausente em records antigos = `grounding`). */
+  benchmark?: VisionBenchmark;
   config: VisionRunConfig;
   contestants: VisionContestant[];
   cells: VisionCell[];
   totals: {
+    /** Células avaliadas (no mark-grid, uma célula pode ter 2 chamadas). */
+    cells?: number;
+    /** Chamadas HTTP efetivamente despachadas. */
     calls: number;
     errors: number;
     skipped: number;

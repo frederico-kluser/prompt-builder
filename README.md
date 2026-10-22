@@ -360,8 +360,16 @@ acerto de tipo e, no modo ação, ação + alvo + texto.
 prompt-builder vision dataset list                     # cenários, elementos, hash
 prompt-builder vision run --models google/gemini-3.8-flash --budget 2 --dry-run
 prompt-builder vision run --models google/gemini-3.8-flash,anthropic/claude-opus-5.5 --budget 2
+prompt-builder vision run --models a,b --benchmark resolution --provider DeepInfra --budget 2
+prompt-builder vision run --models a,b --benchmark grid --provider DeepInfra --budget 2
 prompt-builder vision report <id> --html vision-<id>.html
 ```
+
+Além do F0 (imagem crua), dois bancos medem variantes do MESMO dataset, célula a célula:
+**resolution** (1080p → 720p → 540p → 360p, coordenadas convertidas de volta) e **grid** (controle
+`plain`, grade 9×9, réguas de eixos e `mark-grid` 6×4 com recorte ampliado em 2ª rodada). Em
+comparações entre modelos, fixe `--provider`: sem pin o OpenRouter pode trocar de provedor entre
+chamadas e o número passa a medir roteamento, não grounding.'
 
 Na SPA (`/vision`, também no card da Nova run) a mesma medição roda na aba: você escolhe quantos
 cenários puxar do banco, os modelos e o teto; durante a run, passar o mouse num cenário mostra a
@@ -369,8 +377,9 @@ cenários puxar do banco, os modelos e o teto; durante a run, passar o mouse num
 calor de cada modelo** ao passar o mouse/focar a célula (previsões, controles não vistos e alvos das
 ações). O CLI e a SPA compartilham o MESMO motor e o MESMO dataset.
 
-Nada de grade/zoom/Set-of-Mark/árvore de acessibilidade nesta primeira versão: o benchmark mede o
-piso **imagem crua × coordenada**, e cada técnica da pesquisa entra como variante medida. O roadmap
+O F0 mede o piso **imagem crua × coordenada**; `resolution` e `grid` já são variantes medidas, e
+Set-of-Mark por âncora, árvore de acessibilidade, zoom condicional e verificação multi-turno entram
+como próximos bancos. O roadmap
 completo (percepção, memória, orquestração multi-modelo, segurança e dataset vivo) está em
 [ROADMAP-VISAO.md](./ROADMAP-VISAO.md); o contrato de uso, em `prompt-builder docs vision`.
 

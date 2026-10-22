@@ -172,3 +172,221 @@ describe('runner do benchmark de visão', () => {
     expect(scene.viewport).toEqual({ width: VISION_VIEWPORT.width, height: VISION_VIEWPORT.height });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bancos de probe: resolução e grade
+// ---------------------------------------------------------------------------
+
+/** Gateway que responde na escala/viewport que o system prompt declara. */
+function fakeProbeGateway(
+  scene: VisionScene,
+  opts: { round2?: (correto: string) => string } = {},
+): {
+  gw: OpenRouterGateway;
+  calls: ChatCompletionParams[];
+} {
+  const calls: ChatCompletionParams[] = [];
+  const gw = {
+    peekModelsCache: () => ({ data: [] }),
+    chatCompletion: async (p: ChatCompletionParams): Promise<ChatCompletionResult> => {
+      calls.push(p);
+      const system = String(p.messages[0]!.content);
+      const user = String(p.messages[1]!.content);
+      const pedido = /Pedido: ("(?:[^"\\]|\\.)*")/.exec(user)?.[1];
+      const instruction = pedido ? (JSON.parse(pedido) as string) : '';
+      const task = scene.tasks.find((t) => t.instruction === instruction);
+      const alvo = task?.expect.targetId ? scene.elements.find((e) => e.id === task.expect.targetId) : undefined;
+      let text: string;
+      if (system.includes('TODOS os elementos interativos')) {
+        const dim = /A imagem tem (\d+)×(\d+) pixels/.exec(system);
+        const w = dim ? Number(dim[1]) : 1920;
+        const h = dim ? Number(dim[2]) : 1080;
+        const sx = w / scene.viewport.width;
+        const sy = h / scene.viewport.height;
+        text = JSON.stringify({
+          elements: scene.elements.map((el) => ({
+            type: el.type,
+            label: el.label,
+            iconDescription: el.iconDescription,
+            x: Math.round(el.center.x * sx),
+            y: Math.round(el.center.y * sy),
+          })),
+        });
+      } else if (system.includes('RECORTE AMPLIADO')) {
+        const cell = /célula ([A-F][0-9])/.exec(system)?.[1] ?? 'A1';
+        const source = /x=(\d+)\.\.(\d+), y=(\d+)\.\.(\d+)/.exec(system);
+        const viewport = /recorte tem (\d+)×(\d+) pixels/.exec(system);
+        const vw = viewport ? Number(viewport[1]) : 640;
+        const vh = viewport ? Number(viewport[2]) : 540;
+        const cw = 1920 / 6;
+        const ch = 1080 / 4;
+        const col = cell.charCodeAt(0) - 65;
+        const row = Number(cell[1]) - 1;
+        const padX = Math.round(cw * 0.08);
+        const padY = Math.round(ch * 0.08);
+        const sx = Math.max(0, Math.round(col * cw) - padX);
+        const sy = Math.max(0, Math.round(row * ch) - padY);
+        const sw = Math.min(1920 - sx, Math.round(cw) + padX * 2);
+        const sh = Math.min(1080 - sy, Math.round(ch) + padY * 2);
+        // O source declarado no prompt confere com o derivado da grade.
+        expect(source).not.toBeNull();
+        expect(task).toBeDefined();
+        expect(alvo).toBeDefined();
+        text = JSON.stringify({
+          action: task!.expect.action,
+          target: alvo!.label ?? alvo!.iconDescription,
+          x: Math.round(((alvo!.center.x - sx) / sw) * vw),
+          y: Math.round(((alvo!.center.y - sy) / sh) * vh),
+          text: task!.expect.text ?? null,
+        });
+        if (opts.round2) text = opts.round2(text);
+      } else if (system.includes('grade GROSSA')) {
+        expect(task).toBeDefined();
+        expect(alvo).toBeDefined();
+        const col = Math.min(5, Math.floor(alvo!.center.x / (1920 / 6)));
+        const row = Math.min(3, Math.floor(alvo!.center.y / (1080 / 4)));
+        text = JSON.stringify({
+          cell: `${String.fromCharCode(65 + col)}${row + 1}`,
+          action: task!.expect.action,
+          target: alvo!.label ?? alvo!.iconDescription,
+          x: alvo!.center.x,
+          y: alvo!.center.y,
+          text: task!.expect.text ?? null,
+        });
+      } else {
+        expect(task).toBeDefined();
+        expect(alvo).toBeDefined();
+        text = JSON.stringify({
+          action: task!.expect.action,
+          target: alvo!.label ?? alvo!.iconDescription,
+          x: alvo!.center.x,
+          y: alvo!.center.y,
+          text: task!.expect.text ?? null,
+        });
+      }
+      return {
+        text,
+        tokensIn: 1200,
+        tokensOut: 120,
+        latencyMs: 42,
+        raw: { fake: true },
+        cost: { usd: 0.0002, source: 'usage' },
+      };
+    },
+  } as unknown as OpenRouterGateway;
+  return { gw, calls };
+}
+
+describe('bancos de probe do benchmark de visão', () => {
+  it('resolução envia a imagem reduzida e converte as coordenadas de volta para 1080p', async () => {
+    resetSceneImageCache();
+    const loaded = await loadVisionDataset();
+    const scene = loaded.dataset.scenes.find((s) => s.id === 'bootstrap-login')!;
+    const { gw, calls } = fakeProbeGateway(scene);
+    const record = await runVision({
+      dataset: loaded.dataset,
+      datasetRoot: visionDataDir(),
+      config: config({
+        benchmark: 'resolution',
+        tasks: ['map'],
+        resolutions: ['1920x1080', '960x540'],
+      }),
+      apiKey: 'sk-or-v1-fake',
+      gateway: gw,
+    });
+    expect(calls).toHaveLength(2);
+    expect(record.benchmark).toBe('resolution');
+    expect(record.contestants[0]?.map?.f1).toBe(1);
+    expect(record.contestants[0]?.score).toBe(1);
+    const variants = record.contestants[0]?.variants ?? [];
+    expect(variants.map((v) => v.variant)).toEqual(['1920x1080', '960x540']);
+    expect(variants.every((v) => v.map?.f1 === 1)).toBe(true);
+    const reduzida = record.cells.find((c) => c.kind === 'map' && c.variant === '960x540')!;
+    expect(reduzida.kind).toBe('map');
+    if (reduzida.kind === 'map') {
+      expect(reduzida.imageViewport).toEqual({ width: 960, height: 540 });
+      expect(reduzida.predictions[0]?.x).toBe(scene.elements[0]!.center.x);
+      expect(reduzida.cellId).toBe(`map:${scene.id}@960x540`);
+    }
+    expect(String(calls[1]!.messages[0]!.content)).toContain('reduzida');
+  });
+
+  it('grade compara plain × mark-grid e o mark-grid faz 2 rodadas sobre o recorte', async () => {
+    resetSceneImageCache();
+    const loaded = await loadVisionDataset();
+    const scene = loaded.dataset.scenes.find((s) => s.id === 'bootstrap-login')!;
+    const { gw, calls } = fakeProbeGateway(scene);
+    const record = await runVision({
+      dataset: loaded.dataset,
+      datasetRoot: visionDataDir(),
+      config: config({
+        benchmark: 'grid',
+        tasks: ['action'],
+        gridVariants: ['plain', 'mark-grid'],
+      }),
+      apiKey: 'sk-or-v1-fake',
+      gateway: gw,
+    });
+    // 4 tarefas × 2 variantes; mark-grid gasta 2 chamadas por tarefa.
+    expect(calls).toHaveLength(4 * 2 + 4);
+    expect(record.totals.calls).toBe(12);
+    expect(record.benchmark).toBe('grid');
+    expect(record.promptVersion).toBe('vision-grid-prompt@1');
+    expect(record.contestants[0]?.action?.passRate).toBe(1);
+    const variants = record.contestants[0]?.variants ?? [];
+    expect(variants.find((v) => v.variant === 'plain')?.action?.passRate).toBe(1);
+    const mark = variants.find((v) => v.variant === 'mark-grid')!;
+    expect(mark.action?.passRate).toBe(1);
+    expect(mark.calls).toBe(8);
+    const markCells = record.cells.filter((c) => c.kind === 'action' && c.variant === 'mark-grid');
+    expect(markCells).toHaveLength(4);
+    for (const cell of markCells) {
+      if (cell.kind !== 'action') continue;
+      expect(cell.rounds).toBe(2);
+      expect(cell.trace).toHaveLength(2);
+      expect(cell.trace?.[0]?.cell).toMatch(/^[A-F][1-4]$/);
+      expect(cell.trace?.[1]?.crop).toBeDefined();
+      expect(cell.score?.pass).toBe(true);
+    }
+  });
+});
+
+
+describe('mark-grid — refino de posição não reescreve a ação', () => {
+  it('mantém ação/alvo/texto da rodada 1 e usa só o ponto da rodada 2', async () => {
+    resetSceneImageCache();
+    const loaded = await loadVisionDataset();
+    const scene = loaded.dataset.scenes.find((s) => s.id === 'bootstrap-login')!;
+    // A rodada 2 "erra" a ação de propósito; o placar deve preservar a rodada 1.
+    const { gw } = fakeProbeGateway(scene, {
+      round2: (correto) => {
+        const p = JSON.parse(correto) as { x: number; y: number };
+        return JSON.stringify({ action: 'click', target: 'outra coisa', x: p.x, y: p.y, text: 'texto errado' });
+      },
+    });
+    const record = await runVision({
+      dataset: loaded.dataset,
+      datasetRoot: visionDataDir(),
+      config: config({
+        benchmark: 'grid',
+        tasks: ['action'],
+        gridVariants: ['mark-grid'],
+        scenes: ['bootstrap-login'],
+      }),
+      apiKey: 'sk-or-v1-fake',
+      gateway: gw,
+    });
+    expect(record.contestants[0]?.action?.passRate).toBe(1);
+    const typeCell = record.cells.find(
+      (c) => c.kind === 'action' && c.taskId === 'bootstrap-login-a1',
+    );
+    expect(typeCell?.kind).toBe('action');
+    if (typeCell?.kind === 'action') {
+      expect(typeCell.rounds).toBe(2);
+      expect(typeCell.trace?.[1]?.prediction?.action).toBe('click');
+      expect(typeCell.prediction?.action).toBe('type');
+      expect(typeCell.prediction?.text).toBe('aluna@exemplo.com');
+      expect(typeCell.score?.pass).toBe(true);
+    }
+  });
+});

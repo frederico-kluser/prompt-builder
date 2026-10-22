@@ -1,7 +1,7 @@
 {
   "format": "vision-dataset@1",
-  "version": "0.1.0",
-  "generator": "vision-build@1",
+  "version": "0.2.0",
+  "generator": "vision-build@2",
   "createdAt": "2026-10-21T23:37:31.034Z",
   "viewport": {
     "width": 1920,
@@ -433,7 +433,664 @@
         "dashboard",
         "tabela",
         "navbar"
-      ]
+      ],
+      "probes": {
+        "resolutions": [
+          {
+            "id": "1920x1080",
+            "width": 1920,
+            "height": 1080,
+            "file": "images/bootstrap-painel-cursos.png",
+            "sha256": "c2e1a1416bac976f59517d9c8eb626597fb7c937a2f5b59b63b97cf187332b03",
+            "bytes": 65307
+          },
+          {
+            "id": "1280x720",
+            "width": 1280,
+            "height": 720,
+            "file": "resolutions/bootstrap-painel-cursos-1280x720.png",
+            "sha256": "9bf3fd719bc909d7ec533ed657a2a1395759293e0589c3204f5a0e2fee2820f9",
+            "bytes": 71030
+          },
+          {
+            "id": "960x540",
+            "width": 960,
+            "height": 540,
+            "file": "resolutions/bootstrap-painel-cursos-960x540.png",
+            "sha256": "9a382965505854c67b22d14d246e91131941fc313314d23bea4de6264fff2dad",
+            "bytes": 43522
+          },
+          {
+            "id": "640x360",
+            "width": 640,
+            "height": 360,
+            "file": "resolutions/bootstrap-painel-cursos-640x360.png",
+            "sha256": "a31acfbc43f20668fd10e7f8d93d8d3ee9f1face47d9631e670fb2863124b011",
+            "bytes": 26878
+          }
+        ],
+        "overlays": [
+          {
+            "id": "grid-simple",
+            "image": {
+              "file": "overlays/bootstrap-painel-cursos-grid-simple.png",
+              "sha256": "88b29c716173ec9575523040b4b53d50eddd4e721326076d6bb3e25507a6f64f",
+              "bytes": 116391
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 9,
+            "rows": 9
+          },
+          {
+            "id": "axis-grid",
+            "image": {
+              "file": "overlays/bootstrap-painel-cursos-axis-grid.png",
+              "sha256": "03b5ff65ed0325828442b00c40f8600456d39e1c08f3abd695a5ee9d3f77e71f",
+              "bytes": 128254
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "step": 240
+          },
+          {
+            "id": "mark-grid",
+            "image": {
+              "file": "overlays/bootstrap-painel-cursos-mark-grid.png",
+              "sha256": "e95b1b2f1a631d200aba3b3c1fa3ba4e28d7679c07bc58ac1f9a733c92d232d1",
+              "bytes": 125780
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4,
+            "cells": [
+              {
+                "id": "A1",
+                "bbox": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-A1.png",
+                  "sha256": "27c4ec4de1bcdb610b82c89bd08d3dd2beb504482d75ace3bd670db0e381d435",
+                  "bytes": 80229
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A2",
+                "bbox": {
+                  "x": 0,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-A2.png",
+                  "sha256": "16c167b6def37ef459bbb1c6fb5394687ce44ce025c8d4ad66691c65706e481d",
+                  "bytes": 49844
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A3",
+                "bbox": {
+                  "x": 0,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-A3.png",
+                  "sha256": "7eaa93f0cc1e75308c3ab9afbf42a3b38ecb7430577b62271dccb66f162a0fd7",
+                  "bytes": 8990
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A4",
+                "bbox": {
+                  "x": 0,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-A4.png",
+                  "sha256": "7eaa93f0cc1e75308c3ab9afbf42a3b38ecb7430577b62271dccb66f162a0fd7",
+                  "bytes": 8990
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "B1",
+                "bbox": {
+                  "x": 320,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-B1.png",
+                  "sha256": "dc3fc551e0e399b15eeecdc57a2c5e3527d5c8fdf2a47d08a64986d315c38b8f",
+                  "bytes": 56839
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B2",
+                "bbox": {
+                  "x": 320,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-B2.png",
+                  "sha256": "7408cc247dc963f72da8b9db3d0b13ffc50c17630f8d48531dbe95913d907735",
+                  "bytes": 53088
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B3",
+                "bbox": {
+                  "x": 320,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-B3.png",
+                  "sha256": "e274063c3fedd8a15137057beeb64976a6349c235e02750e352c871e96451b08",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B4",
+                "bbox": {
+                  "x": 320,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-B4.png",
+                  "sha256": "e274063c3fedd8a15137057beeb64976a6349c235e02750e352c871e96451b08",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "C1",
+                "bbox": {
+                  "x": 640,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-C1.png",
+                  "sha256": "6d16c65aa8f5fba0640dbbc5c4f4f3d70a159ff7aa5c33f40fabf0a7cc4ddbfe",
+                  "bytes": 20603
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C2",
+                "bbox": {
+                  "x": 640,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-C2.png",
+                  "sha256": "f6bd4463c7639d85fb1ade54e2075ad7db7cf057ec62b41cf8a5725ba47bbdf7",
+                  "bytes": 14957
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C3",
+                "bbox": {
+                  "x": 640,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-C3.png",
+                  "sha256": "e274063c3fedd8a15137057beeb64976a6349c235e02750e352c871e96451b08",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C4",
+                "bbox": {
+                  "x": 640,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-C4.png",
+                  "sha256": "e274063c3fedd8a15137057beeb64976a6349c235e02750e352c871e96451b08",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "D1",
+                "bbox": {
+                  "x": 960,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-D1.png",
+                  "sha256": "45fca66e6eed28d2e9931c7476960de99005d4ac06d1ade600fd6b0dcf311cc7",
+                  "bytes": 20856
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D2",
+                "bbox": {
+                  "x": 960,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-D2.png",
+                  "sha256": "03e601b1b2432cc679b7407d4769630ad5593ba2194c7370ee43bf06fc7d8111",
+                  "bytes": 25114
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D3",
+                "bbox": {
+                  "x": 960,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-D3.png",
+                  "sha256": "e274063c3fedd8a15137057beeb64976a6349c235e02750e352c871e96451b08",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D4",
+                "bbox": {
+                  "x": 960,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-D4.png",
+                  "sha256": "e274063c3fedd8a15137057beeb64976a6349c235e02750e352c871e96451b08",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "E1",
+                "bbox": {
+                  "x": 1280,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-E1.png",
+                  "sha256": "d02aceb99a04d663f69efa549b68dc63abafb7046c9b66d48ce063a70c431ee2",
+                  "bytes": 9100
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E2",
+                "bbox": {
+                  "x": 1280,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-E2.png",
+                  "sha256": "fa2ff85bd5fbc2793b9b2973d5a6016f781f1a0150eb18052abb9e4171bf65fe",
+                  "bytes": 9204
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E3",
+                "bbox": {
+                  "x": 1280,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-E3.png",
+                  "sha256": "e274063c3fedd8a15137057beeb64976a6349c235e02750e352c871e96451b08",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E4",
+                "bbox": {
+                  "x": 1280,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-E4.png",
+                  "sha256": "e274063c3fedd8a15137057beeb64976a6349c235e02750e352c871e96451b08",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "F1",
+                "bbox": {
+                  "x": 1600,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-F1.png",
+                  "sha256": "7cd83db8aeda1370d078f60f7b01205228a7388265da5d131cefb588472b871a",
+                  "bytes": 42477
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 0,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F2",
+                "bbox": {
+                  "x": 1600,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-F2.png",
+                  "sha256": "8d02fa3f50f6000af6eeda5be40254728f9e8012df62955b083d540a447eaba0",
+                  "bytes": 43811
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 248,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F3",
+                "bbox": {
+                  "x": 1600,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-F3.png",
+                  "sha256": "e274063c3fedd8a15137057beeb64976a6349c235e02750e352c871e96451b08",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 518,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F4",
+                "bbox": {
+                  "x": 1600,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-painel-cursos-F4.png",
+                  "sha256": "e274063c3fedd8a15137057beeb64976a6349c235e02750e352c871e96451b08",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 788,
+                  "w": 346,
+                  "h": 292
+                }
+              }
+            ]
+          }
+        ]
+      }
     },
     {
       "id": "bootstrap-login",
@@ -643,7 +1300,664 @@
       "tags": [
         "auth",
         "formulário"
-      ]
+      ],
+      "probes": {
+        "resolutions": [
+          {
+            "id": "1920x1080",
+            "width": 1920,
+            "height": 1080,
+            "file": "images/bootstrap-login.png",
+            "sha256": "fc7b0bf15b8b181f619ca08e78140cf3680dfb3b338352401f8da29819e0b0e4",
+            "bytes": 32102
+          },
+          {
+            "id": "1280x720",
+            "width": 1280,
+            "height": 720,
+            "file": "resolutions/bootstrap-login-1280x720.png",
+            "sha256": "c8484457a51742b091ef219ad71fc363374e11860d1ceeeb8ce477ff4e0911a4",
+            "bytes": 42997
+          },
+          {
+            "id": "960x540",
+            "width": 960,
+            "height": 540,
+            "file": "resolutions/bootstrap-login-960x540.png",
+            "sha256": "89e829c67c79ed1ee041771a50717d678122f7c82d75ce4713ba83de62314630",
+            "bytes": 26612
+          },
+          {
+            "id": "640x360",
+            "width": 640,
+            "height": 360,
+            "file": "resolutions/bootstrap-login-640x360.png",
+            "sha256": "d82d21818ac39498c4ee18fcb5a75c6ad8af3c4c26c2cd2c3cd08cf726ecec17",
+            "bytes": 15410
+          }
+        ],
+        "overlays": [
+          {
+            "id": "grid-simple",
+            "image": {
+              "file": "overlays/bootstrap-login-grid-simple.png",
+              "sha256": "69850600746db418d86ff5a1911294534e87cbf62b879d88a850175b4d7e16dd",
+              "bytes": 76419
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 9,
+            "rows": 9
+          },
+          {
+            "id": "axis-grid",
+            "image": {
+              "file": "overlays/bootstrap-login-axis-grid.png",
+              "sha256": "5a0189ef9f85394db2c3eee3114ff310da4e1f9cde07127b9e512f3334b6a461",
+              "bytes": 88730
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "step": 240
+          },
+          {
+            "id": "mark-grid",
+            "image": {
+              "file": "overlays/bootstrap-login-mark-grid.png",
+              "sha256": "d325e71477cd24ec078e83ae88115715bb855d9b1b65ea48816126127582d94f",
+              "bytes": 86385
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4,
+            "cells": [
+              {
+                "id": "A1",
+                "bbox": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-A1.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A2",
+                "bbox": {
+                  "x": 0,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-A2.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A3",
+                "bbox": {
+                  "x": 0,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-A3.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A4",
+                "bbox": {
+                  "x": 0,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-A4.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "B1",
+                "bbox": {
+                  "x": 320,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-B1.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B2",
+                "bbox": {
+                  "x": 320,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-B2.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B3",
+                "bbox": {
+                  "x": 320,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-B3.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B4",
+                "bbox": {
+                  "x": 320,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-B4.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "C1",
+                "bbox": {
+                  "x": 640,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-C1.png",
+                  "sha256": "5292f9ba93e2f89b4388bda3ee990ea16adc6d406a48a72e7f75c1280914a112",
+                  "bytes": 9518
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C2",
+                "bbox": {
+                  "x": 640,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-C2.png",
+                  "sha256": "56fb3e5f8dc45ef040d1bc549fd332ff9984285e20a858a453e0e65f9c8760a1",
+                  "bytes": 51437
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C3",
+                "bbox": {
+                  "x": 640,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-C3.png",
+                  "sha256": "13ed3d2e2081141872e796c8e157d691574a9642035befd3f7951635175a958c",
+                  "bytes": 40920
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C4",
+                "bbox": {
+                  "x": 640,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-C4.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "D1",
+                "bbox": {
+                  "x": 960,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-D1.png",
+                  "sha256": "78c576748953a9d4e79bf04145a8d97be46b58390bce38773ae500a0d06104d0",
+                  "bytes": 9555
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D2",
+                "bbox": {
+                  "x": 960,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-D2.png",
+                  "sha256": "4c24b312bcd26cb20ed3b35ddeb278364e57e32bd2f0fd91aa0d4776c46e87da",
+                  "bytes": 17100
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D3",
+                "bbox": {
+                  "x": 960,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-D3.png",
+                  "sha256": "f2d86c480f536aa65074d03488f7c1760a8ac060400d133e2fd74ea06f3d54ee",
+                  "bytes": 36890
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D4",
+                "bbox": {
+                  "x": 960,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-D4.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "E1",
+                "bbox": {
+                  "x": 1280,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-E1.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E2",
+                "bbox": {
+                  "x": 1280,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-E2.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E3",
+                "bbox": {
+                  "x": 1280,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-E3.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E4",
+                "bbox": {
+                  "x": 1280,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-E4.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "F1",
+                "bbox": {
+                  "x": 1600,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-F1.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 0,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F2",
+                "bbox": {
+                  "x": 1600,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-F2.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 248,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F3",
+                "bbox": {
+                  "x": 1600,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-F3.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 518,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F4",
+                "bbox": {
+                  "x": 1600,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/bootstrap-login-F4.png",
+                  "sha256": "06308ee64c264d8652af44522456e34894cc8f25759a5497e9d3b2c341a56922",
+                  "bytes": 8961
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 788,
+                  "w": 346,
+                  "h": 292
+                }
+              }
+            ]
+          }
+        ]
+      }
     },
     {
       "id": "react95-painel",
@@ -1427,7 +2741,664 @@
         "desktop",
         "react95",
         "tabela"
-      ]
+      ],
+      "probes": {
+        "resolutions": [
+          {
+            "id": "1920x1080",
+            "width": 1920,
+            "height": 1080,
+            "file": "images/react95-painel.png",
+            "sha256": "d3048fa577406573b80d91b0da0a2f8c1d19d0bed60f73208f72a680cadd989c",
+            "bytes": 81648
+          },
+          {
+            "id": "1280x720",
+            "width": 1280,
+            "height": 720,
+            "file": "resolutions/react95-painel-1280x720.png",
+            "sha256": "eab547095efba97593346838d8947eed530e5b4d58f7bdd30e6e40f06bb95fb1",
+            "bytes": 140804
+          },
+          {
+            "id": "960x540",
+            "width": 960,
+            "height": 540,
+            "file": "resolutions/react95-painel-960x540.png",
+            "sha256": "5bd9b3b6db385a1162fa81e108a4a160f459f4b7f6d005ff76c16a557c49f038",
+            "bytes": 88361
+          },
+          {
+            "id": "640x360",
+            "width": 640,
+            "height": 360,
+            "file": "resolutions/react95-painel-640x360.png",
+            "sha256": "493b6f776d5c9a27db348ba743df0a3e954d164fca503349dc2ae175aaadd1f3",
+            "bytes": 70875
+          }
+        ],
+        "overlays": [
+          {
+            "id": "grid-simple",
+            "image": {
+              "file": "overlays/react95-painel-grid-simple.png",
+              "sha256": "7c6b8c038e33d98ef1776c41fcae13b1c6bbe405076acf2c6962cd3e60c2c0ab",
+              "bytes": 161508
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 9,
+            "rows": 9
+          },
+          {
+            "id": "axis-grid",
+            "image": {
+              "file": "overlays/react95-painel-axis-grid.png",
+              "sha256": "fdd526cd6f4bad90b5e09845d34b6e684cd572575785c09ed3ca014b0bd11ee4",
+              "bytes": 173214
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "step": 240
+          },
+          {
+            "id": "mark-grid",
+            "image": {
+              "file": "overlays/react95-painel-mark-grid.png",
+              "sha256": "40f3a7d541823dd900cae666b7ffffcf3f56bd6431ee77c8bb9b341fb59f9324",
+              "bytes": 172569
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4,
+            "cells": [
+              {
+                "id": "A1",
+                "bbox": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-A1.png",
+                  "sha256": "11ca6ab01a127700fbd23de5bd5c647d937f20bfcbcb71c6dac123ee22417b90",
+                  "bytes": 76163
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A2",
+                "bbox": {
+                  "x": 0,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-A2.png",
+                  "sha256": "6dbc899b42e3923896eebd929af9eb0181fa7c68adfd6d03d147742812d61fef",
+                  "bytes": 57818
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A3",
+                "bbox": {
+                  "x": 0,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-A3.png",
+                  "sha256": "4804da7fc657827982a574fc622e0d24144929f7155b2d94159839dce8a84289",
+                  "bytes": 73307
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A4",
+                "bbox": {
+                  "x": 0,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-A4.png",
+                  "sha256": "0b7043d8634cc9a9b5547db55122404817cf2c0fb0239a9241e9a17b5196a76c",
+                  "bytes": 71801
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "B1",
+                "bbox": {
+                  "x": 320,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-B1.png",
+                  "sha256": "7745bfc472ca72fc4b8e554c87139db725e0ec77b759323244ac512aca4f64e7",
+                  "bytes": 32598
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B2",
+                "bbox": {
+                  "x": 320,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-B2.png",
+                  "sha256": "dc65b70e5fc7a3b93c0328ca526d695c0aa17586dcaad962956e791a6923db98",
+                  "bytes": 35084
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B3",
+                "bbox": {
+                  "x": 320,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-B3.png",
+                  "sha256": "a5d8e1cb6068bc3ae73a910bcfd0c0edcb4da0230a072cf60d0d76aef01fe35b",
+                  "bytes": 37193
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B4",
+                "bbox": {
+                  "x": 320,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-B4.png",
+                  "sha256": "99b973a0273eaac6aa334e7c30cc8d5e6c6c9273fbd3c321c5509fbdd8a37e3c",
+                  "bytes": 42266
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "C1",
+                "bbox": {
+                  "x": 640,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-C1.png",
+                  "sha256": "715093d5c931a432e1ade9cd09ee1df440268fe9d4c10ca041b9bcdf85812e57",
+                  "bytes": 22142
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C2",
+                "bbox": {
+                  "x": 640,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-C2.png",
+                  "sha256": "b2307a16fb4191d099c8f71919875b21425fb03e4a0e5993204a196e8c797b32",
+                  "bytes": 30561
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C3",
+                "bbox": {
+                  "x": 640,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-C3.png",
+                  "sha256": "f913013a7cedb2863b763b6a44dd1e6460a6ae3453c9baca6cf7294e75a7e1ac",
+                  "bytes": 23204
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C4",
+                "bbox": {
+                  "x": 640,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-C4.png",
+                  "sha256": "619e2976f1f5d6e7f71539909174379098154dbb7985f6c2cca016115f9bffd8",
+                  "bytes": 21002
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "D1",
+                "bbox": {
+                  "x": 960,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-D1.png",
+                  "sha256": "808919f87a6aa37ec7dd4423b5c08a36bf8bcc9e03059790520a6788257ceef3",
+                  "bytes": 26106
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D2",
+                "bbox": {
+                  "x": 960,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-D2.png",
+                  "sha256": "4fe33ce51a038014c7b32e572b5ca28dad0a6c0af342c91e1ac9aa440802313a",
+                  "bytes": 50598
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D3",
+                "bbox": {
+                  "x": 960,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-D3.png",
+                  "sha256": "e0813536f071f7b8025bf586a007b0e94fb47fcfd861c7cbdf8123b8341e7dca",
+                  "bytes": 64822
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D4",
+                "bbox": {
+                  "x": 960,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-D4.png",
+                  "sha256": "9e54bea47de4a0b920ae7ceecfb47f00202d37d6aef8e67710530483021f2de1",
+                  "bytes": 49778
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "E1",
+                "bbox": {
+                  "x": 1280,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-E1.png",
+                  "sha256": "2feabfa9722182cd20941c67e978f44b980d5598accd48e493fc9f52dea4f796",
+                  "bytes": 45324
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E2",
+                "bbox": {
+                  "x": 1280,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-E2.png",
+                  "sha256": "db59199820f986c29fe3a17e01d5ce7704d8fc5011743e82d9c5025ef7774086",
+                  "bytes": 58621
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E3",
+                "bbox": {
+                  "x": 1280,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-E3.png",
+                  "sha256": "b7ed7752c1669fc500f4c2947e3c2f3fbb6faa26dab9fbe34755afc38566ee4d",
+                  "bytes": 73387
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E4",
+                "bbox": {
+                  "x": 1280,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-E4.png",
+                  "sha256": "8f65d7c97ecaf7aea3d71fb89761466ba5472bc36547fb90bed66919bc974bb3",
+                  "bytes": 24844
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "F1",
+                "bbox": {
+                  "x": 1600,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-F1.png",
+                  "sha256": "e9520fd45a85f7b46dffdafb02133e203a82b5b228430e0d86ed7d0a62264760",
+                  "bytes": 27352
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 0,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F2",
+                "bbox": {
+                  "x": 1600,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-F2.png",
+                  "sha256": "6790a7b2e072391e43eef752b9451ce55a6a654a82680143ea4b39ea8e6e3e5d",
+                  "bytes": 14106
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 248,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F3",
+                "bbox": {
+                  "x": 1600,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-F3.png",
+                  "sha256": "f60ab87dfb0392c03037d84f2d8f176b6b7ee41a7bb48d2680bc100f7eeb933f",
+                  "bytes": 25900
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 518,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F4",
+                "bbox": {
+                  "x": 1600,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/react95-painel-F4.png",
+                  "sha256": "7cc18a936edf80a079f31e2f2201ebbae4ce80c5dd5506b93788c11813d32bd8",
+                  "bytes": 23218
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 788,
+                  "w": 346,
+                  "h": 292
+                }
+              }
+            ]
+          }
+        ]
+      }
     },
     {
       "id": "fluent-painel",
@@ -2245,7 +4216,664 @@
         "dashboard",
         "fluent",
         "modal"
-      ]
+      ],
+      "probes": {
+        "resolutions": [
+          {
+            "id": "1920x1080",
+            "width": 1920,
+            "height": 1080,
+            "file": "images/fluent-painel.png",
+            "sha256": "9b0b30ed58c4ad179bfdeb7662e6b68f00ea88e729e3f1ec2309a244f7d00b68",
+            "bytes": 175466
+          },
+          {
+            "id": "1280x720",
+            "width": 1280,
+            "height": 720,
+            "file": "resolutions/fluent-painel-1280x720.png",
+            "sha256": "a0f9f1d9a13fd1669d9e8a2b40831233a7715bb58b5079bf02cf4b27855d82af",
+            "bytes": 166506
+          },
+          {
+            "id": "960x540",
+            "width": 960,
+            "height": 540,
+            "file": "resolutions/fluent-painel-960x540.png",
+            "sha256": "35a077b0e5b450f59fe5cad19e07c23a2bbab7ed93c0fbe8e718107312d206c6",
+            "bytes": 102214
+          },
+          {
+            "id": "640x360",
+            "width": 640,
+            "height": 360,
+            "file": "resolutions/fluent-painel-640x360.png",
+            "sha256": "e6cbee06e99b591e704617f6b144f4f0048716ea40221061ed47cb3da7ee965b",
+            "bytes": 64712
+          }
+        ],
+        "overlays": [
+          {
+            "id": "grid-simple",
+            "image": {
+              "file": "overlays/fluent-painel-grid-simple.png",
+              "sha256": "8f2625222144d154265b0e31b8fb756e68d330ee9015074dfbd21391f660b6d9",
+              "bytes": 250597
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 9,
+            "rows": 9
+          },
+          {
+            "id": "axis-grid",
+            "image": {
+              "file": "overlays/fluent-painel-axis-grid.png",
+              "sha256": "6be0e035535fa12e2a0c379b18f6840d9817274a0f2ac017467fb63645f345ea",
+              "bytes": 260866
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "step": 240
+          },
+          {
+            "id": "mark-grid",
+            "image": {
+              "file": "overlays/fluent-painel-mark-grid.png",
+              "sha256": "6c9d9e3f98ca2831ec74b0d61b4de50f23aca3bb8708fd228b4c2e52d188cd1d",
+              "bytes": 259688
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4,
+            "cells": [
+              {
+                "id": "A1",
+                "bbox": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-A1.png",
+                  "sha256": "732890696dc1f9cd2c26cea5d84291f8bcd27cd2282029530e1948891d3c6d96",
+                  "bytes": 91312
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A2",
+                "bbox": {
+                  "x": 0,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-A2.png",
+                  "sha256": "2f0c6cb61719170e131fab140836e7d6e14f891e661253e8e381f13feeb67fc9",
+                  "bytes": 61731
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A3",
+                "bbox": {
+                  "x": 0,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-A3.png",
+                  "sha256": "cfc380b667d03db92c51c14160a834ed5fc19a25d41fbf2fa5832296d19b2867",
+                  "bytes": 44332
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A4",
+                "bbox": {
+                  "x": 0,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-A4.png",
+                  "sha256": "e19ce1c3747eb01ed0221f2ea355ea0023cc4b4410e08d2f37c1b3f8066f8a6e",
+                  "bytes": 14907
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "B1",
+                "bbox": {
+                  "x": 320,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-B1.png",
+                  "sha256": "1abf93fa0b3daaa56f250ef4389fa95c353b2b344eba7e28b75813d3e3b76062",
+                  "bytes": 56651
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B2",
+                "bbox": {
+                  "x": 320,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-B2.png",
+                  "sha256": "3e548de965b6de88fd3a5aaf165aa03f21efc524fa0e9210c8e2c94e4acae14f",
+                  "bytes": 68028
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B3",
+                "bbox": {
+                  "x": 320,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-B3.png",
+                  "sha256": "b2627d042692560e9f57d3c97e4c9fbce253084888809325b739d6ea7f61ea53",
+                  "bytes": 72957
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B4",
+                "bbox": {
+                  "x": 320,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-B4.png",
+                  "sha256": "2cfb3f5aba93f8b01086b17e6a2d0ed45db7c76251356eabfc613d9fc138c82c",
+                  "bytes": 16366
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "C1",
+                "bbox": {
+                  "x": 640,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-C1.png",
+                  "sha256": "458c2e10a58605eeebc491ca9e04328c906faceb16cc626b0c19dae7ea2dbc11",
+                  "bytes": 26864
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C2",
+                "bbox": {
+                  "x": 640,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-C2.png",
+                  "sha256": "fdb953a9d00146263cf75d8d8a30a563516ffe0c57b0f6e1c46dfd593cd5bfff",
+                  "bytes": 22111
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C3",
+                "bbox": {
+                  "x": 640,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-C3.png",
+                  "sha256": "e31b35e5fe5f65bb428d72980caaa6c499216eead10bf44ba907ed8e39f4d568",
+                  "bytes": 9283
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C4",
+                "bbox": {
+                  "x": 640,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-C4.png",
+                  "sha256": "53c28401f97fef2d6f8a7172ba61d43de75ee6ae7cbe710813516af645357747",
+                  "bytes": 9066
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "D1",
+                "bbox": {
+                  "x": 960,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-D1.png",
+                  "sha256": "426995b4292b3ca08c48237e0049ea05b14e45d469421609dce5748a2c236176",
+                  "bytes": 20729
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D2",
+                "bbox": {
+                  "x": 960,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-D2.png",
+                  "sha256": "aef2a8b17ba0af79583fdbbc201c5d1b49d6fea93f84493371b2ef4ba90c741b",
+                  "bytes": 30744
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D3",
+                "bbox": {
+                  "x": 960,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-D3.png",
+                  "sha256": "3f25c8aa6dc86c8b314e51e2a06052e9a518b9202a78dd59d655aa3e92f9bafc",
+                  "bytes": 42312
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D4",
+                "bbox": {
+                  "x": 960,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-D4.png",
+                  "sha256": "0abbf45781c5686fc55eab74c9c793c29c94ace3c13943a84ad104ef0b0bb173",
+                  "bytes": 10130
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "E1",
+                "bbox": {
+                  "x": 1280,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-E1.png",
+                  "sha256": "5f73dabbaeb5ad8291051e526abec88518bf706e7e2a7c4b50024f73cd03da27",
+                  "bytes": 47671
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E2",
+                "bbox": {
+                  "x": 1280,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-E2.png",
+                  "sha256": "523b6269793d368dc7796fb7b670c6950353cdf9e6b6b5dae083df94db519a07",
+                  "bytes": 93632
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E3",
+                "bbox": {
+                  "x": 1280,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-E3.png",
+                  "sha256": "d2416d2ac9ff45a1b5b7c287cbb2995b2bc6e0a877fce3d78a06736ba20647fd",
+                  "bytes": 105142
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E4",
+                "bbox": {
+                  "x": 1280,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-E4.png",
+                  "sha256": "88b0ccaf9a1597cadffe6d43c159f8426b5356edaf81f74a9ffadb9467cf2632",
+                  "bytes": 77549
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "F1",
+                "bbox": {
+                  "x": 1600,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-F1.png",
+                  "sha256": "b4d70978078135c5a4eed546b8c0d1e23f0f2cafad6347f5a7a8b5efebaf65f9",
+                  "bytes": 70403
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 0,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F2",
+                "bbox": {
+                  "x": 1600,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-F2.png",
+                  "sha256": "84361df860d360172c347739b8f21fa5a454d0683d87ffa62a0c7684b14433ca",
+                  "bytes": 51383
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 248,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F3",
+                "bbox": {
+                  "x": 1600,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-F3.png",
+                  "sha256": "8cb4b37d0250b75d3075d3c51584ac94fc56e9709502c939e37ecbe5ddee9bbc",
+                  "bytes": 65330
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 518,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F4",
+                "bbox": {
+                  "x": 1600,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/fluent-painel-F4.png",
+                  "sha256": "c2b0cc2850db45b646fab495c2833961cae58b054c30cb17f1ce6db02baef3f1",
+                  "bytes": 57062
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 788,
+                  "w": 346,
+                  "h": 292
+                }
+              }
+            ]
+          }
+        ]
+      }
     },
     {
       "id": "material-painel",
@@ -2944,7 +5572,664 @@
         "dashboard",
         "material",
         "modal"
-      ]
+      ],
+      "probes": {
+        "resolutions": [
+          {
+            "id": "1920x1080",
+            "width": 1920,
+            "height": 1080,
+            "file": "images/material-painel.png",
+            "sha256": "81ea1f96169bf87ce188320fcc08e30ac99cc47fc7f46378c642d01a8d66ee62",
+            "bytes": 177902
+          },
+          {
+            "id": "1280x720",
+            "width": 1280,
+            "height": 720,
+            "file": "resolutions/material-painel-1280x720.png",
+            "sha256": "dc4d725163eb84ea3267efc03125e5b163541cd2fad5326f1b7827e812e90ced",
+            "bytes": 184525
+          },
+          {
+            "id": "960x540",
+            "width": 960,
+            "height": 540,
+            "file": "resolutions/material-painel-960x540.png",
+            "sha256": "e0f7d85408782937b129e1f37e0776e9c9ed69e96de7729a0dede6af77c73954",
+            "bytes": 113193
+          },
+          {
+            "id": "640x360",
+            "width": 640,
+            "height": 360,
+            "file": "resolutions/material-painel-640x360.png",
+            "sha256": "80b5bca6bb79d253c713dc0415dbcb30408029a242e79c01885a18b8c3f2da5f",
+            "bytes": 75012
+          }
+        ],
+        "overlays": [
+          {
+            "id": "grid-simple",
+            "image": {
+              "file": "overlays/material-painel-grid-simple.png",
+              "sha256": "6f825121a92a5861059d19e1be9fd5d34ec476656fa3dcdb44dd1da96599f1d3",
+              "bytes": 261967
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 9,
+            "rows": 9
+          },
+          {
+            "id": "axis-grid",
+            "image": {
+              "file": "overlays/material-painel-axis-grid.png",
+              "sha256": "8b513c10e4311d54263893cd0d6f6cd53a12bd74e7d36ae96c819bcb8945564c",
+              "bytes": 273052
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "step": 240
+          },
+          {
+            "id": "mark-grid",
+            "image": {
+              "file": "overlays/material-painel-mark-grid.png",
+              "sha256": "f880b7483dbe3adc4acfcf1588996933eee78e03a73feb5c064f5cd80419051e",
+              "bytes": 270443
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4,
+            "cells": [
+              {
+                "id": "A1",
+                "bbox": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-A1.png",
+                  "sha256": "4be158d8e4b4e9a92e47a37bce47b6b0fd2d8960cc09c44390c7d4a3df29c757",
+                  "bytes": 78926
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A2",
+                "bbox": {
+                  "x": 0,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-A2.png",
+                  "sha256": "7529e50c069d6cd672a6f905721557087e3d5a4e18e35b8dd177e1fed58a99c5",
+                  "bytes": 57449
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A3",
+                "bbox": {
+                  "x": 0,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-A3.png",
+                  "sha256": "6ac62b82532d52017bc6f8c384f86e880c892614bbc86a52740af82a965d17ce",
+                  "bytes": 65305
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A4",
+                "bbox": {
+                  "x": 0,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-A4.png",
+                  "sha256": "f6ca443490886817e2ef7416c9bad438e6b3d14fca8743c843931cb623401633",
+                  "bytes": 22891
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "B1",
+                "bbox": {
+                  "x": 320,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-B1.png",
+                  "sha256": "c09a008a705da993ce0bcc02b992f3c1577172d2a7f5cfd447972769a4bd1307",
+                  "bytes": 49781
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B2",
+                "bbox": {
+                  "x": 320,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-B2.png",
+                  "sha256": "89c4b8297552a5bfd0f0ba0302e95b60d9295eba41e65e60c74cf690dc3bf253",
+                  "bytes": 55895
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B3",
+                "bbox": {
+                  "x": 320,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-B3.png",
+                  "sha256": "d4a9e572bcd8e7dccb9414caee13c728ff0fd135fd6ecdae7cc8e4fca036f518",
+                  "bytes": 78276
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B4",
+                "bbox": {
+                  "x": 320,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-B4.png",
+                  "sha256": "86f22547e2cf86b0492688df8af79b1f08837abe6438ab78aa8cc83899782037",
+                  "bytes": 53017
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "C1",
+                "bbox": {
+                  "x": 640,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-C1.png",
+                  "sha256": "e6ff107dc9ab0225e83de0f98128b189ddeba9cfab10ff3206869fdc594ad955",
+                  "bytes": 26668
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C2",
+                "bbox": {
+                  "x": 640,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-C2.png",
+                  "sha256": "b1d2ef0f32470b8275ac35a69b19e31a97ba3d7409a8642beb1db2307d93b68f",
+                  "bytes": 48430
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C3",
+                "bbox": {
+                  "x": 640,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-C3.png",
+                  "sha256": "e359961f850babb10fd494e3a7fbfac2c712120cf416dd7eb75e3ac6fe31c749",
+                  "bytes": 18992
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C4",
+                "bbox": {
+                  "x": 640,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-C4.png",
+                  "sha256": "3ca9fbb5dc0b22a760f1ae10f77a76a69ff5b572e7fe6d8b5c4644d91841f81b",
+                  "bytes": 9162
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "D1",
+                "bbox": {
+                  "x": 960,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-D1.png",
+                  "sha256": "9ed4e2f32ea9da162073ed2b17fa565a339fdf74a996a4ed1c9edf8d4d777465",
+                  "bytes": 24827
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D2",
+                "bbox": {
+                  "x": 960,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-D2.png",
+                  "sha256": "4bed2f4e28de5654c66313be98b63763326717d7cc348b9dc07c670b5c31c9e7",
+                  "bytes": 32084
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D3",
+                "bbox": {
+                  "x": 960,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-D3.png",
+                  "sha256": "4317bbf97260d54195e3fd85631f9ff3a44295a9de0471817abe6fa3f50e5181",
+                  "bytes": 54100
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D4",
+                "bbox": {
+                  "x": 960,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-D4.png",
+                  "sha256": "708252054eef156fc8a77edd374cf9d24e7cb902fe1b7899714f8e930cff7dfc",
+                  "bytes": 42499
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "E1",
+                "bbox": {
+                  "x": 1280,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-E1.png",
+                  "sha256": "365abe473bd7aa499fa28a3d648a305aabf211eb89125a9d3bf1508828837b0d",
+                  "bytes": 61097
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E2",
+                "bbox": {
+                  "x": 1280,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-E2.png",
+                  "sha256": "c27d1de8d4c8f4a3fe934833ccd7a644c4c071eb9b642328ae152343ad2056ab",
+                  "bytes": 62151
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E3",
+                "bbox": {
+                  "x": 1280,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-E3.png",
+                  "sha256": "c602cdcb32d046a5652289936d27a88b7ac78b9507cae090c2a9c3041907e65d",
+                  "bytes": 117654
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E4",
+                "bbox": {
+                  "x": 1280,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-E4.png",
+                  "sha256": "2a76165cafdab3e9823f08b0b50d990381ba06a8e78edbe29eff722faa2e52f6",
+                  "bytes": 112487
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "F1",
+                "bbox": {
+                  "x": 1600,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-F1.png",
+                  "sha256": "20a410d0d807b1480b8692ec0e6d184407d150615e8fbab20b2af7f02d480cf0",
+                  "bytes": 70258
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 0,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F2",
+                "bbox": {
+                  "x": 1600,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-F2.png",
+                  "sha256": "0d89ff6c20f55a4ea294ed057d91fd0a8f8cd070720801e477fca022bf3d4ac8",
+                  "bytes": 67140
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 248,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F3",
+                "bbox": {
+                  "x": 1600,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-F3.png",
+                  "sha256": "d582e0e983a37d5234d83591c1c5c8fba7f9c530ed9caaa9573058413e307cc6",
+                  "bytes": 77882
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 518,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F4",
+                "bbox": {
+                  "x": 1600,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/material-painel-F4.png",
+                  "sha256": "12d71329525899031f31f7f94183a41ee47656a15c2dc2ad4e6f6fcfe44fca78",
+                  "bytes": 58122
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 788,
+                  "w": 346,
+                  "h": 292
+                }
+              }
+            ]
+          }
+        ]
+      }
     },
     {
       "id": "macos-finder",
@@ -3655,7 +6940,664 @@
         "desktop",
         "finder",
         "menubar"
-      ]
+      ],
+      "probes": {
+        "resolutions": [
+          {
+            "id": "1920x1080",
+            "width": 1920,
+            "height": 1080,
+            "file": "images/macos-finder.png",
+            "sha256": "ade08454db7f587f38e131db2dbb60cf364a338856c68096a944c90638418030",
+            "bytes": 153120
+          },
+          {
+            "id": "1280x720",
+            "width": 1280,
+            "height": 720,
+            "file": "resolutions/macos-finder-1280x720.png",
+            "sha256": "17b2a656d96a8bade7158be139b3c71268defc077a77e6759d3b7a376443814b",
+            "bytes": 123135
+          },
+          {
+            "id": "960x540",
+            "width": 960,
+            "height": 540,
+            "file": "resolutions/macos-finder-960x540.png",
+            "sha256": "3f997945f37a39fd369b1daf5f12c12343ffcdc26405f5d44c78c0b4dc01ca30",
+            "bytes": 78927
+          },
+          {
+            "id": "640x360",
+            "width": 640,
+            "height": 360,
+            "file": "resolutions/macos-finder-640x360.png",
+            "sha256": "061f91c22e2ab1ee787a33e4ee5232fb5507b03aa500f36c5021a8ab986d263c",
+            "bytes": 40200
+          }
+        ],
+        "overlays": [
+          {
+            "id": "grid-simple",
+            "image": {
+              "file": "overlays/macos-finder-grid-simple.png",
+              "sha256": "0af2ed024f01121b7ee3e0f40d3a19beba7e917500a65cacb17d7f9ed237d341",
+              "bytes": 318064
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 9,
+            "rows": 9
+          },
+          {
+            "id": "axis-grid",
+            "image": {
+              "file": "overlays/macos-finder-axis-grid.png",
+              "sha256": "8e42c25708e3d3beea179b1afae37f5ebef442d6f13f399f404968ef3f9a92a1",
+              "bytes": 328006
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "step": 240
+          },
+          {
+            "id": "mark-grid",
+            "image": {
+              "file": "overlays/macos-finder-mark-grid.png",
+              "sha256": "431a51e86c9e1a2209032837b048d7b21bdf5746ab8512fb0ced8fefc70ab3d1",
+              "bytes": 331206
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4,
+            "cells": [
+              {
+                "id": "A1",
+                "bbox": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-A1.png",
+                  "sha256": "e9f8a65875aec1391ed4457743885fd10503ed45b3a9ba8bcda642e5b89c8b2c",
+                  "bytes": 120141
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A2",
+                "bbox": {
+                  "x": 0,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-A2.png",
+                  "sha256": "c86a0c87ba3d15fbfd2262ea06080227bfa2ea19688b2a3b9b59d8c62a50678a",
+                  "bytes": 70073
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A3",
+                "bbox": {
+                  "x": 0,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-A3.png",
+                  "sha256": "b728b2aad2d8d7e8d430d88fd9e40556ceb60c3622456c320cef1403823a1666",
+                  "bytes": 21441
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A4",
+                "bbox": {
+                  "x": 0,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-A4.png",
+                  "sha256": "f475b2d3489a3d7928a74e3f5cc4a0a72bb25f41c80d55cca1ffa7444eed6bc9",
+                  "bytes": 19608
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "B1",
+                "bbox": {
+                  "x": 320,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-B1.png",
+                  "sha256": "8f7f28cad2b56648ba0f79a4d3f85878528ffc0bf901b65c962f236fec1659c9",
+                  "bytes": 57701
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B2",
+                "bbox": {
+                  "x": 320,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-B2.png",
+                  "sha256": "937d92b3387982e3af685b4d41a79526f145292546370d85c536abd10b799c71",
+                  "bytes": 17601
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B3",
+                "bbox": {
+                  "x": 320,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-B3.png",
+                  "sha256": "40b78379a7a31d90d7a9e03368a451fac07a9787959098f4fb73320d5ef21cd1",
+                  "bytes": 8979
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B4",
+                "bbox": {
+                  "x": 320,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-B4.png",
+                  "sha256": "7d7b1f0475963f91ec3e83967026d0fb3698622bda371dd0748bd7776ab3e3de",
+                  "bytes": 9614
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "C1",
+                "bbox": {
+                  "x": 640,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-C1.png",
+                  "sha256": "501cf18e6f44419ae0044bf61e48d0cf7e7dc81d824e934ae24db28056090c33",
+                  "bytes": 27700
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C2",
+                "bbox": {
+                  "x": 640,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-C2.png",
+                  "sha256": "334248cfa47bc74fd540d79d656e51a82967d18aed06a3a5ce97a8e10566db4e",
+                  "bytes": 8945
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C3",
+                "bbox": {
+                  "x": 640,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-C3.png",
+                  "sha256": "334248cfa47bc74fd540d79d656e51a82967d18aed06a3a5ce97a8e10566db4e",
+                  "bytes": 8945
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C4",
+                "bbox": {
+                  "x": 640,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-C4.png",
+                  "sha256": "10e0504f8d34eb813f76fead938ebd3fba585b45c60f2381d4385ce18840be8f",
+                  "bytes": 36892
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "D1",
+                "bbox": {
+                  "x": 960,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-D1.png",
+                  "sha256": "0b4ebdeba028477cb422e3deaa247dabb8d47e46c7806345da84c379e5a3fa94",
+                  "bytes": 48287
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D2",
+                "bbox": {
+                  "x": 960,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-D2.png",
+                  "sha256": "846133809fce324dbb701c2f912a294da676a95a0d4f916f192038017908e2ce",
+                  "bytes": 14172
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D3",
+                "bbox": {
+                  "x": 960,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-D3.png",
+                  "sha256": "334248cfa47bc74fd540d79d656e51a82967d18aed06a3a5ce97a8e10566db4e",
+                  "bytes": 8945
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D4",
+                "bbox": {
+                  "x": 960,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-D4.png",
+                  "sha256": "e115e7d93c5920935c53ad7a91573b58417eb98436eef4e736c0af8e5d733d42",
+                  "bytes": 36564
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "E1",
+                "bbox": {
+                  "x": 1280,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-E1.png",
+                  "sha256": "d3960555870f593225525d817f84ef84e2b2d5dd0d7b5d56f1707941f6ae1cc8",
+                  "bytes": 38364
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E2",
+                "bbox": {
+                  "x": 1280,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-E2.png",
+                  "sha256": "ddf5a701fb087f23d98ce7f4c62e3c6fd7da53aab2337d3681254c18718d3b58",
+                  "bytes": 13761
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E3",
+                "bbox": {
+                  "x": 1280,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-E3.png",
+                  "sha256": "2b99762920372f34b3420e205993731d97220bd2e30b7ab80ed22cbc4ace422e",
+                  "bytes": 9907
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E4",
+                "bbox": {
+                  "x": 1280,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-E4.png",
+                  "sha256": "663f337a64f5e72b5c66ce3efca21c3c240816801d612595107f3cc906e8831c",
+                  "bytes": 19452
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "F1",
+                "bbox": {
+                  "x": 1600,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-F1.png",
+                  "sha256": "b6bd015324982049426cbe7dbcbaf8734108c07ec3376e0b7584a7e0844acd1e",
+                  "bytes": 21979
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 0,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F2",
+                "bbox": {
+                  "x": 1600,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-F2.png",
+                  "sha256": "5bba8043058e0cb661df1376d728d60d3913ca0730dd2c4425edf684b0bcc1cf",
+                  "bytes": 8962
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 248,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F3",
+                "bbox": {
+                  "x": 1600,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-F3.png",
+                  "sha256": "5bba8043058e0cb661df1376d728d60d3913ca0730dd2c4425edf684b0bcc1cf",
+                  "bytes": 8962
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 518,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F4",
+                "bbox": {
+                  "x": 1600,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-finder-F4.png",
+                  "sha256": "5bba8043058e0cb661df1376d728d60d3913ca0730dd2c4425edf684b0bcc1cf",
+                  "bytes": 8962
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 788,
+                  "w": 346,
+                  "h": 292
+                }
+              }
+            ]
+          }
+        ]
+      }
     },
     {
       "id": "macos-salvar-como",
@@ -3838,7 +7780,664 @@
         "desktop",
         "modal",
         "formulário"
-      ]
+      ],
+      "probes": {
+        "resolutions": [
+          {
+            "id": "1920x1080",
+            "width": 1920,
+            "height": 1080,
+            "file": "images/macos-salvar-como.png",
+            "sha256": "44222f965a8de7b0dca822e57ec3d82cf3e3966afa84a0fe9ad5f1105952de7c",
+            "bytes": 188480
+          },
+          {
+            "id": "1280x720",
+            "width": 1280,
+            "height": 720,
+            "file": "resolutions/macos-salvar-como-1280x720.png",
+            "sha256": "2a3d306879c9bb3f015cf00a85a23acc56742bb617eb51e22f9b1f53bafc9dc5",
+            "bytes": 130562
+          },
+          {
+            "id": "960x540",
+            "width": 960,
+            "height": 540,
+            "file": "resolutions/macos-salvar-como-960x540.png",
+            "sha256": "f2f0b4663beb1da9ad327f9aeac81c1c89f4fc67b340caeee7ef23275e8e1fd0",
+            "bytes": 89105
+          },
+          {
+            "id": "640x360",
+            "width": 640,
+            "height": 360,
+            "file": "resolutions/macos-salvar-como-640x360.png",
+            "sha256": "4e6999949bc90de1541ba272a2cd51da6416d92c3261e9067dd6c2531b35e9bc",
+            "bytes": 37076
+          }
+        ],
+        "overlays": [
+          {
+            "id": "grid-simple",
+            "image": {
+              "file": "overlays/macos-salvar-como-grid-simple.png",
+              "sha256": "edccb2ca2b4f96b173f45e4b550e60d5b8558cdf9d66ec4e22175deb5e3c77c3",
+              "bytes": 520626
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 9,
+            "rows": 9
+          },
+          {
+            "id": "axis-grid",
+            "image": {
+              "file": "overlays/macos-salvar-como-axis-grid.png",
+              "sha256": "39e505cea16168634c6f4d80ae98310096acc99df98636d7555b03e39682b50d",
+              "bytes": 528675
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "step": 240
+          },
+          {
+            "id": "mark-grid",
+            "image": {
+              "file": "overlays/macos-salvar-como-mark-grid.png",
+              "sha256": "2d1a69805b021da264184b2dd7ea204cc93cefe9cf7213cf75bb12161b1db935",
+              "bytes": 528317
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4,
+            "cells": [
+              {
+                "id": "A1",
+                "bbox": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-A1.png",
+                  "sha256": "556fee39c76166c7b4cc3c3c82e735ff4a691b801d27a403d729fe8481fed31d",
+                  "bytes": 44823
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A2",
+                "bbox": {
+                  "x": 0,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-A2.png",
+                  "sha256": "cd0cdef6a59e1b1f2203246c28fa700f16ca7ca8932d352a304e1116db15722b",
+                  "bytes": 41072
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A3",
+                "bbox": {
+                  "x": 0,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-A3.png",
+                  "sha256": "52b5064f5ee4e30a98abbed9984786f62b61ebf486a35551e7ee237ffb37f551",
+                  "bytes": 20277
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "A4",
+                "bbox": {
+                  "x": 0,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-A4.png",
+                  "sha256": "f7096370482779ca5c3abd35cb3ecbfa8a3d6affa59d29e3a6903b6d5a480b51",
+                  "bytes": 8962
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 0,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "B1",
+                "bbox": {
+                  "x": 320,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-B1.png",
+                  "sha256": "06c5b05e7b7252f861508a42fb26d6e5cafae07f6d9627af3b58809114cf1246",
+                  "bytes": 42847
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B2",
+                "bbox": {
+                  "x": 320,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-B2.png",
+                  "sha256": "ebcc10c23f0ccea24f20eb95fa3e680c568d2ae17498e7c0d0dbf22f3c9bed85",
+                  "bytes": 41133
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B3",
+                "bbox": {
+                  "x": 320,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-B3.png",
+                  "sha256": "3f7a59c37864859ae6afcde10b0b32d150dcea83f35f540a59305c55b2d51fa0",
+                  "bytes": 24952
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "B4",
+                "bbox": {
+                  "x": 320,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-B4.png",
+                  "sha256": "f7096370482779ca5c3abd35cb3ecbfa8a3d6affa59d29e3a6903b6d5a480b51",
+                  "bytes": 8962
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 294,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "C1",
+                "bbox": {
+                  "x": 640,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-C1.png",
+                  "sha256": "34c3a49eb53f1a8fcb16de38f44472010f2d7895370eeeab369205c70d538468",
+                  "bytes": 42312
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C2",
+                "bbox": {
+                  "x": 640,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-C2.png",
+                  "sha256": "71e386cd43e16891a96d2edea0ec282f8b1fc8bca90ddf12aea5c015e720853c",
+                  "bytes": 60234
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C3",
+                "bbox": {
+                  "x": 640,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-C3.png",
+                  "sha256": "d16670d7afcc36e132def56557f884c3feb672e8bca49b9e8fda1dedf1c68ef8",
+                  "bytes": 36973
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "C4",
+                "bbox": {
+                  "x": 640,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-C4.png",
+                  "sha256": "f2d7799654126af79c429a5b3298536909a71f573dc25b8453e1edaff0494cea",
+                  "bytes": 9047
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 614,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "D1",
+                "bbox": {
+                  "x": 960,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-D1.png",
+                  "sha256": "41ddc8f84cb69337e61bcdb8d51336b3a6d0e5d1d7b19135fb69b1b64f41283a",
+                  "bytes": 41038
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D2",
+                "bbox": {
+                  "x": 960,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-D2.png",
+                  "sha256": "ba38ccecaae95875165aa0730cec4436b60cba65690daa3bdc8836bc6c9ea2d7",
+                  "bytes": 39671
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D3",
+                "bbox": {
+                  "x": 960,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-D3.png",
+                  "sha256": "da6ca9aa805f4de3cc932005f697cb5c7502fba425d1b24c31bf35c9e55e25fb",
+                  "bytes": 35528
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "D4",
+                "bbox": {
+                  "x": 960,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-D4.png",
+                  "sha256": "2a9e101d9fd698a5f9132fa4ced0b6d9728c5c43d5098919633e6a16b4ea2b12",
+                  "bytes": 9054
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 934,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "E1",
+                "bbox": {
+                  "x": 1280,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-E1.png",
+                  "sha256": "9ca08fc6836c30c6e92aec085525b3977904a81ab5127b031b77a778670869c3",
+                  "bytes": 10136
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 0,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E2",
+                "bbox": {
+                  "x": 1280,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-E2.png",
+                  "sha256": "d87138faf879130f053f67bad2f347113f5ac303d032d0d52b234fb619fd742d",
+                  "bytes": 11554
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 248,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E3",
+                "bbox": {
+                  "x": 1280,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-E3.png",
+                  "sha256": "417a819f03ec7b8cd51a78b1671025df3e434965dd0780d2309c5b517899402d",
+                  "bytes": 12224
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 518,
+                  "w": 372,
+                  "h": 314
+                }
+              },
+              {
+                "id": "E4",
+                "bbox": {
+                  "x": 1280,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-E4.png",
+                  "sha256": "f7096370482779ca5c3abd35cb3ecbfa8a3d6affa59d29e3a6903b6d5a480b51",
+                  "bytes": 8962
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1254,
+                  "y": 788,
+                  "w": 372,
+                  "h": 292
+                }
+              },
+              {
+                "id": "F1",
+                "bbox": {
+                  "x": 1600,
+                  "y": 0,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-F1.png",
+                  "sha256": "f7096370482779ca5c3abd35cb3ecbfa8a3d6affa59d29e3a6903b6d5a480b51",
+                  "bytes": 8962
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 0,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F2",
+                "bbox": {
+                  "x": 1600,
+                  "y": 270,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-F2.png",
+                  "sha256": "f7096370482779ca5c3abd35cb3ecbfa8a3d6affa59d29e3a6903b6d5a480b51",
+                  "bytes": 8962
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 248,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F3",
+                "bbox": {
+                  "x": 1600,
+                  "y": 540,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-F3.png",
+                  "sha256": "f7096370482779ca5c3abd35cb3ecbfa8a3d6affa59d29e3a6903b6d5a480b51",
+                  "bytes": 8962
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 518,
+                  "w": 346,
+                  "h": 314
+                }
+              },
+              {
+                "id": "F4",
+                "bbox": {
+                  "x": 1600,
+                  "y": 810,
+                  "w": 320,
+                  "h": 270
+                },
+                "image": {
+                  "file": "crops/macos-salvar-como-F4.png",
+                  "sha256": "f7096370482779ca5c3abd35cb3ecbfa8a3d6affa59d29e3a6903b6d5a480b51",
+                  "bytes": 8962
+                },
+                "viewport": {
+                  "width": 640,
+                  "height": 540
+                },
+                "source": {
+                  "x": 1574,
+                  "y": 788,
+                  "w": 346,
+                  "h": 292
+                }
+              }
+            ]
+          }
+        ]
+      }
     }
   ],
   "assets": [

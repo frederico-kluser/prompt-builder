@@ -102,3 +102,47 @@ describe('prompt-builder vision', () => {
     expect(env.error.code).toBe('vision.run_not_found');
   });
 });
+
+describe('prompt-builder vision — bancos de probe', () => {
+  it('--benchmark resolution planeja cenário × escalas e recusa action', () => {
+    const r = run([
+      'vision', 'run', '--models', 'google/gemini-2.5-flash', '--benchmark', 'resolution',
+      '--limit', '2', '--budget', '0.5', '--dry-run', '--json',
+    ]);
+    expect(r.code).toBe(0);
+    const env = JSON.parse(r.stdout) as {
+      ok: boolean;
+      data: { benchmark: string; variants: string[]; cells: number; tasks: string[] };
+    };
+    expect(env.ok).toBe(true);
+    expect(env.data.benchmark).toBe('resolution');
+    expect(env.data.variants).toEqual(['1920x1080', '1280x720', '960x540', '640x360']);
+    expect(env.data.tasks).toEqual(['map']);
+    expect(env.data.cells).toBe(8);
+
+    const invalido = run([
+      'vision', 'run', '--models', 'google/gemini-2.5-flash', '--benchmark', 'resolution',
+      '--tasks', 'action', '--budget', '0.5', '--dry-run', '--json',
+    ]);
+    expect(invalido.code).toBe(2);
+  });
+
+  it('--benchmark grid planeja tarefa × variantes e cobra a 2ª rodada no teto', () => {
+    const r = run([
+      'vision', 'run', '--models', 'google/gemini-2.5-flash', '--benchmark', 'grid',
+      '--scenes', 'bootstrap-login', '--grid-variants', 'plain,mark-grid',
+      '--budget', '0.5', '--dry-run', '--json',
+    ]);
+    expect(r.code).toBe(0);
+    const env = JSON.parse(r.stdout) as {
+      ok: boolean;
+      data: { benchmark: string; variants: string[]; cells: number; tasks: string[]; estimateUsd: number | null };
+    };
+    expect(env.ok).toBe(true);
+    expect(env.data.benchmark).toBe('grid');
+    expect(env.data.variants).toEqual(['plain', 'mark-grid']);
+    expect(env.data.tasks).toEqual(['action']);
+    expect(env.data.cells).toBe(8); // 4 tarefas × 2 variantes
+    expect(env.data.estimateUsd).toBeGreaterThan(0);
+  });
+});

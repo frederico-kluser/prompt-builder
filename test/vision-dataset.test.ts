@@ -78,6 +78,40 @@ describe('dataset versionado', () => {
     }
   });
 
+  it('todo cenário tem 4 resoluções e 3 overlays pinados; mark-grid tem 24 crops', async () => {
+    const loaded = await loadVisionDataset();
+    for (const scene of loaded.dataset.scenes) {
+      expect(scene.probes?.resolutions?.map((r) => r.id)).toEqual([
+        '1920x1080',
+        '1280x720',
+        '960x540',
+        '640x360',
+      ]);
+      const native = scene.probes!.resolutions!.find((r) => r.id === '1920x1080')!;
+      expect(native.file).toBe(scene.image.file);
+      expect(native.sha256).toBe(scene.image.sha256);
+      expect(scene.probes?.overlays?.map((o) => o.id).sort()).toEqual([
+        'axis-grid',
+        'grid-simple',
+        'mark-grid',
+      ]);
+      const mark = scene.probes!.overlays!.find((o) => o.id === 'mark-grid')!;
+      expect(mark.cells).toHaveLength(24);
+      expect(new Set(mark.cells!.map((c) => c.id)).size).toBe(24);
+      for (const cell of mark.cells!) {
+        expect(cell.viewport).toEqual({ width: 640, height: 540 });
+        expect(cell.bbox.x + cell.bbox.w).toBeLessThanOrEqual(VISION_VIEWPORT.width);
+        expect(cell.bbox.y + cell.bbox.h).toBeLessThanOrEqual(VISION_VIEWPORT.height);
+        const bytes = await fs.readFile(path.join(visionDataDir(), cell.image.file));
+        expect(pngSize(bytes)).toEqual({ width: 640, height: 540 });
+      }
+      for (const r of scene.probes!.resolutions!.filter((x) => x.id !== '1920x1080')) {
+        const bytes = await fs.readFile(path.join(visionDataDir(), r.file));
+        expect(pngSize(bytes)).toEqual({ width: r.width, height: r.height });
+      }
+    }
+  });
+
   it('resumo bate com o manifesto (cenários/elementos/tarefas)', async () => {
     const loaded = await loadVisionDataset();
     const s = summarizeDataset(loaded.dataset);

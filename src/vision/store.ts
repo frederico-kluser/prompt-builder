@@ -55,6 +55,8 @@ export interface VisionRunSummary {
   startedAt: string;
   finishedAt?: string;
   datasetVersion: string;
+  benchmark?: string;
+  provider?: string;
   scenes: number;
   models: string[];
   calls: number;
@@ -73,6 +75,8 @@ export function summarizeVisionRun(rec: VisionRunRecord): VisionRunSummary {
     startedAt: rec.startedAt,
     ...(rec.finishedAt ? { finishedAt: rec.finishedAt } : {}),
     datasetVersion: rec.dataset.version,
+    ...(rec.benchmark ? { benchmark: rec.benchmark } : {}),
+    ...(rec.config.provider ? { provider: rec.config.provider } : {}),
     scenes: rec.dataset.scenes.length,
     models: rec.contestants.map((c) => c.modelId),
     calls: rec.totals.calls,

@@ -22,6 +22,7 @@ import {
   type DatasetFilters,
   type VisionDataset,
   type VisionDatasetSummary,
+  type VisionImageRef,
   type VisionScene,
 } from '../engine/vision/index.js';
 
@@ -108,6 +109,18 @@ export async function verifyVisionDataset(root: string = visionDataDir()): Promi
     throw err;
   }
   let checked = 0;
+  const conferirRef = async (ref: VisionImageRef, onde: string): Promise<void> => {
+    try {
+      const bytes = await fs.readFile(path.join(root, ref.file));
+      checked += 1;
+      const sha = createHash('sha256').update(bytes).digest('hex');
+      if (sha !== ref.sha256) issues.push(`${onde}: sha256 diverge (manifesto ${ref.sha256.slice(0, 12)}…, disco ${sha.slice(0, 12)}…)`);
+      if (bytes.byteLength !== ref.bytes) issues.push(`${onde}: tamanho diverge (manifesto ${ref.bytes}, disco ${bytes.byteLength})`);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') issues.push(`${onde}: imagem ausente (${ref.file})`);
+      else throw err;
+    }
+  };
   for (const scene of loaded.dataset.scenes) {
     const img = path.join(root, scene.image.file);
     try {
@@ -123,6 +136,18 @@ export async function verifyVisionDataset(root: string = visionDataDir()): Promi
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') issues.push(`cenário "${scene.id}": imagem ausente (${scene.image.file})`);
       else throw err;
+    }
+    for (const r of scene.probes?.resolutions ?? []) {
+      // A resolução nativa reusa a imagem base (mesmo arquivo/sha); já foi
+      // conferida acima e não precisa de segunda leitura.
+      if (r.file === scene.image.file) continue;
+      await conferirRef(r, `cenário "${scene.id}" → resolução ${r.id}`);
+    }
+    for (const ov of scene.probes?.overlays ?? []) {
+      await conferirRef(ov.image, `cenário "${scene.id}" → overlay ${ov.id}`);
+      for (const cell of ov.cells ?? []) {
+        await conferirRef(cell.image, `cenário "${scene.id}" → crop ${ov.id}/${cell.id}`);
+      }
     }
     try {
       const html = await fs.readFile(path.join(root, scene.code.file), 'utf8');
@@ -154,9 +179,9 @@ export function selectVisionScenes(
 
 const imageCache = new Map<string, Promise<string>>();
 
-/** Imagem do cenário como data URL PNG (o formato que vai ao provedor). */
-export function sceneImageDataUrl(root: string, scene: VisionScene): Promise<string> {
-  const arquivo = path.join(root, scene.image.file);
+/** Imagem do cenário (ou de uma variante) como data URL PNG. */
+export function sceneImageDataUrl(root: string, scene: VisionScene, ref?: VisionImageRef): Promise<string> {
+  const arquivo = path.join(root, ref?.file ?? scene.image.file);
   const cache = imageCache.get(arquivo);
   if (cache) return cache;
   const p = fs.readFile(arquivo).then((bytes) => `data:image/png;base64,${bytes.toString('base64')}`);

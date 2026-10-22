@@ -32,12 +32,13 @@ import {
 import { SCENES } from './scenes/index.js';
 import { ASSETS } from './assets.js';
 import { openBrowserForBuild, renderScene } from './render.js';
+import { buildSceneProbes } from './probes.js';
 import type { SceneSpec } from './scene-types.js';
 
 export const VISION_DATA_ROOT = path.join(PKG_DATA_DIR, 'vision');
 const BUILD_DIR = path.dirname(fileURLToPath(import.meta.url));
 const MANIFEST = 'dataset@1.json';
-const GENERATOR = 'vision-build@1';
+const GENERATOR = 'vision-build@2';
 
 interface Flags {
   only: string[] | null;
@@ -115,10 +116,15 @@ export async function buildVisionDataset(argv: string[] = process.argv.slice(2),
       }
       const imagens = await fs.readFile(pngPath);
       const scene = montarCena(spec, extraido.elements, imagens, issues);
+      // Variantes pinadas junto com a tela: downscales (resolução) e
+      // overlays/crops (grade). A prova continua sendo a imagem base.
+      const probes = await buildSceneProbes(browser, pngPath, root, spec.id, scene.image);
+      scene.probes = probes;
       problemas.push(...issues.map((i) => `${spec.id}: ${i}`));
       scenes.push(scene);
       process.stderr.write(
-        `   ${scene.elements.length} elemento(s) · ${scene.tasks.length} tarefa(s) · ${(imagens.byteLength / 1024).toFixed(0)} KiB\n`,
+        `   ${scene.elements.length} elemento(s) · ${scene.tasks.length} tarefa(s) · ${(imagens.byteLength / 1024).toFixed(0)} KiB` +
+          ` · ${probes.resolutions.length} resolução(ões) · ${probes.overlays.length} overlay(s)\n`,
       );
     }
   } finally {

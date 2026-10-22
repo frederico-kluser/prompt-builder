@@ -23,6 +23,7 @@ import type {
   VisionActionPrediction,
   VisionActionScore,
   VisionActionTask,
+  VisionBenchmark,
   VisionCell,
   VisionContestant,
   VisionElement,
@@ -32,6 +33,7 @@ import type {
   VisionMapCell,
   VisionMapScore,
   VisionScene,
+  VisionVariantAggregate,
 } from './types.js';
 import { VISION_SCORE_WEIGHTS } from './types.js';
 
@@ -323,8 +325,11 @@ export function aggregateContestant(params: {
   modelId: string;
   cells: readonly VisionCell[];
   scenes: ReadonlyMap<string, VisionScene>;
+  /** Banco da run — decide a nota de manchete por variante. */
+  benchmark?: VisionBenchmark;
 }): VisionContestant {
   const { contestantId, modelId, cells, scenes } = params;
+  const benchmark = params.benchmark ?? 'grounding';
   const mapEntries: Array<{ cell: VisionMapCell; scene: VisionScene }> = [];
   const actionCells: VisionActionCell[] = [];
   for (const cell of cells) {
@@ -335,6 +340,82 @@ export function aggregateContestant(params: {
   }
   const map = mapEntries.length > 0 ? aggregateMap(mapEntries) : undefined;
   const action = actionCells.length > 0 ? aggregateAction(actionCells) : undefined;
+
+  // Recorte por variante: é o número que responde "quanto caiu em 360p?" e
+  // "o Mark-Grid bateu o controle?". A agregação global acima continua sendo
+  // a leitura genérica (e é o que a SPA antiga sabe desenhar).
+  const variants: VisionVariantAggregate[] = [];
+  if (benchmark !== 'grounding') {
+    const porVariante = new Map<string, VisionCell[]>();
+    for (const c of cells) {
+      if (!c.variant) continue;
+      const lista = porVariante.get(c.variant) ?? [];
+      lista.push(c);
+      porVariante.set(c.variant, lista);
+    }
+    for (const [variant, lista] of porVariante) {
+      const mapV = lista.filter((c): c is VisionMapCell => c.kind === 'map');
+      const actionV = lista.filter((c): c is VisionActionCell => c.kind === 'action');
+      const mapAgg = mapV.length > 0 ? aggregateMap(mapV.map((cell) => ({ cell, scene: scenes.get(cell.sceneId)! })).filter((e) => e.scene)) : undefined;
+      const actionAgg = actionV.length > 0 ? aggregateAction(actionV) : undefined;
+      const naoPuladas = lista.filter((c) => c.status !== 'skipped');
+      const latenciasV = naoPuladas.filter((c) => c.latencyMs > 0).map((c) => c.latencyMs);
+      variants.push({
+        variant,
+        benchmark,
+        cells: lista.length,
+        errors: lista.filter((c) => c.status === 'error').length,
+        skipped: lista.filter((c) => c.status === 'skipped').length,
+        calls: lista.reduce((a, c) => a + (c.kind === 'action' ? c.trace?.length ?? 1 : 1), 0),
+        costUsd: lista.reduce((a, c) => a + c.costUsd, 0),
+        meanLatencyMs:
+          latenciasV.length > 0 ? Math.round(latenciasV.reduce((a, b) => a + b, 0) / latenciasV.length) : 0,
+        tokensIn: lista.reduce((a, c) => a + c.tokensIn, 0),
+        tokensOut: lista.reduce((a, c) => a + c.tokensOut, 0),
+        ...(mapAgg
+          ? {
+              map: {
+                scenes: mapAgg.scenes,
+                f1: mapAgg.f1,
+                precision: mapAgg.precision,
+                recall: mapAgg.recall,
+                labelF1: mapAgg.labelF1,
+                typeAccuracy: mapAgg.typeAccuracy,
+              },
+            }
+          : {}),
+        ...(actionAgg
+          ? {
+              action: {
+                tasks: actionAgg.tasks,
+                passed: actionAgg.passed,
+                passRate: actionAgg.passRate,
+                actionAccuracy: actionAgg.actionAccuracy,
+                targetHitRate: actionAgg.targetHitRate,
+                textOkRate: actionAgg.textOkRate,
+              },
+            }
+          : {}),
+      });
+    }
+    variants.sort((a, b) => {
+      // Controle primeiro (grade), depois escalas da maior para a menor.
+      if (a.variant === 'plain') return -1;
+      if (b.variant === 'plain') return 1;
+      const na = Number(a.variant.split('x')[0]);
+      const nb = Number(b.variant.split('x')[0]);
+      if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return nb - na;
+      return a.variant.localeCompare(b.variant);
+    });
+  }
+
+  const notasVariante = variants
+    .map((v) => v.map?.f1 ?? v.action?.passRate ?? null)
+    .filter((v): v is number => v !== null);
+  const score =
+    benchmark !== 'grounding' && notasVariante.length > 0
+      ? notasVariante.reduce((a, b) => a + b, 0) / notasVariante.length
+      : headlineScore(map, action);
   const feitas = cells.filter((c) => c.status !== 'skipped');
   const latencias = feitas.filter((c) => c.latencyMs > 0).map((c) => c.latencyMs);
   return {
@@ -342,8 +423,9 @@ export function aggregateContestant(params: {
     modelId,
     ...(map ? { map } : {}),
     ...(action ? { action } : {}),
-    score: headlineScore(map, action),
-    calls: cells.length,
+    ...(variants.length > 0 ? { variants } : {}),
+    score,
+    calls: cells.reduce((a, c) => a + (c.kind === 'action' ? c.trace?.length ?? 1 : 1), 0),
     errors: cells.filter((c) => c.status === 'error').length,
     skipped: cells.filter((c) => c.status === 'skipped').length,
     parseFailures: cells.filter((c) => c.status === 'ok' && !c.parseOk).length,

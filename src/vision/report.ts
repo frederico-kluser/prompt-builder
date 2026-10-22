@@ -106,6 +106,78 @@ function tipoRows(map: VisionMapAggregate): string[] {
   return rows;
 }
 
+
+/** Cabeçalho/linhas da tabela por variante (resolução ou grade). */
+function variantTables(rec: VisionRunRecord): { headers: string[]; rows: string[][]; titulo: string; nota: string } | null {
+  if (rec.benchmark !== 'resolution' && rec.benchmark !== 'grid') return null;
+  const variantes = rec.contestants[0]?.variants?.map((v) => v.variant) ?? [];
+  if (variantes.length === 0) return null;
+  const headers = ['variante', ...rec.contestants.map((c) => `\`${c.modelId}\``)];
+  const rows: string[][] = [];
+  const base = (c: VisionContestant, v: string): number | null => {
+    const x = c.variants?.find((y) => y.variant === v);
+    return rec.benchmark === 'resolution' ? x?.map?.f1 ?? null : x?.action?.passRate ?? null;
+  };
+  for (const v of variantes) {
+    rows.push([
+      v,
+      ...rec.contestants.map((c) => {
+        const x = c.variants?.find((y) => y.variant === v);
+        if (!x) return '—';
+        if (rec.benchmark === 'resolution') {
+          return x.map ? `${pct(x.map.f1)} (P ${pct(x.map.precision)} · R ${pct(x.map.recall)})` : '—';
+        }
+        return x.action ? `${pct(x.action.passRate)} (${x.action.passed}/${x.action.tasks})` : '—';
+      }),
+    ]);
+  }
+  // Linha de referência: retenção vs 1080p (resolução) ou delta vs plain (grade).
+  if (rec.benchmark === 'resolution') {
+    rows.push([
+      '**retenção vs 1080p**',
+      ...rec.contestants.map((c) => {
+        const native = base(c, '1920x1080');
+        if (native === null || native === 0) return '—';
+        return variantes
+          .filter((v) => v !== '1920x1080')
+          .map((v) => {
+            const b = base(c, v);
+            return b === null ? null : `${v.split('x')[1]}p ${pct(b / native)}`;
+          })
+          .filter(Boolean)
+          .join(' · ') || '—';
+      }),
+    ]);
+  } else {
+    rows.push([
+      '**delta vs plain**',
+      ...rec.contestants.map((c) => {
+        const plain = base(c, 'plain');
+        if (plain === null) return '—';
+        return variantes
+          .filter((v) => v !== 'plain')
+          .map((v) => {
+            const b = base(c, v);
+            if (b === null) return null;
+            const delta = (b - plain) * 100;
+            return `${v} ${delta >= 0 ? '+' : ''}${delta.toFixed(1)} p.p.`;
+          })
+          .filter(Boolean)
+          .join(' · ') || '—';
+      }),
+    ]);
+  }
+  return {
+    headers,
+    rows,
+    titulo: rec.benchmark === 'resolution' ? 'Resolução — a mesma tela em outras escalas' : 'Grade — controle × técnicas',
+    nota:
+      rec.benchmark === 'resolution'
+        ? 'Coordenadas foram convertidas de volta para 1920×1080 antes de pontuar; a imagem enviada está em `cell.imageViewport`.'
+        : 'Todas as variantes usam a MESMA verdade e o MESMO pedido; `plain` é o controle. `mark-grid` pode ter 2 rodadas (recorte + ampliação).',
+  };
+}
+
 /** O relatório em Markdown (stdout de `vision report`). */
 export function renderVisionReportMarkdown(rec: VisionRunRecord): string {
   const linhas: string[] = [];
@@ -118,10 +190,15 @@ export function renderVisionReportMarkdown(rec: VisionRunRecord): string {
     `- **modos**: ${rec.config.tasks.join(' + ')} · **coordenadas pedidas**: ${rec.config.coordSpace === 'pixels' ? 'pixels 0–1920/0–1080' : 'normalizado 0–1000'}`,
   );
   linhas.push(
-    `- **modelos**: ${rec.contestants.length} · **células**: ${rec.totals.calls} (erros ${rec.totals.errors}, puladas ${rec.totals.skipped})`,
+    `- **modelos**: ${rec.contestants.length} · **células**: ${rec.totals.cells ?? rec.cells.length} · **chamadas HTTP**: ${rec.totals.calls} ` +
+      `(erros ${rec.totals.errors}, puladas ${rec.totals.skipped})`,
   );
   linhas.push(`- **custo medido**: ${usd(rec.totals.costUsd)} · **status**: ${rec.status}`);
-  linhas.push(`- **prompt**: ${rec.promptVersion} · **início**: ${rec.startedAt}${rec.finishedAt ? ` · **fim**: ${rec.finishedAt}` : ''}`);
+  linhas.push(
+    `- **prompt**: ${rec.promptVersion} · **banco**: ${rec.benchmark ?? 'grounding'}` +
+      `${rec.config.provider ? ` · **provedor fixado**: ${rec.config.provider}` : ''} · **início**: ${rec.startedAt}` +
+      `${rec.finishedAt ? ` · **fim**: ${rec.finishedAt}` : ''}`,
+  );
   linhas.push('');
   if (rec.warnings.length > 0) {
     linhas.push('> ⚠️ ' + rec.warnings.join('\n> ⚠️ '));
@@ -130,9 +207,24 @@ export function renderVisionReportMarkdown(rec: VisionRunRecord): string {
   linhas.push('## Placar');
   linhas.push('');
   linhas.push('Nota = média das notas disponíveis (mapa: F1 de região; ação: taxa de acerto).');
+  if (rec.benchmark && rec.benchmark !== 'grounding') {
+    linhas.push('');
+    linhas.push('Nesta rodada, a **nota é a média entre variantes**; a coluna “mapa F1”/“ação pass” acima é a micro-média global.');
+  }
   linhas.push('');
   linhas.push(...placarRows(rec));
   linhas.push('');
+  const vt = variantTables(rec);
+  if (vt) {
+    linhas.push(`## ${vt.titulo}`);
+    linhas.push('');
+    linhas.push(vt.nota);
+    linhas.push('');
+    linhas.push(`| ${vt.headers.join(' | ')} |`);
+    linhas.push(`|---|${rec.contestants.map(() => '---:').join('|')}|`);
+    for (const r of vt.rows) linhas.push(`| ${r.join(' | ')} |`);
+    linhas.push('');
+  }
   if (rec.config.tasks.includes('map')) {
     linhas.push('## Modo mapa — todos os elementos interativos');
     linhas.push('');
@@ -189,7 +281,13 @@ export function renderVisionReportMarkdown(rec: VisionRunRecord): string {
   linhas.push('- **Mapa**: uma previsão casa com um elemento quando o ponto cai DENTRO da caixa. O casamento é um-para-um, guloso, por qualidade (rótulo > tipo > proximidade do centro). Precisão = casados/previsões; recall = casados/elementos; F1 harmônico. Rótulo normaliza acento/caixa e aceita contenção e aliases; tipo compara o vocabulário fechado.');
   linhas.push('- **Ação**: a tarefa passa quando a ação declarada é a esperada, o ponto cai na caixa do alvo (quando há alvo) e o texto digitado confere (quando há texto).');
   linhas.push('- Erro de chamada conta como resposta errada no denominador; célula pulada por orçamento/cancelamento fica FORA das métricas (o status da run diz que o placar é parcial).');
-  linhas.push('- Coordenada fora do espaço pedido é convertida pelo parser (0–1000 ↔ pixels) e registrada na célula (`coordScale`); nenhuma técnica de grade/zoom/SoM é aplicada nesta versão.');
+  if (rec.benchmark === 'resolution') {
+    linhas.push('- **Resolução**: a imagem enviada é um downscale da tela canônica (sem reflow). O prompt declara o viewport enviado; o parser converte o ponto para a grade da variante e o runner reescala para 1920×1080 ANTES de pontuar. `imageViewport` fica no record.');
+  } else if (rec.benchmark === 'grid') {
+    linhas.push('- **Grade**: todas as variantes usam a mesma verdade e o mesmo pedido; `plain` é o controle. `grid-simple` desenha 9×9 sem rótulos, `axis-grid` usa réguas de x/y e `mark-grid` usa células 6×4. No `mark-grid`, a rodada 2 recebe o recorte ampliado da célula escolhida e contribui SÓ com o ponto refinado; ação/alvo/texto vêm da rodada 1.');
+  } else {
+    linhas.push('- Coordenada fora do espaço pedido é convertida pelo parser (0–1000 ↔ pixels) e registrada na célula (`coordScale`); nenhuma técnica de grade/zoom/SoM é aplicada no F0.');
+  }
   linhas.push('');
   return linhas.join('\n');
 }
@@ -223,14 +321,16 @@ export function renderVisionReportHtml(rec: VisionRunRecord): string {
       `(hash <code>${esc(rec.dataset.hash.slice(0, 16))}…</code>) · <strong>${rec.dataset.scenes.length}</strong> cenário(s) · ` +
       `<strong>modos</strong> ${esc(rec.config.tasks.join(' + '))} · <strong>coordenadas</strong> ` +
       `${rec.config.coordSpace === 'pixels' ? 'pixels 1920×1080' : 'normalizado 0–1000'} · ` +
-      `<strong>status</strong> ${esc(rec.status)} · <strong>custo medido</strong> ${usd(rec.totals.costUsd)}</p>`,
+      `<strong>status</strong> ${esc(rec.status)} · <strong>banco</strong> ${esc(rec.benchmark ?? 'grounding')}` +
+      `${rec.config.provider ? ` · <strong>provedor</strong> ${esc(rec.config.provider)}` : ''} · <strong>custo medido</strong> ${usd(rec.totals.costUsd)}</p>`,
   );
   if (rec.warnings.length > 0) {
     blocos.push(`<blockquote>⚠️ ${rec.warnings.map(esc).join('<br>⚠️ ')}</blockquote>`);
   }
   blocos.push('<h2>Placar</h2>');
   blocos.push(
-    `<p class="sub">Nota = média das notas disponíveis (mapa: F1 de região; ação: taxa de acerto).</p>` +
+    `<p class="sub">Nota = média das notas disponíveis (mapa: F1 de região; ação: taxa de acerto).` +
+      `${rec.benchmark && rec.benchmark !== 'grounding' ? ' Nesta rodada, a nota é a média entre variantes; a coluna de modo é a micro-média global.' : ''}</p>` +
       htmlTable(
         ['#', 'modelo', 'nota', 'mapa F1', 'rótulo F1', 'ação pass', 'erros', 'custo', 'tokens in/out', 'latência'],
         rec.contestants.map((c, i) => [
@@ -247,6 +347,12 @@ export function renderVisionReportHtml(rec: VisionRunRecord): string {
         ]),
       ),
   );
+  const vt = variantTables(rec);
+  if (vt) {
+    blocos.push(`<h2>${esc(vt.titulo)}</h2>`);
+    blocos.push(`<p class="sub">${esc(vt.nota)}</p>`);
+    blocos.push(htmlTable(vt.headers, vt.rows));
+  }
   if (rec.config.tasks.includes('map')) {
     blocos.push('<h2>Modo mapa — todos os elementos interativos</h2>');
     blocos.push('<h3>Por família</h3>');
@@ -305,7 +411,13 @@ export function renderVisionReportHtml(rec: VisionRunRecord): string {
 <li><strong>Mapa</strong>: casa quando o ponto cai DENTRO da caixa; um-para-um, guloso por qualidade (rótulo &gt; tipo &gt; proximidade). Precisão = casados/previsões, recall = casados/elementos, F1 harmônico. Rótulo normaliza acento/caixa, aceita contenção e aliases.</li>
 <li><strong>Ação</strong>: passa quando a ação é a esperada, o ponto cai na caixa do alvo (quando há alvo) e o texto confere (quando há texto).</li>
 <li>Erro de chamada conta como resposta errada; célula pulada por orçamento/cancelamento fica FORA das métricas (status parcial da run).</li>
-<li>Coordenada fora do espaço pedido é convertida pelo parser e registrada (<code>coordScale</code>); nenhuma técnica de grade/zoom/SoM nesta versão.</li>
+${
+  rec.benchmark === 'resolution'
+    ? '<li><strong>Resolução</strong>: downscale da tela canônica (sem reflow); o ponto é convertido para a grade da variante e reescalado para 1920×1080 antes de pontuar.</li>'
+    : rec.benchmark === 'grid'
+      ? '<li><strong>Grade</strong>: mesma verdade/pedido em todas as variantes; <code>plain</code> é o controle. No <code>mark-grid</code>, a rodada 2 usa o recorte ampliado e contribui só com o ponto; ação/alvo/texto vêm da rodada 1.</li>'
+      : '<li>Coordenada fora do espaço pedido é convertida pelo parser e registrada (<code>coordScale</code>); nenhuma técnica de grade/zoom/SoM no F0.</li>'
+}
 </ul>`,
   );
   return `<!doctype html>
@@ -332,12 +444,19 @@ ${blocos.join('\n')}
 export function renderVisionSummary(rec: VisionRunRecord): string {
   const linhas = [`Benchmark de visão ${rec.id} — ${rec.status}`];
   linhas.push(
-    `dataset ${rec.dataset.version} · ${rec.dataset.scenes.length} cenário(s) · ${rec.config.tasks.join('+')} · ${usd(rec.totals.costUsd)}`,
+    `dataset ${rec.dataset.version} · ${rec.benchmark ?? 'grounding'}${rec.contestants[0]?.variants?.length ? ` (${rec.contestants[0].variants.map((v) => v.variant).join(', ')})` : ''} · ` +
+      `${rec.dataset.scenes.length} cenário(s) · ${rec.config.tasks.join('+')} · ${usd(rec.totals.costUsd)}`,
   );
   for (const c of rec.contestants) {
     const partes = [`${c.modelId}: ${pct(c.score)}`];
     if (c.map) partes.push(`mapa F1 ${pct(c.map.f1)} (P ${pct(c.map.precision)} · R ${pct(c.map.recall)})`);
     if (c.action) partes.push(`ação ${pct(c.action.passRate)} (${c.action.passed}/${c.action.tasks})`);
+    if (c.variants?.length) {
+      const detalhe = c.variants
+        .map((v) => `${v.variant} ${pct(v.map?.f1 ?? v.action?.passRate ?? 0)}`)
+        .join(' · ');
+      partes.push(`variantes: ${detalhe}`);
+    }
     linhas.push(`  ${partes.join(' · ')}`);
   }
   return linhas.join('\n');

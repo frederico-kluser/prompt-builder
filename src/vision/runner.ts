@@ -17,6 +17,7 @@ import type { OpenRouterModel } from '../types.js';
 import type {
   VisionCell,
   VisionDataset,
+  VisionImageRef,
   VisionRunConfig,
   VisionRunRecord,
   VisionScene,
@@ -47,6 +48,9 @@ export interface RunVisionParams {
 /** Executa o benchmark no Node e devolve o record (o chamador persiste). */
 export async function runVision(params: RunVisionParams): Promise<VisionRunRecord> {
   const gateway = params.gateway ?? getGateway();
+  if (params.config.provider) {
+    gateway.configure({ auditableProviderOrder: [params.config.provider], auditableQuantizations: [] });
+  }
   const catalog = params.catalog ?? gateway.peekModelsCache(params.apiKey)?.data ?? [];
   const ledger =
     params.parentLedger?.fork() ??
@@ -66,6 +70,6 @@ export async function runVision(params: RunVisionParams): Promise<VisionRunRecor
     ...(params.onCell ? { onCell: params.onCell } : {}),
     ...(params.now ? { now: params.now } : {}),
     id: `vision-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
-    imageFor: (scene: VisionScene) => sceneImageDataUrl(params.datasetRoot, scene),
+    imageFor: (scene: VisionScene, ref?: VisionImageRef) => sceneImageDataUrl(params.datasetRoot, scene, ref),
   });
 }

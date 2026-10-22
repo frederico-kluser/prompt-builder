@@ -189,6 +189,13 @@ describe('parser do modo action', () => {
     expect(r.value?.action).toBe('unknown');
   });
 
+  it('mark-grid: normaliza o id da célula sem inventar', () => {
+    const r = parseActionOutput('{"cell":" c-3 ","action":"click","x":10,"y":20}', opts);
+    expect(r.value?.cell).toBe('C3');
+    const sem = parseActionOutput('{"action":"click","x":10,"y":20}', opts);
+    expect(sem.value?.cell).toBeNull();
+  });
+
   it('scroll não exige ponto', () => {
     const r = parseActionOutput('{"action":"scroll","direction":"down"}', opts);
     expect(r.ok).toBe(true);

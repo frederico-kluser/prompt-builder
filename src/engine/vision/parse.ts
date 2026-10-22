@@ -385,12 +385,15 @@ export function parseActionOutput(
     x = px.x;
     y = px.y;
   }
-  const target = textOrNull(firstPresent(obj, ['target', 'alvo', 'element', 'elemento', 'element_id', 'mark_id']));
+  const target = textOrNull(firstPresent(obj, ['target', 'alvo', 'element', 'elemento', 'element_id']));
   const texto = textOrNull(firstPresent(obj, ['text', 'texto', 'value', 'valor', 'input', 'content']));
+  // Só o mark-grid usa célula; normaliza "c3"/"C-3" para "C3" e ignora lixo.
+  const cellCru = textOrNull(firstPresent(obj, ['cell', 'celula', 'célula', 'grid_cell', 'cell_id', 'mark', 'mark_id']));
+  const cell = cellCru ? cellCru.toUpperCase().replace(/[^A-Z0-9]/g, '') : null;
   if (action === 'unknown') {
     return {
       ok: false,
-      value: { action, rawAction, target, x, y, text: texto },
+      value: { action, rawAction, target, x, y, text: texto, cell },
       error: `ação não reconhecida: ${rawAction || '(vazia)'}`,
       coordScale,
       raw,
@@ -398,7 +401,7 @@ export function parseActionOutput(
   }
   return {
     ok: true,
-    value: { action, rawAction, target, x, y, text: texto },
+    value: { action, rawAction, target, x, y, text: texto, cell },
     coordScale,
     raw,
   };

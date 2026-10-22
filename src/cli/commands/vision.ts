@@ -10,17 +10,24 @@
 // de saída (stdout = payload, stderr = narração).
 
 import { promises as fs } from 'node:fs';
-import { getGateway, APPROX_IMAGE_TOKENS } from '../../openrouter.js';
+import { configureGateway, getGateway, APPROX_IMAGE_TOKENS } from '../../openrouter.js';
 import { makeCallEstimator } from '../../estimate.js';
 import { REASONING_LEVELS } from '../../reasoning.js';
 import { isBudgetSignal } from '../../budget.js';
 import {
+  VISION_BENCHMARKS,
+  VISION_GRID_PROMPT_VERSION,
+  VISION_PROMPT_VERSION,
   VISION_COORD_SPACES,
   VISION_FAMILIES,
+  VISION_GRID_VARIANTS,
+  VISION_RESOLUTIONS,
   VISION_TASKS,
+  type VisionBenchmark,
   type VisionCoordSpace,
   type VisionDataset,
   type VisionFamily,
+  type VisionGridVariant,
   type VisionRunConfig,
   type VisionRunRecord,
   type VisionTaskKind,
@@ -61,6 +68,10 @@ export const VISION_SUBCOMMANDS = ['run', 'list', 'show', 'report', 'dataset'] a
 const RUN_OPTIONS = {
   models: { type: 'string', short: 'm' },
   tasks: { type: 'string' },
+  benchmark: { type: 'string' },
+  provider: { type: 'string' },
+  resolutions: { type: 'string' },
+  'grid-variants': { type: 'string' },
   families: { type: 'string' },
   scenes: { type: 'string' },
   limit: { type: 'string' },
@@ -109,6 +120,43 @@ function modelosDe(valor: unknown): string[] {
     });
   }
   return modelos;
+}
+
+function benchmarkDe(valor: unknown): VisionBenchmark {
+  if (valor === undefined || valor === '') return 'grounding';
+  if (typeof valor === 'string' && (VISION_BENCHMARKS as readonly string[]).includes(valor)) {
+    return valor as VisionBenchmark;
+  }
+  throw new CliError(`--benchmark inválido: ${String(valor)}.`, EXIT.USAGE, { accepted: VISION_BENCHMARKS }, {
+    code: 'usage.invalid_flag_value',
+    hint: `Bancos: ${VISION_BENCHMARKS.join(', ')}.`,
+  });
+}
+
+function resolutionsDe(valor: unknown): string[] | undefined {
+  const bruto = listaDe(valor, '--resolutions');
+  if (bruto.length === 0) return undefined;
+  const invalidas = bruto.filter((r) => !(VISION_RESOLUTIONS as readonly string[]).includes(r));
+  if (invalidas.length > 0) {
+    throw new CliError(`--resolutions inválido: ${invalidas.join(', ')}.`, EXIT.USAGE, { accepted: VISION_RESOLUTIONS }, {
+      code: 'usage.invalid_flag_value',
+      hint: `Escalas: ${VISION_RESOLUTIONS.join(', ')}.`,
+    });
+  }
+  return bruto;
+}
+
+function gridVariantsDe(valor: unknown): VisionGridVariant[] | undefined {
+  const bruto = listaDe(valor, '--grid-variants');
+  if (bruto.length === 0) return undefined;
+  const invalidas = bruto.filter((v) => !(VISION_GRID_VARIANTS as readonly string[]).includes(v));
+  if (invalidas.length > 0) {
+    throw new CliError(`--grid-variants inválido: ${invalidas.join(', ')}.`, EXIT.USAGE, { accepted: VISION_GRID_VARIANTS }, {
+      code: 'usage.invalid_flag_value',
+      hint: `Variantes: ${VISION_GRID_VARIANTS.join(', ')}.`,
+    });
+  }
+  return bruto as VisionGridVariant[];
 }
 
 function tarefasDe(valor: unknown): VisionTaskKind[] {
@@ -218,9 +266,35 @@ function datasetCliError(err: unknown): CliError {
 function configDe(values: Record<string, unknown>, budget: BudgetChoice): VisionRunConfig {
   const models = modelosDe(values.models);
   const scenes = listaDe(values.scenes, '--scenes');
+  const benchmark = benchmarkDe(values.benchmark);
+  const tarefasPedidas = values.tasks === undefined || values.tasks === '' ? null : tarefasDe(values.tasks);
+  if (benchmark === 'resolution' && tarefasPedidas && !tarefasPedidas.includes('map')) {
+    throw new CliError('--benchmark resolution mede o modo mapa; tire --tasks ou use --tasks map.', EXIT.USAGE, {
+      benchmark,
+      tasks: tarefasPedidas,
+    }, { code: 'usage.invalid_flag_value', hint: 'O banco de resolução só tem células de mapa.' });
+  }
+  if (benchmark === 'grid' && tarefasPedidas && !tarefasPedidas.includes('action')) {
+    throw new CliError('--benchmark grid mede o modo ação; tire --tasks ou use --tasks action.', EXIT.USAGE, {
+      benchmark,
+      tasks: tarefasPedidas,
+    }, { code: 'usage.invalid_flag_value', hint: 'O banco de grade só tem células de ação.' });
+  }
+  const tasks: VisionTaskKind[] =
+    benchmark === 'resolution'
+      ? ['map']
+      : benchmark === 'grid'
+        ? ['action']
+        : (tarefasPedidas ?? [...VISION_TASKS]);
+  const resolutions = resolutionsDe(values.resolutions);
+  const gridVariants = gridVariantsDe(values['grid-variants']);
   return {
     models,
-    tasks: tarefasDe(values.tasks),
+    benchmark,
+    ...(typeof values.provider === 'string' && values.provider.trim() ? { provider: values.provider.trim() } : {}),
+    tasks,
+    ...(resolutions ? { resolutions } : {}),
+    ...(gridVariants ? { gridVariants } : {}),
     families: familiasDe(values.families),
     scenes: scenes.length > 0 ? scenes : null,
     limit: values.limit === undefined || values.limit === '' ? null : inteiroDe(values.limit, '--limit', 1, 10_000, 0),
@@ -244,6 +318,8 @@ function exitFor(record: VisionRunRecord, cancelado: boolean): number {
 function resumoRun(record: VisionRunRecord): Record<string, unknown> {
   return {
     ...summarizeVisionRun(record),
+    benchmark: record.benchmark ?? 'grounding',
+    variants: record.contestants[0]?.variants?.map((v) => v.variant) ?? [],
     statusDetail: record.status,
     datasetHash: record.dataset.hash,
     promptVersion: record.promptVersion,
@@ -275,6 +351,9 @@ async function cmdRun(argv: string[]): Promise<number> {
   const { out, values } = ctx;
   const budget = resolveBudget(values.budget, (m) => out.warn(m));
   const config = configDe(values, budget);
+  if ((config.benchmark === 'resolution' || config.benchmark === 'grid') && !config.provider) {
+    out.warn('sem --provider: o provedor pode variar entre células; para comparar modelos, fixe um provedor (ex.: --provider DeepInfra).');
+  }
   const root = datasetRaiz(values);
   const carregado = await carregarDataset(root);
   const dataset = carregado.dataset;
@@ -318,7 +397,11 @@ async function cmdRun(argv: string[]): Promise<number> {
     models: config.models,
     tasks: config.tasks,
     coordSpace: config.coordSpace,
-    promptVersion: 'vision-prompt@1',
+    benchmark: config.benchmark ?? 'grounding',
+    ...(config.provider ? { provider: config.provider } : {}),
+    promptVersion: config.benchmark === 'grid' ? VISION_GRID_PROMPT_VERSION : VISION_PROMPT_VERSION,
+    ...(config.resolutions ? { resolutions: config.resolutions } : {}),
+    ...(config.gridVariants ? { gridVariants: config.gridVariants } : {}),
     ...(config.budgetUsd !== undefined ? { budgetUsd: config.budgetUsd } : {}),
   };
 
@@ -354,14 +437,25 @@ async function cmdRun(argv: string[]): Promise<number> {
     if (catalog.length > 0) {
       const estimador = makeCallEstimator(catalog);
       const promptTokens = 900 + APPROX_IMAGE_TOKENS;
+      // mark-grid = 2 chamadas por célula; o resto é 1. A estimativa é pelo
+      // teto de saída (o custo real por célula vem do `usage`).
+      const gridVariants = config.gridVariants ?? [...VISION_GRID_VARIANTS];
+      const markExtra =
+        config.benchmark === 'grid' && gridVariants.includes('mark-grid')
+          ? plano.actionCells * config.models.length
+          : 0;
+      const chamadasEstimadas = plano.cells + markExtra;
       estimativaUsd = 0;
       for (const modelId of config.models) {
-        estimativaUsd += estimador(modelId, promptTokens, config.maxTokens) * plano.cells / config.models.length;
+        estimativaUsd += estimador(modelId, promptTokens, config.maxTokens) * chamadasEstimadas / config.models.length;
       }
     }
     const resumo = {
       dryRun: true,
       dataset: { version: dataset.version, hash: crop(datasetHash(dataset)), scenes: selecao.scenes.map((s) => s.id) },
+      benchmark: plano.benchmark,
+      variants: plano.variants,
+      ...(config.provider ? { provider: config.provider } : {}),
       tasks: config.tasks,
       models: config.models,
       cells: plano.cells,
@@ -378,7 +472,7 @@ async function cmdRun(argv: string[]): Promise<number> {
     };
     if (out.isText) {
       out.line(`visão · dataset ${dataset.version} · ${selecao.scenes.length} cenário(s) · ${plano.cells} célula(s) · ${config.models.length} modelo(s)`);
-      out.line(`tarefas: ${config.tasks.join('+')} · coordenadas: ${config.coordSpace}`);
+      out.line(`banco: ${plano.benchmark}${plano.variants.length > 0 ? ` (${plano.variants.join(', ')})` : ''} · tarefas: ${config.tasks.join('+')} · coordenadas: ${config.coordSpace}`);
       out.line(`estimativa pelo teto: ${estimativaUsd === null ? 'indisponível (sem catálogo)' : usd(estimativaUsd)}`);
       for (const r of recusas) out.line(`  RECUSARIA  ${r.code} — ${r.message.split('\n')[0]}`);
       for (const r of resumo.requires) out.line(`  REQUER     ${r.code}`);
@@ -391,6 +485,12 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   if (budget.kind === 'missing') throw budgetRequiredError();
   const apiKey = await resolveKey(values);
+  // Pin de provedor: `auditable` desliga fallback e congela a ordem. Sem isso,
+  // a mesma célula pode cair em provedores diferentes e o benchmark mede o
+  // roteamento, não o modelo.
+  if (config.provider) {
+    configureGateway({ auditableProviderOrder: [config.provider], auditableQuantizations: [] });
+  }
   const catalogo = await loadCatalog(ctx, apiKey);
   const semVisao = modelsWithoutImageInput(config.models, catalogo.models);
   if (semVisao.length > 0) {
@@ -497,7 +597,10 @@ async function cmdList(argv: string[]): Promise<number> {
   if (ctx.out.isText) {
     if (runs.length === 0) ctx.out.line('nenhuma run de visão ainda — comece com `vision run`.');
     for (const r of runs) {
-      ctx.out.line(`${r.id}  ${r.status}  ${r.datasetVersion}  ${r.scenes} cenário(s)  ${r.calls} chamada(s)  ${usd(r.costUsd)}`);
+      ctx.out.line(
+        `${r.id}  ${r.status}  ${r.datasetVersion}  ${r.benchmark ?? 'grounding'}${r.provider ? `/${r.provider}` : ''}  ` +
+          `${r.scenes} cenário(s)  ${r.calls} chamada(s)  ${usd(r.costUsd)}`,
+      );
       ctx.out.line(`  melhor: ${r.bestModel ?? '—'} (${(r.bestScore * 100).toFixed(1)}%)`);
     }
   }
@@ -620,7 +723,14 @@ async function cmdDataset(argv: string[]): Promise<number> {
     const code = ctx.values.code === true ? await sceneSource(root, scene) : undefined;
     if (ctx.out.isText) {
       ctx.out.line(`${scene.id} — ${scene.title} (${scene.family}, ${scene.theme})`);
-      ctx.out.line(`${scene.elements.length} elemento(s) · ${scene.tasks.length} tarefa(s) de ação · imagem ${scene.image.file}`);
+      ctx.out.line(
+        `${scene.elements.length} elemento(s) · ${scene.tasks.length} tarefa(s) de ação · imagem ${scene.image.file}` +
+          ` · ${scene.probes?.resolutions?.length ?? 0} resolução(ões) · ${scene.probes?.overlays?.length ?? 0} overlay(s)`,
+      );
+      for (const r of scene.probes?.resolutions ?? []) ctx.out.line(`  [resolução] ${r.id} — ${r.file}`);
+      for (const ov of scene.probes?.overlays ?? []) {
+        ctx.out.line(`  [grade] ${ov.id} — ${ov.image.file}${ov.cells ? ` · ${ov.cells.length} recorte(s)` : ''}`);
+      }
       for (const el of scene.elements) {
         ctx.out.line(
           `  ${el.id} ${el.type} · ${el.label ?? `icon:${el.iconDescription ?? '?'}`} @ (${el.bbox.x},${el.bbox.y} ${el.bbox.w}×${el.bbox.h})`,

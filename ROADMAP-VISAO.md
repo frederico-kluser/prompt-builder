@@ -1,7 +1,9 @@
 # ROADMAP — Benchmark de Visão (UI grounding)
 
-> Status: **v0.1 (F0) implementado** — imagem crua, dois modos, dataset versionado
-> com verdade do DOM, placar determinístico, 5 famílias e 7 cenários.
+> Status: **v0.2 (F0 + bancos 1 e 2) implementado** — imagem crua, dois modos,
+> dataset versionado com verdade do DOM, placar determinístico, 5 famílias e 7
+> cenários; banco **resolution** (downscale) e banco **grid** (`plain`,
+> `grid-simple`, `axis-grid`, `mark-grid@2`) com recorte pinado no build.
 > Este roadmap cobre o que falta e **por que cada técnica entra (ou não)**,
 > ancorado na pesquisa de percepção/memória/orquestração de computer use
 > (out/2026) que originou o benchmark.
@@ -44,9 +46,15 @@ resultado com matriz cenário × modelo e mapa de calor por modelo).
 - **Placar:** ponto dentro da caixa (casamento 1-para-1 guloso por qualidade);
   precisão/recall/F1 de região e de rótulo, acerto de tipo, recall por tipo e
   por família; no modo ação: ação certa + alvo certo + texto certo.
-- **Prompt:** sem overlay, sem grade, sem a11y, sem zoom. Texto antes da
+- **Prompt F0:** sem overlay, sem grade, sem a11y, sem zoom. Texto antes da
   imagem. Coordenada declarada. Sem retries por padrão.
-- **Relatório:** Markdown + HTML autocontido (`vision report --html`).
+- **Bancos novos (v0.2):** `vision run --benchmark resolution` (1080p → 720p →
+  540p → 360p, coordenadas reescaladas para a grade canônica) e
+  `--benchmark grid` (controle `plain`, grade 9×9, eixos, e Mark-Grid 6×4 em 2
+  rodadas com recorte ampliado). O record guarda `benchmark`, `variant`,
+  `imageViewport`, os rastros das rodadas e o provedor fixado.
+- **Relatório:** Markdown + HTML autocontido (`vision report --html`), com
+  tabela por variante, retenção vs 1080p e delta vs `plain`.
 
 Limitações conhecidas: 7 cenários (poucos para IC estreito), imagens PT-BR,
 cenários sintéticos, rótulos automáticos podem conter ruído (ex.: "Somente SLA
@@ -107,6 +115,12 @@ poder estatístico.
 
 ### F2 — Percepção I: overlays e busca (grade/SoM)
 
+**Status (v0.2): implementado o primeiro corte** — `--benchmark grid` com
+`plain` (controle), `grid-simple` 9×9, `axis-grid` e `mark-grid` 6×4 em duas
+rodadas (célula → recorte 640×540; ação/alvo/texto da rodada 1, ponto da
+rodada 2). Ficam para a próxima iteração: 8×8 do paper, 4 células candidatas,
+SoM ancorado e tiling.
+
 **Objetivo:** medir se "marcar a imagem" ajuda modelos generalistas a apontar.
 
 - **Mark-Grid 2 rodadas** (o maior ganho sem treino no paper: 11,7% → 95,2% no
@@ -137,6 +151,10 @@ perde com overlay (polui a imagem); grade de 1 passada é neutra/negativa.
 por classe de modelo.
 
 ### F3 — Percepção II: recorte/zoom sob incerteza e resolução
+
+**Status (v0.2): a parte de resolução está implementada** — `--benchmark
+resolution`, com downscales pinados no build e reescala de coordenadas
+conferida pelo placar. Zoom condicional e DPR 2 continuam abertos.
 
 - **Zoom adaptativo (UI-Zoomer):** só quando confiança < limiar; medir Δ e
   custo das chamadas extras. Zoom incondicional **piora** o ScreenSpot-v2 — o
@@ -281,6 +299,48 @@ imagem no relatório.
 - **Ponte com o ecossistema:** exportar formato ScreenSpot-like (instrução,
   `bbox`) e importar anotações humanas para cenários reais (F11 futuro).
 
+### F12 — Ação executada: o clique fecha o ciclo (proposta)
+
+**Pergunta:** o modelo acerta a **posição** ou acerta a **ação**? O placar atual
+compara o ponto com a caixa do DOM; não prova que clicar ali produz o efeito
+pedido. Este banco executa a previsão num Chromium e observa o DOM depois —
+**zero chamadas extras** e verdade ainda determinística.
+
+**Desenho (v1, escopo mínimo):**
+
+- Reutiliza os cenários e as 30 tarefas de ação do dataset; cada tarefa declara
+  um `effect` observável (ex.: `{"kind":"value","targetId":"login-email",
+  "equals":"aluna@exemplo.com"}`, `{"kind":"checked","targetId":"login-lembrar",
+  "equals":true}`, `{"kind":"navigation","urlContains":"/cursos"}`,
+  `{"kind":"domAppears","selector":"[data-vision-effect=salvo]"}`).
+- O runner carrega o HTML do cenário num Chromium headless (o MESMO do build),
+  executa a previsão: `click`/`double_click`/`right_click` no ponto,
+  `type` no ponto + texto, `select` na opção, `hover`; `scroll`/`key` com teclado.
+- Espera curta e determinística (network idle + `requestAnimationFrame`), lê o
+  efeito e fecha a célula como `effectOk: true|false`, com um snapshot do DOM
+  pós-ação (≤ 2 KiB) e o erro do browser quando houver.
+- **Reset obrigatório** entre tarefas do mesmo cenário (reload + estado inicial);
+  uma execução não pode contaminar a próxima. O record guarda o hash do HTML e
+  a sequência executada.
+- **Métricas:** `effectRate` (pass), `actionOk`, `pointInBox`, `effectOk`;
+  matriz por ação e família; custo extra = 0 (só tempo de browser), latência
+  separada da latência do modelo.
+- **Casos de borda:** alvo coberto por modal, elemento que navega, campo com
+  máscara, botão que só habilita depois de preencher outro campo. Em v1, a
+  tarefa declara `effect` e o runner NÃO tenta adivinhar; sem `effect` a célula
+  fica `unscored` (fora da métrica e declarada).
+
+**Aceite:** 3 modelos × 30 tarefas; `effectRate` reportado com IC bootstrap;
+divergência `pointInBox=true` mas `effectOk=false` vira lista auditável (o
+clique caiu no lugar, mas o efeito não veio). O banco entra como
+`--benchmark executed` e **não** substitui o `action` — os dois medem coisas
+diferentes.
+
+**Riscos:** execução de HTML nosso é segura (sem rede externa, sem `file://`
+fora do dataset); o custo é tempo de browser (paralelizar por worker) e o
+determinismo exige congelar animações e `Math.random`/`Date` quando o cenário
+usar. Não é "agente operando app real" — é a ponte entre grounding e efeito.
+
 ### F11 — Fora do sintético (real, controlado)
 
 - Apps reais com a11y (VS Code, Gmail, Excel), capturados com permissão, com
@@ -295,8 +355,9 @@ imagem no relatório.
 | # | Fase | Por que agora | Impacto esperado | Custo |
 |---|---|---|---|---|
 | 1 | F1 dataset/splits/dificuldade | sem N, nenhum número é conclusivo | alto | médio |
-| 2 | F3 resolução/downscale | maior impacto e custo ~0 (Anthropic) | alto | baixo |
-| 3 | F2 Mark-Grid 2 rodadas | maior ganho medido sem treino | alto | alto (4× latência) |
+| 2 | F3 resolução/downscale | **feito v0.2**; falta zoom/DPR | alto | baixo |
+| 3 | F2 Mark-Grid 2 rodadas | **feito v0.2** (6×4, 2 rodadas) | alto | alto (4× latência) |
+| 3b | F12 ação executada | separa acerto de ponto de efeito real | alto | médio |
 | 4 | F2 SoM com âncoras | separa detecção de escolha (diagnóstico) | alto (diagnóstico) | baixo |
 | 5 | F4 a11y + híbrido | maior atalho de precisão quando existe árvore | alto | médio |
 | 6 | F5 verificador + refine | corrige erro de clique sem detector | médio-alto | médio |
@@ -310,7 +371,8 @@ imagem no relatório.
 **Decisão registrada (F0):** nada de grade/zoom/a11y na primeira versão — o
 objetivo era medir o piso "imagem crua". O benchmark nasceu determinístico e
 barato de auditar para que cada técnica acima entre como *variante medida*, não
-como opinião.
+como opinião. Em v0.2, `resolution` e `grid` entraram como bancos separados do
+F0; a SPA continua no F0 até as variantes serem copiadas para o bundle.
 
 ## 6. Anti-metas (o que NÃO vamos fazer)
 
@@ -333,9 +395,11 @@ Desenho: pareado por cenário, 3 modelos (generalista forte, generalista
 econômico, grounder nativo), 2 modos, 30 cenários dev + 30 test, IC bootstrap
 95% (10k reamostragens), custo medido por célula.
 
-1. **Baseline × Mark-Grid@2 × Axis-Grid × grade simples** (F2) — o experimento
-   de maior valor informativo.
-2. **Resolução:** 1080p × 1440×900 × 720p, com e sem reescala de coordenadas.
+1. **Baseline × Mark-Grid@2 × Axis-Grid × grade simples** (F2) — **rodado em
+   22/10/2026** com DeepInfra fixado; Mark-Grid não bateu o controle nos 3
+   modelos (ver `recaps/vision-benchmarks-v2/`).
+2. **Resolução:** 1080p × 1280×720 × 960×540 × 640×360 — **rodado em
+   22/10/2026**; a queda é monotônica e severa em 640×360.
 3. **SoM-âncora** (teto) × **SoM-detector** (piso) × sem overlay.
 4. **a11y-only × visão-only × híbrido** (F4), com tokens do texto medidos.
 5. **Zoom sob incerteza** com limiares 0,5/0,6/0,7 e alvo < 20 px.

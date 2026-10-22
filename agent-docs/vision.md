@@ -25,6 +25,27 @@ convenção de UI-TARS/Gemini, melhor para modelos com grounding nativo). O
 parser converte o que vier (inclusive `bbox` e `%`) e registra na célula o
 espaço detectado.
 
+## Bancos de prova (variantes medidas)
+
+O F0 é a **imagem crua**. Dois bancos experimentais usam a MESMA verdade do DOM e
+mudam **uma** variável por célula — o record guarda o banco e a variante:
+
+- **`resolution`** — a mesma tela reduzida para 1280×720, 960×540 e 640×360
+  (além do 1080p nativo). O prompt declara o tamanho da imagem enviada e as
+  coordenadas voltam para 1920×1080 antes de pontuar. Mede **robustez à escala**,
+  não reflow (a imagem é um downscale, o layout não muda).
+- **`grid`** — o mesmo pedido de ação com quatro apresentações:
+  `plain` (controle), `grid-simple` (grade 9×9 sem rótulos — controle negativo),
+  `axis-grid` (réguas de x/y) e `mark-grid` (grade 6×4 com células A1..F4).
+  No `mark-grid`, a rodada 1 escolhe a célula e a rodada 2 recebe um **recorte
+  ampliado** dela (640×540); a ação/alvo/texto vêm da rodada 1 e a rodada 2 só
+  refina o ponto. Custo: 2 chamadas por célula.
+
+**Fixe o provedor** (`--provider DeepInfra`) ao comparar modelos: sem pin, o
+OpenRouter pode trocar de provedor entre células (ou cair num provedor que
+ignora a imagem) e o número passa a medir o roteamento. O record grava
+`config.provider`; o relatório mostra a variante e a retenção/delta.
+
 ## Comandos
 
 ```bash
@@ -41,7 +62,15 @@ prompt-builder vision run --models google/gemini-3.8-flash \
 prompt-builder vision run --models google/gemini-3.8-flash,anthropic/claude-opus-5.5 \
   --tasks map,action --families bootstrap,macos --budget 2
 
-# 4) resultado
+# 4) bancos novos (sempre com provedor fixado)
+prompt-builder vision run --models a,b --benchmark resolution \
+  --provider DeepInfra --budget 2
+prompt-builder vision run --models a,b --benchmark grid \
+  --provider DeepInfra --grid-variants plain,mark-grid --budget 2
+prompt-builder vision run --models a,b --benchmark grid --grid-variants mark-grid \
+  --scenes bootstrap-login --budget 0.2 --dry-run
+
+# 5) resultado
 prompt-builder vision list
 prompt-builder vision show <id>
 prompt-builder vision report <id> --html vision-<id>.html
@@ -56,7 +85,11 @@ Flags da run:
 | flag | efeito |
 |---|---|
 | `--models a,b` | obrigatório; ids do OpenRouter (o catálogo precisa declarar entrada `image`) |
-| `--tasks map,action` | modos a rodar (padrão: os dois) |
+| `--tasks map,action` | modos a rodar (padrão: os dois; `resolution` força map e `grid` força action) |
+| `--benchmark grounding\|resolution\|grid` | banco de prova (padrão: grounding/F0) |
+| `--provider <nome>` | fixa o provedor OpenRouter (`auditable`; sem fallback) |
+| `--resolutions 1920x1080,…` | escalas do banco `resolution` (padrão: todas do dataset) |
+| `--grid-variants plain,…` | variantes do banco `grid` (padrão: todas) |
 | `--families bootstrap,react95,fluent,material,macos` | filtra famílias |
 | `--scenes id1,id2` | filtra cenários por id |
 | `--limit N` | corta o dataset (ordem do manifesto) |
@@ -80,7 +113,9 @@ Tudo sai do record, sem recálculo em outra superfície.
   cai na caixa do alvo (quando há alvo) **e** o texto confere (quando há texto).
   `scroll`/`key` não têm alvo e não pontuam posição.
 - **nota** = média das notas disponíveis (map: F1; action: taxa de acerto). Rodar
-  só um modo dá a nota daquele modo — o relatório diz qual.
+  só um modo dá a nota daquele modo — o relatório diz qual. Nos bancos de probe,
+  a nota é a **média entre variantes** e o relatório mostra a tabela por variante
+  (além da retenção vs 1080p e do delta vs `plain`).
 - Erro de chamada conta como resposta errada; célula pulada por
   orçamento/cancelamento fica **fora** das métricas e a run sai `aborted`
   (exit 7 por orçamento, 130 por cancelamento).
@@ -97,7 +132,11 @@ Coordenadas: ponto dentro da caixa é o critério — não há tolerância de ra
 - `code` — o HTML do cenário (o mesmo que gerou a imagem);
 - `elements[]` — id estável (`login-entrar`), tipo fechado, rótulo, descrição de
   ícone, aliases, caixa em pixels e centro;
-- `tasks[]` — pedidos do modo ação (`instruction`, ação esperada, alvo, texto).
+- `tasks[]` — pedidos do modo ação (`instruction`, ação esperada, alvo, texto);
+- `probes.resolutions[]` — PNGs reduzidos + largura/altura + sha256 (o 1080p
+  nativo reusa a imagem base);
+- `probes.overlays[]` — grades pinadas (`grid-simple`, `axis-grid`, `mark-grid`)
+  e, no mark-grid, os 24 recortes ampliados com a caixa canônica de origem.
 
 As famílias atuais usam frameworks reais: **Bootstrap 5.3.3**, **React95**,
 **Fluent UI**, **Material 3** e um desktop **macOS** em CSS próprio. Cada
@@ -131,13 +170,28 @@ imagem) · `4` key ausente · `7` parcial por orçamento · `8` catálogo indisp
 
 ## Limites desta versão (e o que vem depois)
 
-- Nada de grade, zoom, Set-of-Mark, árvore de acessibilidade nem recorte: é a
-  medição **imagem crua × coordenada**. Essas técnicas entram como variantes
-  medidas do mesmo dataset — o roadmap completo está em `ROADMAP-VISAO.md`.
+- O **F0** continua sendo imagem crua × coordenada. Os bancos `resolution` e
+  `grid` já medem escala e overlays; Set-of-Mark por âncora, árvore de
+  acessibilidade, zoom condicional e **verificação multi-turno** ainda são
+  roadmap (`ROADMAP-VISAO.md`).
+- O banco `grid` é CLI-first: a SPA `/vision` ainda só roda o F0 (as variantes
+  ainda não são copiadas para `web/public/vision/`).
+- O `mark-grid` é uma implementação de 2 rodadas (célula → recorte ampliado);
+  o placar usa ação/alvo/texto da rodada 1 e o ponto da rodada 2, de propósito:
+  mede localização, não "o modelo reescreve a ação sob zoom".
 - O dataset é sintético (cinco famílias, PT-BR). Isso mede grounding, não
   operação de um app real; e não compara diretamente com ScreenSpot/OSWorld.
 - Imagens de 1080p custam ~1.800 tokens de entrada por chamada — uma run de 20
   cenários × 2 modos × 2 modelos ≈ 120 chamadas. Use `--dry-run` e `--limit`.
+
+## Terceiro banco (proposto)
+
+**Ação executada (closed-loop).** Em vez de comparar o ponto com a caixa,
+executar a previsão num Chromium e ler o efeito no DOM (`value`, `checked`,
+`navigation`, `domAppears`). Zero chamadas extras de LLM; reload entre tarefas;
+métricas `effectRate`, `actionOk`, `pointInBox` e `effectOk`. A especificação
+completa (formato do `effect`, reset, casos de borda e aceite) está em
+`ROADMAP-VISAO.md` (F12). **Ainda não implementado.**
 
 ## Para quem mantém o dataset
 
