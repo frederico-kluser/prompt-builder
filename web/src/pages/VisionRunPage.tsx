@@ -30,6 +30,10 @@ const FAMILY_LABEL: Record<string, string> = {
   macos: 'macOS',
 };
 
+function pct0(v: number | null): string {
+  return v === null || Number.isNaN(v) ? '—' : `${Math.round(v * 100)}%`;
+}
+
 function shortModel(id: string): string {
   const i = id.lastIndexOf('/');
   return i >= 0 ? id.slice(i + 1) : id;
@@ -236,7 +240,7 @@ export function VisionRunPage() {
         Cenário × modelo
       </SectionHead>
 
-      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,0.75fr)]">
         <div className="min-w-0">
           <div className="overflow-x-auto rounded-xl border border-border bg-card">
             <table className="w-full border-collapse text-[12.5px]">
@@ -250,7 +254,7 @@ export function VisionRunPage() {
                   </th>
                   {modelos.map((m) => (
                     <th key={m} scope="col" className="px-2 py-2 text-center font-medium">
-                      <span className="block max-w-[9rem] truncate" title={m}>
+                      <span className="block max-w-[7.5rem] truncate" title={m}>
                         {shortModel(m)}
                       </span>
                       {m === vencedor?.modelId && <span className="text-[10px] font-semibold text-primary">1º</span>}
@@ -281,14 +285,17 @@ export function VisionRunPage() {
                             aria-pressed={ativo}
                             aria-label={`${scene.title}, ${modelId}: nota ${fmtPct(v.combined)}; mapa ${fmtPct(v.mapF1)}; ação ${fmtPct(v.actionPass)}`}
                             className={cn(
-                              'mx-auto flex min-h-11 w-full min-w-[6.5rem] flex-col items-center justify-center rounded-lg border px-2 py-1.5 text-center transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50',
+                              'mx-auto flex min-h-11 w-full min-w-[6rem] flex-col items-center justify-center overflow-hidden rounded-lg border px-2 py-1.5 text-center transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50',
                               band ? BAND_CLASS[band] : 'border-border bg-muted text-muted-foreground',
                               ativo && 'ring-2 ring-ring/70',
                             )}
                           >
                             <span className="text-[13px] font-semibold tabular-nums">{fmtPct(v.combined)}</span>
-                            <span className="text-[10.5px] tabular-nums opacity-80">
-                              mapa {fmtPct(v.mapF1)} · ação {fmtPct(v.actionPass)}
+                            <span className="block text-[10px] leading-tight tabular-nums opacity-80">
+                              mapa {pct0(v.mapF1)}
+                            </span>
+                            <span className="block text-[10px] leading-tight tabular-nums opacity-80">
+                              ação {pct0(v.actionPass)}
                             </span>
                             {v.skipped > 0 && <span className="text-[10px] opacity-80">{v.skipped} pulada(s)</span>}
                           </button>
