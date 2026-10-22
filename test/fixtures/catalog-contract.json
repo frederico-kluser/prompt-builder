@@ -14,6 +14,7 @@
         "low",
         "max",
         "medium",
+        "none",
         "xhigh"
       ],
       "mandatory": false,
@@ -32,6 +33,7 @@
       ],
       "supportedEfforts": [
         "high",
+        "none",
         "xhigh"
       ],
       "mandatory": false,
