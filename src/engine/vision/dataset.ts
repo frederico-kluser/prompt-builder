@@ -16,6 +16,8 @@ import {
   VISION_ELEMENT_TYPES,
   VISION_FAMILIES,
   VISION_GRID_VARIANTS,
+  VISION_FRAME_GRIDS,
+  VISION_MATRIX_GRIDS,
   VISION_RESOLUTIONS,
   VISION_TASKS,
   VISION_VIEWPORT,
@@ -27,6 +29,7 @@ import type {
   VisionFamily,
   VisionGridOverlay,
   VisionGridVariant,
+  VisionMatrixGrid,
   VisionResolutionRef,
   VisionScene,
   VisionTaskKind,
@@ -96,7 +99,20 @@ const gridCellSchema = z.strictObject({
 });
 
 const overlaySchema = z.strictObject({
-  id: z.enum(VISION_GRID_VARIANTS.filter((v) => v !== 'plain') as ['grid-simple', 'axis-grid', 'mark-grid']),
+  id: z.enum([
+    ...(VISION_GRID_VARIANTS.filter((v) => v !== 'plain') as ['grid-simple', 'axis-grid', 'mark-grid']),
+    ...VISION_FRAME_GRIDS,
+  ]),
+  resolution: z.enum(VISION_RESOLUTIONS).optional(),
+  kind: z.enum(['overlay', 'frame', 'sidecar']).optional(),
+  margins: z
+    .strictObject({
+      left: z.number().int().nonnegative(),
+      top: z.number().int().nonnegative(),
+      right: z.number().int().nonnegative(),
+      bottom: z.number().int().nonnegative(),
+    })
+    .optional(),
   image: imageRefSchema,
   viewport: viewportSchema,
   cols: z.number().int().positive().optional(),
@@ -215,13 +231,25 @@ export function validateDatasetSemantics(dataset: VisionDataset): string[] {
       }
       const overlayIds = new Set<string>();
       for (const ov of scene.probes.overlays ?? []) {
-        if (overlayIds.has(ov.id)) issues.push(`${ondeProbe}: overlay "${ov.id}" duplicado`);
-        overlayIds.add(ov.id);
-        if (ov.viewport.width !== viewport.width || ov.viewport.height !== viewport.height) {
-          issues.push(`${ondeProbe}: overlay "${ov.id}" tem viewport ${ov.viewport.width}×${ov.viewport.height} ≠ dataset`);
+        const chave = `${ov.id}@${ov.resolution ?? 'native'}`;
+        if (overlayIds.has(chave)) issues.push(`${ondeProbe}: overlay "${chave}" duplicado`);
+        overlayIds.add(chave);
+        // Overlay clássico é 1080p; frame/sidecar variam com a resolução.
+        const viewportOk =
+          ov.kind === 'frame' ||
+          ov.kind === 'sidecar' ||
+          (ov.viewport.width === viewport.width && ov.viewport.height === viewport.height);
+        if (!viewportOk) {
+          issues.push(`${ondeProbe}: overlay "${chave}" tem viewport ${ov.viewport.width}×${ov.viewport.height} ≠ dataset`);
         }
         if (ov.id === 'mark-grid' && (!ov.cells || ov.cells.length === 0)) {
           issues.push(`${ondeProbe}: "mark-grid" sem células/crops`);
+        }
+        if ((ov.id === 'frame-axis' || ov.id === 'frame-mark') && !ov.margins) {
+          issues.push(`${ondeProbe}: "${ov.id}" sem margens`);
+        }
+        if ((ov.id === 'frame-axis' || ov.id === 'frame-mark' || ov.id === 'sidecar-grid') && !ov.resolution) {
+          issues.push(`${ondeProbe}: "${ov.id}" sem resolução`);
         }
         const celIds = new Set<string>();
         for (const c of ov.cells ?? []) {
@@ -297,9 +325,11 @@ export interface VisionPlannedCell {
   task?: VisionScene['tasks'][number];
   /** Banco de probe desta célula (ausente = F0). */
   benchmark?: VisionBenchmark;
-  /** Escala (`resolution`) ou variante (`grid`). */
+  /** Escala (`resolution`) ou variante combinada (`matrix`). */
   variant?: string;
-  resolution?: VisionResolutionRef;
+  resolutionRef?: VisionResolutionRef;
+  /** Banco `matrix`: grade específica. */
+  matrixGrid?: VisionMatrixGrid;
   overlay?: VisionGridOverlay;
 }
 
@@ -308,6 +338,7 @@ export interface VisionPlanOptions {
   benchmark?: VisionBenchmark;
   resolutions?: readonly string[];
   gridVariants?: readonly VisionGridVariant[];
+  matrixGrids?: readonly VisionMatrixGrid[];
 }
 
 /**
@@ -340,8 +371,40 @@ export function planCells(
           scene,
           benchmark,
           variant: r.id,
-          resolution: r,
+          resolutionRef: r,
         });
+      }
+    }
+    return plan;
+  }
+  if (benchmark === 'matrix') {
+    if (!tasks.includes('action')) return plan;
+    const wantedGrid = new Set(opts.matrixGrids ?? VISION_MATRIX_GRIDS);
+    const wantedRes = opts.resolutions ? new Set(opts.resolutions) : null;
+    for (const scene of scenes) {
+      for (const task of scene.tasks) {
+        for (const r of scene.probes?.resolutions ?? []) {
+          if (wantedRes && !wantedRes.has(r.id)) continue;
+          for (const grid of VISION_MATRIX_GRIDS) {
+            if (!wantedGrid.has(grid)) continue;
+            const overlay =
+              grid === 'plain'
+                ? undefined
+                : scene.probes?.overlays?.find((o) => o.id === grid && o.resolution === r.id);
+            if (grid !== 'plain' && !overlay) continue;
+            plan.push({
+              cellId: `action:${task.id}@${r.id}+${grid}`,
+              kind: 'action',
+              scene,
+              task,
+              benchmark,
+              variant: `${r.id}+${grid}`,
+              resolutionRef: r,
+              matrixGrid: grid,
+              ...(overlay ? { overlay } : {}),
+            });
+          }
+        }
       }
     }
     return plan;

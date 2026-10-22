@@ -87,7 +87,7 @@ export type VisionTaskKind = (typeof VISION_TASKS)[number];
  * A prova em si (imagem + verdade do DOM) é a mesma; o que muda é a
  * APRESENTAÇÃO. Nunca se cria uma prova na hora da run.
  */
-export const VISION_BENCHMARKS = ['grounding', 'resolution', 'grid'] as const;
+export const VISION_BENCHMARKS = ['grounding', 'resolution', 'grid', 'matrix'] as const;
 
 export type VisionBenchmark = (typeof VISION_BENCHMARKS)[number];
 
@@ -100,6 +100,20 @@ export type VisionResolution = (typeof VISION_RESOLUTIONS)[number];
 export const VISION_GRID_VARIANTS = ['plain', 'grid-simple', 'axis-grid', 'mark-grid'] as const;
 
 export type VisionGridVariant = (typeof VISION_GRID_VARIANTS)[number];
+
+/**
+ * Grades SEM desenhar em cima do print: a referência fica nas margens
+ * (`frame-*`) ou numa imagem separada (`sidecar-grid`). O print nunca é
+ * alterado por essas variantes.
+ */
+export const VISION_FRAME_GRIDS = ['frame-axis', 'frame-mark', 'sidecar-grid'] as const;
+
+export type VisionFrameGrid = (typeof VISION_FRAME_GRIDS)[number];
+
+/** Matriz resolução × grade: `plain` é o controle sem grade. */
+export const VISION_MATRIX_GRIDS = ['plain', ...VISION_FRAME_GRIDS] as const;
+
+export type VisionMatrixGrid = (typeof VISION_MATRIX_GRIDS)[number];
 
 /** Célula do `mark-grid`: caixa canônica + o recorte que a segunda rodada vê. */
 export interface VisionGridCellSpec {
@@ -114,9 +128,18 @@ export interface VisionGridCellSpec {
 
 /** Overlay de grade renderizado no build (nunca desenhado na hora da prova). */
 export interface VisionGridOverlay {
-  id: Exclude<VisionGridVariant, 'plain'>;
+  id: Exclude<VisionGridVariant, 'plain'> | VisionFrameGrid;
+  /**
+   * Escala a que a variante pertence. Ausente = só a 1080p nativa. As grades
+   * `frame-*`/`sidecar-*` são geradas por resolução (as margens não podem ser
+   * reduzidas junto com o print sem virar ilegíveis).
+   */
+  resolution?: VisionResolution;
+  kind?: 'overlay' | 'frame' | 'sidecar';
   image: VisionImageRef;
   viewport: { width: number; height: number };
+  /** Margens da moldura (só `frame-*`), em pixels da imagem enviada. */
+  margins?: { left: number; top: number; right: number; bottom: number };
   cols?: number;
   rows?: number;
   /** Passo dos eixos (px canônicos), no `axis-grid`. */
@@ -367,6 +390,11 @@ export interface VisionActionCell {
   /** Banco e variante desta célula (`grid`: plain/grid-simple/...). */
   benchmark?: VisionBenchmark;
   variant?: string;
+  /** Banco `matrix`: escala e grade usadas (além do `variant` combinado). */
+  resolution?: string;
+  grid?: string;
+  margins?: { left: number; top: number; right: number; bottom: number };
+  imageViewport?: { width: number; height: number };
   /** Rodadas efetivamente executadas (2 no `mark-grid` com recorte). */
   rounds?: 1 | 2;
   /** Rastros das rodadas (a 1ª também custou e fica auditável). */
@@ -529,6 +557,8 @@ export interface VisionRunConfig {
   resolutions?: string[];
   /** `grid`: variantes a rodar (default: todas). */
   gridVariants?: VisionGridVariant[];
+  /** `matrix`: grades a cruzar com as resoluções (default: todas). */
+  matrixGrids?: VisionMatrixGrid[];
   /**
    * Provedor FIXADO no OpenRouter (ex.: `DeepInfra`). Sem pin, o roteamento
    * automático troca de provedor entre células — e um provedor que ignora a

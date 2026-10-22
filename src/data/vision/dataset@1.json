@@ -1,6 +1,6 @@
 {
   "format": "vision-dataset@1",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "generator": "vision-build@2",
   "createdAt": "2026-10-21T23:37:31.034Z",
   "viewport": {
@@ -472,6 +472,7 @@
         "overlays": [
           {
             "id": "grid-simple",
+            "kind": "overlay",
             "image": {
               "file": "overlays/bootstrap-painel-cursos-grid-simple.png",
               "sha256": "88b29c716173ec9575523040b4b53d50eddd4e721326076d6bb3e25507a6f64f",
@@ -486,6 +487,7 @@
           },
           {
             "id": "axis-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/bootstrap-painel-cursos-axis-grid.png",
               "sha256": "03b5ff65ed0325828442b00c40f8600456d39e1c08f3abd695a5ee9d3f77e71f",
@@ -499,6 +501,7 @@
           },
           {
             "id": "mark-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/bootstrap-painel-cursos-mark-grid.png",
               "sha256": "e95b1b2f1a631d200aba3b3c1fa3ba4e28d7679c07bc58ac1f9a733c92d232d1",
@@ -1088,6 +1091,246 @@
                 }
               }
             ]
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/bootstrap-painel-cursos-1920x1080-frame-axis.png",
+              "sha256": "c5fb3ce0749ffe2cec94cc3667f69d24d6c2beee601ac8b26dbaab826d2b8ded",
+              "bytes": 144552
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/bootstrap-painel-cursos-1920x1080-frame-mark.png",
+              "sha256": "49ac0a12cca233a27ae9e06a6eaff4eaecc9a88d56a762a7ae4eca3d01b8d49c",
+              "bytes": 131427
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "sidecars/bootstrap-painel-cursos-1920x1080-sidecar-grid.png",
+              "sha256": "899f6e86e8adbabf8bd44136fc646c8b145f13f9f54fc35780f9d3a22e9f8a8b",
+              "bytes": 61070
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/bootstrap-painel-cursos-1280x720-frame-axis.png",
+              "sha256": "bb9f52b6a9ff58b63869a242f28c5ec66a0636deaf192a1544a4e895b78e0075",
+              "bytes": 96291
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/bootstrap-painel-cursos-1280x720-frame-mark.png",
+              "sha256": "6e19c70a87f19228db33bce944f9cc403dd4625d55bff9a5b6a12121f3ff029c",
+              "bytes": 84253
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1280x720",
+            "image": {
+              "file": "sidecars/bootstrap-painel-cursos-1280x720-sidecar-grid.png",
+              "sha256": "a6329bd24f9666aae252645a0151d403526b12f911afcf7bf77fc83086c48ea3",
+              "bytes": 37161
+            },
+            "viewport": {
+              "width": 1280,
+              "height": 720
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/bootstrap-painel-cursos-960x540-frame-axis.png",
+              "sha256": "f2d8cee32aa348a177448a2e4437b8ff85ba1c93fd4dad41c909559f81618e6e",
+              "bytes": 62012
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/bootstrap-painel-cursos-960x540-frame-mark.png",
+              "sha256": "25afe807a2b681cb21f1282e1ed4a59e57fc7dbd3916312786315ef20df3b985",
+              "bytes": 54131
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "960x540",
+            "image": {
+              "file": "sidecars/bootstrap-painel-cursos-960x540-sidecar-grid.png",
+              "sha256": "8cfbe5576e0c11c69aa0a97d1b49bcbb80fdbe9d88807b8791ca7fdc5d08396d",
+              "bytes": 28143
+            },
+            "viewport": {
+              "width": 960,
+              "height": 540
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/bootstrap-painel-cursos-640x360-frame-axis.png",
+              "sha256": "83dc5327ac9d971e7deabb9b4a875c7a422f25b9e9e32df90089d9765d74dc09",
+              "bytes": 42328
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/bootstrap-painel-cursos-640x360-frame-mark.png",
+              "sha256": "9598c2bb2366bba8ee55b2bbb06d4c563f74d1d7c33a9c0a8affefeb1674b644",
+              "bytes": 37120
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "640x360",
+            "image": {
+              "file": "sidecars/bootstrap-painel-cursos-640x360-sidecar-grid.png",
+              "sha256": "efea82b8e2b63b2b4d0b9beb8b8f73da8d49ada9773f635af71a18d91f29965c",
+              "bytes": 20203
+            },
+            "viewport": {
+              "width": 640,
+              "height": 360
+            },
+            "cols": 6,
+            "rows": 4
           }
         ]
       }
@@ -1339,6 +1582,7 @@
         "overlays": [
           {
             "id": "grid-simple",
+            "kind": "overlay",
             "image": {
               "file": "overlays/bootstrap-login-grid-simple.png",
               "sha256": "69850600746db418d86ff5a1911294534e87cbf62b879d88a850175b4d7e16dd",
@@ -1353,6 +1597,7 @@
           },
           {
             "id": "axis-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/bootstrap-login-axis-grid.png",
               "sha256": "5a0189ef9f85394db2c3eee3114ff310da4e1f9cde07127b9e512f3334b6a461",
@@ -1366,6 +1611,7 @@
           },
           {
             "id": "mark-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/bootstrap-login-mark-grid.png",
               "sha256": "d325e71477cd24ec078e83ae88115715bb855d9b1b65ea48816126127582d94f",
@@ -1955,6 +2201,246 @@
                 }
               }
             ]
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/bootstrap-login-1920x1080-frame-axis.png",
+              "sha256": "13c6e03555008fdf4d72b39b617d8cca3d83bf0c634d7bd3dc629b3e411dbaf1",
+              "bytes": 104268
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/bootstrap-login-1920x1080-frame-mark.png",
+              "sha256": "14512b79f0825935340bd9168aed30aca90ceff78e5b705aef7ac1268ba7c09a",
+              "bytes": 91013
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "sidecars/bootstrap-login-1920x1080-sidecar-grid.png",
+              "sha256": "899f6e86e8adbabf8bd44136fc646c8b145f13f9f54fc35780f9d3a22e9f8a8b",
+              "bytes": 61070
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/bootstrap-login-1280x720-frame-axis.png",
+              "sha256": "881b1a6fba408245cf424ff6268db44a387cc9a932bc29cdc06bfdda95b108f9",
+              "bytes": 68087
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/bootstrap-login-1280x720-frame-mark.png",
+              "sha256": "73ad5321f6e7a515a35b195ba0f40089b825985de3389209d5f76a92a252d4ea",
+              "bytes": 55491
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1280x720",
+            "image": {
+              "file": "sidecars/bootstrap-login-1280x720-sidecar-grid.png",
+              "sha256": "a6329bd24f9666aae252645a0151d403526b12f911afcf7bf77fc83086c48ea3",
+              "bytes": 37161
+            },
+            "viewport": {
+              "width": 1280,
+              "height": 720
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/bootstrap-login-960x540-frame-axis.png",
+              "sha256": "fa891047ae8c63c842ca8d486f9c4f2061346fac03f8e18babade8be588ae929",
+              "bytes": 45900
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/bootstrap-login-960x540-frame-mark.png",
+              "sha256": "faf0975c0cf045b30b0cac750db13377b6d5ef5109b0ce25dac28c0143bc94e1",
+              "bytes": 37873
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "960x540",
+            "image": {
+              "file": "sidecars/bootstrap-login-960x540-sidecar-grid.png",
+              "sha256": "8cfbe5576e0c11c69aa0a97d1b49bcbb80fdbe9d88807b8791ca7fdc5d08396d",
+              "bytes": 28143
+            },
+            "viewport": {
+              "width": 960,
+              "height": 540
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/bootstrap-login-640x360-frame-axis.png",
+              "sha256": "43c3859ce24043b44f20b6ecdf936c0df8bf1d9e0db52cfffcd8e8bfd260ef33",
+              "bytes": 30976
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/bootstrap-login-640x360-frame-mark.png",
+              "sha256": "9c18287218bb616d0970bb7689eb77bed53cff0e585c5c6c989be2ff6f09239d",
+              "bytes": 25695
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "640x360",
+            "image": {
+              "file": "sidecars/bootstrap-login-640x360-sidecar-grid.png",
+              "sha256": "efea82b8e2b63b2b4d0b9beb8b8f73da8d49ada9773f635af71a18d91f29965c",
+              "bytes": 20203
+            },
+            "viewport": {
+              "width": 640,
+              "height": 360
+            },
+            "cols": 6,
+            "rows": 4
           }
         ]
       }
@@ -2780,6 +3266,7 @@
         "overlays": [
           {
             "id": "grid-simple",
+            "kind": "overlay",
             "image": {
               "file": "overlays/react95-painel-grid-simple.png",
               "sha256": "7c6b8c038e33d98ef1776c41fcae13b1c6bbe405076acf2c6962cd3e60c2c0ab",
@@ -2794,6 +3281,7 @@
           },
           {
             "id": "axis-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/react95-painel-axis-grid.png",
               "sha256": "fdd526cd6f4bad90b5e09845d34b6e684cd572575785c09ed3ca014b0bd11ee4",
@@ -2807,6 +3295,7 @@
           },
           {
             "id": "mark-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/react95-painel-mark-grid.png",
               "sha256": "40f3a7d541823dd900cae666b7ffffcf3f56bd6431ee77c8bb9b341fb59f9324",
@@ -3396,6 +3885,246 @@
                 }
               }
             ]
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/react95-painel-1920x1080-frame-axis.png",
+              "sha256": "6adc81ba65d1d0df127cff210bf00ba429676890084c6d6899f485326d547d64",
+              "bytes": 182861
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/react95-painel-1920x1080-frame-mark.png",
+              "sha256": "b0a51be384ee0883e7261f4e831f8ef49396891b0269bbf147bbbea991f227d3",
+              "bytes": 170522
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "sidecars/react95-painel-1920x1080-sidecar-grid.png",
+              "sha256": "899f6e86e8adbabf8bd44136fc646c8b145f13f9f54fc35780f9d3a22e9f8a8b",
+              "bytes": 61070
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/react95-painel-1280x720-frame-axis.png",
+              "sha256": "e97155dea939b547726cd81b64fd0bbf9f16057ab7b7536e58e6b1d17c565911",
+              "bytes": 166633
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/react95-painel-1280x720-frame-mark.png",
+              "sha256": "93716b31496a0fc9df477859d76e3aaa094e9381bc7e03bd78dd6e7c598c6a36",
+              "bytes": 154503
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1280x720",
+            "image": {
+              "file": "sidecars/react95-painel-1280x720-sidecar-grid.png",
+              "sha256": "a6329bd24f9666aae252645a0151d403526b12f911afcf7bf77fc83086c48ea3",
+              "bytes": 37161
+            },
+            "viewport": {
+              "width": 1280,
+              "height": 720
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/react95-painel-960x540-frame-axis.png",
+              "sha256": "edd0bab2ff1563018914838ed5759507efa9973a592ab429679886f7d7030b6e",
+              "bytes": 108945
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/react95-painel-960x540-frame-mark.png",
+              "sha256": "124188dec1c1871680eda41d45be124ff5a09c22565161b6d3da09fe3229dccf",
+              "bytes": 100682
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "960x540",
+            "image": {
+              "file": "sidecars/react95-painel-960x540-sidecar-grid.png",
+              "sha256": "8cfbe5576e0c11c69aa0a97d1b49bcbb80fdbe9d88807b8791ca7fdc5d08396d",
+              "bytes": 28143
+            },
+            "viewport": {
+              "width": 960,
+              "height": 540
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/react95-painel-640x360-frame-axis.png",
+              "sha256": "3798a96eae5b328bd9d7d230bf7131841598fe0e0151653e5626585c5ba2844d",
+              "bytes": 87988
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/react95-painel-640x360-frame-mark.png",
+              "sha256": "19f82a66598203b14a17432a3f46a0b995e195eeae288d49a42497618ac70eba",
+              "bytes": 82512
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "640x360",
+            "image": {
+              "file": "sidecars/react95-painel-640x360-sidecar-grid.png",
+              "sha256": "efea82b8e2b63b2b4d0b9beb8b8f73da8d49ada9773f635af71a18d91f29965c",
+              "bytes": 20203
+            },
+            "viewport": {
+              "width": 640,
+              "height": 360
+            },
+            "cols": 6,
+            "rows": 4
           }
         ]
       }
@@ -4255,6 +4984,7 @@
         "overlays": [
           {
             "id": "grid-simple",
+            "kind": "overlay",
             "image": {
               "file": "overlays/fluent-painel-grid-simple.png",
               "sha256": "8f2625222144d154265b0e31b8fb756e68d330ee9015074dfbd21391f660b6d9",
@@ -4269,6 +4999,7 @@
           },
           {
             "id": "axis-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/fluent-painel-axis-grid.png",
               "sha256": "6be0e035535fa12e2a0c379b18f6840d9817274a0f2ac017467fb63645f345ea",
@@ -4282,6 +5013,7 @@
           },
           {
             "id": "mark-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/fluent-painel-mark-grid.png",
               "sha256": "6c9d9e3f98ca2831ec74b0d61b4de50f23aca3bb8708fd228b4c2e52d188cd1d",
@@ -4871,6 +5603,246 @@
                 }
               }
             ]
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/fluent-painel-1920x1080-frame-axis.png",
+              "sha256": "8626a92ca3852ae3ff89dbf2af92fa7029670069a30da4cb44402137ca30ef28",
+              "bytes": 277346
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/fluent-painel-1920x1080-frame-mark.png",
+              "sha256": "3ab58d39987ddb422c974ce99830f1e29f6f247af6199c6e9dbd7afad7fe16d0",
+              "bytes": 264863
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "sidecars/fluent-painel-1920x1080-sidecar-grid.png",
+              "sha256": "899f6e86e8adbabf8bd44136fc646c8b145f13f9f54fc35780f9d3a22e9f8a8b",
+              "bytes": 61070
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/fluent-painel-1280x720-frame-axis.png",
+              "sha256": "392c6d8711314583ef282603345e3842939bf43c997dfb8d2debc2b5cc91debd",
+              "bytes": 192546
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/fluent-painel-1280x720-frame-mark.png",
+              "sha256": "c3a0a1dd31e3a4d21277027b61525e0ce84d44bd1e6c731deea9cb6de81c811b",
+              "bytes": 180350
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1280x720",
+            "image": {
+              "file": "sidecars/fluent-painel-1280x720-sidecar-grid.png",
+              "sha256": "a6329bd24f9666aae252645a0151d403526b12f911afcf7bf77fc83086c48ea3",
+              "bytes": 37161
+            },
+            "viewport": {
+              "width": 1280,
+              "height": 720
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/fluent-painel-960x540-frame-axis.png",
+              "sha256": "c946fdeddfe69bc9601f08db8c2e8afc68aa0b4183e6e9a5f91498241787fc25",
+              "bytes": 122387
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/fluent-painel-960x540-frame-mark.png",
+              "sha256": "4fed93ba7e43147508fbcc5758ca7ee3c57cb8469ae4b9ea25d34546abe306c2",
+              "bytes": 114488
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "960x540",
+            "image": {
+              "file": "sidecars/fluent-painel-960x540-sidecar-grid.png",
+              "sha256": "8cfbe5576e0c11c69aa0a97d1b49bcbb80fdbe9d88807b8791ca7fdc5d08396d",
+              "bytes": 28143
+            },
+            "viewport": {
+              "width": 960,
+              "height": 540
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/fluent-painel-640x360-frame-axis.png",
+              "sha256": "4dc057da9e4fce0f5c2fc52a127e5bb86ed327c83408abfb88b61085f7468f52",
+              "bytes": 81336
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/fluent-painel-640x360-frame-mark.png",
+              "sha256": "977dab6bdb553c68db601cc53c9cf127bc37d4d447293d39133eff6f09c42c2c",
+              "bytes": 76074
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "640x360",
+            "image": {
+              "file": "sidecars/fluent-painel-640x360-sidecar-grid.png",
+              "sha256": "efea82b8e2b63b2b4d0b9beb8b8f73da8d49ada9773f635af71a18d91f29965c",
+              "bytes": 20203
+            },
+            "viewport": {
+              "width": 640,
+              "height": 360
+            },
+            "cols": 6,
+            "rows": 4
           }
         ]
       }
@@ -5611,6 +6583,7 @@
         "overlays": [
           {
             "id": "grid-simple",
+            "kind": "overlay",
             "image": {
               "file": "overlays/material-painel-grid-simple.png",
               "sha256": "6f825121a92a5861059d19e1be9fd5d34ec476656fa3dcdb44dd1da96599f1d3",
@@ -5625,6 +6598,7 @@
           },
           {
             "id": "axis-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/material-painel-axis-grid.png",
               "sha256": "8b513c10e4311d54263893cd0d6f6cd53a12bd74e7d36ae96c819bcb8945564c",
@@ -5638,6 +6612,7 @@
           },
           {
             "id": "mark-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/material-painel-mark-grid.png",
               "sha256": "f880b7483dbe3adc4acfcf1588996933eee78e03a73feb5c064f5cd80419051e",
@@ -6227,6 +7202,246 @@
                 }
               }
             ]
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/material-painel-1920x1080-frame-axis.png",
+              "sha256": "181a637c07b03971c3d2aaab0d1212f5620b4cc13b7ce490cda3eb5af6e2e60a",
+              "bytes": 287258
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/material-painel-1920x1080-frame-mark.png",
+              "sha256": "32ce1181cd95dc8bf090df6836f89b26ef3ef04fd30396becd745636afe6f0ac",
+              "bytes": 274448
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "sidecars/material-painel-1920x1080-sidecar-grid.png",
+              "sha256": "899f6e86e8adbabf8bd44136fc646c8b145f13f9f54fc35780f9d3a22e9f8a8b",
+              "bytes": 61070
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/material-painel-1280x720-frame-axis.png",
+              "sha256": "5638a819a601b2915f450a431329a47f5193fbee47fb8e21e119fdc425f49fdf",
+              "bytes": 209070
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/material-painel-1280x720-frame-mark.png",
+              "sha256": "7c2c8d7414b5379a2430e0b8c2fb0a6b28c75b9b2710e3b3d78a55de42b41b4b",
+              "bytes": 198117
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1280x720",
+            "image": {
+              "file": "sidecars/material-painel-1280x720-sidecar-grid.png",
+              "sha256": "a6329bd24f9666aae252645a0151d403526b12f911afcf7bf77fc83086c48ea3",
+              "bytes": 37161
+            },
+            "viewport": {
+              "width": 1280,
+              "height": 720
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/material-painel-960x540-frame-axis.png",
+              "sha256": "e9d66bcbeff29bb4f0f7242231c9c91373cf3dc3ad8f8664ec1233c6bf10d9cf",
+              "bytes": 132798
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/material-painel-960x540-frame-mark.png",
+              "sha256": "ff3bf336593d25e4f84afc7550fd679e39f561ace28babe7fbdfc09d6f4426bc",
+              "bytes": 125091
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "960x540",
+            "image": {
+              "file": "sidecars/material-painel-960x540-sidecar-grid.png",
+              "sha256": "8cfbe5576e0c11c69aa0a97d1b49bcbb80fdbe9d88807b8791ca7fdc5d08396d",
+              "bytes": 28143
+            },
+            "viewport": {
+              "width": 960,
+              "height": 540
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/material-painel-640x360-frame-axis.png",
+              "sha256": "387d492f0ab529fd1c22547a4b9e5cd7eda133ef48fdf0305b2adcc1adc7ea5c",
+              "bytes": 90714
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/material-painel-640x360-frame-mark.png",
+              "sha256": "0df88b229497c8ff5aefcc6fbbbf744c798b6c7cb130ba2d1ae7f6d3973df8ef",
+              "bytes": 85562
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "640x360",
+            "image": {
+              "file": "sidecars/material-painel-640x360-sidecar-grid.png",
+              "sha256": "efea82b8e2b63b2b4d0b9beb8b8f73da8d49ada9773f635af71a18d91f29965c",
+              "bytes": 20203
+            },
+            "viewport": {
+              "width": 640,
+              "height": 360
+            },
+            "cols": 6,
+            "rows": 4
           }
         ]
       }
@@ -6979,6 +8194,7 @@
         "overlays": [
           {
             "id": "grid-simple",
+            "kind": "overlay",
             "image": {
               "file": "overlays/macos-finder-grid-simple.png",
               "sha256": "0af2ed024f01121b7ee3e0f40d3a19beba7e917500a65cacb17d7f9ed237d341",
@@ -6993,6 +8209,7 @@
           },
           {
             "id": "axis-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/macos-finder-axis-grid.png",
               "sha256": "8e42c25708e3d3beea179b1afae37f5ebef442d6f13f399f404968ef3f9a92a1",
@@ -7006,6 +8223,7 @@
           },
           {
             "id": "mark-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/macos-finder-mark-grid.png",
               "sha256": "431a51e86c9e1a2209032837b048d7b21bdf5746ab8512fb0ced8fefc70ab3d1",
@@ -7595,6 +8813,246 @@
                 }
               }
             ]
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/macos-finder-1920x1080-frame-axis.png",
+              "sha256": "16ccf8411b443655d9429f9ea23d92d95bbfc9f2ab1ef3db29375838e522c5f2",
+              "bytes": 350122
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/macos-finder-1920x1080-frame-mark.png",
+              "sha256": "4ddd216949d4c064bf05531c74cfbf8793c59e5a300df2fd95da170fd3a89b76",
+              "bytes": 336486
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "sidecars/macos-finder-1920x1080-sidecar-grid.png",
+              "sha256": "899f6e86e8adbabf8bd44136fc646c8b145f13f9f54fc35780f9d3a22e9f8a8b",
+              "bytes": 61070
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/macos-finder-1280x720-frame-axis.png",
+              "sha256": "f4034013cdd636e1b5a7d767caa2191ef009239d3bc822e3e8f117f6d7f2eeca",
+              "bytes": 149589
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/macos-finder-1280x720-frame-mark.png",
+              "sha256": "fff4348999bbff8a71f9cbb6e993df2c9b3bacceae49d2517080e9d7fade74d0",
+              "bytes": 137156
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1280x720",
+            "image": {
+              "file": "sidecars/macos-finder-1280x720-sidecar-grid.png",
+              "sha256": "a6329bd24f9666aae252645a0151d403526b12f911afcf7bf77fc83086c48ea3",
+              "bytes": 37161
+            },
+            "viewport": {
+              "width": 1280,
+              "height": 720
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/macos-finder-960x540-frame-axis.png",
+              "sha256": "1cd3e267df5dd2e288b0d1040fbc628749889f5a5c567c6630b8f72339a27939",
+              "bytes": 99766
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/macos-finder-960x540-frame-mark.png",
+              "sha256": "f9a2aba4fffda37b0d801fea912551f61fc79af39b18f427ef60482a52e5b168",
+              "bytes": 91454
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "960x540",
+            "image": {
+              "file": "sidecars/macos-finder-960x540-sidecar-grid.png",
+              "sha256": "8cfbe5576e0c11c69aa0a97d1b49bcbb80fdbe9d88807b8791ca7fdc5d08396d",
+              "bytes": 28143
+            },
+            "viewport": {
+              "width": 960,
+              "height": 540
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/macos-finder-640x360-frame-axis.png",
+              "sha256": "59978e80abf262bf4209d853238cebbdcecc6bef4ea43030a0deed73a1ea4cdf",
+              "bytes": 56266
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/macos-finder-640x360-frame-mark.png",
+              "sha256": "a3a9fcd63f07ed98bc7373e02e98802da1d7b0e2c12f87a9b41a8d31cb1f4437",
+              "bytes": 51043
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "640x360",
+            "image": {
+              "file": "sidecars/macos-finder-640x360-sidecar-grid.png",
+              "sha256": "efea82b8e2b63b2b4d0b9beb8b8f73da8d49ada9773f635af71a18d91f29965c",
+              "bytes": 20203
+            },
+            "viewport": {
+              "width": 640,
+              "height": 360
+            },
+            "cols": 6,
+            "rows": 4
           }
         ]
       }
@@ -7819,6 +9277,7 @@
         "overlays": [
           {
             "id": "grid-simple",
+            "kind": "overlay",
             "image": {
               "file": "overlays/macos-salvar-como-grid-simple.png",
               "sha256": "edccb2ca2b4f96b173f45e4b550e60d5b8558cdf9d66ec4e22175deb5e3c77c3",
@@ -7833,6 +9292,7 @@
           },
           {
             "id": "axis-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/macos-salvar-como-axis-grid.png",
               "sha256": "39e505cea16168634c6f4d80ae98310096acc99df98636d7555b03e39682b50d",
@@ -7846,6 +9306,7 @@
           },
           {
             "id": "mark-grid",
+            "kind": "overlay",
             "image": {
               "file": "overlays/macos-salvar-como-mark-grid.png",
               "sha256": "2d1a69805b021da264184b2dd7ea204cc93cefe9cf7213cf75bb12161b1db935",
@@ -8435,6 +9896,246 @@
                 }
               }
             ]
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/macos-salvar-como-1920x1080-frame-axis.png",
+              "sha256": "a47640f008b453696cebb02e832c6e84fb58fe3dbf9a3348d87bc3fe70d3c285",
+              "bytes": 553500
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "frames/macos-salvar-como-1920x1080-frame-mark.png",
+              "sha256": "937235c4287b50f4b5dbe542088cca45c5f8f584481009c0d60790f7534f3a3f",
+              "bytes": 539640
+            },
+            "viewport": {
+              "width": 2070,
+              "height": 1177
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 134,
+              "top": 81,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1920x1080",
+            "image": {
+              "file": "sidecars/macos-salvar-como-1920x1080-sidecar-grid.png",
+              "sha256": "899f6e86e8adbabf8bd44136fc646c8b145f13f9f54fc35780f9d3a22e9f8a8b",
+              "bytes": 61070
+            },
+            "viewport": {
+              "width": 1920,
+              "height": 1080
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/macos-salvar-como-1280x720-frame-axis.png",
+              "sha256": "323eadc291bbec14907aefccb576dcea207ea21fb123434a4898321617f0ec71",
+              "bytes": 157591
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "1280x720",
+            "image": {
+              "file": "frames/macos-salvar-como-1280x720-frame-mark.png",
+              "sha256": "b2e710b36e97c2ddfab4099d071203a3b10ffde45924823066406315ac9f7d9f",
+              "bytes": 143735
+            },
+            "viewport": {
+              "width": 1386,
+              "height": 790
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 90,
+              "top": 54,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "1280x720",
+            "image": {
+              "file": "sidecars/macos-salvar-como-1280x720-sidecar-grid.png",
+              "sha256": "a6329bd24f9666aae252645a0151d403526b12f911afcf7bf77fc83086c48ea3",
+              "bytes": 37161
+            },
+            "viewport": {
+              "width": 1280,
+              "height": 720
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/macos-salvar-como-960x540-frame-axis.png",
+              "sha256": "eb31bdd1fe510f580b288d96b2d72132d7005a6eb0bd5c10bda1bf4b97ba3731",
+              "bytes": 111033
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "960x540",
+            "image": {
+              "file": "frames/macos-salvar-como-960x540-frame-mark.png",
+              "sha256": "f77363086efe87a0c65acf58c02089be2e44873ef9551cbe9f41a9eb6710d0e5",
+              "bytes": 102357
+            },
+            "viewport": {
+              "width": 1043,
+              "height": 604
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 67,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "960x540",
+            "image": {
+              "file": "sidecars/macos-salvar-como-960x540-sidecar-grid.png",
+              "sha256": "8cfbe5576e0c11c69aa0a97d1b49bcbb80fdbe9d88807b8791ca7fdc5d08396d",
+              "bytes": 28143
+            },
+            "viewport": {
+              "width": 960,
+              "height": 540
+            },
+            "cols": 6,
+            "rows": 4
+          },
+          {
+            "id": "frame-axis",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/macos-salvar-como-640x360-frame-axis.png",
+              "sha256": "66e9ad0c3071c73e16ef10c59a5eba8aef077c93b957f19c1e74805f1b37f91a",
+              "bytes": 52941
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "frame-mark",
+            "kind": "frame",
+            "resolution": "640x360",
+            "image": {
+              "file": "frames/macos-salvar-como-640x360-frame-mark.png",
+              "sha256": "5046e64e3854253e51d1cd10f9401fe66ccf28b13824401ceba29816c1184a5c",
+              "bytes": 47336
+            },
+            "viewport": {
+              "width": 714,
+              "height": 424
+            },
+            "cols": 6,
+            "rows": 4,
+            "margins": {
+              "left": 58,
+              "top": 48,
+              "right": 16,
+              "bottom": 16
+            }
+          },
+          {
+            "id": "sidecar-grid",
+            "kind": "sidecar",
+            "resolution": "640x360",
+            "image": {
+              "file": "sidecars/macos-salvar-como-640x360-sidecar-grid.png",
+              "sha256": "efea82b8e2b63b2b4d0b9beb8b8f73da8d49ada9773f635af71a18d91f29965c",
+              "bytes": 20203
+            },
+            "viewport": {
+              "width": 640,
+              "height": 360
+            },
+            "cols": 6,
+            "rows": 4
           }
         ]
       }

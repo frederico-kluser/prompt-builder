@@ -13,7 +13,7 @@
 // `VISION_PROMPT_VERSION` muda quando o texto muda: run antiga continua legível,
 // e comparar placares entre versões diferentes é decisão humana, não do código.
 
-import type { VisionCoordSpace } from './types.js';
+import type { VisionCoordSpace, VisionMatrixGrid } from './types.js';
 import { VISION_ACTIONS, VISION_ELEMENT_TYPES, VISION_VIEWPORT } from './types.js';
 
 export const VISION_PROMPT_VERSION = 'vision-prompt@1';
@@ -207,4 +207,59 @@ Este é o recorte ampliado da célula ${opts.cell ?? '?'} (${viewport.width}×${
   return `Pedido: ${JSON.stringify(instruction)}
 
 Cumpra o pedido nesta tela (${viewport.width}×${viewport.height}). Responda só o JSON da ação.`;
+}
+
+
+// ---------------------------------------------------------------------------
+// Banco `matrix` — resolução × grade SEM grade em cima do print
+// ---------------------------------------------------------------------------
+
+export const VISION_MATRIX_PROMPT_VERSION = 'vision-matrix-prompt@1';
+
+export interface MatrixPromptOptions extends PromptOptions {
+  grid: VisionMatrixGrid;
+  /** Viewport da imagem PRINCIPAL (o print), sem as margens da moldura. */
+  imageViewport: { width: number; height: number };
+  /** Margens da moldura, quando `grid` é `frame-*`. */
+  margins?: { left: number; top: number; right: number; bottom: number };
+}
+
+function matrixBase(opts: MatrixPromptOptions): string {
+  return actionSystemPrompt({ ...opts, viewport: opts.imageViewport });
+}
+
+/** System prompt da matriz resolução × grade. */
+export function matrixSystemPrompt(opts: MatrixPromptOptions): string {
+  const { grid, imageViewport: img, margins: m } = opts;
+  const base = matrixBase(opts);
+  if (grid === 'plain') return base;
+  if (grid === 'frame-axis') {
+    const full = m ? { width: img.width + m.left + m.right, height: img.height + m.top + m.bottom } : img;
+    return `${base}
+
+A imagem tem ${full.width}×${full.height} pixels. A CAPTURA da UI ocupa a região x=${m?.left ?? 0}..${(m?.left ?? 0) + img.width}, y=${m?.top ?? 0}..${(m?.top ?? 0) + img.height}; o resto são MARGENS com réguas.
+NÃO há grade desenhada em cima da captura. Use as réguas das margens para calibrar.
+Devolva x/y em PIXELS DA ÁREA DA CAPTURA (0–${img.width}, 0–${img.height}), com origem no canto superior esquerdo da captura; NÃO inclua as margens no ponto.`;
+  }
+  if (grid === 'frame-mark') {
+    const full = m ? { width: img.width + m.left + m.right, height: img.height + m.top + m.bottom } : img;
+    return `${base}
+
+A imagem tem ${full.width}×${full.height} pixels. A CAPTURA da UI ocupa x=${m?.left ?? 0}..${(m?.left ?? 0) + img.width}, y=${m?.top ?? 0}..${(m?.top ?? 0) + img.height}; as margens têm as letras das colunas (A–F) e os números das linhas (1–4).
+NÃO há grade desenhada em cima da captura. Use as letras/números para localizar a célula e calibrar o ponto.
+Devolva x/y em PIXELS DA ÁREA DA CAPTURA (0–${img.width}, 0–${img.height}), com origem no canto superior esquerdo da captura; NÃO inclua as margens.`;
+  }
+  return `${base}
+
+A PRIMEIRA imagem é a captura LIMPA (${img.width}×${img.height}); a SEGUNDA é uma grade de referência do MESMO tamanho, sem a captura.
+Não há grade desenhada em cima do print. Use a grade apenas como régua.
+Devolva x/y em PIXELS DA PRIMEIRA IMAGEM (a captura).`;
+}
+
+/** User prompt da matriz (mesmo pedido do dataset). */
+export function matrixUserPrompt(instruction: string, opts: MatrixPromptOptions): string {
+  const { imageViewport: img } = opts;
+  return `Pedido: ${JSON.stringify(instruction)}
+
+Cumpra o pedido nesta tela (${img.width}×${img.height}). Responda só o JSON da ação.`;
 }

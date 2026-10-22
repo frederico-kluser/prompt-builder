@@ -145,9 +145,10 @@ DECISÕES TIPADAS (modo JEV — noul/choice/score em casos rotulados)
 
 VISÃO (UI grounding: o que é clicável numa imagem de tela)
   vision run --models a,b --budget <usd|none> [--tasks map,action]
-          [--benchmark grounding|resolution|grid] [--provider <nome>] [--families …]
+          [--benchmark grounding|resolution|grid|matrix] [--provider <nome>] [--families …]
                            o modelo lê a imagem 1080p e devolve elementos/ação;
-                           resolution/grid medem escala e overlays no mesmo dataset
+                           resolution/grid medem escala/overlays; matrix cruza
+                           resolução × grade sem grade em cima do print
   vision dataset list|show|verify  ·  vision list|show|report <id>
                            dataset versionado (ver: docs vision)
 

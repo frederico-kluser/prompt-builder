@@ -1,5 +1,9 @@
 # Benchmarks 1 e 2 — resolução e grade (3 modelos, provedor fixado)
 
+> Continuação: a matriz resolução × grade **sem grade em cima do print** está em
+> [`../vision-matriz/`](../vision-matriz/README.md) (dataset 0.3.0, 1440 chamadas).
+> O gerador/tutorial está em [`../vision-gerador/`](../vision-gerador/README.md).
+
 Rodada real em **22/10/2026**, dataset `vision-dataset@0.2.0` (hash `sha256:8d0de4203…`),
 7 cenários · 197 controles · 30 tarefas de ação. **Provedor fixado em `DeepInfra`**
 (`--provider`, `auditable`: sem fallback) — sem isso o OpenRouter troca de provedor

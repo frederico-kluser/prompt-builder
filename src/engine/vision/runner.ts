@@ -29,11 +29,14 @@ import {
 import type { OpenRouterModel, ReasoningLevel } from '../../types.js';
 import {
   VISION_GRID_PROMPT_VERSION,
+  VISION_MATRIX_PROMPT_VERSION,
   VISION_PROMPT_VERSION,
   actionSystemPrompt,
   actionUserPrompt,
   gridSystemPrompt,
   gridUserPrompt,
+  matrixSystemPrompt,
+  matrixUserPrompt,
   mapSystemPrompt,
   mapUserPrompt,
   resolutionMapSystemPrompt,
@@ -56,6 +59,7 @@ import {
   type VisionGridCellSpec,
   type VisionGridVariant,
   type VisionImageRef,
+  type VisionMatrixGrid,
   type VisionMapCell,
   type VisionRoundTrace,
   type VisionRunConfig,
@@ -92,6 +96,25 @@ const MAX_ERROR_CHARS = 400;
 function erroCurto(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   return msg.length > MAX_ERROR_CHARS ? `${msg.slice(0, MAX_ERROR_CHARS)}…` : msg;
+}
+
+
+/** Ponto da imagem enviada (moldura ou print) → ponto da tela canônica. */
+function pontoDaMatriz(
+  p: VisionActionPrediction,
+  sent: { width: number; height: number },
+  margins?: { left: number; top: number; right: number; bottom: number },
+): VisionActionPrediction {
+  if (p.x == null || p.y == null) return p;
+  const contentW = margins ? sent.width - margins.left - margins.right : sent.width;
+  const contentH = margins ? sent.height - margins.top - margins.bottom : sent.height;
+  const x = margins ? p.x - margins.left : p.x;
+  const y = margins ? p.y - margins.top : p.y;
+  return {
+    ...p,
+    x: Math.max(0, Math.min(VISION_VIEWPORT.width, Math.round((x / contentW) * VISION_VIEWPORT.width))),
+    y: Math.max(0, Math.min(VISION_VIEWPORT.height, Math.round((y / contentH) * VISION_VIEWPORT.height))),
+  };
 }
 
 /** Um retry curto só para falha de transporte do chamador (não control signal). */
@@ -281,6 +304,7 @@ export async function runVisionCore(params: RunVisionCoreParams): Promise<Vision
     benchmark,
     ...(config.resolutions ? { resolutions: config.resolutions } : {}),
     ...(config.gridVariants ? { gridVariants: config.gridVariants } : {}),
+    ...(config.matrixGrids ? { matrixGrids: config.matrixGrids } : {}),
   });
   if (planos.length === 0) {
     throw new VisionRunError(
@@ -307,49 +331,80 @@ export async function runVisionCore(params: RunVisionCoreParams): Promise<Vision
           const scene = plano.scene;
           const variant = plano.variant;
           const overlay = plano.overlay;
-          const resolution = plano.resolution;
-          const imageViewport = resolution
+          const resolution = plano.resolutionRef;
+          const mainViewport = resolution
             ? { width: resolution.width, height: resolution.height }
-            : overlay?.viewport ?? scene.viewport;
+            : scene.viewport;
+          const isMatrixFrame = benchmark === 'matrix' && overlay?.kind === 'frame';
+          // A moldura é só referência visual: o ponto é pedido na área da
+          // captura (0..w, 0..h), com origem no canto da captura. As margens
+          // ficam fora do ponto e não entram no parser.
+          const imageViewport = isMatrixFrame
+            ? mainViewport
+            : resolution
+              ? mainViewport
+              : overlay?.viewport ?? scene.viewport;
+          const matrixOpts =
+            benchmark === 'matrix'
+              ? {
+                  coordSpace: config.coordSpace,
+                  viewport: imageViewport,
+                  imageViewport: mainViewport,
+                  grid: (plano.matrixGrid ?? 'plain') as VisionMatrixGrid,
+                  ...(overlay?.margins ? { margins: overlay.margins } : {}),
+                }
+              : null;
           const promptOpts = { coordSpace: config.coordSpace, viewport: imageViewport };
           const prompt =
             benchmark === 'resolution'
               ? resolutionMapUserPrompt(promptOpts)
-              : benchmark === 'grid'
-                ? gridUserPrompt(plano.task!.instruction, {
-                    ...promptOpts,
-                    variant: (variant ?? 'plain') as VisionGridVariant,
-                  })
-                : plano.kind === 'map'
-                  ? mapUserPrompt(promptOpts)
-                  : actionUserPrompt(plano.task!.instruction, promptOpts);
+              : benchmark === 'matrix' && matrixOpts
+                ? matrixUserPrompt(plano.task!.instruction, matrixOpts)
+                : benchmark === 'grid'
+                  ? gridUserPrompt(plano.task!.instruction, {
+                      ...promptOpts,
+                      variant: (variant ?? 'plain') as VisionGridVariant,
+                    })
+                  : plano.kind === 'map'
+                    ? mapUserPrompt(promptOpts)
+                    : actionUserPrompt(plano.task!.instruction, promptOpts);
 
           if (parado) return celulaVazia(plano, modelId, 'skipped', prompt, 'run parada (orçamento/cancelamento)');
 
           const system =
             benchmark === 'resolution'
               ? resolutionMapSystemPrompt(promptOpts)
-              : benchmark === 'grid'
-                ? gridSystemPrompt({
-                    ...promptOpts,
-                    variant: (variant ?? 'plain') as VisionGridVariant,
-                  })
-                : plano.kind === 'map'
-                  ? mapSystemPrompt(promptOpts)
-                  : actionSystemPrompt(promptOpts);
+              : benchmark === 'matrix' && matrixOpts
+                ? matrixSystemPrompt(matrixOpts)
+                : benchmark === 'grid'
+                  ? gridSystemPrompt({
+                      ...promptOpts,
+                      variant: (variant ?? 'plain') as VisionGridVariant,
+                    })
+                  : plano.kind === 'map'
+                    ? mapSystemPrompt(promptOpts)
+                    : actionSystemPrompt(promptOpts);
           const messages: ChatMessage[] = [
             { role: 'system', content: system },
             { role: 'user', content: prompt },
           ];
 
-          let imagem: string;
+          const imageRefs: VisionImageRef[] = [];
+          if (benchmark === 'matrix') {
+            if (overlay?.kind === 'frame') imageRefs.push(overlay.image);
+            else if (resolution) imageRefs.push(resolution);
+            if (overlay?.kind === 'sidecar') imageRefs.push(overlay.image);
+          } else {
+            imageRefs.push((resolution ?? overlay?.image)!);
+          }
+          const imagens: string[] = [];
           try {
-            imagem = await params.imageFor(scene, resolution ?? overlay?.image);
+            for (const ref of imageRefs) imagens.push(await params.imageFor(scene, ref));
           } catch (err) {
             return celulaVazia(plano, modelId, 'error', prompt, `imagem do cenário indisponível: ${erroCurto(err)}`);
           }
           if (parado) return celulaVazia(plano, modelId, 'skipped', prompt, 'run parada (orçamento/cancelamento)');
-          messages[1] = { role: 'user', content: prompt, images: [{ url: imagem }] };
+          messages[1] = { role: 'user', content: prompt, images: imagens.map((url) => ({ url })) };
 
           if (benchmark === 'resolution' || plano.kind === 'map') {
             const chamada = await chamar(callCtx, modelId, messages);
@@ -406,6 +461,43 @@ export async function runVisionCore(params: RunVisionCoreParams): Promise<Vision
             ...(parsed1.value?.cell ? { cell: parsed1.value.cell } : {}),
             imageViewport,
           });
+
+          if (benchmark === 'matrix') {
+            const pred = parsed1.value
+              ? pontoDaMatriz(parsed1.value, imageViewport, isMatrixFrame ? undefined : overlay?.margins)
+              : null;
+            return {
+              kind: 'action',
+              cellId: plano.cellId,
+              taskId: plano.task!.id,
+              sceneId: scene.id,
+              family: scene.family,
+              modelId,
+              contestantId: modelId,
+              instruction: plano.task!.instruction,
+              prompt,
+              status: 'ok',
+              latencyMs: chamada1.result.latencyMs,
+              tokensIn: chamada1.result.tokensIn,
+              tokensOut: chamada1.result.tokensOut,
+              costUsd: measuredCallUsd(chamada1.result.cost) ?? 0,
+              ...(chamada1.result.provider?.name ? { provider: chamada1.result.provider.name } : {}),
+              raw: parsed1.raw,
+              parseOk: parsed1.ok,
+              coordScale: parsed1.coordScale,
+              prediction: pred,
+              score: scoreActionTask(scene, plano.task!, pred),
+              benchmark,
+              variant,
+              resolution: resolution?.id,
+              grid: plano.matrixGrid,
+              ...(overlay?.margins ? { margins: overlay.margins } : {}),
+              imageViewport,
+              rounds: 1,
+              trace: [trace1],
+            };
+          }
+
           let finalPred = parsed1.value;
           let finalParse = parsed1;
           let rounds: 1 | 2 = 1;
@@ -592,7 +684,12 @@ export async function runVisionCore(params: RunVisionCoreParams): Promise<Vision
     warnings.push('algum cenário não tem overlays pinados; ele ficou fora do banco de grade.');
   }
 
-  const promptVersion = benchmark === 'grid' ? VISION_GRID_PROMPT_VERSION : VISION_PROMPT_VERSION;
+  const promptVersion =
+    benchmark === 'grid'
+      ? VISION_GRID_PROMPT_VERSION
+      : benchmark === 'matrix'
+        ? VISION_MATRIX_PROMPT_VERSION
+        : VISION_PROMPT_VERSION;
   const record: VisionRunRecord = {
     format: VISION_RUN_FORMAT,
     id: params.id,
@@ -654,6 +751,7 @@ export function planVisionRun(
     benchmark,
     ...(config.resolutions ? { resolutions: config.resolutions } : {}),
     ...(config.gridVariants ? { gridVariants: config.gridVariants } : {}),
+    ...(config.matrixGrids ? { matrixGrids: config.matrixGrids } : {}),
   });
   const mapCells = planos.filter((p) => p.kind === 'map').length;
   const actionCells = planos.filter((p) => p.kind === 'action').length;

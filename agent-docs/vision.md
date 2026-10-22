@@ -46,6 +46,25 @@ OpenRouter pode trocar de provedor entre células (ou cair num provedor que
 ignora a imagem) e o número passa a medir o roteamento. O record grava
 `config.provider`; o relatório mostra a variante e a retenção/delta.
 
+### Matriz sem grade em cima do print
+
+`--benchmark matrix --resolutions … --matrix-grids …` cruza resolução × grade
+no mesmo dataset. As grades são **referências fora do print**:
+
+- `plain` — controle, sem grade;
+- `frame-axis` — o print fica dentro de uma moldura; as réguas de x/y ficam só
+  nas margens;
+- `frame-mark` — moldura com letras de coluna (A–F) e números de linha (1–4)
+  nas margens;
+- `sidecar-grid` — o print vai limpo e uma **segunda imagem** contém a grade.
+
+Peça coordenadas da **área da captura** (`0..w`, `0..h`) quando houver moldura;
+assim a conta de volta é só dividir por `sx`/`sy`. O runner registra
+`resolution`, `grid`, `margins` e `imageViewport` na célula e remapeia para
+1920×1080 antes de pontuar. O gerador/tutorial para o usuário está em
+[`recaps/vision-gerador/`](../recaps/vision-gerador/) (abre `index.html`, baixa
+PNGs + `manifest.json` + `INSTRUCOES.md`).
+
 ## Comandos
 
 ```bash
@@ -67,7 +86,10 @@ prompt-builder vision run --models a,b --benchmark resolution \
   --provider DeepInfra --budget 2
 prompt-builder vision run --models a,b --benchmark grid \
   --provider DeepInfra --grid-variants plain,mark-grid --budget 2
-prompt-builder vision run --models a,b --benchmark grid --grid-variants mark-grid \
+prompt-builder vision run --models a,b --benchmark matrix --provider DeepInfra \
+  --resolutions 1920x1080,1280x720,960x540,640x360 \
+  --matrix-grids plain,frame-axis,frame-mark,sidecar-grid --budget 5
+prompt-builder vision run --models a,b --benchmark matrix --matrix-grids plain,frame-axis \
   --scenes bootstrap-login --budget 0.2 --dry-run
 
 # 5) resultado
@@ -90,6 +112,7 @@ Flags da run:
 | `--provider <nome>` | fixa o provedor OpenRouter (`auditable`; sem fallback) |
 | `--resolutions 1920x1080,…` | escalas do banco `resolution` (padrão: todas do dataset) |
 | `--grid-variants plain,…` | variantes do banco `grid` (padrão: todas) |
+| `--matrix-grids plain,…` | grades do banco `matrix` (padrão: todas as 4) |
 | `--families bootstrap,react95,fluent,material,macos` | filtra famílias |
 | `--scenes id1,id2` | filtra cenários por id |
 | `--limit N` | corta o dataset (ordem do manifesto) |
@@ -136,7 +159,9 @@ Coordenadas: ponto dentro da caixa é o critério — não há tolerância de ra
 - `probes.resolutions[]` — PNGs reduzidos + largura/altura + sha256 (o 1080p
   nativo reusa a imagem base);
 - `probes.overlays[]` — grades pinadas (`grid-simple`, `axis-grid`, `mark-grid`)
-  e, no mark-grid, os 24 recortes ampliados com a caixa canônica de origem.
+  e, no mark-grid, os 24 recortes ampliados com a caixa canônica; as grades sem
+  overlay (`frame-axis`, `frame-mark`, `sidecar-grid`) têm `resolution`,
+  `kind` e `margins` e são geradas por resolução.
 
 As famílias atuais usam frameworks reais: **Bootstrap 5.3.3**, **React95**,
 **Fluent UI**, **Material 3** e um desktop **macOS** em CSS próprio. Cada
@@ -174,8 +199,8 @@ imagem) · `4` key ausente · `7` parcial por orçamento · `8` catálogo indisp
   `grid` já medem escala e overlays; Set-of-Mark por âncora, árvore de
   acessibilidade, zoom condicional e **verificação multi-turno** ainda são
   roadmap (`ROADMAP-VISAO.md`).
-- O banco `grid` é CLI-first: a SPA `/vision` ainda só roda o F0 (as variantes
-  ainda não são copiadas para `web/public/vision/`).
+- Os bancos `grid` e `matrix` são CLI-first: a SPA `/vision` ainda só roda o F0
+  (as variantes ainda não são copiadas para `web/public/vision/`).
 - O `mark-grid` é uma implementação de 2 rodadas (célula → recorte ampliado);
   o placar usa ação/alvo/texto da rodada 1 e o ponto da rodada 2, de propósito:
   mede localização, não "o modelo reescreve a ação sob zoom".

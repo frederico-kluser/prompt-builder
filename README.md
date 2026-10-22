@@ -362,6 +362,9 @@ prompt-builder vision run --models google/gemini-3.8-flash --budget 2 --dry-run
 prompt-builder vision run --models google/gemini-3.8-flash,anthropic/claude-opus-5.5 --budget 2
 prompt-builder vision run --models a,b --benchmark resolution --provider DeepInfra --budget 2
 prompt-builder vision run --models a,b --benchmark grid --provider DeepInfra --budget 2
+prompt-builder vision run --models a,b --benchmark matrix --provider DeepInfra \
+  --resolutions 1920x1080,1280x720,960x540,640x360 \
+  --matrix-grids plain,frame-axis,frame-mark,sidecar-grid --budget 5
 prompt-builder vision report <id> --html vision-<id>.html
 ```
 

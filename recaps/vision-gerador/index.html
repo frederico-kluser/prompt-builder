@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gerador de variantes — resolução e grade sem cobrir o print</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b0d10; --panel:#121820; --line:#24303c; --ink:#e8eef5; --mut:#9fb0c0; --cyan:#67e8f9; --green:#67e8b0; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:1180px; margin:0 auto; padding:36px 18px 80px; }
+  h1 { font-size:1.6rem; margin:0 0 .35rem; letter-spacing:-.02em; }
+  h2 { font-size:1.1rem; margin:2rem 0 .6rem; }
+  p { color:#c9d6e2; margin:.4rem 0; max-width:78ch; }
+  .mut { color:var(--mut); font-size:13px; }
+  code { font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; background:#1b2430; padding:.1rem .3rem; border-radius:.3rem; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; margin:14px 0; }
+  label { display:block; font-size:13px; color:var(--mut); margin:.65rem 0 .25rem; }
+  input[type=text], input[type=number], textarea { width:100%; background:#0e141b; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:.6rem .7rem; font:14px/1.4 ui-sans-serif,system-ui,sans-serif; }
+  textarea { min-height:76px; resize:vertical; }
+  .row { display:grid; grid-template-columns:1.2fr 1fr; gap:14px; align-items:start; }
+  .checks { display:flex; flex-wrap:wrap; gap:10px 16px; margin-top:.4rem; }
+  .checks label { display:flex; gap:.45rem; align-items:center; margin:0; color:var(--ink); font-size:13.5px; }
+  input[type=checkbox] { accent-color:var(--cyan); width:16px; height:16px; }
+  button { border:1px solid var(--line); background:#1a2531; color:var(--ink); border-radius:9px; padding:.62rem .95rem; font:600 14px ui-sans-serif,system-ui,sans-serif; cursor:pointer; }
+  button.primary { background:var(--cyan); color:#061016; border-color:transparent; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .actions { display:flex; flex-wrap:wrap; gap:9px; margin-top:14px; }
+  .status { min-height:1.5rem; color:var(--mut); font-size:13px; margin-top:8px; }
+  .gallery { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:14px; }
+  figure { margin:0; background:#0e141b; border:1px solid var(--line); border-radius:11px; overflow:hidden; }
+  figure img { display:block; width:100%; height:auto; background:#0b0d10; }
+  figcaption { padding:8px 11px 10px; font-size:12px; color:var(--mut); display:flex; justify-content:space-between; gap:8px; align-items:center; }
+  figcaption a { color:var(--cyan); text-decoration:none; }
+  figcaption a:hover { text-decoration:underline; }
+  .drop { border:1.5px dashed #355064; border-radius:12px; padding:18px; text-align:center; color:var(--mut); }
+  .drop.drag { border-color:var(--cyan); background:#0d1b22; }
+  .note { border-left:3px solid #b7791f; background:#1a1710; color:#f0d9a8; padding:.65rem .9rem; border-radius:6px; margin:12px 0; font-size:13.5px; }
+  .ok { color:var(--green); }
+  @media (max-width:820px){ .row,.gallery{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<main>
+  <h1>Gerador de variantes</h1>
+  <p class="mut">Resolução + grade <b>sem desenhar em cima do print</b>. Roda no navegador; nenhuma imagem é enviada.</p>
+
+  <section class="panel">
+    <div id="drop" class="drop">
+      <b>Arraste um PNG/JPEG aqui</b> ou
+      <input id="file" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Escolher captura de tela">
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="res">Resoluções (uma por linha ou separadas por vírgula)</label>
+        <textarea id="res" spellcheck="false">1920x1080
+1280x720
+960x540
+640x360</textarea>
+        <p class="mut">A primeira resolução deve ser a nativa, se você quiser o controle. Larguras ímpares são arredondadas.</p>
+      </div>
+      <div>
+        <label>Grades sem overlay</label>
+        <div class="checks">
+          <label><input type="checkbox" id="g-axis" checked> Moldura com eixos (frame-axis)</label>
+          <label><input type="checkbox" id="g-mark" checked> Moldura com letras/números (frame-mark)</label>
+          <label><input type="checkbox" id="g-side" checked> Grade separada (sidecar-grid)</label>
+        </div>
+        <label for="cell">Células da grade</label>
+        <input id="cell" type="text" value="6x4" spellcheck="false">
+        <p class="mut">A moldura usa margens fixas e legíveis; o print não recebe linha nenhuma.</p>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="gen" class="primary" disabled>Gerar variantes</button>
+      <button id="zip" disabled>Baixar tudo (.zip)</button>
+      <button id="md" disabled>Baixar INSTRUCOES.md</button>
+      <button id="man" disabled>Baixar manifest.json</button>
+    </div>
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+  </section>
+
+  <div class="note">O prompt deve pedir coordenadas <b>da área da captura</b> (0..w, 0..h) quando houver moldura. O gerador registra as margens no manifesto; a conta de volta é <code>(x - left)/sx</code> se você mudar a convenção. A convenção recomendada é a relativa ao print, então a conta é só <code>x/sx</code>.</div>
+
+  <section>
+    <h2>Prévia</h2>
+    <p class="mut" id="empty">Nenhuma variante gerada ainda.</p>
+    <div id="gallery" class="gallery"></div>
+  </section>
+
+  <section>
+    <h2>O que sai no ZIP</h2>
+    <p class="mut">PNGs das resoluções e das grades escolhidas, <code>manifest.json</code> (dimensões, escala, margens, células) e <code>INSTRUCOES.md</code> (fórmulas de remapeamento e prompts).</p>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const state = { img: null, name: '', files: [], manifest: null, instructions: '' };
+  let drag = false;
+
+  const drop = $('drop');
+  const fileInput = $('file');
+  const gen = $('gen');
+
+  function setStatus(msg, ok = false) {
+    $('status').textContent = msg;
+    $('status').className = `status${ok ? ' ok' : ''}`;
+  }
+
+  function clearPreview() {
+    for (const f of state.files) if (f.url) URL.revokeObjectURL(f.url);
+    state.files = [];
+    state.manifest = null;
+    $('gallery').innerHTML = '';
+    $('empty').style.display = '';
+    $('zip').disabled = true;
+    $('md').disabled = true;
+    $('man').disabled = true;
+  }
+
+  async function loadFile(file) {
+    if (!file) return;
+    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) {
+      setStatus('Formato não suportado. Use PNG, JPEG ou WebP.');
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = () => reject(new Error('imagem inválida'));
+        i.src = url;
+      });
+      clearPreview();
+      state.img = img;
+      state.name = file.name || 'captura.png';
+      gen.disabled = false;
+      setStatus(`Carregado: ${img.naturalWidth}×${img.naturalHeight} · ${file.name}`, true);
+    } catch (err) {
+      setStatus(`Falha ao abrir: ${err.message}`);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('drag'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.classList.remove('drag');
+    void loadFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', () => void loadFile(fileInput.files[0]));
+
+  const COLORS = { frame:'#0b0d10', ink:'#dbe7f3', mut:'#8aa0b4', cyan:'#67e8f9' };
+  const frameFont = '600 15px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+
+  function parseResolutions(text) {
+    const out = [];
+    for (const raw of text.split(/[\n,;]+/)) {
+      const s = raw.trim().toLowerCase();
+      if (!s) continue;
+      const m = /^(\d{2,5})\s*[x×]\s*(\d{2,5})$/.exec(s);
+      if (!m) throw new Error(`resolução inválida: ${raw}`);
+      const w = Number(m[1]);
+      const h = Number(m[2]);
+      if (w < 64 || h < 64 || w > 12000 || h > 12000) throw new Error(`resolução fora de 64–12000: ${raw}`);
+      out.push({ id: `${w}x${h}`, width: w, height: h });
+    }
+    if (out.length === 0) throw new Error('informe ao menos uma resolução');
+    return out;
+  }
+
+  function parseCells(text) {
+    const m = /^(\d{1,2})\s*[x×]\s*(\d{1,2})$/i.exec(text.trim());
+    if (!m) throw new Error('células inválidas; use algo como 6x4');
+    const cols = Number(m[1]);
+    const rows = Number(m[2]);
+    if (cols < 2 || rows < 2 || cols > 12 || rows > 10) throw new Error('use 2–12 colunas e 2–10 linhas');
+    return { cols, rows };
+  }
+
+  function niceStep(size) {
+    if (size >= 1600) return 240;
+    if (size >= 1200) return 160;
+    if (size >= 900) return 120;
+    return 120;
+  }
+
+  function margins(w, h) {
+    return {
+      left: Math.round(Math.max(58, w * 0.07)),
+      top: Math.round(Math.max(48, h * 0.075)),
+      right: 16,
+      bottom: 16,
+    };
+  }
+
+  function canvas(w, h) {
+    const c = document.createElement('canvas');
+    c.width = Math.round(w);
+    c.height = Math.round(h);
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    return [c, ctx];
+  }
+
+  function drawFrame(source, w, h, cols, rows, mark) {
+    const m = margins(w, h);
+    const fw = w + m.left + m.right;
+    const fh = h + m.top + m.bottom;
+    const [c, ctx] = canvas(fw, fh);
+    ctx.fillStyle = COLORS.frame;
+    ctx.fillRect(0, 0, fw, fh);
+    ctx.drawImage(source, m.left, m.top, w, h);
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(m.left + 0.5, m.top + 0.5, w - 1, h - 1);
+    ctx.font = frameFont;
+    const stepX = niceStep(w);
+    const stepY = niceStep(h);
+    for (let x = 0; x <= w; x += stepX) {
+      const label = `x=${x}`;
+      const tw = ctx.measureText(label).width;
+      const tx = Math.min(m.left + x + 3, fw - tw - 4);
+      ctx.strokeStyle = COLORS.cyan;
+      ctx.beginPath();
+      ctx.moveTo(m.left + x, m.top - 8);
+      ctx.lineTo(m.left + x, m.top - 1);
+      ctx.stroke();
+      ctx.fillStyle = COLORS.ink;
+      ctx.fillText(label, tx, m.top - 12);
+    }
+    for (let y = 0; y <= h; y += stepY) {
+      ctx.strokeStyle = COLORS.cyan;
+      ctx.beginPath();
+      ctx.moveTo(m.left - 8, m.top + y);
+      ctx.lineTo(m.left - 1, m.top + y);
+      ctx.stroke();
+      ctx.fillStyle = COLORS.ink;
+      ctx.fillText(`y=${y}`, 3, m.top + y + 5);
+    }
+    if (mark) {
+      const cw = w / cols;
+      const ch = h / rows;
+      ctx.textAlign = 'center';
+      ctx.font = '700 16px ui-sans-serif, system-ui, sans-serif';
+      for (let col = 0; col < cols; col++) {
+        ctx.fillStyle = COLORS.cyan;
+        ctx.fillText(String.fromCharCode(65 + col), m.left + cw * (col + 0.5), m.top - 16);
+        ctx.strokeStyle = COLORS.cyan;
+        ctx.beginPath();
+        ctx.moveTo(m.left + cw * col, m.top - 7);
+        ctx.lineTo(m.left + cw * col, m.top - 1);
+        ctx.stroke();
+      }
+      for (let row = 0; row < rows; row++) {
+        ctx.fillStyle = COLORS.cyan;
+        ctx.fillText(String(row + 1), m.left - 24, m.top + ch * (row + 0.5) + 6);
+      }
+      ctx.textAlign = 'left';
+      ctx.fillStyle = COLORS.mut;
+      ctx.font = frameFont;
+      ctx.fillText('captura sem grade; colunas A–F / linhas 1–4 nas margens', m.left, 18);
+    } else {
+      ctx.fillStyle = COLORS.mut;
+      ctx.fillText('captura sem grade; réguas nas margens', m.left, 18);
+    }
+    return { canvas: c, margins: m, viewport: { width: fw, height: fh } };
+  }
+
+  function drawSidecar(w, h, cols, rows) {
+    const [c, ctx] = canvas(w, h);
+    ctx.fillStyle = COLORS.frame;
+    ctx.fillRect(0, 0, w, h);
+    const cw = w / cols;
+    const ch = h / rows;
+    ctx.strokeStyle = 'rgba(103,232,249,0.55)';
+    ctx.lineWidth = 1;
+    for (let col = 0; col <= cols; col++) {
+      ctx.beginPath();
+      ctx.moveTo(Math.round(col * cw), 0);
+      ctx.lineTo(Math.round(col * cw), h);
+      ctx.stroke();
+    }
+    for (let row = 0; row <= rows; row++) {
+      ctx.beginPath();
+      ctx.moveTo(0, Math.round(row * ch));
+      ctx.lineTo(w, Math.round(row * ch));
+      ctx.stroke();
+    }
+    ctx.font = frameFont;
+    ctx.fillStyle = COLORS.cyan;
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        ctx.fillText(`${String.fromCharCode(65 + col)}${row + 1}`, col * cw + 6, row * ch + 20);
+      }
+    }
+    ctx.fillStyle = COLORS.mut;
+    ctx.fillText('grade de referência — use com a captura limpa', 8, h - 10);
+    return c;
+  }
+
+  function toBlob(c) {
+    return new Promise((resolve, reject) => c.toBlob((b) => b ? resolve(b) : reject(new Error('PNG falhou')), 'image/png'));
+  }
+
+  async function generate() {
+    if (!state.img) return;
+    clearPreview();
+    setStatus('Gerando…');
+    try {
+      const img = state.img;
+      const W = img.naturalWidth;
+      const H = img.naturalHeight;
+      const resolutions = parseResolutions($('res').value);
+      const { cols, rows } = parseCells($('cell').value);
+      const wantAxis = $('g-axis').checked;
+      const wantMark = $('g-mark').checked;
+      const wantSide = $('g-side').checked;
+      const files = [];
+      const manifest = {
+        format: 'vision-variants@1',
+        source: { name: state.name, width: W, height: H },
+        resolutions: [],
+        grids: [],
+        mapping: {
+          resolution: 'x_original = x_previsto / (resolution.width / source.width); o mesmo em y',
+          frame: 'coordenadas relativas ao print: x_original = x_previsto / sx (não subtraia margens; a convenção do prompt é a área da captura)',
+          sidecar: 'coordenadas da primeira imagem (captura limpa); x_original = x_previsto / sx',
+        },
+      };
+
+      for (const r of resolutions) {
+        const [base, bctx] = canvas(r.width, r.height);
+        bctx.drawImage(img, 0, 0, r.width, r.height);
+        const baseBlob = await toBlob(base);
+        const baseName = `${r.id}.png`;
+        files.push({ name: baseName, blob: baseBlob });
+        manifest.resolutions.push({
+          id: r.id,
+          file: baseName,
+          width: r.width,
+          height: r.height,
+          sx: +(r.width / W).toFixed(6),
+          sy: +(r.height / H).toFixed(6),
+        });
+
+        if (wantAxis || wantMark) {
+          if (wantAxis) {
+            const f = drawFrame(base, r.width, r.height, cols, rows, false);
+            const name = `${r.id}-frame-axis.png`;
+            files.push({ name, blob: await toBlob(f.canvas) });
+            manifest.grids.push({
+              id: 'frame-axis', resolution: r.id, kind: 'frame', file: name,
+              margins: f.margins, viewport: f.viewport, cols, rows,
+            });
+          }
+          if (wantMark) {
+            const f = drawFrame(base, r.width, r.height, cols, rows, true);
+            const name = `${r.id}-frame-mark.png`;
+            files.push({ name, blob: await toBlob(f.canvas) });
+            manifest.grids.push({
+              id: 'frame-mark', resolution: r.id, kind: 'frame', file: name,
+              margins: f.margins, viewport: f.viewport, cols, rows,
+            });
+          }
+        }
+        if (wantSide) {
+          const s = drawSidecar(r.width, r.height, cols, rows);
+          const name = `${r.id}-sidecar-grid.png`;
+          files.push({ name, blob: await toBlob(s) });
+          manifest.grids.push({
+            id: 'sidecar-grid', resolution: r.id, kind: 'sidecar', file: name,
+            viewport: { width: r.width, height: r.height }, cols, rows,
+          });
+        }
+      }
+
+      const markdown = buildInstructions(manifest);
+      files.push({ name: 'INSTRUCOES.md', blob: new Blob([markdown], { type: 'text/markdown' }) });
+      files.push({ name: 'manifest.json', blob: new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' }) });
+
+      state.files = files.map((f) => ({ ...f, url: f.name.endsWith('.png') ? URL.createObjectURL(f.blob) : null }));
+      state.manifest = manifest;
+      state.instructions = markdown;
+      renderGallery();
+      $('zip').disabled = false;
+      $('md').disabled = false;
+      $('man').disabled = false;
+      setStatus(`Pronto: ${files.length} arquivo(s), ${resolutions.length} resolução(ões).`, true);
+    } catch (err) {
+      setStatus(`Erro: ${err.message}`);
+    }
+  }
+
+  function renderGallery() {
+    const gallery = $('gallery');
+    gallery.innerHTML = '';
+    const imgs = state.files.filter((f) => f.url);
+    $('empty').style.display = imgs.length ? 'none' : '';
+    for (const f of imgs) {
+      const fig = document.createElement('figure');
+      const img = document.createElement('img');
+      img.src = f.url;
+      img.alt = f.name;
+      img.loading = 'lazy';
+      const cap = document.createElement('figcaption');
+      const label = document.createElement('span');
+      label.textContent = f.name;
+      const a = document.createElement('a');
+      a.href = f.url;
+      a.download = f.name;
+      a.textContent = 'baixar';
+      cap.append(label, a);
+      fig.append(img, cap);
+      gallery.append(fig);
+    }
+  }
+
+  function buildInstructions(m) {
+    const lines = [];
+    lines.push('# Variantes geradas — instruções');
+    lines.push('');
+    lines.push(`Fonte: **${m.source.name}** (${m.source.width}×${m.source.height}).`);
+    lines.push('');
+    lines.push('## Resoluções');
+    lines.push('');
+    lines.push('| arquivo | envio | sx | sy |');
+    lines.push('|---|---:|---:|---:|');
+    for (const r of m.resolutions) lines.push(`| \`${r.file}\` | ${r.width}×${r.height} | ${r.sx} | ${r.sy} |`);
+    lines.push('');
+    lines.push('## Grades (sem cobrir o print)');
+    lines.push('');
+    if (m.grids.length === 0) lines.push('Nenhuma grade foi gerada.');
+    else {
+      lines.push('| arquivo | tipo | resolução | margens | viewport |');
+      lines.push('|---|---|---|---:|---:|');
+      for (const g of m.grids) {
+        const mg = g.margins ? `${g.margins.left}/${g.margins.top}/${g.margins.right}/${g.margins.bottom}` : '—';
+        lines.push(`| \`${g.file}\` | ${g.id} (${g.kind}) | ${g.resolution} | ${mg} | ${g.viewport.width}×${g.viewport.height} |`);
+      }
+    }
+    lines.push('');
+    lines.push('## Remapeamento');
+    lines.push('');
+    lines.push('- Sem moldura / sidecar: `x_original = x_previsto / sx` e `y_original = y_previsto / sy`.');
+    lines.push('- Moldura: peça coordenadas **relativas à área da captura** (`0..w`, `0..h`), com origem no canto superior esquerdo do print. A conta é a mesma: divida por `sx`/`sy`. As margens são só referência.');
+    lines.push('- Se você pedir coordenadas da imagem inteira na moldura, subtraia `left`/`top` antes de dividir.');
+    lines.push('');
+    lines.push('## Prompt recomendado');
+    lines.push('');
+    lines.push('```text');
+    lines.push('A imagem tem {w}×{h} pixels. Responda em PIXELS DESTA IMAGEM.');
+    lines.push('```');
+    lines.push('');
+    lines.push('Para moldura:');
+    lines.push('');
+    lines.push('```text');
+    lines.push('A captura ocupa x={left}..{left+w}, y={top}..{top+h}. NÃO há grade em cima da captura.');
+    lines.push('Devolva x/y em pixels da ÁREA DA CAPTURA (0..{w}, 0..{h}); não inclua as margens.');
+    lines.push('```');
+    lines.push('');
+    lines.push('Para sidecar: “a primeira imagem é a captura limpa; a segunda é a grade de referência; devolva o ponto na primeira”.');
+    return lines.join('\n');
+  }
+
+  // ZIP STORE (sem compressão) — evita dependência externa e funciona offline.
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(bytes) {
+    let c = 0xffffffff;
+    for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+  function u16(n) { return [n & 255, (n >>> 8) & 255]; }
+  function u32(n) { return [n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255]; }
+  async function makeZip(files) {
+    const entries = [];
+    for (const f of files) {
+      const data = new Uint8Array(await f.blob.arrayBuffer());
+      const name = new TextEncoder().encode(f.name);
+      entries.push({ name, data, crc: crc32(data) });
+    }
+    const chunks = [];
+    let offset = 0;
+    const central = [];
+    for (const e of entries) {
+      const local = new Uint8Array([
+        ...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+        ...u32(e.crc), ...u32(e.data.length), ...u32(e.data.length),
+        ...u16(e.name.length), ...u16(0), ...e.name,
+      ]);
+      chunks.push(local, e.data);
+      central.push({ ...e, offset });
+      offset += local.length + e.data.length;
+    }
+    const centralStart = offset;
+    let centralSize = 0;
+    for (const e of central) {
+      const h = new Uint8Array([
+        ...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+        ...u32(e.crc), ...u32(e.data.length), ...u32(e.data.length),
+        ...u16(e.name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(e.offset),
+        ...e.name,
+      ]);
+      chunks.push(h);
+      centralSize += h.length;
+    }
+    chunks.push(new Uint8Array([
+      ...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(entries.length), ...u16(entries.length),
+      ...u32(centralSize), ...u32(centralStart), ...u16(0),
+    ]));
+    return new Blob(chunks, { type: 'application/zip' });
+  }
+
+  function download(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  gen.addEventListener('click', () => void generate());
+  $('zip').addEventListener('click', async () => {
+    if (!state.files.length) return;
+    setStatus('Montando ZIP…');
+    try {
+      const blob = await makeZip(state.files);
+      download(blob, 'vision-variantes.zip');
+      setStatus(`ZIP com ${state.files.length} arquivo(s).`, true);
+    } catch (err) {
+      setStatus(`Erro no ZIP: ${err.message}`);
+    }
+  });
+  $('md').addEventListener('click', () => {
+    if (state.instructions) download(new Blob([state.instructions], { type: 'text/markdown' }), 'INSTRUCOES.md');
+  });
+  $('man').addEventListener('click', () => {
+    if (state.manifest) download(new Blob([JSON.stringify(state.manifest, null, 2)], { type: 'application/json' }), 'manifest.json');
+  });
+})();
+</script>
+</body>
+</html>

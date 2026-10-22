@@ -1,9 +1,11 @@
 # ROADMAP — Benchmark de Visão (UI grounding)
 
-> Status: **v0.2 (F0 + bancos 1 e 2) implementado** — imagem crua, dois modos,
-> dataset versionado com verdade do DOM, placar determinístico, 5 famílias e 7
-> cenários; banco **resolution** (downscale) e banco **grid** (`plain`,
-> `grid-simple`, `axis-grid`, `mark-grid@2`) com recorte pinado no build.
+> Status: **v0.3 (F0 + bancos 1, 2 e matriz) implementado** — imagem crua, dois
+> modos, dataset versionado com verdade do DOM, placar determinístico, 5 famílias
+> e 7 cenários; bancos **resolution**, **grid** (`grid-simple`, `axis-grid`,
+> `mark-grid-lite`) e **matrix** (resolução × grade SEM grade em cima do print:
+> moldura com réguas/letras ou sidecar). Gerador/tutorial de variantes em
+> `recaps/vision-gerador/`.
 > Este roadmap cobre o que falta e **por que cada técnica entra (ou não)**,
 > ancorado na pesquisa de percepção/memória/orquestração de computer use
 > (out/2026) que originou o benchmark.
@@ -115,14 +117,15 @@ poder estatístico.
 
 ### F2 — Percepção I: overlays e busca (grade/SoM)
 
-**Status (v0.2): implementado um corte SIMPLIFICADO** — `--benchmark grid` com
-`plain` (controle), `grid-simple` 9×9, `axis-grid` e `mark-grid-lite` 6×4 em
-duas rodadas (1 célula → recorte 640×540; ação/alvo/texto da rodada 1, ponto da
-rodada 2). **Não é o Mark-Grid do paper**: o original usa grade 8×8, prevê
-4 IDs de extremidade, recorta o bbox resultante, redimensiona o lado menor para
-512 px e mostra duas imagens (overview com caixa + recorte com grade). O
-resultado negativo do nosso `mark-grid-lite` não refuta o paper. Próxima
-iteração: 4 IDs/8×8, SoM ancorado e tiling.
+**Status (v0.3): grade clássica + grades sem overlay testadas** —
+`--benchmark grid` (grade em cima do print) e `--benchmark matrix` (resolução ×
+`plain`/`frame-axis`/`frame-mark`/`sidecar-grid`, sem cobrir o print). A matriz
+de 1440 chamadas mostrou: **1080p + plain = 71,1%** (melhor geral), **1080p +
+sidecar = 70,0%** (melhor com grade), **1280p + plain = 68,9%** (melhor
+custo/qualidade); molduras ficaram abaixo do controle na média. O
+`mark-grid-lite` continua sendo uma simplificação (1 célula 6×4), não o paper
+(4 IDs/8×8/crop 512/duas imagens); o resultado negativo não refuta o paper.
+Próxima iteração: `mark-grid@2` fiel, SoM ancorado e tiling.
 
 **Objetivo:** medir se "marcar a imagem" ajuda modelos generalistas a apontar.
 
@@ -401,8 +404,10 @@ econômico, grounder nativo), 2 modos, 30 cenários dev + 30 test, IC bootstrap
 1. **Baseline × Mark-Grid@2 × Axis-Grid × grade simples** (F2) — **rodado em
    22/10/2026** com DeepInfra fixado; Mark-Grid não bateu o controle nos 3
    modelos (ver `recaps/vision-benchmarks-v2/`).
-2. **Resolução:** 1080p × 1280×720 × 960×540 × 640×360 — **rodado em
-   22/10/2026**; a queda é monotônica e severa em 640×360.
+2. **Resolução × grade sem overlay:** 1080p/720p/540p/360p × plain/frame/sidecar
+   — **rodado em 22/10/2026** (1440 chamadas, $0,6455). Melhor geral 1080p+plain
+   (71,1%); melhor com grade 1080p+sidecar (70,0%); 1280p+plain é o melhor
+   custo/qualidade (68,9%, $0,0251); 640p cai para 20–36%.
 3. **SoM-âncora** (teto) × **SoM-detector** (piso) × sem overlay.
 4. **a11y-only × visão-only × híbrido** (F4), com tokens do texto medidos.
 5. **Zoom sob incerteza** com limiares 0,5/0,6/0,7 e alvo < 20 px.

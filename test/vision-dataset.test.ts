@@ -90,11 +90,20 @@ describe('dataset versionado', () => {
       const native = scene.probes!.resolutions!.find((r) => r.id === '1920x1080')!;
       expect(native.file).toBe(scene.image.file);
       expect(native.sha256).toBe(scene.image.sha256);
-      expect(scene.probes?.overlays?.map((o) => o.id).sort()).toEqual([
-        'axis-grid',
-        'grid-simple',
-        'mark-grid',
-      ]);
+      const classicas = scene.probes!.overlays!.filter((o) => !o.resolution).map((o) => o.id).sort();
+      expect(classicas).toEqual(['axis-grid', 'grid-simple', 'mark-grid']);
+      const frames = scene.probes!.overlays!.filter((o) => o.kind === 'frame');
+      const sidecars = scene.probes!.overlays!.filter((o) => o.kind === 'sidecar');
+      expect(frames).toHaveLength(8); // 4 resoluções × frame-axis/frame-mark
+      expect(sidecars).toHaveLength(4); // 4 resoluções
+      for (const f of frames) {
+        expect(f.margins?.left).toBeGreaterThan(0);
+        expect(f.viewport.width).toBeGreaterThan(0);
+      }
+      for (const sc of sidecars) {
+        expect(sc.resolution).toBeDefined();
+        expect(sc.viewport.width).toBe(Number(sc.resolution!.split('x')[0]));
+      }
       const mark = scene.probes!.overlays!.find((o) => o.id === 'mark-grid')!;
       expect(mark.cells).toHaveLength(24);
       expect(new Set(mark.cells!.map((c) => c.id)).size).toBe(24);

@@ -21,6 +21,8 @@ import {
   VISION_COORD_SPACES,
   VISION_FAMILIES,
   VISION_GRID_VARIANTS,
+  VISION_MATRIX_GRIDS,
+  VISION_MATRIX_PROMPT_VERSION,
   VISION_RESOLUTIONS,
   VISION_TASKS,
   type VisionBenchmark,
@@ -28,6 +30,7 @@ import {
   type VisionDataset,
   type VisionFamily,
   type VisionGridVariant,
+  type VisionMatrixGrid,
   type VisionRunConfig,
   type VisionRunRecord,
   type VisionTaskKind,
@@ -72,6 +75,7 @@ const RUN_OPTIONS = {
   provider: { type: 'string' },
   resolutions: { type: 'string' },
   'grid-variants': { type: 'string' },
+  'matrix-grids': { type: 'string' },
   families: { type: 'string' },
   scenes: { type: 'string' },
   limit: { type: 'string' },
@@ -157,6 +161,19 @@ function gridVariantsDe(valor: unknown): VisionGridVariant[] | undefined {
     });
   }
   return bruto as VisionGridVariant[];
+}
+
+function matrixGridsDe(valor: unknown): VisionMatrixGrid[] | undefined {
+  const bruto = listaDe(valor, '--matrix-grids');
+  if (bruto.length === 0) return undefined;
+  const invalidas = bruto.filter((v) => !(VISION_MATRIX_GRIDS as readonly string[]).includes(v));
+  if (invalidas.length > 0) {
+    throw new CliError(`--matrix-grids inválido: ${invalidas.join(', ')}.`, EXIT.USAGE, { accepted: VISION_MATRIX_GRIDS }, {
+      code: 'usage.invalid_flag_value',
+      hint: `Grades da matriz: ${VISION_MATRIX_GRIDS.join(', ')}.`,
+    });
+  }
+  return bruto as VisionMatrixGrid[];
 }
 
 function tarefasDe(valor: unknown): VisionTaskKind[] {
@@ -280,14 +297,21 @@ function configDe(values: Record<string, unknown>, budget: BudgetChoice): Vision
       tasks: tarefasPedidas,
     }, { code: 'usage.invalid_flag_value', hint: 'O banco de grade só tem células de ação.' });
   }
+  if (benchmark === 'matrix' && tarefasPedidas && !tarefasPedidas.includes('action')) {
+    throw new CliError('--benchmark matrix mede o modo ação; tire --tasks ou use --tasks action.', EXIT.USAGE, {
+      benchmark,
+      tasks: tarefasPedidas,
+    }, { code: 'usage.invalid_flag_value', hint: 'A matriz resolução × grade só tem células de ação.' });
+  }
   const tasks: VisionTaskKind[] =
     benchmark === 'resolution'
       ? ['map']
-      : benchmark === 'grid'
+      : benchmark === 'grid' || benchmark === 'matrix'
         ? ['action']
         : (tarefasPedidas ?? [...VISION_TASKS]);
   const resolutions = resolutionsDe(values.resolutions);
   const gridVariants = gridVariantsDe(values['grid-variants']);
+  const matrixGrids = matrixGridsDe(values['matrix-grids']);
   return {
     models,
     benchmark,
@@ -295,6 +319,7 @@ function configDe(values: Record<string, unknown>, budget: BudgetChoice): Vision
     tasks,
     ...(resolutions ? { resolutions } : {}),
     ...(gridVariants ? { gridVariants } : {}),
+    ...(matrixGrids ? { matrixGrids } : {}),
     families: familiasDe(values.families),
     scenes: scenes.length > 0 ? scenes : null,
     limit: values.limit === undefined || values.limit === '' ? null : inteiroDe(values.limit, '--limit', 1, 10_000, 0),
@@ -351,7 +376,7 @@ async function cmdRun(argv: string[]): Promise<number> {
   const { out, values } = ctx;
   const budget = resolveBudget(values.budget, (m) => out.warn(m));
   const config = configDe(values, budget);
-  if ((config.benchmark === 'resolution' || config.benchmark === 'grid') && !config.provider) {
+  if ((config.benchmark === 'resolution' || config.benchmark === 'grid' || config.benchmark === 'matrix') && !config.provider) {
     out.warn('sem --provider: o provedor pode variar entre células; para comparar modelos, fixe um provedor (ex.: --provider DeepInfra).');
   }
   const root = datasetRaiz(values);
@@ -399,9 +424,15 @@ async function cmdRun(argv: string[]): Promise<number> {
     coordSpace: config.coordSpace,
     benchmark: config.benchmark ?? 'grounding',
     ...(config.provider ? { provider: config.provider } : {}),
-    promptVersion: config.benchmark === 'grid' ? VISION_GRID_PROMPT_VERSION : VISION_PROMPT_VERSION,
+    promptVersion:
+      config.benchmark === 'grid'
+        ? VISION_GRID_PROMPT_VERSION
+        : config.benchmark === 'matrix'
+          ? VISION_MATRIX_PROMPT_VERSION
+          : VISION_PROMPT_VERSION,
     ...(config.resolutions ? { resolutions: config.resolutions } : {}),
     ...(config.gridVariants ? { gridVariants: config.gridVariants } : {}),
+    ...(config.matrixGrids ? { matrixGrids: config.matrixGrids } : {}),
     ...(config.budgetUsd !== undefined ? { budgetUsd: config.budgetUsd } : {}),
   };
 

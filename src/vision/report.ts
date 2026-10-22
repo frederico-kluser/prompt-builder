@@ -5,6 +5,7 @@
 // o acerto é decidido (ponto na caixa, rótulo normalizado) e o que NÃO foi
 // medido, para o número não virar promessa.
 
+import { VISION_MATRIX_GRIDS } from '../engine/vision/types.js';
 import type { VisionContestant, VisionMapAggregate, VisionRunRecord } from '../engine/vision/types.js';
 
 const pct = (v: number): string => `${(v * 100).toFixed(1)}%`;
@@ -109,9 +110,20 @@ function tipoRows(map: VisionMapAggregate): string[] {
 
 /** Cabeçalho/linhas da tabela por variante (resolução ou grade). */
 function variantTables(rec: VisionRunRecord): { headers: string[]; rows: string[][]; titulo: string; nota: string } | null {
-  if (rec.benchmark !== 'resolution' && rec.benchmark !== 'grid') return null;
-  const variantes = rec.contestants[0]?.variants?.map((v) => v.variant) ?? [];
+  if (rec.benchmark !== 'resolution' && rec.benchmark !== 'grid' && rec.benchmark !== 'matrix') return null;
+  const variantes = [...(rec.contestants[0]?.variants?.map((v) => v.variant) ?? [])];
   if (variantes.length === 0) return null;
+  if (rec.benchmark === 'matrix') {
+    const ordem = new Map<string, number>(VISION_MATRIX_GRIDS.map((g, i) => [g, i]));
+    variantes.sort((a, b) => {
+      const [ra, ga] = a.split('+');
+      const [rb, gb] = b.split('+');
+      const na = Number(ra?.split('x')[0]);
+      const nb = Number(rb?.split('x')[0]);
+      if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return nb - na;
+      return (ordem.get(ga ?? '') ?? 99) - (ordem.get(gb ?? '') ?? 99);
+    });
+  }
   const headers = ['variante', ...rec.contestants.map((c) => `\`${c.modelId}\``)];
   const rows: string[][] = [];
   const base = (c: VisionContestant, v: string): number | null => {
@@ -131,8 +143,19 @@ function variantTables(rec: VisionRunRecord): { headers: string[]; rows: string[
       }),
     ]);
   }
-  // Linha de referência: retenção vs 1080p (resolução) ou delta vs plain (grade).
-  if (rec.benchmark === 'resolution') {
+  // Linha de referência: retenção vs 1080p (resolução), delta vs plain (grade)
+  // ou melhor combinação (matriz).
+  if (rec.benchmark === 'matrix') {
+    rows.push([
+      '**melhor combinação**',
+      ...rec.contestants.map((c) => {
+        const melhor = [...(c.variants ?? [])]
+          .filter((v) => v.action)
+          .sort((a, b) => (b.action?.passRate ?? 0) - (a.action?.passRate ?? 0))[0];
+        return melhor?.action ? `${melhor.variant} (${pct(melhor.action.passRate)})` : '—';
+      }),
+    ]);
+  } else if (rec.benchmark === 'resolution') {
     rows.push([
       '**retenção vs 1080p**',
       ...rec.contestants.map((c) => {
@@ -170,11 +193,18 @@ function variantTables(rec: VisionRunRecord): { headers: string[]; rows: string[
   return {
     headers,
     rows,
-    titulo: rec.benchmark === 'resolution' ? 'Resolução — a mesma tela em outras escalas' : 'Grade — controle × técnicas',
+    titulo:
+      rec.benchmark === 'resolution'
+        ? 'Resolução — a mesma tela em outras escalas'
+        : rec.benchmark === 'matrix'
+          ? 'Matriz — resolução × grade (sem grade em cima do print)'
+          : 'Grade — controle × técnicas',
     nota:
       rec.benchmark === 'resolution'
         ? 'Coordenadas foram convertidas de volta para 1920×1080 antes de pontuar; a imagem enviada está em `cell.imageViewport`.'
-        : 'Todas as variantes usam a MESMA verdade e o MESMO pedido; `plain` é o controle. `mark-grid` deste repositório é uma variante **lite** (1 célula 6×4 → recorte → ponto), NÃO o Mark-Grid do paper (4 IDs de extremidade, grade 8×8, recorte no lado menor 512 e duas imagens).',
+        : rec.benchmark === 'matrix'
+          ? 'Cada célula combina uma resolução com uma grade sem overlay: `plain` (sem grade), `frame-axis` (réguas nas margens), `frame-mark` (letras/números nas margens) ou `sidecar-grid` (grade em imagem separada). O print nunca recebe grade. O ponto é remapeado para 1920×1080 antes de pontuar.'
+          : 'Todas as variantes usam a MESMA verdade e o MESMO pedido; `plain` é o controle. `mark-grid` deste repositório é uma variante **lite** (1 célula 6×4 → recorte → ponto), NÃO o Mark-Grid do paper (4 IDs de extremidade, grade 8×8, recorte no lado menor 512 e duas imagens).',
   };
 }
 
@@ -285,6 +315,8 @@ export function renderVisionReportMarkdown(rec: VisionRunRecord): string {
     linhas.push('- **Resolução**: a imagem enviada é um downscale da tela canônica (sem reflow). O prompt declara o viewport enviado; o parser converte o ponto para a grade da variante e o runner reescala para 1920×1080 ANTES de pontuar. `imageViewport` fica no record.');
   } else if (rec.benchmark === 'grid') {
     linhas.push('- **Grade**: todas as variantes usam a mesma verdade e o mesmo pedido; `plain` é o controle. `grid-simple` desenha 9×9 sem rótulos, `axis-grid` usa réguas de x/y e `mark-grid` usa células 6×4. No `mark-grid`, a rodada 2 recebe o recorte ampliado da célula escolhida e contribui SÓ com o ponto refinado; ação/alvo/texto vêm da rodada 1.');
+  } else if (rec.benchmark === 'matrix') {
+    linhas.push('- **Matriz**: o print é reduzido para a resolução da célula e recebe uma grade SEM overlay. `frame-*` acrescenta margens com réguas/letras e pede o ponto na ÁREA DA CAPTURA (as margens não entram na conta); `sidecar-grid` manda a captura limpa + uma imagem separada de grade. O ponto final é reescalado para 1920×1080 antes de pontuar.');
   } else {
     linhas.push('- Coordenada fora do espaço pedido é convertida pelo parser (0–1000 ↔ pixels) e registrada na célula (`coordScale`); nenhuma técnica de grade/zoom/SoM é aplicada no F0.');
   }
@@ -416,7 +448,9 @@ ${
     ? '<li><strong>Resolução</strong>: downscale da tela canônica (sem reflow); o ponto é convertido para a grade da variante e reescalado para 1920×1080 antes de pontuar.</li>'
     : rec.benchmark === 'grid'
       ? '<li><strong>Grade</strong>: mesma verdade/pedido em todas as variantes; <code>plain</code> é o controle. No <code>mark-grid</code>, a rodada 2 usa o recorte ampliado e contribui só com o ponto; ação/alvo/texto vêm da rodada 1.</li>'
-      : '<li>Coordenada fora do espaço pedido é convertida pelo parser e registrada (<code>coordScale</code>); nenhuma técnica de grade/zoom/SoM no F0.</li>'
+      : rec.benchmark === 'matrix'
+        ? '<li><strong>Matriz</strong>: resolução × grade sem overlay. Moldura desconta as margens; sidecar usa a captura limpa + imagem de grade separada; o ponto volta para 1920×1080.</li>'
+        : '<li>Coordenada fora do espaço pedido é convertida pelo parser e registrada (<code>coordScale</code>); nenhuma técnica de grade/zoom/SoM no F0.</li>'
 }
 </ul>`,
   );

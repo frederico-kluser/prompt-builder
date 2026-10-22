@@ -35,7 +35,7 @@ import type {
   VisionScene,
   VisionVariantAggregate,
 } from './types.js';
-import { VISION_SCORE_WEIGHTS } from './types.js';
+import { VISION_MATRIX_GRIDS, VISION_SCORE_WEIGHTS } from './types.js';
 
 /** Limiar do texto digitado/declarado (0–1) para contar como acerto. */
 export const TEXT_MATCH_THRESHOLD = 0.75;
@@ -399,6 +399,15 @@ export function aggregateContestant(params: {
       });
     }
     variants.sort((a, b) => {
+      if (benchmark === 'matrix') {
+        const [ra, ga] = a.variant.split('+');
+        const [rb, gb] = b.variant.split('+');
+        const na = Number(ra?.split('x')[0]);
+        const nb = Number(rb?.split('x')[0]);
+        if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return nb - na;
+        const ordem = new Map<string, number>(VISION_MATRIX_GRIDS.map((g, i) => [g, i]));
+        return (ordem.get(ga ?? '') ?? 99) - (ordem.get(gb ?? '') ?? 99);
+      }
       // Controle primeiro (grade), depois escalas da maior para a menor.
       if (a.variant === 'plain') return -1;
       if (b.variant === 'plain') return 1;

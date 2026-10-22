@@ -390,3 +390,83 @@ describe('mark-grid — refino de posição não reescreve a ação', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Matriz resolução × grade sem overlay
+// ---------------------------------------------------------------------------
+
+function fakeMatrixGateway(scene: VisionScene): {
+  gw: OpenRouterGateway;
+  calls: ChatCompletionParams[];
+} {
+  const calls: ChatCompletionParams[] = [];
+  const gw = {
+    peekModelsCache: () => ({ data: [] }),
+    chatCompletion: async (p: ChatCompletionParams): Promise<ChatCompletionResult> => {
+      calls.push(p);
+      const user = String(p.messages[1]!.content);
+      const pedido = /Pedido: ("(?:[^"\\]|\\.)*")/.exec(user)?.[1];
+      const instruction = pedido ? (JSON.parse(pedido) as string) : '';
+      const task = scene.tasks.find((t) => t.instruction === instruction)!;
+      const alvo = scene.elements.find((e) => e.id === task.expect.targetId)!;
+      const dim = /nesta tela \((\d+)×(\d+)\)/.exec(user);
+      const w = dim ? Number(dim[1]) : scene.viewport.width;
+      const h = dim ? Number(dim[2]) : scene.viewport.height;
+      const x = Math.round((alvo.center.x / scene.viewport.width) * w);
+      const y = Math.round((alvo.center.y / scene.viewport.height) * h);
+      return {
+        text: JSON.stringify({
+          action: task.expect.action,
+          target: alvo.label ?? alvo.iconDescription,
+          x,
+          y,
+          text: task.expect.text ?? null,
+        }),
+        tokensIn: 1200,
+        tokensOut: 120,
+        latencyMs: 42,
+        raw: { fake: true },
+        cost: { usd: 0.0002, source: 'usage' },
+      };
+    },
+  } as unknown as OpenRouterGateway;
+  return { gw, calls };
+}
+
+describe('matriz resolução × grade sem overlay', () => {
+  it('cruza resoluções e grades, remapeia o ponto e manda o sidecar como 2ª imagem', async () => {
+    resetSceneImageCache();
+    const loaded = await loadVisionDataset();
+    const scene = loaded.dataset.scenes.find((s) => s.id === 'bootstrap-login')!;
+    const { gw, calls } = fakeMatrixGateway(scene);
+    const record = await runVision({
+      dataset: loaded.dataset,
+      datasetRoot: visionDataDir(),
+      config: config({
+        benchmark: 'matrix',
+        tasks: ['action'],
+        resolutions: ['1920x1080', '640x360'],
+        matrixGrids: ['plain', 'frame-axis', 'sidecar-grid'],
+        scenes: ['bootstrap-login'],
+      }),
+      apiKey: 'sk-or-v1-fake',
+      gateway: gw,
+    });
+    expect(calls).toHaveLength(4 * 2 * 3);
+    expect(record.benchmark).toBe('matrix');
+    expect(record.promptVersion).toBe('vision-matrix-prompt@1');
+    expect(record.contestants[0]?.action?.passRate).toBe(1);
+    expect(record.contestants[0]?.variants).toHaveLength(6);
+    const frame = record.cells.find(
+      (c) => c.kind === 'action' && c.variant === '640x360+frame-axis',
+    );
+    expect(frame?.kind).toBe('action');
+    if (frame?.kind === 'action') {
+      expect(frame.margins?.left).toBeGreaterThan(0);
+      expect(frame.grid).toBe('frame-axis');
+      expect(frame.score?.pass).toBe(true);
+    }
+    const sidecarCall = calls.find((c) => String(c.messages[0]!.content).includes('SEGUNDA é uma grade'));
+    expect(sidecarCall?.messages[1]?.images).toHaveLength(2);
+  });
+});

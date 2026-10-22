@@ -146,3 +146,39 @@ describe('prompt-builder vision — bancos de probe', () => {
     expect(env.data.estimateUsd).toBeGreaterThan(0);
   });
 });
+
+describe('prompt-builder vision — matriz resolução × grade', () => {
+  it('planeja resolução × grade sem overlay e aceita sidecar', () => {
+    const r = run([
+      'vision', 'run', '--models', 'google/gemini-2.5-flash', '--benchmark', 'matrix',
+      '--scenes', 'bootstrap-login', '--resolutions', '1920x1080,640x360',
+      '--matrix-grids', 'plain,frame-axis,sidecar-grid',
+      '--budget', '1', '--dry-run', '--json',
+    ]);
+    expect(r.code).toBe(0);
+    const env = JSON.parse(r.stdout) as {
+      ok: boolean;
+      data: { benchmark: string; variants: string[]; cells: number; tasks: string[] };
+    };
+    expect(env.ok).toBe(true);
+    expect(env.data.benchmark).toBe('matrix');
+    expect(env.data.tasks).toEqual(['action']);
+    expect(env.data.cells).toBe(24); // 4 tarefas × 2 resoluções × 3 grades
+    expect(env.data.variants).toEqual([
+      '1920x1080+plain',
+      '1920x1080+frame-axis',
+      '1920x1080+sidecar-grid',
+      '640x360+plain',
+      '640x360+frame-axis',
+      '640x360+sidecar-grid',
+    ]);
+  });
+
+  it('recusa grade de matriz desconhecida', () => {
+    const r = run([
+      'vision', 'run', '--models', 'google/gemini-2.5-flash', '--benchmark', 'matrix',
+      '--matrix-grids', 'overlay', '--budget', '1', '--dry-run', '--json',
+    ]);
+    expect(r.code).toBe(2);
+  });
+});
