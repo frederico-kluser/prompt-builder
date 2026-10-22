@@ -174,7 +174,7 @@ function variantTables(rec: VisionRunRecord): { headers: string[]; rows: string[
     nota:
       rec.benchmark === 'resolution'
         ? 'Coordenadas foram convertidas de volta para 1920×1080 antes de pontuar; a imagem enviada está em `cell.imageViewport`.'
-        : 'Todas as variantes usam a MESMA verdade e o MESMO pedido; `plain` é o controle. `mark-grid` pode ter 2 rodadas (recorte + ampliação).',
+        : 'Todas as variantes usam a MESMA verdade e o MESMO pedido; `plain` é o controle. `mark-grid` deste repositório é uma variante **lite** (1 célula 6×4 → recorte → ponto), NÃO o Mark-Grid do paper (4 IDs de extremidade, grade 8×8, recorte no lado menor 512 e duas imagens).',
   };
 }
 

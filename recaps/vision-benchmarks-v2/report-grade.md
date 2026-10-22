@@ -20,7 +20,7 @@ Nesta rodada, a **nota é a média entre variantes**; a coluna “mapa F1”/“
 
 ## Grade — controle × técnicas
 
-Todas as variantes usam a MESMA verdade e o MESMO pedido; `plain` é o controle. `mark-grid` pode ter 2 rodadas (recorte + ampliação).
+Todas as variantes usam a MESMA verdade e o MESMO pedido; `plain` é o controle. `mark-grid` deste repositório é uma variante **lite** (1 célula 6×4 → recorte → ponto), NÃO o Mark-Grid do paper (4 IDs de extremidade, grade 8×8, recorte no lado menor 512 e duas imagens).
 
 | variante | `xiaomi/mimo-v2.6-pro` | `z-ai/glm-5.3-flash` | `deepseek/deepseek-v4.1-flash-1017` |
 |---|---:|---:|---:|

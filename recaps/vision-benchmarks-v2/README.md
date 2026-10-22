@@ -8,7 +8,7 @@ entre células e o número mede roteamento, não o modelo.
 | banco | o que muda | células | chamadas HTTP | custo medido |
 |---|---|---:|---:|---:|
 | `resolution` | mesma tela em 1080p / 720p / 540p / 360p | 84 | 84 | **$0.0870** |
-| `grid` | mesma tarefa com `plain` / 9×9 / eixos / Mark-Grid 6×4 | 360 | 449 | **$0.0954** |
+| `grid` | mesma tarefa com `plain` / 9×9 / eixos / Mark-Grid-lite 6×4 | 360 | 449 | **$0.0954** |
 
 Os dois bancos usam a **mesma verdade do DOM** do F0; só a apresentação muda.
 `grid` tem uma célula que não chegou à 2ª rodada (449 em vez de 450 chamadas):
@@ -32,7 +32,7 @@ Precisão/recall completos (e por tipo/família): [`report-resolucao.md`](./repo
 Nota = média das 4 variantes. `plain` é o controle; delta em pontos percentuais
 contra ele.
 
-| modelo | nota | plain | 9×9 | eixos | Mark-Grid | Δ Mark-Grid | alvo (geral) | custo | latência |
+| modelo | nota | plain | 9×9 | eixos | Mark-Grid-lite | Δ vs plain | alvo (geral) | custo | latência |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | **MiMo V2.6-Pro** | **70.8%** | 70.0% | 70.0% | **73.3%** | 70.0% | **0.0** | 78.3% | $0.0268 | 9.8 s |
 | GLM 5.3 Flash | 66.7% | **73.3%** | 73.3% | 66.7% | 53.3% | **−20.0** | 75.0% | $0.0553 | 2.0 s |
@@ -51,12 +51,14 @@ Custo/latência completos, por família e por ação: [`report-grade.md`](./repo
 - **720p não é monotônico.** DeepSeek sobe de 69.0% (1080p) para 73.1% (720p).
   Com uma rodada e 7 cenários, isso é ruído/variação de amostra, não “720p é
   melhor”; o teste não tem IC.
-- **Mark-Grid não reproduziu o ganho do paper neste dataset.** Nos 3 modelos
-  ficou empatado ou pior que o controle (GLM −20 p.p.). O nosso Mark-Grid é
-  6×4 em 2 rodadas (célula → recorte 640×540 → ponto), enquanto o paper usa
-  8×8 e 4 células candidatas; além disso, erro de célula na rodada 1 não tem
-  como ser corrigido na rodada 2. O resultado é útil: overlay não é ganho
-  automático.
+- **Mark-Grid-lite não reproduziu o ganho do paper — e não deveria ser lido
+  como refutação.** Nos 3 modelos ficou empatado ou pior que o controle (GLM
+  −20 p.p.). O nosso variante é 6×4 em 2 rodadas com **1 célula** e pede um
+  ponto; o paper usa **8×8, 4 IDs de extremidade**, recorta o bbox resultante,
+  redimensiona o lado menor para 512 px e mostra **duas imagens** (overview com
+  caixa + recorte com grade). São técnicas diferentes; o resultado mede o custo
+  de um zoom por célula, não o Mark-Grid completo. O original fica no roadmap
+  como `mark-grid@2` fiel.
 - **Grade simples e eixos são quase neutros.** No máximo ±1 tarefa (±3,3 p.p.)
   e o sinal troca de modelo para modelo. É exatamente o controle negativo que a
   literatura previa; não justificam o custo de imagem/tokens.
@@ -73,6 +75,16 @@ entrou) em vez de ~3.200 no **Wafer**. Fixar `DeepInfra` levou o mesmo 720p a
 **88,7%**. Ou seja: sem pin de provedor, o banco de resolução mede o roteamento.
 As rodadas sem pin foram descartadas e não entram nas tabelas.
 
+## Pesquisa
+
+O dossier com fontes e implicações está em
+[`pesquisas/benchmarks-visao-2026.md`](../../pesquisas/benchmarks-visao-2026.md).
+Ele documenta o mecanismo exato do Mark-Grid (4 IDs/8×8/crop 512), a evidência
+de resolução do ScreenSpot-Pro/FastFocus e a verificação por estado do ambiente
+(IRA/GUI-RewardBench, VLAA-GUI). O Tavily não estava disponível (todas as chaves
+do pool esgotadas/revogadas); a pesquisa foi feita com busca web + a base já
+versionada no ROADMAP, sem inventar fonte.
+
 ## Terceiro banco (proposto, não implementado)
 
 **Ação executada (closed-loop).** Em vez de comparar o ponto com a caixa,
@@ -87,8 +99,8 @@ Especificação completa em [`ROADMAP-VISAO.md`](../../ROADMAP-VISAO.md#f12--aç
 - Só o provedor `DeepInfra`; conclusões não se transferem para outro provedor.
 - `resolution` é downscale da mesma imagem (sem reflow); não mede layout responsivo.
 - `grid` só roda no modo ação; o F0 (mapa + ação) continua sendo o placar base.
-- Mark-Grid é a variante 6×4/2 rodadas deste repositório, não a implementação
-  exata do paper.
+- Mark-Grid-lite é a variante 6×4/1 célula/2 rodadas deste repositório, não a
+  implementação de 4 IDs/8×8 do paper.
 
 ## Arquivos
 

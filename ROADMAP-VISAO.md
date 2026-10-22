@@ -115,11 +115,14 @@ poder estatístico.
 
 ### F2 — Percepção I: overlays e busca (grade/SoM)
 
-**Status (v0.2): implementado o primeiro corte** — `--benchmark grid` com
-`plain` (controle), `grid-simple` 9×9, `axis-grid` e `mark-grid` 6×4 em duas
-rodadas (célula → recorte 640×540; ação/alvo/texto da rodada 1, ponto da
-rodada 2). Ficam para a próxima iteração: 8×8 do paper, 4 células candidatas,
-SoM ancorado e tiling.
+**Status (v0.2): implementado um corte SIMPLIFICADO** — `--benchmark grid` com
+`plain` (controle), `grid-simple` 9×9, `axis-grid` e `mark-grid-lite` 6×4 em
+duas rodadas (1 célula → recorte 640×540; ação/alvo/texto da rodada 1, ponto da
+rodada 2). **Não é o Mark-Grid do paper**: o original usa grade 8×8, prevê
+4 IDs de extremidade, recorta o bbox resultante, redimensiona o lado menor para
+512 px e mostra duas imagens (overview com caixa + recorte com grade). O
+resultado negativo do nosso `mark-grid-lite` não refuta o paper. Próxima
+iteração: 4 IDs/8×8, SoM ancorado e tiling.
 
 **Objetivo:** medir se "marcar a imagem" ajuda modelos generalistas a apontar.
 
