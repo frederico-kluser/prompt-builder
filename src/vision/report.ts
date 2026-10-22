@@ -449,7 +449,7 @@ ${
     : rec.benchmark === 'grid'
       ? '<li><strong>Grade</strong>: mesma verdade/pedido em todas as variantes; <code>plain</code> é o controle. No <code>mark-grid</code>, a rodada 2 usa o recorte ampliado e contribui só com o ponto; ação/alvo/texto vêm da rodada 1.</li>'
       : rec.benchmark === 'matrix'
-        ? '<li><strong>Matriz</strong>: resolução × grade sem overlay. Moldura desconta as margens; sidecar usa a captura limpa + imagem de grade separada; o ponto volta para 1920×1080.</li>'
+        ? '<li><strong>Matriz</strong>: resolução × grade sem overlay. A moldura pede o ponto na área da captura (as margens não entram na conta); o sidecar usa a captura limpa + imagem de grade separada; o ponto volta para 1920×1080.</li>'
         : '<li>Coordenada fora do espaço pedido é convertida pelo parser e registrada (<code>coordScale</code>); nenhuma técnica de grade/zoom/SoM no F0.</li>'
 }
 </ul>`,
