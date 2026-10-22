@@ -67,10 +67,10 @@ function runJevMinima(id: string, status: JevRunRecord['status'] = 'finished'): 
 afterEach(() => vi.resetModules());
 
 describe('IndexedDB v3 (modo JEV)', () => {
-  it('DB_VERSION = 3 e as 3 stores novas estão na lista', async () => {
+  it('DB_VERSION = 4 e as stores do JEV e da visão estão na lista', async () => {
     const { idb } = await modulos(new FakeIdb());
-    expect(idb.DB_VERSION).toBe(3);
-    for (const s of ['jevRuns', 'jevSessions', 'jevSummaries']) expect(idb.STORES).toContain(s);
+    expect(idb.DB_VERSION).toBe(4);
+    for (const s of ['jevRuns', 'jevSessions', 'jevSummaries', 'visionRuns', 'visionSummaries']) expect(idb.STORES).toContain(s);
     // As antigas continuam (a biblioteca e o histórico LLM não podem sumir).
     for (const s of ['runs', 'sessions', 'runSummaries', 'sessionSummaries', 'prompts']) expect(idb.STORES).toContain(s);
   });

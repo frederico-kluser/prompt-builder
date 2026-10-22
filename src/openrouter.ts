@@ -1377,7 +1377,11 @@ export function countTextTokens(text: string): number {
  * estimado × real da calibração.
  */
 export function guessPromptTokens(messages: ChatMessage[]): number {
-  return countTextTokens(messages.map((m) => m.content).join('\n'));
+  const texto = countTextTokens(messages.map((m) => m.content).join('\n'));
+  const imagens = messages.reduce((n, m) => n + (m.images?.length ?? 0), 0);
+  // Aproximação SÓ para reserva: o número real vem de `usage` (medido). A
+  // imagem domina o prompt e o custo por imagem varia por provedor/resolução.
+  return texto + imagens * APPROX_IMAGE_TOKENS;
 }
 
 /**
@@ -1958,10 +1962,17 @@ export function validateModelsPayload(json: unknown): {
       supportedParameters = supportedParameters.filter((p) => !REASONING_WIRE_PARAMS.has(p));
     }
 
+    // Modalidade de ENTRADA (visão): persistida no cache — o `raw` é removido
+    // ao gravar, então sem este campo o pré-voo de visão nunca saberia.
+    const modalidades = (item.architecture as { input_modalities?: unknown } | undefined)?.input_modalities;
+    const inputModalities = Array.isArray(modalidades)
+      ? modalidades.filter((v): v is string => typeof v === 'string' && v.length > 0)
+      : undefined;
     models.push({
       id,
       name: typeof item.name === 'string' && item.name.trim() ? item.name : id,
       contextLength,
+      ...(inputModalities && inputModalities.length > 0 ? { inputModalities } : {}),
       pricing: {
         prompt: priceField(pricing.prompt, issue, id, 'pricing.prompt'),
         completion: priceField(pricing.completion, issue, id, 'pricing.completion'),
@@ -1983,9 +1994,74 @@ export function parseModelsPayload(json: unknown): OpenRouterModel[] {
   return validateModelsPayload(json).models;
 }
 
+/**
+ * Imagem anexada a uma mensagem (benchmark de visão). `url` é um data URL
+ * (`data:image/png;base64,…`) ou uma URL https pública — nada de `file://`:
+ * o corpo sai da máquina e o caminho local não tem sentido do outro lado.
+ * `detail` é a dica de resolução do provedor (default: `high`, que é o que
+ * grounding de alvo pequeno precisa).
+ */
+export interface ChatImage {
+  url: string;
+  detail?: 'auto' | 'low' | 'high';
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  /**
+   * Imagens da mensagem. O TEXTO continua em `content` (a cascata de dado
+   * pessoal varre texto; imagem não é varrida) e a conversão para o formato
+   * de partes do fio acontece em `wireMessages`, DEPOIS da proteção.
+   * Presente = chamada multimodal (só o benchmark de visão usa).
+   */
+  images?: ChatImage[];
+}
+
+/** Uma parte de conteúdo no formato do fio (OpenAI/OpenRouter). */
+export type WireContentPart =
+  | { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
+
+/** Mensagem como vai no corpo HTTP (`content` string ou lista de partes). */
+export interface WireMessage {
+  role: ChatMessage['role'];
+  content: string | WireContentPart[];
+}
+
+/** Tokens aproximados de UMA imagem 1080p na reserva (a medição vem do usage). */
+export const APPROX_IMAGE_TOKENS = 1800;
+
+/**
+ * Mensagens protegidas → mensagens do FIO. Sem imagens, devolve o MESMO texto
+ * (formato histórico). Com imagens, `content` vira partes: o texto PRIMEIRO e
+ * a imagem depois — a ordem recomendada para modelos de visão.
+ *
+ * Função pura e exportada para o teste provar que nada é reescrito depois da
+ * cascata e que URL não-http(s)/data é recusada (não há leitura de arquivo).
+ */
+export function wireMessages(messages: readonly ChatMessage[]): WireMessage[] {
+  return messages.map((m) => {
+    if (!m.images || m.images.length === 0) return { role: m.role, content: m.content };
+    const parts: WireContentPart[] = [];
+    if (m.content) parts.push({ type: 'text', text: m.content });
+    for (const img of m.images) {
+      const url = typeof img.url === 'string' ? img.url.trim() : '';
+      if (!/^(data:image\/[a-z0-9.+-]+;base64,|https:\/\/)/i.test(url)) {
+        throw new Error('imagem com URL inválida: use data:image/…;base64,… ou https:// (nada de file://)');
+      }
+      parts.push({
+        type: 'image_url',
+        image_url: { url, ...(img.detail ? { detail: img.detail } : {}) },
+      });
+    }
+    return { role: m.role, content: parts };
+  });
+}
+
+/** A chamada carrega imagem? (gate do modo LGPD sensível.) */
+export function hasImages(messages: readonly ChatMessage[]): boolean {
+  return messages.some((m) => Array.isArray(m.images) && m.images.length > 0);
 }
 
 export interface ChatCompletionResult {
@@ -3013,9 +3089,16 @@ export class OpenRouterGateway {
   private buildBody(params: ChatCompletionParams, stream: boolean): Record<string, unknown> {
     const { apiKey, modelId, messages, temperature = 0 } = params;
     const model = this.cachedModel(apiKey, modelId);
+    // Fail-closed LGPD: imagem não passa pela cascata de dado pessoal, então
+    // em área sensível ela NÃO sai — recusa antes da reserva/fetch.
+    if (hasImages(messages) && params.sink?.sensitiveRouting?.()) {
+      throw new Error(
+        'modo de dados sensíveis LGPD: imagem não passa pela cascata de dado pessoal e não é enviada (fail-closed).',
+      );
+    }
     const body: Record<string, unknown> = {
       model: modelId,
-      messages: this.protectMessages(messages, params.sink),
+      messages: wireMessages(this.protectMessages(messages, params.sink)),
       ...deterministicSampling(model, modelId, temperature),
     };
     if (stream) body.stream = true;
@@ -3024,7 +3107,9 @@ export class OpenRouterGateway {
     // IMPL-114: cache_control no FIM do prefixo estável (layout v1 — ver o
     // campo `cacheControlAfter`). Vai DEPOIS do `protectMessages`: o prefixo
     // cacheado tem de ser byte a byte o que sobe no fio.
-    if (typeof params.cacheControlAfter === 'number') {
+    // `cache_control` numa PARTE de imagem não é a forma documentada (a marca
+    // vale para bloco de texto) — com imagem, o cache explícito não é aplicado.
+    if (typeof params.cacheControlAfter === 'number' && !hasImages(messages)) {
       applyCacheControl(body, params.cacheControlAfter);
     }
     // json_schema estrito quando o catalogo declara structured_outputs (IMPL-006).

@@ -82,6 +82,9 @@ const CLASSIFICACAO: Record<string, 'shim' | 'mirror' | 'web-only'> = {
   // Modo JEV (decisões tipadas): runner, métricas, lint, treino e relatórios
   // são fonte única em src/engine/jev/ — o web re-exporta o barrel.
   jev: 'shim',
+  // Benchmark de visão: dataset/prompt/parse/placar/runner core são puros e
+  // fonte única em src/engine/vision/; a SPA injeta os seams (fetch/IndexedDB).
+  vision: 'shim',
   // IMPL-081 (R-10:REC-2): journal de chamadas pagas — núcleo (chave canônica,
   // ocorrência, replay, política de retomada) em src/engine/callJournal.ts; o
   // shim do web acrescenta só o adaptador IndexedDB (o do Node é src/storage.ts).
@@ -117,6 +120,7 @@ const CANONICO_EM: Record<string, string> = {
   sessionReportHtml: 'engine/sessionReportHtml',
   csv: 'engine/csv',
   jev: 'engine/jev/index',
+  vision: 'engine/vision/index',
   callJournal: 'engine/callJournal',
 };
 

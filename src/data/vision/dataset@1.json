@@ -1,0 +1,3903 @@
+{
+  "format": "vision-dataset@1",
+  "version": "0.1.0",
+  "generator": "vision-build@1",
+  "createdAt": "2026-10-21T23:37:31.034Z",
+  "viewport": {
+    "width": 1920,
+    "height": 1080
+  },
+  "scenes": [
+    {
+      "id": "bootstrap-painel-cursos",
+      "family": "bootstrap",
+      "title": "Painel administrativo de cursos (Bootstrap 5)",
+      "theme": "light",
+      "viewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "image": {
+        "file": "images/bootstrap-painel-cursos.png",
+        "sha256": "c2e1a1416bac976f59517d9c8eb626597fb7c937a2f5b59b63b97cf187332b03",
+        "bytes": 65307
+      },
+      "code": {
+        "file": "scenes/bootstrap/bootstrap-painel-cursos.html"
+      },
+      "elements": [
+        {
+          "id": "top-busca",
+          "type": "input",
+          "label": "Buscar curso, aluno ou turma",
+          "iconDescription": null,
+          "bbox": {
+            "x": 137,
+            "y": 13,
+            "w": 420,
+            "h": 38
+          },
+          "center": {
+            "x": 347,
+            "y": 32
+          },
+          "hint": "Buscar curso, aluno ou turma"
+        },
+        {
+          "id": "top-notificacoes",
+          "type": "button",
+          "label": null,
+          "iconDescription": "sino de notificações",
+          "aliases": [
+            "sino",
+            "alertas"
+          ],
+          "bbox": {
+            "x": 1796,
+            "y": 13,
+            "w": 42,
+            "h": 38
+          },
+          "center": {
+            "x": 1817,
+            "y": 32
+          }
+        },
+        {
+          "id": "top-perfil",
+          "type": "button",
+          "label": "MP",
+          "iconDescription": null,
+          "aliases": [
+            "perfil",
+            "minha conta"
+          ],
+          "bbox": {
+            "x": 1846,
+            "y": 13,
+            "w": 50,
+            "h": 38
+          },
+          "center": {
+            "x": 1871,
+            "y": 32
+          }
+        },
+        {
+          "id": "nav-visao-geral",
+          "type": "link",
+          "label": "Visão geral",
+          "iconDescription": null,
+          "bbox": {
+            "x": 16,
+            "y": 80,
+            "w": 207,
+            "h": 40
+          },
+          "center": {
+            "x": 120,
+            "y": 100
+          }
+        },
+        {
+          "id": "nav-cursos",
+          "type": "link",
+          "label": "Cursos",
+          "iconDescription": null,
+          "bbox": {
+            "x": 16,
+            "y": 124,
+            "w": 207,
+            "h": 40
+          },
+          "center": {
+            "x": 120,
+            "y": 144
+          }
+        },
+        {
+          "id": "nav-alunos",
+          "type": "link",
+          "label": "Alunos",
+          "iconDescription": null,
+          "bbox": {
+            "x": 16,
+            "y": 168,
+            "w": 207,
+            "h": 40
+          },
+          "center": {
+            "x": 120,
+            "y": 188
+          }
+        },
+        {
+          "id": "nav-relatorios",
+          "type": "link",
+          "label": "Relatórios",
+          "iconDescription": null,
+          "bbox": {
+            "x": 16,
+            "y": 212,
+            "w": 207,
+            "h": 40
+          },
+          "center": {
+            "x": 120,
+            "y": 232
+          }
+        },
+        {
+          "id": "curso-novo",
+          "type": "button",
+          "label": "Novo curso",
+          "iconDescription": null,
+          "aliases": [
+            "adicionar curso",
+            "criar curso"
+          ],
+          "bbox": {
+            "x": 1777,
+            "y": 100,
+            "w": 119,
+            "h": 38
+          },
+          "center": {
+            "x": 1837,
+            "y": 119
+          }
+        },
+        {
+          "id": "curso-filtro",
+          "type": "input",
+          "label": "Filtrar por nome",
+          "iconDescription": null,
+          "bbox": {
+            "x": 264,
+            "y": 166,
+            "w": 320,
+            "h": 38
+          },
+          "center": {
+            "x": 424,
+            "y": 185
+          },
+          "hint": "Filtrar por nome"
+        },
+        {
+          "id": "curso-status",
+          "type": "select",
+          "label": "Status",
+          "iconDescription": null,
+          "bbox": {
+            "x": 592,
+            "y": 166,
+            "w": 200,
+            "h": 38
+          },
+          "center": {
+            "x": 692,
+            "y": 185
+          }
+        },
+        {
+          "id": "curso-exportar",
+          "type": "button",
+          "label": "Exportar CSV",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1772,
+            "y": 166,
+            "w": 124,
+            "h": 38
+          },
+          "center": {
+            "x": 1834,
+            "y": 185
+          }
+        },
+        {
+          "id": "editar-react-avancado",
+          "type": "button",
+          "label": "Editar",
+          "iconDescription": null,
+          "aliases": [
+            "editar curso react avancado"
+          ],
+          "bbox": {
+            "x": 1765,
+            "y": 277,
+            "w": 57,
+            "h": 31
+          },
+          "center": {
+            "x": 1794,
+            "y": 293
+          }
+        },
+        {
+          "id": "excluir-react-avancado",
+          "type": "button",
+          "label": "Excluir",
+          "iconDescription": null,
+          "aliases": [
+            "excluir curso react avancado"
+          ],
+          "bbox": {
+            "x": 1826,
+            "y": 277,
+            "w": 61,
+            "h": 31
+          },
+          "center": {
+            "x": 1857,
+            "y": 293
+          }
+        },
+        {
+          "id": "editar-typescript",
+          "type": "button",
+          "label": "Editar",
+          "iconDescription": null,
+          "aliases": [
+            "editar curso typescript"
+          ],
+          "bbox": {
+            "x": 1765,
+            "y": 339,
+            "w": 57,
+            "h": 31
+          },
+          "center": {
+            "x": 1794,
+            "y": 355
+          }
+        },
+        {
+          "id": "excluir-typescript",
+          "type": "button",
+          "label": "Excluir",
+          "iconDescription": null,
+          "aliases": [
+            "excluir curso typescript"
+          ],
+          "bbox": {
+            "x": 1826,
+            "y": 339,
+            "w": 61,
+            "h": 31
+          },
+          "center": {
+            "x": 1857,
+            "y": 355
+          }
+        },
+        {
+          "id": "editar-design",
+          "type": "button",
+          "label": "Editar",
+          "iconDescription": null,
+          "aliases": [
+            "editar curso design de interfaces"
+          ],
+          "bbox": {
+            "x": 1765,
+            "y": 401,
+            "w": 57,
+            "h": 31
+          },
+          "center": {
+            "x": 1794,
+            "y": 417
+          }
+        },
+        {
+          "id": "excluir-design",
+          "type": "button",
+          "label": "Excluir",
+          "iconDescription": null,
+          "aliases": [
+            "excluir curso design de interfaces"
+          ],
+          "bbox": {
+            "x": 1826,
+            "y": 401,
+            "w": 61,
+            "h": 31
+          },
+          "center": {
+            "x": 1857,
+            "y": 417
+          }
+        },
+        {
+          "id": "pagina-anterior",
+          "type": "button",
+          "label": "Anterior",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1687,
+            "y": 465,
+            "w": 88,
+            "h": 38
+          },
+          "center": {
+            "x": 1731,
+            "y": 484
+          },
+          "state": {
+            "disabled": true
+          }
+        },
+        {
+          "id": "pagina-2",
+          "type": "button",
+          "label": "2",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1774,
+            "y": 465,
+            "w": 35,
+            "h": 38
+          },
+          "center": {
+            "x": 1792,
+            "y": 484
+          }
+        },
+        {
+          "id": "pagina-proxima",
+          "type": "button",
+          "label": "Próxima",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1808,
+            "y": 465,
+            "w": 88,
+            "h": 38
+          },
+          "center": {
+            "x": 1852,
+            "y": 484
+          }
+        }
+      ],
+      "tasks": [
+        {
+          "id": "bootstrap-painel-cursos-a1",
+          "sceneId": "bootstrap-painel-cursos",
+          "kind": "action",
+          "instruction": "Clique em \"Novo curso\".",
+          "expect": {
+            "action": "click",
+            "targetId": "curso-novo"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "bootstrap-painel-cursos-a2",
+          "sceneId": "bootstrap-painel-cursos",
+          "kind": "action",
+          "instruction": "Clique em \"Excluir\" na linha do curso \"TypeScript na prática\".",
+          "expect": {
+            "action": "click",
+            "targetId": "excluir-typescript"
+          },
+          "difficulty": "medium"
+        },
+        {
+          "id": "bootstrap-painel-cursos-a3",
+          "sceneId": "bootstrap-painel-cursos",
+          "kind": "action",
+          "instruction": "Escolha o status \"Rascunho\" no filtro de status.",
+          "expect": {
+            "action": "select",
+            "targetId": "curso-status",
+            "text": "Rascunho"
+          },
+          "difficulty": "medium"
+        },
+        {
+          "id": "bootstrap-painel-cursos-a4",
+          "sceneId": "bootstrap-painel-cursos",
+          "kind": "action",
+          "instruction": "Clique em \"Editar\" no curso \"Design de Interfaces\".",
+          "expect": {
+            "action": "click",
+            "targetId": "editar-design"
+          },
+          "difficulty": "medium"
+        }
+      ],
+      "tags": [
+        "dashboard",
+        "tabela",
+        "navbar"
+      ]
+    },
+    {
+      "id": "bootstrap-login",
+      "family": "bootstrap",
+      "title": "Tela de login (Bootstrap 5)",
+      "theme": "light",
+      "viewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "image": {
+        "file": "images/bootstrap-login.png",
+        "sha256": "fc7b0bf15b8b181f619ca08e78140cf3680dfb3b338352401f8da29819e0b0e4",
+        "bytes": 32102
+      },
+      "code": {
+        "file": "scenes/bootstrap/bootstrap-login.html"
+      },
+      "elements": [
+        {
+          "id": "login-email",
+          "type": "input",
+          "label": "E-mail",
+          "iconDescription": null,
+          "aliases": [
+            "e-mail",
+            "email",
+            "correio eletrônico"
+          ],
+          "bbox": {
+            "x": 765,
+            "y": 441,
+            "w": 390,
+            "h": 38
+          },
+          "center": {
+            "x": 960,
+            "y": 460
+          },
+          "hint": "voce@exemplo.com"
+        },
+        {
+          "id": "login-senha",
+          "type": "input",
+          "label": "Senha",
+          "iconDescription": null,
+          "aliases": [
+            "password"
+          ],
+          "bbox": {
+            "x": 765,
+            "y": 527,
+            "w": 390,
+            "h": 38
+          },
+          "center": {
+            "x": 960,
+            "y": 546
+          },
+          "hint": "Sua senha"
+        },
+        {
+          "id": "login-lembrar",
+          "type": "checkbox",
+          "label": "Lembrar-me",
+          "iconDescription": null,
+          "aliases": [
+            "lembrar de mim",
+            "manter conectado"
+          ],
+          "bbox": {
+            "x": 765,
+            "y": 585,
+            "w": 16,
+            "h": 16
+          },
+          "center": {
+            "x": 773,
+            "y": 593
+          },
+          "hint": "on"
+        },
+        {
+          "id": "login-esqueci",
+          "type": "link",
+          "label": "Esqueci minha senha",
+          "iconDescription": null,
+          "aliases": [
+            "recuperar senha"
+          ],
+          "bbox": {
+            "x": 1016,
+            "y": 583,
+            "w": 139,
+            "h": 21
+          },
+          "center": {
+            "x": 1086,
+            "y": 594
+          }
+        },
+        {
+          "id": "login-entrar",
+          "type": "button",
+          "label": "Entrar",
+          "iconDescription": null,
+          "aliases": [
+            "entrar",
+            "acessar",
+            "login"
+          ],
+          "bbox": {
+            "x": 765,
+            "y": 623,
+            "w": 390,
+            "h": 38
+          },
+          "center": {
+            "x": 960,
+            "y": 642
+          }
+        },
+        {
+          "id": "login-criar-conta",
+          "type": "button",
+          "label": "Criar conta",
+          "iconDescription": null,
+          "aliases": [
+            "cadastrar",
+            "criar conta"
+          ],
+          "bbox": {
+            "x": 765,
+            "y": 669,
+            "w": 390,
+            "h": 38
+          },
+          "center": {
+            "x": 960,
+            "y": 688
+          }
+        },
+        {
+          "id": "login-termos",
+          "type": "link",
+          "label": "Termos de uso",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1002,
+            "y": 732,
+            "w": 96,
+            "h": 19
+          },
+          "center": {
+            "x": 1050,
+            "y": 742
+          }
+        }
+      ],
+      "tasks": [
+        {
+          "id": "bootstrap-login-a1",
+          "sceneId": "bootstrap-login",
+          "kind": "action",
+          "instruction": "Digite \"aluna@exemplo.com\" no campo de e-mail.",
+          "expect": {
+            "action": "type",
+            "targetId": "login-email",
+            "text": "aluna@exemplo.com"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "bootstrap-login-a2",
+          "sceneId": "bootstrap-login",
+          "kind": "action",
+          "instruction": "Clique no botão \"Entrar\".",
+          "expect": {
+            "action": "click",
+            "targetId": "login-entrar"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "bootstrap-login-a3",
+          "sceneId": "bootstrap-login",
+          "kind": "action",
+          "instruction": "Marque a caixa \"Lembrar-me\".",
+          "expect": {
+            "action": "click",
+            "targetId": "login-lembrar"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "bootstrap-login-a4",
+          "sceneId": "bootstrap-login",
+          "kind": "action",
+          "instruction": "Clique no link \"Esqueci minha senha\".",
+          "expect": {
+            "action": "click",
+            "targetId": "login-esqueci"
+          },
+          "difficulty": "easy"
+        }
+      ],
+      "tags": [
+        "auth",
+        "formulário"
+      ]
+    },
+    {
+      "id": "react95-painel",
+      "family": "react95",
+      "title": "Painel de pedidos em Windows 95 (React95)",
+      "theme": "light",
+      "viewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "image": {
+        "file": "images/react95-painel.png",
+        "sha256": "d3048fa577406573b80d91b0da0a2f8c1d19d0bed60f73208f72a680cadd989c",
+        "bytes": 81648
+      },
+      "code": {
+        "file": "scenes/react95/react95-painel.html"
+      },
+      "elements": [
+        {
+          "id": "r95-1",
+          "type": "button",
+          "label": "_",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1126,
+            "y": 21,
+            "w": 31,
+            "h": 27
+          },
+          "center": {
+            "x": 1142,
+            "y": 35
+          }
+        },
+        {
+          "id": "r95-2",
+          "type": "button",
+          "label": "□",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1165,
+            "y": 21,
+            "w": 31,
+            "h": 27
+          },
+          "center": {
+            "x": 1181,
+            "y": 35
+          }
+        },
+        {
+          "id": "r95-3",
+          "type": "button",
+          "label": "✕",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1204,
+            "y": 21,
+            "w": 31,
+            "h": 27
+          },
+          "center": {
+            "x": 1220,
+            "y": 35
+          }
+        },
+        {
+          "id": "r95-4",
+          "type": "button",
+          "label": "Arquivo",
+          "iconDescription": null,
+          "bbox": {
+            "x": 107,
+            "y": 56,
+            "w": 79,
+            "h": 28
+          },
+          "center": {
+            "x": 147,
+            "y": 70
+          }
+        },
+        {
+          "id": "r95-5",
+          "type": "button",
+          "label": "Editar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 188,
+            "y": 56,
+            "w": 62,
+            "h": 28
+          },
+          "center": {
+            "x": 219,
+            "y": 70
+          }
+        },
+        {
+          "id": "r95-6",
+          "type": "button",
+          "label": "Ajuda",
+          "iconDescription": null,
+          "bbox": {
+            "x": 496,
+            "y": 56,
+            "w": 66,
+            "h": 28
+          },
+          "center": {
+            "x": 529,
+            "y": 70
+          }
+        },
+        {
+          "id": "r95-7",
+          "type": "link",
+          "label": "Central de ajuda",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1150,
+            "y": 64,
+            "w": 85,
+            "h": 13
+          },
+          "center": {
+            "x": 1193,
+            "y": 71
+          }
+        },
+        {
+          "id": "r95-8",
+          "type": "button",
+          "label": "Novo",
+          "iconDescription": null,
+          "bbox": {
+            "x": 111,
+            "y": 102,
+            "w": 72,
+            "h": 28
+          },
+          "center": {
+            "x": 147,
+            "y": 116
+          }
+        },
+        {
+          "id": "r95-9",
+          "type": "button",
+          "label": "Salvar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 187,
+            "y": 102,
+            "w": 78,
+            "h": 28
+          },
+          "center": {
+            "x": 226,
+            "y": 116
+          }
+        },
+        {
+          "id": "r95-10",
+          "type": "button",
+          "label": "Pedidos",
+          "iconDescription": null,
+          "bbox": {
+            "x": 107,
+            "y": 144,
+            "w": 107,
+            "h": 40
+          },
+          "center": {
+            "x": 161,
+            "y": 164
+          }
+        },
+        {
+          "id": "r95-11",
+          "type": "button",
+          "label": "Clientes",
+          "iconDescription": null,
+          "bbox": {
+            "x": 206,
+            "y": 148,
+            "w": 89,
+            "h": 36
+          },
+          "center": {
+            "x": 251,
+            "y": 166
+          }
+        },
+        {
+          "id": "r95-12",
+          "type": "button",
+          "label": "Todos os clientes",
+          "iconDescription": null,
+          "bbox": {
+            "x": 784,
+            "y": 211,
+            "w": 435,
+            "h": 28
+          },
+          "center": {
+            "x": 1002,
+            "y": 225
+          },
+          "state": {
+            "expanded": false
+          }
+        },
+        {
+          "id": "r95-13",
+          "type": "input",
+          "label": "21/10/2026",
+          "iconDescription": null,
+          "bbox": {
+            "x": 784,
+            "y": 254,
+            "w": 435,
+            "h": 27
+          },
+          "center": {
+            "x": 1002,
+            "y": 268
+          },
+          "hint": "21/10/2026"
+        },
+        {
+          "id": "r95-14",
+          "type": "button",
+          "label": "Filtrar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1102,
+            "y": 305,
+            "w": 121,
+            "h": 28
+          },
+          "center": {
+            "x": 1163,
+            "y": 319
+          }
+        },
+        {
+          "id": "r95-15",
+          "type": "button",
+          "label": "Limpar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1102,
+            "y": 339,
+            "w": 121,
+            "h": 28
+          },
+          "center": {
+            "x": 1163,
+            "y": 353
+          }
+        },
+        {
+          "id": "r95-16",
+          "type": "button",
+          "label": "Salvar como…",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1102,
+            "y": 373,
+            "w": 121,
+            "h": 28
+          },
+          "center": {
+            "x": 1163,
+            "y": 387
+          }
+        },
+        {
+          "id": "r95-17",
+          "type": "link",
+          "label": "VC-10248",
+          "iconDescription": null,
+          "bbox": {
+            "x": 121,
+            "y": 461,
+            "w": 68,
+            "h": 18
+          },
+          "center": {
+            "x": 155,
+            "y": 470
+          }
+        },
+        {
+          "id": "r95-18",
+          "type": "link",
+          "label": "VC-10247",
+          "iconDescription": null,
+          "bbox": {
+            "x": 121,
+            "y": 495,
+            "w": 68,
+            "h": 18
+          },
+          "center": {
+            "x": 155,
+            "y": 504
+          }
+        },
+        {
+          "id": "r95-19",
+          "type": "link",
+          "label": "VC-10246",
+          "iconDescription": null,
+          "bbox": {
+            "x": 121,
+            "y": 529,
+            "w": 68,
+            "h": 18
+          },
+          "center": {
+            "x": 155,
+            "y": 538
+          }
+        },
+        {
+          "id": "r95-20",
+          "type": "link",
+          "label": "VC-10245",
+          "iconDescription": null,
+          "bbox": {
+            "x": 121,
+            "y": 563,
+            "w": 68,
+            "h": 18
+          },
+          "center": {
+            "x": 155,
+            "y": 572
+          }
+        },
+        {
+          "id": "r95-21",
+          "type": "link",
+          "label": "VC-10244",
+          "iconDescription": null,
+          "bbox": {
+            "x": 121,
+            "y": 597,
+            "w": 68,
+            "h": 18
+          },
+          "center": {
+            "x": 155,
+            "y": 606
+          }
+        },
+        {
+          "id": "r95-22",
+          "type": "link",
+          "label": "VC-10243",
+          "iconDescription": null,
+          "bbox": {
+            "x": 121,
+            "y": 631,
+            "w": 68,
+            "h": 18
+          },
+          "center": {
+            "x": 155,
+            "y": 640
+          }
+        },
+        {
+          "id": "r95-23",
+          "type": "link",
+          "label": "VC-10242",
+          "iconDescription": null,
+          "bbox": {
+            "x": 121,
+            "y": 665,
+            "w": 68,
+            "h": 18
+          },
+          "center": {
+            "x": 155,
+            "y": 674
+          }
+        },
+        {
+          "id": "r95-24",
+          "type": "link",
+          "label": "VC-10241",
+          "iconDescription": null,
+          "bbox": {
+            "x": 121,
+            "y": 699,
+            "w": 65,
+            "h": 18
+          },
+          "center": {
+            "x": 154,
+            "y": 708
+          }
+        },
+        {
+          "id": "r95-25",
+          "type": "button",
+          "label": "✕",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1858,
+            "y": 21,
+            "w": 31,
+            "h": 27
+          },
+          "center": {
+            "x": 1874,
+            "y": 35
+          }
+        },
+        {
+          "id": "r95-26",
+          "type": "menuitem",
+          "label": "Abrir ordem de serviço",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1286,
+            "y": 297,
+            "w": 590,
+            "h": 44
+          },
+          "center": {
+            "x": 1581,
+            "y": 319
+          }
+        },
+        {
+          "id": "r95-27",
+          "type": "menuitem",
+          "label": "Exportar planilha",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1286,
+            "y": 341,
+            "w": 590,
+            "h": 44
+          },
+          "center": {
+            "x": 1581,
+            "y": 363
+          }
+        },
+        {
+          "id": "r95-28",
+          "type": "menuitem",
+          "label": "Gerar boleto",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1286,
+            "y": 385,
+            "w": 590,
+            "h": 44
+          },
+          "center": {
+            "x": 1581,
+            "y": 407
+          }
+        },
+        {
+          "id": "r95-29",
+          "type": "button",
+          "label": "✕",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1858,
+            "y": 537,
+            "w": 31,
+            "h": 27
+          },
+          "center": {
+            "x": 1874,
+            "y": 551
+          }
+        },
+        {
+          "id": "r95-30",
+          "type": "button",
+          "label": "Loggi — Expresso (1 dia útil)",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1396,
+            "y": 629,
+            "w": 482,
+            "h": 28
+          },
+          "center": {
+            "x": 1637,
+            "y": 643
+          },
+          "state": {
+            "expanded": false
+          }
+        },
+        {
+          "id": "r95-31",
+          "type": "input",
+          "label": "4",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1396,
+            "y": 672,
+            "w": 62,
+            "h": 27
+          },
+          "center": {
+            "x": 1427,
+            "y": 686
+          },
+          "hint": "4"
+        },
+        {
+          "id": "r95-32",
+          "type": "input",
+          "label": "3526 1021 0001 4800 0980",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1396,
+            "y": 714,
+            "w": 482,
+            "h": 27
+          },
+          "center": {
+            "x": 1637,
+            "y": 728
+          },
+          "hint": "3526 1021 0001 4800 0980"
+        },
+        {
+          "id": "r95-33",
+          "type": "button",
+          "label": "Cancelar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1634,
+            "y": 949,
+            "w": 104,
+            "h": 28
+          },
+          "center": {
+            "x": 1686,
+            "y": 963
+          }
+        },
+        {
+          "id": "r95-34",
+          "type": "button",
+          "label": "Confirmar envio",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1746,
+            "y": 949,
+            "w": 136,
+            "h": 28
+          },
+          "center": {
+            "x": 1814,
+            "y": 963
+          }
+        },
+        {
+          "id": "r95-35",
+          "type": "menuitem",
+          "label": "Novo pedidoCtrl+N",
+          "iconDescription": null,
+          "bbox": {
+            "x": 266,
+            "y": 64,
+            "w": 250,
+            "h": 44
+          },
+          "center": {
+            "x": 391,
+            "y": 86
+          }
+        },
+        {
+          "id": "r95-36",
+          "type": "menuitem",
+          "label": "Abrir pedido existente…",
+          "iconDescription": null,
+          "bbox": {
+            "x": 266,
+            "y": 108,
+            "w": 250,
+            "h": 44
+          },
+          "center": {
+            "x": 391,
+            "y": 130
+          }
+        },
+        {
+          "id": "r95-37",
+          "type": "menuitem",
+          "label": "Duplicar pedido",
+          "iconDescription": null,
+          "bbox": {
+            "x": 266,
+            "y": 152,
+            "w": 250,
+            "h": 44
+          },
+          "center": {
+            "x": 391,
+            "y": 174
+          }
+        },
+        {
+          "id": "r95-38",
+          "type": "menuitem",
+          "label": "Exportar planilha",
+          "iconDescription": null,
+          "bbox": {
+            "x": 266,
+            "y": 206,
+            "w": 250,
+            "h": 44
+          },
+          "center": {
+            "x": 391,
+            "y": 228
+          }
+        },
+        {
+          "id": "r95-39",
+          "type": "menuitem",
+          "label": "Imprimir romaneio",
+          "iconDescription": null,
+          "bbox": {
+            "x": 266,
+            "y": 250,
+            "w": 250,
+            "h": 44
+          },
+          "center": {
+            "x": 391,
+            "y": 272
+          }
+        },
+        {
+          "id": "r95-40",
+          "type": "menuitem",
+          "label": "Fechar janela",
+          "iconDescription": null,
+          "bbox": {
+            "x": 266,
+            "y": 304,
+            "w": 250,
+            "h": 44
+          },
+          "center": {
+            "x": 391,
+            "y": 326
+          }
+        },
+        {
+          "id": "r95-41",
+          "type": "button",
+          "label": "▣Iniciar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 6,
+            "y": 1041,
+            "w": 89,
+            "h": 34
+          },
+          "center": {
+            "x": 51,
+            "y": 1058
+          }
+        },
+        {
+          "id": "r95-42",
+          "type": "button",
+          "label": "VCVendaCerta 95",
+          "iconDescription": null,
+          "bbox": {
+            "x": 107,
+            "y": 1041,
+            "w": 214,
+            "h": 34
+          },
+          "center": {
+            "x": 214,
+            "y": 1058
+          }
+        },
+        {
+          "id": "r95-43",
+          "type": "button",
+          "label": "ΣResumo",
+          "iconDescription": null,
+          "bbox": {
+            "x": 325,
+            "y": 1041,
+            "w": 150,
+            "h": 34
+          },
+          "center": {
+            "x": 400,
+            "y": 1058
+          }
+        },
+        {
+          "id": "r95-44",
+          "type": "button",
+          "label": "Explorer",
+          "iconDescription": null,
+          "bbox": {
+            "x": 479,
+            "y": 1041,
+            "w": 132,
+            "h": 34
+          },
+          "center": {
+            "x": 545,
+            "y": 1058
+          }
+        }
+      ],
+      "tasks": [
+        {
+          "id": "react95-painel-a1",
+          "sceneId": "react95-painel",
+          "kind": "action",
+          "instruction": "Clique no botão \"Novo\".",
+          "expect": {
+            "action": "click",
+            "targetId": "r95-8"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "react95-painel-a2",
+          "sceneId": "react95-painel",
+          "kind": "action",
+          "instruction": "Clique na aba \"Clientes\".",
+          "expect": {
+            "action": "click",
+            "targetId": "r95-11"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "react95-painel-a3",
+          "sceneId": "react95-painel",
+          "kind": "action",
+          "instruction": "Clique em \"Confirmar envio\" no diálogo.",
+          "expect": {
+            "action": "click",
+            "targetId": "r95-34"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "react95-painel-a4",
+          "sceneId": "react95-painel",
+          "kind": "action",
+          "instruction": "Clique em \"Imprimir romaneio\" no menu aberto.",
+          "expect": {
+            "action": "click",
+            "targetId": "r95-39"
+          },
+          "difficulty": "medium"
+        }
+      ],
+      "tags": [
+        "desktop",
+        "react95",
+        "tabela"
+      ]
+    },
+    {
+      "id": "fluent-painel",
+      "family": "fluent",
+      "title": "Console de operações em Fluent UI",
+      "theme": "light",
+      "viewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "image": {
+        "file": "images/fluent-painel.png",
+        "sha256": "9b0b30ed58c4ad179bfdeb7662e6b68f00ea88e729e3f1ec2309a244f7d00b68",
+        "bytes": 175466
+      },
+      "code": {
+        "file": "scenes/fluent/fluent-painel.html"
+      },
+      "elements": [
+        {
+          "id": "fluent-1",
+          "type": "input",
+          "label": "Buscar pedido, cliente ou SKU",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1287,
+            "y": 12,
+            "w": 316,
+            "h": 32
+          },
+          "center": {
+            "x": 1445,
+            "y": 28
+          }
+        },
+        {
+          "id": "fluent-2",
+          "type": "button",
+          "label": "Ajuda",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1613,
+            "y": 12,
+            "w": 32,
+            "h": 32
+          },
+          "center": {
+            "x": 1629,
+            "y": 28
+          }
+        },
+        {
+          "id": "fluent-3",
+          "type": "button",
+          "label": "Notificações",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1655,
+            "y": 12,
+            "w": 32,
+            "h": 32
+          },
+          "center": {
+            "x": 1671,
+            "y": 28
+          }
+        },
+        {
+          "id": "fluent-4",
+          "type": "button",
+          "label": "Configurações",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1697,
+            "y": 12,
+            "w": 32,
+            "h": 32
+          },
+          "center": {
+            "x": 1713,
+            "y": 28
+          }
+        },
+        {
+          "id": "fluent-5",
+          "type": "tab",
+          "label": "Pedidos",
+          "iconDescription": null,
+          "bbox": {
+            "x": 8,
+            "y": 98,
+            "w": 215,
+            "h": 20
+          },
+          "center": {
+            "x": 116,
+            "y": 108
+          }
+        },
+        {
+          "id": "fluent-6",
+          "type": "tab",
+          "label": "Clientes",
+          "iconDescription": null,
+          "bbox": {
+            "x": 8,
+            "y": 118,
+            "w": 215,
+            "h": 20
+          },
+          "center": {
+            "x": 116,
+            "y": 128
+          }
+        },
+        {
+          "id": "fluent-7",
+          "type": "tab",
+          "label": "Catálogo",
+          "iconDescription": null,
+          "bbox": {
+            "x": 8,
+            "y": 138,
+            "w": 215,
+            "h": 20
+          },
+          "center": {
+            "x": 116,
+            "y": 148
+          }
+        },
+        {
+          "id": "fluent-8",
+          "type": "tab",
+          "label": "Clientes",
+          "iconDescription": null,
+          "bbox": {
+            "x": 8,
+            "y": 158,
+            "w": 215,
+            "h": 20
+          },
+          "center": {
+            "x": 116,
+            "y": 168
+          }
+        },
+        {
+          "id": "fluent-9",
+          "type": "tab",
+          "label": "Relatórios",
+          "iconDescription": null,
+          "bbox": {
+            "x": 8,
+            "y": 208,
+            "w": 215,
+            "h": 20
+          },
+          "center": {
+            "x": 116,
+            "y": 218
+          }
+        },
+        {
+          "id": "fluent-10",
+          "type": "tab",
+          "label": "Faturamento",
+          "iconDescription": null,
+          "bbox": {
+            "x": 8,
+            "y": 228,
+            "w": 215,
+            "h": 20
+          },
+          "center": {
+            "x": 116,
+            "y": 238
+          }
+        },
+        {
+          "id": "fluent-11",
+          "type": "button",
+          "label": "Ver detalhes",
+          "iconDescription": null,
+          "bbox": {
+            "x": 21,
+            "y": 358,
+            "w": 88,
+            "h": 24
+          },
+          "center": {
+            "x": 65,
+            "y": 370
+          }
+        },
+        {
+          "id": "fluent-12",
+          "type": "button",
+          "label": "Novo pedido",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1636,
+            "y": 76,
+            "w": 111,
+            "h": 32
+          },
+          "center": {
+            "x": 1692,
+            "y": 92
+          }
+        },
+        {
+          "id": "fluent-13",
+          "type": "button",
+          "label": "Exportar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1755,
+            "y": 76,
+            "w": 141,
+            "h": 32
+          },
+          "center": {
+            "x": 1826,
+            "y": 92
+          }
+        },
+        {
+          "id": "fluent-14",
+          "type": "input",
+          "label": "Ex.: VC-10248",
+          "iconDescription": null,
+          "bbox": {
+            "x": 275,
+            "y": 191,
+            "w": 395,
+            "h": 34
+          },
+          "center": {
+            "x": 473,
+            "y": 208
+          }
+        },
+        {
+          "id": "fluent-15",
+          "type": "select",
+          "label": "Cliente",
+          "iconDescription": null,
+          "bbox": {
+            "x": 684,
+            "y": 191,
+            "w": 395,
+            "h": 34
+          },
+          "center": {
+            "x": 882,
+            "y": 208
+          }
+        },
+        {
+          "id": "fluent-16",
+          "type": "select",
+          "label": "Região",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1094,
+            "y": 191,
+            "w": 395,
+            "h": 34
+          },
+          "center": {
+            "x": 1292,
+            "y": 208
+          }
+        },
+        {
+          "id": "fluent-17",
+          "type": "input",
+          "label": "Data inicial",
+          "iconDescription": null,
+          "bbox": {
+            "x": 275,
+            "y": 237,
+            "w": 395,
+            "h": 32
+          },
+          "center": {
+            "x": 473,
+            "y": 253
+          }
+        },
+        {
+          "id": "fluent-18",
+          "type": "input",
+          "label": "Data final",
+          "iconDescription": null,
+          "bbox": {
+            "x": 684,
+            "y": 237,
+            "w": 395,
+            "h": 32
+          },
+          "center": {
+            "x": 882,
+            "y": 253
+          }
+        },
+        {
+          "id": "fluent-19",
+          "type": "input",
+          "label": "Valor mínimo",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1094,
+            "y": 237,
+            "w": 395,
+            "h": 32
+          },
+          "center": {
+            "x": 1292,
+            "y": 253
+          }
+        },
+        {
+          "id": "fluent-20",
+          "type": "checkbox",
+          "label": "Loja online",
+          "iconDescription": null,
+          "bbox": {
+            "x": 333,
+            "y": 281,
+            "w": 16,
+            "h": 16
+          },
+          "center": {
+            "x": 341,
+            "y": 289
+          },
+          "state": {
+            "checked": true
+          }
+        },
+        {
+          "id": "fluent-21",
+          "type": "checkbox",
+          "label": "Balcão",
+          "iconDescription": null,
+          "bbox": {
+            "x": 444,
+            "y": 281,
+            "w": 16,
+            "h": 16
+          },
+          "center": {
+            "x": 452,
+            "y": 289
+          },
+          "state": {
+            "checked": true
+          }
+        },
+        {
+          "id": "fluent-22",
+          "type": "checkbox",
+          "label": "Telefone",
+          "iconDescription": null,
+          "bbox": {
+            "x": 530,
+            "y": 281,
+            "w": 16,
+            "h": 16
+          },
+          "center": {
+            "x": 538,
+            "y": 289
+          }
+        },
+        {
+          "id": "fluent-23",
+          "type": "checkbox",
+          "label": "Marketplace",
+          "iconDescription": null,
+          "bbox": {
+            "x": 628,
+            "y": 281,
+            "w": 16,
+            "h": 16
+          },
+          "center": {
+            "x": 636,
+            "y": 289
+          }
+        },
+        {
+          "id": "fluent-24",
+          "type": "radio",
+          "label": "Mais recentes",
+          "iconDescription": null,
+          "bbox": {
+            "x": 349,
+            "y": 311,
+            "w": 16,
+            "h": 16
+          },
+          "center": {
+            "x": 357,
+            "y": 319
+          },
+          "state": {
+            "checked": true
+          }
+        },
+        {
+          "id": "fluent-25",
+          "type": "radio",
+          "label": "Maior valor",
+          "iconDescription": null,
+          "bbox": {
+            "x": 479,
+            "y": 311,
+            "w": 16,
+            "h": 16
+          },
+          "center": {
+            "x": 487,
+            "y": 319
+          }
+        },
+        {
+          "id": "fluent-26",
+          "type": "radio",
+          "label": "Prazo",
+          "iconDescription": null,
+          "bbox": {
+            "x": 591,
+            "y": 311,
+            "w": 16,
+            "h": 16
+          },
+          "center": {
+            "x": 599,
+            "y": 319
+          }
+        },
+        {
+          "id": "fluent-27",
+          "type": "switch",
+          "label": "Somente SLA vencido",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1449,
+            "y": 309,
+            "w": 40,
+            "h": 20
+          },
+          "center": {
+            "x": 1469,
+            "y": 319
+          },
+          "state": {
+            "checked": true
+          }
+        },
+        {
+          "id": "fluent-28",
+          "type": "button",
+          "label": "Aplicar filtros",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1265,
+            "y": 341,
+            "w": 96,
+            "h": 32
+          },
+          "center": {
+            "x": 1313,
+            "y": 357
+          }
+        },
+        {
+          "id": "fluent-29",
+          "type": "button",
+          "label": "Limpar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1369,
+            "y": 341,
+            "w": 120,
+            "h": 32
+          },
+          "center": {
+            "x": 1429,
+            "y": 357
+          }
+        },
+        {
+          "id": "fluent-30",
+          "type": "button",
+          "label": "Colunas",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1353,
+            "y": 421,
+            "w": 80,
+            "h": 24
+          },
+          "center": {
+            "x": 1393,
+            "y": 433
+          }
+        },
+        {
+          "id": "fluent-31",
+          "type": "button",
+          "label": "Mais ações",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1439,
+            "y": 421,
+            "w": 24,
+            "h": 24
+          },
+          "center": {
+            "x": 1451,
+            "y": 433
+          }
+        },
+        {
+          "id": "fluent-32",
+          "type": "link",
+          "label": "VC-10248",
+          "iconDescription": null,
+          "bbox": {
+            "x": 271,
+            "y": 503,
+            "w": 65,
+            "h": 16
+          },
+          "center": {
+            "x": 304,
+            "y": 511
+          }
+        },
+        {
+          "id": "fluent-33",
+          "type": "link",
+          "label": "VC-10247",
+          "iconDescription": null,
+          "bbox": {
+            "x": 271,
+            "y": 543,
+            "w": 64,
+            "h": 16
+          },
+          "center": {
+            "x": 303,
+            "y": 551
+          }
+        },
+        {
+          "id": "fluent-34",
+          "type": "link",
+          "label": "VC-10246",
+          "iconDescription": null,
+          "bbox": {
+            "x": 271,
+            "y": 584,
+            "w": 65,
+            "h": 16
+          },
+          "center": {
+            "x": 304,
+            "y": 592
+          }
+        },
+        {
+          "id": "fluent-35",
+          "type": "link",
+          "label": "VC-10245",
+          "iconDescription": null,
+          "bbox": {
+            "x": 271,
+            "y": 624,
+            "w": 65,
+            "h": 16
+          },
+          "center": {
+            "x": 304,
+            "y": 632
+          }
+        },
+        {
+          "id": "fluent-36",
+          "type": "link",
+          "label": "VC-10244",
+          "iconDescription": null,
+          "bbox": {
+            "x": 271,
+            "y": 665,
+            "w": 66,
+            "h": 16
+          },
+          "center": {
+            "x": 304,
+            "y": 673
+          }
+        },
+        {
+          "id": "fluent-37",
+          "type": "link",
+          "label": "VC-10243",
+          "iconDescription": null,
+          "bbox": {
+            "x": 271,
+            "y": 705,
+            "w": 65,
+            "h": 16
+          },
+          "center": {
+            "x": 304,
+            "y": 713
+          }
+        },
+        {
+          "id": "fluent-38",
+          "type": "link",
+          "label": "VC-10242",
+          "iconDescription": null,
+          "bbox": {
+            "x": 271,
+            "y": 746,
+            "w": 65,
+            "h": 16
+          },
+          "center": {
+            "x": 304,
+            "y": 754
+          }
+        },
+        {
+          "id": "fluent-39",
+          "type": "slider",
+          "label": "10100",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1543,
+            "y": 406,
+            "w": 120,
+            "h": 32
+          },
+          "center": {
+            "x": 1603,
+            "y": 422
+          }
+        },
+        {
+          "id": "fluent-40",
+          "type": "link",
+          "label": "Gerar boleto Ctrl B",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1543,
+            "y": 776,
+            "w": 211,
+            "h": 17
+          },
+          "center": {
+            "x": 1649,
+            "y": 785
+          }
+        },
+        {
+          "id": "fluent-41",
+          "type": "select",
+          "label": "Transportadora",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1354,
+            "y": 890,
+            "w": 496,
+            "h": 34
+          },
+          "center": {
+            "x": 1602,
+            "y": 907
+          }
+        },
+        {
+          "id": "fluent-42",
+          "type": "checkbox",
+          "label": "Contratar seguro de carga (R$ 84,20)",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1354,
+            "y": 936,
+            "w": 16,
+            "h": 16
+          },
+          "center": {
+            "x": 1362,
+            "y": 944
+          },
+          "state": {
+            "checked": true
+          }
+        },
+        {
+          "id": "fluent-43",
+          "type": "checkbox",
+          "label": "Enviar romaneio ao cliente por e-mail",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1354,
+            "y": 960,
+            "w": 16,
+            "h": 16
+          },
+          "center": {
+            "x": 1362,
+            "y": 968
+          }
+        },
+        {
+          "id": "fluent-44",
+          "type": "button",
+          "label": "Confirmar envio",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1608,
+            "y": 992,
+            "w": 96,
+            "h": 32
+          },
+          "center": {
+            "x": 1656,
+            "y": 1008
+          }
+        },
+        {
+          "id": "fluent-45",
+          "type": "button",
+          "label": "Cancelar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1712,
+            "y": 992,
+            "w": 138,
+            "h": 32
+          },
+          "center": {
+            "x": 1781,
+            "y": 1008
+          }
+        }
+      ],
+      "tasks": [
+        {
+          "id": "fluent-painel-a1",
+          "sceneId": "fluent-painel",
+          "kind": "action",
+          "instruction": "Clique em \"Novo pedido\".",
+          "expect": {
+            "action": "click",
+            "targetId": "fluent-12"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "fluent-painel-a2",
+          "sceneId": "fluent-painel",
+          "kind": "action",
+          "instruction": "Clique em \"Aplicar filtros\".",
+          "expect": {
+            "action": "click",
+            "targetId": "fluent-28"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "fluent-painel-a3",
+          "sceneId": "fluent-painel",
+          "kind": "action",
+          "instruction": "Clique em \"Confirmar envio\".",
+          "expect": {
+            "action": "click",
+            "targetId": "fluent-44"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "fluent-painel-a4",
+          "sceneId": "fluent-painel",
+          "kind": "action",
+          "instruction": "Marque a caixa \"Balcão\".",
+          "expect": {
+            "action": "click",
+            "targetId": "fluent-21"
+          },
+          "difficulty": "medium"
+        },
+        {
+          "id": "fluent-painel-a5",
+          "sceneId": "fluent-painel",
+          "kind": "action",
+          "instruction": "Escolha o filtro de \"Cliente\".",
+          "expect": {
+            "action": "select",
+            "targetId": "fluent-15",
+            "text": "Atacadão do Sul LTDA"
+          },
+          "difficulty": "medium"
+        }
+      ],
+      "tags": [
+        "dashboard",
+        "fluent",
+        "modal"
+      ]
+    },
+    {
+      "id": "material-painel",
+      "family": "material",
+      "title": "Painel de operações em Material 3",
+      "theme": "light",
+      "viewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "image": {
+        "file": "images/material-painel.png",
+        "sha256": "81ea1f96169bf87ce188320fcc08e30ac99cc47fc7f46378c642d01a8d66ee62",
+        "bytes": 177902
+      },
+      "code": {
+        "file": "scenes/material/material-painel.html"
+      },
+      "elements": [
+        {
+          "id": "md-1",
+          "type": "button",
+          "label": "Menu",
+          "iconDescription": null,
+          "bbox": {
+            "x": 289,
+            "y": 12,
+            "w": 40,
+            "h": 40
+          },
+          "center": {
+            "x": 309,
+            "y": 32
+          }
+        },
+        {
+          "id": "md-2",
+          "type": "input",
+          "label": "Buscar pedido, cliente ou SKU",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1346,
+            "y": 4,
+            "w": 340,
+            "h": 56
+          },
+          "center": {
+            "x": 1516,
+            "y": 32
+          }
+        },
+        {
+          "id": "md-3",
+          "type": "button",
+          "label": "Notificações",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1700,
+            "y": 12,
+            "w": 40,
+            "h": 40
+          },
+          "center": {
+            "x": 1720,
+            "y": 32
+          }
+        },
+        {
+          "id": "md-4",
+          "type": "button",
+          "label": "Ajuda",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1754,
+            "y": 12,
+            "w": 40,
+            "h": 40
+          },
+          "center": {
+            "x": 1774,
+            "y": 32
+          }
+        },
+        {
+          "id": "md-5",
+          "type": "button",
+          "label": "Aplicativos",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1808,
+            "y": 12,
+            "w": 40,
+            "h": 40
+          },
+          "center": {
+            "x": 1828,
+            "y": 32
+          }
+        },
+        {
+          "id": "md-6",
+          "type": "tab",
+          "label": "Estoque",
+          "iconDescription": null,
+          "bbox": {
+            "x": 20,
+            "y": 70,
+            "w": 376,
+            "h": 48
+          },
+          "center": {
+            "x": 208,
+            "y": 94
+          }
+        },
+        {
+          "id": "md-7",
+          "type": "tab",
+          "label": "Clientes",
+          "iconDescription": null,
+          "bbox": {
+            "x": 396,
+            "y": 70,
+            "w": 376,
+            "h": 48
+          },
+          "center": {
+            "x": 584,
+            "y": 94
+          }
+        },
+        {
+          "id": "md-8",
+          "type": "tab",
+          "label": "Faturamento",
+          "iconDescription": null,
+          "bbox": {
+            "x": 772,
+            "y": 70,
+            "w": 376,
+            "h": 48
+          },
+          "center": {
+            "x": 960,
+            "y": 94
+          }
+        },
+        {
+          "id": "md-9",
+          "type": "tab",
+          "label": "Relatórios",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1148,
+            "y": 70,
+            "w": 376,
+            "h": 48
+          },
+          "center": {
+            "x": 1336,
+            "y": 94
+          }
+        },
+        {
+          "id": "md-10",
+          "type": "tab",
+          "label": "Faturamento",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1524,
+            "y": 70,
+            "w": 376,
+            "h": 48
+          },
+          "center": {
+            "x": 1712,
+            "y": 94
+          }
+        },
+        {
+          "id": "md-11",
+          "type": "button",
+          "label": "Filtros salvos",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1455,
+            "y": 149,
+            "w": 120,
+            "h": 40
+          },
+          "center": {
+            "x": 1515,
+            "y": 169
+          }
+        },
+        {
+          "id": "md-12",
+          "type": "button",
+          "label": "Novo pedido",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1585,
+            "y": 149,
+            "w": 151,
+            "h": 40
+          },
+          "center": {
+            "x": 1661,
+            "y": 169
+          }
+        },
+        {
+          "id": "md-13",
+          "type": "button",
+          "label": "Filtros salvos",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1746,
+            "y": 149,
+            "w": 146,
+            "h": 40
+          },
+          "center": {
+            "x": 1819,
+            "y": 169
+          }
+        },
+        {
+          "id": "md-14",
+          "type": "input",
+          "label": "Pedido",
+          "iconDescription": null,
+          "bbox": {
+            "x": 337,
+            "y": 260,
+            "w": 362,
+            "h": 56
+          },
+          "center": {
+            "x": 518,
+            "y": 288
+          }
+        },
+        {
+          "id": "md-15",
+          "type": "select",
+          "label": "Cliente",
+          "iconDescription": null,
+          "bbox": {
+            "x": 715,
+            "y": 260,
+            "w": 362,
+            "h": 56
+          },
+          "center": {
+            "x": 896,
+            "y": 288
+          }
+        },
+        {
+          "id": "md-16",
+          "type": "input",
+          "label": "Região",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1093,
+            "y": 260,
+            "w": 362,
+            "h": 56
+          },
+          "center": {
+            "x": 1274,
+            "y": 288
+          }
+        },
+        {
+          "id": "md-17",
+          "type": "input",
+          "label": "De",
+          "iconDescription": null,
+          "bbox": {
+            "x": 337,
+            "y": 330,
+            "w": 362,
+            "h": 56
+          },
+          "center": {
+            "x": 518,
+            "y": 358
+          }
+        },
+        {
+          "id": "md-18",
+          "type": "input",
+          "label": "Até",
+          "iconDescription": null,
+          "bbox": {
+            "x": 715,
+            "y": 330,
+            "w": 362,
+            "h": 56
+          },
+          "center": {
+            "x": 896,
+            "y": 358
+          }
+        },
+        {
+          "id": "md-19",
+          "type": "input",
+          "label": "Valor mínimo",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1093,
+            "y": 330,
+            "w": 362,
+            "h": 56
+          },
+          "center": {
+            "x": 1274,
+            "y": 358
+          }
+        },
+        {
+          "id": "md-20",
+          "type": "button",
+          "label": "Loja online",
+          "iconDescription": null,
+          "bbox": {
+            "x": 400,
+            "y": 400,
+            "w": 121,
+            "h": 32
+          },
+          "center": {
+            "x": 461,
+            "y": 416
+          }
+        },
+        {
+          "id": "md-21",
+          "type": "button",
+          "label": "Balcão",
+          "iconDescription": null,
+          "bbox": {
+            "x": 529,
+            "y": 400,
+            "w": 94,
+            "h": 32
+          },
+          "center": {
+            "x": 576,
+            "y": 416
+          }
+        },
+        {
+          "id": "md-22",
+          "type": "button",
+          "label": "Telefone",
+          "iconDescription": null,
+          "bbox": {
+            "x": 631,
+            "y": 400,
+            "w": 89,
+            "h": 32
+          },
+          "center": {
+            "x": 676,
+            "y": 416
+          }
+        },
+        {
+          "id": "md-23",
+          "type": "button",
+          "label": "Marketplace",
+          "iconDescription": null,
+          "bbox": {
+            "x": 728,
+            "y": 400,
+            "w": 112,
+            "h": 32
+          },
+          "center": {
+            "x": 784,
+            "y": 416
+          }
+        },
+        {
+          "id": "md-24",
+          "type": "checkbox",
+          "label": "Somente SLA vencido",
+          "iconDescription": null,
+          "bbox": {
+            "x": 337,
+            "y": 446,
+            "w": 18,
+            "h": 18
+          },
+          "center": {
+            "x": 346,
+            "y": 455
+          },
+          "state": {
+            "checked": true
+          }
+        },
+        {
+          "id": "md-25",
+          "type": "checkbox",
+          "label": "Com nota emitida",
+          "iconDescription": null,
+          "bbox": {
+            "x": 509,
+            "y": 446,
+            "w": 18,
+            "h": 18
+          },
+          "center": {
+            "x": 518,
+            "y": 455
+          },
+          "state": {
+            "checked": true
+          }
+        },
+        {
+          "id": "md-26",
+          "type": "checkbox",
+          "label": "Devoluções",
+          "iconDescription": null,
+          "bbox": {
+            "x": 656,
+            "y": 446,
+            "w": 18,
+            "h": 18
+          },
+          "center": {
+            "x": 665,
+            "y": 455
+          }
+        },
+        {
+          "id": "md-27",
+          "type": "button",
+          "label": "Filtrar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1289,
+            "y": 478,
+            "w": 69,
+            "h": 40
+          },
+          "center": {
+            "x": 1324,
+            "y": 498
+          }
+        },
+        {
+          "id": "md-28",
+          "type": "button",
+          "label": "Limpar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1368,
+            "y": 478,
+            "w": 87,
+            "h": 40
+          },
+          "center": {
+            "x": 1412,
+            "y": 498
+          }
+        },
+        {
+          "id": "md-29",
+          "type": "button",
+          "label": "Exportar CSV",
+          "iconDescription": null,
+          "bbox": {
+            "x": 464,
+            "y": 578,
+            "w": 133,
+            "h": 32
+          },
+          "center": {
+            "x": 531,
+            "y": 594
+          }
+        },
+        {
+          "id": "md-30",
+          "type": "button",
+          "label": "Regras de SLA",
+          "iconDescription": null,
+          "bbox": {
+            "x": 607,
+            "y": 578,
+            "w": 142,
+            "h": 32
+          },
+          "center": {
+            "x": 678,
+            "y": 594
+          }
+        },
+        {
+          "id": "md-31",
+          "type": "button",
+          "label": "Mais",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1415,
+            "y": 574,
+            "w": 40,
+            "h": 40
+          },
+          "center": {
+            "x": 1435,
+            "y": 594
+          }
+        },
+        {
+          "id": "md-32",
+          "type": "button",
+          "label": "Atualizar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1831,
+            "y": 226,
+            "w": 40,
+            "h": 40
+          },
+          "center": {
+            "x": 1851,
+            "y": 246
+          }
+        },
+        {
+          "id": "md-33",
+          "type": "switch",
+          "label": "Atualização automáticaa cada 60 segundos",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1819,
+            "y": 638,
+            "w": 52,
+            "h": 32
+          },
+          "center": {
+            "x": 1845,
+            "y": 654
+          }
+        },
+        {
+          "id": "md-34",
+          "type": "select",
+          "label": "Transportadora",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1336,
+            "y": 844,
+            "w": 504,
+            "h": 56
+          },
+          "center": {
+            "x": 1588,
+            "y": 872
+          }
+        },
+        {
+          "id": "md-35",
+          "type": "checkbox",
+          "label": "Contratar seguro de carga (R$ 84,20)",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1336,
+            "y": 914,
+            "w": 18,
+            "h": 18
+          },
+          "center": {
+            "x": 1345,
+            "y": 923
+          },
+          "state": {
+            "checked": true
+          }
+        },
+        {
+          "id": "md-36",
+          "type": "checkbox",
+          "label": "Enviar romaneio ao cliente por e-mail",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1336,
+            "y": 940,
+            "w": 18,
+            "h": 18
+          },
+          "center": {
+            "x": 1345,
+            "y": 949
+          }
+        },
+        {
+          "id": "md-37",
+          "type": "button",
+          "label": "Confirmar envio",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1602,
+            "y": 976,
+            "w": 81,
+            "h": 40
+          },
+          "center": {
+            "x": 1643,
+            "y": 996
+          }
+        },
+        {
+          "id": "md-38",
+          "type": "button",
+          "label": "Cancelar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1691,
+            "y": 976,
+            "w": 149,
+            "h": 40
+          },
+          "center": {
+            "x": 1766,
+            "y": 996
+          }
+        }
+      ],
+      "tasks": [
+        {
+          "id": "material-painel-a1",
+          "sceneId": "material-painel",
+          "kind": "action",
+          "instruction": "Clique em \"Novo pedido\".",
+          "expect": {
+            "action": "click",
+            "targetId": "md-12"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "material-painel-a2",
+          "sceneId": "material-painel",
+          "kind": "action",
+          "instruction": "Clique em \"Filtrar\".",
+          "expect": {
+            "action": "click",
+            "targetId": "md-27"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "material-painel-a3",
+          "sceneId": "material-painel",
+          "kind": "action",
+          "instruction": "Clique em \"Confirmar envio\".",
+          "expect": {
+            "action": "click",
+            "targetId": "md-37"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "material-painel-a4",
+          "sceneId": "material-painel",
+          "kind": "action",
+          "instruction": "Marque a caixa \"Com nota emitida\".",
+          "expect": {
+            "action": "click",
+            "targetId": "md-25"
+          },
+          "difficulty": "medium"
+        },
+        {
+          "id": "material-painel-a5",
+          "sceneId": "material-painel",
+          "kind": "action",
+          "instruction": "Clique em \"Exportar CSV\".",
+          "expect": {
+            "action": "click",
+            "targetId": "md-29"
+          },
+          "difficulty": "medium"
+        }
+      ],
+      "tags": [
+        "dashboard",
+        "material",
+        "modal"
+      ]
+    },
+    {
+      "id": "macos-finder",
+      "family": "macos",
+      "title": "Desktop macOS com uma janela do Finder",
+      "theme": "dark",
+      "viewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "image": {
+        "file": "images/macos-finder.png",
+        "sha256": "ade08454db7f587f38e131db2dbb60cf364a338856c68096a944c90638418030",
+        "bytes": 153120
+      },
+      "code": {
+        "file": "scenes/macos/macos-finder.html"
+      },
+      "elements": [
+        {
+          "id": "mac-apple",
+          "type": "button",
+          "label": null,
+          "iconDescription": "menu Apple",
+          "aliases": [
+            "logo da apple"
+          ],
+          "bbox": {
+            "x": 10,
+            "y": 2,
+            "w": 32,
+            "h": 24
+          },
+          "center": {
+            "x": 26,
+            "y": 14
+          }
+        },
+        {
+          "id": "mac-menu-finder",
+          "type": "menuitem",
+          "label": "Finder",
+          "iconDescription": null,
+          "bbox": {
+            "x": 44,
+            "y": 2,
+            "w": 57,
+            "h": 24
+          },
+          "center": {
+            "x": 73,
+            "y": 14
+          }
+        },
+        {
+          "id": "mac-menu-arquivo",
+          "type": "menuitem",
+          "label": "Arquivo",
+          "iconDescription": null,
+          "bbox": {
+            "x": 103,
+            "y": 2,
+            "w": 65,
+            "h": 24
+          },
+          "center": {
+            "x": 136,
+            "y": 14
+          }
+        },
+        {
+          "id": "mac-menu-editar",
+          "type": "menuitem",
+          "label": "Editar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 170,
+            "y": 2,
+            "w": 54,
+            "h": 24
+          },
+          "center": {
+            "x": 197,
+            "y": 14
+          }
+        },
+        {
+          "id": "mac-menu-visualizar",
+          "type": "menuitem",
+          "label": "Visualizar",
+          "iconDescription": null,
+          "bbox": {
+            "x": 226,
+            "y": 2,
+            "w": 76,
+            "h": 24
+          },
+          "center": {
+            "x": 264,
+            "y": 14
+          }
+        },
+        {
+          "id": "mac-menu-ir",
+          "type": "menuitem",
+          "label": "Ir",
+          "iconDescription": null,
+          "bbox": {
+            "x": 304,
+            "y": 2,
+            "w": 28,
+            "h": 24
+          },
+          "center": {
+            "x": 318,
+            "y": 14
+          }
+        },
+        {
+          "id": "mac-menu-janela",
+          "type": "menuitem",
+          "label": "Janela",
+          "iconDescription": null,
+          "bbox": {
+            "x": 334,
+            "y": 2,
+            "w": 55,
+            "h": 24
+          },
+          "center": {
+            "x": 362,
+            "y": 14
+          }
+        },
+        {
+          "id": "mac-menu-ajuda",
+          "type": "menuitem",
+          "label": "Ajuda",
+          "iconDescription": null,
+          "bbox": {
+            "x": 391,
+            "y": 2,
+            "w": 53,
+            "h": 24
+          },
+          "center": {
+            "x": 418,
+            "y": 14
+          }
+        },
+        {
+          "id": "mac-wifi",
+          "type": "button",
+          "label": null,
+          "iconDescription": "Wi-Fi",
+          "aliases": [
+            "rede sem fio"
+          ],
+          "bbox": {
+            "x": 1651,
+            "y": 7,
+            "w": 27,
+            "h": 14
+          },
+          "center": {
+            "x": 1665,
+            "y": 14
+          }
+        },
+        {
+          "id": "mac-bateria",
+          "type": "button",
+          "label": "Bateria 100%",
+          "iconDescription": null,
+          "aliases": [
+            "bateria",
+            "carga da bateria"
+          ],
+          "bbox": {
+            "x": 1690,
+            "y": 5,
+            "w": 70,
+            "h": 18
+          },
+          "center": {
+            "x": 1725,
+            "y": 14
+          }
+        },
+        {
+          "id": "mac-busca-menu",
+          "type": "button",
+          "label": null,
+          "iconDescription": "lupa de busca do sistema",
+          "aliases": [
+            "pesquisa do sistema"
+          ],
+          "bbox": {
+            "x": 1771,
+            "y": 7,
+            "w": 25,
+            "h": 15
+          },
+          "center": {
+            "x": 1784,
+            "y": 15
+          }
+        },
+        {
+          "id": "mac-pasta-projetos",
+          "type": "button",
+          "label": "Projetos",
+          "iconDescription": null,
+          "aliases": [
+            "pasta projetos"
+          ],
+          "bbox": {
+            "x": 36,
+            "y": 68,
+            "w": 74,
+            "h": 83
+          },
+          "center": {
+            "x": 73,
+            "y": 110
+          }
+        },
+        {
+          "id": "mac-lixeira",
+          "type": "button",
+          "label": "Lixeira",
+          "iconDescription": null,
+          "aliases": [
+            "trash",
+            "lixo"
+          ],
+          "bbox": {
+            "x": 36,
+            "y": 178,
+            "w": 74,
+            "h": 83
+          },
+          "center": {
+            "x": 73,
+            "y": 220
+          }
+        },
+        {
+          "id": "win-fechar",
+          "type": "button",
+          "label": null,
+          "iconDescription": "fechar janela",
+          "bbox": {
+            "x": 224,
+            "y": 102,
+            "w": 12,
+            "h": 12
+          },
+          "center": {
+            "x": 230,
+            "y": 108
+          }
+        },
+        {
+          "id": "win-minimizar",
+          "type": "button",
+          "label": null,
+          "iconDescription": "minimizar janela",
+          "bbox": {
+            "x": 244,
+            "y": 102,
+            "w": 12,
+            "h": 12
+          },
+          "center": {
+            "x": 250,
+            "y": 108
+          }
+        },
+        {
+          "id": "win-maximizar",
+          "type": "button",
+          "label": null,
+          "iconDescription": "maximizar janela",
+          "bbox": {
+            "x": 264,
+            "y": 102,
+            "w": 12,
+            "h": 12
+          },
+          "center": {
+            "x": 270,
+            "y": 108
+          }
+        },
+        {
+          "id": "finder-voltar",
+          "type": "button",
+          "label": null,
+          "iconDescription": "voltar",
+          "bbox": {
+            "x": 974,
+            "y": 96,
+            "w": 28,
+            "h": 24
+          },
+          "center": {
+            "x": 988,
+            "y": 108
+          }
+        },
+        {
+          "id": "finder-avancar",
+          "type": "button",
+          "label": null,
+          "iconDescription": "avançar",
+          "bbox": {
+            "x": 1010,
+            "y": 96,
+            "w": 28,
+            "h": 24
+          },
+          "center": {
+            "x": 1024,
+            "y": 108
+          }
+        },
+        {
+          "id": "finder-busca",
+          "type": "input",
+          "label": "Buscar",
+          "iconDescription": null,
+          "aliases": [
+            "pesquisar arquivos"
+          ],
+          "bbox": {
+            "x": 1072,
+            "y": 98,
+            "w": 174,
+            "h": 18
+          },
+          "center": {
+            "x": 1159,
+            "y": 107
+          },
+          "hint": "Buscar"
+        },
+        {
+          "id": "finder-view-icones",
+          "type": "tab",
+          "label": "Ícones",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1266,
+            "y": 96,
+            "w": 57,
+            "h": 22
+          },
+          "center": {
+            "x": 1295,
+            "y": 107
+          }
+        },
+        {
+          "id": "finder-view-lista",
+          "type": "tab",
+          "label": "Lista",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1323,
+            "y": 96,
+            "w": 46,
+            "h": 22
+          },
+          "center": {
+            "x": 1346,
+            "y": 107
+          }
+        },
+        {
+          "id": "finder-view-colunas",
+          "type": "tab",
+          "label": "Colunas",
+          "iconDescription": null,
+          "bbox": {
+            "x": 1369,
+            "y": 96,
+            "w": 65,
+            "h": 22
+          },
+          "center": {
+            "x": 1402,
+            "y": 107
+          }
+        },
+        {
+          "id": "side-airdrop",
+          "type": "link",
+          "label": "AirDrop",
+          "iconDescription": null,
+          "bbox": {
+            "x": 218,
+            "y": 171,
+            "w": 195,
+            "h": 28
+          },
+          "center": {
+            "x": 316,
+            "y": 185
+          }
+        },
+        {
+          "id": "side-recentes",
+          "type": "link",
+          "label": "Recentes",
+          "iconDescription": null,
+          "bbox": {
+            "x": 218,
+            "y": 200,
+            "w": 195,
+            "h": 28
+          },
+          "center": {
+            "x": 316,
+            "y": 214
+          }
+        },
+        {
+          "id": "side-aplicativos",
+          "type": "link",
+          "label": "Aplicativos",
+          "iconDescription": null,
+          "bbox": {
+            "x": 218,
+            "y": 230,
+            "w": 195,
+            "h": 28
+          },
+          "center": {
+            "x": 316,
+            "y": 244
+          }
+        },
+        {
+          "id": "side-downloads",
+          "type": "link",
+          "label": "Downloads",
+          "iconDescription": null,
+          "bbox": {
+            "x": 218,
+            "y": 259,
+            "w": 195,
+            "h": 28
+          },
+          "center": {
+            "x": 316,
+            "y": 273
+          }
+        },
+        {
+          "id": "side-documentos",
+          "type": "link",
+          "label": "Documentos",
+          "iconDescription": null,
+          "bbox": {
+            "x": 218,
+            "y": 289,
+            "w": 195,
+            "h": 28
+          },
+          "center": {
+            "x": 316,
+            "y": 303
+          }
+        },
+        {
+          "id": "side-icloud",
+          "type": "link",
+          "label": "iCloud Drive",
+          "iconDescription": null,
+          "bbox": {
+            "x": 218,
+            "y": 319,
+            "w": 195,
+            "h": 28
+          },
+          "center": {
+            "x": 316,
+            "y": 333
+          }
+        },
+        {
+          "id": "side-projetos",
+          "type": "link",
+          "label": "Projetos",
+          "iconDescription": null,
+          "bbox": {
+            "x": 218,
+            "y": 375,
+            "w": 195,
+            "h": 28
+          },
+          "center": {
+            "x": 316,
+            "y": 389
+          }
+        },
+        {
+          "id": "file-relatorio-q3",
+          "type": "link",
+          "label": "Relatório Q3.pdf",
+          "iconDescription": null,
+          "aliases": [
+            "relatorio q3"
+          ],
+          "bbox": {
+            "x": 438,
+            "y": 177,
+            "w": 996,
+            "h": 36
+          },
+          "center": {
+            "x": 936,
+            "y": 195
+          }
+        },
+        {
+          "id": "file-contratos",
+          "type": "link",
+          "label": "Contratos",
+          "iconDescription": null,
+          "aliases": [
+            "pasta contratos"
+          ],
+          "bbox": {
+            "x": 438,
+            "y": 213,
+            "w": 996,
+            "h": 36
+          },
+          "center": {
+            "x": 936,
+            "y": 231
+          }
+        },
+        {
+          "id": "file-fotos",
+          "type": "link",
+          "label": "Fotos da equipe",
+          "iconDescription": null,
+          "aliases": [
+            "pasta fotos"
+          ],
+          "bbox": {
+            "x": 438,
+            "y": 249,
+            "w": 996,
+            "h": 36
+          },
+          "center": {
+            "x": 936,
+            "y": 267
+          }
+        },
+        {
+          "id": "dock-finder",
+          "type": "button",
+          "label": null,
+          "iconDescription": "Finder",
+          "aliases": [
+            "finder"
+          ],
+          "bbox": {
+            "x": 829,
+            "y": 1015,
+            "w": 46,
+            "h": 46
+          },
+          "center": {
+            "x": 852,
+            "y": 1038
+          }
+        },
+        {
+          "id": "dock-safari",
+          "type": "button",
+          "label": null,
+          "iconDescription": "Safari",
+          "aliases": [
+            "navegador safari"
+          ],
+          "bbox": {
+            "x": 883,
+            "y": 1015,
+            "w": 46,
+            "h": 46
+          },
+          "center": {
+            "x": 906,
+            "y": 1038
+          }
+        },
+        {
+          "id": "dock-mail",
+          "type": "button",
+          "label": null,
+          "iconDescription": "Mail",
+          "aliases": [
+            "correio mail"
+          ],
+          "bbox": {
+            "x": 937,
+            "y": 1015,
+            "w": 46,
+            "h": 46
+          },
+          "center": {
+            "x": 960,
+            "y": 1038
+          }
+        },
+        {
+          "id": "dock-mensagens",
+          "type": "button",
+          "label": null,
+          "iconDescription": "Mensagens",
+          "aliases": [
+            "messages"
+          ],
+          "bbox": {
+            "x": 991,
+            "y": 1015,
+            "w": 46,
+            "h": 46
+          },
+          "center": {
+            "x": 1014,
+            "y": 1038
+          }
+        },
+        {
+          "id": "dock-lixeira",
+          "type": "button",
+          "label": null,
+          "iconDescription": "Lixeira",
+          "aliases": [
+            "trash lixo"
+          ],
+          "bbox": {
+            "x": 1045,
+            "y": 1015,
+            "w": 46,
+            "h": 46
+          },
+          "center": {
+            "x": 1068,
+            "y": 1038
+          }
+        }
+      ],
+      "tasks": [
+        {
+          "id": "macos-finder-a1",
+          "sceneId": "macos-finder",
+          "kind": "action",
+          "instruction": "Clique em \"Documentos\" na barra lateral do Finder.",
+          "expect": {
+            "action": "click",
+            "targetId": "side-documentos"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "macos-finder-a2",
+          "sceneId": "macos-finder",
+          "kind": "action",
+          "instruction": "Abra o arquivo \"Relatório Q3.pdf\".",
+          "expect": {
+            "action": "click",
+            "targetId": "file-relatorio-q3"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "macos-finder-a3",
+          "sceneId": "macos-finder",
+          "kind": "action",
+          "instruction": "Clique em \"Lista\" para mudar a visualização da pasta.",
+          "expect": {
+            "action": "click",
+            "targetId": "finder-view-lista"
+          },
+          "difficulty": "medium"
+        },
+        {
+          "id": "macos-finder-a4",
+          "sceneId": "macos-finder",
+          "kind": "action",
+          "instruction": "Clique em \"Downloads\" na barra lateral.",
+          "expect": {
+            "action": "click",
+            "targetId": "side-downloads"
+          },
+          "difficulty": "easy"
+        }
+      ],
+      "tags": [
+        "desktop",
+        "finder",
+        "menubar"
+      ]
+    },
+    {
+      "id": "macos-salvar-como",
+      "family": "macos",
+      "title": "Diálogo \"Salvar como\" sobre uma janela do macOS",
+      "theme": "dark",
+      "viewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "image": {
+        "file": "images/macos-salvar-como.png",
+        "sha256": "44222f965a8de7b0dca822e57ec3d82cf3e3966afa84a0fe9ad5f1105952de7c",
+        "bytes": 188480
+      },
+      "code": {
+        "file": "scenes/macos/macos-salvar-como.html"
+      },
+      "elements": [
+        {
+          "id": "salvar-fechar",
+          "type": "button",
+          "label": null,
+          "iconDescription": "fechar diálogo",
+          "aliases": [
+            "x fechar"
+          ],
+          "bbox": {
+            "x": 1206,
+            "y": 446,
+            "w": 22,
+            "h": 22
+          },
+          "center": {
+            "x": 1217,
+            "y": 457
+          }
+        },
+        {
+          "id": "salvar-nome",
+          "type": "input",
+          "label": "Salvar como:",
+          "iconDescription": null,
+          "bbox": {
+            "x": 806,
+            "y": 487,
+            "w": 414,
+            "h": 26
+          },
+          "center": {
+            "x": 1013,
+            "y": 500
+          },
+          "hint": "Relatório Q3.pdf"
+        },
+        {
+          "id": "salvar-onde",
+          "type": "select",
+          "label": "Onde",
+          "iconDescription": null,
+          "bbox": {
+            "x": 806,
+            "y": 523,
+            "w": 414,
+            "h": 26
+          },
+          "center": {
+            "x": 1013,
+            "y": 536
+          }
+        },
+        {
+          "id": "salvar-padrao",
+          "type": "checkbox",
+          "label": "Usar como padrão",
+          "iconDescription": null,
+          "bbox": {
+            "x": 810,
+            "y": 564,
+            "w": 13,
+            "h": 13
+          },
+          "center": {
+            "x": 817,
+            "y": 571
+          },
+          "state": {
+            "checked": true
+          },
+          "hint": "on"
+        },
+        {
+          "id": "salvar-cancelar",
+          "type": "button",
+          "label": "Cancelar",
+          "iconDescription": null,
+          "aliases": [
+            "descartar"
+          ],
+          "bbox": {
+            "x": 1026,
+            "y": 598,
+            "w": 92,
+            "h": 30
+          },
+          "center": {
+            "x": 1072,
+            "y": 613
+          }
+        },
+        {
+          "id": "salvar-confirmar",
+          "type": "button",
+          "label": "Salvar",
+          "iconDescription": null,
+          "aliases": [
+            "confirmar salvar"
+          ],
+          "bbox": {
+            "x": 1128,
+            "y": 598,
+            "w": 92,
+            "h": 30
+          },
+          "center": {
+            "x": 1174,
+            "y": 613
+          }
+        }
+      ],
+      "tasks": [
+        {
+          "id": "macos-salvar-como-a1",
+          "sceneId": "macos-salvar-como",
+          "kind": "action",
+          "instruction": "Digite \"Relatório-Q3-final.pdf\" no campo \"Salvar como\".",
+          "expect": {
+            "action": "type",
+            "targetId": "salvar-nome",
+            "text": "Relatório-Q3-final.pdf"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "macos-salvar-como-a2",
+          "sceneId": "macos-salvar-como",
+          "kind": "action",
+          "instruction": "Clique no botão \"Salvar\".",
+          "expect": {
+            "action": "click",
+            "targetId": "salvar-confirmar"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "macos-salvar-como-a3",
+          "sceneId": "macos-salvar-como",
+          "kind": "action",
+          "instruction": "Clique em \"Cancelar\".",
+          "expect": {
+            "action": "click",
+            "targetId": "salvar-cancelar"
+          },
+          "difficulty": "easy"
+        },
+        {
+          "id": "macos-salvar-como-a4",
+          "sceneId": "macos-salvar-como",
+          "kind": "action",
+          "instruction": "Defina o local \"Área de Trabalho\" no seletor \"Onde\".",
+          "expect": {
+            "action": "select",
+            "targetId": "salvar-onde",
+            "text": "Área de Trabalho"
+          },
+          "difficulty": "medium"
+        }
+      ],
+      "tags": [
+        "desktop",
+        "modal",
+        "formulário"
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "family": "bootstrap",
+      "name": "Bootstrap",
+      "version": "5.3.3",
+      "license": "MIT",
+      "files": [
+        "vendor/bootstrap/bootstrap.min.css",
+        "vendor/bootstrap/LICENSE"
+      ]
+    },
+    {
+      "family": "react95",
+      "name": "React95 (React 18.3.1 + react95 4.0.0 + styled-components 6)",
+      "version": "4.0.0",
+      "license": "MIT (+ MIT das dependências; ver vendor/react95/)",
+      "files": [
+        "vendor/react95/app.iife.js",
+        "vendor/react95/ms_sans_serif.woff2",
+        "vendor/react95/ms_sans_serif_bold.woff2",
+        "vendor/react95/LICENSE",
+        "vendor/react95/LICENSES.md"
+      ]
+    },
+    {
+      "family": "fluent",
+      "name": "Fluent UI web components",
+      "version": "3.1.3 + fluent-themes 0.4.0",
+      "license": "MIT",
+      "files": [
+        "vendor/fluent/fluent-web-components.min.js",
+        "vendor/fluent/fluent-themes.iife.js",
+        "vendor/fluent/inter-latin-wght.woff2",
+        "vendor/fluent/LICENSE",
+        "vendor/fluent/LICENSE-inter-OFL.txt"
+      ]
+    },
+    {
+      "family": "material",
+      "name": "Material Web (Material 3)",
+      "version": "2.5.0",
+      "license": "Apache-2.0",
+      "files": [
+        "vendor/material/material-web.all.min.js",
+        "vendor/material/roboto-latin-wght.woff2",
+        "vendor/material/material-symbols-outlined.woff2",
+        "vendor/material/LICENSE",
+        "vendor/material/LICENSE-roboto-OFL.txt",
+        "vendor/material/LICENSE-material-symbols.txt"
+      ]
+    },
+    {
+      "family": "macos",
+      "name": "macOS — CSS próprio do repositório",
+      "version": "1",
+      "license": "MIT",
+      "files": []
+    }
+  ]
+}

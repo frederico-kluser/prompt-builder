@@ -100,5 +100,11 @@
     "title": "Modo JEV (decisões tipadas)",
     "summary": "benchmark e evolução de definições de decisão do Jev (noul/choice/score) em casos rotulados: jev-config@1, métricas de calibração e bandas, custo por decisão, comparação com LLM e cascata",
     "approxTokens": 4300
+  },
+  {
+    "topic": "vision",
+    "title": "Benchmark de visão (UI grounding)",
+    "summary": "o que é clicável numa imagem 1080p: modos map/action, dataset versionado com caixas do DOM, placar determinístico (ponto na caixa + rótulo/tipo), custo por imagem e como adicionar cenários",
+    "approxTokens": 1900
   }
 ]

@@ -1,5 +1,6 @@
 import { Suspense, lazy, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { ArrowRight, Crosshair } from 'lucide-react';
 import { SegmentedToggle, SegmentedToggleOption } from '@/components/motion-ui/segmented-toggle';
 import { NewRun } from './NewRun';
 import { BENCH_KIND_KEY, initialBenchKind, type BenchKind } from '../jev/benchKind';
@@ -76,6 +77,21 @@ export function NewBenchmark() {
           <p className="text-[13px] text-muted-foreground" data-bench-help={kind}>
             {HELP[kind]}
           </p>
+          <Link
+            to="/vision"
+            className="mt-1 flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:bg-muted/60"
+          >
+            <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+              <Crosshair className="size-4" aria-hidden="true" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-medium">Benchmark de visão</span>
+              <span className="block text-[12px] text-muted-foreground">
+                O modelo lê uma tela 1080p e devolve o que é clicável — placar determinístico, com mapa de calor por modelo.
+              </span>
+            </span>
+            <ArrowRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          </Link>
         </div>
       </div>
       {visitados.has('llm') && (

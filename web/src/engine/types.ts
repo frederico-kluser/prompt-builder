@@ -165,6 +165,8 @@ export interface OpenRouterModel {
   name: string;
   contextLength?: number;
   pricing: OpenRouterModelPricing;
+  /** `architecture.input_modalities` (ausente = desconhecido). Ver src/types.ts. */
+  inputModalities?: string[];
   /**
    * Parametros de amostragem que o modelo aceita (campo `supported_parameters`
    * do OpenRouter). Fonte de verdade para enviar `temperature`/`seed` so a quem

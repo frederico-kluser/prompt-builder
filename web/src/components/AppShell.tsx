@@ -13,6 +13,7 @@ import { AnimatePresence, motion, useTransform } from 'motion/react';
 import {
   Check,
   CircleHelp,
+  Crosshair,
   FileText,
   History,
   Monitor,
@@ -280,6 +281,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     () => [
       { id: 'new', label: 'Nova run', group: 'Ir para', icon: cmdIcon(Plus), keywords: ['criar', 'benchmark', 'rodar'] },
       { id: 'runs', label: 'Histórico', group: 'Ir para', icon: cmdIcon(History), keywords: ['runs', 'treinos', 'passado'] },
+      { id: 'vision', label: 'Benchmark de visão', group: 'Ir para', icon: cmdIcon(Crosshair), keywords: ['visão', 'imagem', 'clicável', 'grounding', 'heatmap'] },
       { id: 'prompts', label: 'Prompts', group: 'Ir para', icon: cmdIcon(FileText), keywords: ['biblioteca', 'salvos'] },
       { id: 'settings', label: 'Configurações', group: 'Ir para', icon: cmdIcon(SettingsIcon), keywords: ['chave', 'key', 'openrouter'] },
       { id: 'help:compare', label: 'Como funciona: comparar modelos', group: 'Ajuda', icon: cmdIcon(CircleHelp), keywords: ['tutorial'] },
