@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>VendaCerta Admin · Pedidos (Fluent UI)</title>
+<style>
+  @font-face {
+    font-family: "Inter";
+    src: url("../../vendor/fluent/inter-latin-wght.woff2") format("woff2");
+    font-weight: 100 900; font-style: normal; font-display: block;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+    background: var(--colorNeutralBackground2, #fafafa);
+    color: var(--colorNeutralForeground1, #242424);
+    font-size: 14px;
+    overflow: hidden;
+  }
+
+  /* ---------------------------------------------------------------- shell */
+  .shell { display: grid; grid-template-rows: 56px 1fr; height: 1080px; }
+
+  .topbar {
+    display: flex; align-items: center; gap: 10px; padding: 0 16px 0 12px;
+    background: var(--colorNeutralBackground1, #fff);
+    border-bottom: 1px solid var(--colorNeutralStroke2, #e0e0e0);
+    box-shadow: var(--shadow2, 0 1px 2px rgba(0,0,0,.05));
+  }
+  .app-launcher {
+    width: 32px; height: 32px; display: grid; grid-template-columns: repeat(3, 5px);
+    gap: 3px; place-content: center; border-radius: 4px; cursor: pointer;
+  }
+  .app-launcher i { width: 5px; height: 5px; background: var(--colorNeutralForeground2, #424242); display: block; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-right: 4px; }
+  .brand .logo {
+    width: 28px; height: 28px; border-radius: 6px; background: var(--colorBrandBackground, #0f6cbd);
+    color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 15px;
+  }
+  .brand-name { font-weight: 600; font-size: 15px; letter-spacing: -.1px; }
+  .topbar .divider { width: 1px; height: 22px; background: var(--colorNeutralStroke2, #e0e0e0); margin: 0 6px; }
+  .topbar .crumb { color: var(--colorNeutralForeground2, #424242); font-size: 13px; }
+  .topbar .spacer { flex: 1 1 auto; }
+  .topbar fluent-text-input { width: 316px; }
+  .icon-btn {
+    width: 32px; height: 32px; border: 0; background: transparent; border-radius: 4px;
+    display: grid; place-items: center; cursor: pointer; color: var(--colorNeutralForeground2, #424242);
+    position: relative;
+  }
+  .icon-btn .dot {
+    position: absolute; top: 5px; right: 6px; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--colorPaletteRedBackground3, #d13438);
+  }
+  .who { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+
+  /* ------------------------------------------------------------- sidebar */
+  .main-grid { display: grid; grid-template-columns: 232px 1fr; min-height: 0; }
+
+  .nav {
+    background: var(--colorNeutralBackground3, #f5f5f5);
+    border-right: 1px solid var(--colorNeutralStroke2, #e0e0e0);
+    padding: 12px 8px; display: flex; flex-direction: column; min-height: 0;
+  }
+  .nav .group-label {
+    font-size: 11px; font-weight: 600; letter-spacing: .4px; text-transform: uppercase;
+    color: var(--colorNeutralForeground3, #616161); padding: 10px 10px 6px;
+  }
+  fluent-tablist[orientation="vertical"] { width: 100%; }
+  label.opt { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; cursor: pointer; }
+  fluent-tablist[orientation="vertical"] fluent-tab {
+    justify-content: flex-start; width: 100%; padding: 0 10px; font-size: 13.5px;
+  }
+  .nav-card {
+    margin-top: 18px; background: var(--colorNeutralBackground1, #fff);
+    border: 1px solid var(--colorNeutralStroke2, #e0e0e0); border-radius: 6px; padding: 12px;
+  }
+  .nav-card h4 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .nav-card p { margin: 0 0 10px; font-size: 12px; line-height: 1.45; color: var(--colorNeutralForeground2, #424242); }
+
+  /* -------------------------------------------------------------- content */
+  .content { padding: 20px 24px; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+  .page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+  .page-head h1 { font-size: 26px; font-weight: 600; margin: 0 0 2px; letter-spacing: -.4px; }
+  .page-head .sub { font-size: 13px; color: var(--colorNeutralForeground2, #424242); }
+  .page-head .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) 372px; gap: 16px; flex: 1 1 auto; min-height: 0; }
+  .card {
+    background: var(--colorNeutralBackground1, #fff);
+    border: 1px solid var(--colorNeutralStroke2, #e0e0e0);
+    border-radius: 8px; box-shadow: var(--shadow2, 0 1px 2px rgba(0,0,0,.06));
+    padding: 16px 18px; margin-bottom: 16px;
+  }
+  .card > h3 { margin: 0 0 14px; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .card > h3 .badge {
+    margin-left: auto; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 10px;
+    background: var(--colorPaletteYellowBackground2, #ffefc2); color: #5c4700;
+  }
+
+  .filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 14px; }
+  .filters fluent-text-input, .filters fluent-dropdown { width: 100%; }
+  .filters .full { grid-column: 1 / -1; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .filters .group-label {
+    font-size: 11px; font-weight: 600; letter-spacing: .4px; text-transform: uppercase;
+    color: var(--colorNeutralForeground3, #616161);
+  }
+  .filters .actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; }
+
+  .table-card { padding: 0; overflow: hidden; }
+  .table-card .head { display: flex; align-items: center; gap: 10px; padding: 14px 18px 12px; }
+  .table-card .head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+  .table-card .head .right { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    text-align: left; font-size: 11.5px; font-weight: 600; letter-spacing: .3px;
+    color: var(--colorNeutralForeground2, #424242); background: var(--colorNeutralBackground2, #fafafa);
+    padding: 9px 14px; border-top: 1px solid var(--colorNeutralStroke2, #e0e0e0);
+    border-bottom: 1px solid var(--colorNeutralStroke2, #e0e0e0);
+  }
+  tbody td { padding: 10px 14px; border-bottom: 1px solid var(--colorNeutralStroke3, #f0f0f0); }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: var(--colorNeutralBackground2, #fafafa); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 10px; }
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .pill.ok { background: #dff6dd; color: #0e700e; }
+  .pill.wait { background: #fff4ce; color: #7a5c00; }
+  .pill.ship { background: #deecf9; color: #0f548c; }
+  .pill.cancel { background: #fde7e9; color: #a4262c; }
+  .rowlink { color: var(--colorBrandForeground1, #0f6cbd); text-decoration: none; font-weight: 600; }
+  .table-foot { display: flex; align-items: center; gap: 10px; padding: 10px 16px; font-size: 12.5px; color: var(--colorNeutralForeground2, #424242); }
+  .table-foot .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+  .side .card:last-child { margin-bottom: 0; }
+  .metric { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+  .metric .v { font-size: 24px; font-weight: 600; letter-spacing: -.4px; }
+  .metric .k { font-size: 12.5px; color: var(--colorNeutralForeground2, #424242); }
+  .metric .delta { font-size: 12px; font-weight: 600; color: #0e700e; }
+  .metric .delta.down { color: #a4262c; }
+  .kv { display: flex; justify-content: space-between; font-size: 12.5px; padding: 4px 0; color: var(--colorNeutralForeground2, #424242); }
+  .kv b { color: var(--colorNeutralForeground1, #242424); font-weight: 600; }
+  hr.sep { border: 0; border-top: 1px solid var(--colorNeutralStroke2, #e0e0e0); margin: 12px 0; }
+  .shortcut { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 5px 0; }
+  .shortcut .kbd {
+    margin-left: auto; font-size: 11px; color: var(--colorNeutralForeground2, #424242);
+    border: 1px solid var(--colorNeutralStroke2, #e0e0e0); border-bottom-width: 2px;
+    border-radius: 4px; padding: 1px 6px; background: var(--colorNeutralBackground1, #fff);
+  }
+
+  /* ------------------------------------------- docked non-modal <fluent-dialog> */
+  fluent-dialog {
+    display: block; position: fixed; right: 48px; bottom: 40px; width: 540px; z-index: 40;
+  }
+  fluent-dialog::part(dialog) {
+    position: relative; inset: auto; width: 100%; max-width: none; height: auto; max-height: none;
+  }
+  .dlg-body { padding: 20px 22px 16px; }
+  .dlg-body h2 { margin: 0 0 6px; font-size: 20px; font-weight: 600; letter-spacing: -.3px; }
+  .dlg-body p { margin: 0 0 14px; font-size: 13.5px; line-height: 1.5; color: var(--colorNeutralForeground2, #424242); }
+  .dlg-body fluent-dropdown { width: 100%; margin-bottom: 12px; }
+  .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+</style>
+</head>
+<body>
+<!-- 1) prebuilt bundle registers every fluent-* element  2) token bundle  3) setTheme -->
+<script src="../../vendor/fluent/fluent-web-components.min.js"></script>
+<script src="../../vendor/fluent/fluent-themes.iife.js"></script>
+<script>
+  Fluent.setTheme(Object.assign({}, FluentThemes.light, {
+    fontFamilyBase: '"Inter", "Segoe UI", system-ui, sans-serif',
+    fontFamilyNumeric: '"Inter", "Segoe UI", sans-serif'
+  }));
+</script>
+
+<div class="shell">
+  <!-- ------------------------------------------------------------- top bar -->
+  <header class="topbar">
+    <span class="app-launcher" aria-label="Iniciar aplicativos"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+    <div class="brand">
+      <span class="logo">V</span>
+      <span class="brand-name">VendaCerta Admin</span>
+    </div>
+    <span class="divider"></span>
+    <span class="crumb">Operação › Pedidos</span>
+    <div class="spacer"></div>
+    <fluent-text-input placeholder="Buscar pedido, cliente ou SKU">
+      <svg slot="start" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></svg>
+    </fluent-text-input>
+    <button class="icon-btn" aria-label="Ajuda">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 113.6 2.3c-.7.4-1.1 1-1.1 1.8v.4"/><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none"/></svg>
+    </button>
+    <button class="icon-btn" aria-label="Notificações">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 9a6 6 0 1112 0c0 4.5 1.6 5.6 1.6 5.6H4.4S6 13.5 6 9z"/><path d="M10 19a2 2 0 004 0"/></svg>
+      <span class="dot"></span>
+    </button>
+    <button class="icon-btn" aria-label="Configurações">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-2.9 1.2V21a2 2 0 11-4 0v-.1A1.7 1.7 0 007 19.4a1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1A1.7 1.7 0 003 14.9H3a2 2 0 110-4h.1A1.7 1.7 0 004.6 7a1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1A1.7 1.7 0 009 2.6V2.5a2 2 0 114 0v.1A1.7 1.7 0 0017 4.6a1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1A1.7 1.7 0 0021 9.4h.1a2 2 0 110 4H21a1.7 1.7 0 00-1.6 1z"/></svg>
+    </button>
+    <span class="divider"></span>
+    <div class="who">
+      <fluent-avatar initials="MC" color="colorful" aria-label="Marina Costa"></fluent-avatar>
+      <span>Marina Costa</span>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+    </div>
+  </header>
+
+  <div class="main-grid">
+    <!-- ------------------------------------------------------------ nav -->
+    <aside class="nav">
+      <div class="group-label">Operação</div>
+      <fluent-tablist orientation="vertical" activeid="nav-pedidos">
+        <fluent-tab id="nav-visao">
+          <svg slot="start" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          Visão geral
+        </fluent-tab>
+        <fluent-tab id="nav-pedidos">
+          <svg slot="start" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16l-1.4 12H5.4L4 7z"/><path d="M9 7V5a3 3 0 016 0v2"/></svg>
+          Pedidos
+        </fluent-tab>
+        <fluent-tab id="nav-clientes">
+          <svg slot="start" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0111 0"/><path d="M16 11a3 3 0 100-6"/></svg>
+          Clientes
+        </fluent-tab>
+        <fluent-tab id="nav-catalogo">
+          <svg slot="start" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>
+          Catálogo
+        </fluent-tab>
+      </fluent-tablist>
+
+      <div class="group-label">Análise</div>
+      <fluent-tablist orientation="vertical">
+        <fluent-tab id="nav-fat">
+          <svg slot="start" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>
+          Faturamento
+        </fluent-tab>
+        <fluent-tab id="nav-rel">
+          <svg slot="start" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg>
+          Relatórios
+        </fluent-tab>
+      </fluent-tablist>
+
+      <div class="nav-card">
+        <h4>Meta do mês</h4>
+        <p>R$ 1.284.930 de R$ 1.607.000 faturados (78%).</p>
+        <fluent-progress-bar value="0.78"></fluent-progress-bar>
+        <div style="margin-top:10px">
+          <fluent-button appearance="subtle" size="small">Ver detalhes</fluent-button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ---------------------------------------------------------- content -->
+    <section class="content">
+      <div class="page-head">
+        <div>
+          <h1>Pedidos</h1>
+          <div class="sub">128 pedidos no período · atualizado às 14:32 · Loja Centro Campinas</div>
+        </div>
+        <div class="actions">
+          <fluent-button appearance="outline">
+            <svg slot="start" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+            Exportar
+          </fluent-button>
+          <fluent-button appearance="primary">
+            <svg slot="start" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg>
+            Novo pedido
+          </fluent-button>
+        </div>
+      </div>
+
+      <div class="cols">
+        <div style="min-width:0">
+          <!-- filters -->
+          <div class="card">
+            <h3>Filtros <span class="badge">12 pendentes</span></h3>
+            <div class="filters">
+              <fluent-text-input placeholder="Ex.: VC-10248" value=""></fluent-text-input>
+              <fluent-dropdown value="todos" placeholder="Cliente">
+                <fluent-dropdown-option value="todos">Todos os clientes</fluent-dropdown-option>
+                <fluent-dropdown-option value="atacadao">Atacadão do Sul LTDA</fluent-dropdown-option>
+                <fluent-dropdown-option value="bompreco">Mercado Bom Preço</fluent-dropdown-option>
+                <fluent-dropdown-option value="novaera">Distribuidora Nova Era</fluent-dropdown-option>
+              </fluent-dropdown>
+              <fluent-dropdown value="sudeste" placeholder="Região">
+                <fluent-dropdown-option value="sudeste">Sudeste</fluent-dropdown-option>
+                <fluent-dropdown-option value="sul">Sul</fluent-dropdown-option>
+                <fluent-dropdown-option value="nordeste">Nordeste</fluent-dropdown-option>
+              </fluent-dropdown>
+
+              <fluent-text-input placeholder="Data inicial" value="01/10/2026"></fluent-text-input>
+              <fluent-text-input placeholder="Data final" value="21/10/2026"></fluent-text-input>
+              <fluent-text-input placeholder="Valor mínimo" value="R$ 1.000,00"></fluent-text-input>
+
+              <div class="full">
+                <span class="group-label">Canal</span>
+                <label class="opt"><fluent-checkbox checked></fluent-checkbox>Loja online</label>
+                <label class="opt"><fluent-checkbox checked></fluent-checkbox>Balcão</label>
+                <label class="opt"><fluent-checkbox></fluent-checkbox>Telefone</label>
+                <label class="opt"><fluent-checkbox></fluent-checkbox>Marketplace</label>
+              </div>
+
+              <div class="full">
+                <span class="group-label">Ordenar</span>
+                <fluent-radio-group name="ordenar" value="recente" orientation="horizontal">
+                  <label class="opt"><fluent-radio value="recente"></fluent-radio>Mais recentes</label>
+                  <label class="opt"><fluent-radio value="valor"></fluent-radio>Maior valor</label>
+                  <label class="opt"><fluent-radio value="prazo"></fluent-radio>Prazo</label>
+                </fluent-radio-group>
+                <label class="opt" style="margin-left:auto">
+                  <fluent-label>Somente SLA vencido</fluent-label>
+                  <fluent-switch checked></fluent-switch>
+                </label>
+              </div>
+
+              <div class="actions">
+                <fluent-button appearance="subtle">Limpar</fluent-button>
+                <fluent-button appearance="primary">Aplicar filtros</fluent-button>
+              </div>
+            </div>
+          </div>
+
+          <!-- table -->
+          <div class="card table-card">
+            <div class="head">
+              <h3>Pedidos recentes</h3>
+              <div class="right">
+                <fluent-menu-button appearance="subtle" size="small">Colunas</fluent-menu-button>
+                <fluent-menu-button appearance="subtle" size="small" icon-only aria-label="Mais ações">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
+                </fluent-menu-button>
+                <fluent-badge appearance="filled" color="danger">4</fluent-badge>
+              </div>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:112px">Pedido</th>
+                  <th>Cliente</th>
+                  <th class="num" style="width:64px">Itens</th>
+                  <th class="num" style="width:120px">Total</th>
+                  <th style="width:122px">Status</th>
+                  <th style="width:86px">Entrega</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td><a class="rowlink" href="#">VC-10248</a></td><td>Atacadão do Sul LTDA</td><td class="num">14</td><td class="num">R$ 18.420,00</td><td><span class="pill ok">Aprovado</span></td><td>23/10</td></tr>
+                <tr><td><a class="rowlink" href="#">VC-10247</a></td><td>Mercado Bom Preço</td><td class="num">6</td><td class="num">R$ 4.190,50</td><td><span class="pill wait">Pendente</span></td><td>22/10</td></tr>
+                <tr><td><a class="rowlink" href="#">VC-10246</a></td><td>Distribuidora Nova Era</td><td class="num">32</td><td class="num">R$ 51.905,00</td><td><span class="pill ship">Enviado</span></td><td>21/10</td></tr>
+                <tr><td><a class="rowlink" href="#">VC-10245</a></td><td>Casa &amp; Cia Materiais</td><td class="num">9</td><td class="num">R$ 7.312,80</td><td><span class="pill ok">Aprovado</span></td><td>24/10</td></tr>
+                <tr><td><a class="rowlink" href="#">VC-10244</a></td><td>Ferragens Guarani</td><td class="num">21</td><td class="num">R$ 22.048,00</td><td><span class="pill cancel">Cancelado</span></td><td>—</td></tr>
+                <tr><td><a class="rowlink" href="#">VC-10243</a></td><td>Supermercados Pampa</td><td class="num">18</td><td class="num">R$ 16.274,30</td><td><span class="pill wait">Pendente</span></td><td>25/10</td></tr>
+                <tr><td><a class="rowlink" href="#">VC-10242</a></td><td>Transportes Litoral</td><td class="num">4</td><td class="num">R$ 2.980,00</td><td><span class="pill ship">Enviado</span></td><td>20/10</td></tr>
+              </tbody>
+            </table>
+            <div class="table-foot">
+              <span>Exibindo 7 de 128 pedidos</span>
+              <div class="right">
+                <fluent-button appearance="subtle" size="small" disabled>Anterior</fluent-button>
+                <span>1 de 19</span>
+                <fluent-button appearance="subtle" size="small">Próxima</fluent-button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- side rail -->
+        <aside class="side">
+          <div class="card">
+            <h3>Resumo do dia</h3>
+            <div class="metric"><span class="k">Receita</span><span class="v">R$ 1.284.930</span></div>
+            <div class="metric"><span class="k">vs. ontem</span><span class="delta">▲ 12,4%</span></div>
+            <hr class="sep">
+            <div class="kv"><span>Pedidos pagos</span><b>1.842</b></div>
+            <div class="kv"><span>Ticket médio</span><b>R$ 697,57</b></div>
+            <div class="kv"><span>Aguardando envio</span><b>37</b></div>
+            <div class="kv"><span>SLA vencido</span><b>4</b></div>
+            <hr class="sep">
+            <div style="font-size:12.5px;color:var(--colorNeutralForeground2,#424242);margin-bottom:4px">Itens por página</div>
+            <fluent-slider value="40" min="10" max="100" step="10"></fluent-slider>
+            <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--colorNeutralForeground2,#424242);margin-top:2px">
+              <span>10</span><span>100</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Alertas <fluent-counter-badge appearance="filled" color="danger">4</fluent-counter-badge></h3>
+            <div style="display:grid;gap:8px">
+              <fluent-message-bar layout="multiline" intent="warning">4 pedidos acima do SLA de 24h.</fluent-message-bar>
+              <fluent-message-bar layout="multiline" intent="success">Backup do ERP concluído às 03:00.</fluent-message-bar>
+            </div>
+            <hr class="sep">
+            <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">Atalhos</div>
+            <div class="shortcut">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16v13H4z"/></svg>
+              Abrir ordem de serviço
+              <span class="kbd">Ctrl O</span>
+            </div>
+            <div class="shortcut">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></svg>
+              Exportar planilha
+              <span class="kbd">Ctrl E</span>
+            </div>
+            <div class="shortcut">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 8h14v9H5z"/><path d="M8 8V5h8v3"/></svg>
+              Gerar boleto
+              <span class="kbd">Ctrl B</span>
+            </div>
+            <fluent-link href="#">Central de ajuda do VendaCerta</fluent-link>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- real <fluent-dialog type="non-modal"> opened with .show(), docked bottom-right -->
+<fluent-dialog id="confirmarEnvio" type="non-modal" aria-labelledby="dlgTitle">
+  <div class="dlg-body">
+    <h2 id="dlgTitle">Confirmar envio</h2>
+    <p>O pedido <b>VC-10246</b> (Distribuidora Nova Era, 32 itens) será enviado pela
+       transportadora selecionada. O romaneio é gerado em seguida.</p>
+    <fluent-dropdown value="loggi" placeholder="Transportadora">
+      <fluent-dropdown-option value="loggi">Loggi — Expresso (1 dia útil)</fluent-dropdown-option>
+      <fluent-dropdown-option value="total">Total Express — Rodoviário</fluent-dropdown-option>
+      <fluent-dropdown-option value="pac">Correios — PAC</fluent-dropdown-option>
+    </fluent-dropdown>
+    <div style="display:grid;gap:8px">
+      <label class="opt"><fluent-checkbox checked></fluent-checkbox>Contratar seguro de carga (R$ 84,20)</label>
+      <label class="opt"><fluent-checkbox></fluent-checkbox>Enviar romaneio ao cliente por e-mail</label>
+    </div>
+    <div class="dlg-actions">
+      <fluent-button appearance="outline">Cancelar</fluent-button>
+      <fluent-button appearance="primary">Confirmar envio</fluent-button>
+    </div>
+  </div>
+</fluent-dialog>
+
+<script>
+  customElements.whenDefined('fluent-dialog').then(function () {
+    var dlg = document.getElementById('confirmarEnvio');
+    var open = function () { try { dlg.show(); } catch (e) { /* already open */ } };
+    if (dlg.isConnected) open(); else requestAnimationFrame(open);
+  });
+</script>
+</body>
+</html>

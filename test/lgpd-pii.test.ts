@@ -484,7 +484,7 @@ describe('IMPL-042 (3) — prova ESTÁTICA: o ponto único é o único caminho a
     for (const p of posts) expect(p).toContain('body: JSON.stringify(body)');
     expect(fonte.match(/const body = this\.buildBody\(/g)?.length).toBe(2);
     const buildBody = /private buildBody\([\s\S]*?\n {2}\}\n/.exec(fonte)?.[0] ?? '';
-    expect(buildBody).toContain('messages: this.protectMessages(messages, params.sink)');
+    expect(buildBody).toContain('messages: wireMessages(this.protectMessages(messages, params.sink))');
     // A ÚNICA chave `messages` do corpo é a protegida, e ninguém a reescreve depois.
     expect(buildBody.match(/\bmessages\s*:/g)).toEqual(['messages:']);
     expect(fonte).not.toMatch(/\.messages\s*=|\[['"]messages['"]\]\s*=/);

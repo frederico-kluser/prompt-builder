@@ -184,6 +184,7 @@ documentação em `docs/`/`TELAS.md` foi consolidada na memória em 2026-09-26.)
 - [Os três modos](#os-três-modos)
 - [Relatório de ciclos do treino](#relatório-de-ciclos-do-treino)
 - [Modo JEV (decisões tipadas)](#modo-jev-decisões-tipadas)
+- [Benchmark de visão (UI grounding)](#benchmark-de-visão-ui-grounding)
 - [Os papéis dos modelos](#os-papéis-dos-modelos)
 - [Conformidade LGPD (allowlist por endpoint)](#conformidade-lgpd-allowlist-por-endpoint)
 - [Anatomia de uma etapa](#anatomia-de-uma-etapa)
@@ -337,6 +338,53 @@ que cai na banda de confiança e escala o resto). Formato próprio `jev-config@1
 
 O Jev não é ZDR: em área LGPD sensível o modo fica indisponível. Contrato completo:
 `prompt-builder docs jev`.
+
+---
+
+## Benchmark de visão (UI grounding)
+
+Um benchmark separado para **entender a imagem e devolver o que é clicável**. O modelo recebe uma
+captura de tela 1920×1080 de uma UI real (renderizada por nós com frameworks de verdade: Bootstrap 5,
+**React95**/Windows 95, **Fluent UI**, **Material 3** e um desktop macOS) e responde em **dois modos**:
+
+- **map** — todos os elementos interativos: `{"type":"button","label":"Entrar","iconDescription":null,"x":100,"y":300}`;
+- **action** — dado um pedido ("Clique em Novo curso"), a ação + a posição do alvo.
+
+A verdade não é um juiz LLM: é o **DOM do cenário** (caixa de cada controle via
+`getBoundingClientRect`). O dataset é **versionado e pinado por sha256** — imagem + coordenadas + o
+HTML que a gerou vivem em `src/data/vision/` e **crescem por commit**, nunca "criadas na hora".
+Placar determinístico: ponto dentro da caixa (precisão/recall/F1), rótulo normalizado com aliases,
+acerto de tipo e, no modo ação, ação + alvo + texto.
+
+```bash
+prompt-builder vision dataset list                     # cenários, elementos, hash
+prompt-builder vision run --models google/gemini-3.8-flash --budget 2 --dry-run
+prompt-builder vision run --models google/gemini-3.8-flash,anthropic/claude-opus-5.5 --budget 2
+prompt-builder vision run --models a,b --benchmark resolution --provider DeepInfra --budget 2
+prompt-builder vision run --models a,b --benchmark grid --provider DeepInfra --budget 2
+prompt-builder vision run --models a,b --benchmark matrix --provider DeepInfra \
+  --resolutions 1920x1080,1280x720,960x540,640x360 \
+  --matrix-grids plain,frame-axis,frame-mark,sidecar-grid --budget 5
+prompt-builder vision report <id> --html vision-<id>.html
+```
+
+Além do F0 (imagem crua), dois bancos medem variantes do MESMO dataset, célula a célula:
+**resolution** (1080p → 720p → 540p → 360p, coordenadas convertidas de volta) e **grid** (controle
+`plain`, grade 9×9, réguas de eixos e `mark-grid` 6×4 com recorte ampliado em 2ª rodada). Em
+comparações entre modelos, fixe `--provider`: sem pin o OpenRouter pode trocar de provedor entre
+chamadas e o número passa a medir roteamento, não grounding.'
+
+Na SPA (`/vision`, também no card da Nova run) a mesma medição roda na aba: você escolhe quantos
+cenários puxar do banco, os modelos e o teto; durante a run, passar o mouse num cenário mostra a
+**tela do teste** com a verdade do DOM; no resultado, a matriz cenário × modelo mostra o **mapa de
+calor de cada modelo** ao passar o mouse/focar a célula (previsões, controles não vistos e alvos das
+ações). O CLI e a SPA compartilham o MESMO motor e o MESMO dataset.
+
+O F0 mede o piso **imagem crua × coordenada**; `resolution` e `grid` já são variantes medidas, e
+Set-of-Mark por âncora, árvore de acessibilidade, zoom condicional e verificação multi-turno entram
+como próximos bancos. O roadmap
+completo (percepção, memória, orquestração multi-modelo, segurança e dataset vivo) está em
+[ROADMAP-VISAO.md](./ROADMAP-VISAO.md); o contrato de uso, em `prompt-builder docs vision`.
 
 ---
 

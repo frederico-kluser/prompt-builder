@@ -38,6 +38,8 @@ const PromptsPage = lazyPage(() => import('./pages/PromptsPage'), 'PromptsPage')
 const JevRunView = lazyPage(() => import('./pages/jev/JevRunView'), 'JevRunView');
 const JevTrainingView = lazyPage(() => import('./pages/jev/JevTrainingView'), 'JevTrainingView');
 const JevReportPage = lazyPage(() => import('./pages/jev/JevReportPage'), 'JevReportPage');
+const VisionPage = lazyPage(() => import('./pages/VisionPage'), 'VisionPage');
+const VisionRunPage = lazyPage(() => import('./pages/VisionRunPage'), 'VisionRunPage');
 
 /**
  * Deploy novo com a aba aberta: os chunks antigos somem (o rewrite da Vercel
@@ -145,6 +147,9 @@ function AppRoutes() {
           <Route path="/welcome" element={<FirstRun />} />
           {/* Seletor LLM | JEV (D-12): wrapper sobre o NewRun intocado. */}
           <Route path="/new" element={<KeyGate><NewBenchmark /></KeyGate>} />
+          {/* Benchmark de visão (imagem → clicável): setup/run e resultado. */}
+          <Route path="/vision" element={<KeyGate><VisionPage /></KeyGate>} />
+          <Route path="/vision/runs/:id" element={<VisionRunPage />} />
           <Route path="/runs" element={<RunsList />} />
           <Route path="/runs/:id" element={<RunView />} />
           <Route path="/training/:sessionId" element={<TrainingView />} />

@@ -46,6 +46,7 @@ import { getDataDir } from '../storage.js';
 import { cmdCalib } from './commands/calib.js';
 import { cmdPrompts } from './commands/prompts.js';
 import { cmdJev } from './commands/jev.js';
+import { cmdVision } from './commands/vision.js';
 
 const VERSION = pkgVersion();
 
@@ -141,6 +142,15 @@ CALIBRAÇÃO DO JUIZ (juiz × humano; só disco, sem key)
 DECISÕES TIPADAS (modo JEV — noul/choice/score em casos rotulados)
   jev validate|example|models|import|run|eval|compare|train|list|show|report|export|techniques
                            mede e evolui definições de decisão do Jev (ver: docs jev)
+
+VISÃO (UI grounding: o que é clicável numa imagem de tela)
+  vision run --models a,b --budget <usd|none> [--tasks map,action]
+          [--benchmark grounding|resolution|grid|matrix] [--provider <nome>] [--families …]
+                           o modelo lê a imagem 1080p e devolve elementos/ação;
+                           resolution/grid medem escala/overlays; matrix cruza
+                           resolução × grade sem grade em cima do print
+  vision dataset list|show|verify  ·  vision list|show|report <id>
+                           dataset versionado (ver: docs vision)
 
 AGENTES (modo agente — mesmo motor, executor pi)
   agents doctor [--deep] [--container] [--config <arq>]
@@ -249,6 +259,8 @@ async function dispatch(cmd: string | undefined, argv: string[]): Promise<number
     case 'jev':
     case 'decisions':
       return cmdJev(argv);
+    case 'vision':
+      return cmdVision(argv);
     default: {
       const sugestao = cmd ? closestMatch(cmd, COMMANDS) : undefined;
       throw new CliError(

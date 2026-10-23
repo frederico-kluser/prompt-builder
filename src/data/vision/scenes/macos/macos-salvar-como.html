@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>macOS — Salvar como</title><style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font:13px/1.35 ui-sans-serif,-apple-system,"Segoe UI",system-ui,sans-serif;color:#1d1d1f;overflow:hidden}
+  body{background:#173752 radial-gradient(1200px 720px at 22% 12%,rgba(122,180,240,.20),transparent 72%)}
+  button{border:0;background:none;font:inherit;color:inherit;cursor:pointer}
+  .menubar{height:28px;display:flex;align-items:center;gap:2px;padding:0 10px;background:rgba(28,26,24,.55);backdrop-filter:blur(18px);color:#f5f5f7;font-size:13px}
+  .menubar .item{padding:3px 9px;border-radius:5px}
+  .menubar .item:hover{background:rgba(255,255,255,.16)}
+  .menubar .apple{font-size:15px;padding:2px 9px}
+  .menubar .right{margin-left:auto;display:flex;align-items:center;gap:12px;padding-right:4px}
+  .status{display:flex;align-items:center;gap:5px;font-size:12px}
+  .status svg{display:block}
+  .desktop{position:relative;height:calc(100% - 28px)}
+  .win{position:absolute;left:210px;top:54px;width:1240px;height:760px;border-radius:11px;overflow:hidden;background:#fff;box-shadow:0 30px 70px rgba(0,0,0,.45),0 0 0 .5px rgba(0,0,0,.25);display:flex;flex-direction:column}
+  .titlebar{height:52px;display:flex;align-items:center;gap:10px;padding:0 14px;background:#f6f6f8;border-bottom:1px solid #e3e3e6}
+  .lights{display:flex;gap:8px;margin-right:8px}
+  .tl{width:12px;height:12px;border-radius:50%;display:block}
+  .tl-r{background:#ff5f57}.tl-y{background:#febc2e}.tl-g{background:#28c840}
+  .title{font-weight:600;font-size:13.5px;margin-right:auto}
+  .toolbar{display:flex;align-items:center;gap:8px}
+  .tb{width:28px;height:24px;border-radius:6px;display:grid;place-items:center;color:#48484a}
+  .tb:hover{background:#e9e9ec}
+  .search{display:flex;align-items:center;gap:6px;height:26px;width:210px;padding:0 9px;background:#e9e9ec;border-radius:7px;color:#6e6e73;font-size:12px}
+  .search input{border:0;outline:0;background:transparent;font:inherit;color:#1d1d1f;width:100%}
+  .seg{display:flex;background:#e9e9ec;border-radius:7px;padding:2px}
+  .seg button{padding:3px 10px;border-radius:5px;font-size:12px;color:#3a3a3c}
+  .seg button.on{background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.18)}
+  .body{display:flex;flex:1;min-height:0}
+  .side{width:212px;background:#f2f2f5;border-right:1px solid #e3e3e6;padding:10px 8px;display:flex;flex-direction:column;gap:2px}
+  .side .head{font-size:11px;font-weight:600;color:#8e8e93;padding:6px 8px 4px;text-transform:none}
+  .side a{display:block;padding:5px 9px;border-radius:6px;color:#3a3a3c;text-decoration:none;font-size:13px}
+  .side a.on{background:#dcdce1;font-weight:600}
+  .content{flex:1;padding:14px 16px;display:flex;flex-direction:column;gap:0}
+  .colhead{display:grid;grid-template-columns:1fr 130px 90px;gap:10px;padding:4px 8px 8px;border-bottom:1px solid #e8e8ea;color:#8e8e93;font-size:11.5px}
+  .file{display:grid;grid-template-columns:1fr 130px 90px;gap:10px;align-items:center;padding:8px;border-radius:6px;text-align:left;width:100%;font-size:13px;color:inherit;text-decoration:none}
+  .file:hover{background:#f2f5ff}
+  .file .nm{display:flex;align-items:center;gap:9px;min-width:0}
+  .file .nm span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .icon{width:20px;height:20px;border-radius:4px;display:grid;place-items:center;flex:none}
+  .icon.doc{background:#dbe9ff}.icon.folder{background:#cfe2ff}
+  .dock{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);display:flex;gap:8px;padding:7px 10px;border-radius:18px;background:rgba(255,255,255,.28);backdrop-filter:blur(22px);box-shadow:0 12px 30px rgba(0,0,0,.28)}
+  .app{width:46px;height:46px;border-radius:11px;display:grid;place-items:center;font-size:22px;color:#fff}
+  .app.finder{background:linear-gradient(180deg,#4ea3f7,#1f74d8)}
+  .app.safari{background:linear-gradient(180deg,#67c6f7,#1a7fd4)}
+  .app.mail{background:linear-gradient(180deg,#63b3ff,#1f6fe0)}
+  .app.messages{background:linear-gradient(180deg,#5ee06a,#1fa838)}
+  .app.trash{background:linear-gradient(180deg,#c9ced8,#9aa1ad);font-size:24px}
+  .folder-desktop{position:absolute;display:flex;flex-direction:column;align-items:center;gap:5px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.55);font-size:12px;padding:8px;border-radius:8px}
+  .folder-desktop .big{width:58px;height:46px;border-radius:7px;background:linear-gradient(180deg,#8ec5ff,#4b90e8);box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)}
+  .backdrop{position:absolute;inset:0;display:grid;place-items:center}  .veil{position:absolute;inset:0;background:rgba(0,0,0,.38)}  .sheet{position:relative;width:560px;border-radius:12px;background:#f6f6f8;box-shadow:0 40px 90px rgba(0,0,0,.5),0 0 0 .5px rgba(0,0,0,.3);padding:18px 20px 16px}  .sheet h2{margin:0 0 14px;font-size:14px;font-weight:600;text-align:center}  .row{display:grid;grid-template-columns:96px 1fr;align-items:center;gap:10px;margin-bottom:10px}  .row label{color:#3a3a3c;text-align:right;font-size:12.5px}  .field{height:26px;border-radius:6px;border:.5px solid #c9c9ce;background:#fff;padding:0 8px;font:inherit;font-size:12.5px;width:100%}  select.field{appearance:none;background-image:linear-gradient(45deg,transparent 50%,#8e8e93 50%),linear-gradient(135deg,#8e8e93 50%,transparent 50%);background-position:calc(100% - 12px) 11px,calc(100% - 8px) 11px;background-size:4px 4px;background-repeat:no-repeat}  .check{display:flex;align-items:center;gap:7px;margin:12px 0 18px 106px;font-size:12.5px}  .actions{display:flex;justify-content:flex-end;gap:10px}  .btn{height:30px;min-width:92px;border-radius:7px;font-size:13px;font-weight:500;box-shadow:0 .5px 1px rgba(0,0,0,.15),0 0 0 .5px rgba(0,0,0,.15);background:#fff}  .btn.primary{background:linear-gradient(180deg,#2f8bfb,#0b6ae4);color:#fff;box-shadow:0 .5px 1px rgba(0,0,0,.25)}  .close{position:absolute;right:12px;top:10px;width:22px;height:22px;border-radius:50%;background:#e6e6ea}  .close .x{display:block;position:relative;width:11px;height:11px;margin:auto}  .close .x::before,.close .x::after{content:"";position:absolute;left:0;top:5px;width:11px;height:1.5px;background:#6e6e73;border-radius:1px;transform:rotate(45deg)}  .close .x::after{transform:rotate(-45deg)}</style></head>
+<body>
+<div class="desktop" style="height:100%">
+  <div class="backdrop">
+    <div class="veil"></div>
+    <div class="sheet">
+      <button class="close" data-vision-id="salvar-fechar" data-vision-icon="fechar diálogo" data-vision-aliases="x fechar"><span class="x"></span></button>
+      <h2>Salvar como</h2>
+      <div class="row"><label for="nome">Salvar como:</label><input class="field" id="nome" data-vision-id="salvar-nome" value="Relatório Q3.pdf"></div>
+      <div class="row"><label for="onde">Onde:</label>
+        <select class="field" id="onde" data-vision-id="salvar-onde" aria-label="Onde">
+          <option>Documentos</option><option>Área de Trabalho</option><option>Downloads</option>
+        </select>
+      </div>
+      <div class="check"><input type="checkbox" id="padrao" checked data-vision-id="salvar-padrao"><label for="padrao">Usar como padrão</label></div>
+      <div class="actions">
+        <button class="btn" data-vision-id="salvar-cancelar" data-vision-aliases="descartar">Cancelar</button>
+        <button class="btn primary" data-vision-id="salvar-confirmar" data-vision-aliases="confirmar salvar">Salvar</button>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>

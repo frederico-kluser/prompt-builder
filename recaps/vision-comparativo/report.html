@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Benchmark de visão — vision-mvjf79fb-36cbd99e</title>
+<style>
+:root{color-scheme:light dark}*{box-sizing:border-box}
+body{margin:0;padding:2rem 1.25rem;font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#0b0d10;color:#e8ecf1}
+main{max-width:76rem;margin:0 auto}
+h1{font-size:1.55rem;margin:0 0 .5rem}h2{margin:2rem 0 .6rem;font-size:1.2rem}h3{margin:1.4rem 0 .5rem;font-size:1rem;color:#b9c6d4}
+p{margin:.45rem 0}p.meta{color:#c9d4df}p.sub{color:#9fb0c0;font-size:13.5px}
+code{font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;background:#1b2129;padding:.1rem .3rem;border-radius:.3rem}
+table{width:100%;border-collapse:collapse;margin:.6rem 0 1rem;font-size:13.5px;display:block;overflow-x:auto}
+th,td{border-bottom:1px solid #232b35;padding:.45rem .5rem;text-align:right;white-space:nowrap}
+th{color:#9fb0c0;font-weight:600}td:first-child,th:first-child{text-align:left}
+blockquote{margin:.8rem 0;padding:.6rem .9rem;border-left:3px solid #b7791f;background:#1a1710;color:#f0d9a8}
+ul{margin:.6rem 0;padding-left:1.2rem}li{margin:.3rem 0;color:#c9d4df}
+</style></head><body><main>
+<h1>Benchmark de visão — <code>vision-mvjf79fb-36cbd99e</code></h1>
+<p class="meta"><strong>dataset</strong> <code>vision-dataset@0.1.0</code> (hash <code>sha256:0afe12079…</code>) · <strong>7</strong> cenário(s) · <strong>modos</strong> map + action · <strong>coordenadas</strong> pixels 1920×1080 · <strong>status</strong> finished · <strong>custo medido</strong> $0.0785</p>
+<h2>Placar</h2>
+<p class="sub">Nota = média das notas disponíveis (mapa: F1 de região; ação: taxa de acerto).</p><table><thead><tr><th>#</th><th>modelo</th><th>nota</th><th>mapa F1</th><th>rótulo F1</th><th>ação pass</th><th>erros</th><th>custo</th><th>tokens in/out</th><th>latência</th></tr></thead><tbody>
+<tr><td>1</td><td><code>xiaomi/mimo-v2.6-pro</code></td><td><strong>78.1%</strong></td><td>82.8%</td><td>62.7%</td><td>73.3%</td><td>1</td><td>$0.0527</td><td>92424/16961</td><td>11.4 s</td></tr>
+<tr><td>2</td><td><code>deepseek/deepseek-v4.1-flash-1017</code></td><td><strong>66.1%</strong></td><td>72.3%</td><td>53.3%</td><td>60.0%</td><td>0</td><td>$0.0133</td><td>52706/14809</td><td>4.2 s</td></tr>
+<tr><td>3</td><td><code>z-ai/glm-5.3-flash</code></td><td><strong>42.3%</strong></td><td>51.3%</td><td>38.3%</td><td>33.3%</td><td>3</td><td>$0.0126</td><td>74156/15447</td><td>5.5 s</td></tr>
+</tbody></table>
+<h2>Modo mapa — todos os elementos interativos</h2>
+<h3>Por família</h3>
+<table><thead><tr><th>família</th><th>xiaomi/mimo-v2.6-pro</th><th>deepseek/deepseek-v4.1-flash-1017</th><th>z-ai/glm-5.3-flash</th></tr></thead><tbody>
+<tr><td>Bootstrap</td><td>100.0% (2)</td><td>85.0% (2)</td><td>100.0% (2)</td></tr>
+<tr><td>Fluent UI</td><td>90.7% (1)</td><td>72.9% (1)</td><td>—</td></tr>
+<tr><td>macOS</td><td>99.3% (2)</td><td>93.4% (2)</td><td>50.0% (2)</td></tr>
+<tr><td>Material 3</td><td>89.4% (1)</td><td>89.4% (1)</td><td>89.4% (1)</td></tr>
+<tr><td>React95</td><td>0.0% (1)</td><td>0.0% (1)</td><td>0.0% (1)</td></tr>
+</tbody></table>
+<h3>Por tipo de elemento — <code>xiaomi/mimo-v2.6-pro</code></h3>
+<table><thead><tr><th>tipo</th><th>elementos</th><th>vistos</th><th>recall</th></tr></thead><tbody>
+<tr><td>button</td><td>88</td><td>64</td><td>72.7%</td></tr>
+<tr><td>link</td><td>33</td><td>24</td><td>72.7%</td></tr>
+<tr><td>input</td><td>20</td><td>17</td><td>85.0%</td></tr>
+<tr><td>menuitem</td><td>16</td><td>7</td><td>43.8%</td></tr>
+<tr><td>tab</td><td>14</td><td>14</td><td>100.0%</td></tr>
+<tr><td>checkbox</td><td>13</td><td>13</td><td>100.0%</td></tr>
+<tr><td>select</td><td>7</td><td>7</td><td>100.0%</td></tr>
+<tr><td>radio</td><td>3</td><td>3</td><td>100.0%</td></tr>
+<tr><td>switch</td><td>2</td><td>2</td><td>100.0%</td></tr>
+<tr><td>slider</td><td>1</td><td>1</td><td>100.0%</td></tr>
+</tbody></table>
+<h2>Modo ação — o que clicar</h2>
+<h3>Por família</h3>
+<table><thead><tr><th>família</th><th>xiaomi/mimo-v2.6-pro</th><th>deepseek/deepseek-v4.1-flash-1017</th><th>z-ai/glm-5.3-flash</th></tr></thead><tbody>
+<tr><td>Bootstrap</td><td>100.0% (8)</td><td>87.5% (8)</td><td>25.0% (8)</td></tr>
+<tr><td>Fluent UI</td><td>20.0% (5)</td><td>0.0% (5)</td><td>20.0% (5)</td></tr>
+<tr><td>macOS</td><td>87.5% (8)</td><td>75.0% (8)</td><td>25.0% (8)</td></tr>
+<tr><td>Material 3</td><td>40.0% (5)</td><td>40.0% (5)</td><td>20.0% (5)</td></tr>
+<tr><td>React95</td><td>100.0% (4)</td><td>75.0% (4)</td><td>100.0% (4)</td></tr>
+</tbody></table>
+<h3>Por ação</h3>
+<table><thead><tr><th>ação</th><th>xiaomi/mimo-v2.6-pro</th><th>deepseek/deepseek-v4.1-flash-1017</th><th>z-ai/glm-5.3-flash</th></tr></thead><tbody>
+<tr><td>click</td><td>72.0% (25)</td><td>60.0% (25)</td><td>36.0% (25)</td></tr>
+<tr><td>select</td><td>66.7% (3)</td><td>33.3% (3)</td><td>33.3% (3)</td></tr>
+<tr><td>type</td><td>100.0% (2)</td><td>100.0% (2)</td><td>0.0% (2)</td></tr>
+</tbody></table>
+<h2>Células com problema</h2>
+<table><thead><tr><th>célula</th><th>modelo</th><th>status</th><th>motivo</th></tr></thead><tbody>
+<tr><td><code>map:react95-painel</code></td><td><code>xiaomi/mimo-v2.6-pro</code></td><td>ok</td><td>saída não parseável</td></tr>
+<tr><td><code>map:react95-painel</code></td><td><code>z-ai/glm-5.3-flash</code></td><td>ok</td><td>saída não parseável</td></tr>
+<tr><td><code>map:fluent-painel</code></td><td><code>z-ai/glm-5.3-flash</code></td><td>error</td><td>terminated</td></tr>
+<tr><td><code>map:macos-finder</code></td><td><code>z-ai/glm-5.3-flash</code></td><td>ok</td><td>saída não parseável</td></tr>
+</tbody></table>
+<h2>Metodologia</h2>
+<ul>
+<li>A verdade vem do DOM renderizado: caixa de cada controle em pixels de uma imagem 1920×1080 (não é anotação humana).</li>
+<li><strong>Mapa</strong>: casa quando o ponto cai DENTRO da caixa; um-para-um, guloso por qualidade (rótulo &gt; tipo &gt; proximidade). Precisão = casados/previsões, recall = casados/elementos, F1 harmônico. Rótulo normaliza acento/caixa, aceita contenção e aliases.</li>
+<li><strong>Ação</strong>: passa quando a ação é a esperada, o ponto cai na caixa do alvo (quando há alvo) e o texto confere (quando há texto).</li>
+<li>Erro de chamada conta como resposta errada; célula pulada por orçamento/cancelamento fica FORA das métricas (status parcial da run).</li>
+<li>Coordenada fora do espaço pedido é convertida pelo parser e registrada (<code>coordScale</code>); nenhuma técnica de grade/zoom/SoM nesta versão.</li>
+</ul>
+</main></body></html>

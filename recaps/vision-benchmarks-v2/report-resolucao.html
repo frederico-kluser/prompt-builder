@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Benchmark de visão — vision-mvjhpg8h-a097fb59</title>
+<style>
+:root{color-scheme:light dark}*{box-sizing:border-box}
+body{margin:0;padding:2rem 1.25rem;font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#0b0d10;color:#e8ecf1}
+main{max-width:76rem;margin:0 auto}
+h1{font-size:1.55rem;margin:0 0 .5rem}h2{margin:2rem 0 .6rem;font-size:1.2rem}h3{margin:1.4rem 0 .5rem;font-size:1rem;color:#b9c6d4}
+p{margin:.45rem 0}p.meta{color:#c9d4df}p.sub{color:#9fb0c0;font-size:13.5px}
+code{font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;background:#1b2129;padding:.1rem .3rem;border-radius:.3rem}
+table{width:100%;border-collapse:collapse;margin:.6rem 0 1rem;font-size:13.5px;display:block;overflow-x:auto}
+th,td{border-bottom:1px solid #232b35;padding:.45rem .5rem;text-align:right;white-space:nowrap}
+th{color:#9fb0c0;font-weight:600}td:first-child,th:first-child{text-align:left}
+blockquote{margin:.8rem 0;padding:.6rem .9rem;border-left:3px solid #b7791f;background:#1a1710;color:#f0d9a8}
+ul{margin:.6rem 0;padding-left:1.2rem}li{margin:.3rem 0;color:#c9d4df}
+</style></head><body><main>
+<h1>Benchmark de visão — <code>vision-mvjhpg8h-a097fb59</code></h1>
+<p class="meta"><strong>dataset</strong> <code>vision-dataset@0.2.0</code> (hash <code>sha256:8d0de4203…</code>) · <strong>7</strong> cenário(s) · <strong>modos</strong> map · <strong>coordenadas</strong> pixels 1920×1080 · <strong>status</strong> finished · <strong>banco</strong> resolution · <strong>provedor</strong> DeepInfra · <strong>custo medido</strong> $0.0870</p>
+<h2>Placar</h2>
+<p class="sub">Nota = média das notas disponíveis (mapa: F1 de região; ação: taxa de acerto). Nesta rodada, a nota é a média entre variantes; a coluna de modo é a micro-média global.</p><table><thead><tr><th>#</th><th>modelo</th><th>nota</th><th>mapa F1</th><th>rótulo F1</th><th>ação pass</th><th>erros</th><th>custo</th><th>tokens in/out</th><th>latência</th></tr></thead><tbody>
+<tr><td>1</td><td><code>z-ai/glm-5.3-flash</code></td><td><strong>76.2%</strong></td><td>76.5%</td><td>51.6%</td><td>—</td><td>0</td><td>$0.0179</td><td>48622/22768</td><td>10.3 s</td></tr>
+<tr><td>2</td><td><code>xiaomi/mimo-v2.6-pro</code></td><td><strong>60.4%</strong></td><td>61.2%</td><td>43.6%</td><td>—</td><td>0</td><td>$0.0506</td><td>40950/62391</td><td>55.5 s</td></tr>
+<tr><td>3</td><td><code>deepseek/deepseek-v4.1-flash-1017</code></td><td><strong>54.7%</strong></td><td>56.4%</td><td>38.0%</td><td>—</td><td>0</td><td>$0.0186</td><td>29540/62013</td><td>31.1 s</td></tr>
+</tbody></table>
+<h2>Resolução — a mesma tela em outras escalas</h2>
+<p class="sub">Coordenadas foram convertidas de volta para 1920×1080 antes de pontuar; a imagem enviada está em `cell.imageViewport`.</p>
+<table><thead><tr><th>variante</th><th>`z-ai/glm-5.3-flash`</th><th>`xiaomi/mimo-v2.6-pro`</th><th>`deepseek/deepseek-v4.1-flash-1017`</th></tr></thead><tbody>
+<tr><td>1920x1080</td><td>92.2% (P 88.4% · R 96.4%)</td><td>82.4% (P 88.4% · R 77.2%)</td><td>69.0% (P 74.3% · R 64.5%)</td></tr>
+<tr><td>1280x720</td><td>88.7% (P 87.6% · R 89.8%)</td><td>62.9% (P 83.9% · R 50.3%)</td><td>73.1% (P 77.7% · R 69.0%)</td></tr>
+<tr><td>960x540</td><td>71.6% (P 69.2% · R 74.1%)</td><td>62.2% (P 83.1% · R 49.7%)</td><td>60.0% (P 57.4% · R 62.9%)</td></tr>
+<tr><td>640x360</td><td>52.3% (P 53.4% · R 51.3%)</td><td>34.1% (P 45.0% · R 27.4%)</td><td>16.7% (P 22.8% · R 13.2%)</td></tr>
+<tr><td><strong>retenção vs 1080p</strong></td><td>720p 96.2% · 540p 77.6% · 360p 56.7%</td><td>720p 76.3% · 540p 75.5% · 360p 41.4%</td><td>720p 105.9% · 540p 87.0% · 360p 24.2%</td></tr>
+</tbody></table>
+<h2>Modo mapa — todos os elementos interativos</h2>
+<h3>Por família</h3>
+<table><thead><tr><th>família</th><th>z-ai/glm-5.3-flash</th><th>xiaomi/mimo-v2.6-pro</th><th>deepseek/deepseek-v4.1-flash-1017</th></tr></thead><tbody>
+<tr><td>Bootstrap</td><td>97.0% (8)</td><td>94.3% (8)</td><td>75.2% (8)</td></tr>
+<tr><td>Fluent UI</td><td>66.4% (4)</td><td>23.2% (4)</td><td>42.2% (4)</td></tr>
+<tr><td>macOS</td><td>91.2% (8)</td><td>91.3% (8)</td><td>69.2% (8)</td></tr>
+<tr><td>Material 3</td><td>72.8% (4)</td><td>64.8% (4)</td><td>60.7% (4)</td></tr>
+<tr><td>React95</td><td>69.5% (4)</td><td>0.0% (4)</td><td>15.0% (4)</td></tr>
+</tbody></table>
+<h3>Por tipo de elemento — <code>z-ai/glm-5.3-flash</code></h3>
+<table><thead><tr><th>tipo</th><th>elementos</th><th>vistos</th><th>recall</th></tr></thead><tbody>
+<tr><td>button</td><td>352</td><td>264</td><td>75.0%</td></tr>
+<tr><td>link</td><td>132</td><td>108</td><td>81.8%</td></tr>
+<tr><td>input</td><td>80</td><td>70</td><td>87.5%</td></tr>
+<tr><td>menuitem</td><td>64</td><td>53</td><td>82.8%</td></tr>
+<tr><td>tab</td><td>56</td><td>53</td><td>94.6%</td></tr>
+<tr><td>checkbox</td><td>52</td><td>30</td><td>57.7%</td></tr>
+<tr><td>select</td><td>28</td><td>24</td><td>85.7%</td></tr>
+<tr><td>radio</td><td>12</td><td>6</td><td>50.0%</td></tr>
+<tr><td>switch</td><td>8</td><td>4</td><td>50.0%</td></tr>
+<tr><td>slider</td><td>4</td><td>2</td><td>50.0%</td></tr>
+</tbody></table>
+<h2>Metodologia</h2>
+<ul>
+<li>A verdade vem do DOM renderizado: caixa de cada controle em pixels de uma imagem 1920×1080 (não é anotação humana).</li>
+<li><strong>Mapa</strong>: casa quando o ponto cai DENTRO da caixa; um-para-um, guloso por qualidade (rótulo &gt; tipo &gt; proximidade). Precisão = casados/previsões, recall = casados/elementos, F1 harmônico. Rótulo normaliza acento/caixa, aceita contenção e aliases.</li>
+<li><strong>Ação</strong>: passa quando a ação é a esperada, o ponto cai na caixa do alvo (quando há alvo) e o texto confere (quando há texto).</li>
+<li>Erro de chamada conta como resposta errada; célula pulada por orçamento/cancelamento fica FORA das métricas (status parcial da run).</li>
+<li><strong>Resolução</strong>: downscale da tela canônica (sem reflow); o ponto é convertido para a grade da variante e reescalado para 1920×1080 antes de pontuar.</li>
+</ul>
+</main></body></html>

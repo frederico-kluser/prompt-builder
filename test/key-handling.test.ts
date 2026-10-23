@@ -234,10 +234,18 @@ const VERIFICADORES: Record<string, Verificador> = {
     // Nenhuma rota do backend (/v1…) chamada por fetch literal espalhado pela SPA.
     expect(fontes.filter(([, s]) => /fetch\(\s*['"`]\/v1/.test(s)).map(([f]) => f)).toEqual([]);
     // Fora do gateway, os ÚNICOS fetch diretos são o ranking PÚBLICO do
-    // catálogo e o cliente SOMENTE-LEITURA do self-host (http-api#3,
-    // web/src/backend.ts) — nenhum dos dois com key.
+    // catálogo, o cliente SOMENTE-LEITURA do self-host (http-api#3,
+    // web/src/backend.ts) e o dataset estático da visão (`/vision/…`, mesma
+    // origem) — nenhum deles leva key.
     const diretos = fontes.filter(([f, s]) => !f.startsWith('web/src/engine/') && /\bfetch\(/.test(s)).map(([f]) => f);
-    expect([...diretos].sort()).toEqual(['web/src/backend.ts', 'web/src/components/ModelSelector.tsx']);
+    expect([...diretos].sort()).toEqual([
+      'web/src/backend.ts',
+      'web/src/components/ModelSelector.tsx',
+      'web/src/vision/dataset.ts',
+    ]);
+    const visao = fontes.find(([f]) => f === 'web/src/vision/dataset.ts')![1];
+    expect(visao).not.toMatch(/getStoredKey|Authorization|apiKey|sk-or-/);
+    expect(visao).toContain('`${VISION_WEB_ROOT}/dataset@1.json`');
     const sel = fontes.find(([f]) => f === 'web/src/components/ModelSelector.tsx')![1];
     const linha = sel.split('\n').find((l) => /\bfetch\(/.test(l))!;
     expect(linha).toContain('DEFAULT_OPENROUTER_BASE_URL');

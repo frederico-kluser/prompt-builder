@@ -18,10 +18,12 @@ const DB_NAME = 'prompt-builder';
 // v3: modo JEV (decisões tipadas) — 'jevRuns', 'jevSessions' e 'jevSummaries'
 // (records do `src/engine/jev/` + o resumo da lista, gravados na mesma
 // transação por `web/src/jev/store.ts`).
+// v4: benchmark de visão — 'visionRuns' e 'visionSummaries' (records do
+// `src/engine/vision/` + resumo da lista, gravados por `web/src/vision/store.ts`).
 // O upgrade de clientes existentes já está coberto: o onupgradeneeded itera
-// STORES e cria apenas as stores que faltam, então quem vem da v1/v2 ganha as
-// stores novas sem perder os dados das demais.
-export const DB_VERSION = 3;
+// STORES e cria apenas as stores que faltam, então quem vem da v1/v2/v3 ganha
+// as stores novas sem perder os dados das demais.
+export const DB_VERSION = 4;
 export const STORES = [
   'runs',
   'sessions',
@@ -31,6 +33,8 @@ export const STORES = [
   'jevRuns',
   'jevSessions',
   'jevSummaries',
+  'visionRuns',
+  'visionSummaries',
 ] as const;
 export type Store = (typeof STORES)[number];
 

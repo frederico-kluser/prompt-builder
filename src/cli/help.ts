@@ -37,6 +37,7 @@ export const COMMANDS = [
   'agents',
   'telemetry',
   'jev',
+  'vision',
 ] as const;
 
 /** Rodapé comum de TODO help: contrato de saída + a tabela de códigos. */
@@ -89,6 +90,7 @@ const RESUMO: Record<string, string> = {
   agents: 'modo agente: arena de agentes com executor pi',
   telemetry: 'telemetria opt-in e os headers de atribuição enviados ao OpenRouter',
   jev: 'modo JEV: mede e evolui decisões tipadas (noul/choice/score) em casos rotulados',
+  vision: 'benchmark de visão: elementos clicáveis e ações em imagens de UI 1080p',
 };
 
 /**
@@ -350,6 +352,28 @@ const USO: Record<string, string> = {
   jev techniques           operadores do modo + as 19 técnicas de prompt LLM no Jev
   Alias: \`decisions\`. Exit 6 = inconclusiva; 7 = parcial por orçamento; 3 = config,
   lint, dataset, recusa LGPD/PII ou definição recusada pela API (400).`,
+  vision: `  vision run --models <a,b> --budget <usd|none> [--tasks map,action]
+          [--benchmark grounding|resolution|grid|matrix] [--provider <nome>]
+          [--resolutions 1920x1080,1280x720,960x540,640x360]
+          [--grid-variants plain,grid-simple,axis-grid,mark-grid]
+          [--matrix-grids plain,frame-axis,frame-mark,sidecar-grid]
+          [--families bootstrap,react95,fluent,material,macos] [--scenes <ids>]
+          [--limit N] [--coord-space pixels|normalized] [--temperature 0]
+          [--max-tokens 4096] [--reasoning <nível>] [--timeout <ms>] [--retries N]
+          [--dry-run] [--allow-concurrent]
+           roda o dataset de visão: o modelo recebe a imagem 1080p e devolve os
+           elementos clicáveis (map) e/ou a ação pedida com posição (action)
+           --benchmark resolution = mesma tela em 720p/540p/360p; grid = overlays
+           (plain, grade 9×9, eixos, mark-grid com recorte+2ª rodada); matrix =
+           resolução × grade SEM grade em cima do print (moldura/sidecar). Fixe
+           --provider para o roteamento não trocar de provedor entre células.
+  vision list [--limit N] | vision show <id>
+           runs de visão gravadas em <data-dir>/vision-runs
+  vision report <id> [--html <arq>] [-o <arq.md>]
+           placar em Markdown (stdout) e/ou relatório HTML autocontido
+  vision dataset list | show <cena> [--code] | verify
+           inspeciona e verifica (sha256) o dataset versionado em src/data/vision
+  Exit 7 = parcial por orçamento; 130 = interrompido; 3 = dataset/modelo sem visão.`,
 };
 
 export function renderCommandHelp(cmd: string): string {

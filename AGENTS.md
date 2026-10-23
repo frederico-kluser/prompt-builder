@@ -81,7 +81,7 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
   **10** cenários (seleção < 20 ⇒ sem holdout, `holdoutSkipReason: min-scenarios`, "confirmação
   fraca"), fechado por teste pareado EXATO (troca de sinais). Treino default = 10 cenários
   (`TRAINING_DEFAULT_STAGES`): com 5 o gate quase não consegue promover.
-- IndexedDB do cliente é **v3** (v2: store `prompts` — biblioteca `/prompts` via `web/src/engine/promptStore.ts`, client-only; v3: `jevRuns`/`jevSessions`/`jevSummaries` do modo JEV, `web/src/jev/store.ts`). Eventos agregados `stage.gabarito` (`stageIndex: -1`) e `duel.progress` (sem índice) **não** entram no reducer de etapas.
+- IndexedDB do cliente é **v4** (v2: store `prompts` — biblioteca `/prompts` via `web/src/engine/promptStore.ts`, client-only; v3: `jevRuns`/`jevSessions`/`jevSummaries` do modo JEV, `web/src/jev/store.ts`; v4: `visionRuns`/`visionSummaries` do benchmark de visão, `web/src/vision/store.ts`). Eventos agregados `stage.gabarito` (`stageIndex: -1`) e `duel.progress` (sem índice) **não** entram no reducer de etapas.
 - Há um **modo client-side** (`web/src/engine/`) que roda o pipeline no navegador (SPA
   estática/Vercel). Desde o F0 do PLANO-PARIDADE a duplicação é **classificada e vigiada**:
   módulos puros (`rank`/`stats`/`holdout`/`dedup`/`duelCore`/…) são **fonte única** em `src/` e o
@@ -122,6 +122,44 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
   `MOTION_TOKEN` está nas env vars da Vercel (2026-07-30) para levar o Motion+ real; sem ele o
   deploy passa com o substituto (antes do IMPL-118 caía com `400` em `api.motion.dev`).
 - **Não rode o backend `src/` em serverless (Vercel):** ele grava runs no filesystem (`storage.ts`), efêmero/isolado no serverless → `GET /v1/benchmark/runs/:id` vira `Run nao encontrada`. Produção = **SPA estática** (`npm run web:build`); o backend é só dev/self-host. Deploy errado se denuncia quando `/health` responde JSON em vez do `index.html`. Ver memória CoALA (`coala.py search "arquitetura shim mirror"`).
+
+## Benchmark de visão (UI grounding: `vision …`, `vision-dataset@1`)
+- Mede **imagem → clicável**: `map` (todos os elementos interativos com
+  `{type,label,iconDescription,x,y}`) e `action` (pedido em linguagem natural →
+  ação + posição). Motor compartilhado entre CLI e SPA (shim
+  `web/src/engine/vision.ts`); não há tool MCP.
+- **A verdade é o DOM**, nunca um juiz LLM: o cenário é HTML nosso, renderizado
+  em 1080p, e cada controle é anotado com `data-vision-id`; o build extrai
+  `getBoundingClientRect` + nome acessível. `npm run vision:build` (Chromium via
+  `playwright-core`, `VISION_CHROME` opcional) grava
+  `src/data/vision/{dataset@1.json,scenes/<família>/<id>.html,images/<id>.png}`
+  e FALHA se um interativo alcançável ficar sem anotação. Cenário de framework
+  pronto usa `htmlFile` + `autoAnnotate: '<prefixo>'` e tarefas por alvo
+  semântico (`target: {label,type,nth}`), resolvidas no build.
+- Dataset é **versionado e pinado** (sha256 de cada imagem; `vision dataset
+  verify`); a run não gera prova. `src/data/vision/**` é permitido pelo gate do
+  tarball (`scripts/tarball-gate.mjs`) — depois de um build, rode
+  `npm run build && node scripts/tarball-gate.mjs --update`.
+- Gateway: `ChatMessage.images` (data URL/https) → `wireMessages()` DEPOIS da
+  cascata de PII, texto antes da imagem; URL `file://` é recusada; em
+  `sensitiveRouting` (LGPD sensível) imagem é recusada antes do fetch;
+  `guessPromptTokens` soma `APPROX_IMAGE_TOKENS` por imagem.
+- Placar (`src/engine/vision/`): casamento 1-para-1 guloso por qualidade entre
+  pontos DENTRO da caixa (rótulo normalizado + aliases; tipo no vocabulário
+  fechado), F1 de região e de rótulo; ação passa com ação + alvo + texto.
+  Erro conta como resposta errada; célula pulada por orçamento/cancelamento fica
+  FORA das métricas. Contrato de prompt versionado em `VISION_PROMPT_VERSION`.
+- **SPA (`/vision` e `/vision/runs/:id`)**: o motor é o MESMO (shim
+  `web/src/engine/vision.ts` re-exporta `src/engine/vision/`); o que é seam vive
+  em `web/src/vision/` (dataset via `fetch`, IndexedDB v4 `visionRuns`/
+  `visionSummaries`, key/teto). `web/public/vision/` é GERADO por
+  `scripts/vision-web-assets.mjs` (prebuild/predev copiam manifesto + PNGs) e
+  fica fora do git. A tela mostra a verdade no hover, o heatmap por modelo na
+  matriz e um lightbox; não há item novo na nav (entra pelo card da `/new` e pela
+  paleta ⌘K).
+- Skills de execução: `prompt-builder docs vision`, e o roadmap completo
+  (F1–F11: dataset/splits, Mark-Grid, SoM, a11y, zoom, verificação, planner+
+  grounder, memória, segurança, produto) em `ROADMAP-VISAO.md`.
 
 ## Modo JEV (decisões tipadas: `jev …`, `jev-config@1`)
 - Mede e evolui definições de decisão (`noul`/`choice`/`score`) do Jev e de outros modelos de
