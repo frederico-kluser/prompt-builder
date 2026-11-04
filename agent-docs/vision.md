@@ -102,6 +102,43 @@ Sem `--budget` fora de um terminal, a run **recusa** (exit 2, nada foi gasto):
 `--budget 2` dá teto; `--budget none` assume o custo. `--dry-run` usa a MESMA
 sequência de recusas da execução real.
 
+### 6) SOMs: "esta tela mostra TODOS estes controlos?"
+
+`vision run` mede grounding livre (o modelo devolve x/y). Um modelo de **decisão**
+(SOM) não gera listas: responde perguntas tipadas. Para medir enumeração com ele,
+`vision som` gera um `jev-config@1` de **conjunto de candidatos** — todos os
+controlos reais da tela (do DOM) + rótulos **provados ausentes** nela, empacotados
+em blocos de `--slots` perguntas `noul` (uma por candidato, 1 imagem por bloco).
+
+```bash
+prompt-builder vision som --out sb.json --slots 12 \
+  --models perplexity/pplx-decider-v1.2,cloudflare/clef-omni,typesafe/jev-1.14 \
+  --repeats 2 --budget 2
+prompt-builder jev run -c sb.json --budget 2 --dry-run --json
+prompt-builder jev run -c sb.json --budget none --output-format ndjson
+```
+
+Saída: `sb.json` (config) + `sb.json.provenance.json` (candidato por `qid`, sem
+Base64, para recalcular precisão/recall por cena). Métricas: acurácia por pergunta
+e, sobretudo, **precisão/recall/F1 do conjunto aceite** (`elementSetMetrics`).
+
+O teto é honesto e limitado: os candidatos vêm do DOM (o "proposer" é o oráculo),
+logo o recall tem teto 1 por construção; isto mede **decisão sobre candidatos**,
+não descoberta livre nem coordenadas. Negativos de outras telas são mais fáceis
+que texto estático da própria tela — declarar isso no relatório.
+
+Flags do `vision som`:
+
+| flag | efeito |
+|---|---|
+| `--out <arquivo>` | **obrigatório**; cria o ficheiro (não sobrescreve) |
+| `--slots <n>` | perguntas por pedido (1..32; padrão 12) |
+| `--decoy-ratio <n>` | negativos por positivo (1..3; padrão 1) |
+| `--scenes a,b` | subconjunto de cenários |
+| `--models a,b` | competidores (máx. 8: limite do `jev-config@1`) |
+| `--repeats <n>` / `--budget <usd\|none>` | como no `jev run` |
+
+
 Flags da run:
 
 | flag | efeito |
