@@ -10,6 +10,8 @@
 // de saída (stdout = payload, stderr = narração).
 
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { configureGateway, getGateway, APPROX_IMAGE_TOKENS } from '../../openrouter.js';
 import { makeCallEstimator } from '../../estimate.js';
 import { REASONING_LEVELS } from '../../reasoning.js';
@@ -25,6 +27,10 @@ import {
   VISION_MATRIX_PROMPT_VERSION,
   VISION_RESOLUTIONS,
   VISION_TASKS,
+  SOM_BENCHMARK_FORMAT,
+  SOM_SLOTS,
+  SOM_SCENE_SPLITS,
+  buildSomBenchmark,
   type VisionBenchmark,
   type VisionCoordSpace,
   type VisionDataset,
@@ -66,7 +72,7 @@ import { budgetRequiredError, budgetUsdOf, toRefusal, type BudgetChoice } from '
 import { openSpendGuards, spendGuardRefusals, type SpendGuards } from '../spendGuards.js';
 import { forceExitNow, installGracefulStop } from '../runControl.js';
 
-export const VISION_SUBCOMMANDS = ['run', 'list', 'show', 'report', 'dataset'] as const;
+export const VISION_SUBCOMMANDS = ['run', 'list', 'show', 'report', 'dataset', 'som'] as const;
 
 const RUN_OPTIONS = {
   models: { type: 'string', short: 'm' },
@@ -99,6 +105,17 @@ const REPORT_OPTIONS = {
   'dataset-dir': { type: 'string' },
   out: { type: 'string', short: 'o' },
   html: { type: 'string' },
+} as const;
+
+const SOM_OPTIONS = {
+  out: { type: 'string', short: 'o' },
+  'dataset-dir': { type: 'string' },
+  scenes: { type: 'string' },
+  slots: { type: 'string' },
+  'decoy-ratio': { type: 'string' },
+  models: { type: 'string', short: 'm' },
+  repeats: { type: 'string' },
+  budget: { type: 'string' },
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -270,8 +287,174 @@ function datasetRaiz(values: Record<string, unknown>): string {
   return typeof dir === 'string' && dir.trim() ? dir : visionDataDir();
 }
 
-function datasetCliError(err: unknown): CliError {
-  if (err instanceof VisionDatasetError) {
+/** Concorrentes por omissão do benchmark de ELEMENTOS (SOMs com imagem no catálogo). */
+export const SOM_DEFAULT_MODELS = [
+  'cloudflare/clef-omni',
+  'typesafe/jev-1.14',
+  'perplexity/pplx-decider-v1.2',
+  'perplexity/pplx-decider-flash-v1.2',
+  'openai/gpt-6-luna-decisions',
+  'liquid/d1.1',
+  'morph/reflex',
+  'nace-ai/drex-max',
+] as const;
+
+/** `jev-config@1` aceita no máximo 8 competidores por run. */
+export const SOM_MAX_MODELS = 8;
+
+/**
+ * `vision som` — gera um `jev-config@1` que mede "TODOS os controles desta tela?"
+ * num modelo de DECISÃO: cada caso é um bloco de `slots` candidatos (controles
+ * reais + rótulos provados ausentes) com uma pergunta `noul` por candidato.
+ * Precisão/recall/F1 do conjunto saem do record; acurácia por pergunta também.
+ */
+async function cmdSom(argv: string[]): Promise<number> {
+  const parsed = parse(argv, { ...SOM_OPTIONS });
+  const ctx = buildContext(parsed);
+  const root = datasetRaiz(ctx.values);
+  const out = typeof ctx.values.out === 'string' && ctx.values.out.trim() ? path.resolve(ctx.values.out) : null;
+  if (!out) {
+    throw new CliError('Falta --out: o arquivo jev-config@1 a gerar.', EXIT.USAGE, undefined, {
+      code: 'usage.missing_out',
+      hint: 'Ex.: `prompt-builder vision som --out .work/vision-som.json --models cloudflare/clef-omni,typesafe/jev-1.14 --budget 2`.',
+    });
+  }
+  const verify = await verifyVisionDataset(root);
+  if (!verify.ok) {
+    throw new CliError(`dataset de visão inválido: ${verify.issues[0] ?? 'ver issues'}`, EXIT.CONFIG, verify, {
+      code: 'vision.dataset_invalid',
+      hint: 'Rode `prompt-builder vision dataset verify`.',
+    });
+  }
+  const carregado = await loadVisionDataset(root);
+  const slots = inteiroDe(ctx.values.slots, '--slots', 1, 32, SOM_SLOTS);
+  const decoyRatio = inteiroDe(ctx.values['decoy-ratio'], '--decoy-ratio', 1, 3, 1);
+  const pedidas = listaDe(ctx.values.scenes, '--scenes');
+  const sceneIds = pedidas.length ? pedidas : undefined;
+  const models = listaDe(ctx.values.models, '--models');
+  if (models.length > SOM_MAX_MODELS) {
+    throw new CliError(`--models aceita no máximo ${SOM_MAX_MODELS} (o schema do jev-config limita os competidores).`, EXIT.USAGE, {
+      models,
+      max: SOM_MAX_MODELS,
+    }, { code: 'usage.too_many_models', hint: 'Divida em duas runs com o mesmo controle no início (ele é a base das comparações pareadas).' });
+  }
+  const repeats = inteiroDe(ctx.values.repeats, '--repeats', 1, 10, 2);
+  const budgetUsd = Number(ctx.values.budget ?? 2);
+  if (!Number.isFinite(budgetUsd) || budgetUsd <= 0) {
+    throw new CliError('--budget deve ser > 0 (USD).', EXIT.USAGE, { budget: ctx.values.budget });
+  }
+
+  // Imagens: só probes 1280×720 (Jev limita 1568/eixo) — bytes conferidos por sha256.
+  const imageFor = async (sceneId: string): Promise<string> => {
+    const scene = carregado.dataset.scenes.find((s) => s.id === sceneId);
+    const ref = scene?.probes?.resolutions?.find((r) => r.id === '1280x720');
+    if (!scene || !ref) {
+      throw new CliError(`cenário "${sceneId}" sem probe 1280×720 — gere o dataset (npm run vision:build).`, EXIT.CONFIG, { sceneId });
+    }
+    const bytes = await fs.readFile(path.join(root, ref.file));
+    const sha = createHash('sha256').update(bytes).digest('hex');
+    if (sha !== ref.sha256 || bytes.byteLength !== ref.bytes) {
+      throw new CliError(`imagem do cenário "${sceneId}" diverge do manifesto (sha256/tamanho).`, EXIT.CONFIG, { sceneId });
+    }
+    return `data:image/png;base64,${bytes.toString('base64')}`;
+  };
+  const sceneText: Record<string, string> = {};
+  for (const scene of carregado.dataset.scenes) {
+    if (sceneIds && !sceneIds.includes(scene.id)) continue;
+    sceneText[scene.id] = normalizeHtmlForDecoys(await sceneSource(root, scene));
+  }
+  const images = new Map<string, string>();
+  for (const sceneId of Object.keys(sceneText)) images.set(sceneId, await imageFor(sceneId));
+
+  const bench = buildSomBenchmark(carregado.dataset, {
+    sceneText,
+    imageFor: (sceneId) => {
+      const url = images.get(sceneId);
+      if (!url) throw new CliError(`sem imagem carregada para "${sceneId}".`, EXIT.CONFIG, { sceneId });
+      return url;
+    },
+    slots,
+    decoyRatio,
+    ...(sceneIds ? { sceneIds } : {}),
+  });
+
+  const config = {
+    format: 'jev-config@1',
+    mode: 'compare',
+    theme: 'UI elements: is every candidate control on this screen?',
+    language: 'en',
+    spec: {
+      // `spec.questions` é RECORD (mapa id → pergunta), não array.
+      questions: Object.fromEntries(
+        bench.questions.map((q) => [q.id, { type: q.type, instructions: q.instructions, criteria: q.criteria }]),
+      ),
+    },
+    cases: bench.cases,
+    models: { decision: models.length ? models : [...SOM_DEFAULT_MODELS] },
+    repeats,
+    fit: false,
+    budgetUsd,
+    compare: { primary: 'accuracy' },
+    piiMode: 'synthetic',
+  };
+  await fs.writeFile(out, `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx' });
+  // Proveniência SEM Base64: permite recalcular precisão/recall por cena.
+  const provenance = {
+    format: SOM_BENCHMARK_FORMAT,
+    datasetHash: bench.datasetHash,
+    slots: bench.slots,
+    sceneSplits: SOM_SCENE_SPLITS,
+    counts: bench.counts,
+    models: config.models.decision,
+    repeats,
+    cases: bench.caseSlots.map(({ caseId, slots: block }) => {
+      const item = bench.cases.find((c) => c.id === caseId)!;
+      return {
+        id: caseId,
+        split: item.split,
+        tags: item.tags,
+        slots: block.map((cand, i) => ({ qid: `s${i + 1}`, kind: cand.kind, ref: cand.ref, description: cand.description })),
+      };
+    }),
+  };
+  await fs.writeFile(`${out}.provenance.json`, `${JSON.stringify(provenance, null, 2)}\n`, { flag: 'wx' });
+
+  if (ctx.out.isText) {
+    ctx.out.line(`benchmark de elementos → ${out}`);
+    ctx.out.line(
+      `${bench.counts.cases} caso(s) (${bench.counts.train} treino · ${bench.counts.holdout} holdout) · ` +
+        `${bench.counts.positives} controle(s) reais · ${bench.counts.negatives} ausente(s) · ${bench.slots} perguntas/pedido`,
+    );
+    ctx.out.line(
+      `modelos (${config.models.decision.length}): ${config.models.decision.join(', ')}`,
+    );
+    ctx.out.line(`depois: prompt-builder jev run -c "${out}" --budget ${budgetUsd} --dry-run`);
+  }
+  ctx.out.result(true, 'vision.som.build', {
+    out,
+    provenance: `${out}.provenance.json`,
+    datasetHash: bench.datasetHash,
+    counts: bench.counts,
+    slots: bench.slots,
+    models: config.models.decision,
+    repeats,
+    budgetUsd,
+  });
+  return EXIT.OK;
+}
+
+/** HTML do cenário normalizado, só para PROVAR que o rótulo decoy não está na tela. */
+function normalizeHtmlForDecoys(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/\s+/gu, ' ');
+}
+
+function datasetCliError(err: unknown): CliError {  if (err instanceof VisionDatasetError) {
     return new CliError(err.message, EXIT.CONFIG, { issues: err.issues }, {
       code: 'vision.dataset_invalid',
       hint: 'Rode `prompt-builder vision dataset verify` para a lista completa; o dataset viaja no pacote (`src/data/vision`).',
@@ -825,6 +1008,8 @@ export async function cmdVision(argv: string[]): Promise<number> {
       return cmdReport(rest);
     case 'dataset':
       return cmdDataset(rest);
+    case 'som':
+      return cmdSom(rest);
     default:
       throw new CliError(
         sub ? `Subcomando desconhecido: "vision ${sub}".` : 'Uso: prompt-builder vision <subcomando> — veja `prompt-builder vision --help`.',

@@ -7,4 +7,5 @@ export * from './score.js';
 export * from './prompt.js';
 export * from './dataset.js';
 export * from './models.js';
+export * from './som.js';
 export * from './runner.js';
