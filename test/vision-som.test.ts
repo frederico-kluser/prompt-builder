@@ -12,8 +12,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   SOM_BENCHMARK_FORMAT,
+  SOM_DISCOVERY_TYPES,
+  SOM_REGIONS,
   SOM_SCENE_SPLITS,
+  buildDiscoveryBenchmark,
   buildSomBenchmark,
+  discoveryMetrics,
   elementSetMetrics,
   normalizeLabel,
   visibleLabelOf,
@@ -161,13 +165,120 @@ describe('métricas de conjunto', () => {
   });
 });
 
+describe('descoberta: o modelo reporta o que existe, sem candidatos', () => {
+  const cena = (id: string, els: Array<[string, string, number, number]>) => ({
+    id,
+    family: 'bootstrap',
+    title: id,
+    theme: 'light',
+    viewport: { width: 1920, height: 1080 },
+    image: { file: `images/${id}.png`, sha256: 'a'.repeat(64), bytes: 10 },
+    code: { file: `scenes/bootstrap/${id}.html` },
+    elements: els.map(([label, type, x, y], i) => ({
+      id: `${id}-el${i}`,
+      type,
+      label,
+      iconDescription: null,
+      bbox: { x, y, w: 80, h: 30 },
+      center: { x: x + 40, y: y + 15 },
+    })),
+    tasks: [],
+  });
+  const base = [
+    // topo-esquerda (100,100), topo-direita (1500,200), baixo-centro (900,900)
+    cena('bootstrap-painel-cursos', [['Novo curso', 'button', 100, 100], ['Buscar', 'input', 1500, 200], ['Ver mais', 'link', 900, 900]]),
+    cena('fluent-painel', [['Salvar', 'button', 120, 120], ['Modo', 'switch', 1400, 150], ['Aba', 'tab', 1000, 950]]),
+  ];
+  const build = () => buildDiscoveryBenchmark(dataset(base), { imageFor: () => IMG });
+
+  it('pergunta 10 tipos + 6 regiões (16, teto de adaptadores como Drex Max)', () => {
+    const b = build();
+    expect(b.questions).toHaveLength(16);
+    expect(b.questions.map((q) => q.id)).toEqual([
+      ...SOM_DISCOVERY_TYPES.map((t) => `type_${t.id}`),
+      ...SOM_REGIONS.map((r) => `region_${r.id}`),
+    ]);
+    expect(b.cases).toHaveLength(2);
+    expect(b.counts).toMatchObject({ cases: 2, train: 1, holdout: 1, questions: 16 });
+    for (const q of b.questions) expect(q.type).toBe('noul');
+  });
+
+  it('o state leva SÓ a imagem: nenhum rótulo, id, contagem ou candidato', () => {
+    const b = build();
+    for (const c of b.cases) {
+      expect(c.state).toHaveLength(2);
+      expect(typeof c.state[0]).toBe('string');
+      expect(c.state[1]).toMatchObject({ type: 'image_url' });
+      const serializado = JSON.stringify(c.state);
+      for (const word of ['Novo curso', 'Salvar', 'button', 'switch', 'element', 'bbox']) {
+        expect(serializado).not.toContain(word);
+      }
+    }
+  });
+
+  it('o ouro vem do DOM: tipos que existem e regiões ocupadas', () => {
+    const b = build();
+    const porCaso = new Map(b.gold.map((g) => [g.caseId, g]));
+    const g1 = porCaso.get('bootstrap-painel-cursos·descoberta')!;
+    expect(g1.types).toEqual(['button', 'input', 'link']);
+    expect(g1.regions).toEqual(['bottom-center', 'top-left', 'top-right']);
+    expect(g1.elementCount).toBe(3);
+    const esperado = b.cases[0].expected;
+    expect(esperado.type_button).toBe(true);
+    expect(esperado.type_radio).toBe(false); // tipo ausente continua a ser uma pergunta (negativa)
+    expect(esperado['region_top-left']).toBe(true);
+    expect(esperado['region_bottom-left']).toBe(false);
+  });
+
+  it('as mesmas perguntas em todas as telas (spec fixa) e partição por cena', () => {
+    const b = build();
+    const ids0 = Object.keys(b.cases[0].expected).sort();
+    for (const c of b.cases) expect(Object.keys(c.expected).sort()).toEqual(ids0);
+    expect(b.cases[0].tags).toContain('task:discovery');
+    expect(b.cases.map((c) => c.split)).toEqual(['train', 'holdout']);
+  });
+});
+
+describe('métricas de descoberta', () => {
+  it('P/R/F1 dos tipos e das regiões reportadas', () => {
+    const esperado = {
+      type_button: true, type_link: true, type_radio: false, type_slider: false,
+      region_top_left: true, region_top_right: false,
+    };
+    // acertou tudo
+    expect(discoveryMetrics({ ...esperado }, esperado)).toMatchObject({
+      typeTruePositives: 2, typeFalsePositives: 0, typeFalseNegatives: 0,
+      regionTruePositives: 1, regionFalsePositives: 0, regionFalseNegatives: 0,
+    });
+    // exagerou: reportou radio e slider; esqueceu link e top-right
+    const exagerou = discoveryMetrics(
+      { type_button: true, type_link: false, type_radio: true, type_slider: true, region_top_left: true, region_top_right: true },
+      esperado,
+    );
+    expect(exagerou).toMatchObject({ typeTruePositives: 1, typeFalsePositives: 2, typeFalseNegatives: 1 });
+    expect(exagerou.typePrecision).toBeCloseTo(1 / 3);
+    expect(exagerou.typeRecall).toBeCloseTo(1 / 2);
+    expect(exagerou.regionTruePositives).toBe(1);
+    expect(exagerou.regionFalsePositives).toBe(1);
+  });
+
+  it('recusar tudo não inventa precisão (null, não 1)', () => {
+    const esperado = { type_button: true, type_radio: false, region_top_left: true, region_top_right: false };
+    const m = discoveryMetrics({}, esperado);
+    expect(m.typePrecision).toBeNull();
+    expect(m.typeRecall).toBe(0);
+    expect(m.typeF1).toBeNull();
+    expect(m.regionRecall).toBe(0);
+  });
+});
+
 describe('gerador real (dataset do pacote)', () => {
   it('gera jev-config@1 + proveniência sem Base64 a partir do dataset pinado', async () => {
     const { cmdVision } = await import('../src/cli/commands/vision.js');
     const dir = await mkdtemp(join(tmpdir(), 'pb-som-'));
     try {
       const out = join(dir, 'som.json');
-      const code = await cmdVision(['som', '--out', out, '--slots', '12', '--scenes', 'bootstrap-login']);
+      const code = await cmdVision(['som', '--out', out, '--task', 'elements', '--slots', '12', '--scenes', 'bootstrap-login']);
       expect(code).toBe(0);
       const cfg = JSON.parse(await (await import('node:fs/promises')).readFile(out, 'utf8'));
       expect(cfg.format).toBe('jev-config@1');

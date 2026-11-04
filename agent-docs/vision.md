@@ -105,27 +105,32 @@ sequência de recusas da execução real.
 ### 6) SOMs: "esta tela mostra TODOS estes controlos?"
 
 `vision run` mede grounding livre (o modelo devolve x/y). Um modelo de **decisão**
-(SOM) não gera listas: responde perguntas tipadas. Para medir enumeração com ele,
-`vision som` gera um `jev-config@1` de **conjunto de candidatos** — todos os
-controlos reais da tela (do DOM) + rótulos **provados ausentes** nela, empacotados
-em blocos de `--slots` perguntas `noul` (uma por candidato, 1 imagem por bloco).
+(SOM) não gera listas: responde perguntas tipadas. Há dois desenhos:
+
+| `--task` | O que o modelo recebe | O que mede |
+|---|---|---|
+| `discovery` (padrão) | **só a imagem** + 16 perguntas fixas (10 tipos + 6 regiões) | o que ele **reporta existir** — sem candidatos, sem rótulos |
+| `elements` | imagem + blocos de 12 candidatos (controlos reais + ausentes) | aceitação de candidatos (recall de teto 1) |
 
 ```bash
-prompt-builder vision som --out sb.json --slots 12 \
-  --models perplexity/pplx-decider-v1.2,cloudflare/clef-omni,typesafe/jev-1.14 \
-  --repeats 2 --budget 2
-prompt-builder jev run -c sb.json --budget 2 --dry-run --json
-prompt-builder jev run -c sb.json --budget none --output-format ndjson
+# descoberta: o modelo diz o que existe, sem lhe dizer o que procurar
+prompt-builder vision som --out disc.json --task discovery \
+  --models perplexity/pplx-decider-v1.2,cloudflare/clef-omni
+# elementos: candidatos com rótulos do DOM
+prompt-builder vision som --out elem.json --task elements --slots 12 \
+  --models perplexity/pplx-decider-v1.2,typesafe/jev-1.14
+prompt-builder jev run -c disc.json --budget none --output-format ndjson
 ```
 
-Saída: `sb.json` (config) + `sb.json.provenance.json` (candidato por `qid`, sem
-Base64, para recalcular precisão/recall por cena). Métricas: acurácia por pergunta
-e, sobretudo, **precisão/recall/F1 do conjunto aceite** (`elementSetMetrics`).
+> **Teto de 16 perguntas por pedido**: o Drex Max devolve
+> `422 questions must be an object of 1..16 questions`. Por isso a descoberta usa
+> exatamente 16 (10 tipos + 6 regiões). Acima disso, divida em dois pedidos — o
+> mesmo `state` é cobrado uma vez por grupo no Perplexity, mas cada pedido é um
+> `state` novo.
 
-O teto é honesto e limitado: os candidatos vêm do DOM (o "proposer" é o oráculo),
-logo o recall tem teto 1 por construção; isto mede **decisão sobre candidatos**,
-não descoberta livre nem coordenadas. Negativos de outras telas são mais fáceis
-que texto estático da própria tela — declarar isso no relatório.
+Métricas: `discoveryMetrics` (P/R/F1 de tipos e de regiões) e
+`elementSetMetrics` (P/R/F1 do conjunto aceite). Ambas no barrel
+`src/engine/vision`.
 
 Flags do `vision som`:
 

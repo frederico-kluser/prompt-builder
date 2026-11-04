@@ -28,8 +28,10 @@ import {
   VISION_RESOLUTIONS,
   VISION_TASKS,
   SOM_BENCHMARK_FORMAT,
+  SOM_DISCOVERY_FORMAT,
   SOM_SLOTS,
   SOM_SCENE_SPLITS,
+  buildDiscoveryBenchmark,
   buildSomBenchmark,
   type VisionBenchmark,
   type VisionCoordSpace,
@@ -110,6 +112,7 @@ const REPORT_OPTIONS = {
 const SOM_OPTIONS = {
   out: { type: 'string', short: 'o' },
   'dataset-dir': { type: 'string' },
+  task: { type: 'string' },
   scenes: { type: 'string' },
   slots: { type: 'string' },
   'decoy-ratio': { type: 'string' },
@@ -365,24 +368,90 @@ async function cmdSom(argv: string[]): Promise<number> {
   }
   const images = new Map<string, string>();
   for (const sceneId of Object.keys(sceneText)) images.set(sceneId, await imageFor(sceneId));
+  const imageOf = (sceneId: string): string => {
+    const url = images.get(sceneId);
+    if (!url) throw new CliError(`sem imagem carregada para "${sceneId}".`, EXIT.CONFIG, { sceneId });
+    return url;
+  };
 
-  const bench = buildSomBenchmark(carregado.dataset, {
-    sceneText,
-    imageFor: (sceneId) => {
-      const url = images.get(sceneId);
-      if (!url) throw new CliError(`sem imagem carregada para "${sceneId}".`, EXIT.CONFIG, { sceneId });
-      return url;
-    },
-    slots,
-    decoyRatio,
-    ...(sceneIds ? { sceneIds } : {}),
-  });
+  const taskFlag = typeof ctx.values.task === 'string' && ctx.values.task ? ctx.values.task : 'discovery';
+  if (taskFlag !== 'discovery' && taskFlag !== 'elements') {
+    throw new CliError(`--task inválido: ${taskFlag}.`, EXIT.USAGE, { accepted: ['discovery', 'elements'] }, {
+      code: 'usage.invalid_flag_value',
+      hint: 'discovery = sem candidatos (só imagem); elements = conjunto de candidatos com rótulos.',
+    });
+  }
 
   const config = {
     format: 'jev-config@1',
     mode: 'compare',
-    theme: 'UI elements: is every candidate control on this screen?',
+    theme: taskFlag === 'discovery' ? 'UI discovery: what exists on this screen?' : 'UI elements: is every candidate control on this screen?',
     language: 'en',
+    budgetUsd,
+    models: { decision: models.length ? models : [...SOM_DEFAULT_MODELS] },
+    repeats,
+    fit: false,
+    compare: { primary: 'accuracy' },
+    piiMode: 'synthetic',
+  };
+  let provenance: Record<string, unknown>;
+
+  if (taskFlag === 'discovery') {
+    const bench = buildDiscoveryBenchmark(carregado.dataset, {
+      imageFor: imageOf,
+      ...(sceneIds ? { sceneIds } : {}),
+    });
+    Object.assign(config, {
+      spec: {
+        questions: Object.fromEntries(
+          bench.questions.map((q) => [q.id, { type: q.type, instructions: q.instructions, criteria: q.criteria }]),
+        ),
+      },
+      cases: bench.cases,
+    });
+    await fs.writeFile(out, `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx' });
+    provenance = {
+      format: SOM_DISCOVERY_FORMAT,
+      task: 'discovery',
+      datasetHash: bench.datasetHash,
+      sceneSplits: SOM_SCENE_SPLITS,
+      counts: bench.counts,
+      models: config.models.decision,
+      repeats,
+      gold: bench.gold,
+      questions: bench.questions.map((q) => q.id),
+    };
+    await fs.writeFile(`${out}.provenance.json`, `${JSON.stringify(provenance, null, 2)}\n`, { flag: 'wx' });
+    if (ctx.out.isText) {
+      ctx.out.line(`benchmark de DESCOBERTA (só imagem, sem candidatos) → ${out}`);
+      ctx.out.line(
+        `${bench.counts.cases} caso(s) (${bench.counts.train} treino · ${bench.counts.holdout} holdout) · ` +
+          `${bench.counts.questions} perguntas/pedido (10 tipos + 6 regiões + 1)`,
+      );
+      ctx.out.line(`modelos (${config.models.decision.length}): ${config.models.decision.join(', ')}`);
+      ctx.out.line(`depois: prompt-builder jev run -c "${out}" --budget ${budgetUsd} --dry-run`);
+    }
+    ctx.out.result(true, 'vision.som.build', {
+      out,
+      provenance: `${out}.provenance.json`,
+      task: 'discovery',
+      datasetHash: bench.datasetHash,
+      counts: bench.counts,
+      models: config.models.decision,
+      repeats,
+      budgetUsd,
+    });
+    return EXIT.OK;
+  }
+
+  const bench = buildSomBenchmark(carregado.dataset, {
+    sceneText,
+    imageFor: imageOf,
+    slots,
+    decoyRatio,
+    ...(sceneIds ? { sceneIds } : {}),
+  });
+  Object.assign(config, {
     spec: {
       // `spec.questions` é RECORD (mapa id → pergunta), não array.
       questions: Object.fromEntries(
@@ -390,17 +459,12 @@ async function cmdSom(argv: string[]): Promise<number> {
       ),
     },
     cases: bench.cases,
-    models: { decision: models.length ? models : [...SOM_DEFAULT_MODELS] },
-    repeats,
-    fit: false,
-    budgetUsd,
-    compare: { primary: 'accuracy' },
-    piiMode: 'synthetic',
-  };
+  });
   await fs.writeFile(out, `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx' });
   // Proveniência SEM Base64: permite recalcular precisão/recall por cena.
-  const provenance = {
+  provenance = {
     format: SOM_BENCHMARK_FORMAT,
+    task: 'elements',
     datasetHash: bench.datasetHash,
     slots: bench.slots,
     sceneSplits: SOM_SCENE_SPLITS,
