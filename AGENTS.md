@@ -187,6 +187,13 @@ do pacote, `npx prompt-builder-cli` falha com "could not determine executable to
   ⚠️ O CORS NÃO expõe `Retry-After`: na aba só o AIMD protege de 429. Com LLM na run a SPA exige
   teto (`budgetUsd`), e LLM sem preço exige o "sim" do custo mesmo com a faixa baixa.
 - Docs para agentes: `agent-docs/jev.md` (`prompt-builder docs jev`).
+- **Mídia no `state` (SOM de imagem):** `{type:'image_url', image_url:{url:'data:image/png;base64,…'}}`
+  atravessa o corpo como está. `src/engine/jev/media.ts` (puro) separa mídia de TEXTO:
+  o Base64 **não** conta chars/4 (era o que fazia `budget.context` recusar screenshot
+  legítimo) e entra uma estimativa visual por área; o lint valida por PERFIL DE
+  ADAPTADOR (`mediaProfileFor`: TypeSafe 280..1568/16MiB/64 + aninhado; Clef Omni
+  4MiB/4/topo) com códigos `state.media_*`. Não há fórmula oficial de tokens de
+  imagem: a estimativa é declarada e o custo real continua vindo de `usage.cost`.
 
 ## CLI (`src/cli/`, publicado como `prompt-builder`)
 - Mora em `src/cli/` e compila pelo MESMO `tsconfig.json` → `dist/cli/`. **Não** é uma terceira
@@ -281,3 +288,23 @@ nesta máquina):
 7. **Nunca contornar um gate**: bloqueado → corrigir a CAUSA e repetir. Diagnóstico:
    `bash ~/.dsh/skills/opensource-project/scripts/oss-doctor.sh`; gates por ação:
    `oss-gate.sh commit-msg|push|pr|merge|release`; próxima versão calculada: `oss-version.py next`.
+
+<!-- oss:merge-policy:begin -->
+## Política de integração: merge, nunca rebase
+
+A integração é **merge**; rebase é proibido. Merge commit e squash merge são
+merges — rebase não é.
+
+- **Sincronizar a ramificação**: `git fetch origin && git merge origin/main` (ou
+  `git pull`, que faz merge). **Nunca** `git rebase`, `git pull --rebase` nem
+  `git rebase origin/main`.
+- **Integrar o PR**: `gh pr merge --squash --delete-branch` no cofre (`main` é
+  squash-only por ruleset; squash é merge e mantém o histórico linear). Onde o
+  ruleset permitir, `gh pr merge --merge` também é merge; **rebase-merge nunca**.
+- **PR desatualizado**: `gh pr update-branch` (merge) ou merge de `origin/main` na
+  ramificação; depois `gh pr checks --watch`. Sem rebase e sem force-push.
+- **Configuração imposta**: `oss-enforce.sh` deteta rebase no projeto
+  (`pull.rebase`, `branch.*.rebase`, `allow_rebase_merge`, `allowed_merge_methods`)
+  e corrige — `[CONFIGURADO]` — sem perguntar. Diagnóstico dedicado:
+  `oss-merge-policy.sh check` (na instalação da skill).
+<!-- oss:merge-policy:end -->

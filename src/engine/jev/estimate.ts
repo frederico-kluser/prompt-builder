@@ -12,6 +12,7 @@ import { deltaDetectavelPp } from '../../stats.js';
 import type { OpenRouterModel } from '../../types.js';
 import type { JevContestant, JevSpec, ResolvedJevConfig } from './types.js';
 import { projectState, wireQuestionsOf } from './wire.js';
+import { estimateVisualTokens, splitMedia } from './media.js';
 import { renderLlmDecisionMessages } from './llmRender.js';
 
 /** Fallback SÓ da estimativa quando o catálogo de decisões não pôde ser lido (jev-1.13). */
@@ -59,7 +60,15 @@ export interface JevEstimate {
 
 function decisionTokens(spec: JevSpec, state: unknown, qids?: readonly string[]): number {
   const st = projectState(state as never, spec.stateView);
-  return countTextTokens(JSON.stringify({ state: st, questions: wireQuestionsOf(spec, qids) })) + DECISION_REQUEST_OVERHEAD_TOKENS;
+  // Mídia tipada NÃO é texto: o Base64 sai da conta de chars e entra a
+  // estimativa visual (ver media.ts). Sem isso, 40 KB de data URL viram ~10 mil
+  // "tokens" de texto e o `budget.context` recusa uma imagem legítima.
+  const { value, parts } = splitMedia(st);
+  return (
+    countTextTokens(JSON.stringify({ state: value, questions: wireQuestionsOf(spec, qids) })) +
+    DECISION_REQUEST_OVERHEAD_TOKENS +
+    estimateVisualTokens(parts)
+  );
 }
 
 export interface EstimateJevOptions {

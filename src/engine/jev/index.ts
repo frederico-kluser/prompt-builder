@@ -4,6 +4,7 @@
 
 export * from './types.js';
 export * from './wire.js';
+export * from './media.js';
 export * from './lint.js';
 export * from './dist.js';
 export * from './scoring.js';
