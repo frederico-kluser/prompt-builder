@@ -37,6 +37,8 @@ describe('left#15 (1) rotas pesadas sob demanda, com esqueleto e fronteira de er
       ['JevRunView', './pages/jev/JevRunView'],
       ['JevTrainingView', './pages/jev/JevTrainingView'],
       ['JevReportPage', './pages/jev/JevReportPage'],
+      ['VisionPage', './pages/VisionPage'],
+      ['VisionRunPage', './pages/VisionRunPage'],
     ];
     for (const [nome, mod] of lazies) {
       expect(main, nome).toContain(`const ${nome} = lazyPage(() => import('${mod}'), '${nome}');`);

@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Painel de Operações · Material 3</title>
+<style>
+  @font-face {
+    font-family: "Roboto";
+    src: url("../../vendor/material/roboto-latin-wght.woff2") format("woff2");
+    font-weight: 100 900; font-style: normal; font-display: block;
+  }
+  @font-face {
+    font-family: "Material Symbols Outlined";
+    src: url("../../vendor/material/material-symbols-outlined.woff2") format("woff2");
+    font-weight: 100 700; font-style: normal; font-display: block;
+  }
+
+  :root {
+    color-scheme: light;
+    --md-ref-typeface-brand: "Roboto", sans-serif;
+    --md-ref-typeface-plain: "Roboto", sans-serif;
+    --m3-surface: #fef7ff;
+    --m3-surface-dim: #ded8e1;
+    --m3-container: #f3edf7;
+    --m3-container-high: #ece6f0;
+    --m3-container-low: #f7f2fa;
+    --m3-on-surface: #1d1b20;
+    --m3-on-surface-variant: #49454f;
+    --m3-outline: #79747e;
+    --m3-outline-variant: #cac4d0;
+    --m3-primary: #6750a4;
+    --m3-primary-container: #eaddff;
+    --m3-on-primary-container: #21005d;
+    --m3-secondary-container: #e8def8;
+    --m3-tertiary: #7d5260;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: var(--md-ref-typeface-plain);
+    background: var(--m3-surface);
+    color: var(--m3-on-surface);
+    font-size: 14px;
+    overflow: hidden;
+  }
+  md-icon { font-family: "Material Symbols Outlined"; }
+
+  /* ------------------------------------------------------------ structure */
+  .app { display: flex; flex-direction: column; height: 1080px; }
+
+  .topbar {
+    height: 64px; flex: 0 0 64px; display: flex; align-items: center; gap: 14px;
+    padding: 0 24px; background: var(--m3-container); border-bottom: 1px solid var(--m3-outline-variant);
+  }
+  .topbar .brand { display: flex; align-items: center; gap: 12px; margin-right: 8px; }
+  .topbar .brand .logo {
+    width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
+    background: var(--m3-primary); color: #fff;
+  }
+  .topbar h1 { font-size: 19px; font-weight: 500; margin: 0; letter-spacing: .2px; }
+  .topbar .sub { font-size: 12px; color: var(--m3-on-surface-variant); }
+  .topbar .spacer { flex: 1 1 auto; }
+  .topbar md-outlined-text-field { width: 340px; --md-outlined-text-field-container-shape: 22px; }
+  .avatar {
+    width: 34px; height: 34px; border-radius: 50%; background: var(--m3-tertiary); color: #fff;
+    display: grid; place-items: center; font-size: 13px; font-weight: 500; letter-spacing: .3px;
+  }
+
+  .tabsbar { flex: 0 0 56px; display: flex; align-items: flex-end; padding: 0 20px; border-bottom: 1px solid var(--m3-outline-variant); background: var(--m3-surface); }
+  md-tabs { width: 100%; }
+
+  .body { flex: 1 1 auto; display: flex; min-height: 0; }
+
+  /* sidebar */
+  .nav { width: 288px; flex: 0 0 288px; background: var(--m3-container-low); border-right: 1px solid var(--m3-outline-variant); padding: 16px 12px; }
+  .nav .section { font-size: 11px; font-weight: 600; letter-spacing: .9px; text-transform: uppercase; color: var(--m3-on-surface-variant); margin: 16px 12px 8px; }
+  .nav md-list { padding: 0; --md-list-container-color: transparent; }
+  .nav md-list-item {
+    --md-list-item-label-text-font: var(--md-ref-typeface-plain);
+    --md-list-item-label-text-size: 14px;
+    border-radius: 26px; margin-bottom: 2px;
+  }
+  .nav md-list-item.current {
+    background: var(--m3-secondary-container);
+    --md-list-item-label-text-color: var(--m3-on-primary-container);
+  }
+  .nav .nav-foot { margin: 20px 12px 0; padding: 14px; border-radius: 16px; background: var(--m3-container-high); font-size: 12.5px; line-height: 1.45; color: var(--m3-on-surface-variant); }
+  .nav .nav-foot strong { color: var(--m3-on-surface); display: block; margin-bottom: 2px; }
+
+  /* main */
+  main { flex: 1 1 auto; min-width: 0; padding: 22px 28px; overflow: hidden; }
+  .page-head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 18px; }
+  .page-head h2 { font-size: 26px; font-weight: 500; margin: 0 0 2px; letter-spacing: -.2px; }
+  .page-head .crumb { font-size: 12.5px; color: var(--m3-on-surface-variant); }
+  .page-head .actions { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) 396px; gap: 20px; height: calc(100% - 74px); }
+  .side { display: flex; flex-direction: column; min-height: 0; }
+
+  .card {
+    background: var(--m3-container-low); border: 1px solid var(--m3-outline-variant);
+    border-radius: 18px; padding: 18px 20px; margin-bottom: 18px;
+  }
+  .card h3 { font-size: 15px; font-weight: 500; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+  .card h3 .tag { margin-left: auto; font-size: 11.5px; font-weight: 500; color: var(--m3-on-primary-container); background: var(--m3-primary-container); border-radius: 999px; padding: 3px 10px; }
+
+  .filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 16px; }
+  .filters md-outlined-text-field, .filters md-outlined-select { width: 100%; }
+  .filters .row-span { grid-column: 1 / -1; display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
+  .filters .row-span .label { font-size: 12px; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; color: var(--m3-on-surface-variant); }
+  .filters .buttons { grid-column: 1 / -1; display: flex; gap: 10px; justify-content: flex-end; }
+  md-checkbox, md-radio, md-switch { --md-checkbox-label-text-font: var(--md-ref-typeface-plain); }
+  label.check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+  label.radio-row { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 3px 0; cursor: pointer; }
+  label.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; cursor: pointer; }
+  label.switch-row .txt { font-size: 13px; }
+  label.switch-row .txt small { display: block; color: var(--m3-on-surface-variant); font-size: 11.5px; }
+
+  .table-card { padding: 6px 0 0; overflow: hidden; }
+  .table-card .head { display: flex; align-items: center; gap: 10px; padding: 12px 20px 10px; }
+  .table-card .head h3 { margin: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    text-align: left; font-size: 11.5px; letter-spacing: .6px; text-transform: uppercase;
+    color: var(--m3-on-surface-variant); font-weight: 600; padding: 10px 14px;
+    background: var(--m3-container); border-bottom: 1px solid var(--m3-outline-variant);
+  }
+  tbody td { padding: 12px 14px; border-bottom: 1px solid var(--m3-container-high); color: var(--m3-on-surface); }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: var(--m3-container); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; border-radius: 999px; padding: 4px 11px; }
+  .status.ok { background: #d7f2e3; color: #0f5132; }
+  .status.wait { background: #fff0c2; color: #7a5a00; }
+  .status.ship { background: #dbe4ff; color: #1b3a8a; }
+  .status.cancel { background: #ffe0e0; color: #8c1d18; }
+  .table-foot { display: flex; align-items: center; gap: 8px; padding: 10px 18px; font-size: 12.5px; color: var(--m3-on-surface-variant); }
+  .table-foot .right { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+
+  .side .card:last-child { margin-bottom: 0; }
+  .metric { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+  .metric .v { font-size: 24px; font-weight: 500; letter-spacing: -.3px; }
+  .metric .k { font-size: 12.5px; color: var(--m3-on-surface-variant); }
+  .delta { font-size: 12px; font-weight: 500; color: #146c43; }
+  .delta.down { color: #b3261e; }
+  .divider { height: 1px; background: var(--m3-outline-variant); margin: 14px 0; }
+  .pref-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .pref-row .txt { font-size: 13px; }
+  .pref-row .txt small { display: block; color: var(--m3-on-surface-variant); font-size: 11.5px; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .progress-row { display: flex; align-items: center; gap: 12px; margin: 10px 0 4px; }
+  .progress-row md-linear-progress { flex: 1 1 auto; }
+  .progress-row span { font-size: 12.5px; color: var(--m3-on-surface-variant); min-width: 34px; text-align: right; }
+  .kv { display: flex; justify-content: space-between; font-size: 12.5px; padding: 5px 0; color: var(--m3-on-surface-variant); }
+  .kv b { color: var(--m3-on-surface); font-weight: 500; }
+
+  /* Dialog surface. NOTE: @material/web's <md-dialog> is a true modal: when [open] its inner
+     <dialog> is promoted to the browser top layer (viewport-anchored, with a full-viewport
+     scrim), so it cannot be docked inside a screenshot scene. The M3 dialog anatomy is
+     therefore composed here from real md-* controls on an M3 surface (see REPORT.md). */
+  .dialog-dock {
+    position: fixed; right: 56px; bottom: 44px; width: 552px; z-index: 40;
+  }
+  .dlg-surface {
+    background: #ffffff; border-radius: 28px; padding: 24px 24px 20px;
+    box-shadow: 0 6px 12px rgba(0,0,0,.10), 0 16px 40px rgba(0,0,0,.20);
+  }
+  .dlg-icon { display: flex; justify-content: center; color: var(--m3-primary); margin-bottom: 6px; }
+  .dlg-surface h2 { font-size: 22px; font-weight: 400; margin: 0 0 14px; text-align: center; letter-spacing: -.2px; }
+  .dlg-surface p { margin: 0 0 16px; font-size: 14px; line-height: 1.5; color: var(--m3-on-surface-variant); }
+  .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ----------------------------------------------------------- top bar -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo"><md-icon style="font-size:22px">grid_view</md-icon></div>
+      <div>
+        <h1>Console de Operações</h1>
+        <div class="sub">Unidade Campinas · turno da tarde</div>
+      </div>
+    </div>
+    <md-icon-button aria-label="Menu"><md-icon>menu</md-icon></md-icon-button>
+
+    <div class="spacer"></div>
+
+    <md-outlined-text-field placeholder="Buscar pedido, cliente ou SKU">
+      <md-icon slot="leading-icon">search</md-icon>
+    </md-outlined-text-field>
+
+    <md-icon-button aria-label="Notificações"><md-icon>notifications</md-icon></md-icon-button>
+    <md-icon-button aria-label="Ajuda"><md-icon>help</md-icon></md-icon-button>
+    <md-icon-button aria-label="Aplicativos"><md-icon>apps</md-icon></md-icon-button>
+    <div class="avatar">MC</div>
+  </header>
+
+  <!-- ------------------------------------------------------------- tabs -->
+  <div class="tabsbar">
+    <md-tabs>
+      <md-primary-tab inline-icon active><md-icon slot="icon">list_alt</md-icon>Pedidos</md-primary-tab>
+      <md-primary-tab inline-icon><md-icon slot="icon">inventory_2</md-icon>Estoque</md-primary-tab>
+      <md-primary-tab inline-icon><md-icon slot="icon">groups</md-icon>Clientes</md-primary-tab>
+      <md-primary-tab inline-icon><md-icon slot="icon">payments</md-icon>Faturamento</md-primary-tab>
+      <md-primary-tab inline-icon><md-icon slot="icon">insights</md-icon>Relatórios</md-primary-tab>
+    </md-tabs>
+  </div>
+
+  <div class="body">
+    <!-- ------------------------------------------------------------ nav -->
+    <aside class="nav">
+      <div class="section">Operação</div>
+      <md-list>
+        <md-list-item type="button" class="current">
+          <md-icon slot="start">dashboard</md-icon>
+          <div slot="headline">Visão geral</div>
+        </md-list-item>
+        <md-list-item type="button">
+          <md-icon slot="start">receipt_long</md-icon>
+          <div slot="headline">Pedidos</div>
+          <span slot="end">128</span>
+        </md-list-item>
+        <md-list-item type="button">
+          <md-icon slot="start">local_shipping</md-icon>
+          <div slot="headline">Expedição</div>
+        </md-list-item>
+        <md-list-item type="button">
+          <md-icon slot="start">warehouse</md-icon>
+          <div slot="headline">Armazém</div>
+        </md-list-item>
+      </md-list>
+
+      <div class="section">Análise</div>
+      <md-list>
+        <md-list-item type="button">
+          <md-icon slot="start">query_stats</md-icon>
+          <div slot="headline">Indicadores</div>
+        </md-list-item>
+        <md-list-item type="button">
+          <md-icon slot="start">calendar_month</md-icon>
+          <div slot="headline">Agenda fiscal</div>
+        </md-list-item>
+        <md-list-item type="button">
+          <md-icon slot="start">settings</md-icon>
+          <div slot="headline">Configurações</div>
+        </md-list-item>
+      </md-list>
+
+      <div class="nav-foot">
+        <strong>Turno fecha em 3h12</strong>
+        Última sincronização com o ERP às 14:32.
+      </div>
+    </aside>
+
+    <!-- ----------------------------------------------------------- main -->
+    <main>
+      <div class="page-head">
+        <div>
+          <h2>Pedidos</h2>
+          <div class="crumb">Operação / Pedidos / 21 de outubro de 2026</div>
+        </div>
+        <div class="actions">
+          <md-outlined-button><md-icon slot="icon">download</md-icon>Exportar</md-outlined-button>
+          <md-filled-tonal-button><md-icon slot="icon">filter_alt</md-icon>Filtros salvos</md-filled-tonal-button>
+          <md-filled-button><md-icon slot="icon">add</md-icon>Novo pedido</md-filled-button>
+        </div>
+      </div>
+
+      <div class="cols">
+        <section style="min-width:0">
+          <!-- filter card -->
+          <div class="card">
+            <h3>Filtros
+              <span class="tag">12 pendentes</span>
+            </h3>
+            <div class="filters">
+              <md-outlined-text-field label="Pedido" value="VC-10248"></md-outlined-text-field>
+              <md-outlined-select label="Cliente" value="todos">
+                <md-select-option value="todos"><div slot="headline">Todos os clientes</div></md-select-option>
+                <md-select-option value="atacadao"><div slot="headline">Atacadão do Sul LTDA</div></md-select-option>
+                <md-select-option value="bompreco"><div slot="headline">Mercado Bom Preço</div></md-select-option>
+                <md-select-option value="novaera"><div slot="headline">Distribuidora Nova Era</div></md-select-option>
+              </md-outlined-select>
+              <md-outlined-text-field label="Região" value="Sudeste"></md-outlined-text-field>
+
+              <md-outlined-text-field label="De" value="01/10/2026">
+                <md-icon slot="trailing-icon">event</md-icon>
+              </md-outlined-text-field>
+              <md-outlined-text-field label="Até" value="21/10/2026">
+                <md-icon slot="trailing-icon">event</md-icon>
+              </md-outlined-text-field>
+              <md-outlined-text-field label="Valor mínimo" value="R$ 1.000,00"></md-outlined-text-field>
+
+              <div class="row-span">
+                <span class="label">Canal</span>
+                <div class="chips">
+                  <md-filter-chip label="Loja online" selected></md-filter-chip>
+                  <md-filter-chip label="Balcão" selected></md-filter-chip>
+                  <md-filter-chip label="Telefone"></md-filter-chip>
+                  <md-filter-chip label="Marketplace"></md-filter-chip>
+                </div>
+              </div>
+
+              <div class="row-span">
+                <label class="check"><md-checkbox checked></md-checkbox>Somente SLA vencido</label>
+                <label class="check"><md-checkbox checked></md-checkbox>Com nota emitida</label>
+                <label class="check"><md-checkbox></md-checkbox>Devoluções</label>
+              </div>
+
+              <div class="buttons">
+                <md-text-button>Limpar</md-text-button>
+                <md-filled-button>Filtrar</md-filled-button>
+              </div>
+            </div>
+          </div>
+
+          <!-- table card -->
+          <div class="card table-card">
+            <div class="head">
+              <h3>Pedidos recentes</h3>
+              <md-assist-chip label="Exportar CSV"><md-icon slot="icon">table_view</md-icon></md-assist-chip>
+              <md-assist-chip label="Regras de SLA"><md-icon slot="icon">rule</md-icon></md-assist-chip>
+              <span style="margin-left:auto"><md-icon-button aria-label="Mais"><md-icon>more_vert</md-icon></md-icon-button></span>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:118px">Pedido</th>
+                  <th>Cliente</th>
+                  <th class="num" style="width:64px">Itens</th>
+                  <th class="num" style="width:126px">Total</th>
+                  <th style="width:132px">Status</th>
+                  <th style="width:96px">Entrega</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td>VC-10248</td><td>Atacadão do Sul LTDA</td><td class="num">14</td><td class="num">R$ 18.420,00</td><td><span class="status ok">Aprovado</span></td><td>23/10</td></tr>
+                <tr><td>VC-10247</td><td>Mercado Bom Preço</td><td class="num">6</td><td class="num">R$ 4.190,50</td><td><span class="status wait">Pendente</span></td><td>22/10</td></tr>
+                <tr><td>VC-10246</td><td>Distribuidora Nova Era</td><td class="num">32</td><td class="num">R$ 51.905,00</td><td><span class="status ship">Enviado</span></td><td>21/10</td></tr>
+                <tr><td>VC-10245</td><td>Casa &amp; Cia Materiais</td><td class="num">9</td><td class="num">R$ 7.312,80</td><td><span class="status ok">Aprovado</span></td><td>24/10</td></tr>
+                <tr><td>VC-10244</td><td>Ferragens Guarani</td><td class="num">21</td><td class="num">R$ 22.048,00</td><td><span class="status cancel">Cancelado</span></td><td>—</td></tr>
+                <tr><td>VC-10243</td><td>Supermercados Pampa</td><td class="num">18</td><td class="num">R$ 16.274,30</td><td><span class="status wait">Pendente</span></td><td>25/10</td></tr>
+              </tbody>
+            </table>
+            <div class="table-foot">
+              <span>Exibindo 6 de 128 pedidos</span>
+              <div class="right">
+                <md-icon-button aria-label="Anterior"><md-icon>chevron_left</md-icon></md-icon-button>
+                <span>1 de 22</span>
+                <md-icon-button aria-label="Próxima"><md-icon>chevron_right</md-icon></md-icon-button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- side rail -->
+        <aside class="side">
+          <div class="card">
+            <h3>Resumo do dia
+              <md-icon-button aria-label="Atualizar" style="margin-left:auto"><md-icon>refresh</md-icon></md-icon-button>
+            </h3>
+            <div class="metric"><span class="k">Receita</span><span class="v">R$ 1.284.930</span></div>
+            <div class="delta">▲ 12,4% vs. ontem</div>
+            <div class="divider"></div>
+            <div class="kv"><span>Pedidos pagos</span><b>1.842</b></div>
+            <div class="kv"><span>Ticket médio</span><b>R$ 697,57</b></div>
+            <div class="kv"><span>Aguardando envio</span><b>37</b></div>
+            <div class="progress-row">
+              <md-linear-progress value="0.78"></md-linear-progress>
+              <span>78%</span>
+            </div>
+            <div class="kv"><span>Meta mensal</span><b>R$ 1.607.000</b></div>
+            <div class="progress-row" style="margin-top:14px">
+              <md-circular-progress value="0.64" style="--md-circular-progress-size:44px"></md-circular-progress>
+              <div style="font-size:12.5px;line-height:1.35;color:var(--m3-on-surface-variant)">
+                SLA cumprido em 64% dos pedidos<br>do turno.
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Preferências da lista</h3>
+            <label class="switch-row">
+              <div class="txt">Atualização automática<small>a cada 60 segundos</small></div>
+              <md-switch checked></md-switch>
+            </label>
+            <label class="switch-row">
+              <div class="txt">Alertas sonoros<small>novos pedidos do canal online</small></div>
+              <md-switch></md-switch>
+            </label>
+            <div class="divider"></div>
+            <div style="font-size:12.5px;font-weight:600;color:var(--m3-on-surface-variant);margin-bottom:6px">Densidade</div>
+            <label class="radio-row"><md-radio name="dens" value="compacta"></md-radio>Compacta</label>
+            <label class="radio-row"><md-radio name="dens" value="padrao" checked></md-radio>Padrão</label>
+            <label class="radio-row"><md-radio name="dens" value="ampla"></md-radio>Ampla</label>
+            <div class="divider"></div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <span style="font-size:12.5px;color:var(--m3-on-surface-variant)">Itens por página</span>
+              <md-slider value="40" min="10" max="100" step="10" labeled style="flex:1 1 auto"></md-slider>
+            </div>
+            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:12px">
+              <md-text-button>Restaurar</md-text-button>
+              <md-filled-tonal-button>Aplicar</md-filled-tonal-button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- M3 dialog surface docked to the lower-right corner (composed from real md-* controls) -->
+<div class="dialog-dock" role="dialog" aria-labelledby="dlgTitle" aria-modal="false">
+  <div class="dlg-surface">
+    <div class="dlg-icon"><md-icon style="font-size:24px">local_shipping</md-icon></div>
+    <h2 id="dlgTitle">Confirmar envio</h2>
+    <p>
+      O pedido <b>VC-10246</b> (Distribuidora Nova Era, 32 itens) será enviado pela
+      transportadora selecionada. O romaneio é gerado em seguida.
+    </p>
+    <md-outlined-select label="Transportadora" value="loggi" style="width:100%;margin-bottom:14px">
+      <md-select-option value="loggi"><div slot="headline">Loggi — Expresso (1 dia útil)</div></md-select-option>
+      <md-select-option value="total"><div slot="headline">Total Express — Rodoviário</div></md-select-option>
+      <md-select-option value="pac"><div slot="headline">Correios — PAC</div></md-select-option>
+    </md-outlined-select>
+    <label class="check" style="display:flex;margin-bottom:8px"><md-checkbox checked></md-checkbox>Contratar seguro de carga (R$ 84,20)</label>
+    <label class="check" style="display:flex"><md-checkbox></md-checkbox>Enviar romaneio ao cliente por e-mail</label>
+    <div class="dlg-actions">
+      <md-text-button>Cancelar</md-text-button>
+      <md-filled-button>Confirmar envio</md-filled-button>
+    </div>
+  </div>
+</div>
+
+<script src="../../vendor/material/material-web.all.min.js"></script>
+</body>
+</html>

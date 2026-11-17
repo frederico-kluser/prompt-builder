@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Matriz resolução × grade — resultado</title>
+<style>
+  :root{color-scheme:dark;--bg:#0b0d10;--panel:#121820;--line:#24303c;--ink:#e8eef5;--mut:#9fb0c0;--hot:#67e8b0;--cold:#fca5a5;--cyan:#7dd3fc}
+  *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+  main{max-width:1160px;margin:0 auto;padding:40px 18px 80px}
+  h1{font-size:1.65rem;margin:0 0 .35rem;letter-spacing:-.02em}h2{font-size:1.15rem;margin:2.3rem 0 .5rem}
+  p{color:#c9d6e2;margin:.45rem 0;max-width:82ch}.mut{color:var(--mut);font-size:13px}
+  code{font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;background:#1b2430;padding:.1rem .3rem;border-radius:.3rem}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:20px 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:15px}.card b{display:block;font-size:1.45rem;margin:.1rem 0;font-variant-numeric:tabular-nums}
+  table{width:100%;border-collapse:collapse;margin:.5rem 0 1rem;font-size:13px;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  th,td{padding:.46rem .55rem;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}th{color:var(--mut);background:#10161d;font-weight:600}
+  th:first-child,td:first-child{text-align:left}tr:last-child td{border-bottom:0}
+  .win{color:var(--hot);font-weight:700}.bad{color:var(--cold)}
+  .note{border-left:3px solid #b7791f;background:#1a1710;color:#f0d9a8;padding:.65rem .9rem;border-radius:6px;margin:1rem 0;font-size:13.5px}
+  .good{border-left-color:#2dd4bf;background:#0d1b19;color:#b8f5e6}
+  .gallery{display:grid;grid-template-columns:repeat(2,1fr);gap:13px;margin-top:12px}
+  figure{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden}
+  figure img{display:block;width:100%;height:auto;background:#fff}figcaption{padding:8px 11px;font-size:12px;color:var(--mut)}
+  a{color:var(--cyan);text-decoration:none}a:hover{text-decoration:underline}
+  @media(max-width:820px){.cards,.gallery{grid-template-columns:1fr}table{display:block;overflow-x:auto}}
+</style>
+</head>
+<body>
+<main>
+  <h1>Matriz resolução × grade</h1>
+  <p class="mut">22/10/2026 · <code>vision-dataset@0.3.0</code> · 7 cenários · 30 tarefas · 1440 chamadas · <b>$0,6455</b> · provedor fixado <b>DeepInfra</b>.</p>
+  <p>Quatro resoluções × quatro apresentações <b>sem grade em cima do print</b>. O ponto é remapeado para 1920×1080 antes de pontuar.</p>
+
+  <div class="cards">
+    <div class="card"><span class="mut">Melhor combinação</span><b class="win">1920 + plain</b><span class="mut">71,1% · $0,0442</span></div>
+    <div class="card"><span class="mut">Melhor com grade</span><b>1920 + sidecar</b><span class="mut">70,0% · $0,0847</span></div>
+    <div class="card"><span class="mut">Melhor custo/qualidade</span><b>1280 + plain</b><span class="mut">68,9% · $0,0251</span></div>
+  </div>
+
+  <h2>Placar por combinação</h2>
+  <table>
+    <thead><tr><th>combinação</th><th>MiMo</th><th>GLM</th><th>DeepSeek</th><th>média</th><th>custo</th></tr></thead>
+    <tbody>
+      <tr><td>1920×1080 + plain</td><td>70,0%</td><td class="win">73,3%</td><td class="win">70,0%</td><td class="win">71,1%</td><td>$0,0442</td></tr>
+      <tr><td>1920×1080 + sidecar-grid</td><td class="win">73,3%</td><td>70,0%</td><td>66,7%</td><td>70,0%</td><td>$0,0847</td></tr>
+      <tr><td>1280×720 + plain</td><td class="win">73,3%</td><td class="win">73,3%</td><td>60,0%</td><td>68,9%</td><td>$0,0251</td></tr>
+      <tr><td>1280×720 + sidecar-grid</td><td class="win">73,3%</td><td>70,0%</td><td>60,0%</td><td>67,8%</td><td>$0,0432</td></tr>
+      <tr><td>960×540 + sidecar-grid</td><td>70,0%</td><td>56,7%</td><td>50,0%</td><td>58,9%</td><td>$0,0294</td></tr>
+      <tr><td>960×540 + frame-mark</td><td>66,7%</td><td>66,7%</td><td>40,0%</td><td>57,8%</td><td>$0,0301</td></tr>
+      <tr><td>960×540 + plain</td><td>70,0%</td><td>60,0%</td><td>40,0%</td><td>56,7%</td><td>$0,0180</td></tr>
+      <tr><td>1280×720 + frame-mark</td><td>63,3%</td><td>56,7%</td><td>46,7%</td><td>55,6%</td><td>$0,0363</td></tr>
+      <tr><td>960×540 + frame-axis</td><td>66,7%</td><td>46,7%</td><td>53,3%</td><td>55,6%</td><td>$0,0366</td></tr>
+      <tr><td>1280×720 + frame-axis</td><td class="win">73,3%</td><td class="bad">16,7%</td><td>66,7%</td><td>52,2%</td><td>$0,0441</td></tr>
+      <tr><td>1920×1080 + frame-mark</td><td class="win">73,3%</td><td>60,0%</td><td class="bad">13,3%</td><td>48,9%</td><td>$0,0629</td></tr>
+      <tr><td>1920×1080 + frame-axis</td><td class="win">73,3%</td><td>30,0%</td><td class="bad">10,0%</td><td class="bad">37,8%</td><td>$0,0724</td></tr>
+      <tr><td>640×360 + sidecar-grid</td><td>36,7%</td><td>46,7%</td><td>23,3%</td><td>35,6%</td><td>$0,0257</td></tr>
+      <tr><td>640×360 + plain</td><td>33,3%</td><td>43,3%</td><td>16,7%</td><td>31,1%</td><td>$0,0195</td></tr>
+      <tr><td>640×360 + frame-mark</td><td>36,7%</td><td>36,7%</td><td>13,3%</td><td>28,9%</td><td>$0,0323</td></tr>
+      <tr><td>640×360 + frame-axis</td><td>33,3%</td><td>20,0%</td><td>6,7%</td><td class="bad">20,0%</td><td>$0,0412</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Efeitos principais</h2>
+  <table>
+    <thead><tr><th>resolução</th><th>média</th></tr></thead>
+    <tbody><tr><td>1280×720</td><td class="win">61,1%</td></tr><tr><td>960×540</td><td>57,2%</td></tr><tr><td>1920×1080</td><td>56,9%</td></tr><tr><td>640×360</td><td class="bad">28,9%</td></tr></tbody>
+  </table>
+  <table>
+    <thead><tr><th>grade</th><th>média</th></tr></thead>
+    <tbody><tr><td>sidecar-grid</td><td class="win">58,1%</td></tr><tr><td>plain</td><td>56,9%</td></tr><tr><td>frame-mark</td><td>47,8%</td></tr><tr><td>frame-axis</td><td class="bad">41,4%</td></tr></tbody>
+  </table>
+
+  <div class="note good"><b>Escolha prática:</b> 1080p + plain para qualidade; 1280p + plain para custo/qualidade; se a grade for obrigatória, 1080p + <b>sidecar</b> (nunca em cima do print). Moldura não compensa na média.</div>
+  <div class="note">A moldura no 1080p gera 2070×1177 e parece sofrer resize extra do provedor; no 1280p o efeito muda de modelo para modelo (MiMo empata, DeepSeek sobe, GLM desaba). Não há ganho generalizável — e o absoluto em 640×360 é baixo demais para clique preciso.</div>
+
+  <h2>Galeria</h2>
+  <div class="gallery">
+    <figure><img src="telas/04-plain-1280.png" alt="Captura limpa 1280"><figcaption><b>plain</b> — captura limpa, sem grade</figcaption></figure>
+    <figure><img src="telas/03-sidecar-1280.png" alt="Grade sidecar"><figcaption><b>sidecar-grid</b> — grade em imagem separada; o print não é tocado</figcaption></figure>
+    <figure><img src="telas/01-frame-axis-1280.png" alt="Moldura com eixos"><figcaption><b>frame-axis</b> — réguas só nas margens</figcaption></figure>
+    <figure><img src="telas/02-frame-mark-1280.png" alt="Moldura com letras"><figcaption><b>frame-mark</b> — letras/números nas margens</figcaption></figure>
+    <figure><img src="telas/06-plain-640.png" alt="Captura 640"><figcaption><b>640×360 plain</b> — onde o clique preciso desaba</figcaption></figure>
+    <figure><img src="telas/05-frame-mark-640.png" alt="Moldura 640"><figcaption><b>640×360 frame-mark</b> — margens legíveis, alvo minúsculo</figcaption></figure>
+  </div>
+
+  <h2>Arquivos</h2>
+  <p><a href="report.md">report.md</a> · <a href="report.html">report.html</a> · <a href="record.json">record.json</a> · <a href="README.md">README</a> · <a href="../vision-gerador/index.html">gerador</a> · <a href="../vision-gerador/INSTRUCOES.md">tutorial</a> · <a href="../vision-gerador/gerador-de-variantes.zip">ZIP do gerador</a></p>
+  <p class="mut">Limites: 30 tarefas, uma rodada por combinação, um provedor. Cada tarefa vale 3,3 p.p.; diferenças de 1–2 tarefas não separam combinações. Sem IC; conclusões direcionais.</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,29 @@
+{
+  "name": "Convenção de Mensagens de Commit",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "~DEFAULT_BRANCH",
+        "refs/heads/main",
+        "refs/heads/master",
+        "refs/heads/develop",
+        "refs/heads/release/**"
+      ],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "commit_message_pattern",
+      "parameters": {
+        "name": "Conventional Commits obrigatório",
+        "negate": false,
+        "operator": "regex",
+        "pattern": "^((feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\\([^)]*\\))?!?: |(Revert|Reapply) )[\\s\\S]*"
+      }
+    }
+  ],
+  "bypass_actors": []
+}

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Benchmarks 1 e 2 — resolução e grade</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b0d10; --panel:#131820; --line:#24303c; --ink:#e8eef5; --mut:#9fb0c0; --hot:#67e8b0; --cold:#fca5a5; --accent:#7dd3fc; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:1120px; margin:0 auto; padding:42px 20px 80px; }
+  h1 { font-size:1.75rem; line-height:1.2; margin:0 0 .4rem; letter-spacing:-.02em; }
+  h2 { font-size:1.22rem; margin:2.6rem 0 .5rem; }
+  h3 { font-size:.98rem; margin:1.4rem 0 .4rem; color:var(--mut); font-weight:600; text-transform:uppercase; letter-spacing:.08em; }
+  p { margin:.45rem 0; color:#c9d6e2; }
+  .meta { color:var(--mut); font-size:13.5px; }
+  .lede { max-width:70ch; color:#d7e2ec; }
+  code { font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; background:#1b2430; padding:.1rem .32rem; border-radius:.3rem; }
+  .cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:22px 0 8px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; }
+  .card .tag { font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--mut); }
+  .card .big { font-size:1.65rem; margin:.15rem 0; font-weight:600; font-variant-numeric:tabular-nums; }
+  .card .sub { color:var(--mut); font-size:12.5px; }
+  table { width:100%; border-collapse:collapse; margin:.5rem 0 1rem; font-size:13.5px; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  th,td { padding:.52rem .6rem; border-bottom:1px solid var(--line); text-align:right; white-space:nowrap; }
+  th { color:var(--mut); font-weight:600; background:#10161d; }
+  th:first-child, td:first-child { text-align:left; }
+  tr:last-child td { border-bottom:0; }
+  .win { color:var(--hot); font-weight:600; }
+  .bad { color:var(--cold); }
+  .muted { color:var(--mut); }
+  .note { border-left:3px solid #b7791f; background:#1a1710; color:#f0d9a8; padding:.7rem .95rem; border-radius:6px; margin:1rem 0; }
+  .good { border-left-color:#2dd4bf; background:#0d1b19; color:#b8f5e6; }
+  .gallery { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:14px; }
+  figure { margin:0; background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  figure img { display:block; width:100%; height:auto; background:#fff; }
+  figcaption { padding:9px 12px 11px; font-size:12.5px; color:var(--mut); }
+  figcaption b { color:var(--ink); }
+  .links a { color:var(--accent); text-decoration:none; }
+  .links a:hover { text-decoration:underline; }
+  @media (max-width:800px){ .cards,.gallery{grid-template-columns:1fr} table{display:block;overflow-x:auto} }
+</style>
+</head>
+<body>
+<main>
+  <h1>Benchmarks 1 e 2 — resolução e grade</h1>
+  <p class="meta">22/10/2026 · <code>vision-dataset@0.2.0</code> · 7 cenários · 197 controles · 30 tarefas · provedor fixado <b>DeepInfra</b></p>
+  <p class="lede">Os dois bancos mudam <b>uma coisa só</b> na apresentação da mesma tela. A verdade continua sendo o DOM; o placar é determinístico. Nada de juiz LLM.</p>
+
+  <div class="cards">
+    <div class="card"><div class="tag">Banco 1 · resolução</div><div class="big">84</div><div class="sub">células · $0.0870 · 4 escalas</div></div>
+    <div class="card"><div class="tag">Banco 2 · grade</div><div class="big">360</div><div class="sub">células · 449 chamadas · $0.0954</div></div>
+    <div class="card"><div class="tag">Cobertura</div><div class="big">3 × 7</div><div class="sub">modelos × cenários · 1 rodada/célula</div></div>
+  </div>
+
+  <h2>1. Resolução — a mesma tela, quatro escalas</h2>
+  <p>Nota = média do F1 entre as escalas. A coordenada volta para 1920×1080 antes de pontuar. Retenção = F1 em 360p ÷ F1 em 1080p.</p>
+  <table>
+    <thead><tr><th>modelo</th><th>nota</th><th>1080p</th><th>720p</th><th>540p</th><th>360p</th><th>retenção</th><th>custo</th><th>latência</th></tr></thead>
+    <tbody>
+      <tr><td><b>GLM 5.3 Flash</b></td><td class="win">76.2%</td><td class="win">92.2%</td><td class="win">88.7%</td><td class="win">71.6%</td><td class="win">52.3%</td><td class="win">56.7%</td><td>$0.0179</td><td>10.3 s</td></tr>
+      <tr><td>MiMo V2.6-Pro</td><td>60.4%</td><td>82.4%</td><td>62.9%</td><td>62.2%</td><td>34.1%</td><td>41.4%</td><td>$0.0506</td><td>55.5 s</td></tr>
+      <tr><td>DeepSeek V4.1 Flash</td><td>54.7%</td><td>69.0%</td><td>73.1%</td><td>60.0%</td><td class="bad">16.7%</td><td class="bad">24.2%</td><td>$0.0186</td><td>31.1 s</td></tr>
+    </tbody>
+  </table>
+  <div class="note">O DeepSeek em 360p não “ficou cego”: ele continua devolvendo coordenadas na escala 1920×1080 quando a imagem tem 640×360. O parser clampa e o clique cai longe. É falha de contrato de coordenada — e o banco precisa mostrar isso separado da acurácia visual.</div>
+
+  <h2>2. Grade — controle × overlays</h2>
+  <p>Taxa de acerto de 30 tarefas por variante. <code>plain</code> é o controle; a nota é a média das quatro. <b>Mark-Grid-lite</b> usa 1 célula 6×4 e recorte ampliado em 2ª rodada — não é o Mark-Grid do paper (4 IDs/8×8/crop 512).</p>
+  <table>
+    <thead><tr><th>modelo</th><th>nota</th><th>plain</th><th>9×9</th><th>eixos</th><th>Mark-Grid-lite</th><th>Δ vs plain</th><th>alvo geral</th><th>custo</th><th>latência</th></tr></thead>
+    <tbody>
+      <tr><td><b>MiMo V2.6-Pro</b></td><td class="win">70.8%</td><td>70.0%</td><td>70.0%</td><td class="win">73.3%</td><td>70.0%</td><td class="win">0.0</td><td>78.3%</td><td>$0.0268</td><td>9.8 s</td></tr>
+      <tr><td>GLM 5.3 Flash</td><td>66.7%</td><td class="win">73.3%</td><td class="win">73.3%</td><td>66.7%</td><td class="bad">53.3%</td><td class="bad">−20.0</td><td>75.0%</td><td>$0.0553</td><td>2.0 s</td></tr>
+      <tr><td>DeepSeek V4.1 Flash</td><td>60.8%</td><td>60.0%</td><td>63.3%</td><td>63.3%</td><td>56.7%</td><td class="bad">−3.3</td><td>69.2%</td><td>$0.0133</td><td>3.8 s</td></tr>
+    </tbody>
+  </table>
+  <div class="note"><b>Mark-Grid-lite</b> não reproduziu o ganho do paper: empatou ou piorou nos três modelos. Isso <b>não refuta</b> o Mark-Grid — o nosso variante escolhe 1 célula e pede um ponto; o paper prevê 4 IDs de extremidade em grade 8×8, recorta o bbox e reaplica a grade com duas imagens. Grade simples e eixos ficaram dentro de ±1 tarefa.</div>
+
+  <h2>O que mudou a rodada</h2>
+  <p>A primeira rodada, sem <code>--provider</code>, mostrava GLM com <b>9,2%</b> em 720p. Inspecionando o provedor por célula: 14/28 chamadas de resolução do GLM caíram em <b>OpenInference</b> (~830 tokens de entrada; a imagem não entrou), em vez de <b>Wafer</b> (~3.200). Fixar <b>DeepInfra</b> levou o mesmo 720p a <b>88,7%</b>. As rodadas sem pin foram descartadas.</p>
+
+  <h2>Galeria</h2>
+  <p class="muted">Bootstrap “Painel de cursos”. Os overlays e os downscales são pinados por sha256 no manifesto.</p>
+  <div class="gallery">
+    <figure><img src="telas/01-1080p.png" alt="Tela 1080p"><figcaption><b>1080p nativo</b> — imagem canônica do dataset</figcaption></figure>
+    <figure><img src="telas/02-720p.png" alt="Tela 720p"><figcaption><b>1280×720</b> — downscale, sem reflow</figcaption></figure>
+    <figure><img src="telas/03-540p.png" alt="Tela 540p"><figcaption><b>960×540</b> — detalhe de texto começa a sumir</figcaption></figure>
+    <figure><img src="telas/04-360p.png" alt="Tela 360p"><figcaption><b>640×360</b> — onde o recall desaba</figcaption></figure>
+    <figure><img src="telas/05-grade-9x9.png" alt="Grade 9 por 9"><figcaption><b>grid-simple</b> — 9×9 sem rótulos (controle negativo)</figcaption></figure>
+    <figure><img src="telas/06-eixos.png" alt="Réguas de eixos"><figcaption><b>axis-grid</b> — réguas x/y a cada 240/270 px</figcaption></figure>
+    <figure><img src="telas/07-mark-grid.png" alt="Mark-Grid 6 por 4"><figcaption><b>mark-grid-lite</b> — 6×4 com IDs A1..F4 (1 célula por rodada)</figcaption></figure>
+    <figure><img src="telas/08-recorte-D2.png" alt="Recorte ampliado D2"><figcaption><b>recorte D2</b> — 640×540 que a 2ª rodada vê</figcaption></figure>
+  </div>
+
+  <h2>Arquivos e reprodução</h2>
+  <p class="links">
+    <a href="report-resolucao.md">report-resolucao.md</a> · <a href="report-grade.md">report-grade.md</a> ·
+    <a href="record-resolucao.json">record-resolucao.json</a> · <a href="record-grade.json">record-grade.json</a> ·
+    <a href="README.md">README</a> · <a href="../../ROADMAP-VISAO.md">ROADMAP</a>
+  </p>
+  <p class="muted">Limites: 7 cenários, 30 tarefas, uma rodada por célula, um provedor. Sem IC; conclusões são direcionais.</p>
+</main>
+</body>
+</html>

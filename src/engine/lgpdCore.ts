@@ -286,8 +286,9 @@ export function allowlistHealth(
       state: 'desatualizada',
       usable: true,
       message:
-        `Allowlist LGPD com ${ageDays} dias (alvo operacional ${ALLOWLIST_TARGET_AGE_DAYS}; ` +
-        `vence em ${maxAgeDays - ageDays}). Regenere com \`npm run lgpd:allowlist\`.`,
+        `Allowlist LGPD com ${ageDays} dias (gerada em ${snapshot.data_geracao}; ` +
+        `alvo operacional ${ALLOWLIST_TARGET_AGE_DAYS}; vence em ${maxAgeDays - ageDays}). ` +
+        'Regenere com `npm run lgpd:allowlist`.',
     };
   }
   return {

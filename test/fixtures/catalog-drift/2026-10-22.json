@@ -1,0 +1,42 @@
+{
+  "format": "prompt-builder-catalog-drift@1",
+  "changes": [
+    {
+      "modelId": "anthropic/claude-sonnet-5",
+      "field": "supportedEfforts",
+      "before": [
+        "high",
+        "low",
+        "max",
+        "medium",
+        "xhigh"
+      ],
+      "after": [
+        "high",
+        "low",
+        "max",
+        "medium",
+        "none",
+        "xhigh"
+      ],
+      "breaking": true
+    },
+    {
+      "modelId": "deepseek/deepseek-v4-pro",
+      "field": "supportedEfforts",
+      "before": [
+        "high",
+        "xhigh"
+      ],
+      "after": [
+        "high",
+        "none",
+        "xhigh"
+      ],
+      "breaking": true
+    }
+  ],
+  "breaking": true,
+  "acceptedAt": "2026-10-22T12:17:59.112Z",
+  "added": []
+}

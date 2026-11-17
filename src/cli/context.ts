@@ -238,7 +238,7 @@ export function limitList<T>(rows: T[], cap: ListLimit, out: Output, rotulo: str
 // --- config fail-closed ------------------------------------------------------
 
 /** Comandos com subcomando: o rotulo do envelope vira `runs.show`, `key.check`… */
-const FAMILIAS_COM_SUB = new Set(['models', 'key', 'runs', 'sessions', 'library', 'config', 'registry', 'agents', 'limits', 'calib', 'jev']);
+const FAMILIAS_COM_SUB = new Set(['models', 'key', 'runs', 'sessions', 'library', 'config', 'registry', 'agents', 'limits', 'calib', 'jev', 'vision']);
 
 /**
  * Rotulo `command` do envelope de erro, tirado do argv cru (o erro pode nascer
@@ -394,7 +394,7 @@ export function installPipeGuards(handlers: { onClosed: () => void; onOtherError
 export type StdoutClosedAction = 'ignore' | 'stop-run' | 'exit-ok';
 
 /** Comandos que abrem run paga (o pré-voo deles já conta como run). */
-const RUN_COMMANDS = new Set(['compare', 'vary', 'train', 'agents']);
+const RUN_COMMANDS = new Set(['compare', 'vary', 'train', 'agents', 'vision']);
 
 export function stdoutClosedAction(cmd: string | undefined, activeRuns: number): StdoutClosedAction {
   if (cmd === 'mcp') return 'ignore';

@@ -1,0 +1,60 @@
+{
+  "name": "Convenção de Nomes de Ramificação",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["~ALL"],
+      "exclude": [
+        "~DEFAULT_BRANCH",
+        "refs/heads/main",
+        "refs/heads/master",
+        "refs/heads/develop",
+        "refs/heads/gh-pages",
+        "refs/heads/feat/*",
+        "refs/heads/feat/**/*",
+        "refs/heads/fix/*",
+        "refs/heads/fix/**/*",
+        "refs/heads/chore/*",
+        "refs/heads/chore/**/*",
+        "refs/heads/docs/*",
+        "refs/heads/docs/**/*",
+        "refs/heads/style/*",
+        "refs/heads/style/**/*",
+        "refs/heads/refactor/*",
+        "refs/heads/refactor/**/*",
+        "refs/heads/perf/*",
+        "refs/heads/perf/**/*",
+        "refs/heads/test/*",
+        "refs/heads/test/**/*",
+        "refs/heads/build/*",
+        "refs/heads/build/**/*",
+        "refs/heads/ci/*",
+        "refs/heads/ci/**/*",
+        "refs/heads/revert/*",
+        "refs/heads/revert/**/*",
+        "refs/heads/hotfix/*",
+        "refs/heads/hotfix/**/*",
+        "refs/heads/release/*",
+        "refs/heads/release/**/*",
+        "refs/heads/dependabot/*",
+        "refs/heads/dependabot/**/*",
+        "refs/heads/renovate/*",
+        "refs/heads/renovate/**/*",
+        "refs/heads/release-please--*",
+        "refs/heads/gh-readonly-queue/*",
+        "refs/heads/gh-readonly-queue/**/*"
+      ]
+    }
+  },
+  "rules": [
+    { "type": "creation" },
+    {
+      "type": "update",
+      "parameters": {
+        "update_allows_fetch_and_merge": false
+      }
+    }
+  ],
+  "bypass_actors": []
+}

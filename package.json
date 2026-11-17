@@ -146,6 +146,7 @@
     "src/data/lgpd-compliance.json",
     "src/data/lgpd-allowlist.generated.json",
     "src/data/lgpd-retention.json",
+    "src/data/vision",
     "agent-docs",
     "skills",
     "scripts/install-agent-skill.sh",
@@ -179,7 +180,8 @@
     "changeset": "changeset",
     "version-packages": "changeset version",
     "pretest": "npm run build",
-    "test:full": "PB_FULL=1 vitest run"
+    "test:full": "PB_FULL=1 vitest run",
+    "vision:build": "tsx src/vision/build/index.ts"
   },
   "dependencies": {
     "zod": "^4.0.0"
@@ -202,7 +204,8 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^8.3.1",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.2",
+    "yaml": "^2.9.1"
   },
   "repository": {
     "type": "git",

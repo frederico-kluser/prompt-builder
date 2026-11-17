@@ -102,7 +102,41 @@ Regras do fio (verificadas ao vivo; o lint recusa antes de gastar):
 - O id da pergunta nunca vai ao modelo: escreva a pergunta inteira em `instructions`.
 - Estado vazio é erro nosso (a API aceita e cobra).
 
-## Casos rotulados
+## Mídia no estado (`image_url` / `video_url`)
+
+O modo aceita **mídia tipada** no `state` — é assim que se compara SOMs de imagem
+(screenshot, UI, documento digitalizado) sem transformar a imagem em texto:
+
+```json
+"state": [
+  "Use only the attached screenshot as visual evidence.",
+  { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0..." } }
+]
+```
+
+- **O Base64 não é texto.** O orçamento conta os caracteres do texto e uma
+  **estimativa visual por área** (`~área/750`, máx. 4096; sem dimensões legíveis
+  no cabeçalho, 1800). Vídeo nativo conta 12 000. É estimativa: o custo real vem
+  de `usage.cost` e o teto duro continua valendo.
+- **Data URL obrigatório** (`data:image/png;base64,`). URL `http(s)` não é
+  descarregado; base64 nu não é aceito como mídia (e não deve ser enviado como
+  texto). O lint devolve `state.media_invalid`.
+- **Limites por ADAPTADOR, não por nome** (`mediaProfileFor`): TypeSafe/Jev —
+  PNG/JPEG, 280..1568 px por eixo, 16 MiB por imagem, até 64, imagem em qualquer
+  nível do estado; Cloudflare Clef Omni — PNG/JPEG/WebP, 4 MiB, até 4, só no topo
+  do `state[]` (+ vídeo nativo); demais famílias com imagem no catálogo — perfil
+  genérico (só topo, 32 MiB, sem limite de eixo conferido). Erros:
+  `state.media_axis`, `state.media_size`, `state.media_mime`, `state.media_count`,
+  `state.media_position`, `state.media_unsupported` (ex.: vídeo no Jev).
+- **Presença ≠ localização.** Uma pergunta `noul`/`choice` sobre "o controle está
+  visível?" não prova coordenada; `box` tampouco prova presença (devolve arestas
+  mesmo sem alvo). Meça presença e posição em perguntas separadas.
+- **Ouro de UI vem do DOM**, nunca de um juiz: use `expected` por caso e um split
+  por CENA (nunca a mesma tela em treino e holdout).
+- `--data-dir` isola os records; eles guardam o estado integral (inclusive o
+  Base64). Use fixtures públicas/sintéticas — nunca capturas privadas.
+
+
 
 | formato | forma |
 |---|---|

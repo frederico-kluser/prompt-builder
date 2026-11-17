@@ -1,0 +1,85 @@
+#!/bin/sh
+# oss-hooks: pre-push — regra LOCAL em qualquer projeto.
+#   · nomes de ramo <tipo>/<slug> (tipos fechados; exceções de automação)
+#   · ZERO commits diretos em ramos protegidos (main, master, develop, release/**
+#     e o ramo predefinido) — sempre PR; o mesmo que o ruleset exige no GitHub
+#   · ramos protegidos não se apagam
+# Marcado com "# oss-hooks:" — gerido por scripts/oss-hooks.sh (atualizado quando
+# a política muda; hooks alheios nunca são tocados). STANDALONE: sem a skill
+# instalada, usa a política embutida aqui em baixo.
+# Opt-out por repositório (auditável): git config oss.policy off
+set -u
+
+case "$(git config --get oss.policy 2>/dev/null || true)" in
+  off|disabled|false|0) exit 0 ;;
+esac
+case "${OSS_POLICY:-}" in
+  off|disabled|false|0) exit 0 ;;
+esac
+
+# --- política: fonte única (skill) quando existe; embutida como fallback ---
+BRANCH_TYPES='feat|fix|docs|style|refactor|perf|test|build|ci|revert|hotfix|release'
+BRANCH_REGEX="^(${BRANCH_TYPES})/[a-zA-Z0-9][a-zA-Z0-9._/-]*$|^(dependabot|renovate)/[a-zA-Z0-9._/-]+$|^release-please--.*$|^gh-readonly-queue/.*$"
+BRANCH_PROTECTED_REGEX='^(main|master|develop|release/.*)$'
+BRANCH_NAMING_EXEMPT_REGEX='^(main|master|develop|gh-pages)$'
+for _d in "/home/ondokai/.dsh/skills/opensource-project" \
+          "${HOME:-}/.dsh/skills/opensource-project" \
+          "${HOME:-}/.agents/skills/opensource-project" \
+          "${HOME:-}/.claude/skills/opensource-project" \
+          "${HOME:-}/.codex/skills/opensource-project" \
+          "${HOME:-}/.pi/skills/opensource-project" \
+          "${HOME:-}/.jcode/skills/opensource-project"; do
+  if [ -n "${_d:-}" ] && [ -f "$_d/scripts/oss-branch-policy.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$_d/scripts/oss-branch-policy.sh" 2>/dev/null && break
+  fi
+done
+
+# --- encadeamento (instalação --global): corre também o hook LOCAL do repo ---
+_self_dir="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)"
+_local_hooks="$(git rev-parse --git-dir 2>/dev/null)/hooks"
+if [ -n "${_local_hooks:-}" ] && [ "$_self_dir" != "$_local_hooks" ]; then
+  _local="$_local_hooks/pre-push"
+  if [ -x "$_local" ] && [ "$_local" != "$0" ]; then
+    "$_local" "$@" || exit $?
+  fi
+fi
+
+DEFAULT_BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH="main"
+
+is_exempt()    { printf '%s' "$1" | grep -Eq "$BRANCH_NAMING_EXEMPT_REGEX"; }
+is_protected() { [ "$1" = "$DEFAULT_BRANCH" ] && return 0; printf '%s' "$1" | grep -Eq "$BRANCH_PROTECTED_REGEX"; }
+ok_name()      { is_exempt "$1" && return 0; printf '%s' "$1" | grep -Eq "$BRANCH_REGEX"; }
+
+# stdin de cada push: <ref local> <oid local> <ref remoto> <oid remoto>
+fail=0
+while read -r local_ref _local_oid remote_ref _remote_oid; do
+  case "$remote_ref" in
+    refs/heads/*) ;;
+    *) continue ;;   # tags e outros refs não são desta regra
+  esac
+  branch="${remote_ref#refs/heads/}"
+  if [ "$local_ref" = "(delete)" ]; then
+    if is_protected "$branch"; then
+      printf 'Erro: apagar o ramo protegido "%s" é proibido — Solução: ramos protegidos não se apagam; desfaça com PR/revert\n' "$branch" >&2
+      fail=1
+    fi
+    continue
+  fi
+  if is_protected "$branch"; then
+    printf 'Erro: push direto para "%s" é proibido (ramo protegido) — Solução: git switch -c feat/<slug> && git push -u origin feat/<slug> e abra um PR\n' "$branch" >&2
+    fail=1
+    continue
+  fi
+  if ! ok_name "$branch"; then
+    printf 'Erro: nome de ramo fora da convenção: "%s" — Solução: git branch -m %s <tipo>/<slug> (tipos: feat fix docs style refactor perf test build ci revert hotfix release)\n' "$branch" "$branch" >&2
+    fail=1
+  fi
+done
+
+if [ "$fail" -ne 0 ]; then
+  printf '(regra local pre-push; opt-out por repo: git config oss.policy off)\n' >&2
+  exit 1
+fi
+exit 0

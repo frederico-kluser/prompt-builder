@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "predev": "node ../scripts/vision-web-assets.mjs",
+    "prebuild": "node ../scripts/vision-web-assets.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

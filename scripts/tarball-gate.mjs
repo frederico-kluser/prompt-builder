@@ -66,6 +66,10 @@ export function isAllowedPath(p, sources) {
   if (p === 'scripts/agent-setup.sh') return true;
   if (p.startsWith('agent-docs/') || p.startsWith('skills/')) return true;
   if (/^src\/data\/[^/]+\.json$/u.test(p)) return true;
+  // Benchmark de visão: manifesto, código HTML dos cenários, imagens 1080p e os
+  // assets vendorizados dos frameworks. Sem eles o CLI instalado não roda o
+  // dataset (as imagens são o dado do benchmark, não documentação).
+  if (p.startsWith('src/data/vision/')) return true;
   const m = /^dist\/(.+)\.(js|d\.ts)$/u.exec(p);
   if (!m) return false;
   const rel = m[1];

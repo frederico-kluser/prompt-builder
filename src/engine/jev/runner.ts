@@ -154,7 +154,13 @@ export function lintResolved(
       if (!dup) issues.push(ct.kind === 'decision' && i.code.startsWith('budget.') ? { ...i, message: `[${ct.modelId}] ${i.message}` } : i);
     }
   }
-  issues.push(...lintJevCases(casos, r.specs[0], { mode: r.mode, ...(alvo ? { targetQuestions: alvo } : {}) }));
+  issues.push(
+    ...lintJevCases(casos, r.specs[0], {
+      mode: r.mode,
+      ...(alvo ? { targetQuestions: alvo } : {}),
+      ...(r.contestants[0]?.kind === 'decision' ? { modelId: r.contestants[0].modelId } : {}),
+    }),
+  );
   return applyStrict(issues, opts.strict);
 }
 

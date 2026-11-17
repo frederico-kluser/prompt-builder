@@ -524,6 +524,13 @@ export interface OpenRouterModel {
   contextLength?: number;
   pricing: OpenRouterModelPricing;
   /**
+   * Modalidades de ENTRADA declaradas pelo catálogo (`architecture.input_modalities`):
+   * `['text','image']`, `['text']`, … Ausente = desconhecido (não inferir).
+   * É o que o benchmark de visão usa para recusar modelo sem imagem ANTES de
+   * gastar; viaja no cache do catálogo (o `raw` não é persistido).
+   */
+  inputModalities?: string[];
+  /**
    * Parametros de amostragem que o modelo aceita (campo `supported_parameters`
    * do OpenRouter). Fonte de verdade para enviar `temperature`/`seed` so a quem
    * suporta — reasoning models (gpt-5*, serie o*) NAO listam `temperature` e

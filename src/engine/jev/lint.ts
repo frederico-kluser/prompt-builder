@@ -32,6 +32,7 @@ import {
   toWireQuestion,
   wireKeysOf,
 } from './wire.js';
+import { estimateVisualTokens, mediaProfileFor, splitMedia, validateMedia } from './media.js';
 
 /** Estado acima disto (chars) = context rot provável (skill/simulador). */
 export const STATE_LARGE_CHARS = 24_000;
@@ -592,10 +593,23 @@ export function lintJevSpec(spec: JevSpec, opts: LintSpecOptions = {}): JevLintI
     }
   }
 
+  // Mídia por ADAPTADOR (posição, formato, bytes, eixos, contagem): uma imagem
+  // fora do contrato devolve 400/413 e o caso inteiro falha — melhor recusar aqui.
+  if (cases.length) {
+    const profile = mediaProfileFor(opts.modelId);
+    for (const c of cases) {
+      const { parts } = splitMedia(projectState(c.state, spec.stateView));
+      if (parts.length === 0) continue;
+      for (const i of validateMedia(parts, profile)) {
+        push({ ...i, path: `cases.${c.id}.${i.path}` });
+      }
+    }
+  }
+
   // Orçamento de contexto POR MODELO (jev 32.000; kev 8.192; span = desconhecido).
   const ctx = opts.model?.contextLength;
   if (cases.length && ctx && ctx > 0) {
-    let pior = { caseId: '', tokens: 0, total: 0 };
+    let pior = { caseId: '', tokens: 0, total: 0, visual: 0 };
     const qTokens = qs.map((q) => {
       try {
         return countTextTokens(JSON.stringify(toWireQuestion(q)));
@@ -607,15 +621,18 @@ export function lintJevSpec(spec: JevSpec, opts: LintSpecOptions = {}): JevLintI
     const todasQ = qTokens.reduce((s, x) => s + x, 0);
     for (const c of cases) {
       const st = projectState(c.state, spec.stateView);
-      const t = countTextTokens(typeof st === 'string' ? st : JSON.stringify(st));
-      if (t + maiorQ > pior.tokens) pior = { caseId: c.id, tokens: t + maiorQ, total: t + todasQ };
+      // O Base64 da imagem NÃO é texto do prompt; o custo visual é estimado por área.
+      const { value, parts } = splitMedia(st);
+      const visual = estimateVisualTokens(parts);
+      const t = countTextTokens(typeof value === 'string' ? value : JSON.stringify(value)) + visual;
+      if (t + maiorQ > pior.tokens) pior = { caseId: c.id, tokens: t + maiorQ, total: t + todasQ, visual };
     }
     if (pior.tokens > ctx) {
       push({
         level: 'error',
         code: 'budget.context',
         path: 'state',
-        message: `estado + maior pergunta ≈ ${pior.tokens} tokens no caso "${pior.caseId}" > contexto de ${ctx} do modelo.`,
+        message: `estado + maior pergunta ≈ ${pior.tokens} tokens no caso "${pior.caseId}" > contexto de ${ctx} do modelo${pior.visual ? ` (${pior.visual} são mídia estimada)` : ''}.`,
         fix: 'Projete o estado (stateView: só os campos relevantes, com maxChars).',
       });
     } else if (pior.tokens > ctx * 0.8) {
@@ -645,6 +662,8 @@ export function lintJevSpec(spec: JevSpec, opts: LintSpecOptions = {}): JevLintI
 export interface LintCasesOptions {
   mode?: JevMode;
   targetQuestions?: readonly string[];
+  /** Modelo de decisão do primeiro competidor (perfil de mídia do adaptador). */
+  modelId?: string;
   strict?: boolean;
 }
 
@@ -684,7 +703,10 @@ export function lintJevCases(cases: readonly JevCase[], spec: JevSpec, opts: Lin
     if (vazio) {
       issues.push({ level: 'error', code: 'state.empty', path: `cases.${c.id}.state`, message: `caso "${c.id}" com estado vazio (a API aceita E cobra).` });
     } else {
-      const texto = typeof st === 'string' ? st : JSON.stringify(st);
+      // A mídia tipada sai da conta de TEXTO: um Data URL legítimo não é
+      // "blob que consome orçamento" (o contrato da API é exatamente esse).
+      const { value: semMidia } = splitMedia(st);
+      const texto = typeof semMidia === 'string' ? semMidia : JSON.stringify(semMidia);
       if (texto.length > STATE_LARGE_CHARS) {
         issues.push({ level: 'warning', code: 'state.large', path: `cases.${c.id}.state`, message: `caso "${c.id}": estado com ${texto.length} caracteres — context rot provável (J8).` });
       }
