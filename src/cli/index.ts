@@ -149,7 +149,7 @@ VISÃO (UI grounding: o que é clicável numa imagem de tela)
                            o modelo lê a imagem 1080p e devolve elementos/ação;
                            resolution/grid medem escala/overlays; matrix cruza
                            resolução × grade sem grade em cima do print
-  vision dataset list|show|verify  ·  vision list|show|report <id>
+  vision dataset list|show|verify  ·  vision list|show|report <id>  ·  vision som
                            dataset versionado (ver: docs vision)
 
 AGENTES (modo agente — mesmo motor, executor pi)

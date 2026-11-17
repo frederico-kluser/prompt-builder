@@ -373,6 +373,9 @@ const USO: Record<string, string> = {
            placar em Markdown (stdout) e/ou relatório HTML autocontido
   vision dataset list | show <cena> [--code] | verify
            inspeciona e verifica (sha256) o dataset versionado em src/data/vision
+  vision som --models <a,b> [--task discovery|elements] [--slots N] [-o <arq>]
+           monta um jev-config@1 que mede "TODOS os controles desta tela?"
+           (discovery = banco de elementos sem candidatos; elements = por slot)
   Exit 7 = parcial por orçamento; 130 = interrompido; 3 = dataset/modelo sem visão.`,
 };
 
