@@ -40,6 +40,11 @@
 # Diretórios repetidos (ex.: CLAUDE_CONFIG_DIR=~/.claude) contam uma vez só.
 # PB_EXTRA_AGENT_DIRS="dir1:dir2" acrescenta alvos à descoberta (criados sempre).
 #
+# Rodado de um worktree LIGADO (`git worktree add`), o script se re-executa a
+# partir da cópia principal do repo: o link global nunca aponta para uma pasta
+# que some no `git worktree remove`. PB_ALLOW_WORKTREE=1 liga o worktree mesmo
+# assim (testar uma mudança da skill antes do merge).
+#
 # `--target <dir>` (repetível) substitui a descoberta: instala sempre nesses
 # diretórios, criando-os se necessário — vale para qualquer agente fora da lista.
 #
@@ -147,6 +152,34 @@ SCRIPT_DIR=$(resolve_script_dir) || {
 
 # Origem da skill: <raiz do repo ou do pacote>/skills/prompt-builder
 SKILL_SRC=$(CDPATH='' cd -P -- "$SCRIPT_DIR/../skills/$SKILL_NAME" 2>/dev/null && pwd)
+
+# Raiz da cópia PRINCIPAL do repo quando <raiz> é um worktree LIGADO (`git
+# worktree add`) do prompt-builder-cli; falha em checkout normal, pacote npm ou
+# repo alheio. (Mesma regra no scripts/agent-setup.sh.)
+raiz_principal() {
+  command -v git >/dev/null 2>&1 || return 1
+  topo=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ "$(CDPATH='' cd -P -- "$topo" 2>/dev/null && pwd)" = "$1" ] || return 1
+  gitdir=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  comum=$(cd "$1" 2>/dev/null && CDPATH='' cd -P -- "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd) || return 1
+  [ "$gitdir" != "$comum" ] || return 1
+  case $comum in
+    */.git) principal=${comum%/.git} ;;
+    *) return 1 ;; # repo bare: não há cópia principal
+  esac
+  grep -q '"name"[[:space:]]*:[[:space:]]*"prompt-builder-cli"' "$principal/package.json" 2>/dev/null || return 1
+  printf '%s\n' "$principal"
+}
+
+# Worktree ligado: um link global para ELE quebra no `git worktree remove` (foi
+# assim que a skill sumiu de todos os agentes em 2026-10). A instalação global
+# vem da cópia principal; PB_ALLOW_WORKTREE=1 instala o worktree de propósito.
+RAIZ=$(CDPATH='' cd -P -- "$SCRIPT_DIR/.." 2>/dev/null && pwd)
+if [ "${PB_ALLOW_WORKTREE:-0}" != 1 ] && principal=$(raiz_principal "$RAIZ") &&
+  [ -f "$principal/scripts/install-agent-skill.sh" ]; then
+  printf '[worktree]  %s é um worktree ligado (some no `git worktree remove`): uso a cópia principal %s (PB_ALLOW_WORKTREE=1 instala o worktree).\n' "$RAIZ" "$principal" >&2
+  exec bash "$principal/scripts/install-agent-skill.sh" "$@"
+fi
 
 checa_origem() {
   if [ -z "${SKILL_SRC:-}" ] || [ ! -f "$SKILL_SRC/SKILL.md" ]; then
