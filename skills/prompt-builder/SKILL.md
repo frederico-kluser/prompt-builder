@@ -1,6 +1,6 @@
 ---
 name: prompt-builder
-description: "Benchmark de LLMs e evolução de system prompts pelo terminal (CLI/MCP), com orçamento controlado (--dry-run, --budget): comparar modelos, treinar e avaliar prompts, decisões do Jev, modo agente, reproduzir ou exportar runs, promover o vencedor e gerar o relatório de ciclos. Diz onde o prompt-builder está no disco e como rodá-lo de qualquer pasta. É para USAR o prompt-builder, não para desenvolver o código dele."
+description: "Benchmark de LLMs e evolução de system prompts pelo terminal (CLI/MCP), com orçamento controlado (--dry-run, --budget): comparar modelos, treinar e avaliar prompts, decisões do Jev, modo agente, reproduzir ou exportar runs, promover o vencedor e gerar o relatório de ciclos. Diz onde o prompt-builder está no disco e como rodá-lo de qualquer pasta, e sempre pergunta se o usuário quer sugerir outro modelo. É para USAR o prompt-builder, não para desenvolver o código dele."
 license: MIT
 metadata:
   homepage: https://www.npmjs.com/package/prompt-builder-cli
